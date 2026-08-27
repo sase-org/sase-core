@@ -710,7 +710,11 @@ mod tests {
             .get("monitor_id")
             .and_then(|value| value.as_str())
         {
-            meta.monitor_id = Some(monitor_id.to_string());
+            meta.family_shell = Some(crate::agent_scan::FamilyShellWire {
+                kind: "monitor".to_string(),
+                id: Some(monitor_id.to_string()),
+                ..Default::default()
+            });
         }
         if let Some(end) = extra_meta
             .get("stopped_at")

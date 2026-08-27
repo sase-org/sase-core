@@ -443,7 +443,7 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.clan_summary.is_none());
     assert!(legacy.wait_priority.is_none());
-    assert!(legacy.monitor_next_model.is_none());
+    assert!(legacy.family_shell.is_none());
 
     let clan: AgentMetaWire = serde_json::from_str(
         r#"{"agent_clan":"alpha","clan_tribe":"research","clan_summary":"[bold]Summary[/bold]"}"#,

@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 6;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 7;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -176,51 +176,11 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub imported_transaction_key: Option<String>,
     #[serde(default)]
-    pub monitor_state: Option<String>,
-    #[serde(default)]
-    pub monitor_exit_code: Option<i64>,
-    #[serde(default)]
-    pub monitor_elapsed_seconds: Option<f64>,
-    #[serde(default)]
     pub status_label: Option<String>,
-    /// `--next` launch disposition (`launched` / `launched-degraded` /
-    /// `not-launchable`), when the monitor carried a follow-up action.
+    /// Terminal monitor or gate-shell projection, folding the flat
+    /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
     #[serde(default)]
-    pub monitor_followup_outcome: Option<String>,
-    /// Human-readable reason a `--next` action was dropped or degraded,
-    /// mirroring `agent_meta.json`.
-    #[serde(default)]
-    pub monitor_followup_error: Option<String>,
-    /// Why a launched follow-up landed in a degraded workspace.
-    #[serde(default)]
-    pub monitor_followup_degraded_reason: Option<String>,
-    /// Durable artifact path the composed follow-up prompt was persisted to.
-    #[serde(default)]
-    pub monitor_followup_prompt_path: Option<String>,
-    #[serde(default)]
-    pub gate_id: Option<String>,
-    #[serde(default)]
-    pub gate_kind: Option<String>,
-    #[serde(default)]
-    pub gate_state: Option<String>,
-    #[serde(default)]
-    pub gate_elapsed_seconds: Option<f64>,
-    #[serde(default)]
-    pub gate_output_path: Option<String>,
-    #[serde(default)]
-    pub gate_output_truncated: bool,
-    #[serde(default)]
-    pub gate_bundle_path: Option<String>,
-    #[serde(default)]
-    pub gate_notification_id: Option<String>,
-    #[serde(default)]
-    pub gate_followup_outcome: Option<String>,
-    #[serde(default)]
-    pub gate_followup_error: Option<String>,
-    #[serde(default)]
-    pub gate_followup_degraded_reason: Option<String>,
-    #[serde(default)]
-    pub gate_followup_prompt_path: Option<String>,
+    pub family_shell: Option<FamilyShellWire>,
 }
 
 /// Bounded JSON value stored under `agent_meta.json::output_variables`.
@@ -592,126 +552,115 @@ pub struct AgentMetaWire {
     pub retry_terminal: bool,
     #[serde(default)]
     pub retry_error_category: Option<String>,
+    /// Terminal monitor or gate-shell projection, folding the flat
+    /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
     #[serde(default)]
-    pub monitor_id: Option<String>,
-    #[serde(default)]
-    pub monitor_command: Option<String>,
-    #[serde(default)]
-    pub monitor_cwd: Option<String>,
-    #[serde(default)]
-    pub monitor_label: Option<String>,
-    #[serde(default)]
-    pub monitor_reason: Option<String>,
-    #[serde(default)]
-    pub monitor_next_action: Option<String>,
-    #[serde(default)]
-    pub monitor_start_status: Option<String>,
-    #[serde(default)]
-    pub monitor_stop_status: Option<String>,
-    #[serde(default)]
-    pub monitor_timeout_seconds: Option<f64>,
-    #[serde(default)]
-    pub monitor_state: Option<String>,
-    #[serde(default)]
-    pub monitor_exit_code: Option<i64>,
-    #[serde(default)]
-    pub monitor_output_path: Option<String>,
-    #[serde(default)]
-    pub monitor_output_truncated: bool,
-    #[serde(default)]
-    pub monitor_starter_agent: Option<String>,
-    #[serde(default)]
-    pub monitor_followup_agent: Option<String>,
-    #[serde(default)]
-    pub monitor_tail_lines: Option<i64>,
-    #[serde(default)]
-    pub monitor_pgid: Option<i64>,
-    #[serde(default)]
-    pub monitor_supervisor_identity: Option<String>,
-    #[serde(default)]
-    pub monitor_settled: bool,
-    #[serde(default)]
-    pub monitor_idle_timeout_seconds: Option<f64>,
-    #[serde(default)]
-    pub monitor_next_output: Option<String>,
-    /// Optional `--model` expression for the `--next` follow-up agent.
-    #[serde(default)]
-    pub monitor_next_model: Option<String>,
-    #[serde(default)]
-    pub monitor_request_fingerprint: Option<String>,
-    /// `--next` launch disposition (`launched` / `launched-degraded` /
-    /// `not-launchable`), when the monitor carried a follow-up action.
-    #[serde(default)]
-    pub monitor_followup_outcome: Option<String>,
-    /// Human-readable reason a `--next` action was dropped or degraded.
-    #[serde(default)]
-    pub monitor_followup_error: Option<String>,
-    /// Why a launched follow-up landed in a degraded workspace (e.g. the
-    /// original claim could not transfer).
-    #[serde(default)]
-    pub monitor_followup_degraded_reason: Option<String>,
-    /// Durable artifact path the composed follow-up prompt was persisted to
-    /// when it could not be launched.
-    #[serde(default)]
-    pub monitor_followup_prompt_path: Option<String>,
-    #[serde(default)]
-    pub gate_id: Option<String>,
-    #[serde(default)]
-    pub gate_kind: Option<String>,
-    #[serde(default)]
-    pub gate_state: Option<String>,
-    #[serde(default)]
-    pub gate_start_status: Option<String>,
-    #[serde(default)]
-    pub gate_stop_status: Option<String>,
-    #[serde(default)]
-    pub gate_accent: Option<String>,
-    #[serde(default)]
-    pub gate_output_path: Option<String>,
-    #[serde(default)]
-    pub gate_output_truncated: bool,
-    #[serde(default)]
-    pub gate_creator_agent: Option<String>,
-    #[serde(default)]
-    pub gate_followup_agent: Option<String>,
-    #[serde(default)]
-    pub gate_next_action: Option<String>,
-    #[serde(default)]
-    pub gate_next_fork: Option<String>,
-    #[serde(default)]
-    pub gate_next_output: Option<String>,
-    #[serde(default)]
-    pub gate_next_model: Option<String>,
-    #[serde(default)]
-    pub gate_followup_outcome: Option<String>,
-    #[serde(default)]
-    pub gate_followup_error: Option<String>,
-    #[serde(default)]
-    pub gate_followup_degraded_reason: Option<String>,
-    #[serde(default)]
-    pub gate_followup_prompt_path: Option<String>,
-    #[serde(default)]
-    pub gate_elapsed_seconds: Option<f64>,
-    #[serde(default)]
-    pub gate_label: Option<String>,
-    #[serde(default)]
-    pub gate_reason: Option<String>,
-    #[serde(default)]
-    pub gate_timeout_seconds: Option<f64>,
-    #[serde(default)]
-    pub gate_request_fingerprint: Option<String>,
-    #[serde(default)]
-    pub gate_workspace_policy: Option<String>,
-    #[serde(default)]
-    pub gate_bundle_path: Option<String>,
-    #[serde(default)]
-    pub gate_notification_id: Option<String>,
-    #[serde(default)]
-    pub gate_decision_path: Option<String>,
+    pub family_shell: Option<FamilyShellWire>,
     #[serde(default)]
     pub shell_kind: Option<String>,
     #[serde(default)]
     pub proc_id: Option<String>,
+}
+
+/// Monitor-only fields of a `family_shell` record.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FamilyShellMonitorWire {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub starter_agent: Option<String>,
+    #[serde(default)]
+    pub tail_lines: Option<i64>,
+    #[serde(default)]
+    pub pgid: Option<i64>,
+    #[serde(default)]
+    pub supervisor_identity: Option<String>,
+    #[serde(default)]
+    pub settled: bool,
+    #[serde(default)]
+    pub idle_timeout_seconds: Option<f64>,
+}
+
+/// Gate-only fields of a `family_shell` record.
+///
+/// `kind` here is the gate's own flavor (e.g. `"approval"`), not the
+/// `FamilyShellWire::kind` discriminator.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FamilyShellGateWire {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub accent: Option<String>,
+    #[serde(default)]
+    pub creator_agent: Option<String>,
+    #[serde(default)]
+    pub next_fork: Option<String>,
+    #[serde(default)]
+    pub workspace_policy: Option<String>,
+    #[serde(default)]
+    pub bundle_path: Option<String>,
+    #[serde(default)]
+    pub notification_id: Option<String>,
+    #[serde(default)]
+    pub decision_path: Option<String>,
+}
+
+/// One durable family-shell member: a monitor or a gate, never both.
+///
+/// `kind` discriminates `"monitor"` / `"gate"`. The fields below `kind` are
+/// the ones both shells carry (mirroring the two flat `monitor_*` /
+/// `gate_*` prefixes they replace); `monitor` / `gate` hold whichever
+/// kind's own fields, with the other left `None`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FamilyShellWire {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub start_status: Option<String>,
+    #[serde(default)]
+    pub stop_status: Option<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<f64>,
+    #[serde(default)]
+    pub elapsed_seconds: Option<f64>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    #[serde(default)]
+    pub output_truncated: bool,
+    #[serde(default)]
+    pub request_fingerprint: Option<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub next_output: Option<String>,
+    #[serde(default)]
+    pub next_model: Option<String>,
+    #[serde(default)]
+    pub followup_agent: Option<String>,
+    #[serde(default)]
+    pub followup_outcome: Option<String>,
+    #[serde(default)]
+    pub followup_error: Option<String>,
+    #[serde(default)]
+    pub followup_degraded_reason: Option<String>,
+    #[serde(default)]
+    pub followup_prompt_path: Option<String>,
+    #[serde(default)]
+    pub monitor: Option<FamilyShellMonitorWire>,
+    #[serde(default)]
+    pub gate: Option<FamilyShellGateWire>,
 }
 
 /// Compact projection of `running.json`.
@@ -1023,39 +972,46 @@ mod tests {
     fn agent_meta_wire_round_trips_every_monitor_field() {
         let meta = AgentMetaWire {
             name: Some("acme--mon".to_string()),
-            monitor_id: Some("m4kq".to_string()),
-            monitor_command: Some("just check-full".to_string()),
-            monitor_cwd: Some("/home/bryan/workspaces/acme".to_string()),
-            monitor_label: Some("just check-full".to_string()),
-            monitor_reason: Some("Verify the refactor".to_string()),
-            monitor_next_action: Some("Reply to the user.".to_string()),
-            monitor_start_status: Some("MONITORING".to_string()),
-            monitor_stop_status: Some("MONITORED".to_string()),
-            monitor_timeout_seconds: Some(2_700.0),
-            monitor_state: Some("running".to_string()),
-            monitor_exit_code: Some(1),
-            monitor_output_path: Some("live_reply.md".to_string()),
-            monitor_output_truncated: true,
-            monitor_starter_agent: Some("acme--0".to_string()),
-            monitor_followup_agent: Some("acme--1".to_string()),
-            monitor_tail_lines: Some(200),
-            monitor_pgid: Some(4242),
-            monitor_supervisor_identity: Some("boot-abc123:98765".to_string()),
-            monitor_settled: true,
-            monitor_idle_timeout_seconds: Some(600.0),
-            monitor_next_output: Some("tail".to_string()),
-            monitor_next_model: Some("@small".to_string()),
-            monitor_request_fingerprint: Some("sha256:deadbeef".to_string()),
-            monitor_followup_outcome: Some("launched-degraded".to_string()),
-            monitor_followup_error: Some(
-                "workspace claim transfer failed".to_string(),
-            ),
-            monitor_followup_degraded_reason: Some(
-                "original claim already released".to_string(),
-            ),
-            monitor_followup_prompt_path: Some(
-                "artifacts/followup_prompt.md".to_string(),
-            ),
+            family_shell: Some(FamilyShellWire {
+                kind: "monitor".to_string(),
+                id: Some("m4kq".to_string()),
+                label: Some("just check-full".to_string()),
+                reason: Some("Verify the refactor".to_string()),
+                start_status: Some("MONITORING".to_string()),
+                stop_status: Some("MONITORED".to_string()),
+                timeout_seconds: Some(2_700.0),
+                elapsed_seconds: None,
+                state: Some("running".to_string()),
+                output_path: Some("live_reply.md".to_string()),
+                output_truncated: true,
+                next_action: Some("Reply to the user.".to_string()),
+                next_output: Some("tail".to_string()),
+                next_model: Some("@small".to_string()),
+                followup_agent: Some("acme--1".to_string()),
+                request_fingerprint: Some("sha256:deadbeef".to_string()),
+                followup_outcome: Some("launched-degraded".to_string()),
+                followup_error: Some(
+                    "workspace claim transfer failed".to_string(),
+                ),
+                followup_degraded_reason: Some(
+                    "original claim already released".to_string(),
+                ),
+                followup_prompt_path: Some(
+                    "artifacts/followup_prompt.md".to_string(),
+                ),
+                monitor: Some(FamilyShellMonitorWire {
+                    command: Some("just check-full".to_string()),
+                    cwd: Some("/home/bryan/workspaces/acme".to_string()),
+                    exit_code: Some(1),
+                    starter_agent: Some("acme--0".to_string()),
+                    tail_lines: Some(200),
+                    pgid: Some(4242),
+                    supervisor_identity: Some("boot-abc123:98765".to_string()),
+                    settled: true,
+                    idle_timeout_seconds: Some(600.0),
+                }),
+                gate: None,
+            }),
             ..Default::default()
         };
 
@@ -1075,20 +1031,7 @@ mod tests {
             serde_json::from_value(old_record).unwrap();
 
         assert_eq!(decoded.name.as_deref(), Some("pre-monitor-agent"));
-        assert_eq!(decoded.monitor_id, None);
-        assert_eq!(decoded.monitor_state, None);
-        assert!(!decoded.monitor_output_truncated);
-        assert_eq!(decoded.monitor_pgid, None);
-        assert_eq!(decoded.monitor_supervisor_identity, None);
-        assert!(!decoded.monitor_settled);
-        assert_eq!(decoded.monitor_idle_timeout_seconds, None);
-        assert_eq!(decoded.monitor_next_output, None);
-        assert_eq!(decoded.monitor_next_model, None);
-        assert_eq!(decoded.monitor_request_fingerprint, None);
-        assert_eq!(decoded.monitor_followup_outcome, None);
-        assert_eq!(decoded.monitor_followup_error, None);
-        assert_eq!(decoded.monitor_followup_degraded_reason, None);
-        assert_eq!(decoded.monitor_followup_prompt_path, None);
+        assert_eq!(decoded.family_shell, None);
         assert!(decoded.model_alias_trail.is_empty());
         assert_eq!(decoded.model_alias_origin, None);
     }
@@ -1097,37 +1040,43 @@ mod tests {
     fn agent_meta_wire_round_trips_every_gate_field() {
         let meta = AgentMetaWire {
             name: Some("acme--gate".to_string()),
-            gate_id: Some("gate-1".to_string()),
-            gate_kind: Some("approval".to_string()),
-            gate_state: Some("pending".to_string()),
-            gate_start_status: Some("WAITING".to_string()),
-            gate_stop_status: Some("ANSWERED".to_string()),
-            gate_accent: Some("#0BCDEC".to_string()),
-            gate_output_path: Some("gate.out".to_string()),
-            gate_output_truncated: true,
-            gate_creator_agent: Some("acme--0".to_string()),
-            gate_followup_agent: Some("acme--1".to_string()),
-            gate_next_action: Some("Resume after gate.".to_string()),
-            gate_next_fork: Some("family".to_string()),
-            gate_next_output: Some("summary,details".to_string()),
-            gate_next_model: Some("@large".to_string()),
-            gate_followup_outcome: Some("launched".to_string()),
-            gate_followup_error: Some("claim moved late".to_string()),
-            gate_followup_degraded_reason: Some(
-                "workspace claim unavailable".to_string(),
-            ),
-            gate_followup_prompt_path: Some(
-                "artifacts/gate_followup.md".to_string(),
-            ),
-            gate_elapsed_seconds: Some(12.5),
-            gate_label: Some("approval/gate-1".to_string()),
-            gate_reason: Some("Need owner approval".to_string()),
-            gate_timeout_seconds: Some(600.0),
-            gate_request_fingerprint: Some("sha256:cafe".to_string()),
-            gate_workspace_policy: Some("inherit".to_string()),
-            gate_bundle_path: Some("gate_bundle.json".to_string()),
-            gate_notification_id: Some("notif-1".to_string()),
-            gate_decision_path: Some("gate_decision.md".to_string()),
+            family_shell: Some(FamilyShellWire {
+                kind: "gate".to_string(),
+                id: Some("gate-1".to_string()),
+                state: Some("pending".to_string()),
+                start_status: Some("WAITING".to_string()),
+                stop_status: Some("ANSWERED".to_string()),
+                output_path: Some("gate.out".to_string()),
+                output_truncated: true,
+                next_action: Some("Resume after gate.".to_string()),
+                next_output: Some("summary,details".to_string()),
+                next_model: Some("@large".to_string()),
+                followup_agent: Some("acme--1".to_string()),
+                followup_outcome: Some("launched".to_string()),
+                followup_error: Some("claim moved late".to_string()),
+                followup_degraded_reason: Some(
+                    "workspace claim unavailable".to_string(),
+                ),
+                followup_prompt_path: Some(
+                    "artifacts/gate_followup.md".to_string(),
+                ),
+                elapsed_seconds: Some(12.5),
+                label: Some("approval/gate-1".to_string()),
+                reason: Some("Need owner approval".to_string()),
+                timeout_seconds: Some(600.0),
+                request_fingerprint: Some("sha256:cafe".to_string()),
+                monitor: None,
+                gate: Some(FamilyShellGateWire {
+                    kind: Some("approval".to_string()),
+                    accent: Some("#0BCDEC".to_string()),
+                    creator_agent: Some("acme--0".to_string()),
+                    next_fork: Some("family".to_string()),
+                    workspace_policy: Some("inherit".to_string()),
+                    bundle_path: Some("gate_bundle.json".to_string()),
+                    notification_id: Some("notif-1".to_string()),
+                    decision_path: Some("gate_decision.md".to_string()),
+                }),
+            }),
             shell_kind: Some("gate".to_string()),
             proc_id: Some("proc-gate".to_string()),
             ..Default::default()
@@ -1149,12 +1098,7 @@ mod tests {
             serde_json::from_value(old_record).unwrap();
 
         assert_eq!(decoded.name.as_deref(), Some("pre-gate-agent"));
-        assert_eq!(decoded.gate_id, None);
-        assert_eq!(decoded.gate_state, None);
-        assert!(!decoded.gate_output_truncated);
-        assert_eq!(decoded.gate_next_model, None);
-        assert_eq!(decoded.gate_followup_prompt_path, None);
-        assert_eq!(decoded.gate_decision_path, None);
+        assert_eq!(decoded.family_shell, None);
         assert_eq!(decoded.shell_kind, None);
         assert_eq!(decoded.proc_id, None);
     }
@@ -1239,18 +1183,26 @@ mod tests {
     fn done_marker_wire_round_trips_every_monitor_field() {
         let done = DoneMarkerWire {
             outcome: Some("monitored".to_string()),
-            monitor_state: Some("completed".to_string()),
-            monitor_exit_code: Some(0),
-            monitor_elapsed_seconds: Some(17.5),
             status_label: Some("MONITORED".to_string()),
-            monitor_followup_outcome: Some("not-launchable".to_string()),
-            monitor_followup_error: Some("no lane to launch into".to_string()),
-            monitor_followup_degraded_reason: Some(
-                "claim transfer failed".to_string(),
-            ),
-            monitor_followup_prompt_path: Some(
-                "artifacts/monitor_followup.md".to_string(),
-            ),
+            family_shell: Some(FamilyShellWire {
+                kind: "monitor".to_string(),
+                state: Some("completed".to_string()),
+                elapsed_seconds: Some(17.5),
+                followup_outcome: Some("not-launchable".to_string()),
+                followup_error: Some("no lane to launch into".to_string()),
+                followup_degraded_reason: Some(
+                    "claim transfer failed".to_string(),
+                ),
+                followup_prompt_path: Some(
+                    "artifacts/monitor_followup.md".to_string(),
+                ),
+                monitor: Some(FamilyShellMonitorWire {
+                    exit_code: Some(0),
+                    ..Default::default()
+                }),
+                gate: None,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -1263,23 +1215,31 @@ mod tests {
     fn done_marker_wire_round_trips_every_gate_field() {
         let done = DoneMarkerWire {
             outcome: Some("gated".to_string()),
-            gate_id: Some("gate-1".to_string()),
-            gate_kind: Some("approval".to_string()),
-            gate_state: Some("answered".to_string()),
-            gate_elapsed_seconds: Some(5.25),
             status_label: Some("ANSWERED".to_string()),
-            gate_output_path: Some("gate.out".to_string()),
-            gate_output_truncated: true,
-            gate_bundle_path: Some("gate_bundle.json".to_string()),
-            gate_notification_id: Some("notif-1".to_string()),
-            gate_followup_outcome: Some("launched-degraded".to_string()),
-            gate_followup_error: Some("claim transfer failed".to_string()),
-            gate_followup_degraded_reason: Some(
-                "workspace already reclaimed".to_string(),
-            ),
-            gate_followup_prompt_path: Some(
-                "artifacts/gate_followup.md".to_string(),
-            ),
+            family_shell: Some(FamilyShellWire {
+                kind: "gate".to_string(),
+                id: Some("gate-1".to_string()),
+                state: Some("answered".to_string()),
+                elapsed_seconds: Some(5.25),
+                output_path: Some("gate.out".to_string()),
+                output_truncated: true,
+                followup_outcome: Some("launched-degraded".to_string()),
+                followup_error: Some("claim transfer failed".to_string()),
+                followup_degraded_reason: Some(
+                    "workspace already reclaimed".to_string(),
+                ),
+                followup_prompt_path: Some(
+                    "artifacts/gate_followup.md".to_string(),
+                ),
+                monitor: None,
+                gate: Some(FamilyShellGateWire {
+                    kind: Some("approval".to_string()),
+                    bundle_path: Some("gate_bundle.json".to_string()),
+                    notification_id: Some("notif-1".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -1299,14 +1259,7 @@ mod tests {
             serde_json::from_value(old_record).unwrap();
 
         assert_eq!(decoded.outcome.as_deref(), Some("completed"));
-        assert_eq!(decoded.monitor_state, None);
-        assert_eq!(decoded.monitor_exit_code, None);
         assert_eq!(decoded.status_label, None);
-        assert_eq!(decoded.monitor_followup_degraded_reason, None);
-        assert_eq!(decoded.monitor_followup_prompt_path, None);
-        assert_eq!(decoded.gate_id, None);
-        assert_eq!(decoded.gate_state, None);
-        assert!(!decoded.gate_output_truncated);
-        assert_eq!(decoded.gate_followup_prompt_path, None);
+        assert_eq!(decoded.family_shell, None);
     }
 }

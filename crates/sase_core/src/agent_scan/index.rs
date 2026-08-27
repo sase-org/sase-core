@@ -205,8 +205,8 @@ pub struct AgentArtifactIndexQueryWire {
     #[serde(default)]
     pub freshness: AgentArtifactIndexFreshnessWire,
     /// Restrict results to real monitor family members
-    /// (`agent_meta.agent_family_role == "monitor"` and non-empty
-    /// `agent_meta.monitor_id`).
+    /// (`agent_meta.agent_family_role == "monitor"` and a non-empty
+    /// `agent_meta.family_shell.id` on a `"monitor"`-kind shell).
     #[serde(default)]
     pub only_monitors: bool,
 }
@@ -4032,7 +4032,8 @@ mod tests {
             indexed.records[0]
                 .agent_meta
                 .as_ref()
-                .and_then(|meta| meta.monitor_id.as_deref()),
+                .and_then(|meta| meta.family_shell.as_ref())
+                .and_then(|shell| shell.id.as_deref()),
             Some("m4kq")
         );
     }

@@ -273,8 +273,10 @@ pub(crate) fn is_real_monitor_member_record(
         .as_deref()
         .is_some_and(|role| role.trim() == MONITOR_FAMILY_ROLE)
         && meta
-            .monitor_id
-            .as_deref()
+            .family_shell
+            .as_ref()
+            .filter(|shell| shell.kind == MONITOR_FAMILY_ROLE)
+            .and_then(|shell| shell.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
@@ -292,8 +294,10 @@ pub(crate) fn is_real_gate_member_record(
         .as_deref()
         .is_some_and(|role| role.trim() == GATE_FAMILY_ROLE)
         && meta
-            .gate_id
-            .as_deref()
+            .family_shell
+            .as_ref()
+            .filter(|shell| shell.kind == GATE_FAMILY_ROLE)
+            .and_then(|shell| shell.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
@@ -350,8 +354,10 @@ pub fn is_runner_slot_occupying_record(
     let gate = is_real_gate_member_record(record);
     if gate
         && meta
-            .gate_state
-            .as_deref()
+            .family_shell
+            .as_ref()
+            .filter(|shell| shell.kind == GATE_FAMILY_ROLE)
+            .and_then(|shell| shell.state.as_deref())
             .is_some_and(|state| state.trim() == "pending")
     {
         return false;
@@ -1069,7 +1075,7 @@ mod tests {
                 serde_json::json!({
                     "agent_family": "fam",
                     "agent_family_role": "monitor",
-                    "monitor_id": "mon-1",
+                    "family_shell": {"kind": "monitor", "id": "mon-1"},
                     "run_started_at": serde_json::Value::Null
                 }),
             ),
@@ -1091,7 +1097,7 @@ mod tests {
                 serde_json::json!({
                     "agent_family": "fam",
                     "agent_family_role": "monitor",
-                    "monitor_id": "mon-1"
+                    "family_shell": {"kind": "monitor", "id": "mon-1"}
                 }),
             ),
             occupancy_record(
@@ -1176,8 +1182,7 @@ mod tests {
             serde_json::json!({
                 "agent_family": "fam",
                 "agent_family_role": "gate",
-                "gate_id": "gate-1",
-                "gate_state": "pending"
+                "family_shell": {"kind": "gate", "id": "gate-1", "state": "pending"}
             }),
         )];
 
@@ -1193,8 +1198,7 @@ mod tests {
             serde_json::json!({
                 "agent_family": "fam",
                 "agent_family_role": "gate",
-                "gate_id": "gate-1",
-                "gate_state": "answered",
+                "family_shell": {"kind": "gate", "id": "gate-1", "state": "answered"},
                 "run_started_at": serde_json::Value::Null
             }),
         )];
@@ -1227,7 +1231,7 @@ mod tests {
             "/monitor",
             serde_json::json!({
                 "agent_family_role": "monitor",
-                "monitor_id": "mon-1",
+                "family_shell": {"kind": "monitor", "id": "mon-1"},
                 "run_started_at": serde_json::Value::Null
             }),
         )];
@@ -1241,7 +1245,7 @@ mod tests {
                 "/starter",
                 serde_json::json!({
                     "agent_family_role": "root",
-                    "monitor_id": "mon-1",
+                    "family_shell": {"kind": "monitor", "id": "mon-1"},
                     "run_started_at": serde_json::Value::Null
                 }),
             ),
@@ -1249,7 +1253,7 @@ mod tests {
                 "/followup",
                 serde_json::json!({
                     "agent_family_role": "code",
-                    "monitor_id": "mon-1",
+                    "family_shell": {"kind": "monitor", "id": "mon-1"},
                     "run_started_at": serde_json::Value::Null
                 }),
             ),
@@ -1266,8 +1270,7 @@ mod tests {
             "/followup",
             serde_json::json!({
                 "agent_family_role": "code",
-                "gate_id": "gate-1",
-                "gate_state": "pending",
+                "family_shell": {"kind": "gate", "id": "gate-1", "state": "pending"},
                 "run_started_at": serde_json::Value::Null
             }),
         )];
@@ -1363,7 +1366,7 @@ mod tests {
             "/20260712120000",
             serde_json::json!({
                 "agent_family_role": "monitor",
-                "monitor_id": "mon-1",
+                "family_shell": {"kind": "monitor", "id": "mon-1"},
                 "run_started_at": "2026-07-12T12:00:10+00:00"
             }),
         );

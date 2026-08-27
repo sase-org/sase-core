@@ -29,7 +29,8 @@ use super::layout::{
 use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordWire,
     AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, OutputVariableValue,
+    AgentArtifactScanWire, AgentMetaWire, DoneMarkerWire, FamilyShellGateWire,
+    FamilyShellMonitorWire, FamilyShellWire, OutputVariableValue,
     PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
     RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -1084,87 +1085,122 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         retried_as_timestamp: coerce_str(data.get("retried_as_timestamp")),
         retry_terminal: coerce_bool_truthy(data.get("retry_terminal")),
         retry_error_category: coerce_str(data.get("retry_error_category")),
-        monitor_id: coerce_str(data.get("monitor_id")),
-        monitor_command: coerce_str(data.get("monitor_command")),
-        monitor_cwd: coerce_str(data.get("monitor_cwd")),
-        monitor_label: coerce_str(data.get("monitor_label")),
-        monitor_reason: coerce_str(data.get("monitor_reason")),
-        monitor_next_action: coerce_str(data.get("monitor_next_action")),
-        monitor_start_status: coerce_str(data.get("monitor_start_status")),
-        monitor_stop_status: coerce_str(data.get("monitor_stop_status")),
-        monitor_timeout_seconds: coerce_float(
-            data.get("monitor_timeout_seconds"),
-        ),
-        monitor_state: coerce_str(data.get("monitor_state")),
-        monitor_exit_code: coerce_int(data.get("monitor_exit_code")),
-        monitor_output_path: coerce_str(data.get("monitor_output_path")),
-        monitor_output_truncated: coerce_bool_truthy(
-            data.get("monitor_output_truncated"),
-        ),
-        monitor_starter_agent: coerce_str(data.get("monitor_starter_agent")),
-        monitor_followup_agent: coerce_str(data.get("monitor_followup_agent")),
-        monitor_tail_lines: coerce_int(data.get("monitor_tail_lines")),
-        monitor_pgid: coerce_int(data.get("monitor_pgid")),
-        monitor_supervisor_identity: coerce_str(
-            data.get("monitor_supervisor_identity"),
-        ),
-        monitor_settled: coerce_bool_truthy(data.get("monitor_settled")),
-        monitor_idle_timeout_seconds: coerce_float(
-            data.get("monitor_idle_timeout_seconds"),
-        ),
-        monitor_next_output: coerce_str(data.get("monitor_next_output")),
-        monitor_next_model: coerce_str(data.get("monitor_next_model")),
-        monitor_request_fingerprint: coerce_str(
-            data.get("monitor_request_fingerprint"),
-        ),
-        monitor_followup_outcome: coerce_str(
-            data.get("monitor_followup_outcome"),
-        ),
-        monitor_followup_error: coerce_str(data.get("monitor_followup_error")),
-        monitor_followup_degraded_reason: coerce_str(
-            data.get("monitor_followup_degraded_reason"),
-        ),
-        monitor_followup_prompt_path: coerce_str(
-            data.get("monitor_followup_prompt_path"),
-        ),
-        gate_id: coerce_str(data.get("gate_id")),
-        gate_kind: coerce_str(data.get("gate_kind")),
-        gate_state: coerce_str(data.get("gate_state")),
-        gate_start_status: coerce_str(data.get("gate_start_status")),
-        gate_stop_status: coerce_str(data.get("gate_stop_status")),
-        gate_accent: coerce_str(data.get("gate_accent")),
-        gate_output_path: coerce_str(data.get("gate_output_path")),
-        gate_output_truncated: coerce_bool_truthy(
-            data.get("gate_output_truncated"),
-        ),
-        gate_creator_agent: coerce_str(data.get("gate_creator_agent")),
-        gate_followup_agent: coerce_str(data.get("gate_followup_agent")),
-        gate_next_action: coerce_str(data.get("gate_next_action")),
-        gate_next_fork: coerce_str(data.get("gate_next_fork")),
-        gate_next_output: coerce_str(data.get("gate_next_output")),
-        gate_next_model: coerce_str(data.get("gate_next_model")),
-        gate_followup_outcome: coerce_str(data.get("gate_followup_outcome")),
-        gate_followup_error: coerce_str(data.get("gate_followup_error")),
-        gate_followup_degraded_reason: coerce_str(
-            data.get("gate_followup_degraded_reason"),
-        ),
-        gate_followup_prompt_path: coerce_str(
-            data.get("gate_followup_prompt_path"),
-        ),
-        gate_elapsed_seconds: coerce_float(data.get("gate_elapsed_seconds")),
-        gate_label: coerce_str(data.get("gate_label")),
-        gate_reason: coerce_str(data.get("gate_reason")),
-        gate_timeout_seconds: coerce_float(data.get("gate_timeout_seconds")),
-        gate_request_fingerprint: coerce_str(
-            data.get("gate_request_fingerprint"),
-        ),
-        gate_workspace_policy: coerce_str(data.get("gate_workspace_policy")),
-        gate_bundle_path: coerce_str(data.get("gate_bundle_path")),
-        gate_notification_id: coerce_str(data.get("gate_notification_id")),
-        gate_decision_path: coerce_str(data.get("gate_decision_path")),
+        family_shell: family_shell_from_object(data),
         shell_kind: coerce_str(data.get("shell_kind")),
         proc_id: coerce_str(data.get("proc_id")),
     }
+}
+
+/// Fold the flat `monitor_*` / `gate_*` marker keys into one
+/// [`FamilyShellWire`], the compatibility projection for on-disk
+/// `agent_meta.json` / `done.json` files, which still carry the flat shape.
+///
+/// A family shell is either a monitor or a gate, never both -- the two are
+/// independent inheritance chains keyed off different launch mechanisms.
+/// If both prefixes are somehow present, `agent_family_role` disambiguates
+/// rather than silently dropping one side.
+fn family_shell_from_object(
+    data: &Map<String, Value>,
+) -> Option<FamilyShellWire> {
+    let mut has_monitor = data.keys().any(|k| k.starts_with("monitor_"));
+    let mut has_gate = data.keys().any(|k| k.starts_with("gate_"));
+    if has_monitor && has_gate {
+        has_monitor = coerce_str(data.get("agent_family_role")).as_deref()
+            != Some("gate");
+        has_gate = !has_monitor;
+    }
+    if has_monitor {
+        return Some(FamilyShellWire {
+            kind: "monitor".to_string(),
+            id: coerce_str(data.get("monitor_id")),
+            state: coerce_str(data.get("monitor_state")),
+            label: coerce_str(data.get("monitor_label")),
+            reason: coerce_str(data.get("monitor_reason")),
+            start_status: coerce_str(data.get("monitor_start_status")),
+            stop_status: coerce_str(data.get("monitor_stop_status")),
+            timeout_seconds: coerce_float(data.get("monitor_timeout_seconds")),
+            elapsed_seconds: coerce_float(data.get("monitor_elapsed_seconds")),
+            output_path: coerce_str(data.get("monitor_output_path")),
+            output_truncated: coerce_bool_truthy(
+                data.get("monitor_output_truncated"),
+            ),
+            request_fingerprint: coerce_str(
+                data.get("monitor_request_fingerprint"),
+            ),
+            next_action: coerce_str(data.get("monitor_next_action")),
+            next_output: coerce_str(data.get("monitor_next_output")),
+            next_model: coerce_str(data.get("monitor_next_model")),
+            followup_agent: coerce_str(data.get("monitor_followup_agent")),
+            followup_outcome: coerce_str(data.get("monitor_followup_outcome")),
+            followup_error: coerce_str(data.get("monitor_followup_error")),
+            followup_degraded_reason: coerce_str(
+                data.get("monitor_followup_degraded_reason"),
+            ),
+            followup_prompt_path: coerce_str(
+                data.get("monitor_followup_prompt_path"),
+            ),
+            monitor: Some(FamilyShellMonitorWire {
+                command: coerce_str(data.get("monitor_command")),
+                cwd: coerce_str(data.get("monitor_cwd")),
+                exit_code: coerce_int(data.get("monitor_exit_code")),
+                starter_agent: coerce_str(data.get("monitor_starter_agent")),
+                tail_lines: coerce_int(data.get("monitor_tail_lines")),
+                pgid: coerce_int(data.get("monitor_pgid")),
+                supervisor_identity: coerce_str(
+                    data.get("monitor_supervisor_identity"),
+                ),
+                settled: coerce_bool_truthy(data.get("monitor_settled")),
+                idle_timeout_seconds: coerce_float(
+                    data.get("monitor_idle_timeout_seconds"),
+                ),
+            }),
+            gate: None,
+        });
+    }
+    if has_gate {
+        return Some(FamilyShellWire {
+            kind: "gate".to_string(),
+            id: coerce_str(data.get("gate_id")),
+            state: coerce_str(data.get("gate_state")),
+            label: coerce_str(data.get("gate_label")),
+            reason: coerce_str(data.get("gate_reason")),
+            start_status: coerce_str(data.get("gate_start_status")),
+            stop_status: coerce_str(data.get("gate_stop_status")),
+            timeout_seconds: coerce_float(data.get("gate_timeout_seconds")),
+            elapsed_seconds: coerce_float(data.get("gate_elapsed_seconds")),
+            output_path: coerce_str(data.get("gate_output_path")),
+            output_truncated: coerce_bool_truthy(
+                data.get("gate_output_truncated"),
+            ),
+            request_fingerprint: coerce_str(
+                data.get("gate_request_fingerprint"),
+            ),
+            next_action: coerce_str(data.get("gate_next_action")),
+            next_output: coerce_str(data.get("gate_next_output")),
+            next_model: coerce_str(data.get("gate_next_model")),
+            followup_agent: coerce_str(data.get("gate_followup_agent")),
+            followup_outcome: coerce_str(data.get("gate_followup_outcome")),
+            followup_error: coerce_str(data.get("gate_followup_error")),
+            followup_degraded_reason: coerce_str(
+                data.get("gate_followup_degraded_reason"),
+            ),
+            followup_prompt_path: coerce_str(
+                data.get("gate_followup_prompt_path"),
+            ),
+            monitor: None,
+            gate: Some(FamilyShellGateWire {
+                kind: coerce_str(data.get("gate_kind")),
+                accent: coerce_str(data.get("gate_accent")),
+                creator_agent: coerce_str(data.get("gate_creator_agent")),
+                next_fork: coerce_str(data.get("gate_next_fork")),
+                workspace_policy: coerce_str(data.get("gate_workspace_policy")),
+                bundle_path: coerce_str(data.get("gate_bundle_path")),
+                notification_id: coerce_str(data.get("gate_notification_id")),
+                decision_path: coerce_str(data.get("gate_decision_path")),
+            }),
+        });
+    }
+    None
 }
 
 fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
@@ -1205,40 +1241,8 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         imported_transaction_key: coerce_str(
             data.get("imported_transaction_key"),
         ),
-        monitor_state: coerce_str(data.get("monitor_state")),
-        monitor_exit_code: coerce_int(data.get("monitor_exit_code")),
-        monitor_elapsed_seconds: coerce_float(
-            data.get("monitor_elapsed_seconds"),
-        ),
         status_label: coerce_str(data.get("status_label")),
-        monitor_followup_outcome: coerce_str(
-            data.get("monitor_followup_outcome"),
-        ),
-        monitor_followup_error: coerce_str(data.get("monitor_followup_error")),
-        monitor_followup_degraded_reason: coerce_str(
-            data.get("monitor_followup_degraded_reason"),
-        ),
-        monitor_followup_prompt_path: coerce_str(
-            data.get("monitor_followup_prompt_path"),
-        ),
-        gate_id: coerce_str(data.get("gate_id")),
-        gate_kind: coerce_str(data.get("gate_kind")),
-        gate_state: coerce_str(data.get("gate_state")),
-        gate_elapsed_seconds: coerce_float(data.get("gate_elapsed_seconds")),
-        gate_output_path: coerce_str(data.get("gate_output_path")),
-        gate_output_truncated: coerce_bool_truthy(
-            data.get("gate_output_truncated"),
-        ),
-        gate_bundle_path: coerce_str(data.get("gate_bundle_path")),
-        gate_notification_id: coerce_str(data.get("gate_notification_id")),
-        gate_followup_outcome: coerce_str(data.get("gate_followup_outcome")),
-        gate_followup_error: coerce_str(data.get("gate_followup_error")),
-        gate_followup_degraded_reason: coerce_str(
-            data.get("gate_followup_degraded_reason"),
-        ),
-        gate_followup_prompt_path: coerce_str(
-            data.get("gate_followup_prompt_path"),
-        ),
+        family_shell: family_shell_from_object(data),
     }
 }
 
@@ -1417,11 +1421,10 @@ mod tests {
         );
         assert_eq!(snapshot.records.len(), 1);
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
-        assert_eq!(
-            meta.monitor_next_action.as_deref(),
-            Some("Reply to the user.")
-        );
-        assert_eq!(meta.monitor_next_model.as_deref(), Some("@small"));
+        let shell = meta.family_shell.as_ref().unwrap();
+        assert_eq!(shell.kind, "monitor");
+        assert_eq!(shell.next_action.as_deref(), Some("Reply to the user."));
+        assert_eq!(shell.next_model.as_deref(), Some("@small"));
     }
 
     #[test]
@@ -1448,8 +1451,9 @@ mod tests {
         );
         assert_eq!(snapshot.records.len(), 1);
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
-        assert_eq!(meta.monitor_id.as_deref(), Some("oldmon"));
-        assert_eq!(meta.monitor_next_model, None);
+        let shell = meta.family_shell.as_ref().unwrap();
+        assert_eq!(shell.id.as_deref(), Some("oldmon"));
+        assert_eq!(shell.next_model, None);
     }
 
     #[test]
@@ -1525,21 +1529,25 @@ mod tests {
         assert_eq!(snapshot.records.len(), 1);
         let record = &snapshot.records[0];
         let meta = record.agent_meta.as_ref().unwrap();
-        assert_eq!(meta.gate_id.as_deref(), Some("gate-1"));
-        assert_eq!(meta.gate_state.as_deref(), Some("pending"));
-        assert_eq!(meta.gate_next_model.as_deref(), Some("@large"));
-        assert!(meta.gate_output_truncated);
+        let meta_shell = meta.family_shell.as_ref().unwrap();
+        assert_eq!(meta_shell.kind, "gate");
+        assert_eq!(meta_shell.id.as_deref(), Some("gate-1"));
+        assert_eq!(meta_shell.state.as_deref(), Some("pending"));
+        assert_eq!(meta_shell.next_model.as_deref(), Some("@large"));
+        assert!(meta_shell.output_truncated);
+        let meta_gate = meta_shell.gate.as_ref().unwrap();
         assert_eq!(
-            meta.gate_decision_path.as_deref(),
+            meta_gate.decision_path.as_deref(),
             Some("gate_decision.md")
         );
         assert_eq!(meta.shell_kind.as_deref(), Some("gate"));
         let done = record.done.as_ref().unwrap();
-        assert_eq!(done.gate_state.as_deref(), Some("answered"));
-        assert_eq!(done.gate_elapsed_seconds, Some(2.5));
-        assert!(done.gate_output_truncated);
+        let done_shell = done.family_shell.as_ref().unwrap();
+        assert_eq!(done_shell.state.as_deref(), Some("answered"));
+        assert_eq!(done_shell.elapsed_seconds, Some(2.5));
+        assert!(done_shell.output_truncated);
         assert_eq!(
-            done.gate_followup_prompt_path.as_deref(),
+            done_shell.followup_prompt_path.as_deref(),
             Some("gate_followup.md")
         );
     }
