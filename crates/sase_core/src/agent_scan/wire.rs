@@ -105,6 +105,25 @@ pub struct AgentArtifactScanStatsWire {
     pub prompt_step_markers_parsed: u64,
 }
 
+/// Metadata for an intentionally bounded artifact-index window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexWindowWire {
+    #[serde(default)]
+    pub requested_limit: Option<u32>,
+    #[serde(default)]
+    pub selected_candidate_count: u64,
+    #[serde(default)]
+    pub returned_record_count: u64,
+    #[serde(default)]
+    pub active_candidate_count: u64,
+    #[serde(default)]
+    pub completed_candidate_count: u64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// Compact projection of `done.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DoneMarkerWire {
@@ -958,6 +977,8 @@ pub struct AgentArtifactScanWire {
     pub projects_root: String,
     pub options: AgentArtifactScanOptionsWire,
     pub stats: AgentArtifactScanStatsWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_window: Option<AgentArtifactIndexWindowWire>,
     #[serde(default)]
     pub records: Vec<AgentArtifactRecordWire>,
     #[serde(default)]

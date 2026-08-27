@@ -33,13 +33,14 @@ use super::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
 };
 use super::wire::{
-    AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, AgentOutputVariableHistoryQueryWire,
-    AgentOutputVariableHistoryWire, AgentOutputVariableKeyGroupWire,
-    AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
-    AgentOutputVariableValueGroupWire, DoneMarkerWire, OutputVariableValue,
-    UsedXPromptWire, AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    AgentArtifactIndexWindowWire, AgentArtifactRecordShapeWire,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
+    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
+    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
+    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
+    DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
+    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
@@ -189,6 +190,46 @@ pub enum AgentArtifactIndexFreshnessWire {
     Cached,
 }
 
+/// Scalar fields that can be tested before `record_json` is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentArtifactCandidateFieldWire {
+    Project,
+    Cl,
+    Model,
+    Provider,
+    Type,
+}
+
+/// Exact candidate filter compiled by Python from the agent-query AST.
+///
+/// This is intentionally not a user-facing query parser. Callers only send
+/// boolean combinations of atoms whose parity against Python Agent evaluation
+/// has been proven for indexed scalar columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentArtifactCandidateFilterWire {
+    All {
+        #[serde(default)]
+        filters: Vec<AgentArtifactCandidateFilterWire>,
+    },
+    Any {
+        #[serde(default)]
+        filters: Vec<AgentArtifactCandidateFilterWire>,
+    },
+    Not {
+        filter: Box<AgentArtifactCandidateFilterWire>,
+    },
+    Contains {
+        field: AgentArtifactCandidateFieldWire,
+        value: String,
+    },
+    Equals {
+        field: AgentArtifactCandidateFieldWire,
+        value: String,
+    },
+}
+
 /// Query knobs for the persistent artifact index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArtifactIndexQueryWire {
@@ -213,6 +254,10 @@ pub struct AgentArtifactIndexQueryWire {
     pub only_monitors: bool,
     #[serde(default)]
     pub record_shape: AgentArtifactRecordShapeWire,
+    #[serde(default)]
+    pub window_limit: Option<u32>,
+    #[serde(default)]
+    pub candidate_filter: Option<AgentArtifactCandidateFilterWire>,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -227,6 +272,8 @@ impl Default for AgentArtifactIndexQueryWire {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         }
     }
 }
@@ -1008,68 +1055,79 @@ pub fn query_agent_artifact_index(
         )?;
     }
 
-    if query.include_active {
-        select_records(
+    let index_window = if should_use_windowed_candidate_query(&query) {
+        Some(select_windowed_records(
             &conn,
-            SelectRecordsQuery {
-                where_sql: active_where(
-                    query.include_hidden,
-                    project_filter.as_ref(),
-                ),
-                limit: query.active_limit,
-                selection: RecordSelection::Active,
-                include_hidden: query.include_hidden,
-                freshness: query.freshness,
-                only_monitors: query.only_monitors,
-            },
+            &query,
             &mut stats,
             &mut by_dir,
-            &options,
             project_filter.as_ref(),
-        )?;
-    }
+        )?)
+    } else {
+        if query.include_active {
+            select_records(
+                &conn,
+                SelectRecordsQuery {
+                    where_sql: active_where(
+                        query.include_hidden,
+                        project_filter.as_ref(),
+                    ),
+                    limit: query.active_limit,
+                    selection: RecordSelection::Active,
+                    include_hidden: query.include_hidden,
+                    freshness: query.freshness,
+                    only_monitors: query.only_monitors,
+                },
+                &mut stats,
+                &mut by_dir,
+                &options,
+                project_filter.as_ref(),
+            )?;
+        }
 
-    if query.include_recent_completed {
-        select_records(
-            &conn,
-            SelectRecordsQuery {
-                where_sql: completed_where(
-                    query.include_hidden,
-                    project_filter.as_ref(),
-                ),
-                limit: query.recent_completed_limit,
-                selection: RecordSelection::Completed,
-                include_hidden: query.include_hidden,
-                freshness: query.freshness,
-                only_monitors: query.only_monitors,
-            },
-            &mut stats,
-            &mut by_dir,
-            &options,
-            project_filter.as_ref(),
-        )?;
-    }
+        if query.include_recent_completed {
+            select_records(
+                &conn,
+                SelectRecordsQuery {
+                    where_sql: completed_where(
+                        query.include_hidden,
+                        project_filter.as_ref(),
+                    ),
+                    limit: query.recent_completed_limit,
+                    selection: RecordSelection::Completed,
+                    include_hidden: query.include_hidden,
+                    freshness: query.freshness,
+                    only_monitors: query.only_monitors,
+                },
+                &mut stats,
+                &mut by_dir,
+                &options,
+                project_filter.as_ref(),
+            )?;
+        }
 
-    if query.include_full_history {
-        select_records(
-            &conn,
-            SelectRecordsQuery {
-                where_sql: visible_where(
-                    query.include_hidden,
-                    project_filter.as_ref(),
-                ),
-                limit: None,
-                selection: RecordSelection::Visible,
-                include_hidden: query.include_hidden,
-                freshness: query.freshness,
-                only_monitors: query.only_monitors,
-            },
-            &mut stats,
-            &mut by_dir,
-            &options,
-            project_filter.as_ref(),
-        )?;
-    }
+        if query.include_full_history {
+            select_records(
+                &conn,
+                SelectRecordsQuery {
+                    where_sql: visible_where(
+                        query.include_hidden,
+                        project_filter.as_ref(),
+                    ),
+                    limit: None,
+                    selection: RecordSelection::Visible,
+                    include_hidden: query.include_hidden,
+                    freshness: query.freshness,
+                    only_monitors: query.only_monitors,
+                },
+                &mut stats,
+                &mut by_dir,
+                &options,
+                project_filter.as_ref(),
+            )?;
+        }
+        None
+    };
 
     let mut records: Vec<AgentArtifactRecordWire> =
         by_dir.into_values().collect();
@@ -1098,6 +1156,7 @@ pub fn query_agent_artifact_index(
         projects_root: projects_root.to_string_lossy().into_owned(),
         options,
         stats,
+        index_window,
         records,
         clan_context,
     })
@@ -3577,6 +3636,258 @@ struct SelectRecordsQuery {
     only_monitors: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateSelection {
+    Active,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedCandidateRow {
+    artifact_dir: String,
+    project_name: String,
+    agent_type: String,
+    cl_name: Option<String>,
+    model: Option<String>,
+    llm_provider: Option<String>,
+    selection: CandidateSelection,
+}
+
+impl IndexedCandidateRow {
+    fn scalar_values(
+        &self,
+        field: AgentArtifactCandidateFieldWire,
+    ) -> Vec<&str> {
+        match field {
+            AgentArtifactCandidateFieldWire::Project => {
+                vec![self.project_name.as_str()]
+            }
+            AgentArtifactCandidateFieldWire::Cl => {
+                self.cl_name.as_deref().into_iter().collect()
+            }
+            AgentArtifactCandidateFieldWire::Model => {
+                self.model.as_deref().into_iter().collect()
+            }
+            AgentArtifactCandidateFieldWire::Provider => {
+                self.llm_provider.as_deref().into_iter().collect()
+            }
+            AgentArtifactCandidateFieldWire::Type => {
+                vec![self.agent_type.as_str()]
+            }
+        }
+    }
+}
+
+fn should_use_windowed_candidate_query(
+    query: &AgentArtifactIndexQueryWire,
+) -> bool {
+    query.window_limit.is_some()
+        && query.freshness == AgentArtifactIndexFreshnessWire::Cached
+        && query.include_active
+        && query.include_recent_completed
+        && !query.include_full_history
+        && !query.include_hidden
+        && !query.only_monitors
+}
+
+fn select_windowed_records(
+    conn: &Connection,
+    query: &AgentArtifactIndexQueryWire,
+    stats: &mut AgentArtifactScanStatsWire,
+    by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
+    project_filter: Option<&BTreeSet<String>>,
+) -> Result<AgentArtifactIndexWindowWire, String> {
+    let requested_limit = query.window_limit.unwrap_or(1).max(1);
+    let active_rows = select_candidate_rows(
+        conn,
+        active_where(query.include_hidden, project_filter),
+        CandidateSelection::Active,
+    )?;
+    let mut active_candidates = Vec::new();
+    let mut active_dirs = BTreeSet::new();
+    for row in active_rows {
+        if candidate_matches_query_filter(&row, query.candidate_filter.as_ref())
+        {
+            active_dirs.insert(row.artifact_dir.clone());
+            active_candidates.push(row);
+        }
+    }
+
+    let completed_rows = select_candidate_rows(
+        conn,
+        completed_window_where(query.include_hidden, project_filter),
+        CandidateSelection::Completed,
+    )?;
+    let mut completed_candidates = Vec::new();
+    for row in completed_rows {
+        if active_dirs.contains(&row.artifact_dir) {
+            continue;
+        }
+        if candidate_matches_query_filter(&row, query.candidate_filter.as_ref())
+        {
+            completed_candidates.push(row);
+        }
+    }
+
+    let completed_budget =
+        requested_limit.saturating_sub(active_candidates.len() as u32) as usize;
+    let mut selected = active_candidates.clone();
+    selected
+        .extend(completed_candidates.iter().take(completed_budget).cloned());
+    let selected_candidate_count = selected.len() as u64;
+    let has_more =
+        active_candidates.len() + completed_candidates.len() > selected.len();
+    select_records_for_windowed_candidates(
+        conn,
+        selected,
+        stats,
+        by_dir,
+        query.include_hidden,
+    )?;
+
+    let returned_record_count = by_dir.len() as u64;
+    Ok(AgentArtifactIndexWindowWire {
+        requested_limit: Some(requested_limit),
+        selected_candidate_count,
+        returned_record_count,
+        active_candidate_count: active_candidates.len() as u64,
+        completed_candidate_count: completed_candidates.len() as u64,
+        has_more,
+        truncated: has_more,
+    })
+}
+
+fn select_candidate_rows(
+    conn: &Connection,
+    where_sql: String,
+    selection: CandidateSelection,
+) -> Result<Vec<IndexedCandidateRow>, String> {
+    let sql = format!(
+        "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider \
+         FROM agent_artifacts {where_sql}"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push(IndexedCandidateRow {
+            artifact_dir: row.get(0).map_err(|e| e.to_string())?,
+            project_name: row.get(1).map_err(|e| e.to_string())?,
+            agent_type: row.get(2).map_err(|e| e.to_string())?,
+            cl_name: row.get(3).map_err(|e| e.to_string())?,
+            model: row.get(4).map_err(|e| e.to_string())?,
+            llm_provider: row.get(5).map_err(|e| e.to_string())?,
+            selection,
+        });
+    }
+    Ok(result)
+}
+
+fn select_records_for_windowed_candidates(
+    conn: &Connection,
+    candidates: Vec<IndexedCandidateRow>,
+    stats: &mut AgentArtifactScanStatsWire,
+    by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
+    include_hidden: bool,
+) -> Result<(), String> {
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    let mut selected_by_dir = BTreeMap::new();
+    for candidate in candidates {
+        selected_by_dir
+            .entry(candidate.artifact_dir.clone())
+            .or_insert(candidate);
+    }
+    let artifact_dirs: Vec<String> = selected_by_dir.keys().cloned().collect();
+    for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT artifact_dir, record_json FROM agent_artifacts \
+             WHERE artifact_dir IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let Some(candidate) = selected_by_dir.get(&artifact_dir) else {
+                continue;
+            };
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let Ok(record) =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            else {
+                stats.json_decode_errors += 1;
+                continue;
+            };
+            let selection = match candidate.selection {
+                CandidateSelection::Active => RecordSelection::Active,
+                CandidateSelection::Completed => RecordSelection::Completed,
+            };
+            if record_matches_selection(
+                conn,
+                &record,
+                selection,
+                include_hidden,
+                false,
+            )? {
+                by_dir.insert(artifact_dir, record);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn candidate_matches_query_filter(
+    row: &IndexedCandidateRow,
+    filter: Option<&AgentArtifactCandidateFilterWire>,
+) -> bool {
+    filter
+        .map(|filter| candidate_filter_matches(row, filter))
+        .unwrap_or(true)
+}
+
+fn candidate_filter_matches(
+    row: &IndexedCandidateRow,
+    filter: &AgentArtifactCandidateFilterWire,
+) -> bool {
+    match filter {
+        AgentArtifactCandidateFilterWire::All { filters } => filters
+            .iter()
+            .all(|filter| candidate_filter_matches(row, filter)),
+        AgentArtifactCandidateFilterWire::Any { filters } => filters
+            .iter()
+            .any(|filter| candidate_filter_matches(row, filter)),
+        AgentArtifactCandidateFilterWire::Not { filter } => {
+            !candidate_filter_matches(row, filter)
+        }
+        AgentArtifactCandidateFilterWire::Contains { field, value } => row
+            .scalar_values(*field)
+            .into_iter()
+            .any(|candidate| contains_case_insensitive(candidate, value)),
+        AgentArtifactCandidateFilterWire::Equals { field, value } => row
+            .scalar_values(*field)
+            .into_iter()
+            .any(|candidate| scalar_equals(candidate, value)),
+    }
+}
+
+fn contains_case_insensitive(candidate: &str, value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    candidate.to_lowercase().contains(&value.to_lowercase())
+}
+
+fn scalar_equals(candidate: &str, value: &str) -> bool {
+    let candidate = candidate.to_lowercase();
+    let value = value.to_lowercase();
+    if candidate == value {
+        return true;
+    }
+    candidate == "agent" && (value == "run" || value == "running")
+}
+
 #[derive(Debug, Clone)]
 struct IndexedLineageRow {
     artifact_dir: String,
@@ -3876,6 +4187,29 @@ fn completed_where(
          )
          AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
          ORDER BY COALESCE(finished_at, 0) DESC, timestamp DESC"
+        )
+    };
+    add_project_filter_to_where(where_sql, project_filter)
+}
+
+fn completed_window_where(
+    include_hidden: bool,
+    project_filter: Option<&BTreeSet<String>>,
+) -> String {
+    let where_sql = if include_hidden {
+        "WHERE has_done_marker = 1
+         OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')
+         ORDER BY timestamp DESC, artifact_dir DESC"
+            .to_string()
+    } else {
+        format!(
+            "WHERE hidden = 0
+         AND (
+             has_done_marker = 1
+             OR workflow_status IN ('completed', 'failed', 'cancelled', 'noop')
+         )
+         AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
+         ORDER BY timestamp DESC, artifact_dir DESC"
         )
     };
     add_project_filter_to_where(where_sql, project_filter)
@@ -4189,6 +4523,15 @@ mod tests {
             .join(ts)
     }
 
+    fn windowed_index_query(limit: u32) -> AgentArtifactIndexQueryWire {
+        AgentArtifactIndexQueryWire {
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+            record_shape: AgentArtifactRecordShapeWire::List,
+            window_limit: Some(limit),
+            ..AgentArtifactIndexQueryWire::default()
+        }
+    }
+
     #[test]
     fn rebuild_indexes_scanner_equivalent_records() {
         let tmp = tempdir().unwrap();
@@ -4231,6 +4574,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4240,6 +4585,211 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         );
         assert_eq!(indexed.records, source.records);
+    }
+
+    #[test]
+    fn windowed_query_decodes_only_selected_candidates() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let older = artifact(&projects, "20260827090000");
+        let newer = artifact(&projects, "20260827100000");
+        for (artifact_dir, name) in [(&older, "older"), (&newer, "newer")] {
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({"name": name, "model": "gpt-5"}),
+            );
+            write_json(
+                &artifact_dir.join("done.json"),
+                json!({"outcome": "completed", "name": name}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        Connection::open(&index)
+            .unwrap()
+            .execute(
+                "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+                params!["{not valid json", older.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            windowed_index_query(1),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260827100000");
+        assert_eq!(snapshot.stats.json_decode_errors, 0);
+        let window = snapshot.index_window.unwrap();
+        assert_eq!(window.requested_limit, Some(1));
+        assert_eq!(window.selected_candidate_count, 1);
+        assert_eq!(window.returned_record_count, 1);
+        assert_eq!(window.active_candidate_count, 0);
+        assert_eq!(window.completed_candidate_count, 2);
+        assert!(window.has_more);
+        assert!(window.truncated);
+    }
+
+    #[test]
+    fn windowed_query_preserves_active_rows_and_fills_with_completed() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for ts in ["20260827090000", "20260827090100", "20260827090200"] {
+            write_json(
+                &artifact(&projects, ts).join("agent_meta.json"),
+                json!({"name": format!("active-{ts}")}),
+            );
+        }
+        for ts in ["20260827090300", "20260827090400"] {
+            let artifact_dir = artifact(&projects, ts);
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({"name": format!("done-{ts}")}),
+            );
+            write_json(
+                &artifact_dir.join("done.json"),
+                json!({"outcome": "completed", "name": format!("done-{ts}")}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            windowed_index_query(4),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+
+        assert_eq!(timestamps.len(), 4);
+        assert!(timestamps.contains("20260827090000"));
+        assert!(timestamps.contains("20260827090100"));
+        assert!(timestamps.contains("20260827090200"));
+        assert!(timestamps.contains("20260827090400"));
+        assert!(!timestamps.contains("20260827090300"));
+        let window = snapshot.index_window.unwrap();
+        assert_eq!(window.selected_candidate_count, 4);
+        assert_eq!(window.returned_record_count, 4);
+        assert_eq!(window.active_candidate_count, 3);
+        assert_eq!(window.completed_candidate_count, 2);
+        assert!(window.has_more);
+    }
+
+    #[test]
+    fn windowed_query_applies_safe_candidate_filter() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let keep = artifact_for_project(&projects, "proj", "20260827101000");
+        let wrong_model =
+            artifact_for_project(&projects, "proj", "20260827101100");
+        let wrong_project =
+            artifact_for_project(&projects, "other", "20260827101200");
+        for (artifact_dir, name, cl_name, model, provider) in [
+            (&keep, "keep", "target-cl", "claude-opus-4", "anthropic"),
+            (
+                &wrong_model,
+                "wrong-model",
+                "target-cl",
+                "gpt-5",
+                "anthropic",
+            ),
+            (
+                &wrong_project,
+                "wrong-project",
+                "target-cl",
+                "claude-opus-4",
+                "anthropic",
+            ),
+        ] {
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({
+                    "name": name,
+                    "cl_name": cl_name,
+                    "model": model,
+                    "llm_provider": provider,
+                }),
+            );
+            write_json(
+                &artifact_dir.join("done.json"),
+                json!({"outcome": "completed", "name": name, "cl_name": cl_name}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let mut query = windowed_index_query(10);
+        query.candidate_filter = Some(AgentArtifactCandidateFilterWire::All {
+            filters: vec![
+                AgentArtifactCandidateFilterWire::Contains {
+                    field: AgentArtifactCandidateFieldWire::Model,
+                    value: "opus".to_string(),
+                },
+                AgentArtifactCandidateFilterWire::Any {
+                    filters: vec![
+                        AgentArtifactCandidateFilterWire::Equals {
+                            field: AgentArtifactCandidateFieldWire::Provider,
+                            value: "anthropic".to_string(),
+                        },
+                        AgentArtifactCandidateFilterWire::Contains {
+                            field: AgentArtifactCandidateFieldWire::Cl,
+                            value: "target".to_string(),
+                        },
+                    ],
+                },
+                AgentArtifactCandidateFilterWire::Not {
+                    filter: Box::new(
+                        AgentArtifactCandidateFilterWire::Contains {
+                            field: AgentArtifactCandidateFieldWire::Project,
+                            value: "other".to_string(),
+                        },
+                    ),
+                },
+            ],
+        });
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            query,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].artifact_dir, keep.to_string_lossy());
+        let window = snapshot.index_window.unwrap();
+        assert_eq!(window.selected_candidate_count, 1);
+        assert_eq!(window.completed_candidate_count, 1);
+        assert!(!window.has_more);
     }
 
     #[test]
@@ -4284,6 +4834,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: true,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4383,6 +4935,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Cached,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -4524,6 +5078,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Cached,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::List,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6176,6 +6732,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6223,6 +6781,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6276,6 +6836,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6365,6 +6927,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6423,6 +6987,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6475,6 +7041,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6494,6 +7062,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6594,6 +7164,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire {
                 only_projects: vec!["proj".to_string()],
@@ -6635,6 +7207,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6711,6 +7285,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6769,6 +7345,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6814,6 +7392,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6871,6 +7451,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6927,6 +7509,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7196,6 +7780,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7215,6 +7801,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7234,6 +7822,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7253,6 +7843,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7392,6 +7984,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7411,6 +8005,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7474,6 +8070,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7527,6 +8125,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7585,6 +8185,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7603,6 +8205,8 @@ mod tests {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         }
     }
 
@@ -7822,6 +8426,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7866,6 +8472,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7894,6 +8502,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7942,6 +8552,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -8001,6 +8613,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -8027,6 +8641,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -8078,6 +8694,8 @@ mod tests {
                 freshness: AgentArtifactIndexFreshnessWire::Revalidate,
                 only_monitors: false,
                 record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
             },
             AgentArtifactScanOptionsWire::default(),
         )

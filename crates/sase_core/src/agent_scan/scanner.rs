@@ -120,6 +120,7 @@ pub fn scan_agent_artifacts(
         projects_root: projects_root.to_string_lossy().into_owned(),
         options,
         stats,
+        index_window: None,
         records,
         clan_context,
     }
@@ -199,6 +200,7 @@ pub fn scan_agent_artifact_dirs(
         projects_root: projects_root.to_string_lossy().into_owned(),
         options,
         stats,
+        index_window: None,
         records,
         clan_context,
     }

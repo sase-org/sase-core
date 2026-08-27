@@ -878,6 +878,8 @@ fn plan_committed_survives_live_scan_and_indexed_reads() {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -941,6 +943,8 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1218,6 +1222,8 @@ fn running_record_carries_linked_repos_through_scan_and_index() {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         },
         AgentArtifactScanOptionsWire::default(),
     )
@@ -1563,6 +1569,8 @@ fn workflow_state_hidden_is_parsed_and_indexed() {
             freshness: AgentArtifactIndexFreshnessWire::Revalidate,
             only_monitors: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
         },
         AgentArtifactScanOptionsWire::default(),
     )
