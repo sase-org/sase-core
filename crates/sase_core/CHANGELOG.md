@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(agent-scan)* derive missing `finished_at` from `stopped_at` at index time (schema v25)
+
 ## [0.32.12](https://github.com/sase-org/sase-core/compare/v0.32.11...v0.32.12) - 2026-08-27
 
 ### Added

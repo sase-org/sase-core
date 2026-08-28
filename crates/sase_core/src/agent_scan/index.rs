@@ -44,7 +44,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 24;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 25;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -4395,7 +4395,10 @@ impl RecordSummary {
             started_at: meta
                 .and_then(|m| m.run_started_at.clone())
                 .or_else(|| workflow_state.and_then(|w| w.start_time.clone())),
-            finished_at: done.and_then(|d| d.finished_at),
+            // A done marker that omits finished_at sorts behind every
+            // stamped row in the recent-completed window. Fall back to
+            // agent_meta.stopped_at so settled monitors stay visible.
+            finished_at: summary_finished_at(done, meta),
             workflow_status,
             hidden: meta.map(|m| m.hidden).unwrap_or(false)
                 || done.map(|d| d.hidden).unwrap_or(false)
@@ -4416,6 +4419,18 @@ impl RecordSummary {
             model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
         }
     }
+}
+
+fn summary_finished_at(
+    done: Option<&DoneMarkerWire>,
+    meta: Option<&AgentMetaWire>,
+) -> Option<f64> {
+    let marker = done?;
+    if let Some(finished_at) = marker.finished_at {
+        return Some(finished_at);
+    }
+    meta.and_then(|value| value.stopped_at.as_deref())
+        .and_then(parse_runtime_timestamp)
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -5351,6 +5366,17 @@ mod tests {
         Connection::open(index)
             .unwrap()
             .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn indexed_finished_at(index: &Path, artifact_dir: &Path) -> Option<f64> {
+        Connection::open(index)
+            .unwrap()
+            .query_row(
+                "SELECT finished_at FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
             .unwrap()
     }
 
@@ -7909,6 +7935,231 @@ mod tests {
         let done = fallback.done.as_ref().unwrap();
         assert_eq!(done.finished_at, Some(999.0));
         assert!(done.finished_at_estimated);
+    }
+
+    #[test]
+    fn missing_done_finished_at_indexes_from_meta_stopped_at() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260828100000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "acme--mon",
+                "stopped_at": "1800000000"
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "monitored",
+                "name": "acme--mon"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            indexed_finished_at(&index, &artifact_dir),
+            Some(1_800_000_000.0)
+        );
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(snapshot.records[0]
+            .done
+            .as_ref()
+            .is_some_and(|done| done.finished_at.is_none()));
+    }
+
+    #[test]
+    fn explicit_done_finished_at_is_not_overridden_by_stopped_at() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260828101000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "acme--gate",
+                "stopped_at": "1800000000"
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "gated",
+                "finished_at": 1_777_000_000.0,
+                "name": "acme--gate"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            indexed_finished_at(&index, &artifact_dir),
+            Some(1_777_000_000.0)
+        );
+    }
+
+    #[test]
+    fn done_marker_without_finished_at_or_stopped_at_indexes_null() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260828102000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "legacy"}),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": "legacy"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(indexed_finished_at(&index, &artifact_dir), None);
+    }
+
+    #[test]
+    fn settled_monitor_without_finished_at_stays_in_recent_completed_window() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let older_agent = artifact(&projects, "20260101000000");
+        let monitor = artifact(&projects, "20260828103000");
+        write_json(
+            &older_agent.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1_700_000_000.0,
+                "name": "old-agent"
+            }),
+        );
+        write_json(
+            &monitor.join("agent_meta.json"),
+            json!({
+                "name": "acme--mon",
+                "agent_family": "acme",
+                "agent_family_role": "monitor",
+                "monitor_id": "m4kq",
+                "monitor_command": "just check-full",
+                "stopped_at": "1800000000"
+            }),
+        );
+        write_json(
+            &monitor.join("done.json"),
+            json!({
+                "outcome": "monitored",
+                "name": "acme--mon"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            indexed_finished_at(&index, &monitor),
+            Some(1_800_000_000.0)
+        );
+        assert_eq!(
+            indexed_finished_at(&index, &older_agent),
+            Some(1_700_000_000.0)
+        );
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(1),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let names: Vec<Option<&str>> = snapshot
+            .records
+            .iter()
+            .map(|record| {
+                record
+                    .agent_meta
+                    .as_ref()
+                    .and_then(|meta| meta.name.as_deref())
+                    .or_else(|| {
+                        record
+                            .done
+                            .as_ref()
+                            .and_then(|done| done.name.as_deref())
+                    })
+            })
+            .collect();
+        assert!(
+            names.contains(&Some("acme--mon")),
+            "without the stopped_at fallback, COALESCE(finished_at, 0) \
+             sorts the monitor to unix epoch 0 and drops it from the \
+             recent-completed window; got {names:?}"
+        );
+        assert!(
+            snapshot.records.iter().any(|record| {
+                record.timestamp == "20260828103000"
+                    && record
+                        .done
+                        .as_ref()
+                        .is_some_and(|done| done.finished_at.is_none())
+            }),
+            "record_json must keep the omitted finished_at; only the \
+             summary column is derived"
+        );
     }
 
     #[test]
