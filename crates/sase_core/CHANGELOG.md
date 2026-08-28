@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(agent-scan)* give the windowed completed tier its own `window_limit` budget
+
 ## [0.32.13](https://github.com/sase-org/sase-core/compare/v0.32.12...v0.32.13) - 2026-08-28
 
 ### Fixed

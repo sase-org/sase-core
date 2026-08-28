@@ -3690,6 +3690,13 @@ fn should_use_windowed_candidate_query(
         && !query.only_monitors
 }
 
+/// Select every matching active candidate plus a newest-first completed
+/// prefix of `window_limit` candidates.
+///
+/// The window bounds the completed tier. `active_limit` on the query
+/// bounds the unwindowed active-tier path. Active rows are never
+/// truncated to satisfy `window_limit`. `has_more` and `truncated` mean
+/// completed candidates were truncated.
 fn select_windowed_records(
     conn: &Connection,
     query: &AgentArtifactIndexQueryWire,
@@ -3729,14 +3736,12 @@ fn select_windowed_records(
         }
     }
 
-    let completed_budget =
-        requested_limit.saturating_sub(active_candidates.len() as u32) as usize;
+    let completed_budget = requested_limit as usize;
     let mut selected = active_candidates.clone();
     selected
         .extend(completed_candidates.iter().take(completed_budget).cloned());
     let selected_candidate_count = selected.len() as u64;
-    let has_more =
-        active_candidates.len() + completed_candidates.len() > selected.len();
+    let has_more = completed_candidates.len() > completed_budget;
     select_records_for_windowed_candidates(
         conn,
         selected,
@@ -4656,7 +4661,7 @@ mod tests {
     }
 
     #[test]
-    fn windowed_query_preserves_active_rows_and_fills_with_completed() {
+    fn windowed_query_preserves_active_rows_and_selects_completed_budget() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         for ts in ["20260827090000", "20260827090100", "20260827090200"] {
@@ -4698,18 +4703,87 @@ mod tests {
             .map(|record| record.timestamp.as_str())
             .collect();
 
-        assert_eq!(timestamps.len(), 4);
+        assert_eq!(timestamps.len(), 5);
         assert!(timestamps.contains("20260827090000"));
         assert!(timestamps.contains("20260827090100"));
         assert!(timestamps.contains("20260827090200"));
+        assert!(timestamps.contains("20260827090300"));
         assert!(timestamps.contains("20260827090400"));
-        assert!(!timestamps.contains("20260827090300"));
         let window = snapshot.index_window.unwrap();
-        assert_eq!(window.selected_candidate_count, 4);
-        assert_eq!(window.returned_record_count, 4);
+        assert_eq!(window.selected_candidate_count, 5);
+        assert_eq!(window.returned_record_count, 5);
         assert_eq!(window.active_candidate_count, 3);
         assert_eq!(window.completed_candidate_count, 2);
+        assert!(!window.has_more);
+        assert!(!window.truncated);
+    }
+
+    #[test]
+    fn windowed_query_selects_completed_budget_when_active_exceeds_limit() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for ts in [
+            "20260827090000",
+            "20260827090100",
+            "20260827090200",
+            "20260827090300",
+            "20260827090400",
+        ] {
+            write_json(
+                &artifact(&projects, ts).join("agent_meta.json"),
+                json!({"name": format!("active-{ts}")}),
+            );
+        }
+        for ts in ["20260827090500", "20260827090600", "20260827090700"] {
+            let artifact_dir = artifact(&projects, ts);
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({"name": format!("done-{ts}")}),
+            );
+            write_json(
+                &artifact_dir.join("done.json"),
+                json!({"outcome": "completed", "name": format!("done-{ts}")}),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            windowed_index_query(2),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+
+        assert_eq!(timestamps.len(), 7);
+        assert!(timestamps.contains("20260827090000"));
+        assert!(timestamps.contains("20260827090100"));
+        assert!(timestamps.contains("20260827090200"));
+        assert!(timestamps.contains("20260827090300"));
+        assert!(timestamps.contains("20260827090400"));
+        assert!(timestamps.contains("20260827090600"));
+        assert!(timestamps.contains("20260827090700"));
+        assert!(!timestamps.contains("20260827090500"));
+        let window = snapshot.index_window.unwrap();
+        assert_eq!(window.requested_limit, Some(2));
+        assert_eq!(window.selected_candidate_count, 7);
+        assert_eq!(window.returned_record_count, 7);
+        assert_eq!(window.active_candidate_count, 5);
+        assert_eq!(window.completed_candidate_count, 3);
         assert!(window.has_more);
+        assert!(window.truncated);
     }
 
     #[test]
