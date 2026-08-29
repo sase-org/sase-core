@@ -4143,7 +4143,8 @@ pub fn plan_transfer_workspace_claim_from_content(
         }
         if in_running_field && is_running_continuation_line(line) {
             if let Some(claim) = WorkspaceClaimLine::parse(line) {
-                let cl_matches = request.cl_name.is_empty()
+                let cl_matches = request.workspace_num != 0
+                    || request.cl_name.is_empty()
                     || claim.cl_name.as_deref()
                         == Some(request.cl_name.as_str());
                 if claim.workspace_num == request.workspace_num
@@ -4472,6 +4473,11 @@ impl WorkspaceClaimLine {
         let mut replacement = self.clone();
         replacement.pid = request.pid;
         replacement.workflow = request.workflow_name.clone();
+        replacement.cl_name = if request.cl_name.is_empty() {
+            None
+        } else {
+            Some(request.cl_name.clone())
+        };
         if !request.artifacts_timestamp.is_empty() {
             replacement
                 .set_artifacts_timestamp(request.artifacts_timestamp.clone());
@@ -5365,6 +5371,56 @@ Keep this comma, and the rest of the prose in the summary.";
         assert!(plan
             .content
             .contains("#101 | 222 | run-retry | demo | 20260501120000"));
+    }
+
+    #[test]
+    fn transfer_workspace_claim_updates_claim_name() {
+        let content = "RUNNING:\n  #101 | 111 | git-main | old | 20260501115959\n\n\nNAME: demo\n";
+        let mut req = request(101);
+        req.workflow_name = "ace-runner".to_string();
+        req.cl_name = "feature".to_string();
+        req.artifacts_timestamp = "20260501120000".to_string();
+        req.transfer_from_pid = Some(111);
+
+        let plan = plan_transfer_workspace_claim_from_content(content, &req);
+
+        assert!(plan.outcome.success);
+        assert!(plan
+            .content
+            .contains("#101 | 222 | ace-runner | feature | 20260501120000"));
+    }
+
+    #[test]
+    fn transfer_numbered_workspace_matches_pid_when_claim_name_changes() {
+        let content = "RUNNING:\n  #101 | 111 | git-main |  | 20260501115959\n\n\nNAME: demo\n";
+        let mut req = request(101);
+        req.workflow_name = "ace-runner".to_string();
+        req.cl_name = "feature".to_string();
+        req.artifacts_timestamp = "20260501120000".to_string();
+        req.transfer_from_pid = Some(111);
+
+        let plan = plan_transfer_workspace_claim_from_content(content, &req);
+
+        assert!(plan.outcome.success);
+        assert!(plan
+            .content
+            .contains("#101 | 222 | ace-runner | feature | 20260501120000"));
+    }
+
+    #[test]
+    fn transfer_placeholder_workspace_still_matches_claim_name() {
+        let content = "RUNNING:\n  #0 | 111 | ace-runner | other | 20260501115959\n  #0 | 112 | ace-runner | feature | 20260501115959\n\nNAME: demo\n";
+        let mut req = request(0);
+        req.workflow_name = "ace-runner-retry".to_string();
+        req.cl_name = "feature".to_string();
+        req.artifacts_timestamp = "20260501120000".to_string();
+        req.transfer_from_pid = Some(111);
+
+        let plan = plan_transfer_workspace_claim_from_content(content, &req);
+
+        assert!(!plan.outcome.success);
+        assert!(plan.content.contains("#0 | 111 | ace-runner | other"));
+        assert!(plan.content.contains("#0 | 112 | ace-runner | feature"));
     }
 
     #[test]
