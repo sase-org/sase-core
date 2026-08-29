@@ -1066,14 +1066,7 @@ fn colon_arg_context(
     if cursor < body_start {
         return None;
     }
-    let body_end = if metadata.name == "wait" {
-        line.len()
-    } else {
-        line[cursor..]
-            .find(char::is_whitespace)
-            .map(|offset| cursor + offset)
-            .unwrap_or(line.len())
-    };
+    let body_end = unterminated_body_end(line, body_start);
     if metadata.name == "wait" {
         return comma_clause_context(
             line,
@@ -1116,7 +1109,8 @@ fn parenthesized_arg_context(
         return None;
     }
     let body_start = open_idx + 1;
-    let body_end = close.unwrap_or(line.len());
+    let body_end =
+        close.unwrap_or_else(|| unterminated_body_end(line, body_start));
     comma_clause_context(
         line,
         cursor,
@@ -1299,6 +1293,25 @@ fn split_top_level_clauses(body: &str) -> Vec<(usize, usize)> {
     }
     clauses.push((start, body.len()));
     clauses
+}
+
+/// Byte offset where an unterminated directive argument body ends.
+fn unterminated_body_end(line: &str, body_start: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut index = body_start;
+    let mut state = QuoteState::default();
+    while index < bytes.len() {
+        let consumed = state.consume(bytes, index);
+        if consumed == 1
+            && !state.in_quotes()
+            && bytes[index].is_ascii_whitespace()
+            && !(index > body_start && bytes[index - 1] == b',')
+        {
+            return index;
+        }
+        index += consumed;
+    }
+    bytes.len()
 }
 
 fn find_top_level_equals(text: &str) -> Option<usize> {
@@ -1966,6 +1979,62 @@ mod tests {
         let document = DocumentSnapshot::new(text);
         detect_directive_context_at_position(&document, pos(character))
             .unwrap_or_else(|| panic!("expected directive context for {text}"))
+    }
+
+    fn assert_replacement_range(
+        text: &str,
+        character: u32,
+        start: u32,
+        end: u32,
+    ) {
+        let context = classify(text, character);
+        assert_eq!(
+            context.replacement_range,
+            EditorRange {
+                start: pos(start),
+                end: pos(end),
+            }
+        );
+    }
+
+    #[test]
+    fn unterminated_wait_colon_body_stops_at_prose() {
+        assert_replacement_range("%wait:co and then do the thing", 8, 6, 8);
+        assert_replacement_range("%wait: do the thing", 6, 6, 6);
+    }
+
+    #[test]
+    fn unclosed_paren_body_stops_at_prose() {
+        assert_replacement_range("%wait(co and more prose", 8, 6, 8);
+        assert_replacement_range("%id(foo and more prose", 6, 4, 7);
+        assert_replacement_range("%model(son and more prose", 10, 7, 10);
+        assert_replacement_range("%clan(rev and more prose", 9, 6, 9);
+        assert_replacement_range("%final(sase and more prose", 11, 7, 11);
+    }
+
+    #[test]
+    fn comma_adjacent_space_keeps_the_wait_list_body() {
+        assert_replacement_range("%wait:planner, co", 17, 15, 17);
+        assert_replacement_range("%wait:planner,", 14, 14, 14);
+        assert_replacement_range("%wait(planner, co", 17, 15, 17);
+    }
+
+    #[test]
+    fn quoted_wait_value_keeps_its_inner_space() {
+        assert_replacement_range("%wait:`my agent` ", 9, 6, 16);
+    }
+
+    #[test]
+    fn cursor_in_prose_past_a_directive_has_no_context() {
+        let text = "%w:sase-59 Can you help me get rid of the ,";
+        let document = DocumentSnapshot::new(text);
+        assert_eq!(
+            detect_directive_context_at_position(
+                &document,
+                pos(text.len() as u32)
+            ),
+            None
+        );
     }
 
     #[test]
