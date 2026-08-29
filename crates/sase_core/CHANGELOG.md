@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.15](https://github.com/sase-org/sase-core/compare/v0.32.14...v0.32.15) - 2026-08-29
+
+### Fixed
+
+- *(agent-launch)* transfer workspace claim names
+
 ## [0.32.14](https://github.com/sase-org/sase-core/compare/v0.32.13...v0.32.14) - 2026-08-28
 
 ### Fixed
