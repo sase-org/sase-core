@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.17](https://github.com/sase-org/sase-core/compare/v0.32.16...v0.32.17) - 2026-09-03
+
+### Added
+
+- nonical ref to row resolution rules in sase-core (sase-w3.1)
+
 ## [0.32.11](https://github.com/sase-org/sase-core/compare/v0.32.10...v0.32.11) - 2026-08-27
 
 ### Added
