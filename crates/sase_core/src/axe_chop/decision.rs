@@ -146,14 +146,14 @@ fn validate_request(
     }
     for (index, guard) in request.inhibit_if.iter().enumerate() {
         match guard {
-            ChopGuardConfigWire::Patch { statuses, .. } => {
-                if statuses.iter().any(|status| status.trim().is_empty()) {
-                    return Err(ChopEngineError::new(
-                        "blank_value",
-                        format!("$.inhibit_if[{index}].statuses"),
-                        "guard statuses must not be blank",
-                    ));
-                }
+            ChopGuardConfigWire::Patch { statuses, .. }
+                if statuses.iter().any(|status| status.trim().is_empty()) =>
+            {
+                return Err(ChopEngineError::new(
+                    "blank_value",
+                    format!("$.inhibit_if[{index}].statuses"),
+                    "guard statuses must not be blank",
+                ));
             }
             ChopGuardConfigWire::AgentHood { hood }
                 if hood.trim().is_empty() =>

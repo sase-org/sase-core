@@ -349,6 +349,11 @@
 //! - `referenced_by_block_remove(document: str) -> str`
 //! - `referenced_by_block_strip(document: str) -> str`
 //! - `artifact_link_row_schema_version() -> int`
+//! - `artifact_row_resolution_wire_schema_version() -> int`
+//! - `artifact_link_ref_parts(value: str) -> dict | None`
+//! - `artifact_row_index_keys(identities: list[dict]) -> list[list[list[str]]]`
+//! - `artifact_row_ref_lookup_keys(query: dict) -> list[list[str]]`
+//! - `artifact_row_resolve(query: dict, candidates: list[dict]) -> dict | None`
 //! - `artifact_link_canonicalize(value: str) -> str`
 //! - `artifact_link_validate_row(row: dict) -> dict`
 //! - `artifact_link_upsert_row(rows: list[dict], row: dict) -> dict`
@@ -572,22 +577,28 @@ use sase_core::artifact_file::{
 };
 use sase_core::artifact_link::{
     artifact_md_path as core_artifact_md_path,
+    artifact_row_index_keys as core_artifact_row_index_keys,
+    artifact_row_ref_lookup_keys as core_artifact_row_ref_lookup_keys,
     builtin_artifact_relations as core_builtin_artifact_relations,
     canonicalize_artifact_link_ref as core_canonicalize_artifact_link_ref,
     companion_md_path as core_companion_md_path,
     lookup_artifact_relation as core_lookup_artifact_relation,
     parse_artifact_link_frontmatter_inlet as core_parse_artifact_link_frontmatter_inlet,
+    parse_artifact_link_ref_parts as core_parse_artifact_link_ref_parts,
     parse_links_block as core_parse_links_block,
     relation_label_from_perspective as core_relation_label_from_perspective,
     remove_links_block as core_remove_links_block,
     render_links_block as core_render_links_block,
+    resolve_artifact_row_identity as core_resolve_artifact_row_identity,
     strip_links_block as core_strip_links_block,
     upsert_artifact_link_row as core_upsert_artifact_link_row,
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
     ArtifactLinkError, ArtifactLinkOriginWire, ArtifactLinkRowWire,
-    ArtifactMdPathRequestWire, BeadLinkDirectionWire, ManagedTableTableWire,
+    ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
+    ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
+    ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_object_store::{
     artifact_object_prompt_link as core_artifact_object_prompt_link,
@@ -5123,11 +5134,125 @@ fn managed_table_from_pydict(
     })
 }
 
+fn artifact_row_identity_from_py(
+    value: &Bound<'_, PyAny>,
+    label: &str,
+) -> PyResult<ArtifactRowIdentityWire> {
+    serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "{label} is not a valid ArtifactRowIdentityWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_row_identities_from_py_list(
+    list: &Bound<'_, PyList>,
+    label: &str,
+) -> PyResult<Vec<ArtifactRowIdentityWire>> {
+    let mut identities = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        identities.push(artifact_row_identity_from_py(
+            &item,
+            &format!("{label}[{idx}]"),
+        )?);
+    }
+    Ok(identities)
+}
+
+fn artifact_row_ref_query_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactRowRefQueryWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "query is not a valid ArtifactRowRefQueryWire dict: {error}"
+        ))
+    })
+}
+
 /// Return the v2 artifact-link row schema version.
 #[pyfunction]
 #[pyo3(name = "artifact_link_row_schema_version")]
 fn py_artifact_link_row_schema_version() -> u64 {
     ARTIFACT_LINK_ROW_SCHEMA_VERSION
+}
+
+/// Return the artifact-row ref-resolution wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_row_resolution_wire_schema_version")]
+fn py_artifact_row_resolution_wire_schema_version() -> u64 {
+    ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION
+}
+
+/// Split an artifact-link ref string into canonical kind and payload.
+#[pyfunction]
+#[pyo3(name = "artifact_link_ref_parts")]
+fn py_artifact_link_ref_parts<'py>(
+    py: Python<'py>,
+    value: &str,
+) -> PyResult<Option<PyObject>> {
+    let Some(parsed) = core_parse_artifact_link_ref_parts(value) else {
+        return Ok(None);
+    };
+    let value = serde_json::to_value(parsed).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value).map(Some)
+}
+
+/// Return batched row-index lookup keys for frontend row identities.
+#[pyfunction]
+#[pyo3(name = "artifact_row_index_keys")]
+fn py_artifact_row_index_keys<'py>(
+    py: Python<'py>,
+    identities: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let identities =
+        artifact_row_identities_from_py_list(identities, "identities")?;
+    let batches: Vec<Vec<Vec<String>>> = identities
+        .iter()
+        .map(core_artifact_row_index_keys)
+        .collect();
+    let value = serde_json::to_value(batches).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return ordered lookup keys for one artifact-link ref query.
+#[pyfunction]
+#[pyo3(name = "artifact_row_ref_lookup_keys")]
+fn py_artifact_row_ref_lookup_keys<'py>(
+    py: Python<'py>,
+    query: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let query = artifact_row_ref_query_from_pydict(query)?;
+    let keys = core_artifact_row_ref_lookup_keys(&query);
+    let value = serde_json::to_value(keys).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Resolve one artifact-link ref query against candidate row identities.
+#[pyfunction]
+#[pyo3(name = "artifact_row_resolve")]
+fn py_artifact_row_resolve<'py>(
+    py: Python<'py>,
+    query: &Bound<'py, PyDict>,
+    candidates: &Bound<'py, PyList>,
+) -> PyResult<Option<PyObject>> {
+    let query = artifact_row_ref_query_from_pydict(query)?;
+    let candidates =
+        artifact_row_identities_from_py_list(candidates, "candidates")?;
+    let Some(resolved) =
+        core_resolve_artifact_row_identity(&query, &candidates)
+    else {
+        return Ok(None);
+    };
+    let value = serde_json::to_value(resolved).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value).map(Some)
 }
 
 /// Canonicalize one artifact-link ref, stripping `@` and rewriting aliases.
@@ -11645,6 +11770,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_referenced_by_block_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_referenced_by_block_strip, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_row_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_row_resolution_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_ref_parts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_row_index_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_row_ref_lookup_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_row_resolve, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_canonicalize, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_validate_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_upsert_row, m)?)?;
@@ -15520,6 +15653,11 @@ MENTORS:
 
             for name in [
                 "artifact_link_row_schema_version",
+                "artifact_row_resolution_wire_schema_version",
+                "artifact_link_ref_parts",
+                "artifact_row_index_keys",
+                "artifact_row_ref_lookup_keys",
+                "artifact_row_resolve",
                 "artifact_link_canonicalize",
                 "artifact_link_validate_row",
                 "artifact_link_upsert_row",
@@ -15538,6 +15676,56 @@ MENTORS:
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
             assert_eq!(py_artifact_link_row_schema_version(), 2);
+            assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
+            let ref_parts =
+                py_artifact_link_ref_parts(py, "@plans:202609/a.md#section")
+                    .unwrap()
+                    .unwrap();
+            let ref_parts = py_to_json_value(ref_parts.bind(py)).unwrap();
+            assert_eq!(ref_parts["schema_version"], json!(1));
+            assert_eq!(ref_parts["kind"], json!("plan"));
+            assert_eq!(ref_parts["payload"], json!("202609/a.md"));
+
+            let identities_value = json!([
+                {"pane_id": "patches", "parts": ["alpha", "same"]},
+                {"pane_id": "patches", "parts": ["beta", "same"]},
+                {"pane_id": "files", "parts": ["doc", "v1"]}
+            ]);
+            let identities_object =
+                json_value_to_py(py, &identities_value).unwrap();
+            let identities =
+                identities_object.bind(py).downcast::<PyList>().unwrap();
+            let index_keys =
+                py_artifact_row_index_keys(py, identities).unwrap();
+            let index_keys = py_to_json_value(index_keys.bind(py)).unwrap();
+            assert!(index_keys[2]
+                .as_array()
+                .unwrap()
+                .contains(&json!(["files.id", "doc"])));
+
+            let row_query_value = json!({
+                "schema_version": 1,
+                "kind": "patch",
+                "payload": "same",
+                "project_hint": "beta"
+            });
+            let row_query_object =
+                json_value_to_py(py, &row_query_value).unwrap();
+            let row_query =
+                row_query_object.bind(py).downcast::<PyDict>().unwrap();
+            let lookup_keys =
+                py_artifact_row_ref_lookup_keys(py, row_query).unwrap();
+            let lookup_keys = py_to_json_value(lookup_keys.bind(py)).unwrap();
+            assert_eq!(
+                lookup_keys[0],
+                json!(["patches.project.name", "beta", "same"])
+            );
+            let resolved = py_artifact_row_resolve(py, row_query, identities)
+                .unwrap()
+                .unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(resolved["pane_id"], json!("patches"));
+            assert_eq!(resolved["parts"], json!(["beta", "same"]));
             assert_eq!(
                 py_artifact_link_canonicalize("plans:202608/report.md")
                     .unwrap(),

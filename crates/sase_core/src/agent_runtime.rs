@@ -236,11 +236,11 @@ pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
-    !(meta
+    !meta
         .parent_timestamp
         .as_deref()
         .is_some_and(|value| !value.is_empty())
-        && !meta.agent_family_parallel)
+        || meta.agent_family_parallel
 }
 
 /// Return whether an artifact is the kind of user-agent row that can hold a

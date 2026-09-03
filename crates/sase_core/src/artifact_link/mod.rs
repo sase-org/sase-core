@@ -5,6 +5,7 @@ mod inlet;
 mod managed_table;
 mod path;
 mod relation;
+mod row_resolution;
 mod wire;
 
 pub use inlet::{
@@ -36,6 +37,12 @@ pub use relation::{
     relation_label_from_perspective, reserved_artifact_relation_slugs,
     ArtifactRelationWire, ARTIFACT_RELATION_WIRE_SCHEMA_VERSION,
     RESERVED_ARTIFACT_RELATION_SLUGS,
+};
+pub use row_resolution::{
+    artifact_row_index_keys, artifact_row_ref_lookup_keys,
+    parse_artifact_link_ref_parts, resolve_artifact_row_identity,
+    ArtifactLinkRefPartsWire, ArtifactRowIdentityWire, ArtifactRowRefQueryWire,
+    ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 pub use wire::{
     artifact_link_dedup_key, canonicalize_artifact_link_ref,
