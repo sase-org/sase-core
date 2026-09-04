@@ -7,27 +7,127 @@
 pub mod wire;
 
 use std::collections::BTreeSet;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params_from_iter, Connection, Row};
+use rusqlite::{params_from_iter, Connection, OptionalExtension, Row};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
+use crate::agent_identity::AgentOwnerIdentity;
+
 pub use wire::{
-    AgentArchiveFacetCountWire, AgentArchiveFacetCountsWire,
-    AgentArchiveFacetRequestWire, AgentArchiveLifecycleFailureWire,
+    AgentArchiveCapabilitiesWire, AgentArchiveCapabilityFactsWire,
+    AgentArchiveCapabilityValidationRequestWire, AgentArchiveFacetCountWire,
+    AgentArchiveFacetCountsWire, AgentArchiveFacetRequestWire,
+    AgentArchiveKeyWire, AgentArchiveLifecycleFailureWire,
     AgentArchivePurgeReportWire, AgentArchiveQueryPageWire,
     AgentArchiveQueryRequestWire, AgentArchiveReviveMarkReportWire,
     AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
     AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
-    AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+    AgentArchiveVisibilityWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 
 const INDEX_FILENAME: &str = "index.sqlite";
+const MAX_SOURCE_RUN_ID_BYTES: usize = 128;
+
+pub fn validate_agent_archive_key(
+    key: AgentArchiveKeyWire,
+) -> Result<AgentArchiveKeyWire, String> {
+    AgentOwnerIdentity::new(&key.source_username, &key.source_machine)
+        .map_err(|e| e.to_string())?;
+    validate_source_run_id(&key.source_run_id)?;
+    Ok(key)
+}
+
+pub fn validate_agent_archive_visibility(
+    visibility: AgentArchiveVisibilityWire,
+) -> Result<AgentArchiveVisibilityWire, String> {
+    match visibility.visibility.as_str() {
+        "hidden" | "visible" | "pinned" => Ok(visibility),
+        other => Err(format!(
+            "unsupported archive visibility {other:?}; expected hidden, visible, or pinned"
+        )),
+    }
+}
+
+pub fn validate_agent_archive_capabilities(
+    request: AgentArchiveCapabilityValidationRequestWire,
+) -> Result<AgentArchiveCapabilitiesWire, String> {
+    let derived = derive_agent_archive_capabilities(request.facts);
+    if let Some(asserted) = request.asserted {
+        if asserted.historically_viewable != derived.historically_viewable {
+            return Err("asserted historically_viewable does not match persisted inputs"
+                .to_string());
+        }
+        if asserted.durably_revivable != derived.durably_revivable {
+            return Err(
+                "asserted durably_revivable does not match persisted inputs"
+                    .to_string(),
+            );
+        }
+        if asserted.restartable != derived.restartable {
+            return Err("asserted restartable does not match persisted inputs"
+                .to_string());
+        }
+        if asserted.missing_requirements != derived.missing_requirements {
+            return Err(
+                "asserted missing_requirements does not match persisted inputs"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(derived)
+}
+
+pub fn derive_agent_archive_capabilities(
+    facts: AgentArchiveCapabilityFactsWire,
+) -> AgentArchiveCapabilitiesWire {
+    let historically_viewable = facts.has_metadata && facts.has_state;
+    let durably_revivable = historically_viewable
+        && facts.has_commits
+        && facts.loader_reconstructible;
+    let restartable = durably_revivable
+        && facts.has_prompt
+        && facts.has_model
+        && facts.has_llm_provider
+        && facts.has_reasoning_effort;
+
+    let mut missing = BTreeSet::new();
+    if !facts.has_commits {
+        missing.insert("commits".to_string());
+    }
+    if !facts.has_llm_provider {
+        missing.insert("llm_provider".to_string());
+    }
+    if !facts.loader_reconstructible {
+        missing.insert("loader_reconstructible_archive".to_string());
+    }
+    if !facts.has_metadata {
+        missing.insert("metadata".to_string());
+    }
+    if !facts.has_model {
+        missing.insert("model".to_string());
+    }
+    if !facts.has_prompt {
+        missing.insert("prompt".to_string());
+    }
+    if !facts.has_reasoning_effort {
+        missing.insert("reasoning_effort".to_string());
+    }
+    if !facts.has_state {
+        missing.insert("state".to_string());
+    }
+
+    AgentArchiveCapabilitiesWire {
+        historically_viewable,
+        durably_revivable,
+        restartable,
+        missing_requirements: missing.into_iter().collect(),
+    }
+}
 
 pub fn query_agent_archive(
     root: &Path,
@@ -114,32 +214,75 @@ pub fn mark_agent_archive_bundles_revived(
 ) -> AgentArchiveReviveMarkReportWire {
     let mut changed = 0;
     let mut failed = Vec::new();
-    let conn = open_existing_index(root).ok().flatten();
+    let matched = (request.bundle_paths.len() + request.keys.len()) as i64;
+    let conn = match open_existing_index(root) {
+        Ok(Some(conn)) => Some(conn),
+        Ok(None) => None,
+        Err(error) => {
+            return AgentArchiveReviveMarkReportWire {
+                ok: false,
+                matched,
+                changed: 0,
+                failed: vec![AgentArchiveLifecycleFailureWire {
+                    bundle_path: "<index>".to_string(),
+                    error,
+                }],
+            };
+        }
+    };
+    let Some(conn) = conn else {
+        return AgentArchiveReviveMarkReportWire {
+            ok: false,
+            matched,
+            changed: 0,
+            failed: request
+                .bundle_paths
+                .iter()
+                .map(|bundle_path| AgentArchiveLifecycleFailureWire {
+                    bundle_path: bundle_path.clone(),
+                    error: "archive index is not available".to_string(),
+                })
+                .chain(request.keys.iter().map(|key| {
+                    AgentArchiveLifecycleFailureWire {
+                        bundle_path: key_label(key),
+                        error: "archive index is not available".to_string(),
+                    }
+                }))
+                .collect(),
+        };
+    };
     for bundle_path in &request.bundle_paths {
-        match mark_one_bundle_revived(
-            Path::new(bundle_path),
-            &request.revived_at,
-        ) {
-            Ok(times_revived) => {
-                changed += 1;
-                if let Some(conn) = &conn {
-                    let _ = conn.execute(
-                        "UPDATE dismissed_bundle_summaries \
-                         SET revived_at = ?, times_revived = ? \
-                         WHERE bundle_path = ?",
-                        (&request.revived_at, times_revived, bundle_path),
-                    );
-                }
-            }
+        match mark_bundle_path_visible(&conn, bundle_path, &request.revived_at)
+        {
+            Ok(true) => changed += 1,
+            Ok(false) => failed.push(AgentArchiveLifecycleFailureWire {
+                bundle_path: bundle_path.clone(),
+                error: "bundle is not indexed".to_string(),
+            }),
             Err(error) => failed.push(AgentArchiveLifecycleFailureWire {
                 bundle_path: bundle_path.clone(),
                 error,
             }),
         }
     }
+    for key in &request.keys {
+        match validate_agent_archive_key(key.clone())
+            .and_then(|key| mark_key_visible(&conn, &key, &request.revived_at))
+        {
+            Ok(true) => changed += 1,
+            Ok(false) => failed.push(AgentArchiveLifecycleFailureWire {
+                bundle_path: key_label(key),
+                error: "archive key is not indexed".to_string(),
+            }),
+            Err(error) => failed.push(AgentArchiveLifecycleFailureWire {
+                bundle_path: key_label(key),
+                error,
+            }),
+        }
+    }
     AgentArchiveReviveMarkReportWire {
         ok: failed.is_empty(),
-        matched: request.bundle_paths.len() as i64,
+        matched,
         changed,
         failed,
     }
@@ -329,56 +472,38 @@ fn json_params_to_sql(params: Vec<JsonValue>) -> Result<Vec<SqlValue>, String> {
 fn summary_from_row(
     row: &Row<'_>,
 ) -> rusqlite::Result<AgentArchiveSummaryWire> {
+    let raw_suffix: String = row.get("raw_suffix")?;
     Ok(AgentArchiveSummaryWire {
-        agent_id: row.get("agent_id")?,
-        raw_suffix: row.get("raw_suffix")?,
+        agent_id: row_string_or(row, "agent_id", &raw_suffix)?,
+        raw_suffix,
         bundle_path: row.get("bundle_path")?,
+        source_username: row_optional_string(row, "source_username")?,
+        source_machine: row_optional_string(row, "source_machine")?,
+        source_run_id: row_optional_string(row, "source_run_id")?,
+        archive_visibility: row_string_or(row, "archive_visibility", "hidden")?,
+        historically_viewable: row_bool_or(row, "historically_viewable", true)?,
+        durably_revivable: row_bool_or(row, "durably_revivable", true)?,
+        restartable: row_bool_or(row, "restartable", false)?,
+        missing_requirements: row_json_string_list_or_empty(
+            row,
+            "missing_requirements",
+        )?,
         cl_name: row.get("cl_name")?,
         agent_name: row.get("agent_name")?,
         status: row.get("status")?,
         start_time: row.get("start_time")?,
-        dismissed_at: row.get("dismissed_at")?,
-        revived_at: row.get("revived_at")?,
-        project_name: row.get("project_name")?,
+        dismissed_at: row_optional_string(row, "dismissed_at")?,
+        revived_at: row_optional_string(row, "revived_at")?,
+        project_name: row_optional_string(row, "project_name")?,
         model: row.get("model")?,
-        runtime: row.get("runtime")?,
+        runtime: row_optional_string(row, "runtime")?,
         llm_provider: row.get("llm_provider")?,
         step_index: row.get("step_index")?,
         step_name: row.get("step_name")?,
-        step_type: row.get("step_type")?,
+        step_type: row_optional_string(row, "step_type")?,
         retry_attempt: row.get("retry_attempt")?,
         is_workflow_child: row.get::<_, i64>("is_workflow_child")? != 0,
     })
-}
-
-fn mark_one_bundle_revived(
-    path: &Path,
-    revived_at: &str,
-) -> Result<i64, String> {
-    let mut bundle = read_bundle(path)?;
-    let times_revived = bundle
-        .get("times_revived")
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
-        })
-        .unwrap_or(0)
-        .max(0)
-        + 1;
-    let Some(object) = bundle.as_object_mut() else {
-        return Err("bundle JSON must be an object".to_string());
-    };
-    object.insert(
-        "revived_at".to_string(),
-        JsonValue::String(revived_at.to_string()),
-    );
-    object.insert(
-        "times_revived".to_string(),
-        JsonValue::Number(times_revived.into()),
-    );
-    write_json_file_atomic(path, &bundle)?;
-    Ok(times_revived)
 }
 
 fn read_bundle(path: &Path) -> Result<JsonValue, String> {
@@ -452,48 +577,253 @@ fn archive_payload_hash(bundle: &JsonValue) -> String {
     hex::encode(Sha256::digest(&encoded))
 }
 
-fn write_json_file_atomic(
-    path: &Path,
-    value: &JsonValue,
-) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let tmp_path = path.with_file_name(format!(
-        ".{}.tmp.{}.{}",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("bundle"),
-        std::process::id(),
-        nonce
-    ));
-    let payload = serde_json::to_string_pretty(value)
-        .map_err(|e| format!("failed to serialize archive bundle: {e}"))?;
-    {
-        let mut file = File::create(&tmp_path).map_err(|e| e.to_string())?;
-        file.write_all(payload.as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.write_all(b"\n").map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-    }
-    fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        e.to_string()
-    })?;
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
-    Ok(())
-}
-
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn validate_source_run_id(run_id: &str) -> Result<(), String> {
+    let valid = !run_id.is_empty()
+        && run_id.len() <= MAX_SOURCE_RUN_ID_BYTES
+        && run_id != "."
+        && run_id != ".."
+        && !run_id.contains("..")
+        && run_id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b':')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid source_run_id {run_id:?}; expected 1..={MAX_SOURCE_RUN_ID_BYTES} path-safe ASCII letters, digits, '-', '_', '.', or ':' without '.."
+        ))
+    }
+}
+
+fn key_label(key: &AgentArchiveKeyWire) -> String {
+    format!(
+        "{}.{}@{}",
+        key.source_username, key.source_machine, key.source_run_id
+    )
+}
+
+fn mark_bundle_path_visible(
+    conn: &Connection,
+    bundle_path: &str,
+    revived_at: &str,
+) -> Result<bool, String> {
+    let row = conn
+        .query_row(
+            "SELECT source_username, source_machine, source_run_id \
+             FROM dismissed_bundle_summaries WHERE bundle_path = ?",
+            [bundle_path],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((source_username, source_machine, source_run_id)) = row else {
+        return Ok(false);
+    };
+    let mut updated =
+        update_summary_by_bundle_path(conn, bundle_path, revived_at)?;
+    if let (Some(source_username), Some(source_machine), Some(source_run_id)) =
+        (source_username, source_machine, source_run_id)
+    {
+        let key = validate_agent_archive_key(AgentArchiveKeyWire {
+            source_username,
+            source_machine,
+            source_run_id,
+        })?;
+        updated |= upsert_projection_visibility(conn, &key, revived_at)?;
+    }
+    Ok(updated)
+}
+
+fn mark_key_visible(
+    conn: &Connection,
+    key: &AgentArchiveKeyWire,
+    revived_at: &str,
+) -> Result<bool, String> {
+    let mut updated = update_summary_by_key(conn, key, revived_at)?;
+    updated |= upsert_projection_visibility(conn, key, revived_at)?;
+    Ok(updated)
+}
+
+fn update_summary_by_bundle_path(
+    conn: &Connection,
+    bundle_path: &str,
+    revived_at: &str,
+) -> Result<bool, String> {
+    update_summary_visibility(
+        conn,
+        "bundle_path = ?",
+        vec![SqlValue::Text(bundle_path.to_string())],
+        revived_at,
+    )
+}
+
+fn update_summary_by_key(
+    conn: &Connection,
+    key: &AgentArchiveKeyWire,
+    revived_at: &str,
+) -> Result<bool, String> {
+    update_summary_visibility(
+        conn,
+        "source_username = ? AND source_machine = ? AND source_run_id = ?",
+        vec![
+            SqlValue::Text(key.source_username.clone()),
+            SqlValue::Text(key.source_machine.clone()),
+            SqlValue::Text(key.source_run_id.clone()),
+        ],
+        revived_at,
+    )
+}
+
+fn update_summary_visibility(
+    conn: &Connection,
+    where_sql: &str,
+    mut params: Vec<SqlValue>,
+    revived_at: &str,
+) -> Result<bool, String> {
+    let mut assignments = Vec::new();
+    if column_exists(conn, "dismissed_bundle_summaries", "archive_visibility")?
+    {
+        assignments.push("archive_visibility = 'visible'".to_string());
+    }
+    if column_exists(conn, "dismissed_bundle_summaries", "revived_at")? {
+        assignments.push("revived_at = ?".to_string());
+        params.insert(0, SqlValue::Text(revived_at.to_string()));
+    }
+    if column_exists(conn, "dismissed_bundle_summaries", "times_revived")? {
+        assignments
+            .push("times_revived = COALESCE(times_revived, 0) + 1".to_string());
+    }
+    if assignments.is_empty() {
+        return Ok(false);
+    }
+    let sql = format!(
+        "UPDATE dismissed_bundle_summaries SET {} WHERE {where_sql}",
+        assignments.join(", ")
+    );
+    let rows = conn
+        .execute(&sql, params_from_iter(params.iter()))
+        .map_err(|e| e.to_string())?;
+    Ok(rows > 0)
+}
+
+fn upsert_projection_visibility(
+    conn: &Connection,
+    key: &AgentArchiveKeyWire,
+    revived_at: &str,
+) -> Result<bool, String> {
+    if !table_exists(conn, "archive_visibility_projection")? {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO archive_visibility_projection (
+            source_username, source_machine, source_run_id, visibility,
+            revived_at, times_revived, updated_at
+         ) VALUES (?1, ?2, ?3, 'visible', ?4, 1, ?4)
+         ON CONFLICT(source_username, source_machine, source_run_id) DO UPDATE SET
+            visibility='visible',
+            revived_at=excluded.revived_at,
+            updated_at=excluded.updated_at,
+            times_revived=COALESCE(times_revived, 0) + 1",
+        (
+            &key.source_username,
+            &key.source_machine,
+            &key.source_run_id,
+            revived_at,
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(count > 0)
+}
+
+fn column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, String> {
+    let sql = format!("PRAGMA table_info({})", quote_identifier(table));
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let name: String = row.get("name").map_err(|e| e.to_string())?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn row_has_column(row: &Row<'_>, column: &str) -> bool {
+    row.as_ref().column_index(column).is_ok()
+}
+
+fn row_optional_string(
+    row: &Row<'_>,
+    column: &str,
+) -> rusqlite::Result<Option<String>> {
+    if row_has_column(row, column) {
+        row.get(column)
+    } else {
+        Ok(None)
+    }
+}
+
+fn row_string_or(
+    row: &Row<'_>,
+    column: &str,
+    default: &str,
+) -> rusqlite::Result<String> {
+    Ok(
+        row_optional_string(row, column)?
+            .unwrap_or_else(|| default.to_string()),
+    )
+}
+
+fn row_bool_or(
+    row: &Row<'_>,
+    column: &str,
+    default: bool,
+) -> rusqlite::Result<bool> {
+    if row_has_column(row, column) {
+        Ok(row.get::<_, i64>(column)? != 0)
+    } else {
+        Ok(default)
+    }
+}
+
+fn row_json_string_list_or_empty(
+    row: &Row<'_>,
+    column: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let Some(raw) = row_optional_string(row, column)? else {
+        return Ok(Vec::new());
+    };
+    Ok(serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -544,7 +874,8 @@ mod tests {
     }
 
     #[test]
-    fn mark_agent_archive_bundles_revived_updates_bundle_and_index() {
+    fn mark_agent_archive_bundles_revived_updates_projection_without_bundle_mutation(
+    ) {
         let tmp = TempDir::new().unwrap();
         let bundle_path = tmp
             .path()
@@ -562,9 +893,13 @@ mod tests {
             "INSERT INTO dismissed_bundle_summaries (
                 bundle_path, agent_id, raw_suffix, shard, filename,
                 archive_revision, bundle_schema_version, agent_type, cl_name,
-                status, is_workflow_child, retry_attempt, mtime_ns, size_bytes
+                status, source_username, source_machine, source_run_id,
+                archive_visibility, historically_viewable, durably_revivable,
+                restartable, missing_requirements, is_workflow_child,
+                retry_attempt, mtime_ns, size_bytes
              ) VALUES (?1, 'agent', '20260512120000', '202605',
                 'agent.1/bundle.json', 1, 2, 'run', 'cl', 'DONE',
+                'alice', 'athena', 'run-1', 'hidden', 1, 1, 1, '[]',
                 0, 0, 1, 2)",
             params![path_to_string(&bundle_path)],
         )
@@ -574,6 +909,7 @@ mod tests {
             tmp.path(),
             AgentArchiveReviveMarkRequestWire {
                 bundle_paths: vec![path_to_string(&bundle_path)],
+                keys: Vec::new(),
                 revived_at: "2026-05-12T13:00:00".to_string(),
             },
         );
@@ -581,7 +917,10 @@ mod tests {
         assert!(report.ok);
         assert_eq!(report.changed, 1);
         let updated = read_bundle(&bundle_path).unwrap();
-        assert_eq!(updated["times_revived"], json!(2));
+        assert_eq!(
+            updated,
+            json!({"raw_suffix":"20260512120000","times_revived":1})
+        );
         let revived_at: String = conn
             .query_row(
                 "SELECT revived_at FROM dismissed_bundle_summaries WHERE bundle_path = ?",
@@ -590,6 +929,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(revived_at, "2026-05-12T13:00:00");
+        let projection: (String, i64) = conn
+            .query_row(
+                "SELECT visibility, times_revived FROM archive_visibility_projection \
+                 WHERE source_username = 'alice' AND source_machine = 'athena' \
+                   AND source_run_id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(projection, ("visible".to_string(), 1));
+    }
+
+    #[test]
+    fn validates_capabilities_against_persisted_inputs() {
+        let full = AgentArchiveCapabilityFactsWire {
+            has_metadata: true,
+            has_state: true,
+            has_commits: true,
+            loader_reconstructible: true,
+            has_prompt: true,
+            has_model: true,
+            has_llm_provider: true,
+            has_reasoning_effort: true,
+        };
+        let capabilities = validate_agent_archive_capabilities(
+            AgentArchiveCapabilityValidationRequestWire {
+                facts: full.clone(),
+                asserted: None,
+            },
+        )
+        .unwrap();
+        assert!(capabilities.historically_viewable);
+        assert!(capabilities.durably_revivable);
+        assert!(capabilities.restartable);
+        assert!(capabilities.missing_requirements.is_empty());
+
+        let missing_prompt = AgentArchiveCapabilityFactsWire {
+            has_prompt: false,
+            ..full
+        };
+        let capabilities = validate_agent_archive_capabilities(
+            AgentArchiveCapabilityValidationRequestWire {
+                facts: missing_prompt.clone(),
+                asserted: None,
+            },
+        )
+        .unwrap();
+        assert!(capabilities.durably_revivable);
+        assert!(!capabilities.restartable);
+        assert_eq!(capabilities.missing_requirements, vec!["prompt"]);
+
+        let error = validate_agent_archive_capabilities(
+            AgentArchiveCapabilityValidationRequestWire {
+                facts: missing_prompt,
+                asserted: Some(AgentArchiveCapabilitiesWire {
+                    historically_viewable: true,
+                    durably_revivable: true,
+                    restartable: true,
+                    missing_requirements: Vec::new(),
+                }),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("restartable"));
+    }
+
+    #[test]
+    fn validates_archive_key_and_visibility() {
+        assert!(validate_agent_archive_key(AgentArchiveKeyWire {
+            source_username: "alice".to_string(),
+            source_machine: "athena".to_string(),
+            source_run_id: "run-1".to_string(),
+        })
+        .is_ok());
+        assert!(validate_agent_archive_key(AgentArchiveKeyWire {
+            source_username: "Alice".to_string(),
+            source_machine: "athena".to_string(),
+            source_run_id: "run-1".to_string(),
+        })
+        .is_err());
+        assert!(validate_agent_archive_visibility(
+            AgentArchiveVisibilityWire {
+                visibility: "pinned".to_string()
+            }
+        )
+        .is_ok());
+        assert!(validate_agent_archive_visibility(
+            AgentArchiveVisibilityWire {
+                visibility: "archived".to_string()
+            }
+        )
+        .is_err());
     }
 
     fn create_index(root: &Path) -> Connection {
@@ -606,6 +1037,14 @@ mod tests {
                 archive_revision INTEGER NOT NULL DEFAULT 1,
                 bundle_schema_version INTEGER NOT NULL DEFAULT 0,
                 agent_type TEXT NOT NULL,
+                source_username TEXT,
+                source_machine TEXT,
+                source_run_id TEXT,
+                archive_visibility TEXT NOT NULL DEFAULT 'hidden',
+                historically_viewable INTEGER NOT NULL DEFAULT 1,
+                durably_revivable INTEGER NOT NULL DEFAULT 1,
+                restartable INTEGER NOT NULL DEFAULT 0,
+                missing_requirements TEXT NOT NULL DEFAULT '[]',
                 cl_name TEXT NOT NULL,
                 agent_name TEXT,
                 status TEXT NOT NULL,
@@ -640,6 +1079,18 @@ mod tests {
             );
             CREATE VIRTUAL TABLE dismissed_bundle_search_fts
             USING fts5(bundle_path UNINDEXED, archive_search_text);
+            CREATE TABLE archive_visibility_projection (
+                source_username TEXT NOT NULL,
+                source_machine TEXT NOT NULL,
+                source_run_id TEXT NOT NULL,
+                visibility TEXT NOT NULL,
+                dismissed_at TEXT,
+                revived_at TEXT,
+                pinned_at TEXT,
+                times_revived INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY(source_username, source_machine, source_run_id)
+            );
             ",
         )
         .unwrap();

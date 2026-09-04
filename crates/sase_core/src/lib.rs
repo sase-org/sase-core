@@ -90,15 +90,19 @@ pub fn prompt_literal_zone_ranges(text: &str) -> Vec<(usize, usize)> {
 }
 
 pub use agent_archive::{
-    agent_archive_facet_counts, mark_agent_archive_bundles_revived,
-    query_agent_archive, verify_agent_archive_index,
-    AgentArchiveFacetCountWire, AgentArchiveFacetCountsWire,
-    AgentArchiveFacetRequestWire, AgentArchiveLifecycleFailureWire,
+    agent_archive_facet_counts, derive_agent_archive_capabilities,
+    mark_agent_archive_bundles_revived, query_agent_archive,
+    validate_agent_archive_capabilities, validate_agent_archive_key,
+    validate_agent_archive_visibility, verify_agent_archive_index,
+    AgentArchiveCapabilitiesWire, AgentArchiveCapabilityFactsWire,
+    AgentArchiveCapabilityValidationRequestWire, AgentArchiveFacetCountWire,
+    AgentArchiveFacetCountsWire, AgentArchiveFacetRequestWire,
+    AgentArchiveKeyWire, AgentArchiveLifecycleFailureWire,
     AgentArchivePurgeReportWire, AgentArchiveQueryPageWire,
     AgentArchiveQueryRequestWire, AgentArchiveReviveMarkReportWire,
     AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
     AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
-    AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+    AgentArchiveVisibilityWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 pub use agent_clan_tribe::{
     resolve_clan_summary, resolve_clan_tribe, ClanSummaryResolutionWire,

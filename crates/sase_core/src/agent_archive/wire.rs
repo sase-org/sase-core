@@ -24,10 +24,63 @@ pub struct AgentArchiveFacetRequestWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentArchiveKeyWire {
+    pub source_username: String,
+    pub source_machine: String,
+    pub source_run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentArchiveVisibilityWire {
+    pub visibility: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentArchiveCapabilityFactsWire {
+    pub has_metadata: bool,
+    pub has_state: bool,
+    pub has_commits: bool,
+    pub loader_reconstructible: bool,
+    pub has_prompt: bool,
+    pub has_model: bool,
+    pub has_llm_provider: bool,
+    pub has_reasoning_effort: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentArchiveCapabilitiesWire {
+    pub historically_viewable: bool,
+    pub durably_revivable: bool,
+    pub restartable: bool,
+    #[serde(default)]
+    pub missing_requirements: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentArchiveCapabilityValidationRequestWire {
+    pub facts: AgentArchiveCapabilityFactsWire,
+    #[serde(default)]
+    pub asserted: Option<AgentArchiveCapabilitiesWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArchiveSummaryWire {
     pub agent_id: String,
     pub raw_suffix: String,
     pub bundle_path: String,
+    pub source_username: Option<String>,
+    pub source_machine: Option<String>,
+    pub source_run_id: Option<String>,
+    pub archive_visibility: String,
+    pub historically_viewable: bool,
+    pub durably_revivable: bool,
+    pub restartable: bool,
+    pub missing_requirements: Vec<String>,
     pub cl_name: String,
     pub agent_name: Option<String>,
     pub status: String,
@@ -65,7 +118,10 @@ pub struct AgentArchiveFacetCountWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArchiveReviveMarkRequestWire {
+    #[serde(default)]
     pub bundle_paths: Vec<String>,
+    #[serde(default)]
+    pub keys: Vec<AgentArchiveKeyWire>,
     pub revived_at: String,
 }
 

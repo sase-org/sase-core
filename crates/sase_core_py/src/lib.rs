@@ -42,6 +42,9 @@
 //! - `query_related_agent_artifact_dirs(index_path: str, artifact_dir: str, seed_timestamps: list[str]) -> list[str]`
 //! - `query_agent_archive(root: str, request: dict) -> dict`
 //! - `agent_archive_facet_counts(root: str, request: dict) -> dict`
+//! - `validate_agent_archive_key(request: dict) -> dict`
+//! - `validate_agent_archive_visibility(request: dict) -> dict`
+//! - `validate_agent_archive_capabilities(request: dict) -> dict`
 //! - `mark_agent_archive_bundles_revived(root: str, request: dict) -> dict`
 //! - `verify_agent_archive_index(root: str) -> dict`
 //! - `delete_dismissed_agent_group(root: str, group_id: str) -> bool`
@@ -409,9 +412,13 @@ use sase_core::agent_archive::{
     agent_archive_facet_counts as core_agent_archive_facet_counts,
     mark_agent_archive_bundles_revived as core_mark_agent_archive_bundles_revived,
     query_agent_archive as core_query_agent_archive,
+    validate_agent_archive_capabilities as core_validate_agent_archive_capabilities,
+    validate_agent_archive_key as core_validate_agent_archive_key,
+    validate_agent_archive_visibility as core_validate_agent_archive_visibility,
     verify_agent_archive_index as core_verify_agent_archive_index,
-    AgentArchiveFacetRequestWire, AgentArchiveQueryRequestWire,
-    AgentArchiveReviveMarkRequestWire,
+    AgentArchiveCapabilityValidationRequestWire, AgentArchiveFacetRequestWire,
+    AgentArchiveKeyWire, AgentArchiveQueryRequestWire,
+    AgentArchiveReviveMarkRequestWire, AgentArchiveVisibilityWire,
 };
 use sase_core::agent_clan_tribe::{
     resolve_clan_summary as core_resolve_clan_summary,
@@ -3089,6 +3096,72 @@ fn py_agent_archive_facet_counts<'py>(
         .allow_threads(|| {
             core_agent_archive_facet_counts(&PathBuf::from(root), request)
         })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate and canonicalize an immutable archive source key.
+#[pyfunction]
+#[pyo3(name = "validate_agent_archive_key")]
+fn py_validate_agent_archive_key<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveKeyWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentArchiveKeyWire dict: {e}"
+            ))
+        })?;
+    let result = core_validate_agent_archive_key(request)
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate one archive visibility projection value.
+#[pyfunction]
+#[pyo3(name = "validate_agent_archive_visibility")]
+fn py_validate_agent_archive_visibility<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveVisibilityWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentArchiveVisibilityWire dict: {e}"
+            ))
+        })?;
+    let result = core_validate_agent_archive_visibility(request)
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate or derive archive capability claims from persisted inputs.
+#[pyfunction]
+#[pyo3(name = "validate_agent_archive_capabilities")]
+fn py_validate_agent_archive_capabilities<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentArchiveCapabilityValidationRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentArchiveCapabilityValidationRequestWire dict: {e}"
+            ))
+        })?;
+    let result = core_validate_agent_archive_capabilities(request)
         .map_err(PyValueError::new_err)?;
     let value = serde_json::to_value(&result).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
@@ -11751,6 +11824,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_archive_key, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_agent_archive_visibility, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_agent_archive_capabilities,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_mark_agent_archive_bundles_revived,
         m
@@ -13495,6 +13574,63 @@ mod tests {
                     "anchor": "member-code"
                 })
             );
+        });
+    }
+
+    #[test]
+    fn agent_archive_capability_bindings_are_exported_and_preserve_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "query_agent_archive",
+                "agent_archive_facet_counts",
+                "validate_agent_archive_key",
+                "validate_agent_archive_visibility",
+                "validate_agent_archive_capabilities",
+                "mark_agent_archive_bundles_revived",
+                "verify_agent_archive_index",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            let key = PyDict::new_bound(py);
+            key.set_item("source_username", "alice").unwrap();
+            key.set_item("source_machine", "athena").unwrap();
+            key.set_item("source_run_id", "run-123").unwrap();
+            let key = py_validate_agent_archive_key(py, &key).unwrap();
+            let key = py_to_json_value(key.bind(py)).unwrap();
+            assert_eq!(key["source_username"], json!("alice"));
+            assert_eq!(key["source_machine"], json!("athena"));
+            assert_eq!(key["source_run_id"], json!("run-123"));
+
+            let visibility = PyDict::new_bound(py);
+            visibility.set_item("visibility", "pinned").unwrap();
+            let visibility =
+                py_validate_agent_archive_visibility(py, &visibility).unwrap();
+            let visibility = py_to_json_value(visibility.bind(py)).unwrap();
+            assert_eq!(visibility["visibility"], json!("pinned"));
+
+            let facts = PyDict::new_bound(py);
+            facts.set_item("has_metadata", true).unwrap();
+            facts.set_item("has_state", true).unwrap();
+            facts.set_item("has_commits", true).unwrap();
+            facts.set_item("loader_reconstructible", true).unwrap();
+            facts.set_item("has_prompt", false).unwrap();
+            facts.set_item("has_model", true).unwrap();
+            facts.set_item("has_llm_provider", true).unwrap();
+            facts.set_item("has_reasoning_effort", true).unwrap();
+            let request = PyDict::new_bound(py);
+            request.set_item("facts", &facts).unwrap();
+            request.set_item("asserted", py.None()).unwrap();
+            let capabilities =
+                py_validate_agent_archive_capabilities(py, &request).unwrap();
+            let capabilities = py_to_json_value(capabilities.bind(py)).unwrap();
+            assert_eq!(capabilities["historically_viewable"], json!(true));
+            assert_eq!(capabilities["durably_revivable"], json!(true));
+            assert_eq!(capabilities["restartable"], json!(false));
+            assert_eq!(capabilities["missing_requirements"], json!(["prompt"]));
         });
     }
 
