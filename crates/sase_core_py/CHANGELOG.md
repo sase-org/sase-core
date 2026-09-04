@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.19](https://github.com/sase-org/sase-core/compare/v0.32.18...v0.32.19) - 2026-09-04
+
+### Added
+
+- *(agent-archive)* validate archive capabilities
+
 ## [0.32.18](https://github.com/sase-org/sase-core/compare/v0.32.17...v0.32.18) - 2026-09-04
 
 ### Added
