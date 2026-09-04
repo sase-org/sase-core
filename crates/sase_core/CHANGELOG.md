@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.21](https://github.com/sase-org/sase-core/compare/v0.32.20...v0.32.21) - 2026-09-04
+
+### Added
+
+- *(axe_chop)* add trigger provider config, decision, and wire types
+
 ## [0.32.20](https://github.com/sase-org/sase-core/compare/v0.32.19...v0.32.20) - 2026-09-04
 
 ### Added
