@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.18](https://github.com/sase-org/sase-core/compare/v0.32.17...v0.32.18) - 2026-09-04
+
+### Added
+
+- *(agent)* add typed owner identity core APIs
+
 ## [0.32.17](https://github.com/sase-org/sase-core/compare/v0.32.16...v0.32.17) - 2026-09-03
 
 ### Added
