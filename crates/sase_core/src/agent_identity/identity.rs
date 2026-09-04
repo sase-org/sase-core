@@ -1,5 +1,6 @@
 use crate::machine_hood::validate_machine_name;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 const MAX_AGENT_NAME_BYTES: usize = 512;
@@ -139,6 +140,42 @@ pub struct AgentLinkTargetWire {
     pub anchor: Option<String>,
 }
 
+/// A validated owner-root token used to disambiguate localized foreign names.
+///
+/// Owner roots are caller-supplied provenance, not topology. A one-segment root
+/// represents a localized machine/legacy namespace such as `athena`; a two-
+/// segment root represents an explicitly owned namespace such as
+/// `alice.athena`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct OwnerRoot(String);
+
+impl OwnerRoot {
+    pub fn new(root: impl Into<String>) -> Result<Self, AgentIdentityError> {
+        let root = root.into();
+        validate_owner_root(&root)?;
+        Ok(Self(root))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedAgentNameWire {
+    #[serde(default)]
+    pub owner_root: Option<String>,
+    pub local_name: String,
+    pub hood: String,
+    pub family_name: String,
+    #[serde(default)]
+    pub member_role: Option<String>,
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum AgentIdentityError {
     #[error(
@@ -195,6 +232,21 @@ pub enum AgentIdentityError {
         "invalid family name '{name}': expected a solo name or one terminal '--<role>' suffix"
     )]
     InvalidFamilyName { name: String },
+
+    #[error(
+        "invalid owner root '{root}': {reason}; expected one or two non-empty path-safe ASCII segments"
+    )]
+    InvalidOwnerRoot { root: String, reason: String },
+
+    #[error(
+        "agent name '{name}' belongs to known foreign owner root '{owner_root}', not destination owner '{username}.{machine_name}'"
+    )]
+    ForeignOwnerRoot {
+        name: String,
+        owner_root: String,
+        username: String,
+        machine_name: String,
+    },
 }
 
 pub fn validate_agent_username(
@@ -225,6 +277,57 @@ pub fn validate_agent_username(
     }
 }
 
+pub fn validate_owner_root(root: &str) -> Result<(), AgentIdentityError> {
+    if root.is_empty() {
+        return Err(AgentIdentityError::InvalidOwnerRoot {
+            root: root.to_string(),
+            reason: "owner root must not be empty".to_string(),
+        });
+    }
+    if root.len() > MAX_AGENT_NAME_BYTES {
+        return Err(AgentIdentityError::InvalidOwnerRoot {
+            root: root.to_string(),
+            reason: format!(
+                "root exceeds the {MAX_AGENT_NAME_BYTES}-byte limit"
+            ),
+        });
+    }
+    if root.contains('/') || root.contains('\\') || root.contains('\0') {
+        return Err(AgentIdentityError::InvalidOwnerRoot {
+            root: root.to_string(),
+            reason: "path separators and NUL are forbidden".to_string(),
+        });
+    }
+    if root.chars().any(char::is_control) {
+        return Err(AgentIdentityError::InvalidOwnerRoot {
+            root: root.to_string(),
+            reason: "control characters are forbidden".to_string(),
+        });
+    }
+    let segments: Vec<_> = root.split('.').collect();
+    if segments.len() > 2 {
+        return Err(AgentIdentityError::InvalidOwnerRoot {
+            root: root.to_string(),
+            reason: "roots may contain at most one dot".to_string(),
+        });
+    }
+    for segment in &segments {
+        if segment.is_empty() || segment.contains("--") {
+            return Err(AgentIdentityError::InvalidOwnerRoot {
+                root: root.to_string(),
+                reason: format!("unsafe segment '{segment}'"),
+            });
+        }
+        validate_simple_segment(segment, root).map_err(|error| {
+            AgentIdentityError::InvalidOwnerRoot {
+                root: root.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// Strictly validate a newly-created agent name.
 ///
 /// Historical classification helpers intentionally accept legacy family
@@ -232,6 +335,31 @@ pub fn validate_agent_username(
 /// stricter entry point, which permits at most one terminal `--<role>` suffix.
 pub fn validate_agent_name(name: &str) -> Result<(), AgentIdentityError> {
     validate_semantic_name(name)
+}
+
+pub fn validate_owned_agent_name(
+    name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<(), AgentIdentityError> {
+    owner.validate()?;
+    let normalized = normalize_agent_archive_name(name)?;
+    if let Some(root) =
+        foreign_agent_owner_root(&normalized, owner, known_owner_roots)?
+    {
+        return Err(AgentIdentityError::ForeignOwnerRoot {
+            name: name.to_string(),
+            owner_root: root,
+            username: owner.username.clone(),
+            machine_name: owner.machine_name.clone(),
+        });
+    }
+    let parsed = parse_owned_agent_name_with_current_owner(
+        &normalized,
+        owner,
+        known_owner_roots,
+    )?;
+    validate_semantic_name(&parsed.local_name)
 }
 
 pub fn classify_agent_ownership(
@@ -331,6 +459,45 @@ pub fn globalize_agent_name(
     Ok(format!("{prefix}{normalized}"))
 }
 
+pub fn normalize_owned_agent_name(
+    name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<String, AgentIdentityError> {
+    owner.validate()?;
+    let parsed = parse_owned_agent_name_with_current_owner(
+        name,
+        owner,
+        known_owner_roots,
+    )?;
+    if let Some(owner_root) = &parsed.owner_root {
+        if !is_current_owner_root(owner_root, owner) {
+            return Err(AgentIdentityError::ForeignOwnerRoot {
+                name: name.to_string(),
+                owner_root: owner_root.clone(),
+                username: owner.username.clone(),
+                machine_name: owner.machine_name.clone(),
+            });
+        }
+    }
+    Ok(parsed.local_name)
+}
+
+pub fn globalize_owned_agent_name(
+    name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<String, AgentIdentityError> {
+    owner.validate()?;
+    let (archive_prefix, core_name) = split_agent_archive_prefix(name)?;
+    let local =
+        normalize_owned_agent_name(core_name, owner, known_owner_roots)?;
+    Ok(format!(
+        "{archive_prefix}{}",
+        globalize_agent_name(&local, owner)?
+    ))
+}
+
 /// Verify a legacy machine-qualified name and convert it to a v2 global name.
 pub fn globalize_legacy_agent_name(
     legacy_name: &str,
@@ -408,6 +575,14 @@ pub fn parse_agent_family_name(
     parse_normalized_family_name(&normalized)
 }
 
+pub fn parse_owned_agent_name(
+    name: &str,
+    known_owner_roots: &[String],
+) -> Result<OwnedAgentNameWire, AgentIdentityError> {
+    let normalized = normalize_agent_archive_name(name)?;
+    parse_normalized_owned_agent_name(&normalized, known_owner_roots)
+}
+
 pub fn agent_local_hood(name: &str) -> Result<String, AgentIdentityError> {
     let parsed = parse_agent_family_name(name)?;
     Ok(historical_hood_segment(
@@ -418,6 +593,13 @@ pub fn agent_local_hood(name: &str) -> Result<String, AgentIdentityError> {
             .expect("validated name has a first segment"),
     )
     .to_string())
+}
+
+pub fn agent_local_hood_with_owner_roots(
+    name: &str,
+    known_owner_roots: &[String],
+) -> Result<String, AgentIdentityError> {
+    Ok(parse_owned_agent_name(name, known_owner_roots)?.hood)
 }
 
 pub fn agent_name_in_hood(
@@ -440,6 +622,29 @@ pub fn agent_name_in_hood(
             .is_some_and(|suffix| suffix.starts_with('.')))
 }
 
+pub fn agent_name_in_hood_with_owner_roots(
+    name: &str,
+    hood: &str,
+    known_owner_roots: &[String],
+) -> Result<bool, AgentIdentityError> {
+    let normalized_hood = parse_owned_agent_name(hood, known_owner_roots)?;
+    if normalized_hood.member_role.is_some()
+        || normalized_hood.local_name.contains("--")
+    {
+        return Err(AgentIdentityError::InvalidFamilyName {
+            name: hood.to_string(),
+        });
+    }
+    let Ok(parsed) = parse_owned_agent_name(name, known_owner_roots) else {
+        return Ok(false);
+    };
+    let family_scope = historical_family_scope(&parsed.family_name);
+    Ok(family_scope == normalized_hood.local_name
+        || family_scope
+            .strip_prefix(&normalized_hood.local_name)
+            .is_some_and(|suffix| suffix.starts_with('.')))
+}
+
 pub fn agent_name_ancestors(
     name: &str,
 ) -> Result<Vec<String>, AgentIdentityError> {
@@ -458,6 +663,14 @@ pub fn agent_name_ancestors(
         ancestors.push(first.to_string());
     }
     Ok(ancestors)
+}
+
+pub fn agent_name_ancestors_with_owner_roots(
+    name: &str,
+    known_owner_roots: &[String],
+) -> Result<Vec<String>, AgentIdentityError> {
+    let parsed = parse_owned_agent_name(name, known_owner_roots)?;
+    Ok(ancestors_for_family_name(&parsed.family_name))
 }
 
 pub fn agent_link_target(
@@ -488,6 +701,60 @@ pub fn agent_link_target(
     }
 }
 
+pub fn agent_link_target_with_owner_roots(
+    semantic_name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<AgentLinkTargetWire, AgentIdentityError> {
+    owner.validate()?;
+    let roots = known_roots_with_current_owner(owner, known_owner_roots)?;
+    let parsed = parse_owned_agent_name(semantic_name, &roots)?;
+    let global_base = match parsed.owner_root.as_deref() {
+        Some(owner_root) if !is_current_owner_root(owner_root, owner) => {
+            format!("{owner_root}.{}", parsed.family_name)
+        }
+        _ => globalize_agent_name(&parsed.family_name, owner)?,
+    };
+    match parsed.member_role {
+        Some(role) => {
+            validate_path_component(&global_base)?;
+            validate_path_component(&role)?;
+            Ok(AgentLinkTargetWire {
+                kind: "family".to_string(),
+                path: format!("families/{global_base}.md"),
+                anchor: Some(format!("member-{role}")),
+            })
+        }
+        None => {
+            validate_path_component(&global_base)?;
+            Ok(AgentLinkTargetWire {
+                kind: "agent".to_string(),
+                path: format!("agents/{global_base}/README.md"),
+                anchor: None,
+            })
+        }
+    }
+}
+
+pub fn foreign_agent_owner_root(
+    name: &str,
+    destination_owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<Option<String>, AgentIdentityError> {
+    destination_owner.validate()?;
+    let normalized = normalize_agent_archive_name(name)?;
+    for root in normalized_owner_roots(known_owner_roots)? {
+        let matches = normalized == root.as_str()
+            || normalized
+                .strip_prefix(root.as_str())
+                .is_some_and(|suffix| suffix.starts_with('.'));
+        if matches && !is_current_owner_root(root.as_str(), destination_owner) {
+            return Ok(Some(root.as_str().to_string()));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn canonical_global_local_name(
     global_name: &str,
     owner: &AgentOwnerIdentity,
@@ -502,6 +769,14 @@ pub(crate) fn canonical_global_local_name(
         });
     }
     strip_global_agent_name(global_name, owner)
+}
+
+pub(crate) fn localize_current_owner_name(
+    name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<String, AgentIdentityError> {
+    normalize_owned_agent_name(name, owner, known_owner_roots)
 }
 
 fn strip_source_global_name(
@@ -537,6 +812,23 @@ fn owner_prefix(owner: &AgentOwnerIdentity) -> String {
     format!("{}.{}.", owner.username, owner.machine_name)
 }
 
+pub(crate) fn owner_root_prefix(owner: &AgentOwnerIdentity) -> String {
+    format!("{}.{}", owner.username, owner.machine_name)
+}
+
+pub(crate) fn source_owner_root_for_destination(
+    source: &AgentOwnerIdentity,
+    destination: &AgentOwnerIdentity,
+) -> Option<String> {
+    if source == destination {
+        None
+    } else if source.username == destination.username {
+        Some(source.machine_name.clone())
+    } else {
+        Some(owner_root_prefix(source))
+    }
+}
+
 fn owner_mismatch(
     name: &str,
     owner: &AgentOwnerIdentity,
@@ -565,6 +857,143 @@ fn parse_normalized_family_name(
             member_role: Some(role.to_string()),
         },
     })
+}
+
+fn parse_normalized_owned_agent_name(
+    normalized: &str,
+    known_owner_roots: &[String],
+) -> Result<OwnedAgentNameWire, AgentIdentityError> {
+    let root = matching_owner_root(normalized, known_owner_roots)?;
+    let (owner_root, local_name) = match root {
+        Some(root) => {
+            let remainder = normalized
+                .strip_prefix(root.as_str())
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .expect("matching owner roots always leave a dotted remainder");
+            (Some(root.as_str().to_string()), remainder)
+        }
+        None => (None, normalized),
+    };
+    validate_historical_semantic_name(local_name)?;
+    let family = parse_normalized_family_name(local_name)?;
+    let hood = historical_hood_segment(
+        family
+            .family_name
+            .split('.')
+            .next()
+            .expect("validated name has a first segment"),
+    )
+    .to_string();
+    Ok(OwnedAgentNameWire {
+        owner_root,
+        local_name: local_name.to_string(),
+        hood,
+        family_name: family.family_name,
+        member_role: family.member_role,
+    })
+}
+
+fn matching_owner_root(
+    normalized: &str,
+    known_owner_roots: &[String],
+) -> Result<Option<OwnerRoot>, AgentIdentityError> {
+    Ok(normalized_owner_roots(known_owner_roots)?
+        .into_iter()
+        .find(|root| {
+            normalized
+                .strip_prefix(root.as_str())
+                .is_some_and(|suffix| suffix.starts_with('.'))
+        }))
+}
+
+fn normalized_owner_roots(
+    known_owner_roots: &[String],
+) -> Result<Vec<OwnerRoot>, AgentIdentityError> {
+    let mut seen = BTreeSet::new();
+    let mut roots = Vec::new();
+    for root in known_owner_roots {
+        let owner_root = OwnerRoot::new(root.clone())?;
+        if seen.insert(owner_root.as_str().to_string()) {
+            roots.push(owner_root);
+        }
+    }
+    roots.sort_by(|left, right| {
+        right
+            .as_str()
+            .split('.')
+            .count()
+            .cmp(&left.as_str().split('.').count())
+            .then_with(|| right.as_str().len().cmp(&left.as_str().len()))
+            .then_with(|| left.as_str().cmp(right.as_str()))
+    });
+    Ok(roots)
+}
+
+fn known_roots_with_current_owner(
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<Vec<String>, AgentIdentityError> {
+    owner.validate()?;
+    let mut roots: BTreeSet<String> =
+        known_owner_roots.iter().cloned().collect();
+    roots.insert(owner.machine_name.clone());
+    roots.insert(owner_root_prefix(owner));
+    let roots: Vec<_> = roots.into_iter().collect();
+    normalized_owner_roots(&roots)?;
+    Ok(roots)
+}
+
+fn parse_owned_agent_name_with_current_owner(
+    name: &str,
+    owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<OwnedAgentNameWire, AgentIdentityError> {
+    parse_owned_agent_name(
+        name,
+        &known_roots_with_current_owner(owner, known_owner_roots)?,
+    )
+}
+
+pub(crate) fn owner_rooted_parse_roots_for_projection(
+    source: &AgentOwnerIdentity,
+    destination: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<Vec<String>, AgentIdentityError> {
+    let mut roots: BTreeSet<String> =
+        known_owner_roots.iter().cloned().collect();
+    roots.insert(destination.machine_name.clone());
+    roots.insert(owner_root_prefix(destination));
+    roots.insert(owner_root_prefix(source));
+    if let Some(source_root) =
+        source_owner_root_for_destination(source, destination)
+    {
+        roots.insert(source_root);
+    }
+    let roots: Vec<_> = roots.into_iter().collect();
+    normalized_owner_roots(&roots)?;
+    Ok(roots)
+}
+
+fn is_current_owner_root(root: &str, owner: &AgentOwnerIdentity) -> bool {
+    root == owner.machine_name || root == owner_root_prefix(owner)
+}
+
+fn split_agent_archive_prefix(
+    name: &str,
+) -> Result<(&str, &str), AgentIdentityError> {
+    match name.split_once('.') {
+        Some((prefix, remainder))
+            if prefix.len() == 6
+                && prefix.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            if remainder.is_empty() {
+                Err(AgentIdentityError::EmptyAgentName)
+            } else {
+                Ok((&name[..prefix.len() + 1], remainder))
+            }
+        }
+        _ => Ok(("", name)),
+    }
 }
 
 /// Validate a name used as an `agent:` artifact reference payload.
@@ -674,6 +1103,23 @@ fn historical_family_scope(family_name: &str) -> String {
     } else {
         format!("{hood}.{suffix}")
     }
+}
+
+fn ancestors_for_family_name(family_name: &str) -> Vec<String> {
+    let mut segments = family_name.split('.');
+    let first = segments.next().expect("validated name has a first segment");
+    let hood = historical_hood_segment(first);
+    let mut ancestors = vec![hood.to_string()];
+    let mut current = first.to_string();
+    for segment in segments {
+        current.push('.');
+        current.push_str(segment);
+        ancestors.push(current.clone());
+    }
+    if ancestors.len() == 1 && hood != first {
+        ancestors.push(first.to_string());
+    }
+    ancestors
 }
 
 fn validate_dotted_base(name: &str) -> Result<(), AgentIdentityError> {
@@ -843,6 +1289,40 @@ mod tests {
     }
 
     #[test]
+    fn owner_roots_validate_and_parse_longest_prefix() {
+        for root in ["athena", "alice.athena", "7n"] {
+            validate_owner_root(root).unwrap();
+        }
+        for root in ["", "alice.", ".athena", "a.b.c", "foo--code", "bad/root"]
+        {
+            assert!(matches!(
+                validate_owner_root(root),
+                Err(AgentIdentityError::InvalidOwnerRoot { .. })
+            ));
+        }
+
+        let roots = vec!["athena".to_string(), "alice.athena".to_string()];
+        let parsed =
+            parse_owned_agent_name("260722.alice.athena.7n--code", &roots)
+                .unwrap();
+        assert_eq!(parsed.owner_root.as_deref(), Some("alice.athena"));
+        assert_eq!(parsed.local_name, "7n--code");
+        assert_eq!(parsed.hood, "7n");
+        assert_eq!(parsed.family_name, "7n");
+        assert_eq!(parsed.member_role.as_deref(), Some("code"));
+
+        let parsed = parse_owned_agent_name("athena.7n--code", &roots).unwrap();
+        assert_eq!(parsed.owner_root.as_deref(), Some("athena"));
+        assert_eq!(parsed.hood, "7n");
+
+        let compatibility =
+            parse_owned_agent_name("athena.7n--code", &[]).unwrap();
+        assert_eq!(compatibility.owner_root, None);
+        assert_eq!(compatibility.hood, "athena");
+        assert_eq!(compatibility.family_name, "athena.7n");
+    }
+
+    #[test]
     fn globalization_normalizes_archive_and_round_trips() {
         let alice = owner("alice", "athena");
         for local in ["foo", "foo.bar", "foo.bar--code"] {
@@ -880,6 +1360,54 @@ mod tests {
             Err(AgentIdentityError::MalformedLegacyName { .. })
         ));
         assert!(globalize_legacy_agent_name("bad-machine.foo", &alice).is_err());
+    }
+
+    #[test]
+    fn owner_aware_globalization_rejects_foreign_roots() {
+        let alice = owner("alice", "athena");
+        let roots = vec!["zeus".to_string(), "bob.athena".to_string()];
+        assert_eq!(
+            normalize_owned_agent_name("athena.foo", &alice, &roots).unwrap(),
+            "foo"
+        );
+        assert_eq!(
+            normalize_owned_agent_name("alice.athena.foo", &alice, &roots)
+                .unwrap(),
+            "foo"
+        );
+        assert_eq!(
+            globalize_owned_agent_name("athena.foo", &alice, &roots).unwrap(),
+            "alice.athena.foo"
+        );
+        assert_eq!(
+            globalize_owned_agent_name("260722.athena.foo", &alice, &roots)
+                .unwrap(),
+            "260722.alice.athena.foo"
+        );
+        assert_eq!(
+            foreign_agent_owner_root("zeus.foo", &alice, &roots)
+                .unwrap()
+                .as_deref(),
+            Some("zeus")
+        );
+        assert_eq!(
+            foreign_agent_owner_root("bob.athena.foo", &alice, &roots)
+                .unwrap()
+                .as_deref(),
+            Some("bob.athena")
+        );
+        assert!(matches!(
+            globalize_owned_agent_name("zeus.foo", &alice, &roots),
+            Err(AgentIdentityError::ForeignOwnerRoot { .. })
+        ));
+        assert!(matches!(
+            validate_owned_agent_name("bob.athena.foo", &alice, &roots),
+            Err(AgentIdentityError::ForeignOwnerRoot { .. })
+        ));
+        assert_eq!(
+            globalize_owned_agent_name("zeus.foo", &alice, &[]).unwrap(),
+            "alice.athena.zeus.foo"
+        );
     }
 
     #[test]
@@ -1027,6 +1555,15 @@ mod tests {
             assert!(agent_name_in_hood(name, hood).unwrap(), "{name}");
             assert!(!agent_name_in_hood(name, "other").unwrap(), "{name}");
             assert!(agent_link_target(name, &alice).is_ok(), "{name}");
+            assert_eq!(
+                agent_local_hood_with_owner_roots(
+                    &format!("athena.{name}"),
+                    &["athena".to_string()],
+                )
+                .unwrap(),
+                hood,
+                "{name}"
+            );
 
             let global = globalize_agent_name(name, &alice).unwrap();
             assert_eq!(
@@ -1071,6 +1608,44 @@ mod tests {
         }
         assert!(agent_name_in_hood("foo", "foo--code").is_err());
         assert!(!agent_name_in_hood("foobar", "foo").unwrap());
+    }
+
+    #[test]
+    fn owner_aware_hood_ancestors_membership_and_links_use_semantic_remainder()
+    {
+        let alice = owner("alice", "hera");
+        let roots = vec!["athena".to_string(), "bob.athena".to_string()];
+        assert_eq!(
+            agent_local_hood_with_owner_roots("athena.7n--code", &roots)
+                .unwrap(),
+            "7n"
+        );
+        assert_eq!(
+            agent_name_ancestors_with_owner_roots("athena.7n--code", &roots)
+                .unwrap(),
+            ["7n"]
+        );
+        assert!(agent_name_in_hood_with_owner_roots(
+            "athena.7n--code",
+            "7n",
+            &roots,
+        )
+        .unwrap());
+        assert!(agent_name_in_hood_with_owner_roots(
+            "bob.athena.work.item--code",
+            "work",
+            &roots,
+        )
+        .unwrap());
+        let target = agent_link_target_with_owner_roots(
+            "athena.7n--code",
+            &alice,
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(target.kind, "family");
+        assert_eq!(target.path, "families/athena.7n.md");
+        assert_eq!(target.anchor.as_deref(), Some("member-code"));
     }
 
     #[test]

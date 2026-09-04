@@ -1,6 +1,9 @@
 use super::identity::{
-    canonical_global_local_name, parse_agent_family_name, AgentIdentityError,
-    AgentOwnerIdentity,
+    canonical_global_local_name, classify_agent_ownership, localize_agent_name,
+    localize_current_owner_name, owner_rooted_parse_roots_for_projection,
+    parse_agent_family_name, parse_owned_agent_name,
+    source_owner_root_for_destination, AgentIdentityError, AgentOwnerIdentity,
+    AgentOwnershipClassification, AgentSourceOwnerIdentity,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -174,6 +177,65 @@ pub struct RewrittenAgentRelationshipWire {
     pub source_run_id: String,
     pub source_destination_run_id: String,
     pub target: RewrittenAgentRelationshipTargetWire,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedAgentGraphWire {
+    pub schema_version: u32,
+    pub source_owner: AgentOwnerIdentity,
+    pub destination_owner: AgentOwnerIdentity,
+    #[serde(default)]
+    pub registry_namespace_root: Option<String>,
+    pub runs: Vec<ProjectedAgentRunWire>,
+    pub containers: Vec<ProjectedAgentRunContainerWire>,
+    pub relationships: Vec<ProjectedAgentRelationshipWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedAgentRunWire {
+    pub source_run_id: String,
+    pub destination_run_id: String,
+    pub global_name: String,
+    pub owner: AgentOwnerIdentity,
+    pub localized_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedAgentRunContainerWire {
+    pub kind: AgentContainerKind,
+    pub global_name: String,
+    pub owner: AgentOwnerIdentity,
+    pub localized_name: String,
+    pub member_source_run_ids: Vec<String>,
+    pub member_destination_run_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectedAgentRelationshipTargetWire {
+    DestinationRunId {
+        source_run_id: String,
+        destination_run_id: String,
+        localized_name: String,
+    },
+    GlobalName {
+        global_name: String,
+        owner: AgentOwnerIdentity,
+        localized_name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedAgentRelationshipWire {
+    pub kind: AgentRelationshipKind,
+    pub source_run_id: String,
+    pub source_destination_run_id: String,
+    pub target: ProjectedAgentRelationshipTargetWire,
     pub required: bool,
 }
 
@@ -372,6 +434,23 @@ pub enum AgentRelationshipError {
         destination_run_id: String,
         first_source_run_id: String,
         second_source_run_id: String,
+    },
+
+    #[error("invalid graph projection {context}: {source}")]
+    InvalidGraphProjection {
+        context: String,
+        #[source]
+        source: Box<AgentIdentityError>,
+    },
+
+    #[error(
+        "localized {kind} name collision '{localized_name}' between '{first}' and '{second}'"
+    )]
+    ProjectionNameCollision {
+        kind: &'static str,
+        localized_name: String,
+        first: String,
+        second: String,
     },
 }
 
@@ -613,6 +692,273 @@ pub fn rewrite_agent_relationship_batch(
         containers,
         relationships,
     })
+}
+
+pub fn project_agent_relationship_graph(
+    batch: &AgentRelationshipBatchWire,
+    destination_ids: &BTreeMap<String, String>,
+    source_owner: &AgentOwnerIdentity,
+    destination_owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+) -> Result<ProjectedAgentGraphWire, AgentRelationshipError> {
+    source_owner
+        .validate()
+        .map_err(|source| projection_identity_error("source owner", source))?;
+    destination_owner.validate().map_err(|source| {
+        projection_identity_error("destination owner", source)
+    })?;
+    require_batch_owner(
+        &batch.owner,
+        source_owner,
+        "projection source owner".to_string(),
+    )?;
+    let rewritten = rewrite_agent_relationship_batch(batch, destination_ids)?;
+    let source = AgentSourceOwnerIdentity::V2 {
+        owner: source_owner.clone(),
+    };
+    let classification = classify_agent_ownership(&source, destination_owner)
+        .map_err(|source| {
+        projection_identity_error("source/destination ownership", source)
+    })?;
+    let registry_namespace_root =
+        source_owner_root_for_destination(source_owner, destination_owner);
+    let parse_roots = owner_rooted_parse_roots_for_projection(
+        source_owner,
+        destination_owner,
+        known_owner_roots,
+    )
+    .map_err(|source| projection_identity_error("known owner roots", source))?;
+
+    let mut localized_runs = BTreeMap::new();
+    let mut run_collisions = BTreeMap::new();
+    let mut runs = Vec::new();
+    for run in &rewritten.runs {
+        let localized_name = project_global_name(
+            &run.global_name,
+            source_owner,
+            destination_owner,
+            known_owner_roots,
+            &parse_roots,
+            classification,
+            "run",
+        )?;
+        if let Some(first) = run_collisions
+            .insert(localized_name.clone(), run.source_run_id.clone())
+        {
+            return Err(AgentRelationshipError::ProjectionNameCollision {
+                kind: "run",
+                localized_name,
+                first,
+                second: run.source_run_id.clone(),
+            });
+        }
+        localized_runs
+            .insert(run.source_run_id.clone(), localized_name.clone());
+        runs.push(ProjectedAgentRunWire {
+            source_run_id: run.source_run_id.clone(),
+            destination_run_id: run.destination_run_id.clone(),
+            global_name: run.global_name.clone(),
+            owner: run.owner.clone(),
+            localized_name,
+        });
+    }
+
+    let mut container_collisions = BTreeMap::new();
+    let mut containers = Vec::new();
+    for container in &rewritten.containers {
+        let localized_name = project_global_name(
+            &container.global_name,
+            source_owner,
+            destination_owner,
+            known_owner_roots,
+            &parse_roots,
+            classification,
+            "container",
+        )?;
+        let collision_key = (container.kind, localized_name.clone());
+        if let Some(first) = container_collisions
+            .insert(collision_key, container.global_name.clone())
+        {
+            return Err(AgentRelationshipError::ProjectionNameCollision {
+                kind: container.kind.as_str(),
+                localized_name,
+                first,
+                second: container.global_name.clone(),
+            });
+        }
+        containers.push(ProjectedAgentRunContainerWire {
+            kind: container.kind,
+            global_name: container.global_name.clone(),
+            owner: container.owner.clone(),
+            localized_name,
+            member_source_run_ids: container.member_source_run_ids.clone(),
+            member_destination_run_ids: container
+                .member_destination_run_ids
+                .clone(),
+        });
+    }
+
+    let relationships = rewritten
+        .relationships
+        .iter()
+        .map(|relationship| {
+            let target = match &relationship.target {
+                RewrittenAgentRelationshipTargetWire::DestinationRunId {
+                    source_run_id,
+                    destination_run_id,
+                } => ProjectedAgentRelationshipTargetWire::DestinationRunId {
+                    source_run_id: source_run_id.clone(),
+                    destination_run_id: destination_run_id.clone(),
+                    localized_name: localized_runs
+                        .get(source_run_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            AgentRelationshipError::MissingDestinationMapping {
+                                source_run_id: source_run_id.clone(),
+                            }
+                        })?,
+                },
+                RewrittenAgentRelationshipTargetWire::GlobalName {
+                    global_name,
+                    owner,
+                } => {
+                    let target_source = AgentSourceOwnerIdentity::V2 {
+                        owner: owner.clone(),
+                    };
+                    let target_classification = classify_agent_ownership(
+                        &target_source,
+                        destination_owner,
+                    )
+                    .map_err(|source| {
+                        projection_identity_error(
+                            "relationship target ownership",
+                            source,
+                        )
+                    })?;
+                    let target_roots = owner_rooted_parse_roots_for_projection(
+                        owner,
+                        destination_owner,
+                        known_owner_roots,
+                    )
+                    .map_err(|source| {
+                        projection_identity_error(
+                            "relationship target owner roots",
+                            source,
+                        )
+                    })?;
+                    let localized_name = project_global_name(
+                        global_name,
+                        owner,
+                        destination_owner,
+                        known_owner_roots,
+                        &target_roots,
+                        target_classification,
+                        "relationship target",
+                    )?;
+                    ProjectedAgentRelationshipTargetWire::GlobalName {
+                        global_name: global_name.clone(),
+                        owner: owner.clone(),
+                        localized_name,
+                    }
+                }
+            };
+            Ok(ProjectedAgentRelationshipWire {
+                kind: relationship.kind,
+                source_run_id: relationship.source_run_id.clone(),
+                source_destination_run_id: relationship
+                    .source_destination_run_id
+                    .clone(),
+                target,
+                required: relationship.required,
+            })
+        })
+        .collect::<Result<Vec<_>, AgentRelationshipError>>()?;
+
+    Ok(ProjectedAgentGraphWire {
+        schema_version: AGENT_RELATIONSHIP_SCHEMA_VERSION,
+        source_owner: source_owner.clone(),
+        destination_owner: destination_owner.clone(),
+        registry_namespace_root,
+        runs,
+        containers,
+        relationships,
+    })
+}
+
+fn project_global_name(
+    global_name: &str,
+    source_owner: &AgentOwnerIdentity,
+    destination_owner: &AgentOwnerIdentity,
+    known_owner_roots: &[String],
+    parse_roots: &[String],
+    classification: AgentOwnershipClassification,
+    context: &str,
+) -> Result<String, AgentRelationshipError> {
+    let source = AgentSourceOwnerIdentity::V2 {
+        owner: source_owner.clone(),
+    };
+    let localized =
+        localize_agent_name(global_name, &source, destination_owner).map_err(
+            |source| {
+                projection_identity_error(
+                    format!("{context} localization for '{global_name}'"),
+                    source,
+                )
+            },
+        )?;
+    if classification == AgentOwnershipClassification::ExactOwner {
+        return localize_current_owner_name(
+            &localized,
+            destination_owner,
+            known_owner_roots,
+        )
+        .map_err(|source| {
+            projection_identity_error(
+                format!(
+                    "{context} exact-owner normalization for '{global_name}'"
+                ),
+                source,
+            )
+        });
+    }
+
+    let expected_root =
+        source_owner_root_for_destination(source_owner, destination_owner);
+    let parsed =
+        parse_owned_agent_name(&localized, parse_roots).map_err(|source| {
+            projection_identity_error(
+                format!("{context} owner-root parse for '{localized}'"),
+                source,
+            )
+        })?;
+    if parsed.owner_root != expected_root {
+        let expected =
+            expected_root.unwrap_or_else(|| "<current owner>".to_string());
+        let actual = parsed
+            .owner_root
+            .unwrap_or_else(|| "<no owner root>".to_string());
+        return Err(projection_identity_error(
+            format!(
+                "{context} localized name '{localized}' used owner root '{actual}', expected '{expected}'"
+            ),
+            AgentIdentityError::InvalidAgentName {
+                name: localized,
+                reason: "localized name does not carry the expected owner root"
+                    .to_string(),
+            },
+        ));
+    }
+    Ok(localized)
+}
+
+fn projection_identity_error(
+    context: impl Into<String>,
+    source: AgentIdentityError,
+) -> AgentRelationshipError {
+    AgentRelationshipError::InvalidGraphProjection {
+        context: context.into(),
+        source: Box::new(source),
+    }
 }
 
 fn validate_containers(
@@ -1423,6 +1769,134 @@ mod tests {
         assert!(matches!(
             rewrite_agent_relationship_batch(&batch, &mapping),
             Err(AgentRelationshipError::UnknownDestinationMapping { .. })
+        ));
+    }
+
+    #[test]
+    fn graph_projection_localizes_full_owner_matrix() {
+        let batch = valid_batch();
+        let mapping = BTreeMap::from([
+            ("run-1".to_string(), "dest-11".to_string()),
+            ("run-2".to_string(), "dest-12".to_string()),
+            ("run-3".to_string(), "dest-13".to_string()),
+            ("run-4".to_string(), "dest-14".to_string()),
+        ]);
+        let roots = vec!["athena".to_string(), "alice.athena".to_string()];
+
+        let exact = project_agent_relationship_graph(
+            &batch,
+            &mapping,
+            &owner("alice", "athena"),
+            &owner("alice", "athena"),
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(exact.registry_namespace_root, None);
+        assert_eq!(exact.runs[0].localized_name, "foo");
+        assert_eq!(exact.containers[0].localized_name, "foo");
+
+        let same_user = project_agent_relationship_graph(
+            &batch,
+            &mapping,
+            &owner("alice", "athena"),
+            &owner("alice", "hera"),
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(
+            same_user.registry_namespace_root.as_deref(),
+            Some("athena")
+        );
+        assert_eq!(same_user.runs[1].localized_name, "athena.foo--code");
+        assert_eq!(same_user.containers[0].localized_name, "athena.foo");
+        assert!(matches!(
+            &same_user.relationships[0].target,
+            ProjectedAgentRelationshipTargetWire::DestinationRunId {
+                source_run_id,
+                destination_run_id,
+                localized_name,
+            } if source_run_id == "run-1"
+                && destination_run_id == "dest-11"
+                && localized_name == "athena.foo"
+        ));
+
+        let other_user = project_agent_relationship_graph(
+            &batch,
+            &mapping,
+            &owner("alice", "athena"),
+            &owner("bob", "hera"),
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(
+            other_user.registry_namespace_root.as_deref(),
+            Some("alice.athena")
+        );
+        assert_eq!(other_user.runs[1].localized_name, "alice.athena.foo--code");
+        assert_eq!(other_user.containers[0].localized_name, "alice.athena.foo");
+    }
+
+    #[test]
+    fn graph_projection_localizes_global_name_relationship_targets() {
+        let mut batch = valid_batch();
+        batch.relationships.push(AgentRelationshipWire {
+            kind: AgentRelationshipKind::Wait,
+            source_run_id: "run-1".to_string(),
+            target: AgentRelationshipTargetWire::GlobalName {
+                global_name: "bob.zeus.external".to_string(),
+                owner: owner("bob", "zeus"),
+            },
+            required: false,
+        });
+        let mapping = BTreeMap::from([
+            ("run-1".to_string(), "dest-11".to_string()),
+            ("run-2".to_string(), "dest-12".to_string()),
+            ("run-3".to_string(), "dest-13".to_string()),
+            ("run-4".to_string(), "dest-14".to_string()),
+        ]);
+        let projection = project_agent_relationship_graph(
+            &batch,
+            &mapping,
+            &owner("alice", "athena"),
+            &owner("alice", "athena"),
+            &["bob.zeus".to_string()],
+        )
+        .unwrap();
+        assert!(projection.relationships.iter().any(|relationship| matches!(
+            &relationship.target,
+            ProjectedAgentRelationshipTargetWire::GlobalName {
+                global_name,
+                owner,
+                localized_name,
+            } if global_name == "bob.zeus.external"
+                && owner.username == "bob"
+                && owner.machine_name == "zeus"
+                && localized_name == "bob.zeus.external"
+        )));
+    }
+
+    #[test]
+    fn graph_projection_rejects_current_owner_localization_collisions() {
+        let batch = AgentRelationshipBatchWire {
+            schema_version: AGENT_RELATIONSHIP_SCHEMA_VERSION,
+            owner: owner("alice", "athena"),
+            runs: vec![run("run-1", "foo"), run("run-2", "athena.foo")],
+            containers: vec![],
+            relationships: vec![],
+        };
+        let mapping = BTreeMap::from([
+            ("run-1".to_string(), "dest-11".to_string()),
+            ("run-2".to_string(), "dest-12".to_string()),
+        ]);
+        assert!(matches!(
+            project_agent_relationship_graph(
+                &batch,
+                &mapping,
+                &owner("alice", "athena"),
+                &owner("alice", "athena"),
+                &["athena".to_string()],
+            ),
+            Err(AgentRelationshipError::ProjectionNameCollision { .. })
         ));
     }
 }
