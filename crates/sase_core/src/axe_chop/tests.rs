@@ -887,6 +887,156 @@ fn git_trigger_returns_checkpoint_observation() {
 }
 
 #[test]
+fn fs_trigger_fires_on_missing_checkpoint_and_persists_baseline_token() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "fs": {"token": "tok-1"},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "fire");
+    assert_eq!(decision.provider.as_deref(), Some("fs"));
+    assert_eq!(decision.checkpoint_key.as_deref(), Some("fs"));
+    assert_eq!(decision.checkpoint_cursor.as_deref(), Some("tok-1"));
+    assert_eq!(
+        decision.checkpoint_policy,
+        Some(ChopCheckpointPolicyWire::OnObservation)
+    );
+}
+
+#[test]
+fn fs_trigger_fires_when_token_changes() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "fs": {"token": "tok-2"},
+        "checkpoint": {"schema_version": 1, "entries": {
+            "fs": {"cursor": "tok-1", "updated_at": "2026-07-19T11:59:00Z"}
+        }},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "fire");
+    assert_eq!(decision.checkpoint_cursor.as_deref(), Some("tok-2"));
+    assert_eq!(decision.reason, "watched paths changed since the last fire");
+}
+
+#[test]
+fn fs_trigger_skips_when_token_unchanged_and_within_max_quiet() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "fs": {"token": "tok-1"},
+        "checkpoint": {"schema_version": 1, "entries": {
+            "fs": {"cursor": "tok-1", "updated_at": "2026-07-19T11:59:00Z"}
+        }},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "skip");
+    assert_eq!(decision.checkpoint_key, None);
+}
+
+#[test]
+fn fs_trigger_fires_after_max_quiet_elapses_with_unchanged_token() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "fs": {"token": "tok-1"},
+        "checkpoint": {"schema_version": 1, "entries": {
+            "fs": {"cursor": "tok-1", "updated_at": "2026-07-19T11:00:00Z"}
+        }},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "fire");
+    assert_eq!(decision.checkpoint_cursor.as_deref(), Some("tok-1"));
+    assert!(decision.reason.contains("max_quiet"));
+}
+
+#[test]
+fn fs_trigger_fails_open_when_no_observation_is_provided() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "checkpoint": {"schema_version": 1, "entries": {
+            "fs": {"cursor": "tok-1", "updated_at": "2026-07-19T11:59:00Z"}
+        }},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "fire");
+    assert_eq!(decision.checkpoint_key, None);
+    assert!(decision.reason.contains("no fs observation"));
+}
+
+#[test]
+fn fs_trigger_fails_open_on_token_computation_error_without_persisting() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": ["axe/lumberjacks/hooks"],
+            "max_quiet": "5m"
+        },
+        "fs": {"error": "permission denied"},
+        "checkpoint": {"schema_version": 1, "entries": {
+            "fs": {"cursor": "tok-1", "updated_at": "2026-07-19T11:59:00Z"}
+        }},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let decision = evaluate_chop_decision(&request).unwrap();
+    assert_eq!(decision.outcome, "fire");
+    assert_eq!(decision.checkpoint_key, None);
+    assert!(decision.reason.contains("permission denied"));
+}
+
+#[test]
+fn fs_trigger_rejects_empty_paths() {
+    let request: ChopDecisionRequestWire = serde_json::from_value(json!({
+        "schema_version": 1,
+        "trigger": {
+            "provider": "fs",
+            "paths": [],
+            "max_quiet": "5m"
+        },
+        "fs": {"token": "tok-1"},
+        "now": "2026-07-19T12:00:00Z"
+    }))
+    .unwrap();
+    let error = evaluate_chop_decision(&request).unwrap_err();
+    assert_eq!(error.code, "blank_value");
+    assert_eq!(error.path, "$.trigger.paths");
+}
+
+#[test]
 fn checkpoint_success_policy_commits_only_after_success() {
     let observed: ChopCheckpointUpdateRequestWire =
         serde_json::from_value(json!({
@@ -1216,6 +1366,84 @@ fn strict_axe_validation_accepts_new_shape() {
         }))
         .unwrap();
     assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_accepts_fs_trigger_with_bare_and_glob_paths() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {"hooks": {
+                "description": "Run hook checks",
+                "chops": {"hook_checks": {
+                    "description": "Check hook state",
+                    "trigger": {"fs": {
+                        "paths": [
+                            "axe/lumberjacks/hooks",
+                            {"path": "axe/lumberjacks/hooks", "glob": "*.json"}
+                        ],
+                        "max_quiet": "5m"
+                    }}
+                }}
+            }}}}
+        }))
+        .unwrap();
+    assert_eq!(validate_axe_config(&request).unwrap(), vec![]);
+}
+
+#[test]
+fn strict_axe_validation_rejects_fs_trigger_missing_required_fields() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {"hooks": {
+                "description": "Run hook checks",
+                "chops": {"hook_checks": {
+                    "description": "Check hook state",
+                    "trigger": {"provider": "fs"}
+                }}
+            }}}}
+        }))
+        .unwrap();
+    let diagnostics = validate_axe_config(&request).unwrap();
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| item.path.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec![
+            "axe.lumberjacks.hooks.chops.hook_checks.trigger.max_quiet",
+            "axe.lumberjacks.hooks.chops.hook_checks.trigger.paths",
+        ]
+    );
+    assert!(diagnostics
+        .iter()
+        .all(|item| item.code == "required_missing"));
+}
+
+#[test]
+fn strict_axe_validation_rejects_blank_fs_paths_and_invalid_watch_spec() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "config": {"axe": {"lumberjacks": {"hooks": {
+                "description": "Run hook checks",
+                "chops": {"hook_checks": {
+                    "description": "Check hook state",
+                    "trigger": {"fs": {
+                        "paths": ["", {"glob": "*.json"}, 5],
+                        "max_quiet": "5m"
+                    }}
+                }}
+            }}}}
+        }))
+        .unwrap();
+    let diagnostics = validate_axe_config(&request).unwrap();
+    let codes: Vec<&str> =
+        diagnostics.iter().map(|item| item.code.as_str()).collect();
+    assert!(codes.contains(&"blank_value"));
+    assert!(codes.contains(&"required_missing"));
+    assert!(codes.contains(&"type_mismatch"));
 }
 
 #[test]

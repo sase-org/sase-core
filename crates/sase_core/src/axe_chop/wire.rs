@@ -245,10 +245,82 @@ pub enum ChopTriggerConfigWire {
         #[serde(default = "default_checkpoint_policy")]
         checkpoint_policy: ChopCheckpointPolicyWire,
     },
+    #[serde(rename = "fs")]
+    Fs {
+        paths: Vec<ChopFsWatchSpecWire>,
+        max_quiet: String,
+    },
 }
 
 fn default_checkpoint_policy() -> ChopCheckpointPolicyWire {
     ChopCheckpointPolicyWire::OnObservation
+}
+
+/// One shallow filesystem watch spec for the `fs` trigger provider.
+///
+/// Accepts either a bare path string or a `{path, glob}` object so config
+/// authors can skip the object form for the common single-path case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChopFsWatchSpecWire {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ChopFsWatchSpecWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(path) => Ok(Self { path, glob: None }),
+            Value::Object(mut map) => {
+                let path = map
+                    .remove("path")
+                    .and_then(|item| item.as_str().map(str::to_string))
+                    .ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "fs watch spec requires a string `path`",
+                        )
+                    })?;
+                let glob = map
+                    .remove("glob")
+                    .map(|item| {
+                        item.as_str().map(str::to_string).ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "fs watch spec `glob` must be a string",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                if let Some(key) = map.keys().next() {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown fs watch spec key `{key}`"
+                    )));
+                }
+                Ok(Self { path, glob })
+            }
+            _ => Err(serde::de::Error::custom(
+                "fs watch spec must be a string or a {path, glob} object",
+            )),
+        }
+    }
+}
+
+/// Filesystem change-token observation computed by the host for one chop's
+/// declared `fs` trigger watch paths.
+///
+/// Exactly one of `token`/`error` is populated: an `error` means the host
+/// could not compute a token (e.g. an unreadable path) and the engine fails
+/// open rather than trusting a partial token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChopFsSnapshotWire {
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// One Patch row supplied by the Python host.
@@ -305,6 +377,8 @@ pub struct ChopDecisionRequestWire {
     pub agents: Vec<ChopAgentSnapshotWire>,
     #[serde(default)]
     pub git: Vec<ChopGitSnapshotWire>,
+    #[serde(default)]
+    pub fs: Option<ChopFsSnapshotWire>,
     #[serde(default)]
     pub checkpoint: ChopCheckpointDocumentWire,
     pub now: String,

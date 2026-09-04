@@ -1,7 +1,11 @@
+use crate::agent_runtime::parse_runtime_timestamp;
+
+use super::config::parse_chop_duration;
 use super::wire::{
     ChopCheckpointPolicyWire, ChopDecisionRequestWire, ChopDecisionWire,
-    ChopEngineError, ChopGuardConfigWire, ChopTriggerConfigWire,
-    CHOP_ENGINE_SCHEMA_VERSION, CHOP_STATE_SCHEMA_VERSION,
+    ChopEngineError, ChopFsWatchSpecWire, ChopGuardConfigWire,
+    ChopTriggerConfigWire, CHOP_ENGINE_SCHEMA_VERSION,
+    CHOP_STATE_SCHEMA_VERSION,
 };
 
 /// Evaluate all inhibit guards followed by the configured trigger.
@@ -111,6 +115,9 @@ pub fn evaluate_chop_decision(
             *threshold,
             *checkpoint_policy,
         ),
+        ChopTriggerConfigWire::Fs { paths, max_quiet } => {
+            evaluate_fs_trigger(request, paths, max_quiet)
+        }
     }
 }
 
@@ -254,6 +261,93 @@ fn evaluate_git_trigger(
     result.checkpoint_cursor = Some(snapshot.head.clone());
     result.checkpoint_policy = Some(checkpoint_policy);
     Ok(result)
+}
+
+/// The `fs` trigger commits its checkpoint under one fixed key: unlike
+/// `git.commits_since` it never fans out across multiple projects, so there
+/// is nothing per-instance to encode into the key.
+const FS_CHECKPOINT_KEY: &str = "fs";
+
+fn evaluate_fs_trigger(
+    request: &ChopDecisionRequestWire,
+    paths: &[ChopFsWatchSpecWire],
+    max_quiet: &str,
+) -> Result<ChopDecisionWire, ChopEngineError> {
+    if paths.is_empty() {
+        return Err(ChopEngineError::new(
+            "blank_value",
+            "$.trigger.paths",
+            "fs trigger requires at least one watch path",
+        ));
+    }
+    let max_quiet_seconds =
+        parse_chop_duration(max_quiet).map_err(|mut error| {
+            error.path = "$.trigger.max_quiet".to_string();
+            error
+        })?;
+
+    let snapshot = request.fs.as_ref();
+    let error = snapshot.and_then(|snap| snap.error.as_deref());
+    let token = match error {
+        Some(_) => None,
+        None => snapshot.and_then(|snap| snap.token.as_deref()),
+    };
+
+    let Some(token) = token else {
+        let reason = match error {
+            Some(error) => {
+                format!("fs token computation failed ({error}); failing open")
+            }
+            None => "no fs observation was provided; failing open".to_string(),
+        };
+        // No checkpoint update: without a real token there is nothing
+        // trustworthy to persist as "last fired", so a future tick with a
+        // working observation still compares against the last known token.
+        return Ok(decision("fire", reason, Some("fs")));
+    };
+
+    let fire = |reason: String| {
+        let mut result = decision("fire", reason, Some("fs"));
+        result.checkpoint_key = Some(FS_CHECKPOINT_KEY.to_string());
+        result.checkpoint_cursor = Some(token.to_string());
+        result.checkpoint_policy =
+            Some(ChopCheckpointPolicyWire::OnObservation);
+        result
+    };
+
+    let Some(entry) = request.checkpoint.entries.get(FS_CHECKPOINT_KEY) else {
+        return Ok(fire(
+            "no prior fs checkpoint; establishing a baseline token".to_string(),
+        ));
+    };
+    if entry.cursor != token {
+        return Ok(fire(
+            "watched paths changed since the last fire".to_string(),
+        ));
+    }
+
+    let quiet_exceeded = match elapsed_seconds(&entry.updated_at, &request.now)
+    {
+        Some(elapsed) => elapsed >= max_quiet_seconds as f64,
+        None => true,
+    };
+    if quiet_exceeded {
+        return Ok(fire(format!(
+            "max_quiet ({max_quiet}) elapsed with no watched-path change"
+        )));
+    }
+
+    Ok(decision(
+        "skip",
+        "watched paths unchanged and within max_quiet",
+        Some("fs"),
+    ))
+}
+
+fn elapsed_seconds(previous: &str, now: &str) -> Option<f64> {
+    let previous = parse_runtime_timestamp(previous)?;
+    let now = parse_runtime_timestamp(now)?;
+    Some((now - previous).max(0.0))
 }
 
 fn decision(

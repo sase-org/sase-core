@@ -828,7 +828,7 @@ fn validate_trigger(
                 "unknown_trigger_provider",
                 path,
                 &format!(
-                    "unknown trigger provider `{provider}`; supported providers: always, git.commits_since"
+                    "unknown trigger provider `{provider}`; supported providers: always, git.commits_since, fs"
                 ),
             ));
         }
@@ -901,17 +901,29 @@ fn validate_trigger_provider(
         unknown_keys(request, config, allowed, path, diagnostics);
         return;
     }
-    if provider != "git.commits_since" {
-        diagnostics.push(diagnostic(
+    match provider {
+        "git.commits_since" => validate_git_commits_since_trigger(
+            request, config, path, tagged, diagnostics,
+        ),
+        "fs" => validate_fs_trigger(request, config, path, tagged, diagnostics),
+        _ => diagnostics.push(diagnostic(
             request,
             "unknown_trigger_provider",
             path,
             &format!(
-                "unknown trigger provider `{provider}`; supported providers: always, git.commits_since"
+                "unknown trigger provider `{provider}`; supported providers: always, git.commits_since, fs"
             ),
-        ));
-        return;
+        )),
     }
+}
+
+fn validate_git_commits_since_trigger(
+    request: &AxeConfigValidationRequestWire,
+    config: &Map<String, Value>,
+    path: &str,
+    tagged: bool,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
     let mut allowed =
         vec!["project", "threshold", "checkpoint_policy", "checkpoint"];
     if tagged {
@@ -960,6 +972,126 @@ fn validate_trigger_provider(
                 &child_path(path, "checkpoint_policy"),
                 "checkpoint policy must be on_observation, on_action_accepted, or on_action_success",
             ));
+        }
+    }
+}
+
+fn validate_fs_trigger(
+    request: &AxeConfigValidationRequestWire,
+    config: &Map<String, Value>,
+    path: &str,
+    tagged: bool,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    let mut allowed = vec!["paths", "max_quiet"];
+    if tagged {
+        allowed.push("provider");
+    }
+    unknown_keys(request, config, &allowed, path, diagnostics);
+    match config.get("paths") {
+        Some(value) => validate_fs_paths(
+            request,
+            value,
+            &child_path(path, "paths"),
+            diagnostics,
+        ),
+        None => diagnostics.push(diagnostic(
+            request,
+            "required_missing",
+            &child_path(path, "paths"),
+            "fs requires at least one entry in `paths`",
+        )),
+    }
+    match config.get("max_quiet") {
+        Some(value) => validate_duration(
+            request,
+            value,
+            &child_path(path, "max_quiet"),
+            diagnostics,
+        ),
+        None => diagnostics.push(diagnostic(
+            request,
+            "required_missing",
+            &child_path(path, "max_quiet"),
+            "fs requires a positive `max_quiet`",
+        )),
+    }
+}
+
+fn validate_fs_paths(
+    request: &AxeConfigValidationRequestWire,
+    value: &Value,
+    path: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    let Some(items) = value.as_array() else {
+        diagnostics.push(diagnostic(
+            request,
+            "type_mismatch",
+            path,
+            "fs paths must be an array of strings or {path, glob} objects",
+        ));
+        return;
+    };
+    if items.is_empty() {
+        diagnostics.push(diagnostic(
+            request,
+            "blank_value",
+            path,
+            "fs paths must not be empty",
+        ));
+        return;
+    }
+    for (index, item) in items.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        match item {
+            Value::String(text) => {
+                if text.trim().is_empty() {
+                    diagnostics.push(diagnostic(
+                        request,
+                        "blank_value",
+                        &item_path,
+                        "fs watch path must not be blank",
+                    ));
+                }
+            }
+            Value::Object(config) => {
+                unknown_keys(
+                    request,
+                    config,
+                    &["path", "glob"],
+                    &item_path,
+                    diagnostics,
+                );
+                match config.get("path") {
+                    Some(value) => validate_nonblank_string(
+                        request,
+                        value,
+                        &child_path(&item_path, "path"),
+                        diagnostics,
+                    ),
+                    None => diagnostics.push(diagnostic(
+                        request,
+                        "required_missing",
+                        &child_path(&item_path, "path"),
+                        "fs watch spec requires `path`",
+                    )),
+                }
+                if let Some(glob) = config.get("glob") {
+                    validate_nonblank_string(
+                        request,
+                        glob,
+                        &child_path(&item_path, "glob"),
+                        diagnostics,
+                    );
+                }
+            }
+            _ => diagnostics.push(diagnostic(
+                request,
+                "type_mismatch",
+                &item_path,
+                "fs watch entries must be strings or {path, glob} objects",
+            )),
         }
     }
 }
