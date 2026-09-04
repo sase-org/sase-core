@@ -31,9 +31,9 @@ use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
     DoneMarkerWire, FamilyShellGateWire, FamilyShellMonitorWire,
-    FamilyShellWire, OutputVariableValue, PendingQuestionMarkerWire,
-    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
-    UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
+    FamilyShellWire, ImportedSourceOwnerWire, OutputVariableValue,
+    PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
+    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
     WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
@@ -838,6 +838,21 @@ fn coerce_object(value: Option<&Value>) -> Option<Map<String, Value>> {
     }
 }
 
+fn coerce_imported_source_owner(
+    value: Option<&Value>,
+) -> Option<ImportedSourceOwnerWire> {
+    let obj = value.and_then(|item| item.as_object())?;
+    let username = coerce_str(obj.get("username"))?;
+    let machine_name = coerce_str(obj.get("machine_name"))?;
+    if username.is_empty() || machine_name.is_empty() {
+        return None;
+    }
+    Some(ImportedSourceOwnerWire {
+        username,
+        machine_name,
+    })
+}
+
 fn coerce_object_list(value: Option<&Value>) -> Vec<Map<String, Value>> {
     match value {
         Some(Value::Array(items)) => items
@@ -1034,6 +1049,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         agent_family,
         agent_family_role,
         agent_family_parallel: legacy_parallel,
+        imported_source_owner: coerce_imported_source_owner(
+            data.get("imported_source_owner"),
+        ),
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tribe: coerce_str(data.get("tribe"))
             .or_else(|| coerce_str(data.get("tag"))),
@@ -1244,6 +1262,9 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         stopped_by: coerce_str(data.get("stopped_by")),
         imported_transaction_key: coerce_str(
             data.get("imported_transaction_key"),
+        ),
+        imported_source_owner: coerce_imported_source_owner(
+            data.get("imported_source_owner"),
         ),
         status_label: coerce_str(data.get("status_label")),
         family_shell: family_shell_from_object(data),

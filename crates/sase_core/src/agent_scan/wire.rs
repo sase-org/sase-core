@@ -195,6 +195,8 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub imported_transaction_key: Option<String>,
     #[serde(default)]
+    pub imported_source_owner: Option<ImportedSourceOwnerWire>,
+    #[serde(default)]
     pub status_label: Option<String>,
     /// Terminal monitor or gate-shell projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
@@ -424,6 +426,15 @@ pub struct AgentOutputVariableSelectorResultWire {
     pub matches: Vec<AgentOutputVariableSelectorMatchWire>,
 }
 
+/// Provenance of an imported run, copied from `imported_source_owner`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImportedSourceOwnerWire {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub machine_name: String,
+}
+
 /// Compact projection of `agent_meta.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentMetaWire {
@@ -485,6 +496,8 @@ pub struct AgentMetaWire {
     pub agent_family_role: Option<String>,
     #[serde(default)]
     pub agent_family_parallel: bool,
+    #[serde(default)]
+    pub imported_source_owner: Option<ImportedSourceOwnerWire>,
     #[serde(default)]
     pub plan_chain_root: bool,
     #[serde(default, alias = "tag")]

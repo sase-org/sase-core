@@ -1022,6 +1022,50 @@ fn explicit_agent_clan_preserves_sequential_family_fields() {
 }
 
 #[test]
+fn imported_source_owner_survives_live_scan() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("projects");
+    let dir = root
+        .join("myproj")
+        .join("artifacts")
+        .join("ace-run")
+        .join("20260717180000");
+    write_json(
+        &dir.join("agent_meta.json"),
+        &json!({
+            "name": "bob.zeus.crew--code",
+            "agent_family": "bob.zeus.crew",
+            "agent_family_role": "code",
+            "imported_source_owner": {
+                "username": "bob",
+                "machine_name": "zeus"
+            },
+        }),
+    );
+    write_json(
+        &dir.join("done.json"),
+        &json!({
+            "status": "DONE",
+            "imported_source_owner": {
+                "username": "bob",
+                "machine_name": "zeus"
+            },
+        }),
+    );
+
+    let snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+    let owner = meta.imported_source_owner.as_ref().unwrap();
+    assert_eq!(owner.username, "bob");
+    assert_eq!(owner.machine_name, "zeus");
+    let done = snapshot.records[0].done.as_ref().unwrap();
+    let done_owner = done.imported_source_owner.as_ref().unwrap();
+    assert_eq!(done_owner.username, "bob");
+    assert_eq!(done_owner.machine_name, "zeus");
+}
+
+#[test]
 fn scanner_keeps_parent_epic_and_authored_plan_references_separate() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("projects");
