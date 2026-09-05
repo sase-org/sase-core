@@ -246,6 +246,8 @@
 //! - `sdd_plan_header_block_upsert_section(document: str, section: dict, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `sdd_plan_header_block_replace(document: str, sections: list[dict], remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `sdd_plan_header_block_remove_section(document: str, kind: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
+//! - `prompt_archive_inventory_wire_schema_version() -> int`
+//! - `prompt_archive_inventory(root: str, request: dict | None = None) -> dict`
 //! - `at_reference_context(text: str, line: int, character: int, known_kinds:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `AtReferenceInventory(payloads: Sequence[dict])`
@@ -916,6 +918,11 @@ use sase_core::project_spec::{
     apply_project_name_update as core_apply_project_name_update,
     list_project_records as core_list_project_records,
     read_project_lifecycle_from_content as core_read_project_lifecycle_from_content,
+};
+use sase_core::prompt_archive::{
+    prompt_archive_inventory as core_prompt_archive_inventory,
+    PromptArchiveInventoryRequestWire,
+    PROMPT_ARCHIVE_INVENTORY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::prompt_artifact::{
     artifact_pool_filename as core_artifact_pool_filename,
@@ -6125,6 +6132,42 @@ fn py_sdd_plan_header_block_remove_section(
         allow_resolved_mixed,
     )
     .map_err(plan_error_to_pyerr)
+}
+
+/// Return the prompt archive inventory wire schema version.
+#[pyfunction]
+#[pyo3(name = "prompt_archive_inventory_wire_schema_version")]
+fn py_prompt_archive_inventory_wire_schema_version() -> u64 {
+    PROMPT_ARCHIVE_INVENTORY_WIRE_SCHEMA_VERSION
+}
+
+/// Discover and parse canonical prompt archive documents.
+#[pyfunction]
+#[pyo3(name = "prompt_archive_inventory", signature = (root, request = None))]
+fn py_prompt_archive_inventory<'py>(
+    py: Python<'py>,
+    root: &str,
+    request: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let request = match request {
+        Some(dict) => {
+            let value = py_to_json_value(dict.as_any())?;
+            serde_json::from_value::<PromptArchiveInventoryRequestWire>(value)
+                .map_err(|error| {
+                    PyValueError::new_err(format!(
+                        "request is not a valid PromptArchiveInventoryRequestWire dict: {error}"
+                    ))
+                })?
+        }
+        None => PromptArchiveInventoryRequestWire::default(),
+    };
+    let root = PathBuf::from(root);
+    let inventory =
+        py.allow_threads(|| core_prompt_archive_inventory(&root, request));
+    let value = serde_json::to_value(&inventory).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 fn sdd_plan_header_section_from_pydict(
@@ -12005,6 +12048,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_sdd_plan_header_block_remove_section,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_prompt_archive_inventory_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_archive_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;

@@ -55,6 +55,7 @@ pub mod perf_logs;
 pub mod plan;
 pub mod procs;
 pub mod project_spec;
+pub mod prompt_archive;
 pub mod prompt_artifact;
 pub mod prompt_literals;
 mod prompt_rewrite;
@@ -794,6 +795,11 @@ pub use project_spec::{
     ProjectLifecycleWire, ProjectRecordWire, LEGACY_PROJECT_SPEC_EXTENSION,
     PROJECT_LIFECYCLE_WIRE_SCHEMA_VERSION, PROJECT_SPEC_ARCHIVE_SUFFIX,
     PROJECT_SPEC_EXTENSION,
+};
+pub use prompt_archive::{
+    prompt_archive_inventory, PromptArchiveDocumentWire,
+    PromptArchiveInventoryRequestWire, PromptArchiveInventoryWire,
+    PROMPT_ARCHIVE_INVENTORY_WIRE_SCHEMA_VERSION,
 };
 pub use prompt_literals::inline_code_ranges;
 pub use prompt_stash::{
