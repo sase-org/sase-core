@@ -307,7 +307,12 @@ impl QueryEvaluationContext {
             }
             FieldValueKind::String | FieldValueKind::Enum => {
                 let wanted = query_value.to_ascii_lowercase();
-                if matches!(field.kind, FieldValueKind::Enum)
+                if key.eq_ignore_ascii_case("sha") {
+                    field
+                        .values_lower
+                        .iter()
+                        .any(|item| item.starts_with(&wanted))
+                } else if matches!(field.kind, FieldValueKind::Enum)
                     || field.exact_match
                 {
                     field.values_lower.iter().any(|item| item == &wanted)

@@ -1240,6 +1240,48 @@ fn flat_repeated_values_are_any_match_and_exclusions_negate() {
 }
 
 #[test]
+fn sha_field_matches_a_prefix_of_the_stored_value() {
+    let profile = profile_from_parts(
+        "stitches",
+        false,
+        vec![string_field("sha", true, false)],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("sha profile");
+    let rows = vec![
+        QueryRow {
+            fields: [(
+                "sha".into(),
+                QueryFieldValues::from_string("abc1234567890"),
+            )]
+            .into_iter()
+            .collect(),
+            searchable_text: String::new(),
+            predicates: QueryPredicateFacts::default(),
+        },
+        QueryRow {
+            fields: [(
+                "sha".into(),
+                QueryFieldValues::from_string("fff0000000000"),
+            )]
+            .into_iter()
+            .collect(),
+            searchable_text: String::new(),
+            predicates: QueryPredicateFacts::default(),
+        },
+    ];
+    let corpus = QueryCorpus::from_rows(&profile, rows);
+    let program = compile_query_with_profile("sha:abc1234", &profile).unwrap();
+    assert_eq!(
+        evaluate_query_many_in_corpus(&program, &corpus),
+        vec![true, false]
+    );
+}
+
+#[test]
 fn boolean_precedence_works_on_generic_rows() {
     let profile = boolean_custom_profile();
     let rows = vec![
