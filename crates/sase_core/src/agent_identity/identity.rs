@@ -49,77 +49,11 @@ impl AgentOwnerIdentity {
     }
 }
 
-/// Explicit source provenance for v2 and imported v1 names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AgentSourceOwnerIdentity {
-    V2 { owner: AgentOwnerIdentity },
-    UsernameUnknownV1 { machine_name: String },
-}
-
-impl AgentSourceOwnerIdentity {
-    pub fn validate(&self) -> Result<(), AgentIdentityError> {
-        match self {
-            Self::V2 { owner } => owner.validate(),
-            Self::UsernameUnknownV1 { machine_name } => {
-                validate_machine_name(machine_name).map_err(|source| {
-                    AgentIdentityError::InvalidMachineName {
-                        machine_name: machine_name.clone(),
-                        reason: source.to_string(),
-                    }
-                })
-            }
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentOwnershipClassification {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentOwnershipClassification {
     ExactOwner,
     SameUserOtherMachine,
     OtherUser,
-    UsernameUnknownV1,
-}
-
-impl AgentOwnershipClassification {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::ExactOwner => "exact_owner",
-            Self::SameUserOtherMachine => "same_user_other_machine",
-            Self::OtherUser => "other_user",
-            Self::UsernameUnknownV1 => "username_unknown_v1",
-        }
-    }
-}
-
-/// First-party evidence available when classifying one legacy-v1 group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyV1GroupOwnershipEvidence {
-    pub v2_hood_published: bool,
-    pub proven_entry_count: usize,
-    pub total_entry_count: usize,
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyV1GroupOwnershipClassification {
-    OwnerObserved,
-    Foreign,
-}
-
-impl LegacyV1GroupOwnershipClassification {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OwnerObserved => "owner_observed",
-            Self::Foreign => "foreign",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,28 +138,6 @@ pub enum AgentIdentityError {
         name: String,
         username: String,
         machine_name: String,
-    },
-
-    #[error(
-        "legacy agent name '{name}' has machine hood '{actual_machine}', expected '{expected_machine}'"
-    )]
-    LegacyMachineMismatch {
-        name: String,
-        actual_machine: String,
-        expected_machine: String,
-    },
-
-    #[error(
-        "legacy agent name '{name}' must be qualified as '<machine_name>.<local-name>'"
-    )]
-    MalformedLegacyName { name: String },
-
-    #[error(
-        "invalid legacy-v1 group ownership evidence: proven entry count {proven_entry_count} exceeds total entry count {total_entry_count}"
-    )]
-    InvalidLegacyV1GroupOwnershipEvidence {
-        proven_entry_count: usize,
-        total_entry_count: usize,
     },
 
     #[error(
@@ -362,62 +274,18 @@ pub fn validate_owned_agent_name(
     validate_semantic_name(&parsed.local_name)
 }
 
-pub fn classify_agent_ownership(
-    source: &AgentSourceOwnerIdentity,
+pub(crate) fn classify_owner_pair(
+    source: &AgentOwnerIdentity,
     target: &AgentOwnerIdentity,
 ) -> Result<AgentOwnershipClassification, AgentIdentityError> {
     source.validate()?;
     target.validate()?;
-    Ok(match source {
-        AgentSourceOwnerIdentity::UsernameUnknownV1 { .. } => {
-            AgentOwnershipClassification::UsernameUnknownV1
-        }
-        AgentSourceOwnerIdentity::V2 { owner } if owner == target => {
-            AgentOwnershipClassification::ExactOwner
-        }
-        AgentSourceOwnerIdentity::V2 { owner }
-            if owner.username == target.username =>
-        {
-            AgentOwnershipClassification::SameUserOtherMachine
-        }
-        AgentSourceOwnerIdentity::V2 { .. } => {
-            AgentOwnershipClassification::OtherUser
-        }
-    })
-}
-
-/// Classify one legacy-v1 group using explicit first-party evidence.
-///
-/// A matching machine token is necessary but never sufficient. The group is
-/// owner-observed only when the target owner has already published its hood in
-/// v2 or at least one entry is proven against a local, non-imported artifact.
-pub fn classify_legacy_v1_group_ownership(
-    group_machine_name: &str,
-    target: &AgentOwnerIdentity,
-    evidence: &LegacyV1GroupOwnershipEvidence,
-) -> Result<LegacyV1GroupOwnershipClassification, AgentIdentityError> {
-    validate_machine_name(group_machine_name).map_err(|source| {
-        AgentIdentityError::InvalidMachineName {
-            machine_name: group_machine_name.to_string(),
-            reason: source.to_string(),
-        }
-    })?;
-    target.validate()?;
-    if evidence.proven_entry_count > evidence.total_entry_count {
-        return Err(
-            AgentIdentityError::InvalidLegacyV1GroupOwnershipEvidence {
-                proven_entry_count: evidence.proven_entry_count,
-                total_entry_count: evidence.total_entry_count,
-            },
-        );
-    }
-
-    let owner_observed = group_machine_name == target.machine_name
-        && (evidence.v2_hood_published || evidence.proven_entry_count > 0);
-    Ok(if owner_observed {
-        LegacyV1GroupOwnershipClassification::OwnerObserved
+    Ok(if source == target {
+        AgentOwnershipClassification::ExactOwner
+    } else if source.username == target.username {
+        AgentOwnershipClassification::SameUserOtherMachine
     } else {
-        LegacyV1GroupOwnershipClassification::Foreign
+        AgentOwnershipClassification::OtherUser
     })
 }
 
@@ -498,33 +366,6 @@ pub fn globalize_owned_agent_name(
     ))
 }
 
-/// Verify a legacy machine-qualified name and convert it to a v2 global name.
-pub fn globalize_legacy_agent_name(
-    legacy_name: &str,
-    current_owner: &AgentOwnerIdentity,
-) -> Result<String, AgentIdentityError> {
-    current_owner.validate()?;
-    let normalized = normalize_agent_archive_name(legacy_name)?;
-    let Some((actual_machine, local_name)) = normalized.split_once('.') else {
-        return Err(AgentIdentityError::MalformedLegacyName {
-            name: legacy_name.to_string(),
-        });
-    };
-    validate_machine_name(actual_machine).map_err(|_| {
-        AgentIdentityError::MalformedLegacyName {
-            name: legacy_name.to_string(),
-        }
-    })?;
-    if actual_machine != current_owner.machine_name {
-        return Err(AgentIdentityError::LegacyMachineMismatch {
-            name: legacy_name.to_string(),
-            actual_machine: actual_machine.to_string(),
-            expected_machine: current_owner.machine_name.clone(),
-        });
-    }
-    globalize_agent_name(local_name, current_owner)
-}
-
 /// Validate and remove exactly the supplied v2 owner's global prefix.
 pub fn strip_global_agent_name(
     global_name: &str,
@@ -541,30 +382,24 @@ pub fn strip_global_agent_name(
 }
 
 /// Localize a verified source-global name for a target owner.
-pub fn localize_agent_name(
+pub(crate) fn localize_source_global_name(
     global_name: &str,
-    source: &AgentSourceOwnerIdentity,
+    source: &AgentOwnerIdentity,
     target: &AgentOwnerIdentity,
 ) -> Result<String, AgentIdentityError> {
-    let classification = classify_agent_ownership(source, target)?;
-    let local_name = strip_source_global_name(global_name, source)?;
-    Ok(match (classification, source) {
-        (AgentOwnershipClassification::ExactOwner, _) => local_name,
-        (
-            AgentOwnershipClassification::SameUserOtherMachine,
-            AgentSourceOwnerIdentity::V2 { owner },
-        ) => format!("{}.{}", owner.machine_name, local_name),
-        (
-            AgentOwnershipClassification::OtherUser,
-            AgentSourceOwnerIdentity::V2 { owner },
-        ) => {
-            format!("{}.{}.{}", owner.username, owner.machine_name, local_name)
+    let classification = classify_owner_pair(source, target)?;
+    let local_name = strip_global_agent_name(global_name, source)?;
+    Ok(match classification {
+        AgentOwnershipClassification::ExactOwner => local_name,
+        AgentOwnershipClassification::SameUserOtherMachine => {
+            format!("{}.{}", source.machine_name, local_name)
         }
-        (
-            AgentOwnershipClassification::UsernameUnknownV1,
-            AgentSourceOwnerIdentity::UsernameUnknownV1 { machine_name },
-        ) => format!("{machine_name}.{local_name}"),
-        _ => unreachable!("classification and source variants are aligned"),
+        AgentOwnershipClassification::OtherUser => {
+            format!(
+                "{}.{}.{}",
+                source.username, source.machine_name, local_name
+            )
+        }
     })
 }
 
@@ -777,35 +612,6 @@ pub(crate) fn localize_current_owner_name(
     known_owner_roots: &[String],
 ) -> Result<String, AgentIdentityError> {
     normalize_owned_agent_name(name, owner, known_owner_roots)
-}
-
-fn strip_source_global_name(
-    global_name: &str,
-    source: &AgentSourceOwnerIdentity,
-) -> Result<String, AgentIdentityError> {
-    source.validate()?;
-    match source {
-        AgentSourceOwnerIdentity::V2 { owner } => {
-            strip_global_agent_name(global_name, owner)
-        }
-        AgentSourceOwnerIdentity::UsernameUnknownV1 { machine_name } => {
-            let normalized = normalize_agent_archive_name(global_name)?;
-            let prefix = format!("{machine_name}.");
-            let Some(local_name) = normalized.strip_prefix(&prefix) else {
-                return Err(AgentIdentityError::LegacyMachineMismatch {
-                    name: global_name.to_string(),
-                    actual_machine: normalized
-                        .split('.')
-                        .next()
-                        .unwrap_or_default()
-                        .to_string(),
-                    expected_machine: machine_name.clone(),
-                });
-            };
-            validate_historical_semantic_name(local_name)?;
-            Ok(local_name.to_string())
-        }
-    }
 }
 
 fn owner_prefix(owner: &AgentOwnerIdentity) -> String {
@@ -1202,90 +1008,22 @@ mod tests {
     fn ownership_classification_never_parses_names() {
         let target = owner("alice", "athena");
         let cases = [
+            (target.clone(), AgentOwnershipClassification::ExactOwner),
             (
-                AgentSourceOwnerIdentity::V2 {
-                    owner: target.clone(),
-                },
-                AgentOwnershipClassification::ExactOwner,
-            ),
-            (
-                AgentSourceOwnerIdentity::V2 {
-                    owner: owner("alice", "zeus"),
-                },
+                owner("alice", "zeus"),
                 AgentOwnershipClassification::SameUserOtherMachine,
             ),
             (
-                AgentSourceOwnerIdentity::V2 {
-                    owner: owner("bob", "athena"),
-                },
+                owner("bob", "athena"),
                 AgentOwnershipClassification::OtherUser,
-            ),
-            (
-                AgentSourceOwnerIdentity::UsernameUnknownV1 {
-                    machine_name: "athena".to_string(),
-                },
-                AgentOwnershipClassification::UsernameUnknownV1,
             ),
         ];
         for (source, expected) in cases {
             assert_eq!(
-                classify_agent_ownership(&source, &target).unwrap(),
+                classify_owner_pair(&source, &target).unwrap(),
                 expected
             );
         }
-    }
-
-    #[test]
-    fn legacy_v1_group_ownership_evidence_matrix() {
-        let target = owner("alice", "athena");
-        for (group_machine_name, machine_matches) in
-            [("athena", true), ("zeus", false)]
-        {
-            for v2_hood_published in [false, true] {
-                for proven_entry_count in [0, 1, 3] {
-                    let evidence = LegacyV1GroupOwnershipEvidence {
-                        v2_hood_published,
-                        proven_entry_count,
-                        total_entry_count: 3,
-                    };
-                    let expected = if machine_matches
-                        && (v2_hood_published || proven_entry_count > 0)
-                    {
-                        LegacyV1GroupOwnershipClassification::OwnerObserved
-                    } else {
-                        LegacyV1GroupOwnershipClassification::Foreign
-                    };
-                    assert_eq!(
-                        classify_legacy_v1_group_ownership(
-                            group_machine_name,
-                            &target,
-                            &evidence,
-                        )
-                        .unwrap(),
-                        expected,
-                        "machine={group_machine_name}, v2={v2_hood_published}, proven={proven_entry_count}",
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_v1_group_ownership_rejects_impossible_evidence() {
-        let error = classify_legacy_v1_group_ownership(
-            "athena",
-            &owner("alice", "athena"),
-            &LegacyV1GroupOwnershipEvidence {
-                v2_hood_published: false,
-                proven_entry_count: 2,
-                total_entry_count: 1,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            AgentIdentityError::InvalidLegacyV1GroupOwnershipEvidence { .. }
-        ));
     }
 
     #[test]
@@ -1342,24 +1080,6 @@ mod tests {
             normalize_agent_archive_name("260722.260721.foo").unwrap(),
             "260721.foo"
         );
-    }
-
-    #[test]
-    fn legacy_globalization_verifies_machine_hood() {
-        let alice = owner("alice", "athena");
-        assert_eq!(
-            globalize_legacy_agent_name("athena.foo.bar", &alice).unwrap(),
-            "alice.athena.foo.bar"
-        );
-        assert!(matches!(
-            globalize_legacy_agent_name("zeus.foo", &alice),
-            Err(AgentIdentityError::LegacyMachineMismatch { .. })
-        ));
-        assert!(matches!(
-            globalize_legacy_agent_name("foo", &alice),
-            Err(AgentIdentityError::MalformedLegacyName { .. })
-        ));
-        assert!(globalize_legacy_agent_name("bad-machine.foo", &alice).is_err());
     }
 
     #[test]
@@ -1427,37 +1147,24 @@ mod tests {
     #[test]
     fn localization_covers_all_owner_cases() {
         let target = owner("alice", "athena");
-        let exact = AgentSourceOwnerIdentity::V2 {
-            owner: target.clone(),
-        };
         assert_eq!(
-            localize_agent_name("alice.athena.foo", &exact, &target).unwrap(),
+            localize_source_global_name("alice.athena.foo", &target, &target)
+                .unwrap(),
             "foo"
         );
 
-        let same_user = AgentSourceOwnerIdentity::V2 {
-            owner: owner("alice", "zeus"),
-        };
+        let same_user = owner("alice", "zeus");
         assert_eq!(
-            localize_agent_name("alice.zeus.foo", &same_user, &target).unwrap(),
+            localize_source_global_name("alice.zeus.foo", &same_user, &target)
+                .unwrap(),
             "zeus.foo"
         );
 
-        let other_user = AgentSourceOwnerIdentity::V2 {
-            owner: owner("bob", "athena"),
-        };
+        let other_user = owner("bob", "athena");
         assert_eq!(
-            localize_agent_name("bob.athena.foo", &other_user, &target)
+            localize_source_global_name("bob.athena.foo", &other_user, &target)
                 .unwrap(),
             "bob.athena.foo"
-        );
-
-        let legacy = AgentSourceOwnerIdentity::UsernameUnknownV1 {
-            machine_name: "zeus".to_string(),
-        };
-        assert_eq!(
-            localize_agent_name("zeus.foo", &legacy, &target).unwrap(),
-            "zeus.foo"
         );
     }
 

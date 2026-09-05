@@ -120,17 +120,13 @@
 //! - `validate_owner_root(root: str) -> None`
 //! - `validate_agent_owner(username: str, machine_name: str) -> None`
 //! - `validate_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> None`
-//! - `classify_agent_ownership(source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
-//! - `classify_legacy_v1_group_ownership(group_machine_name: str, target_username: str, target_machine_name: str, v2_hood_published: bool, proven_entry_count: int, total_entry_count: int) -> str`
 //! - `commit_shas_equivalent(left: str, right: str) -> bool`
 //! - `normalize_agent_archive_name(name: str) -> str`
 //! - `normalize_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> str`
 //! - `globalize_agent_name(local_name: str, username: str, machine_name: str) -> str`
 //! - `globalize_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> str`
-//! - `globalize_legacy_agent_name(legacy_name: str, username: str, machine_name: str) -> str`
 //! - `foreign_agent_owner_root(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> str | None`
 //! - `strip_global_agent_name(global_name: str, username: str, machine_name: str) -> str`
-//! - `localize_agent_name(global_name: str, source_machine_name: str, target_username: str, target_machine_name: str, source_username: str | None = None) -> str`
 //! - `parse_agent_family_name(name: str) -> dict`
 //! - `parse_owned_agent_name(name: str, known_owner_roots: list[str] | None = None) -> dict`
 //! - `agent_local_hood(name: str, known_owner_roots: list[str] | None = None) -> str`
@@ -462,13 +458,9 @@ use sase_core::agent_identity::{
     agent_name_ancestors_with_owner_roots as core_agent_name_ancestors_with_owner_roots,
     agent_name_in_hood as core_agent_name_in_hood,
     agent_name_in_hood_with_owner_roots as core_agent_name_in_hood_with_owner_roots,
-    classify_agent_ownership as core_classify_agent_ownership,
-    classify_legacy_v1_group_ownership as core_classify_legacy_v1_group_ownership,
     foreign_agent_owner_root as core_foreign_agent_owner_root,
     globalize_agent_name as core_globalize_agent_name,
-    globalize_legacy_agent_name as core_globalize_legacy_agent_name,
     globalize_owned_agent_name as core_globalize_owned_agent_name,
-    localize_agent_name as core_localize_agent_name,
     normalize_agent_archive_name as core_normalize_agent_archive_name,
     normalize_owned_agent_name as core_normalize_owned_agent_name,
     parse_agent_family_name as core_parse_agent_family_name,
@@ -481,8 +473,7 @@ use sase_core::agent_identity::{
     validate_agent_username as core_validate_agent_username,
     validate_owned_agent_name as core_validate_owned_agent_name,
     validate_owner_root as core_validate_owner_root, AgentOwnerIdentity,
-    AgentRelationshipBatchWire, AgentSourceOwnerIdentity,
-    LegacyV1GroupOwnershipEvidence, AGENT_RELATIONSHIP_SCHEMA_VERSION,
+    AgentRelationshipBatchWire, AGENT_RELATIONSHIP_SCHEMA_VERSION,
 };
 use sase_core::agent_launch::{
     admission_unit_results as core_admission_unit_results,
@@ -1288,24 +1279,6 @@ fn explicit_owner(
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
-fn source_owner(
-    source_username: Option<&str>,
-    source_machine_name: &str,
-) -> PyResult<AgentSourceOwnerIdentity> {
-    let source = match source_username {
-        Some(username) => AgentSourceOwnerIdentity::V2 {
-            owner: explicit_owner(username, source_machine_name)?,
-        },
-        None => AgentSourceOwnerIdentity::UsernameUnknownV1 {
-            machine_name: source_machine_name.to_string(),
-        },
-    };
-    source
-        .validate()
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    Ok(source)
-}
-
 fn identity_wire_to_py<'py, T: serde::Serialize>(
     py: Python<'py>,
     value: &T,
@@ -1367,54 +1340,6 @@ fn py_validate_owned_agent_name(
 #[pyo3(name = "validate_agent_owner")]
 fn py_validate_agent_owner(username: &str, machine_name: &str) -> PyResult<()> {
     explicit_owner(username, machine_name).map(|_| ())
-}
-
-#[pyfunction]
-#[pyo3(
-    name = "classify_agent_ownership",
-    signature = (
-        source_machine_name,
-        target_username,
-        target_machine_name,
-        source_username = None
-    )
-)]
-fn py_classify_agent_ownership(
-    source_machine_name: &str,
-    target_username: &str,
-    target_machine_name: &str,
-    source_username: Option<&str>,
-) -> PyResult<String> {
-    let source = source_owner(source_username, source_machine_name)?;
-    let target = explicit_owner(target_username, target_machine_name)?;
-    core_classify_agent_ownership(&source, &target)
-        .map(|classification| classification.as_str().to_string())
-        .map_err(|error| PyValueError::new_err(error.to_string()))
-}
-
-#[pyfunction]
-#[pyo3(name = "classify_legacy_v1_group_ownership")]
-fn py_classify_legacy_v1_group_ownership(
-    group_machine_name: &str,
-    target_username: &str,
-    target_machine_name: &str,
-    v2_hood_published: bool,
-    proven_entry_count: usize,
-    total_entry_count: usize,
-) -> PyResult<String> {
-    let target = explicit_owner(target_username, target_machine_name)?;
-    let evidence = LegacyV1GroupOwnershipEvidence {
-        v2_hood_published,
-        proven_entry_count,
-        total_entry_count,
-    };
-    core_classify_legacy_v1_group_ownership(
-        group_machine_name,
-        &target,
-        &evidence,
-    )
-    .map(|classification| classification.as_str().to_string())
-    .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 #[pyfunction]
@@ -1485,20 +1410,6 @@ fn py_globalize_owned_agent_name(
 }
 
 #[pyfunction]
-#[pyo3(name = "globalize_legacy_agent_name")]
-fn py_globalize_legacy_agent_name(
-    legacy_name: &str,
-    username: &str,
-    machine_name: &str,
-) -> PyResult<String> {
-    core_globalize_legacy_agent_name(
-        legacy_name,
-        &explicit_owner(username, machine_name)?,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
-}
-
-#[pyfunction]
 #[pyo3(
     name = "foreign_agent_owner_root",
     signature = (name, username, machine_name, known_owner_roots = None)
@@ -1528,32 +1439,6 @@ fn py_strip_global_agent_name(
     core_strip_global_agent_name(
         global_name,
         &explicit_owner(username, machine_name)?,
-    )
-    .map_err(|error| PyValueError::new_err(error.to_string()))
-}
-
-#[pyfunction]
-#[pyo3(
-    name = "localize_agent_name",
-    signature = (
-        global_name,
-        source_machine_name,
-        target_username,
-        target_machine_name,
-        source_username = None
-    )
-)]
-fn py_localize_agent_name(
-    global_name: &str,
-    source_machine_name: &str,
-    target_username: &str,
-    target_machine_name: &str,
-    source_username: Option<&str>,
-) -> PyResult<String> {
-    core_localize_agent_name(
-        global_name,
-        &source_owner(source_username, source_machine_name)?,
-        &explicit_owner(target_username, target_machine_name)?,
     )
     .map_err(|error| PyValueError::new_err(error.to_string()))
 }
@@ -11711,20 +11596,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_owner_root, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
-    m.add_function(wrap_pyfunction!(py_classify_agent_ownership, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        py_classify_legacy_v1_group_ownership,
-        m
-    )?)?;
     m.add_function(wrap_pyfunction!(py_commit_shas_equivalent, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_owned_agent_name, m)?)?;
-    m.add_function(wrap_pyfunction!(py_globalize_legacy_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_foreign_agent_owner_root, m)?)?;
     m.add_function(wrap_pyfunction!(py_strip_global_agent_name, m)?)?;
-    m.add_function(wrap_pyfunction!(py_localize_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_agent_family_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_local_hood, m)?)?;
@@ -13373,17 +13251,13 @@ mod tests {
                 "validate_owner_root",
                 "validate_owned_agent_name",
                 "validate_agent_owner",
-                "classify_agent_ownership",
-                "classify_legacy_v1_group_ownership",
                 "commit_shas_equivalent",
                 "normalize_agent_archive_name",
                 "normalize_owned_agent_name",
                 "globalize_agent_name",
                 "globalize_owned_agent_name",
-                "globalize_legacy_agent_name",
                 "foreign_agent_owner_root",
                 "strip_global_agent_name",
-                "localize_agent_name",
                 "parse_agent_family_name",
                 "parse_owned_agent_name",
                 "agent_local_hood",
@@ -13396,6 +13270,14 @@ mod tests {
                 "project_agent_relationship_graph",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            for name in [
+                "classify_agent_ownership",
+                "classify_legacy_v1_group_ownership",
+                "globalize_legacy_agent_name",
+                "localize_agent_name",
+            ] {
+                assert!(module.getattr(name).is_err(), "unexpected {name}");
             }
 
             py_validate_agent_username("alice").unwrap();
@@ -13420,34 +13302,6 @@ mod tests {
             .is_err());
             py_validate_agent_owner("alice", "athena").unwrap();
             assert!(py_validate_agent_owner("alice", "athena1").is_err());
-            assert_eq!(
-                py_classify_agent_ownership(
-                    "zeus",
-                    "alice",
-                    "athena",
-                    Some("alice"),
-                )
-                .unwrap(),
-                "same_user_other_machine"
-            );
-            assert_eq!(
-                py_classify_legacy_v1_group_ownership(
-                    "athena", "alice", "athena", false, 1, 2,
-                )
-                .unwrap(),
-                "owner_observed"
-            );
-            assert_eq!(
-                py_classify_legacy_v1_group_ownership(
-                    "zeus", "alice", "athena", true, 2, 2,
-                )
-                .unwrap(),
-                "foreign"
-            );
-            assert!(py_classify_legacy_v1_group_ownership(
-                "athena", "alice", "athena", false, 2, 1,
-            )
-            .is_err());
             assert!(py_commit_shas_equivalent(
                 "d7e06b77b",
                 "d7e06b77b42d89ecf4bb1538c6f89c6fe700124e",
@@ -13490,17 +13344,6 @@ mod tests {
                 )
                 .unwrap(),
                 Some("bob.athena".to_string())
-            );
-            assert_eq!(
-                py_localize_agent_name(
-                    "bob.athena.foo",
-                    "athena",
-                    "alice",
-                    "athena",
-                    Some("bob"),
-                )
-                .unwrap(),
-                "bob.athena.foo"
             );
 
             let family =

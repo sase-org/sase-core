@@ -1,9 +1,9 @@
 use super::identity::{
-    canonical_global_local_name, classify_agent_ownership, localize_agent_name,
-    localize_current_owner_name, owner_rooted_parse_roots_for_projection,
-    parse_agent_family_name, parse_owned_agent_name,
-    source_owner_root_for_destination, AgentIdentityError, AgentOwnerIdentity,
-    AgentOwnershipClassification, AgentSourceOwnerIdentity,
+    canonical_global_local_name, classify_owner_pair,
+    localize_current_owner_name, localize_source_global_name,
+    owner_rooted_parse_roots_for_projection, parse_agent_family_name,
+    parse_owned_agent_name, source_owner_root_for_destination,
+    AgentIdentityError, AgentOwnerIdentity, AgentOwnershipClassification,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -713,10 +713,7 @@ pub fn project_agent_relationship_graph(
         "projection source owner".to_string(),
     )?;
     let rewritten = rewrite_agent_relationship_batch(batch, destination_ids)?;
-    let source = AgentSourceOwnerIdentity::V2 {
-        owner: source_owner.clone(),
-    };
-    let classification = classify_agent_ownership(&source, destination_owner)
+    let classification = classify_owner_pair(source_owner, destination_owner)
         .map_err(|source| {
         projection_identity_error("source/destination ownership", source)
     })?;
@@ -822,19 +819,15 @@ pub fn project_agent_relationship_graph(
                     global_name,
                     owner,
                 } => {
-                    let target_source = AgentSourceOwnerIdentity::V2 {
-                        owner: owner.clone(),
-                    };
-                    let target_classification = classify_agent_ownership(
-                        &target_source,
-                        destination_owner,
-                    )
-                    .map_err(|source| {
-                        projection_identity_error(
-                            "relationship target ownership",
-                            source,
-                        )
-                    })?;
+                    let target_classification =
+                        classify_owner_pair(owner, destination_owner).map_err(
+                            |source| {
+                                projection_identity_error(
+                                    "relationship target ownership",
+                                    source,
+                                )
+                            },
+                        )?;
                     let target_roots = owner_rooted_parse_roots_for_projection(
                         owner,
                         destination_owner,
@@ -894,18 +887,17 @@ fn project_global_name(
     classification: AgentOwnershipClassification,
     context: &str,
 ) -> Result<String, AgentRelationshipError> {
-    let source = AgentSourceOwnerIdentity::V2 {
-        owner: source_owner.clone(),
-    };
-    let localized =
-        localize_agent_name(global_name, &source, destination_owner).map_err(
-            |source| {
-                projection_identity_error(
-                    format!("{context} localization for '{global_name}'"),
-                    source,
-                )
-            },
-        )?;
+    let localized = localize_source_global_name(
+        global_name,
+        source_owner,
+        destination_owner,
+    )
+    .map_err(|source| {
+        projection_identity_error(
+            format!("{context} localization for '{global_name}'"),
+            source,
+        )
+    })?;
     if classification == AgentOwnershipClassification::ExactOwner {
         return localize_current_owner_name(
             &localized,
