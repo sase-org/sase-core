@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.22](https://github.com/sase-org/sase-core/compare/v0.32.21...v0.32.22) - 2026-09-05
+
+### Added
+
+- *(query)* prefix-match sha field values in the evaluator
+
 ## [0.32.21](https://github.com/sase-org/sase-core/compare/v0.32.20...v0.32.21) - 2026-09-04
 
 ### Added
