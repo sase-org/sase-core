@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.23](https://github.com/sase-org/sase-core/compare/v0.32.22...v0.32.23) - 2026-09-05
+
+### Other
+
+- *(agent-identity)* remove legacy import bindings
+
 ## [0.32.19](https://github.com/sase-org/sase-core/compare/v0.32.18...v0.32.19) - 2026-09-04
 
 ### Added
