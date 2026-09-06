@@ -179,6 +179,9 @@
 //! - `fleet_project_resolved_agent_detail(request: dict) -> dict`
 //! - `fleet_validate_resolved_agent_summary(summary: dict) -> dict`
 //! - `fleet_count_logical_agents(request: dict) -> dict`
+//! - `fleet_follow_record_key(record: dict) -> str`
+//! - `fleet_reconcile_follow_records(request: dict) -> dict`
+//! - `fleet_count_focus_and_fleet(request: dict) -> dict`
 //! - `fleet_classify_cursor_replay(request: dict) -> dict`
 //! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
 //! - `fleet_decide_operation_replay(request: dict) -> dict`
@@ -883,7 +886,9 @@ use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
     CacheFreshnessRequestWire, ConnectionPlanWire, CursorReplayRequestWire,
     FleetContractError as FleetContractDomainError,
-    FleetLogicalAgentCountsRequestWire, InstallationIdentityMigrateRequestWire,
+    FleetLogicalAgentCountsRequestWire, FocusFleetCountsRequestWire,
+    FollowReconciliationRequestWire, FollowRecordWire,
+    InstallationIdentityMigrateRequestWire,
     InstallationIdentityRotateRequestWire, LogicalAgentLocatorWire,
     OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
     PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
@@ -11138,6 +11143,41 @@ fn py_fleet_count_logical_agents<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_follow_record_key")]
+fn py_fleet_follow_record_key(record: &Bound<'_, PyDict>) -> PyResult<String> {
+    let record: FollowRecordWire =
+        fleet_wire_from_pydict(record, "follow record")?;
+    core_fleet_contract::follow_record_key(&record)
+        .map_err(fleet_contract_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_reconcile_follow_records")]
+fn py_fleet_reconcile_follow_records<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FollowReconciliationRequestWire =
+        fleet_wire_from_pydict(request, "follow reconciliation request")?;
+    let result = core_fleet_contract::reconcile_follow_records(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_count_focus_and_fleet")]
+fn py_fleet_count_focus_and_fleet<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FocusFleetCountsRequestWire =
+        fleet_wire_from_pydict(request, "focus/fleet counts request")?;
+    let result = core_fleet_contract::count_focus_and_fleet(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_classify_cursor_replay")]
 fn py_fleet_classify_cursor_replay<'py>(
     py: Python<'py>,
@@ -13546,6 +13586,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_count_logical_agents, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_follow_record_key, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_reconcile_follow_records, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_count_focus_and_fleet, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cursor_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_operation_payload_fingerprint,
