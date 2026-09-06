@@ -228,6 +228,8 @@
 //! - `prompt_artifact_rewrite_links(prompt: str, records: list[dict], resolver: Callable[[dict], str | None]) -> dict`
 //! - `prompt_artifact_wire_schema_version() -> int`
 //! - `artifact_files_query(index_path: str, filters: dict) -> list[dict]`
+//! - `artifact_context_query(index_path: str, groups: list[dict]) -> list[dict]`
+//! - `artifact_context_query_wire_schema_version() -> int`
 //! - `artifact_file_materialize_vcs(request: dict) -> dict`
 //! - `artifact_file_query_wire_schema_version() -> int`
 //! - `artifact_file_store_economics(index_path: str, options: dict) -> dict`
@@ -582,14 +584,16 @@ use sase_core::artifact_file::{
     materialize_vcs_artifact_file as core_materialize_vcs_artifact_file,
     plan_artifact_file_retention as core_plan_artifact_file_retention,
     purge_artifact_file_trash as core_purge_artifact_file_trash,
+    query_artifact_context as core_query_artifact_context,
     query_artifact_files as core_query_artifact_files,
     restore_artifact_file_trash as core_restore_artifact_file_trash,
     trash_artifact_file as core_trash_artifact_file,
-    ArtifactFileEconomicsOptionsWire, ArtifactFileQueryError,
-    ArtifactFileQueryFiltersWire, ArtifactFileRetentionPolicyWire,
-    ArtifactFileTrashPurgeRequestWire, ArtifactFileTrashRequestWire,
-    ArtifactFileTrashRestoreRequestWire,
+    ArtifactContextProducerGroupWire, ArtifactFileEconomicsOptionsWire,
+    ArtifactFileQueryError, ArtifactFileQueryFiltersWire,
+    ArtifactFileRetentionPolicyWire, ArtifactFileTrashPurgeRequestWire,
+    ArtifactFileTrashRequestWire, ArtifactFileTrashRestoreRequestWire,
     ArtifactFileVcsMaterializationRequestWire,
+    ARTIFACT_CONTEXT_QUERY_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_LIFECYCLE_WIRE_SCHEMA_VERSION,
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
@@ -5839,6 +5843,48 @@ fn py_artifact_files_query<'py>(
 #[pyo3(name = "artifact_file_query_wire_schema_version")]
 fn py_artifact_file_query_wire_schema_version() -> u64 {
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION
+}
+
+/// Batch-query non-chat artifact metadata for waited producers' exact
+/// artifact directories.
+///
+/// `groups` is a list of `{"wait_name": str, "agent_artifacts_dirs": [str]}`
+/// dicts in dependency order. Reads the tolerant index at most once, and
+/// only when at least one producer directory is requested.
+#[pyfunction]
+#[pyo3(name = "artifact_context_query")]
+fn py_artifact_context_query<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    groups: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let groups =
+        serde_json::from_value::<Vec<ArtifactContextProducerGroupWire>>(
+            py_to_json_value(groups.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+            "groups is not a valid list of ArtifactContextProducerGroupWire \
+                 dicts: {error}"
+        ))
+        })?;
+    let index_path = PathBuf::from(index_path);
+    let rows = py
+        .allow_threads(|| core_query_artifact_context(&index_path, &groups))
+        .map_err(artifact_file_query_error_to_pyerr)?;
+    let value = serde_json::to_value(rows).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact-context query serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the artifact-context query result wire version.
+#[pyfunction]
+#[pyo3(name = "artifact_context_query_wire_schema_version")]
+fn py_artifact_context_query_wire_schema_version() -> u64 {
+    ARTIFACT_CONTEXT_QUERY_WIRE_SCHEMA_VERSION
 }
 
 /// Materialize one VCS-backed artifact into its content-addressed cache.
@@ -12030,6 +12076,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_file_query_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_context_query, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_context_query_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_parse, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_render, m)?)?;
     m.add_function(wrap_pyfunction!(py_sdd_artifact_link_upsert, m)?)?;
@@ -16676,6 +16727,59 @@ MENTORS:
                 py_artifact_file_materialize_vcs(py, &request).unwrap();
             let materialized = py_to_json_value(materialized.bind(py)).unwrap();
             assert_eq!(materialized["status"], json!("missing"));
+        });
+    }
+
+    #[test]
+    fn artifact_context_query_binding_returns_projected_rows_and_handshake() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join("index.jsonl");
+        fs::write(
+            &index,
+            concat!(
+                "{\"schema_version\":1,\"artifact\":{\"id\":\"report\",",
+                "\"label\":\"Report\",\"kind\":\"markdown\",",
+                "\"path\":\"/stored/report.md\",",
+                "\"agent_artifacts_dir\":\"/producers/a\",",
+                "\"agent_name\":\"researcher.a\",",
+                "\"created_at\":\"2026-07-01T00:00:00Z\"}}\n",
+                "{\"schema_version\":1,\"artifact\":{\"id\":\"transcript\",",
+                "\"label\":\"Transcript\",\"kind\":\"chat\",",
+                "\"path\":\"/stored/transcript.md\",",
+                "\"agent_artifacts_dir\":\"/producers/a\",",
+                "\"agent_name\":\"researcher.a\",",
+                "\"created_at\":\"2026-07-01T00:00:00Z\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("artifact_context_query").is_ok());
+            assert!(module
+                .getattr("artifact_context_query_wire_schema_version")
+                .is_ok());
+
+            let group = PyDict::new_bound(py);
+            group.set_item("wait_name", "research.a").unwrap();
+            group
+                .set_item("agent_artifacts_dirs", vec!["/producers/a"])
+                .unwrap();
+            let groups = PyList::new_bound(py, [group]);
+
+            let result =
+                py_artifact_context_query(py, index.to_str().unwrap(), &groups)
+                    .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value.as_array().unwrap().len(), 1);
+            assert_eq!(value[0]["wait_name"], json!("research.a"));
+            assert_eq!(value[0]["agent_name"], json!("researcher.a"));
+            assert_eq!(value[0]["ref"], json!("file:report"));
+            assert_eq!(value[0]["kind"], json!("markdown"));
+            assert_eq!(value[0]["path"], json!("/stored/report.md"));
+            assert_eq!(py_artifact_context_query_wire_schema_version(), 1);
         });
     }
 

@@ -1,5 +1,6 @@
 //! Tolerant artifact-file index reading and cross-frontend query semantics.
 
+mod context;
 mod economics;
 mod retention;
 mod trash;
@@ -18,6 +19,11 @@ use crate::artifact_consumption::{
 };
 use crate::plan::search::{current_date, parse_since_date_bound};
 
+pub use context::{
+    query_artifact_context, ArtifactContextEntryWire,
+    ArtifactContextProducerGroupWire,
+    ARTIFACT_CONTEXT_QUERY_WIRE_SCHEMA_VERSION,
+};
 pub use economics::{
     artifact_file_store_economics, ArtifactFileEconomicsGroupWire,
     ArtifactFileEconomicsOptionsWire, ArtifactFileEconomicsWire,
