@@ -47,6 +47,7 @@ pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
 pub mod markdown_link_refs;
+pub mod migration;
 pub mod model_completion;
 pub mod model_route;
 pub mod notifications;
@@ -700,6 +701,24 @@ pub use markdown_link_refs::{
     allocate_markdown_reference_label, append_markdown_reference_definitions,
     scan_markdown_reference_links, MarkdownReferenceDefinitionWire,
     MarkdownReferenceScanWire, MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
+};
+pub use migration::{
+    acquire_bounded_lock as acquire_migration_bounded_lock, classify,
+    classify_many, fingerprint as migration_fingerprint, plan_next_step,
+    reconcile_plan as reconcile_migration_procs,
+    tree_digest as migration_tree_digest, MigrationBackupRecord,
+    MigrationCanonicalProcRefWire, MigrationConflictRecord,
+    MigrationDigestError, MigrationDigestMismatchWire,
+    MigrationFingerprintWire, MigrationHeldLock, MigrationJournalRecord,
+    MigrationJournalStateWire, MigrationLegacyProcRowWire, MigrationLockError,
+    MigrationManifest, MigrationOperationEntry, MigrationProcConflictWire,
+    MigrationProcMatchWire, MigrationProcReconcilePlanWire,
+    MigrationRefusalWire, MigrationResidueClassificationWire,
+    MigrationResidueDecisionWire, MigrationResidueEntryWire,
+    MigrationResidueFactsWire, MigrationResumePlanWire,
+    MigrationTreeDigestEntryWire, MigrationTreeDigestWire,
+    MIGRATION_FINGERPRINT_ALGORITHM, MIGRATION_TREE_DIGEST_ALGORITHM,
+    MIGRATION_WIRE_SCHEMA_VERSION,
 };
 pub use model_completion::{
     filter_model_completion_candidates, filter_model_completion_entries,

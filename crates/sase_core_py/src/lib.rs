@@ -250,6 +250,15 @@
 //! - `sdd_plan_header_block_remove_section(document: str, kind: str, remove_legacy: bool, allow_resolved_mixed: bool) -> str`
 //! - `prompt_archive_inventory_wire_schema_version() -> int`
 //! - `prompt_archive_inventory(root: str, request: dict | None = None) -> dict`
+//! - `migration_wire_schema_version() -> int`
+//! - `migration_manifest_normalize(manifest: dict) -> dict`
+//! - `migration_journal_record_normalize(record: dict) -> dict`
+//! - `migration_plan_next_step(manifest: dict, records: list[dict], observed_source_digests: dict) -> dict`
+//! - `migration_tree_digest(root: str) -> dict`
+//! - `migration_fingerprint(value: Any) -> str`
+//! - `migration_residue_classify(entry: dict, facts: dict) -> dict`
+//! - `migration_reconcile_procs(legacy_rows: list[dict], canonical_proc_ids: list[str | dict]) -> dict`
+//! - `migration_acquire_bounded_lock(lock_path: str, timeout_ms: int, operation: str) -> MigrationBoundedLockHandle`
 //! - `at_reference_context(text: str, line: int, character: int, known_kinds:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `AtReferenceInventory(payloads: Sequence[dict])`
@@ -866,6 +875,18 @@ use sase_core::markdown_link_refs::{
     MarkdownReferenceDefinitionWire, MarkdownReferenceScanWire,
     MARKDOWN_LINK_REFS_WIRE_SCHEMA_VERSION,
 };
+use sase_core::migration::{
+    acquire_bounded_lock as core_migration_acquire_bounded_lock,
+    classify as core_migration_residue_classify,
+    fingerprint as core_migration_fingerprint,
+    plan_next_step as core_migration_plan_next_step,
+    reconcile_plan as core_migration_reconcile_procs,
+    tree_digest as core_migration_tree_digest, MigrationCanonicalProcRefWire,
+    MigrationDigestError, MigrationHeldLock, MigrationJournalRecord,
+    MigrationLegacyProcRowWire, MigrationLockError, MigrationManifest,
+    MigrationResidueEntryWire, MigrationResidueFactsWire,
+    MIGRATION_WIRE_SCHEMA_VERSION,
+};
 use sase_core::model_route::{
     select_epic_land_model as core_select_epic_land_model,
     size_model_route_from_name as core_size_model_route_from_name,
@@ -1068,6 +1089,30 @@ struct PyAtReferenceInventory {
 #[derive(Clone, Debug)]
 struct PyGlossaryCatalogHandle {
     catalog: CoreCompiledGlossaryCatalog,
+}
+
+#[pyclass(name = "MigrationBoundedLockHandle", module = "sase_core_rs")]
+#[derive(Debug)]
+struct PyMigrationBoundedLockHandle {
+    lock: Option<MigrationHeldLock>,
+}
+
+#[pymethods]
+impl PyMigrationBoundedLockHandle {
+    #[getter]
+    fn waited_ms(&self) -> u64 {
+        self.lock
+            .as_ref()
+            .map(MigrationHeldLock::waited_ms)
+            .unwrap_or(0)
+    }
+
+    fn release(&mut self) -> PyResult<()> {
+        let Some(mut lock) = self.lock.take() else {
+            return Ok(());
+        };
+        lock.release().map_err(migration_lock_error_to_pyerr)
+    }
 }
 
 #[pymethods]
@@ -6214,6 +6259,253 @@ fn py_prompt_archive_inventory<'py>(
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_wire_schema_version")]
+fn py_migration_wire_schema_version() -> u32 {
+    MIGRATION_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_manifest_normalize")]
+fn py_migration_manifest_normalize<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let manifest = migration_manifest_from_pydict(manifest)?;
+    migration_value_to_py(py, &manifest)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_journal_record_normalize")]
+fn py_migration_journal_record_normalize<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record = migration_journal_record_from_pydict(record)?;
+    migration_value_to_py(py, &record)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_plan_next_step")]
+fn py_migration_plan_next_step<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+    records: &Bound<'py, PyList>,
+    observed_source_digests: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let manifest = migration_manifest_from_pydict(manifest)?;
+    let records = migration_journal_records_from_py_list(records)?;
+    let observed_source_digests =
+        migration_source_digests_from_pydict(observed_source_digests)?;
+    let plan = core_migration_plan_next_step(
+        &manifest,
+        &records,
+        &observed_source_digests,
+    );
+    migration_value_to_py(py, &plan)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_tree_digest")]
+fn py_migration_tree_digest<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let root = PathBuf::from(root);
+    let digest = py
+        .allow_threads(|| core_migration_tree_digest(&root))
+        .map_err(migration_digest_error_to_pyerr)?;
+    migration_value_to_py(py, &digest)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_fingerprint")]
+fn py_migration_fingerprint(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let value = py_to_json_value(value)?;
+    core_migration_fingerprint(&value).map_err(migration_digest_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_residue_classify")]
+fn py_migration_residue_classify<'py>(
+    py: Python<'py>,
+    entry: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let entry = migration_residue_entry_from_pydict(entry)?;
+    let facts = migration_residue_facts_from_pydict(facts)?;
+    let classification = core_migration_residue_classify(&entry, &facts);
+    migration_value_to_py(py, &classification)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_reconcile_procs")]
+fn py_migration_reconcile_procs<'py>(
+    py: Python<'py>,
+    legacy_rows: &Bound<'py, PyList>,
+    canonical_proc_ids: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let legacy_rows = migration_legacy_proc_rows_from_py_list(legacy_rows)?;
+    let canonical_proc_ids =
+        migration_canonical_proc_refs_from_py_list(canonical_proc_ids)?;
+    let plan =
+        core_migration_reconcile_procs(&legacy_rows, &canonical_proc_ids);
+    migration_value_to_py(py, &plan)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_acquire_bounded_lock")]
+fn py_migration_acquire_bounded_lock(
+    py: Python<'_>,
+    lock_path: &str,
+    timeout_ms: u64,
+    operation: &str,
+) -> PyResult<PyMigrationBoundedLockHandle> {
+    let lock_path = PathBuf::from(lock_path);
+    let lock = py
+        .allow_threads(|| {
+            core_migration_acquire_bounded_lock(
+                &lock_path, timeout_ms, operation,
+            )
+        })
+        .map_err(migration_lock_error_to_pyerr)?;
+    Ok(PyMigrationBoundedLockHandle { lock: Some(lock) })
+}
+
+fn migration_manifest_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<MigrationManifest> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "manifest is not a valid MigrationManifest dict: {error}"
+        ))
+    })
+}
+
+fn migration_journal_record_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<MigrationJournalRecord> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid MigrationJournalRecord dict: {error}"
+        ))
+    })
+}
+
+fn migration_journal_records_from_py_list(
+    records: &Bound<'_, PyList>,
+) -> PyResult<Vec<MigrationJournalRecord>> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let value = py_to_json_value(&record)?;
+            serde_json::from_value(value).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "records[{index}] is not a valid MigrationJournalRecord dict: {error}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn migration_source_digests_from_pydict(
+    digests: &Bound<'_, PyDict>,
+) -> PyResult<BTreeMap<String, String>> {
+    serde_json::from_value(py_to_json_value(digests.as_any())?).map_err(
+        |error| {
+            PyValueError::new_err(format!(
+                "observed_source_digests must be a string-to-string dict: {error}"
+            ))
+        },
+    )
+}
+
+fn migration_residue_entry_from_pydict(
+    entry: &Bound<'_, PyDict>,
+) -> PyResult<MigrationResidueEntryWire> {
+    serde_json::from_value(py_to_json_value(entry.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "entry is not a valid MigrationResidueEntryWire dict: {error}"
+        ))
+    })
+}
+
+fn migration_residue_facts_from_pydict(
+    facts: &Bound<'_, PyDict>,
+) -> PyResult<MigrationResidueFactsWire> {
+    serde_json::from_value(py_to_json_value(facts.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid MigrationResidueFactsWire dict: {error}"
+        ))
+    })
+}
+
+fn migration_legacy_proc_rows_from_py_list(
+    rows: &Bound<'_, PyList>,
+) -> PyResult<Vec<MigrationLegacyProcRowWire>> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| {
+            serde_json::from_value(py_to_json_value(&row)?).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "legacy_rows[{index}] is not a valid MigrationLegacyProcRowWire dict: {error}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn migration_canonical_proc_refs_from_py_list(
+    refs: &Bound<'_, PyList>,
+) -> PyResult<Vec<MigrationCanonicalProcRefWire>> {
+    refs.iter()
+        .enumerate()
+        .map(|(index, proc_ref)| {
+            if let Ok(proc_id) = proc_ref.extract::<String>() {
+                return Ok(MigrationCanonicalProcRefWire {
+                    proc_id,
+                    ..Default::default()
+                });
+            }
+            serde_json::from_value(py_to_json_value(&proc_ref)?).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "canonical_proc_ids[{index}] is not a string or MigrationCanonicalProcRefWire dict: {error}"
+                    ))
+                },
+            )
+        })
+        .collect()
+}
+
+fn migration_value_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(value).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal migration serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+fn migration_digest_error_to_pyerr(error: MigrationDigestError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn migration_lock_error_to_pyerr(error: MigrationLockError) -> PyErr {
+    match error {
+        MigrationLockError::Timeout(message) => {
+            PyTimeoutError::new_err(message)
+        }
+        other => PyValueError::new_err(other.to_string()),
+    }
 }
 
 fn sdd_plan_header_section_from_pydict(
@@ -12104,6 +12396,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_prompt_archive_inventory, m)?)?;
+    m.add_class::<PyMigrationBoundedLockHandle>()?;
+    m.add_function(wrap_pyfunction!(py_migration_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_manifest_normalize, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_migration_journal_record_normalize,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_migration_plan_next_step, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_tree_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_fingerprint, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_residue_classify, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_reconcile_procs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_acquire_bounded_lock, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_stats, m)?)?;
@@ -12429,6 +12734,173 @@ mod tests {
             let legacy_dict = legacy.bind(py).downcast::<PyDict>().unwrap();
             let direct_dict = direct.bind(py).downcast::<PyDict>().unwrap();
             assert_eq!(py_dict_keys(direct_dict), py_dict_keys(legacy_dict));
+        });
+    }
+
+    #[test]
+    fn migration_bindings_expose_contract_helpers() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("source.txt"), "before").unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+
+            let schema: u32 = module
+                .getattr("migration_wire_schema_version")
+                .unwrap()
+                .call0()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(schema, 1);
+
+            let manifest = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "manifest_id": "m1",
+                    "source_digests": {"root": "abc"},
+                    "operations": [
+                        {
+                            "operation": "state-residue",
+                            "source_digests": {"state": "def"},
+                            "x_phase": "kit-driver"
+                        }
+                    ],
+                    "x_host_note": "keep"
+                }),
+            )
+            .unwrap();
+            let manifest = manifest.bind(py).downcast::<PyDict>().unwrap();
+            let normalized = module
+                .getattr("migration_manifest_normalize")
+                .unwrap()
+                .call1((manifest,))
+                .unwrap();
+            let normalized = py_to_json_value(&normalized).unwrap();
+            assert_eq!(normalized["x_host_note"], "keep");
+            assert_eq!(normalized["operations"][0]["x_phase"], "kit-driver");
+
+            let records = PyList::empty_bound(py);
+            append_json(
+                py,
+                &records,
+                json!({"schema_version": 1, "state": "backed_up"}),
+            );
+            let observed =
+                json_value_to_py(py, &json!({"root": "abc", "state": "def"}))
+                    .unwrap();
+            let observed = observed.bind(py).downcast::<PyDict>().unwrap();
+            let plan = module
+                .getattr("migration_plan_next_step")
+                .unwrap()
+                .call1((manifest, &records, observed))
+                .unwrap();
+            let plan = py_to_json_value(&plan).unwrap();
+            assert_eq!(plan["current_state"], "backed_up");
+            assert_eq!(plan["next_step"], "apply");
+
+            let digest = module
+                .getattr("migration_tree_digest")
+                .unwrap()
+                .call1((root.to_str().unwrap(),))
+                .unwrap();
+            let digest = py_to_json_value(&digest).unwrap();
+            assert_eq!(digest["schema_version"], 1);
+            assert!(digest["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["relative_path"] == "source.txt"));
+
+            let left =
+                json_value_to_py(py, &json!([{"b": 2, "a": 1}])).unwrap();
+            let right =
+                json_value_to_py(py, &json!([{"a": 1, "b": 2}])).unwrap();
+            let left_fp: String = module
+                .getattr("migration_fingerprint")
+                .unwrap()
+                .call1((left.bind(py),))
+                .unwrap()
+                .extract()
+                .unwrap();
+            let right_fp: String = module
+                .getattr("migration_fingerprint")
+                .unwrap()
+                .call1((right.bind(py),))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(left_fp, right_fp);
+
+            let entry = json_value_to_py(
+                py,
+                &json!({
+                    "entry_id": "agent-tags",
+                    "residue_path": "~/.sase/agent_tags.json",
+                    "canonical_counterpart": "~/.sase/agents"
+                }),
+            )
+            .unwrap();
+            let facts = json_value_to_py(
+                py,
+                &json!({
+                    "residue_exists": true,
+                    "counterpart_exists": true
+                }),
+            )
+            .unwrap();
+            let classification = module
+                .getattr("migration_residue_classify")
+                .unwrap()
+                .call1((
+                    entry.bind(py).downcast::<PyDict>().unwrap(),
+                    facts.bind(py).downcast::<PyDict>().unwrap(),
+                ))
+                .unwrap();
+            let classification = py_to_json_value(&classification).unwrap();
+            assert_eq!(classification["decision"], "archive");
+
+            let legacy = PyList::empty_bound(py);
+            append_json(
+                py,
+                &legacy,
+                json!({"task_id": "proc-1", "semantic_fingerprint": "same"}),
+            );
+            let canonical = PyList::empty_bound(py);
+            canonical.append("proc-1").unwrap();
+            let reconcile = module
+                .getattr("migration_reconcile_procs")
+                .unwrap()
+                .call1((&legacy, &canonical))
+                .unwrap();
+            let reconcile = py_to_json_value(&reconcile).unwrap();
+            assert_eq!(reconcile["matched"].as_array().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn migration_bounded_lock_binding_returns_releasable_handle() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = temp.path().join("migration.lock");
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let lock = module
+                .getattr("migration_acquire_bounded_lock")
+                .unwrap()
+                .call1((lock_path.to_str().unwrap(), 250_u64, "binding-test"))
+                .unwrap();
+            let waited_ms: u64 =
+                lock.getattr("waited_ms").unwrap().extract().unwrap();
+            assert!(waited_ms <= 250);
+            lock.call_method0("release").unwrap();
+            lock.call_method0("release").unwrap();
         });
     }
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(migration)* bind the temporary offline migration kit contract helpers
+
 ## [0.32.24](https://github.com/sase-org/sase-core/compare/v0.32.23...v0.32.24) - 2026-09-05
 
 ### Added
