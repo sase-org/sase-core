@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.25](https://github.com/sase-org/sase-core/compare/v0.32.24...v0.32.25) - 2026-09-06
+
+### Added
+
+- *(migration)* add offline migration wire contract
+- *(artifact-file)* add batched exact-producer artifact-context query
+
 ### Added
 
 - *(migration)* bind the temporary offline migration kit contract helpers
