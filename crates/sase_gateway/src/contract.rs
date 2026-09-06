@@ -6,7 +6,7 @@ use std::{
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
-use crate::wire::GATEWAY_WIRE_SCHEMA_VERSION;
+use crate::wire::{FLEET_API_WIRE_SCHEMA_VERSION, GATEWAY_WIRE_SCHEMA_VERSION};
 
 pub fn api_v1_contract_snapshot() -> Value {
     sort_object_keys(json!({
@@ -905,6 +905,226 @@ pub fn api_v1_contract_snapshot() -> Value {
     }))
 }
 
+pub fn fleet_api_v1_contract_snapshot() -> Value {
+    sort_object_keys(json!({
+        "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
+        "contract": "sase_fleet_gateway_api_v1",
+        "base_path": "/api/fleet/v1",
+        "response_shape": {
+            "success": "direct_json_record",
+            "error": "ApiErrorWire",
+            "optional_fields": "explicit_null"
+        },
+        "auth": {
+            "scheme": "bearer",
+            "header": "Authorization",
+            "unauthenticated_routes": [
+                "POST /api/fleet/v1/enroll"
+            ],
+            "bootstrap": {
+                "issuer": "local-only Rust FleetCredentialStore::issue_bootstrap API",
+                "secret_storage": "sha256(domain || secret)",
+                "single_use": true,
+                "default_ttl_seconds": 600
+            },
+            "request_hot_path": {
+                "durable_writes": false,
+                "cache_refresh": "only when credentials.json metadata changes"
+            }
+        },
+        "protocol_negotiation": {
+            "supported_versions": [1],
+            "selection": "highest mutually supported version",
+            "hello_header": "X-SASE-Fleet-Protocol-Versions",
+            "incompatible_error": "incompatible_protocol"
+        },
+        "limits": {
+            "request_body_bytes": 16384,
+            "enrollment_attempts": 8,
+            "enrollment_window_seconds": 60
+        },
+        "routes": [
+            {
+                "method": "POST",
+                "path": "/api/fleet/v1/enroll",
+                "auth": false,
+                "request": "FleetEnrollmentRequestWire",
+                "success": "FleetEnrollmentResponseWire",
+                "quarantine": "409 FleetEnrollmentResponseWire outcome=quarantined",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
+                "path": "/api/fleet/v1/hello",
+                "auth": true,
+                "required_scope": "fleet.hello",
+                "success": "FleetHelloResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/fleet/v1/credential/rotate",
+                "auth": true,
+                "required_scope": "fleet.credential.rotate",
+                "request": "FleetTokenRotateRequestWire",
+                "success": "FleetTokenRotateResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/fleet/v1/credential/revoke",
+                "auth": true,
+                "required_scope": "fleet.credential.revoke",
+                "request": "FleetCredentialRevokeRequestWire",
+                "success": "FleetCredentialRevokeResponseWire",
+                "errors": ["ApiErrorWire"]
+            }
+        ],
+        "records": {
+            "ApiErrorWire": {
+                "schema_version": "u32",
+                "code": [
+                    "unauthorized",
+                    "invalid_request",
+                    "bootstrap_consumed",
+                    "bootstrap_expired",
+                    "bootstrap_rejected",
+                    "credential_expired",
+                    "credential_revoked",
+                    "incompatible_protocol",
+                    "installation_pin_mismatch",
+                    "payload_too_large",
+                    "rate_limited",
+                    "scope_denied",
+                    "internal"
+                ],
+                "message": "string",
+                "target": "string|null",
+                "details": "json|null"
+            },
+            "CapabilitySetWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "resource": "string[]",
+                "host": "string[]; fleet gateway scopes",
+                "protocol": "string[]"
+            },
+            "FleetBootstrapIssueRequestWire": {
+                "local_only": true,
+                "schema_version": "u32",
+                "requested_scopes": "string[]; empty means default fleet scopes",
+                "supported_protocol_versions": "u32[]; empty means [1]",
+                "expires_at_unix": "f64|null; default now + 600s",
+                "installation_pin": "string|null; optional current-installation precondition"
+            },
+            "FleetBootstrapIssueResponseWire": {
+                "local_only": true,
+                "schema_version": "u32",
+                "bootstrap_id": "string",
+                "bootstrap_secret": "high-entropy string; returned once",
+                "expires_at_unix": "f64",
+                "allowed_scopes": "string[]",
+                "pinned_installation_id": "string",
+                "protocol_versions": "u32[]"
+            },
+            "FleetControllerMetadataWire": {
+                "schema_version": "u32",
+                "controller_id": "string|null; generated when absent",
+                "display_name": "string|null",
+                "platform": "string|null",
+                "app_version": "string|null"
+            },
+            "FleetCredentialRecordWire": {
+                "schema_version": "u32",
+                "credential_id": "string",
+                "controller_id": "string|null",
+                "controller": "FleetControllerMetadataWire",
+                "scopes": "string[]",
+                "issued_at_unix": "f64",
+                "expires_at_unix": "f64|null",
+                "rotated_at_unix": "f64|null",
+                "revoked_at_unix": "f64|null",
+                "revoked_reason": "string|null"
+            },
+            "FleetEnrollmentRequestWire": {
+                "schema_version": "u32",
+                "bootstrap_id": "string",
+                "bootstrap_secret": "string",
+                "controller": "FleetControllerMetadataWire",
+                "requested_scopes": "string[]; empty means bootstrap-allowed defaults",
+                "supported_protocol_versions": "u32[]; empty means [1]",
+                "pinned_installation_id": "string"
+            },
+            "FleetEnrollmentResponseWire": {
+                "schema_version": "u32",
+                "outcome": "enrolled|quarantined",
+                "protocol_version": "u32|null",
+                "installation": "InstallationIdentityRecordWire",
+                "machine_selector": "string",
+                "capabilities": "CapabilitySetWire",
+                "credential": "FleetCredentialRecordWire|null",
+                "token_type": "bearer|null",
+                "token": "string|null; returned only on enrollment",
+                "quarantine": "FleetQuarantineWire|null"
+            },
+            "FleetHelloResponseWire": {
+                "schema_version": "u32",
+                "protocol_version": "u32",
+                "installation": "InstallationIdentityRecordWire",
+                "machine_selector": "string",
+                "capabilities": "CapabilitySetWire",
+                "credential": "FleetCredentialRecordWire"
+            },
+            "FleetQuarantineWire": {
+                "schema_version": "u32",
+                "reason": "installation_pin_mismatch",
+                "presented_installation_id": "string",
+                "authoritative_installation_id": "string"
+            },
+            "FleetTokenRotateRequestWire": {
+                "schema_version": "u32",
+                "supported_protocol_versions": "u32[]; empty means [1]"
+            },
+            "FleetTokenRotateResponseWire": {
+                "schema_version": "u32",
+                "protocol_version": "u32",
+                "credential": "FleetCredentialRecordWire",
+                "token_type": "bearer",
+                "token": "string; returned once"
+            },
+            "FleetCredentialRevokeRequestWire": {
+                "schema_version": "u32",
+                "reason": "string|null"
+            },
+            "FleetCredentialRevokeResponseWire": {
+                "schema_version": "u32",
+                "credential": "FleetCredentialRecordWire",
+                "revoked": "bool"
+            },
+            "InstallationIdentityRecordWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "installation_id": "string",
+                "created_at_unix": "f64",
+                "generation": "u64",
+                "prior_installation_id": "string|null",
+                "rotated_at_unix": "f64|null",
+                "adopted_at_unix": "f64|null",
+                "reason": "string|null"
+            }
+        },
+        "storage": {
+            "root": "<sase_home>/fleet_gateway",
+            "credentials_file": "credentials.json",
+            "lock_file": "credentials.lock",
+            "file_mode": "0600",
+            "directory_mode": "0700",
+            "stored_secret_material": "hashes only",
+            "credential_default_ttl_seconds": 7776000
+        }
+    }))
+}
+
 fn sort_object_keys(value: Value) -> Value {
     match value {
         Value::Array(items) => {
@@ -927,6 +1147,19 @@ fn sort_object_keys(value: Value) -> Value {
 pub fn write_api_v1_contract_snapshot(
     path: impl AsRef<Path>,
 ) -> Result<(), ContractSnapshotError> {
+    write_contract_snapshot(path, &api_v1_contract_snapshot())
+}
+
+pub fn write_fleet_api_v1_contract_snapshot(
+    path: impl AsRef<Path>,
+) -> Result<(), ContractSnapshotError> {
+    write_contract_snapshot(path, &fleet_api_v1_contract_snapshot())
+}
+
+fn write_contract_snapshot(
+    path: impl AsRef<Path>,
+    snapshot: &Value,
+) -> Result<(), ContractSnapshotError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| {
@@ -936,7 +1169,7 @@ pub fn write_api_v1_contract_snapshot(
             }
         })?;
     }
-    let mut bytes = serde_json::to_vec_pretty(&api_v1_contract_snapshot())?;
+    let mut bytes = serde_json::to_vec_pretty(snapshot)?;
     bytes.push(b'\n');
     fs::write(path, bytes).map_err(|source| ContractSnapshotError::Write {
         path: path.to_path_buf(),
@@ -975,6 +1208,20 @@ mod tests {
         .unwrap();
         let mut expected =
             serde_json::to_string_pretty(&api_v1_contract_snapshot()).unwrap();
+        expected.push('\n');
+        assert_eq!(committed, expected);
+    }
+
+    #[test]
+    fn committed_fleet_contract_snapshot_is_current() {
+        let committed = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("contracts/api_fleet_v1/fleet_api_v1.json"),
+        )
+        .unwrap();
+        let mut expected =
+            serde_json::to_string_pretty(&fleet_api_v1_contract_snapshot())
+                .unwrap();
         expected.push('\n');
         assert_eq!(committed, expected);
     }

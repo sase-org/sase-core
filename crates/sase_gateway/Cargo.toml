@@ -19,6 +19,7 @@ path = "src/main.rs"
 async-stream = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true, features = ["clock"] }
+fs2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 jsonwebtoken = "9"

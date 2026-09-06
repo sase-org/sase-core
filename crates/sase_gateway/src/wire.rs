@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+pub use sase_core::fleet_contract::{
+    CapabilitySetWire, InstallationIdentityRecordWire,
+};
 pub use sase_core::host_bridge::{
     MobileBeadDetailWire, MobileBeadListRequestWire,
     MobileBeadListResponseWire, MobileBeadShowRequestWire,
@@ -18,6 +21,8 @@ pub use sase_core::host_bridge::{
 };
 
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const FLEET_API_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const FLEET_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBuildWire {
@@ -196,6 +201,129 @@ pub struct PairFinishResponseWire {
     pub token: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetBootstrapIssueRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub requested_scopes: Vec<String>,
+    #[serde(default = "default_fleet_protocol_versions")]
+    pub supported_protocol_versions: Vec<u32>,
+    pub expires_at_unix: Option<f64>,
+    pub installation_pin: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetBootstrapIssueResponseWire {
+    pub schema_version: u32,
+    pub bootstrap_id: String,
+    pub bootstrap_secret: String,
+    pub expires_at_unix: f64,
+    pub allowed_scopes: Vec<String>,
+    pub pinned_installation_id: String,
+    pub protocol_versions: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetControllerMetadataWire {
+    pub schema_version: u32,
+    pub controller_id: Option<String>,
+    pub display_name: Option<String>,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetEnrollmentRequestWire {
+    pub schema_version: u32,
+    pub bootstrap_id: String,
+    pub bootstrap_secret: String,
+    pub controller: FleetControllerMetadataWire,
+    #[serde(default)]
+    pub requested_scopes: Vec<String>,
+    #[serde(default = "default_fleet_protocol_versions")]
+    pub supported_protocol_versions: Vec<u32>,
+    pub pinned_installation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCredentialRecordWire {
+    pub schema_version: u32,
+    pub credential_id: String,
+    pub controller_id: Option<String>,
+    pub controller: FleetControllerMetadataWire,
+    pub scopes: Vec<String>,
+    pub issued_at_unix: f64,
+    pub expires_at_unix: Option<f64>,
+    pub rotated_at_unix: Option<f64>,
+    pub revoked_at_unix: Option<f64>,
+    pub revoked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetQuarantineWire {
+    pub schema_version: u32,
+    pub reason: String,
+    pub presented_installation_id: String,
+    pub authoritative_installation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetEnrollmentResponseWire {
+    pub schema_version: u32,
+    pub outcome: String,
+    pub protocol_version: Option<u32>,
+    pub installation: InstallationIdentityRecordWire,
+    pub machine_selector: String,
+    pub capabilities: CapabilitySetWire,
+    pub credential: Option<FleetCredentialRecordWire>,
+    pub token_type: Option<String>,
+    pub token: Option<String>,
+    pub quarantine: Option<FleetQuarantineWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetHelloResponseWire {
+    pub schema_version: u32,
+    pub protocol_version: u32,
+    pub installation: InstallationIdentityRecordWire,
+    pub machine_selector: String,
+    pub capabilities: CapabilitySetWire,
+    pub credential: FleetCredentialRecordWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetTokenRotateRequestWire {
+    pub schema_version: u32,
+    #[serde(default = "default_fleet_protocol_versions")]
+    pub supported_protocol_versions: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetTokenRotateResponseWire {
+    pub schema_version: u32,
+    pub protocol_version: u32,
+    pub credential: FleetCredentialRecordWire,
+    pub token_type: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCredentialRevokeRequestWire {
+    pub schema_version: u32,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FleetCredentialRevokeResponseWire {
+    pub schema_version: u32,
+    pub credential: FleetCredentialRecordWire,
+    pub revoked: bool,
+}
+
+pub fn default_fleet_protocol_versions() -> Vec<u32> {
+    vec![FLEET_PROTOCOL_VERSION]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCodeWire {
@@ -218,6 +346,16 @@ pub enum ApiErrorCodeWire {
     UpdateAlreadyRunning,
     UpdateJobNotFound,
     PermissionDenied,
+    BootstrapConsumed,
+    BootstrapExpired,
+    BootstrapRejected,
+    CredentialExpired,
+    CredentialRevoked,
+    IncompatibleProtocol,
+    InstallationPinMismatch,
+    PayloadTooLarge,
+    RateLimited,
+    ScopeDenied,
     Internal,
 }
 

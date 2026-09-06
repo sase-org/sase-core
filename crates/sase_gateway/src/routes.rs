@@ -10,7 +10,10 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, Path as AxumPath, Query, State},
+    extract::{
+        rejection::JsonRejection, DefaultBodyLimit, Path as AxumPath, Query,
+        State,
+    },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -37,6 +40,12 @@ use tower_http::trace::TraceLayer;
 #[cfg(test)]
 use sase_core::notifications::MobileActionStateWire;
 
+use crate::fleet_auth::{
+    credential_has_scope, current_unix_time, fleet_capabilities,
+    negotiate_fleet_protocol_version, FleetAuthentication,
+    FleetCredentialStore, FleetEnrollmentResult, FleetStoreError,
+    FLEET_SCOPE_HELLO, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
+};
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
     DynAgentHostBridge, DynHelperHostBridge, DynNotificationHostBridge,
@@ -51,28 +60,37 @@ use crate::storage::{
 };
 use crate::wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
-    EventRecordWire, GatewayBindWire, GatewayBuildWire, HealthResponseWire,
-    MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
-    MobileAgentKillResultWire, MobileAgentLaunchResultWire,
-    MobileAgentListRequestWire, MobileAgentListResponseWire,
-    MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
-    MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
-    MobileBeadListRequestWire, MobileBeadListResponseWire,
-    MobileBeadShowRequestWire, MobileBeadShowResponseWire,
-    MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
-    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
-    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
-    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-    NotificationStateMutationResponseWire, PairFinishRequestWire,
-    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
-    PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
-    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
-    SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    EventRecordWire, FleetCredentialRecordWire,
+    FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
+    FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
+    FleetHelloResponseWire, FleetTokenRotateRequestWire,
+    FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
+    HealthResponseWire, MobileAgentImageLaunchRequestWire,
+    MobileAgentKillRequestWire, MobileAgentKillResultWire,
+    MobileAgentLaunchResultWire, MobileAgentListRequestWire,
+    MobileAgentListResponseWire, MobileAgentResumeOptionsResponseWire,
+    MobileAgentRetryRequestWire, MobileAgentRetryResultWire,
+    MobileAgentTextLaunchRequestWire, MobileBeadListRequestWire,
+    MobileBeadListResponseWire, MobileBeadShowRequestWire,
+    MobileBeadShowResponseWire, MobileChangeSpecTagListRequestWire,
+    MobileChangeSpecTagListResponseWire, MobileUpdateStartRequestWire,
+    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
+    MobileUpdateStatusResponseWire, MobileXpromptCatalogRequestWire,
+    MobileXpromptCatalogResponseWire, NotificationStateMutationResponseWire,
+    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
+    PairStartResponseWire, PushSubscriptionDeleteResponseWire,
+    PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
+    PushSubscriptionRequestWire, SessionResponseWire,
+    GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
 const DEFAULT_HEARTBEAT_INTERVAL: StdDuration = StdDuration::from_secs(30);
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const FLEET_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+const FLEET_ENROLLMENT_RATE_LIMIT: usize = 8;
+const FLEET_ENROLLMENT_RATE_WINDOW_SECONDS: i64 = 60;
+const FLEET_PROTOCOL_VERSIONS_HEADER: &str = "x-sase-fleet-protocol-versions";
 
 #[derive(Clone, Debug)]
 pub struct GatewayState {
@@ -89,6 +107,9 @@ pub struct GatewayState {
     helper_bridge: DynHelperHostBridge,
     attachment_tokens: AttachmentTokenStore,
     push_dispatcher: PushDispatcher,
+    fleet_store: FleetCredentialStore,
+    fleet_enrollment_limiter: FleetEnrollmentRateLimiter,
+    machine_selector: String,
 }
 
 impl GatewayState {
@@ -168,6 +189,7 @@ impl GatewayState {
             .map(|addr| addr.ip().is_loopback())
             .unwrap_or(false);
         let state_dir = options.sase_home.join("mobile_gateway");
+        let machine_selector = default_machine_selector(&options.host_label);
         Self {
             bind: GatewayBindWire {
                 address: options.bind_addr,
@@ -197,6 +219,12 @@ impl GatewayState {
                 options.max_attachment_bytes,
             ),
             push_dispatcher: PushDispatcher::new(options.push_config),
+            fleet_store: FleetCredentialStore::new(options.sase_home),
+            fleet_enrollment_limiter: FleetEnrollmentRateLimiter::new(
+                FLEET_ENROLLMENT_RATE_LIMIT,
+                ChronoDuration::seconds(FLEET_ENROLLMENT_RATE_WINDOW_SECONDS),
+            ),
+            machine_selector,
         }
     }
 
@@ -273,6 +301,10 @@ impl GatewayState {
     pub fn push_dispatcher(&self) -> PushDispatcher {
         self.push_dispatcher.clone()
     }
+
+    pub fn fleet_store(&self) -> FleetCredentialStore {
+        self.fleet_store.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +364,41 @@ struct AttachmentMintRequest {
     display_name: String,
     content_type: Option<String>,
     byte_size: u64,
+}
+
+#[derive(Clone, Debug)]
+struct FleetEnrollmentRateLimiter {
+    inner: Arc<Mutex<VecDeque<DateTime<Utc>>>>,
+    limit: usize,
+    window: ChronoDuration,
+}
+
+impl FleetEnrollmentRateLimiter {
+    fn new(limit: usize, window: ChronoDuration) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+            limit,
+            window,
+        }
+    }
+
+    fn check(&self, now: DateTime<Utc>) -> Result<bool, ApiError> {
+        let mut attempts = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("fleet_enrollment_limiter"))?;
+        while attempts
+            .front()
+            .is_some_and(|attempt| *attempt + self.window <= now)
+        {
+            attempts.pop_front();
+        }
+        if attempts.len() >= self.limit {
+            return Ok(false);
+        }
+        attempts.push_back(now);
+        Ok(true)
+    }
 }
 
 #[derive(Debug)]
@@ -492,12 +559,22 @@ fn default_host_label() -> String {
         .unwrap_or_else(|| "sase-host".to_string())
 }
 
+fn default_machine_selector(host_label: &str) -> String {
+    let normalized = host_label.trim();
+    if normalized.is_empty() {
+        "sase-host".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
 pub fn app(bind_addr: impl Into<String>) -> Router {
     app_with_state(GatewayState::new(bind_addr.into()))
 }
 
 pub fn app_with_state(state: GatewayState) -> Router {
     Router::new()
+        .nest("/api/fleet/v1", fleet_v1_routes())
         .route("/api/v1/health", get(health))
         .route("/api/v1/session/pair/start", post(pair_start))
         .route("/api/v1/session/pair/finish", post(pair_finish))
@@ -548,6 +625,15 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .with_state(state)
 }
 
+fn fleet_v1_routes() -> Router<GatewayState> {
+    Router::new()
+        .route("/enroll", post(fleet_enroll))
+        .route("/hello", get(fleet_hello))
+        .route("/credential/rotate", post(fleet_token_rotate))
+        .route("/credential/revoke", post(fleet_credential_revoke))
+        .layer(DefaultBodyLimit::max(FLEET_REQUEST_BODY_LIMIT_BYTES))
+}
+
 async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
     Json(HealthResponseWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
@@ -558,6 +644,125 @@ async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
         bind: state.bind,
         push: state.push_dispatcher.status(),
     })
+}
+
+async fn fleet_enroll(
+    State(state): State<GatewayState>,
+    payload: Result<Json<FleetEnrollmentRequestWire>, JsonRejection>,
+) -> Result<(StatusCode, Json<FleetEnrollmentResponseWire>), ApiError> {
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let now = Utc::now();
+    if !state.fleet_enrollment_limiter.check(now)? {
+        return Err(ApiError::rate_limited("enroll"));
+    }
+    let now_unix = datetime_to_unix(now);
+    let result = state
+        .fleet_store
+        .enroll(payload, now_unix)
+        .map_err(ApiError::from_fleet_store)?;
+    match result {
+        FleetEnrollmentResult::Enrolled(success) => {
+            let success = *success;
+            let credential = success.credential;
+            let scopes = credential.scopes.clone();
+            Ok((
+                StatusCode::OK,
+                Json(FleetEnrollmentResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    outcome: "enrolled".to_string(),
+                    protocol_version: Some(success.protocol_version),
+                    installation: success.installation,
+                    machine_selector: state.machine_selector.clone(),
+                    capabilities: fleet_capabilities(&scopes),
+                    credential: Some(credential),
+                    token_type: Some("bearer".to_string()),
+                    token: Some(success.token),
+                    quarantine: None,
+                }),
+            ))
+        }
+        FleetEnrollmentResult::Quarantined(mut response) => {
+            response.machine_selector = state.machine_selector.clone();
+            Ok((StatusCode::CONFLICT, Json(*response)))
+        }
+    }
+}
+
+async fn fleet_hello(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Result<Json<FleetHelloResponseWire>, ApiError> {
+    let protocol_version = fleet_protocol_version_from_headers(&headers)?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/hello",
+        FLEET_SCOPE_HELLO,
+    )
+    .await?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+    Ok(Json(FleetHelloResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        protocol_version,
+        installation,
+        machine_selector: state.machine_selector.clone(),
+        capabilities: fleet_capabilities(&credential.scopes),
+        credential,
+    }))
+}
+
+async fn fleet_token_rotate(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetTokenRotateRequestWire>, JsonRejection>,
+) -> Result<Json<FleetTokenRotateResponseWire>, ApiError> {
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    validate_schema(payload.schema_version)?;
+    let protocol_version =
+        negotiate_fleet_protocol_version(&payload.supported_protocol_versions)
+            .ok_or_else(|| {
+                ApiError::incompatible_protocol("supported_protocol_versions")
+            })?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/credential/rotate",
+        FLEET_SCOPE_ROTATE,
+    )
+    .await?;
+    let mut response = state
+        .fleet_store
+        .rotate_credential(&credential.credential_id, current_unix_time())
+        .map_err(ApiError::from_fleet_store)?;
+    response.protocol_version = protocol_version;
+    Ok(Json(response))
+}
+
+async fn fleet_credential_revoke(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetCredentialRevokeRequestWire>, JsonRejection>,
+) -> Result<Json<FleetCredentialRevokeResponseWire>, ApiError> {
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/credential/revoke",
+        FLEET_SCOPE_REVOKE,
+    )
+    .await?;
+    state
+        .fleet_store
+        .revoke_credential(
+            &credential.credential_id,
+            payload,
+            current_unix_time(),
+        )
+        .map(Json)
+        .map_err(ApiError::from_fleet_store)
 }
 
 async fn pair_start(
@@ -1626,6 +1831,35 @@ async fn authenticate(
     Ok(device)
 }
 
+async fn fleet_authenticate(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    _endpoint: &str,
+    required_scope: &str,
+) -> Result<FleetCredentialRecordWire, ApiError> {
+    let token = bearer_token(headers)?;
+    let credential = match state
+        .fleet_store
+        .authenticate_token(token, current_unix_time())
+        .map_err(ApiError::from_fleet_store)?
+    {
+        FleetAuthentication::Active(credential) => credential,
+        FleetAuthentication::Missing => {
+            return Err(ApiError::unauthorized("authorization"));
+        }
+        FleetAuthentication::Expired(_) => {
+            return Err(ApiError::credential_expired("authorization"));
+        }
+        FleetAuthentication::Revoked(_) => {
+            return Err(ApiError::credential_revoked("authorization"));
+        }
+    };
+    if !credential_has_scope(&credential, required_scope) {
+        return Err(ApiError::scope_denied(required_scope));
+    }
+    Ok(credential)
+}
+
 fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     let value = headers
         .get(header::AUTHORIZATION)
@@ -1636,6 +1870,42 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .strip_prefix("Bearer ")
         .filter(|token| !token.trim().is_empty())
         .ok_or_else(|| ApiError::unauthorized("authorization"))
+}
+
+fn fleet_protocol_version_from_headers(
+    headers: &HeaderMap,
+) -> Result<u32, ApiError> {
+    let Some(value) = headers.get(FLEET_PROTOCOL_VERSIONS_HEADER) else {
+        return Ok(crate::wire::FLEET_PROTOCOL_VERSION);
+    };
+    let value = value.to_str().map_err(|_| {
+        ApiError::invalid_request(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            "fleet protocol versions header must be valid text",
+        )
+    })?;
+    let mut versions = Vec::new();
+    for raw in value.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let version = raw.parse::<u32>().map_err(|_| {
+            ApiError::invalid_request(
+                FLEET_PROTOCOL_VERSIONS_HEADER,
+                "fleet protocol versions header contains a non-integer version",
+            )
+        })?;
+        versions.push(version);
+    }
+    negotiate_fleet_protocol_version(&versions).ok_or_else(|| {
+        ApiError::incompatible_protocol(FLEET_PROTOCOL_VERSIONS_HEADER)
+    })
+}
+
+fn datetime_to_unix(now: DateTime<Utc>) -> f64 {
+    now.timestamp() as f64
+        + f64::from(now.timestamp_subsec_micros()) / 1_000_000.0
 }
 
 fn validate_schema(schema_version: u32) -> Result<(), ApiError> {
@@ -2333,6 +2603,148 @@ impl ApiError {
         }
     }
 
+    fn bootstrap_consumed(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::CONFLICT,
+            ApiErrorCodeWire::BootstrapConsumed,
+            "bootstrap secret was already used",
+            target,
+        )
+    }
+
+    fn bootstrap_expired(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCodeWire::BootstrapExpired,
+            "bootstrap secret is expired",
+            target,
+        )
+    }
+
+    fn bootstrap_rejected(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCodeWire::BootstrapRejected,
+            "bootstrap secret was rejected",
+            target,
+        )
+    }
+
+    fn credential_expired(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCodeWire::CredentialExpired,
+            "fleet credential is expired",
+            target,
+        )
+    }
+
+    fn credential_revoked(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCodeWire::CredentialRevoked,
+            "fleet credential is revoked",
+            target,
+        )
+    }
+
+    fn incompatible_protocol(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::UPGRADE_REQUIRED,
+            ApiErrorCodeWire::IncompatibleProtocol,
+            "no mutually supported fleet protocol version",
+            target,
+        )
+    }
+
+    fn payload_too_large(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ApiErrorCodeWire::PayloadTooLarge,
+            "fleet request body exceeds the configured limit",
+            target,
+        )
+    }
+
+    fn rate_limited(target: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiErrorCodeWire::RateLimited,
+            "too many fleet enrollment attempts",
+            target,
+        )
+    }
+
+    fn scope_denied(scope: impl Into<String>) -> Self {
+        Self::fleet_error(
+            StatusCode::FORBIDDEN,
+            ApiErrorCodeWire::ScopeDenied,
+            "fleet credential does not include the required scope",
+            scope,
+        )
+    }
+
+    fn fleet_error(
+        status: StatusCode,
+        code: ApiErrorCodeWire,
+        message: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            wire: Box::new(ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code,
+                message: message.into(),
+                target: Some(target.into()),
+                details: None,
+            }),
+        }
+    }
+
+    fn from_fleet_store(error: FleetStoreError) -> Self {
+        match error {
+            FleetStoreError::BootstrapConsumed => {
+                Self::bootstrap_consumed("bootstrap_secret")
+            }
+            FleetStoreError::BootstrapExpired => {
+                Self::bootstrap_expired("bootstrap_secret")
+            }
+            FleetStoreError::BootstrapRejected => {
+                Self::bootstrap_rejected("bootstrap_secret")
+            }
+            FleetStoreError::CredentialExpired => {
+                Self::credential_expired("authorization")
+            }
+            FleetStoreError::CredentialMissing => {
+                Self::unauthorized("authorization")
+            }
+            FleetStoreError::CredentialRevoked => {
+                Self::credential_revoked("authorization")
+            }
+            FleetStoreError::IncompatibleProtocol => {
+                Self::incompatible_protocol("supported_protocol_versions")
+            }
+            FleetStoreError::ScopeDenied(scope) => Self::scope_denied(scope),
+            FleetStoreError::Validation(message) => {
+                Self::invalid_request("fleet_request", message)
+            }
+            FleetStoreError::LockPoisoned
+            | FleetStoreError::Io { .. }
+            | FleetStoreError::Json { .. }
+            | FleetStoreError::FleetContract(_) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::Internal,
+                    message: error.to_string(),
+                    target: Some("fleet_store".to_string()),
+                    details: None,
+                }),
+            },
+        }
+    }
+
     fn from_host_bridge(error: HostBridgeError) -> Self {
         let (status, code, target) = match &error {
             HostBridgeError::BridgeUnavailable(target) => (
@@ -2439,6 +2851,14 @@ impl ApiError {
     fn from_json_rejection(rejection: JsonRejection) -> Self {
         Self::invalid_request("body", rejection.body_text())
     }
+
+    fn from_fleet_json_rejection(rejection: JsonRejection) -> Self {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            Self::payload_too_large("body")
+        } else {
+            Self::invalid_request("body", rejection.body_text())
+        }
+    }
 }
 
 impl ApiErrorCodeWire {
@@ -2463,6 +2883,18 @@ impl ApiErrorCodeWire {
             ApiErrorCodeWire::UpdateAlreadyRunning => "update_already_running",
             ApiErrorCodeWire::UpdateJobNotFound => "update_job_not_found",
             ApiErrorCodeWire::PermissionDenied => "permission_denied",
+            ApiErrorCodeWire::BootstrapConsumed => "bootstrap_consumed",
+            ApiErrorCodeWire::BootstrapExpired => "bootstrap_expired",
+            ApiErrorCodeWire::BootstrapRejected => "bootstrap_rejected",
+            ApiErrorCodeWire::CredentialExpired => "credential_expired",
+            ApiErrorCodeWire::CredentialRevoked => "credential_revoked",
+            ApiErrorCodeWire::IncompatibleProtocol => "incompatible_protocol",
+            ApiErrorCodeWire::InstallationPinMismatch => {
+                "installation_pin_mismatch"
+            }
+            ApiErrorCodeWire::PayloadTooLarge => "payload_too_large",
+            ApiErrorCodeWire::RateLimited => "rate_limited",
+            ApiErrorCodeWire::ScopeDenied => "scope_denied",
             ApiErrorCodeWire::Internal => "internal",
         }
     }
@@ -2656,6 +3088,95 @@ mod tests {
         body: Value,
     ) -> Request<Body> {
         action_request(token, uri, body)
+    }
+
+    fn fleet_bootstrap(
+        state: &GatewayState,
+        scopes: &[&str],
+        expires_at_unix: Option<f64>,
+    ) -> crate::wire::FleetBootstrapIssueResponseWire {
+        state
+            .fleet_store()
+            .issue_bootstrap(
+                crate::wire::FleetBootstrapIssueRequestWire {
+                    schema_version: 1,
+                    requested_scopes: scopes
+                        .iter()
+                        .map(|scope| scope.to_string())
+                        .collect(),
+                    supported_protocol_versions: vec![1],
+                    expires_at_unix,
+                    installation_pin: None,
+                },
+                current_unix_time(),
+            )
+            .unwrap()
+    }
+
+    fn fleet_bootstrap_at(
+        state: &GatewayState,
+        expires_at_unix: f64,
+        issued_at_unix: f64,
+    ) -> crate::wire::FleetBootstrapIssueResponseWire {
+        state
+            .fleet_store()
+            .issue_bootstrap(
+                crate::wire::FleetBootstrapIssueRequestWire {
+                    schema_version: 1,
+                    requested_scopes: Vec::new(),
+                    supported_protocol_versions: vec![1],
+                    expires_at_unix: Some(expires_at_unix),
+                    installation_pin: None,
+                },
+                issued_at_unix,
+            )
+            .unwrap()
+    }
+
+    fn fleet_enroll_body(
+        bootstrap: &crate::wire::FleetBootstrapIssueResponseWire,
+        scopes: &[&str],
+        versions: Vec<u32>,
+    ) -> Value {
+        json!({
+            "schema_version": 1,
+            "bootstrap_id": bootstrap.bootstrap_id.clone(),
+            "bootstrap_secret": bootstrap.bootstrap_secret.clone(),
+            "controller": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "display_name": "Controller A",
+                "platform": "linux",
+                "app_version": "1.0.0"
+            },
+            "requested_scopes": scopes,
+            "supported_protocol_versions": versions,
+            "pinned_installation_id": bootstrap.pinned_installation_id.clone()
+        })
+    }
+
+    fn fleet_enroll_request(body: Value) -> Request<Body> {
+        json_request("POST", "/api/fleet/v1/enroll", body)
+    }
+
+    fn fleet_json_request(
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> Request<Body> {
+        let bytes = body
+            .map(|value| serde_json::to_vec(&value).unwrap())
+            .unwrap_or_default();
+        let mut builder = Request::builder().method(method).uri(uri);
+        if !bytes.is_empty() {
+            builder = builder.header("content-type", "application/json");
+        }
+        if let Some(token) = token {
+            builder =
+                builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(bytes)).unwrap()
     }
 
     fn notification(
@@ -3523,6 +4044,327 @@ exit 4
         let device_id =
             finish["device"]["device_id"].as_str().unwrap().to_string();
         (start, finish, token, device_id)
+    }
+
+    #[tokio::test]
+    async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[], None);
+        let (status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_HELLO, FLEET_SCOPE_ROTATE, FLEET_SCOPE_REVOKE],
+                vec![99, 1],
+            )),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(enrolled["outcome"], "enrolled");
+        assert_eq!(enrolled["protocol_version"], 1);
+        assert_eq!(enrolled["machine_selector"], "test-host");
+        assert_eq!(
+            enrolled["installation"]["installation_id"],
+            bootstrap.pinned_installation_id
+        );
+        assert_eq!(enrolled["token_type"], "bearer");
+        let token = enrolled["token"].as_str().unwrap().to_string();
+        assert!(token.starts_with("sase_fleet_"));
+        assert_eq!(
+            enrolled["capabilities"]["host"],
+            json!([FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE, FLEET_SCOPE_HELLO])
+        );
+
+        let (hello_status, hello) = json_response_with_state(
+            state,
+            Request::builder()
+                .uri("/api/fleet/v1/hello")
+                .header("authorization", format!("Bearer {token}"))
+                .header(FLEET_PROTOCOL_VERSIONS_HEADER, "2, 1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(hello_status, StatusCode::OK);
+        assert_eq!(hello["protocol_version"], 1);
+        assert_eq!(
+            hello["installation"]["installation_id"],
+            bootstrap.pinned_installation_id
+        );
+        assert_eq!(hello["credential"]["controller_id"], "controller-a");
+    }
+
+    #[tokio::test]
+    async fn fleet_enrollment_rejects_replayed_and_expired_bootstrap_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[], None);
+        let body = fleet_enroll_body(&bootstrap, &[], vec![1]);
+        let (first_status, _first) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(body.clone()),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK);
+
+        let (replay_status, replay) =
+            json_response_with_state(state.clone(), fleet_enroll_request(body))
+                .await;
+        assert_eq!(replay_status, StatusCode::CONFLICT);
+        assert_eq!(replay["code"], "bootstrap_consumed");
+
+        let expired = fleet_bootstrap_at(&state, 2.0, 1.0);
+        let (expired_status, expired_response) = json_response_with_state(
+            state,
+            fleet_enroll_request(fleet_enroll_body(&expired, &[], vec![1])),
+        )
+        .await;
+        assert_eq!(expired_status, StatusCode::BAD_REQUEST);
+        assert_eq!(expired_response["code"], "bootstrap_expired");
+    }
+
+    #[tokio::test]
+    async fn fleet_routes_enforce_declared_scopes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_HELLO], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_HELLO],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+
+        let (rotate_status, rotate) = json_response_with_state(
+            state,
+            fleet_json_request(
+                "POST",
+                "/api/fleet/v1/credential/rotate",
+                Some(token),
+                Some(json!({
+                    "schema_version": 1,
+                    "supported_protocol_versions": [1]
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(rotate_status, StatusCode::FORBIDDEN);
+        assert_eq!(rotate["code"], "scope_denied");
+        assert_eq!(rotate["target"], FLEET_SCOPE_ROTATE);
+    }
+
+    #[tokio::test]
+    async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(&bootstrap, &[], vec![1])),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let old_token = enrolled["token"].as_str().unwrap().to_string();
+
+        let (rotate_status, rotate) = json_response_with_state(
+            state.clone(),
+            fleet_json_request(
+                "POST",
+                "/api/fleet/v1/credential/rotate",
+                Some(&old_token),
+                Some(json!({
+                    "schema_version": 1,
+                    "supported_protocol_versions": [1]
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(rotate_status, StatusCode::OK);
+        let new_token = rotate["token"].as_str().unwrap().to_string();
+        assert_ne!(new_token, old_token);
+
+        let (old_status, old_response) = json_response_with_state(
+            state.clone(),
+            fleet_json_request(
+                "GET",
+                "/api/fleet/v1/hello",
+                Some(&old_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(old_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(old_response["code"], "unauthorized");
+
+        let (revoke_status, revoke) = json_response_with_state(
+            state.clone(),
+            fleet_json_request(
+                "POST",
+                "/api/fleet/v1/credential/revoke",
+                Some(&new_token),
+                Some(json!({
+                    "schema_version": 1,
+                    "reason": "controller retired"
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(revoke_status, StatusCode::OK);
+        assert_eq!(revoke["revoked"], true);
+        assert_eq!(
+            revoke["credential"]["revoked_reason"],
+            "controller retired"
+        );
+
+        let (revoked_status, revoked) = json_response_with_state(
+            state,
+            fleet_json_request(
+                "GET",
+                "/api/fleet/v1/hello",
+                Some(&new_token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(revoked_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(revoked["code"], "credential_revoked");
+    }
+
+    #[tokio::test]
+    async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[], None);
+        let (status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[],
+                vec![2, 1],
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(enrolled["protocol_version"], 1);
+        let token = enrolled["token"].as_str().unwrap().to_string();
+
+        let (hello_status, hello) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/fleet/v1/hello")
+                .header("authorization", format!("Bearer {token}"))
+                .header(FLEET_PROTOCOL_VERSIONS_HEADER, "2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(hello_status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(hello["code"], "incompatible_protocol");
+
+        let incompatible_bootstrap = fleet_bootstrap(&state, &[], None);
+        let (enroll_status, enroll) = json_response_with_state(
+            state,
+            fleet_enroll_request(fleet_enroll_body(
+                &incompatible_bootstrap,
+                &[],
+                vec![2],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(enroll["code"], "incompatible_protocol");
+    }
+
+    #[tokio::test]
+    async fn fleet_installation_pin_mismatch_returns_quarantine_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bootstrap = fleet_bootstrap(&state, &[], None);
+        let mut body = fleet_enroll_body(&bootstrap, &[], vec![1]);
+        body["pinned_installation_id"] = json!("sase_inst_v1_deadbeef");
+
+        let (status, value) =
+            json_response_with_state(state, fleet_enroll_request(body)).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(value["outcome"], "quarantined");
+        assert_eq!(value["token"], Value::Null);
+        assert_eq!(value["quarantine"]["reason"], "installation_pin_mismatch");
+        assert_eq!(
+            value["quarantine"]["authoritative_installation_id"],
+            bootstrap.pinned_installation_id
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_enrollment_attempts_are_rate_limited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let invalid_body = json!({
+            "schema_version": 1,
+            "bootstrap_id": "missing",
+            "bootstrap_secret": "wrong",
+            "controller": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "display_name": null,
+                "platform": null,
+                "app_version": null
+            },
+            "requested_scopes": [],
+            "supported_protocol_versions": [1],
+            "pinned_installation_id": "sase_inst_v1_deadbeef"
+        });
+
+        for _ in 0..FLEET_ENROLLMENT_RATE_LIMIT {
+            let (status, value) = json_response_with_state(
+                state.clone(),
+                fleet_enroll_request(invalid_body.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(value["code"], "bootstrap_rejected");
+        }
+        let (status, value) =
+            json_response_with_state(state, fleet_enroll_request(invalid_body))
+                .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(value["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn fleet_request_body_limit_rejects_large_enrollment_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let oversized = json!({
+            "schema_version": 1,
+            "bootstrap_id": "missing",
+            "bootstrap_secret": "x".repeat(FLEET_REQUEST_BODY_LIMIT_BYTES + 1),
+            "controller": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "display_name": null,
+                "platform": null,
+                "app_version": null
+            },
+            "requested_scopes": [],
+            "supported_protocol_versions": [1],
+            "pinned_installation_id": "sase_inst_v1_deadbeef"
+        });
+
+        let (status, value) =
+            json_response_with_state(state, fleet_enroll_request(oversized))
+                .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(value["code"], "payload_too_large");
     }
 
     #[tokio::test]

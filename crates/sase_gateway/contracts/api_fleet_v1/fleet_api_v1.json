@@ -1,0 +1,227 @@
+{
+  "auth": {
+    "bootstrap": {
+      "default_ttl_seconds": 600,
+      "issuer": "local-only Rust FleetCredentialStore::issue_bootstrap API",
+      "secret_storage": "sha256(domain || secret)",
+      "single_use": true
+    },
+    "header": "Authorization",
+    "request_hot_path": {
+      "cache_refresh": "only when credentials.json metadata changes",
+      "durable_writes": false
+    },
+    "scheme": "bearer",
+    "unauthenticated_routes": [
+      "POST /api/fleet/v1/enroll"
+    ]
+  },
+  "base_path": "/api/fleet/v1",
+  "contract": "sase_fleet_gateway_api_v1",
+  "limits": {
+    "enrollment_attempts": 8,
+    "enrollment_window_seconds": 60,
+    "request_body_bytes": 16384
+  },
+  "protocol_negotiation": {
+    "hello_header": "X-SASE-Fleet-Protocol-Versions",
+    "incompatible_error": "incompatible_protocol",
+    "selection": "highest mutually supported version",
+    "supported_versions": [
+      1
+    ]
+  },
+  "records": {
+    "ApiErrorWire": {
+      "code": [
+        "unauthorized",
+        "invalid_request",
+        "bootstrap_consumed",
+        "bootstrap_expired",
+        "bootstrap_rejected",
+        "credential_expired",
+        "credential_revoked",
+        "incompatible_protocol",
+        "installation_pin_mismatch",
+        "payload_too_large",
+        "rate_limited",
+        "scope_denied",
+        "internal"
+      ],
+      "details": "json|null",
+      "message": "string",
+      "schema_version": "u32",
+      "target": "string|null"
+    },
+    "CapabilitySetWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "host": "string[]; fleet gateway scopes",
+      "protocol": "string[]",
+      "resource": "string[]",
+      "schema_version": "u32"
+    },
+    "FleetBootstrapIssueRequestWire": {
+      "expires_at_unix": "f64|null; default now + 600s",
+      "installation_pin": "string|null; optional current-installation precondition",
+      "local_only": true,
+      "requested_scopes": "string[]; empty means default fleet scopes",
+      "schema_version": "u32",
+      "supported_protocol_versions": "u32[]; empty means [1]"
+    },
+    "FleetBootstrapIssueResponseWire": {
+      "allowed_scopes": "string[]",
+      "bootstrap_id": "string",
+      "bootstrap_secret": "high-entropy string; returned once",
+      "expires_at_unix": "f64",
+      "local_only": true,
+      "pinned_installation_id": "string",
+      "protocol_versions": "u32[]",
+      "schema_version": "u32"
+    },
+    "FleetControllerMetadataWire": {
+      "app_version": "string|null",
+      "controller_id": "string|null; generated when absent",
+      "display_name": "string|null",
+      "platform": "string|null",
+      "schema_version": "u32"
+    },
+    "FleetCredentialRecordWire": {
+      "controller": "FleetControllerMetadataWire",
+      "controller_id": "string|null",
+      "credential_id": "string",
+      "expires_at_unix": "f64|null",
+      "issued_at_unix": "f64",
+      "revoked_at_unix": "f64|null",
+      "revoked_reason": "string|null",
+      "rotated_at_unix": "f64|null",
+      "schema_version": "u32",
+      "scopes": "string[]"
+    },
+    "FleetCredentialRevokeRequestWire": {
+      "reason": "string|null",
+      "schema_version": "u32"
+    },
+    "FleetCredentialRevokeResponseWire": {
+      "credential": "FleetCredentialRecordWire",
+      "revoked": "bool",
+      "schema_version": "u32"
+    },
+    "FleetEnrollmentRequestWire": {
+      "bootstrap_id": "string",
+      "bootstrap_secret": "string",
+      "controller": "FleetControllerMetadataWire",
+      "pinned_installation_id": "string",
+      "requested_scopes": "string[]; empty means bootstrap-allowed defaults",
+      "schema_version": "u32",
+      "supported_protocol_versions": "u32[]; empty means [1]"
+    },
+    "FleetEnrollmentResponseWire": {
+      "capabilities": "CapabilitySetWire",
+      "credential": "FleetCredentialRecordWire|null",
+      "installation": "InstallationIdentityRecordWire",
+      "machine_selector": "string",
+      "outcome": "enrolled|quarantined",
+      "protocol_version": "u32|null",
+      "quarantine": "FleetQuarantineWire|null",
+      "schema_version": "u32",
+      "token": "string|null; returned only on enrollment",
+      "token_type": "bearer|null"
+    },
+    "FleetHelloResponseWire": {
+      "capabilities": "CapabilitySetWire",
+      "credential": "FleetCredentialRecordWire",
+      "installation": "InstallationIdentityRecordWire",
+      "machine_selector": "string",
+      "protocol_version": "u32",
+      "schema_version": "u32"
+    },
+    "FleetQuarantineWire": {
+      "authoritative_installation_id": "string",
+      "presented_installation_id": "string",
+      "reason": "installation_pin_mismatch",
+      "schema_version": "u32"
+    },
+    "FleetTokenRotateRequestWire": {
+      "schema_version": "u32",
+      "supported_protocol_versions": "u32[]; empty means [1]"
+    },
+    "FleetTokenRotateResponseWire": {
+      "credential": "FleetCredentialRecordWire",
+      "protocol_version": "u32",
+      "schema_version": "u32",
+      "token": "string; returned once",
+      "token_type": "bearer"
+    },
+    "InstallationIdentityRecordWire": {
+      "adopted_at_unix": "f64|null",
+      "created_at_unix": "f64",
+      "defined_by": "sase_core::fleet_contract",
+      "generation": "u64",
+      "installation_id": "string",
+      "prior_installation_id": "string|null",
+      "reason": "string|null",
+      "rotated_at_unix": "f64|null",
+      "schema_version": "u32"
+    }
+  },
+  "response_shape": {
+    "error": "ApiErrorWire",
+    "optional_fields": "explicit_null",
+    "success": "direct_json_record"
+  },
+  "routes": [
+    {
+      "auth": false,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/enroll",
+      "quarantine": "409 FleetEnrollmentResponseWire outcome=quarantined",
+      "request": "FleetEnrollmentRequestWire",
+      "success": "FleetEnrollmentResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/fleet/v1/hello",
+      "required_scope": "fleet.hello",
+      "success": "FleetHelloResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/credential/rotate",
+      "request": "FleetTokenRotateRequestWire",
+      "required_scope": "fleet.credential.rotate",
+      "success": "FleetTokenRotateResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/credential/revoke",
+      "request": "FleetCredentialRevokeRequestWire",
+      "required_scope": "fleet.credential.revoke",
+      "success": "FleetCredentialRevokeResponseWire"
+    }
+  ],
+  "schema_version": 1,
+  "storage": {
+    "credential_default_ttl_seconds": 7776000,
+    "credentials_file": "credentials.json",
+    "directory_mode": "0700",
+    "file_mode": "0600",
+    "lock_file": "credentials.lock",
+    "root": "<sase_home>/fleet_gateway",
+    "stored_secret_material": "hashes only"
+  }
+}

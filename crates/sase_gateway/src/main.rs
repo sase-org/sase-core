@@ -1,8 +1,8 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use sase_gateway::{
-    serve, split_command_words, write_api_v1_contract_snapshot, GatewayConfig,
-    PushProviderMode,
+    serve, split_command_words, write_api_v1_contract_snapshot,
+    write_fleet_api_v1_contract_snapshot, GatewayConfig, PushProviderMode,
 };
 
 #[tokio::main]
@@ -15,10 +15,20 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let cli = parse_args(std::env::args().skip(1))?;
+    let mut wrote_contract = false;
     if let Some(path) = cli.contract_out {
         write_api_v1_contract_snapshot(path).map_err(|err| {
             format!("failed to write gateway contract: {err}")
         })?;
+        wrote_contract = true;
+    }
+    if let Some(path) = cli.fleet_contract_out {
+        write_fleet_api_v1_contract_snapshot(path).map_err(|err| {
+            format!("failed to write fleet gateway contract: {err}")
+        })?;
+        wrote_contract = true;
+    }
+    if wrote_contract {
         return Ok(());
     }
     serve(cli.config)
@@ -30,6 +40,7 @@ async fn run() -> Result<(), String> {
 struct GatewayCli {
     config: GatewayConfig,
     contract_out: Option<PathBuf>,
+    fleet_contract_out: Option<PathBuf>,
 }
 
 fn parse_args(
@@ -44,6 +55,7 @@ fn parse_args(
         GatewayConfig::default().helper_bridge_command;
     let mut push_config = GatewayConfig::default().push_config;
     let mut contract_out = None;
+    let mut fleet_contract_out = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -69,6 +81,12 @@ fn parse_args(
                     format!("{arg} requires a JSON output path")
                 })?;
                 contract_out = Some(PathBuf::from(value));
+            }
+            "--fleet-contract-out" | "-G" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("{arg} requires a JSON output path")
+                })?;
+                fleet_contract_out = Some(PathBuf::from(value));
             }
             "--agent-bridge-command" | "-A" => {
                 let value = args
@@ -149,7 +167,7 @@ fn parse_args(
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND] [--push-provider|-P disabled|test|fcm]"
+                    "Usage: sase_gateway [--bind|-b HOST:PORT] [--sase-home|-H DIR] [--allow-non-loopback|-L] [--contract-out|-o PATH] [--fleet-contract-out|-G PATH] [--agent-bridge-command|-A COMMAND] [--helper-bridge-command|-J COMMAND] [--push-provider|-P disabled|test|fcm]"
                 );
                 std::process::exit(0);
             }
@@ -166,6 +184,7 @@ fn parse_args(
             push_config,
         },
         contract_out,
+        fleet_contract_out,
     })
 }
 
@@ -234,6 +253,19 @@ mod tests {
         assert_eq!(
             config.contract_out,
             Some(PathBuf::from("/tmp/contract.json"))
+        );
+    }
+
+    #[test]
+    fn parse_fleet_contract_out_short_flag() {
+        let config = parse_args([
+            "-G".to_string(),
+            "/tmp/fleet-contract.json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.fleet_contract_out,
+            Some(PathBuf::from("/tmp/fleet-contract.json"))
         );
     }
 
