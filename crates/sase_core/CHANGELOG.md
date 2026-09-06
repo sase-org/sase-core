@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.30](https://github.com/sase-org/sase-core/compare/v0.32.29...v0.32.30) - 2026-09-06
+
+### Added
+
+- *(fleet)* add follow reconciliation contracts
+
 ## [0.32.29](https://github.com/sase-org/sase-core/compare/v0.32.28...v0.32.29) - 2026-09-06
 
 ### Fixed
