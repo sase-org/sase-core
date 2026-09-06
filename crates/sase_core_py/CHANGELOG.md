@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.28](https://github.com/sase-org/sase-core/compare/v0.32.27...v0.32.28) - 2026-09-06
+
+### Added
+
+- *(fleet)* add portable identity contracts
+
 ## [0.32.27](https://github.com/sase-org/sase-core/compare/v0.32.26...v0.32.27) - 2026-09-06
 
 ### Added
