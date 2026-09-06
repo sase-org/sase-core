@@ -2302,7 +2302,6 @@ pub fn add_bead_link(
         } else {
             source_ref.clone()
         };
-        store.issues[holder_index].updated_at = added_at.clone();
         store.append_issue_event(
             &holder_id,
             BeadEventOperationWire::LinkAdded,
@@ -2380,7 +2379,6 @@ pub fn remove_bead_link(
                     && link.relation == *stored_relation
                     && link.direction == *stored_direction)
             });
-            store.issues[index].updated_at = removed_at.clone();
             store.append_issue_event(
                 holder_id,
                 BeadEventOperationWire::LinkRemoved,
@@ -3414,6 +3412,13 @@ mod tests {
         reduce_event_streams(&streams).unwrap()
     }
 
+    fn assert_reprojection_byte_stable(beads_dir: &Path, label: &str) {
+        let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+        export_jsonl(beads_dir).unwrap();
+        let after = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+        assert_eq!(before, after, "{label}");
+    }
+
     fn external_ref_store() -> (tempfile::TempDir, PathBuf) {
         let temp = tempdir().unwrap();
         init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
@@ -4386,6 +4391,7 @@ mod tests {
         )
         .unwrap();
         assert!(added.changed);
+        assert_reprojection_byte_stable(&beads_dir, "reference add");
         assert_eq!(
             added.references,
             vec!["agent:bbugyi200.athena.9w".to_string()]
@@ -4417,6 +4423,7 @@ mod tests {
         )
         .unwrap();
         assert!(removed.changed);
+        assert_reprojection_byte_stable(&beads_dir, "reference remove");
         assert_eq!(
             removed.references,
             vec!["research:202607/report.md".to_string()]
@@ -4480,6 +4487,7 @@ mod tests {
         )
         .unwrap();
         assert!(added.changed);
+        assert_reprojection_byte_stable(&beads_dir, "link add");
         assert_eq!(added.issue.as_ref().unwrap().links.len(), 1);
         assert_eq!(
             added.issue.as_ref().unwrap().links[0].target_ref,
@@ -4550,6 +4558,7 @@ mod tests {
         )
         .unwrap();
         assert!(removed.changed);
+        assert_reprojection_byte_stable(&beads_dir, "link remove");
         let issues = read_store_issues(&beads_dir).unwrap();
         let left_issue =
             issues.iter().find(|issue| issue.id == left.id).unwrap();
@@ -4596,6 +4605,7 @@ mod tests {
         )
         .unwrap();
         assert!(added.changed);
+        assert_reprojection_byte_stable(&beads_dir, "inbound link add");
         let issue = added.issue.unwrap();
         assert_eq!(issue.links.len(), 1);
         assert_eq!(issue.links[0].target_ref, "plan:202608/a.md");
@@ -4625,6 +4635,7 @@ mod tests {
         )
         .unwrap();
         assert!(removed.changed);
+        assert_reprojection_byte_stable(&beads_dir, "inbound link remove");
         let issues = read_store_issues(&beads_dir).unwrap();
         let target_issue =
             issues.iter().find(|issue| issue.id == target.id).unwrap();
@@ -5266,6 +5277,7 @@ mod tests {
         .unwrap()
         .issue
         .unwrap();
+        assert_reprojection_byte_stable(&beads_dir, "update");
         assert_eq!(ready.status, StatusWire::Ready);
         assert_eq!(
             MutableStore::load(&beads_dir)
@@ -7086,6 +7098,7 @@ mod tests {
             Some("2026-01-01T00:02:00Z".to_string()),
         )
         .unwrap();
+        assert_reprojection_byte_stable(&beads_dir, "dependency add");
         let projection_before =
             fs::read(beads_dir.join("issues.jsonl")).unwrap();
         let config_before = fs::read(beads_dir.join("config.json")).unwrap();
@@ -7531,6 +7544,7 @@ mod tests {
             "[2026-01-01T00:01:00Z · agent-1] first note\n\n[2026-01-01T00:02:00Z · agent-1] second note"
         );
         assert_eq!(second.updated_at, "2026-01-01T00:02:00Z");
+        assert_reprojection_byte_stable(&beads_dir, "note append");
 
         let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
         let note_events: Vec<_> = streams
@@ -7981,6 +7995,7 @@ mod tests {
             );
             assert_eq!(stream.events[stream.events.len() - 2].actor, "agent-1");
         }
+        assert_reprojection_byte_stable(&beads_dir, "close with note");
     }
 
     #[test]
@@ -8067,6 +8082,7 @@ mod tests {
         assert_eq!(first_issue.status, StatusWire::InProgress);
         assert_eq!(first_issue.assignee, "agent-1");
         assert_eq!(first_issue.updated_at, "2026-01-01T00:02:00Z");
+        assert_reprojection_byte_stable(&beads_dir, "claim");
 
         let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
         let claim_event = streams[0].events.last().unwrap();
