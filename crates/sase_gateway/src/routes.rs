@@ -44,8 +44,12 @@ use crate::fleet_auth::{
     credential_has_scope, current_unix_time, fleet_capabilities,
     negotiate_fleet_protocol_version, FleetAuthentication,
     FleetCredentialStore, FleetEnrollmentResult, FleetStoreError,
-    FLEET_SCOPE_HELLO, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
+    FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
+    FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
+    FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
+    FLEET_SCOPE_SUMMARY_READ,
 };
+use crate::fleet_reads::{resync_item, FleetReadError, FleetReadService};
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
     DynAgentHostBridge, DynHelperHostBridge, DynNotificationHostBridge,
@@ -60,12 +64,17 @@ use crate::storage::{
 };
 use crate::wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
-    EventRecordWire, FleetCredentialRecordWire,
+    EventRecordWire, FleetCatalogQueryWire, FleetContentReadRequestWire,
+    FleetContentReadResponseWire, FleetCredentialRecordWire,
     FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
+    FleetDetailRequestWire, FleetDetailResponseWire,
     FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
-    FleetHelloResponseWire, FleetTokenRotateRequestWire,
-    FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
-    HealthResponseWire, MobileAgentImageLaunchRequestWire,
+    FleetEventStreamItemWire, FleetHelloResponseWire,
+    FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
+    FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
+    FleetResyncReasonWire, FleetSummaryResponseWire,
+    FleetTokenRotateRequestWire, FleetTokenRotateResponseWire, GatewayBindWire,
+    GatewayBuildWire, HealthResponseWire, MobileAgentImageLaunchRequestWire,
     MobileAgentKillRequestWire, MobileAgentKillResultWire,
     MobileAgentLaunchResultWire, MobileAgentListRequestWire,
     MobileAgentListResponseWire, MobileAgentResumeOptionsResponseWire,
@@ -80,7 +89,7 @@ use crate::wire::{
     PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
     PairStartResponseWire, PushSubscriptionDeleteResponseWire,
     PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
-    PushSubscriptionRequestWire, SessionResponseWire,
+    PushSubscriptionRequestWire, SessionResponseWire, StoreCursorWire,
     GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
@@ -108,6 +117,7 @@ pub struct GatewayState {
     attachment_tokens: AttachmentTokenStore,
     push_dispatcher: PushDispatcher,
     fleet_store: FleetCredentialStore,
+    fleet_reads: FleetReadService,
     fleet_enrollment_limiter: FleetEnrollmentRateLimiter,
     machine_selector: String,
 }
@@ -219,7 +229,8 @@ impl GatewayState {
                 options.max_attachment_bytes,
             ),
             push_dispatcher: PushDispatcher::new(options.push_config),
-            fleet_store: FleetCredentialStore::new(options.sase_home),
+            fleet_store: FleetCredentialStore::new(options.sase_home.clone()),
+            fleet_reads: FleetReadService::new(options.sase_home.clone()),
             fleet_enrollment_limiter: FleetEnrollmentRateLimiter::new(
                 FLEET_ENROLLMENT_RATE_LIMIT,
                 ChronoDuration::seconds(FLEET_ENROLLMENT_RATE_WINDOW_SECONDS),
@@ -305,6 +316,10 @@ impl GatewayState {
     pub fn fleet_store(&self) -> FleetCredentialStore {
         self.fleet_store.clone()
     }
+
+    pub fn fleet_reads(&self) -> FleetReadService {
+        self.fleet_reads.clone()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -330,12 +345,26 @@ struct PairingChallenge {
 struct EventHub {
     inner: Arc<Mutex<EventHubInner>>,
     buffer_capacity: usize,
+    sender: tokio::sync::broadcast::Sender<EventRecordWire>,
 }
 
 #[derive(Debug)]
 struct EventHubInner {
     next_id: u64,
     buffer: VecDeque<EventRecordWire>,
+}
+
+struct EventHubSubscription {
+    initial_events: Vec<EventRecordWire>,
+    receiver: tokio::sync::broadcast::Receiver<EventRecordWire>,
+}
+
+impl std::ops::Deref for EventHubSubscription {
+    type Target = [EventRecordWire];
+
+    fn deref(&self) -> &Self::Target {
+        &self.initial_events
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -474,12 +503,16 @@ impl AttachmentTokenStore {
 
 impl EventHub {
     fn new(buffer_capacity: usize) -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(
+            buffer_capacity.max(1).saturating_mul(2),
+        );
         Self {
             inner: Arc::new(Mutex::new(EventHubInner {
                 next_id: 1,
                 buffer: VecDeque::new(),
             })),
             buffer_capacity,
+            sender,
         }
     }
 
@@ -491,6 +524,14 @@ impl EventHub {
             .inner
             .lock()
             .map_err(|_| ApiError::internal("events"))?;
+        Ok(self.append_with_inner(&mut inner, make_payload))
+    }
+
+    fn append_with_inner(
+        &self,
+        inner: &mut EventHubInner,
+        make_payload: impl FnOnce(u64) -> EventPayloadWire,
+    ) -> EventRecordWire {
         let sequence = inner.next_id;
         inner.next_id += 1;
         let record = EventRecordWire {
@@ -503,9 +544,11 @@ impl EventHub {
         while inner.buffer.len() > self.buffer_capacity {
             inner.buffer.pop_front();
         }
-        Ok(record)
+        let _ = self.sender.send(record.clone());
+        record
     }
 
+    #[cfg(test)]
     fn replay_after(
         &self,
         last_event_id: &str,
@@ -517,17 +560,93 @@ impl EventHub {
             .inner
             .lock()
             .map_err(|_| ApiError::internal("events"))?;
-        let Some(oldest) = inner
-            .buffer
-            .front()
-            .and_then(|record| parse_event_id(&record.id))
-        else {
-            return Ok(None);
+        Ok(replay_events_locked(&inner, last_seen))
+    }
+
+    fn subscribe_after(
+        &self,
+        last_event_id: Option<&str>,
+        make_initial_payload: impl FnOnce(u64) -> EventPayloadWire,
+    ) -> Result<EventHubSubscription, ApiError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::internal("events"))?;
+        let (initial_events, receiver) = match last_event_id {
+            Some(last_event_id) => {
+                let receiver = self.sender.subscribe();
+                let Some(last_seen) = parse_event_id(last_event_id) else {
+                    return Ok(EventHubSubscription {
+                        initial_events: vec![self.transient_event(
+                            &inner,
+                            EventPayloadWire::ResyncRequired {
+                                reason: "last_event_id_not_available"
+                                    .to_string(),
+                            },
+                        )],
+                        receiver,
+                    });
+                };
+                let initial_events = replay_events_locked(&inner, last_seen)
+                    .unwrap_or_else(|| {
+                        vec![self.transient_event(
+                            &inner,
+                            EventPayloadWire::ResyncRequired {
+                                reason: "last_event_id_not_available"
+                                    .to_string(),
+                            },
+                        )]
+                    });
+                (initial_events, receiver)
+            }
+            None => {
+                let initial_event =
+                    self.append_with_inner(&mut inner, make_initial_payload);
+                let receiver = self.sender.subscribe();
+                (vec![initial_event], receiver)
+            }
         };
-        if last_seen.saturating_add(1) < oldest {
-            return Ok(None);
+        Ok(EventHubSubscription {
+            initial_events,
+            receiver,
+        })
+    }
+
+    fn transient_event(
+        &self,
+        inner: &EventHubInner,
+        payload: EventPayloadWire,
+    ) -> EventRecordWire {
+        let sequence = inner.next_id.saturating_sub(1);
+        EventRecordWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            id: format_event_id(sequence),
+            created_at: format_time(Utc::now()),
+            payload,
         }
-        let events = inner
+    }
+
+    fn current_sequence(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.next_id.saturating_sub(1))
+            .unwrap_or(0)
+    }
+}
+
+fn replay_events_locked(
+    inner: &EventHubInner,
+    last_seen: u64,
+) -> Option<Vec<EventRecordWire>> {
+    let oldest = inner
+        .buffer
+        .front()
+        .and_then(|record| parse_event_id(&record.id))?;
+    if last_seen.saturating_add(1) < oldest {
+        return None;
+    }
+    Some(
+        inner
             .buffer
             .iter()
             .filter(|record| {
@@ -536,9 +655,8 @@ impl EventHub {
                     .unwrap_or(false)
             })
             .cloned()
-            .collect();
-        Ok(Some(events))
-    }
+            .collect(),
+    )
 }
 
 pub fn default_sase_home() -> PathBuf {
@@ -629,6 +747,13 @@ fn fleet_v1_routes() -> Router<GatewayState> {
     Router::new()
         .route("/enroll", post(fleet_enroll))
         .route("/hello", get(fleet_hello))
+        .route("/summary", get(fleet_summary))
+        .route("/catalog", post(fleet_catalog))
+        .route("/batch", post(fleet_batch_lookup))
+        .route("/detail", post(fleet_detail))
+        .route("/content", post(fleet_content))
+        .route("/projects/eligibility", post(fleet_project_eligibility))
+        .route("/events", get(fleet_events))
         .route("/credential/rotate", post(fleet_token_rotate))
         .route("/credential/revoke", post(fleet_credential_revoke))
         .layer(DefaultBodyLimit::max(FLEET_REQUEST_BODY_LIMIT_BYTES))
@@ -704,6 +829,11 @@ async fn fleet_hello(
         .fleet_store
         .ensure_installation_identity()
         .map_err(ApiError::from_fleet_store)?;
+    let summary = state
+        .fleet_reads
+        .summary()
+        .await
+        .map_err(ApiError::from_fleet_read)?;
     Ok(Json(FleetHelloResponseWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         protocol_version,
@@ -711,7 +841,201 @@ async fn fleet_hello(
         machine_selector: state.machine_selector.clone(),
         capabilities: fleet_capabilities(&credential.scopes),
         credential,
+        cursor: summary.cursor,
+        counts: summary.counts,
+        count_revision: summary.count_revision,
+        freshness: summary.freshness,
     }))
+}
+
+async fn fleet_summary(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+) -> Result<Json<FleetSummaryResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/summary",
+        FLEET_SCOPE_SUMMARY_READ,
+    )
+    .await?;
+    state
+        .fleet_reads
+        .summary()
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_catalog(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetCatalogQueryWire>, JsonRejection>,
+) -> Result<Json<crate::wire::FleetCatalogPageWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/catalog",
+        FLEET_SCOPE_CATALOG_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    state
+        .fleet_reads
+        .catalog(payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_batch_lookup(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetLogicalBatchRequestWire>, JsonRejection>,
+) -> Result<Json<FleetLogicalBatchResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/batch",
+        FLEET_SCOPE_BATCH_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    state
+        .fleet_reads
+        .batch_lookup(payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_detail(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetDetailRequestWire>, JsonRejection>,
+) -> Result<Json<FleetDetailResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/detail",
+        FLEET_SCOPE_DETAIL_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    state
+        .fleet_reads
+        .detail(payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_content(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetContentReadRequestWire>, JsonRejection>,
+) -> Result<Json<FleetContentReadResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/content",
+        FLEET_SCOPE_CONTENT_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    state
+        .fleet_reads
+        .content(payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_project_eligibility(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetProjectEligibilityRequestWire>, JsonRejection>,
+) -> Result<Json<FleetProjectEligibilityResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/projects/eligibility",
+        FLEET_SCOPE_PROJECTS_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    state
+        .fleet_reads
+        .project_eligibility(payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_fleet_read)
+}
+
+async fn fleet_events(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<FleetEventsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/events",
+        FLEET_SCOPE_EVENTS_READ,
+    )
+    .await?;
+    let subscription = state
+        .fleet_reads
+        .subscribe_events(query.cursor()?)
+        .await
+        .map_err(ApiError::from_fleet_read)?;
+    let stream_state = state.clone();
+    let stream = async_stream::stream! {
+        for item in subscription.initial {
+            yield Ok::<_, Infallible>(fleet_sse_event(item));
+        }
+        let mut receiver = subscription.receiver;
+        let mut interval = tokio::time::interval(stream_state.heartbeat_interval);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    yield Ok::<_, Infallible>(fleet_sse_event(
+                        FleetEventStreamItemWire::Heartbeat {
+                            cursor: stream_state.fleet_reads.current_event_cursor(),
+                        },
+                    ));
+                }
+                received = receiver.recv() => {
+                    match received {
+                        Ok(event) => {
+                            yield Ok::<_, Infallible>(fleet_sse_event(
+                                FleetEventStreamItemWire::Invalidation(event),
+                            ));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let Ok(snapshot) = stream_state.fleet_reads.authoritative_snapshot().await else {
+                                break;
+                            };
+                            yield Ok::<_, Infallible>(fleet_sse_event(resync_item(
+                                FleetResyncReasonWire::ReceiverLag,
+                                snapshot,
+                            )));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn fleet_token_rotate(
@@ -971,22 +1295,43 @@ async fn events(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let device = authenticate(&state, &headers, "/api/v1/events").await?;
-    let initial_events = initial_events_for_stream(&state, &headers, &device)?;
+    let subscription = initial_events_for_stream(&state, &headers, &device)?;
     let stream_state = state.clone();
     let stream = async_stream::stream! {
-        for record in initial_events {
+        for record in subscription.initial_events {
             yield Ok::<_, Infallible>(sse_event(record));
         }
+        let mut receiver = subscription.receiver;
         let mut interval = tokio::time::interval(stream_state.heartbeat_interval);
         interval.tick().await;
         loop {
-            interval.tick().await;
-            let Ok(record) = stream_state.event_hub.append(|sequence| {
-                EventPayloadWire::Heartbeat { sequence }
-            }) else {
-                break;
-            };
-            yield Ok::<_, Infallible>(sse_event(record));
+            tokio::select! {
+                _ = interval.tick() => {
+                    let sequence = stream_state.event_hub.current_sequence();
+                    yield Ok::<_, Infallible>(sse_event(EventRecordWire {
+                        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                        id: format_event_id(sequence),
+                        created_at: format_time(Utc::now()),
+                        payload: EventPayloadWire::Heartbeat { sequence },
+                    }));
+                }
+                received = receiver.recv() => {
+                    match received {
+                        Ok(record) => yield Ok::<_, Infallible>(sse_event(record)),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let Ok(record) = stream_state.event_hub.append(|_| {
+                                EventPayloadWire::ResyncRequired {
+                                    reason: "receiver_lagged".to_string(),
+                                }
+                            }) else {
+                                break;
+                            };
+                            yield Ok::<_, Infallible>(sse_event(record));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
         }
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
@@ -1002,6 +1347,41 @@ struct AgentListQuery {
     project: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FleetEventsQuery {
+    #[serde(default)]
+    store_generation: Option<String>,
+    #[serde(default)]
+    sequence: Option<u64>,
+}
+
+impl FleetEventsQuery {
+    fn cursor(&self) -> Result<Option<StoreCursorWire>, ApiError> {
+        match (&self.store_generation, self.sequence) {
+            (None, None) => Ok(None),
+            (Some(store_generation), Some(sequence)) => {
+                let cursor = StoreCursorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    store_generation: store_generation.clone(),
+                    sequence,
+                };
+                sase_core::fleet_contract::validate_store_cursor(&cursor)
+                    .map(Some)
+                    .map_err(|error| {
+                        ApiError::invalid_request(
+                            "fleet_event_cursor",
+                            error.to_string(),
+                        )
+                    })
+            }
+            _ => Err(ApiError::invalid_request(
+                "fleet_event_cursor",
+                "store_generation and sequence must be supplied together",
+            )),
+        }
+    }
 }
 
 async fn list_agents(
@@ -2048,28 +2428,23 @@ fn initial_events_for_stream(
     state: &GatewayState,
     headers: &HeaderMap,
     device: &DeviceRecordWire,
-) -> Result<Vec<EventRecordWire>, ApiError> {
-    let mut events = Vec::new();
-    if let Some(last_event_id) = last_event_id(headers)? {
-        match state.event_hub.replay_after(last_event_id)? {
-            Some(replay) => events.extend(replay),
-            None => events.push(state.event_hub.append(|_| {
-                EventPayloadWire::ResyncRequired {
-                    reason: "last_event_id_not_available".to_string(),
-                }
-            })?),
-        }
-    } else {
-        events.push(state.event_hub.append(|_| EventPayloadWire::Session {
-            device_id: device.device_id.clone(),
-        })?);
-    }
-    events.push(
+) -> Result<EventHubSubscription, ApiError> {
+    let mut subscription =
         state
             .event_hub
-            .append(|sequence| EventPayloadWire::Heartbeat { sequence })?,
-    );
-    Ok(events)
+            .subscribe_after(last_event_id(headers)?, |_| {
+                EventPayloadWire::Session {
+                    device_id: device.device_id.clone(),
+                }
+            })?;
+    let sequence = state.event_hub.current_sequence();
+    subscription.initial_events.push(EventRecordWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        id: format_event_id(sequence),
+        created_at: format_time(Utc::now()),
+        payload: EventPayloadWire::Heartbeat { sequence },
+    });
+    Ok(subscription)
 }
 
 fn last_event_id(headers: &HeaderMap) -> Result<Option<&str>, ApiError> {
@@ -2093,6 +2468,18 @@ fn sse_event(record: EventRecordWire) -> Event {
     Event::default().id(record.id).event(event_name).data(data)
 }
 
+fn fleet_sse_event(item: FleetEventStreamItemWire) -> Event {
+    let event_name = fleet_event_name(&item);
+    let event_id = fleet_event_id(&item);
+    let data = serde_json::to_string(&item)
+        .expect("FleetEventStreamItemWire serialization should be infallible");
+    let event = Event::default().event(event_name).data(data);
+    match event_id {
+        Some(id) => event.id(id),
+        None => event,
+    }
+}
+
 fn event_name(payload: &EventPayloadWire) -> &'static str {
     match payload {
         EventPayloadWire::Heartbeat { .. } => "heartbeat",
@@ -2103,6 +2490,26 @@ fn event_name(payload: &EventPayloadWire) -> &'static str {
         }
         EventPayloadWire::AgentsChanged { .. } => "agents_changed",
         EventPayloadWire::HelpersChanged { .. } => "helpers_changed",
+    }
+}
+
+fn fleet_event_name(item: &FleetEventStreamItemWire) -> &'static str {
+    match item {
+        FleetEventStreamItemWire::Invalidation(_) => "invalidation",
+        FleetEventStreamItemWire::ResyncRequired(_) => "resync_required",
+        FleetEventStreamItemWire::Heartbeat { .. } => "heartbeat",
+    }
+}
+
+fn fleet_event_id(item: &FleetEventStreamItemWire) -> Option<String> {
+    match item {
+        FleetEventStreamItemWire::Invalidation(event) => {
+            Some(format_fleet_event_id(&event.cursor))
+        }
+        FleetEventStreamItemWire::ResyncRequired(resync) => {
+            Some(format_fleet_event_id(&resync.snapshot.cursor))
+        }
+        FleetEventStreamItemWire::Heartbeat { .. } => None,
     }
 }
 
@@ -2438,6 +2845,10 @@ fn format_event_id(id: u64) -> String {
     format!("{id:016}")
 }
 
+fn format_fleet_event_id(cursor: &StoreCursorWire) -> String {
+    format!("{}:{}", cursor.store_generation, cursor.sequence)
+}
+
 fn parse_event_id(id: &str) -> Option<u64> {
     id.parse::<u64>().ok()
 }
@@ -2745,6 +3156,62 @@ impl ApiError {
         }
     }
 
+    fn fleet_timeout(target: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            wire: Box::new(ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::Timeout,
+                message: "fleet read timed out".to_string(),
+                target: Some(target.into()),
+                details: None,
+            }),
+        }
+    }
+
+    fn fleet_stale(target: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            wire: Box::new(ApiErrorWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                code: ApiErrorCodeWire::GoneStale,
+                message: "fleet resource is stale".to_string(),
+                target: Some(target.into()),
+                details: None,
+            }),
+        }
+    }
+
+    fn from_fleet_read(error: FleetReadError) -> Self {
+        match error {
+            FleetReadError::Validation(message) => {
+                Self::invalid_request("fleet_request", message)
+            }
+            FleetReadError::NotFound(target) => Self {
+                status: StatusCode::NOT_FOUND,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::NotFound,
+                    message: "fleet resource not found".to_string(),
+                    target: Some(target),
+                    details: None,
+                }),
+            },
+            FleetReadError::Stale(target) => Self::fleet_stale(target),
+            FleetReadError::Timeout(target) => Self::fleet_timeout(target),
+            FleetReadError::Backend(target) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::Internal,
+                    message: "fleet backend failed".to_string(),
+                    target: Some(target),
+                    details: None,
+                }),
+            },
+        }
+    }
+
     fn from_host_bridge(error: HostBridgeError) -> Self {
         let (status, code, target) = match &error {
             HostBridgeError::BridgeUnavailable(target) => (
@@ -2895,6 +3362,8 @@ impl ApiErrorCodeWire {
             ApiErrorCodeWire::PayloadTooLarge => "payload_too_large",
             ApiErrorCodeWire::RateLimited => "rate_limited",
             ApiErrorCodeWire::ScopeDenied => "scope_denied",
+            ApiErrorCodeWire::Timeout => "timeout",
+            ApiErrorCodeWire::ResyncRequired => "resync_required",
             ApiErrorCodeWire::Internal => "internal",
         }
     }
@@ -4094,6 +4563,19 @@ exit 4
             bootstrap.pinned_installation_id
         );
         assert_eq!(hello["credential"]["controller_id"], "controller-a");
+        assert_eq!(
+            hello["cursor"]["schema_version"],
+            GATEWAY_WIRE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            hello["counts"]["schema_version"],
+            GATEWAY_WIRE_SCHEMA_VERSION
+        );
+        assert!(hello["counts"]["logical_agent_total"].is_u64());
+        assert_eq!(
+            hello["freshness"]["schema_version"],
+            GATEWAY_WIRE_SCHEMA_VERSION
+        );
     }
 
     #[tokio::test]
@@ -4141,6 +4623,21 @@ exit 4
         .await;
         assert_eq!(enroll_status, StatusCode::OK);
         let token = enrolled["token"].as_str().unwrap();
+
+        let (summary_status, summary) = json_response_with_state(
+            state.clone(),
+            fleet_json_request(
+                "GET",
+                "/api/fleet/v1/summary",
+                Some(token),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(summary_status, StatusCode::FORBIDDEN);
+        assert_eq!(summary["code"], "scope_denied");
+        assert_eq!(summary["target"], FLEET_SCOPE_SUMMARY_READ);
+        assert_eq!(state.fleet_reads().refresh_count_for_test(), 0);
 
         let (rotate_status, rotate) = json_response_with_state(
             state,
@@ -6218,10 +6715,9 @@ exit 4
             first_events[0].payload,
             EventPayloadWire::Session { .. }
         ));
-        assert_eq!(first_events[1].id, "0000000000000002");
         assert!(matches!(
             first_events[1].payload,
-            EventPayloadWire::Heartbeat { sequence: 2 }
+            EventPayloadWire::Heartbeat { sequence: 1 }
         ));
 
         let mut headers = HeaderMap::new();
@@ -6229,12 +6725,10 @@ exit 4
         let replay_events =
             initial_events_for_stream(&state, &headers, &device).unwrap();
 
-        assert_eq!(replay_events.len(), 2);
-        assert_eq!(replay_events[0], first_events[1]);
-        assert_eq!(replay_events[1].id, "0000000000000003");
+        assert_eq!(replay_events.len(), 1);
         assert!(matches!(
-            replay_events[1].payload,
-            EventPayloadWire::Heartbeat { sequence: 3 }
+            replay_events[0].payload,
+            EventPayloadWire::Heartbeat { sequence: 1 }
         ));
     }
 
@@ -6260,6 +6754,14 @@ exit 4
         let _first_events =
             initial_events_for_stream(&state, &HeaderMap::new(), &device)
                 .unwrap();
+        state
+            .event_hub
+            .append(|_| EventPayloadWire::NotificationsChanged {
+                reason: "capacity-test".to_string(),
+                notification_id: None,
+                activity_cursor: None,
+            })
+            .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("last-event-id", "0000000000000000".parse().unwrap());
         let events =
@@ -6290,7 +6792,7 @@ exit 4
 
         let restarted_state = state_for_tmp(&tmp, Duration::minutes(5));
         let mut headers = HeaderMap::new();
-        headers.insert("last-event-id", first_events[1].id.parse().unwrap());
+        headers.insert("last-event-id", first_events[0].id.parse().unwrap());
         let events =
             initial_events_for_stream(&restarted_state, &headers, &device)
                 .unwrap();

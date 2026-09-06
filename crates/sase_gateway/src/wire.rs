@@ -2,7 +2,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub use sase_core::fleet_contract::{
-    CapabilitySetWire, InstallationIdentityRecordWire,
+    CapabilitySetWire, FleetAuthoritativeSnapshotWire,
+    FleetCatalogPageSelectionWire, FleetCatalogPageWire, FleetCatalogQueryWire,
+    FleetContentReadRequestWire, FleetContentReadResponseWire,
+    FleetDetailRequestWire, FleetDetailResponseWire, FleetEventStreamItemWire,
+    FleetInvalidationEventWire, FleetInvalidationKindWire,
+    FleetLogicalAgentCountsWire, FleetLogicalBatchEntryWire,
+    FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
+    FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
+    FleetProjectEligibilityWire, FleetResyncReasonWire,
+    FleetResyncRequiredWire, FleetSnapshotFreshnessWire,
+    FleetSummaryResponseWire, InstallationIdentityRecordWire, StoreCursorWire,
 };
 pub use sase_core::host_bridge::{
     MobileBeadDetailWire, MobileBeadListRequestWire,
@@ -289,6 +299,10 @@ pub struct FleetHelloResponseWire {
     pub machine_selector: String,
     pub capabilities: CapabilitySetWire,
     pub credential: FleetCredentialRecordWire,
+    pub cursor: StoreCursorWire,
+    pub counts: FleetLogicalAgentCountsWire,
+    pub count_revision: Option<u64>,
+    pub freshness: FleetSnapshotFreshnessWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -356,6 +370,8 @@ pub enum ApiErrorCodeWire {
     PayloadTooLarge,
     RateLimited,
     ScopeDenied,
+    Timeout,
+    ResyncRequired,
     Internal,
 }
 

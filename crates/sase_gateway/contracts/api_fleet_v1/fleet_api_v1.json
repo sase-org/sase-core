@@ -19,8 +19,18 @@
   "base_path": "/api/fleet/v1",
   "contract": "sase_fleet_gateway_api_v1",
   "limits": {
+    "batch_max_logical_keys": 200,
+    "catalog_default_page_rows": 50,
+    "catalog_max_page_rows": 100,
+    "content_default_bytes": 65536,
+    "content_max_bytes": 262144,
     "enrollment_attempts": 8,
     "enrollment_window_seconds": 60,
+    "event_default_replay_events": 128,
+    "event_max_replay_events": 512,
+    "filter_max_bytes": 128,
+    "project_eligibility_max_project_ids": 200,
+    "query_max_bytes": 512,
     "request_body_bytes": 16384
   },
   "protocol_negotiation": {
@@ -45,6 +55,8 @@
         "installation_pin_mismatch",
         "payload_too_large",
         "rate_limited",
+        "timeout",
+        "resync_required",
         "scope_denied",
         "internal"
       ],
@@ -59,6 +71,26 @@
       "protocol": "string[]",
       "resource": "string[]",
       "schema_version": "u32"
+    },
+    "ContentHandleWire": {
+      "byte_len": "u64|null",
+      "defined_by": "sase_core::fleet_contract",
+      "digest": "string|null",
+      "id": "string; opaque",
+      "kind": "transcript|output|diff|log|artifact|question",
+      "revision": "ResourceRevisionWire|null",
+      "schema_version": "u32",
+      "supports_growth": "bool",
+      "supports_range": "bool"
+    },
+    "FleetAuthoritativeSnapshotWire": {
+      "count_revision": "u64|null",
+      "counts": "FleetLogicalAgentCountsWire",
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "freshness": "FleetSnapshotFreshnessWire",
+      "schema_version": "u32",
+      "summaries": "ResolvedAgentSummaryWire[]"
     },
     "FleetBootstrapIssueRequestWire": {
       "expires_at_unix": "f64|null; default now + 600s",
@@ -77,6 +109,56 @@
       "pinned_installation_id": "string",
       "protocol_versions": "u32[]",
       "schema_version": "u32"
+    },
+    "FleetCatalogPageSelectionWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "has_more": "bool",
+      "limit": "u32",
+      "next_cursor": "string|null",
+      "rows": "ResolvedAgentSummaryWire[]",
+      "schema_version": "u32",
+      "total_matching_rows": "u64"
+    },
+    "FleetCatalogPageWire": {
+      "count_revision": "u64|null",
+      "counts": "FleetLogicalAgentCountsWire",
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "freshness": "FleetSnapshotFreshnessWire",
+      "page": "FleetCatalogPageSelectionWire",
+      "schema_version": "u32"
+    },
+    "FleetCatalogQueryWire": {
+      "cursor": "string|null; opaque catalog page cursor",
+      "defined_by": "sase_core::fleet_contract",
+      "include_terminal": "bool",
+      "limit": "u32|null; default 50, max 100",
+      "project_ids": "string[]; bounded",
+      "query": "string|null; bounded, path/token rejected",
+      "schema_version": "u32",
+      "status_buckets": "stopped|failed|starting|running|queued|waiting|done[]; sorted and deduplicated"
+    },
+    "FleetContentReadRequestWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "handle_id": "string; opaque content handle",
+      "limit": "u64|null; default 65536, max 262144",
+      "offset": "u64",
+      "row_revision": "ResourceRevisionWire",
+      "schema_version": "u32"
+    },
+    "FleetContentReadResponseWire": {
+      "cursor": "StoreCursorWire",
+      "data_base64": "string",
+      "defined_by": "sase_core::fleet_contract",
+      "eof": "bool",
+      "handle": "ContentHandleWire",
+      "next_offset": "u64|null",
+      "offset": "u64",
+      "returned_bytes": "u64",
+      "schema_version": "u32",
+      "sha256": "string",
+      "supports_growth": "bool",
+      "total_byte_len": "u64"
     },
     "FleetControllerMetadataWire": {
       "app_version": "string|null",
@@ -106,6 +188,18 @@
       "revoked": "bool",
       "schema_version": "u32"
     },
+    "FleetDetailRequestWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "logical_key": "string",
+      "schema_version": "u32"
+    },
+    "FleetDetailResponseWire": {
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "detail": "ResolvedAgentDetailWire",
+      "freshness": "FleetSnapshotFreshnessWire",
+      "schema_version": "u32"
+    },
     "FleetEnrollmentRequestWire": {
       "bootstrap_id": "string",
       "bootstrap_secret": "string",
@@ -127,18 +221,117 @@
       "token": "string|null; returned only on enrollment",
       "token_type": "bearer|null"
     },
+    "FleetEventStreamItemWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "shape": "serde tagged union {type,data}",
+      "variants": [
+        "invalidation: FleetInvalidationEventWire; SSE id is store_generation:sequence",
+        "resync_required: FleetResyncRequiredWire; SSE id is snapshot cursor",
+        "heartbeat: { cursor: StoreCursorWire }; no SSE id"
+      ]
+    },
     "FleetHelloResponseWire": {
       "capabilities": "CapabilitySetWire",
+      "count_revision": "u64|null",
+      "counts": "FleetLogicalAgentCountsWire",
       "credential": "FleetCredentialRecordWire",
+      "cursor": "StoreCursorWire",
+      "freshness": "FleetSnapshotFreshnessWire",
       "installation": "InstallationIdentityRecordWire",
       "machine_selector": "string",
       "protocol_version": "u32",
       "schema_version": "u32"
     },
+    "FleetInvalidationEventWire": {
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "kind": "launched|lifecycle_changed|attention_changed|revision_changed|deleted|process_exited|snapshot_replaced",
+      "logical_key": "string|null",
+      "reason": "string",
+      "row_revision": "ResourceRevisionWire|null",
+      "schema_version": "u32"
+    },
+    "FleetLogicalAgentCountsWire": {
+      "attention": "u64",
+      "basis": "FleetCountBasisWire",
+      "defined_by": "sase_core::fleet_contract",
+      "logical_agent_total": "u64",
+      "occupied_runner_slots": "u64",
+      "running": "u64",
+      "schema_version": "u32",
+      "waiting": "u64"
+    },
+    "FleetLogicalBatchEntryWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "requested_logical_key": "string",
+      "schema_version": "u32",
+      "summary": "ResolvedAgentSummaryWire|null"
+    },
+    "FleetLogicalBatchRequestWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "logical_keys": "string[]; max 200",
+      "schema_version": "u32"
+    },
+    "FleetLogicalBatchResponseWire": {
+      "count_revision": "u64|null",
+      "counts": "FleetLogicalAgentCountsWire",
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "entries": "FleetLogicalBatchEntryWire[]",
+      "freshness": "FleetSnapshotFreshnessWire",
+      "schema_version": "u32"
+    },
+    "FleetProjectEligibilityRequestWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "limit": "u32|null; max 200",
+      "project_ids": "string[]; empty means all bounded projects",
+      "schema_version": "u32"
+    },
+    "FleetProjectEligibilityResponseWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "limit": "u32",
+      "projects": "FleetProjectEligibilityWire[]",
+      "schema_version": "u32",
+      "total_matching_projects": "u64",
+      "truncated": "bool"
+    },
+    "FleetProjectEligibilityWire": {
+      "active_claim_count": "u32",
+      "defined_by": "sase_core::fleet_contract",
+      "display_name": "string|null",
+      "eligible": "bool",
+      "launchable": "bool",
+      "project_id": "string",
+      "reason": "string|null",
+      "schema_version": "u32",
+      "state": "string"
+    },
     "FleetQuarantineWire": {
       "authoritative_installation_id": "string",
       "presented_installation_id": "string",
       "reason": "installation_pin_mismatch",
+      "schema_version": "u32"
+    },
+    "FleetResyncRequiredWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "reason": "initial_cursor|generation_mismatch|sequence_ahead_of_authority|replay_gap|incomplete_deletion_history|receiver_lag|ring_rolled_over|generation_replaced",
+      "schema_version": "u32",
+      "snapshot": "FleetAuthoritativeSnapshotWire"
+    },
+    "FleetSnapshotFreshnessWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "error": "string|null; safe diagnostic code only",
+      "freshness": "fresh|aging|stale|unknown",
+      "partial": "bool",
+      "refreshed_at_unix": "f64|null",
+      "schema_version": "u32"
+    },
+    "FleetSummaryResponseWire": {
+      "count_revision": "u64|null",
+      "counts": "FleetLogicalAgentCountsWire",
+      "cursor": "StoreCursorWire",
+      "defined_by": "sase_core::fleet_contract",
+      "freshness": "FleetSnapshotFreshnessWire",
       "schema_version": "u32"
     },
     "FleetTokenRotateRequestWire": {
@@ -162,6 +355,30 @@
       "reason": "string|null",
       "rotated_at_unix": "f64|null",
       "schema_version": "u32"
+    },
+    "ResolvedAgentDetailWire": {
+      "content_handles": "ContentHandleWire[]",
+      "defined_by": "sase_core::fleet_contract",
+      "schema_version": "u32",
+      "summary": "ResolvedAgentSummaryWire"
+    },
+    "ResolvedAgentSummaryWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "identity": "logical and optional exact locators plus logical/exact keys",
+      "path_privacy": "never includes local paths, PIDs, process groups, bearer tokens, or auth headers",
+      "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, capabilities, content metadata"
+    },
+    "ResourceRevisionWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "logical_key": "string",
+      "revision": "u64",
+      "schema_version": "u32"
+    },
+    "StoreCursorWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "schema_version": "u32",
+      "sequence": "u64",
+      "store_generation": "string"
     }
   },
   "response_shape": {
@@ -196,6 +413,83 @@
       "errors": [
         "ApiErrorWire"
       ],
+      "method": "GET",
+      "path": "/api/fleet/v1/summary",
+      "required_scope": "fleet.summary.read",
+      "success": "FleetSummaryResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/catalog",
+      "request": "FleetCatalogQueryWire",
+      "required_scope": "fleet.catalog.read",
+      "success": "FleetCatalogPageWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/batch",
+      "request": "FleetLogicalBatchRequestWire",
+      "required_scope": "fleet.batch.read",
+      "success": "FleetLogicalBatchResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/detail",
+      "request": "FleetDetailRequestWire",
+      "required_scope": "fleet.detail.read",
+      "success": "FleetDetailResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/content",
+      "request": "FleetContentReadRequestWire",
+      "required_scope": "fleet.content.read",
+      "success": "FleetContentReadResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/projects/eligibility",
+      "request": "FleetProjectEligibilityRequestWire",
+      "required_scope": "fleet.projects.read",
+      "success": "FleetProjectEligibilityResponseWire"
+    },
+    {
+      "auth": true,
+      "cursor_query": "store_generation and sequence query parameters",
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/fleet/v1/events",
+      "protocol": "server_sent_events",
+      "required_scope": "fleet.events.read",
+      "success": "FleetEventStreamItemWire stream"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
       "method": "POST",
       "path": "/api/fleet/v1/credential/rotate",
       "request": "FleetTokenRotateRequestWire",
@@ -216,12 +510,15 @@
   ],
   "schema_version": 1,
   "storage": {
+    "content_access": "opaque handles resolve server-side only and return bounded base64 ranges",
     "credential_default_ttl_seconds": 7776000,
     "credentials_file": "credentials.json",
     "directory_mode": "0700",
     "file_mode": "0600",
     "lock_file": "credentials.lock",
+    "read_model_source": "<sase_home>/agent_artifact_index.sqlite plus project records",
     "root": "<sase_home>/fleet_gateway",
-    "stored_secret_material": "hashes only"
+    "stored_secret_material": "hashes only",
+    "wire_privacy": "read responses never expose local filesystem paths, PIDs, process groups, bearer tokens, or auth headers"
   }
 }

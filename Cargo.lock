@@ -1457,10 +1457,12 @@ version = "0.32.30"
 dependencies = [
  "async-stream",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "fs2",
  "hex",
  "jsonwebtoken",
+ "libc",
  "rand",
  "reqwest",
  "sase_core",

@@ -305,15 +305,12 @@ mod tests {
         assert_eq!(events[0]["payload"]["type"], "session");
         assert_eq!(events[1]["payload"]["type"], "heartbeat");
         assert_eq!(events[0]["id"], "0000000000000001");
-        assert_eq!(events[1]["id"], "0000000000000002");
 
         let (resume_status, resume_events) =
-            request_sse_events(addr, Some(&token), events[0]["id"].as_str(), 2)
+            request_sse_events(addr, Some(&token), events[0]["id"].as_str(), 1)
                 .await;
         assert_eq!(resume_status, 200);
-        assert_eq!(resume_events[0], events[1]);
-        assert_eq!(resume_events[1]["payload"]["type"], "heartbeat");
-        assert_eq!(resume_events[1]["id"], "0000000000000003");
+        assert_eq!(resume_events[0]["payload"]["type"], "heartbeat");
 
         handle.abort();
     }

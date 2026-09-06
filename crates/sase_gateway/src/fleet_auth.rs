@@ -38,6 +38,13 @@ pub const FLEET_CREDENTIAL_TTL_SECONDS: f64 = 90.0 * 24.0 * 60.0 * 60.0;
 pub const FLEET_SCOPE_HELLO: &str = "fleet.hello";
 pub const FLEET_SCOPE_ROTATE: &str = "fleet.credential.rotate";
 pub const FLEET_SCOPE_REVOKE: &str = "fleet.credential.revoke";
+pub const FLEET_SCOPE_SUMMARY_READ: &str = "fleet.summary.read";
+pub const FLEET_SCOPE_CATALOG_READ: &str = "fleet.catalog.read";
+pub const FLEET_SCOPE_BATCH_READ: &str = "fleet.batch.read";
+pub const FLEET_SCOPE_DETAIL_READ: &str = "fleet.detail.read";
+pub const FLEET_SCOPE_CONTENT_READ: &str = "fleet.content.read";
+pub const FLEET_SCOPE_PROJECTS_READ: &str = "fleet.projects.read";
+pub const FLEET_SCOPE_EVENTS_READ: &str = "fleet.events.read";
 
 const MAX_AUTH_FILE_BYTES: u64 = 512 * 1024;
 const MAX_LABEL_BYTES: usize = 256;
@@ -701,9 +708,16 @@ struct FleetAuthCache {
 
 pub fn default_fleet_scopes() -> Vec<String> {
     vec![
+        FLEET_SCOPE_BATCH_READ.to_string(),
+        FLEET_SCOPE_CATALOG_READ.to_string(),
+        FLEET_SCOPE_CONTENT_READ.to_string(),
+        FLEET_SCOPE_DETAIL_READ.to_string(),
+        FLEET_SCOPE_EVENTS_READ.to_string(),
         FLEET_SCOPE_REVOKE.to_string(),
         FLEET_SCOPE_ROTATE.to_string(),
         FLEET_SCOPE_HELLO.to_string(),
+        FLEET_SCOPE_PROJECTS_READ.to_string(),
+        FLEET_SCOPE_SUMMARY_READ.to_string(),
     ]
 }
 

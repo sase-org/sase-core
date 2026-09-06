@@ -5,6 +5,7 @@
 pub mod contract;
 pub mod daemon;
 pub mod fleet_auth;
+pub mod fleet_reads;
 pub mod host_bridge;
 pub mod push;
 pub mod routes;
@@ -29,8 +30,15 @@ pub use fleet_auth::{
     FleetCredentialStore, FleetEnrollmentResult, FleetEnrollmentSuccess,
     FleetStoreError, FLEET_AUTH_DIR, FLEET_AUTH_FILE, FLEET_AUTH_LOCK_FILE,
     FLEET_AUTH_STORE_SCHEMA_VERSION, FLEET_BOOTSTRAP_TTL_SECONDS,
-    FLEET_CREDENTIAL_TTL_SECONDS, FLEET_SCOPE_HELLO, FLEET_SCOPE_REVOKE,
-    FLEET_SCOPE_ROTATE,
+    FLEET_CREDENTIAL_TTL_SECONDS, FLEET_SCOPE_BATCH_READ,
+    FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
+    FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
+    FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
+    FLEET_SCOPE_SUMMARY_READ,
+};
+pub use fleet_reads::{
+    resync_item, FleetEventSubscription, FleetInvalidationHub, FleetReadError,
+    FleetReadService,
 };
 pub use host_bridge::{
     split_command_words, AgentHostBridge, CommandAgentHostBridge,
@@ -52,13 +60,24 @@ pub use server::{
 pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
 pub use wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
-    EventRecordWire, FleetBootstrapIssueRequestWire,
-    FleetBootstrapIssueResponseWire, FleetControllerMetadataWire,
-    FleetCredentialRecordWire, FleetCredentialRevokeRequestWire,
-    FleetCredentialRevokeResponseWire, FleetEnrollmentRequestWire,
-    FleetEnrollmentResponseWire, FleetHelloResponseWire, FleetQuarantineWire,
-    FleetTokenRotateRequestWire, FleetTokenRotateResponseWire, GatewayBindWire,
-    GatewayBuildWire, HealthResponseWire, MobileAgentActionAffordancesWire,
+    EventRecordWire, FleetAuthoritativeSnapshotWire,
+    FleetBootstrapIssueRequestWire, FleetBootstrapIssueResponseWire,
+    FleetCatalogPageSelectionWire, FleetCatalogPageWire, FleetCatalogQueryWire,
+    FleetContentReadRequestWire, FleetContentReadResponseWire,
+    FleetControllerMetadataWire, FleetCredentialRecordWire,
+    FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
+    FleetDetailRequestWire, FleetDetailResponseWire,
+    FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
+    FleetEventStreamItemWire, FleetHelloResponseWire,
+    FleetInvalidationEventWire, FleetInvalidationKindWire,
+    FleetLogicalAgentCountsWire, FleetLogicalBatchEntryWire,
+    FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
+    FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
+    FleetProjectEligibilityWire, FleetQuarantineWire, FleetResyncReasonWire,
+    FleetResyncRequiredWire, FleetSnapshotFreshnessWire,
+    FleetSummaryResponseWire, FleetTokenRotateRequestWire,
+    FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
+    HealthResponseWire, MobileAgentActionAffordancesWire,
     MobileAgentDisplayLabelsWire, MobileAgentImageLaunchRequestWire,
     MobileAgentKillRequestWire, MobileAgentKillResultWire,
     MobileAgentLaunchResultWire, MobileAgentLaunchSlotResultWire,

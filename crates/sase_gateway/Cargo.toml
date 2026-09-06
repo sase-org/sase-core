@@ -18,9 +18,11 @@ path = "src/main.rs"
 [dependencies]
 async-stream = { workspace = true }
 axum = { workspace = true }
+base64 = "0.22"
 chrono = { workspace = true, features = ["clock"] }
 fs2 = { workspace = true }
 hex = { workspace = true }
+libc = { workspace = true }
 rand = { workspace = true }
 jsonwebtoken = "9"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
