@@ -75,6 +75,7 @@ mod store_lock;
 pub mod suffix;
 pub mod task_type;
 pub mod telemetry;
+pub mod text_tail;
 pub mod vcs_log;
 pub mod wire;
 pub mod workspace_lease;
@@ -910,6 +911,7 @@ pub use telemetry::{
     TelemetryStoreStatsWire, TELEMETRY_MAX_BUSY_TIMEOUT,
     TELEMETRY_WIRE_SCHEMA_VERSION,
 };
+pub use text_tail::{tail_text_by_lines_and_chars, TextTailWire};
 pub use vcs_log::{
     aggregate_commit_log, classify_commit_origin, classify_commit_types,
     classify_commit_types_for_commit, parse_git_log, AggregatedCommitWire,

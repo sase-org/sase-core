@@ -133,6 +133,7 @@
 //! - `agent_name_in_hood(name: str, hood: str, known_owner_roots: list[str] | None = None) -> bool`
 //! - `agent_name_ancestors(name: str, known_owner_roots: list[str] | None = None) -> list[str]`
 //! - `agent_link_target(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> dict`
+//! - `tail_text_by_lines_and_chars(text: str, max_lines: int, max_chars: int) -> dict`
 //! - `agent_relationship_schema_version() -> int`
 //! - `validate_agent_relationship_batch(batch: dict) -> dict`
 //! - `rewrite_agent_relationship_batch(batch: dict, destination_ids: dict[str, str]) -> dict`
@@ -1012,6 +1013,7 @@ use sase_core::status::{
     remove_workspace_suffix as core_remove_workspace_suffix,
     StatusTransitionRequestWire,
 };
+use sase_core::tail_text_by_lines_and_chars as core_tail_text_by_lines_and_chars;
 use sase_core::task_type::{
     parse_task_type_snapshot as core_parse_task_type_snapshot,
     render_task_type_body as core_render_task_type_body,
@@ -11414,6 +11416,24 @@ fn py_fenced_block_details<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Return the output tail bounded by both line count and Unicode chars.
+#[pyfunction]
+#[pyo3(name = "tail_text_by_lines_and_chars")]
+fn py_tail_text_by_lines_and_chars<'py>(
+    py: Python<'py>,
+    text: &str,
+    max_lines: usize,
+    max_chars: usize,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_tail_text_by_lines_and_chars(
+        text, max_lines, max_chars,
+    ))
+    .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Scan `%if::` / `%proc::` directive-owned fences into a versioned wire.
 #[pyfunction]
 #[pyo3(name = "scan_directive_owned_fences")]
@@ -12627,6 +12647,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_inline_code_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tail_text_by_lines_and_chars, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_directive_owned_fences, m)?)?;
     m.add_function(wrap_pyfunction!(py_code_value_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
@@ -18023,6 +18044,33 @@ MENTORS:
             assert_eq!(
                 py_to_json_value(&value).unwrap(),
                 json!([[2, 7], [8, 12]])
+            );
+        });
+    }
+
+    #[test]
+    fn text_tail_binding_returns_plain_dict_and_counts_unicode_chars() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_tail_text_by_lines_and_chars, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            let value = module
+                .getattr("tail_text_by_lines_and_chars")
+                .unwrap()
+                .call1(("alpha\nbeta\nééévalue", 2_usize, 7_usize))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!({
+                    "text": "éévalue",
+                    "omitted_lines": 1,
+                    "omitted_chars": 6
+                })
             );
         });
     }
