@@ -42,6 +42,7 @@ pub mod external_pr;
 pub mod feature_flag_state;
 pub mod fenced_code;
 pub mod finalizer;
+pub mod fleet_contract;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;

@@ -1427,6 +1427,7 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "rand",
  "regex",
  "rusqlite",
  "serde",

@@ -167,6 +167,24 @@
 //! - `feature_flag_state_wire_schema_version() -> int`
 //! - `feature_flag_state_get(sase_home: str) -> dict`
 //! - `feature_flag_state_set(sase_home: str, flag: str, enabled: bool) -> dict`
+//! - `fleet_contract_schema_version() -> int`
+//! - `fleet_installation_identity_load(sase_home: str) -> dict`
+//! - `fleet_installation_identity_ensure(sase_home: str) -> dict`
+//! - `fleet_installation_identity_rotate(sase_home: str, request: dict) -> dict`
+//! - `fleet_installation_identity_migrate(sase_home: str, request: dict) -> dict`
+//! - `fleet_logical_locator_key(logical_locator: dict) -> str`
+//! - `fleet_instance_locator_key(instance_locator: dict) -> str`
+//! - `fleet_associate_owner_display_name(request: dict) -> dict`
+//! - `fleet_project_resolved_agent_summary(request: dict) -> dict`
+//! - `fleet_project_resolved_agent_detail(request: dict) -> dict`
+//! - `fleet_validate_resolved_agent_summary(summary: dict) -> dict`
+//! - `fleet_count_logical_agents(request: dict) -> dict`
+//! - `fleet_classify_cursor_replay(request: dict) -> dict`
+//! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
+//! - `fleet_decide_operation_replay(request: dict) -> dict`
+//! - `fleet_validate_connection_plan(plan: dict) -> dict`
+//! - `fleet_classify_runtime_duration(request: dict) -> dict`
+//! - `fleet_classify_cache_freshness(request: dict) -> dict`
 //! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
 //! - `runner_limit_override_set_relative(sase_home: str, limit: int, source: str, duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `runner_limit_override_set_until(sase_home: str, limit: int, expires_at: float, source: str, now: float | None = None) -> dict`
@@ -861,6 +879,16 @@ use sase_core::finalizer::{
     FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
     FINALIZER_WIRE_SCHEMA_VERSION,
 };
+use sase_core::fleet_contract::{
+    self as core_fleet_contract, AgentInstanceLocatorWire,
+    CacheFreshnessRequestWire, ConnectionPlanWire, CursorReplayRequestWire,
+    FleetContractError as FleetContractDomainError,
+    FleetLogicalAgentCountsRequestWire, InstallationIdentityMigrateRequestWire,
+    InstallationIdentityRotateRequestWire, LogicalAgentLocatorWire,
+    OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
+    PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
+    ResolvedAgentSummaryWire, RuntimeDurationRequestWire,
+};
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
     parse_git_branch_name as core_parse_git_branch_name,
@@ -1082,6 +1110,7 @@ use sase_core::{
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
     XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
+use serde::de::DeserializeOwned;
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct,
     SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
@@ -10904,6 +10933,288 @@ fn py_feature_flag_state_set<'py>(
     feature_flag_state_wire_to_py(py, &outcome)
 }
 
+// --- Portable fleet identity and operation contracts ---------------------
+
+fn fleet_contract_error_to_pyerr(err: FleetContractDomainError) -> PyErr {
+    let message = err.to_string();
+    match err {
+        FleetContractDomainError::Validation(_) => {
+            PyValueError::new_err(message)
+        }
+        FleetContractDomainError::LockTimeout { .. }
+        | FleetContractDomainError::Io { .. }
+        | FleetContractDomainError::Json { .. } => {
+            PyRuntimeError::new_err(message)
+        }
+    }
+}
+
+fn fleet_wire_from_pydict<T: DeserializeOwned>(
+    dict: &Bound<'_, PyDict>,
+    label: &str,
+) -> PyResult<T> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "{label} is not a valid fleet contract wire dict: {error}"
+        ))
+    })
+}
+
+fn fleet_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal fleet contract serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_contract_schema_version")]
+fn py_fleet_contract_schema_version() -> u32 {
+    core_fleet_contract::fleet_contract_schema_version()
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_installation_identity_load")]
+fn py_fleet_installation_identity_load<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_fleet_contract::load_installation_identity(&home)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_installation_identity_ensure")]
+fn py_fleet_installation_identity_ensure<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_fleet_contract::ensure_installation_identity(&home)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_installation_identity_rotate")]
+fn py_fleet_installation_identity_rotate<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: InstallationIdentityRotateRequestWire =
+        fleet_wire_from_pydict(
+            request,
+            "installation identity rotate request",
+        )?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_fleet_contract::rotate_installation_identity(&home, &request)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_installation_identity_migrate")]
+fn py_fleet_installation_identity_migrate<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: InstallationIdentityMigrateRequestWire =
+        fleet_wire_from_pydict(
+            request,
+            "installation identity migrate request",
+        )?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_fleet_contract::migrate_installation_identity(&home, &request)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_logical_locator_key")]
+fn py_fleet_logical_locator_key(
+    logical_locator: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let locator: LogicalAgentLocatorWire =
+        fleet_wire_from_pydict(logical_locator, "logical locator")?;
+    core_fleet_contract::logical_locator_key(&locator)
+        .map_err(fleet_contract_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_instance_locator_key")]
+fn py_fleet_instance_locator_key(
+    instance_locator: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let locator: AgentInstanceLocatorWire =
+        fleet_wire_from_pydict(instance_locator, "instance locator")?;
+    core_fleet_contract::instance_locator_key(&locator)
+        .map_err(fleet_contract_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_associate_owner_display_name")]
+fn py_fleet_associate_owner_display_name<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: OwnerDisplayNameRequestWire =
+        fleet_wire_from_pydict(request, "owner display name request")?;
+    let result = core_fleet_contract::associate_owner_display_name(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_project_resolved_agent_summary")]
+fn py_fleet_project_resolved_agent_summary<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ResolvedAgentProjectionRequestWire =
+        fleet_wire_from_pydict(request, "resolved agent projection request")?;
+    let result = core_fleet_contract::project_resolved_agent_summary(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_project_resolved_agent_detail")]
+fn py_fleet_project_resolved_agent_detail<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ResolvedAgentProjectionRequestWire =
+        fleet_wire_from_pydict(request, "resolved agent projection request")?;
+    let result = core_fleet_contract::project_resolved_agent_detail(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_resolved_agent_summary")]
+fn py_fleet_validate_resolved_agent_summary<'py>(
+    py: Python<'py>,
+    summary: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let summary: ResolvedAgentSummaryWire =
+        fleet_wire_from_pydict(summary, "resolved agent summary")?;
+    let result = core_fleet_contract::validate_resolved_agent_summary(&summary)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_count_logical_agents")]
+fn py_fleet_count_logical_agents<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetLogicalAgentCountsRequestWire =
+        fleet_wire_from_pydict(request, "logical agent counts request")?;
+    let result = core_fleet_contract::count_logical_agents(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_classify_cursor_replay")]
+fn py_fleet_classify_cursor_replay<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: CursorReplayRequestWire =
+        fleet_wire_from_pydict(request, "cursor replay request")?;
+    let result = core_fleet_contract::classify_cursor_replay(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_operation_payload_fingerprint")]
+fn py_fleet_operation_payload_fingerprint<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PayloadFingerprintRequestWire =
+        fleet_wire_from_pydict(request, "payload fingerprint request")?;
+    let result = core_fleet_contract::operation_payload_fingerprint(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_decide_operation_replay")]
+fn py_fleet_decide_operation_replay<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: OperationDecisionRequestWire =
+        fleet_wire_from_pydict(request, "operation decision request")?;
+    let result = core_fleet_contract::decide_operation_replay(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_connection_plan")]
+fn py_fleet_validate_connection_plan<'py>(
+    py: Python<'py>,
+    plan: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let plan: ConnectionPlanWire =
+        fleet_wire_from_pydict(plan, "connection plan")?;
+    let result = core_fleet_contract::validate_connection_plan(&plan)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_classify_runtime_duration")]
+fn py_fleet_classify_runtime_duration<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RuntimeDurationRequestWire =
+        fleet_wire_from_pydict(request, "runtime duration request")?;
+    let result = core_fleet_contract::classify_runtime_duration(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_classify_cache_freshness")]
+fn py_fleet_classify_cache_freshness<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: CacheFreshnessRequestWire =
+        fleet_wire_from_pydict(request, "cache freshness request")?;
+    let result = core_fleet_contract::classify_cache_freshness(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
 #[pyfunction]
 #[pyo3(
     name = "resolve_effective_effort",
@@ -11944,6 +12255,297 @@ fn configure_detached_process(command: &mut Command) {
     }
 }
 
+#[test]
+fn fleet_contract_bindings_round_trip_nested_dicts() {
+    use serde_json::json;
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(py_fleet_contract_schema_version(), 1);
+        let missing = py_fleet_installation_identity_load(
+            py,
+            home.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let missing = py_to_json_value(missing.bind(py)).unwrap();
+        assert!(missing["record"].is_null());
+
+        let ensured = py_fleet_installation_identity_ensure(
+            py,
+            home.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let ensured = py_to_json_value(ensured.bind(py)).unwrap();
+        assert_eq!(ensured["created"], json!(true));
+        let installation_id =
+            ensured["record"]["installation_id"].as_str().unwrap();
+
+        let origin = json!({
+            "schema_version": 1,
+            "installation_id": installation_id,
+        });
+        let project = json!({
+            "schema_version": 1,
+            "origin": origin,
+            "project_id": "sase-main",
+        });
+        let logical = json!({
+            "schema_version": 1,
+            "project": project,
+            "agent_id": "agent-1",
+            "family_id": "family-1",
+        });
+        let exact = json!({
+            "schema_version": 1,
+            "logical": logical,
+            "shell_id": "shell-1",
+            "run_id": "run-1",
+            "attempt_id": "attempt-1",
+        });
+        let logical_dict =
+            json_value_to_py(py, &logical).unwrap().into_bound(py);
+        let logical_dict = logical_dict.downcast::<PyDict>().unwrap();
+        let logical_key = py_fleet_logical_locator_key(logical_dict).unwrap();
+        let exact_dict = json_value_to_py(py, &exact).unwrap().into_bound(py);
+        let exact_dict = exact_dict.downcast::<PyDict>().unwrap();
+        assert!(py_fleet_instance_locator_key(exact_dict)
+            .unwrap()
+            .starts_with(&logical_key));
+
+        let owner = json!({
+            "schema_version": 1,
+            "logical_locator": logical,
+            "owner_username": "bryan",
+            "owner_machine_name": "athena",
+            "display_name": "athena.agent-1",
+            "display_alias": "agent-1",
+        });
+        let owner = json_value_to_py(py, &owner).unwrap().into_bound(py);
+        let owner = owner.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            py_to_json_value(
+                py_fleet_associate_owner_display_name(py, owner)
+                    .unwrap()
+                    .bind(py),
+            )
+            .unwrap()["owner_label"],
+            json!("bryan.athena")
+        );
+
+        let revision = json!({
+            "schema_version": 1,
+            "logical_key": logical_key,
+            "revision": 7,
+        });
+        let handle = json!({
+            "schema_version": 1,
+            "id": "transcript-1",
+            "kind": "transcript",
+            "revision": revision,
+            "digest": "a".repeat(64),
+            "byte_len": 1024,
+            "supports_range": true,
+            "supports_growth": true,
+        });
+        let request = json!({
+            "schema_version": 1,
+            "record": {
+                "project_name": "SASE",
+                "project_dir": "/tmp/project",
+                "project_file": "/tmp/project.sase",
+                "workflow_dir_name": "ace-run",
+                "artifact_dir": "/tmp/artifacts/20260906120000",
+                "timestamp": "20260906120000",
+                "agent_meta": {
+                    "name": "athena.agent-1",
+                    "model": "gpt-5",
+                    "llm_provider": "codex",
+                    "agent_family": "family-1"
+                },
+                "running": {
+                    "pid": 1234,
+                    "model": "gpt-5",
+                    "llm_provider": "codex",
+                    "workspace_dir": "/tmp/ws"
+                },
+                "raw_prompt_snippet": "Implement the approved plan",
+                "has_done_marker": false
+            },
+            "logical_locator": logical,
+            "owner_facts": {
+                "schema_version": 1,
+                "exact_locator": exact,
+                "row_revision": revision,
+                "liveness": "alive",
+                "connection_health": "online",
+                "freshness": "fresh",
+                "observed_at_unix": 10.0,
+                "row_kind": "agent_shell",
+                "current_instance": true,
+                "dismissable": false,
+                "needs_attention": false,
+                "occupied_runner_slot": true,
+                "container_projected_concrete_agent": false,
+                "capabilities": {
+                    "schema_version": 1,
+                    "resource": ["stop", "content.read"],
+                    "host": [],
+                    "protocol": []
+                },
+                "content_handles": [handle]
+            }
+        });
+        let request = json_value_to_py(py, &request).unwrap().into_bound(py);
+        let request = request.downcast::<PyDict>().unwrap();
+        let summary =
+            py_fleet_project_resolved_agent_summary(py, request).unwrap();
+        let summary_value = py_to_json_value(summary.bind(py)).unwrap();
+        assert_eq!(summary_value["lifecycle"], json!("running"));
+        assert_eq!(summary_value["content"]["handle_count"], json!(1));
+        let summary_dict = summary.bind(py).downcast::<PyDict>().unwrap();
+        let validated =
+            py_fleet_validate_resolved_agent_summary(py, summary_dict).unwrap();
+        assert_eq!(
+            py_to_json_value(validated.bind(py)).unwrap(),
+            summary_value
+        );
+
+        let detail =
+            py_fleet_project_resolved_agent_detail(py, request).unwrap();
+        assert_eq!(
+            py_to_json_value(detail.bind(py)).unwrap()["content_handles"][0]
+                ["id"],
+            json!("transcript-1")
+        );
+        let counts_req = json!({
+            "schema_version": 1,
+            "summaries": [summary_value],
+        });
+        let counts_req =
+            json_value_to_py(py, &counts_req).unwrap().into_bound(py);
+        let counts_req = counts_req.downcast::<PyDict>().unwrap();
+        let counts = py_fleet_count_logical_agents(py, counts_req).unwrap();
+        assert_eq!(
+            py_to_json_value(counts.bind(py)).unwrap()["running"],
+            json!(1)
+        );
+
+        let cursor_req = json!({
+            "schema_version": 1,
+            "cursor": {
+                "schema_version": 1,
+                "store_generation": "gen-1",
+                "sequence": 4
+            },
+            "current_generation": "gen-1",
+            "newest_sequence": 5,
+            "oldest_replayable_sequence": 5,
+            "deletion_history_complete": true
+        });
+        let cursor_req =
+            json_value_to_py(py, &cursor_req).unwrap().into_bound(py);
+        let cursor_req = cursor_req.downcast::<PyDict>().unwrap();
+        let cursor = py_fleet_classify_cursor_replay(py, cursor_req).unwrap();
+        assert_eq!(
+            py_to_json_value(cursor.bind(py)).unwrap()["classification"],
+            json!("replayable")
+        );
+
+        let fingerprint_req = json!({
+            "schema_version": 1,
+            "payload": {"b": 2, "a": 1},
+        });
+        let fingerprint_req = json_value_to_py(py, &fingerprint_req)
+            .unwrap()
+            .into_bound(py);
+        let fingerprint_req = fingerprint_req.downcast::<PyDict>().unwrap();
+        let fingerprint =
+            py_fleet_operation_payload_fingerprint(py, fingerprint_req)
+                .unwrap();
+        let fingerprint_value = py_to_json_value(fingerprint.bind(py)).unwrap();
+        assert_eq!(fingerprint_value["sha256"].as_str().unwrap().len(), 64);
+
+        let op_req = json!({
+            "schema_version": 1,
+            "key": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "operation_id": "op-1"
+            },
+            "payload_fingerprint": fingerprint_value,
+            "target": exact,
+            "resource_revision": revision,
+            "now_unix": 10.0,
+            "acceptance_window_seconds": 5.0,
+            "existing_record": null
+        });
+        let op_req = json_value_to_py(py, &op_req).unwrap().into_bound(py);
+        let op_req = op_req.downcast::<PyDict>().unwrap();
+        let decision = py_fleet_decide_operation_replay(py, op_req).unwrap();
+        assert_eq!(
+            py_to_json_value(decision.bind(py)).unwrap()["decision"],
+            json!("accept_new")
+        );
+
+        let plan = json!({
+            "schema_version": 1,
+            "provider_ref": "provider-a",
+            "endpoint": "https://fleet.example.test/api",
+            "credential_ref": "cred-main",
+            "pinned_installation_id": installation_id,
+            "connection_kind": "gateway",
+            "tls": {
+                "schema_version": 1,
+                "mode": "system_roots",
+                "ca_ref": null,
+                "server_name_ref": null
+            }
+        });
+        let plan = json_value_to_py(py, &plan).unwrap().into_bound(py);
+        let plan = plan.downcast::<PyDict>().unwrap();
+        assert!(py_fleet_validate_connection_plan(py, plan).is_ok());
+
+        let duration_req = json!({
+            "schema_version": 1,
+            "owner_started_at_unix": 1.0,
+            "owner_stopped_at_unix": null,
+            "owner_observed_at_unix": 4.5,
+            "max_clock_anomaly_seconds": 1.0
+        });
+        let duration_req =
+            json_value_to_py(py, &duration_req).unwrap().into_bound(py);
+        let duration_req = duration_req.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            py_to_json_value(
+                py_fleet_classify_runtime_duration(py, duration_req)
+                    .unwrap()
+                    .bind(py)
+            )
+            .unwrap()["elapsed_seconds"],
+            json!(3.5)
+        );
+        let freshness_req = json!({
+            "schema_version": 1,
+            "viewer_monotonic_elapsed_seconds": null,
+            "fresh_threshold_seconds": 3.0,
+            "stale_threshold_seconds": 10.0
+        });
+        let freshness_req =
+            json_value_to_py(py, &freshness_req).unwrap().into_bound(py);
+        let freshness_req = freshness_req.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            py_to_json_value(
+                py_fleet_classify_cache_freshness(py, freshness_req)
+                    .unwrap()
+                    .bind(py)
+            )
+            .unwrap()["freshness"],
+            json!("unknown")
+        );
+    });
+}
+
 #[cfg(windows)]
 fn configure_detached_process(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -12911,6 +13513,48 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_feature_flag_state_get, m)?)?;
     m.add_function(wrap_pyfunction!(py_feature_flag_state_set, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_contract_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_installation_identity_load, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_installation_identity_ensure,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_installation_identity_rotate,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_installation_identity_migrate,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_logical_locator_key, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_instance_locator_key, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_associate_owner_display_name,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_project_resolved_agent_summary,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_project_resolved_agent_detail,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_validate_resolved_agent_summary,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_count_logical_agents, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_classify_cursor_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_operation_payload_fingerprint,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_decide_operation_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_connection_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_size_model_route, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_epic_land_model, m)?)?;
