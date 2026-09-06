@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.31](https://github.com/sase-org/sase-core/compare/v0.32.30...v0.32.31) - 2026-09-06
+
+### Added
+
+- *(gateway)* add fleet read API
+
 ## [0.32.30](https://github.com/sase-org/sase-core/compare/v0.32.29...v0.32.30) - 2026-09-06
 
 ### Added
