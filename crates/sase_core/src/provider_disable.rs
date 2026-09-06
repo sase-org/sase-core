@@ -24,6 +24,12 @@ const PROVIDER_DISABLE_LOCK_FILENAME: &str = "llm_provider_disables.lock";
 const LOCK_TIMEOUT: Duration = Duration::from_millis(250);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderDisableReadRepair {
+    ReadOnly,
+    Repair,
+}
+
 /// How a disable participates in routing.
 ///
 /// `hard` is today's fail-closed disable. `soft` spares the provider in
@@ -131,7 +137,7 @@ pub fn provider_disable_state_path(sase_home: &Path) -> PathBuf {
     sase_home.join(PROVIDER_DISABLE_STATE_FILENAME)
 }
 
-fn provider_disable_lock_path(sase_home: &Path) -> PathBuf {
+pub(crate) fn provider_disable_lock_path(sase_home: &Path) -> PathBuf {
     sase_home.join(PROVIDER_DISABLE_LOCK_FILENAME)
 }
 
@@ -320,6 +326,18 @@ fn read_records_locked(
     sase_home: &Path,
     now: Option<f64>,
 ) -> Result<BTreeMap<String, ProviderDisableWire>, ProviderDisableError> {
+    read_records_locked_with_repair(
+        sase_home,
+        now,
+        ProviderDisableReadRepair::Repair,
+    )
+}
+
+pub(crate) fn read_records_locked_with_repair(
+    sase_home: &Path,
+    now: Option<f64>,
+    repair: ProviderDisableReadRepair,
+) -> Result<BTreeMap<String, ProviderDisableWire>, ProviderDisableError> {
     let path = provider_disable_state_path(sase_home);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -332,14 +350,18 @@ fn read_records_locked(
     {
         Ok(raw) => raw,
         Err(_) => {
-            remove_invalid_state(&path)?;
+            if repair == ProviderDisableReadRepair::Repair {
+                remove_invalid_state(&path)?;
+            }
             return Ok(BTreeMap::new());
         }
     };
     if raw.version != PROVIDER_DISABLE_WIRE_SCHEMA_VERSION
         && raw.version != PROVIDER_DISABLE_WIRE_SCHEMA_V1
     {
-        remove_invalid_state(&path)?;
+        if repair == ProviderDisableReadRepair::Repair {
+            remove_invalid_state(&path)?;
+        }
         return Ok(BTreeMap::new());
     }
 
@@ -380,7 +402,7 @@ fn read_records_locked(
         records.insert(provider, record);
     }
 
-    if changed {
+    if changed && repair == ProviderDisableReadRepair::Repair {
         if records.is_empty() {
             remove_invalid_state(&path)?;
         } else {

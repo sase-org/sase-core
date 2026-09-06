@@ -178,6 +178,19 @@
 //! - `provider_disable_try_set_relative(sase_home: str, provider: str, source: str, mode: str = "hard", duration_seconds: float | None = None, now: float | None = None) -> dict`
 //! - `provider_disable_try_set_until(sase_home: str, provider: str, expires_at: float, source: str, mode: str = "hard", now: float | None = None) -> dict`
 //! - `provider_disable_clear(sase_home: str, provider: str) -> bool`
+//! - `provider_priority_wire_schema_version() -> int`
+//! - `provider_routing_context_wire_schema_version() -> int`
+//! - `provider_availability_wire_schema_version() -> int`
+//! - `provider_priority_get(sase_home: str, now: float | None = None) -> dict | None`
+//! - `provider_priority_peek(sase_home: str, now: float | None = None) -> dict`
+//! - `provider_priority_decode(data: bytes | None, now: float | None = None) -> dict`
+//! - `provider_priority_set_relative(sase_home: str, provider: str, source: str, facts: dict, expected: dict | None = None, duration_seconds: float | None = None, now: float | None = None) -> dict`
+//! - `provider_priority_set_until(sase_home: str, provider: str, expires_at: float, source: str, facts: dict, expected: dict | None = None, now: float | None = None) -> dict`
+//! - `provider_priority_clear(sase_home: str, expected: dict | None = None, now: float | None = None) -> dict`
+//! - `provider_routing_context_get(sase_home: str, now: float | None = None) -> dict`
+//! - `provider_routing_context_from_parts(disables: list[dict], priority: dict | None, captured_at: float) -> dict`
+//! - `provider_availability_classify(context: dict, facts: dict) -> dict`
+//! - `provider_availability_classify_many(context: dict, facts: list[dict]) -> list[dict]`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `size_model_route(size: str) -> dict`
 //! - `select_epic_land_model(explicit_model: str | None, phase_count: int, threshold: int, epic_lander_model: str, big_epic_lander_model: str) -> dict`
@@ -974,6 +987,22 @@ use sase_core::provider_disable::{
     try_set_provider_disable_relative as core_try_set_provider_disable_relative,
     try_set_provider_disable_until as core_try_set_provider_disable_until,
     ProviderDisableError as ProviderDisableDomainError, ProviderDisableMode,
+};
+use sase_core::provider_priority::{
+    classify_provider_availability as core_classify_provider_availability,
+    classify_provider_availability_many as core_classify_provider_availability_many,
+    clear_provider_priority as core_clear_provider_priority,
+    decode_provider_priority_bytes as core_decode_provider_priority_bytes,
+    get_provider_priority as core_get_provider_priority,
+    get_provider_routing_context as core_get_provider_routing_context,
+    peek_provider_priority as core_peek_provider_priority,
+    provider_routing_context_from_parts as core_provider_routing_context_from_parts,
+    set_provider_priority_relative as core_set_provider_priority_relative,
+    set_provider_priority_until as core_set_provider_priority_until,
+    ProviderAvailabilityFactsWire,
+    ProviderPriorityError as ProviderPriorityDomainError,
+    ProviderPriorityTargetFactsWire, ProviderPriorityWire,
+    ProviderRoutingContextWire,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -10546,6 +10575,275 @@ fn py_provider_disable_clear(
         .map_err(provider_disable_error_to_pyerr)
 }
 
+// --- Temporary LLM provider priority ----------------------------------
+
+fn provider_priority_error_to_pyerr(err: ProviderPriorityDomainError) -> PyErr {
+    match err {
+        ProviderPriorityDomainError::Validation(message) => {
+            PyValueError::new_err(message)
+        }
+        ProviderPriorityDomainError::LockTimeout
+        | ProviderPriorityDomainError::Io(_)
+        | ProviderPriorityDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+fn provider_priority_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal provider-priority serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+fn provider_priority_dict_from_py<T>(
+    value: &Bound<'_, PyAny>,
+    label: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+        PyValueError::new_err(format!("{label} is not a valid dict: {error}"))
+    })
+}
+
+fn provider_priority_optional_record_from_py(
+    expected: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<ProviderPriorityWire>> {
+    let Some(value) = expected else {
+        return Ok(None);
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    provider_priority_dict_from_py(value, "expected priority").map(Some)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_priority_wire_schema_version")]
+fn py_provider_priority_wire_schema_version() -> u32 {
+    sase_core::PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_routing_context_wire_schema_version")]
+fn py_provider_routing_context_wire_schema_version() -> u32 {
+    sase_core::PROVIDER_ROUTING_CONTEXT_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_availability_wire_schema_version")]
+fn py_provider_availability_wire_schema_version() -> u32 {
+    sase_core::PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_priority_get", signature = (sase_home, now = None))]
+fn py_provider_priority_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let priority = core_get_provider_priority(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &priority)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_priority_peek", signature = (sase_home, now = None))]
+fn py_provider_priority_peek<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let decoded = core_peek_provider_priority(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &decoded)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_priority_decode", signature = (data, now = None))]
+fn py_provider_priority_decode<'py>(
+    py: Python<'py>,
+    data: Option<&Bound<'py, PyBytes>>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let decoded = core_decode_provider_priority_bytes(
+        data.map(|value| value.as_bytes()),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &decoded)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_priority_set_relative",
+    signature = (
+        sase_home,
+        provider,
+        source,
+        facts,
+        expected = None,
+        duration_seconds = None,
+        now = None
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+fn py_provider_priority_set_relative<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    source: &str,
+    facts: &Bound<'_, PyDict>,
+    expected: Option<&Bound<'_, PyAny>>,
+    duration_seconds: Option<f64>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let facts: ProviderPriorityTargetFactsWire =
+        provider_priority_dict_from_py(facts.as_any(), "facts")?;
+    let expected = provider_priority_optional_record_from_py(expected)?;
+    let outcome = core_set_provider_priority_relative(
+        &PathBuf::from(sase_home),
+        provider,
+        duration_seconds,
+        source,
+        &facts,
+        expected.as_ref(),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_priority_set_until",
+    signature = (sase_home, provider, expires_at, source, facts, expected = None, now = None)
+)]
+#[allow(clippy::too_many_arguments)]
+fn py_provider_priority_set_until<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    expires_at: f64,
+    source: &str,
+    facts: &Bound<'_, PyDict>,
+    expected: Option<&Bound<'_, PyAny>>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let facts: ProviderPriorityTargetFactsWire =
+        provider_priority_dict_from_py(facts.as_any(), "facts")?;
+    let expected = provider_priority_optional_record_from_py(expected)?;
+    let outcome = core_set_provider_priority_until(
+        &PathBuf::from(sase_home),
+        provider,
+        expires_at,
+        source,
+        &facts,
+        expected.as_ref(),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_priority_clear", signature = (sase_home, expected = None, now = None))]
+fn py_provider_priority_clear<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    expected: Option<&Bound<'_, PyAny>>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let expected = provider_priority_optional_record_from_py(expected)?;
+    let outcome = core_clear_provider_priority(
+        &PathBuf::from(sase_home),
+        expected.as_ref(),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_routing_context_get", signature = (sase_home, now = None))]
+fn py_provider_routing_context_get<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let context = core_get_provider_routing_context(
+        &PathBuf::from(sase_home),
+        effort_override_now(now)?,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &context)
+}
+
+#[pyfunction]
+fn provider_routing_context_from_parts<'py>(
+    py: Python<'py>,
+    disables: &Bound<'_, PyList>,
+    priority: &Bound<'_, PyAny>,
+    captured_at: f64,
+) -> PyResult<PyObject> {
+    let disables =
+        provider_priority_dict_from_py(disables.as_any(), "disables")?;
+    let priority = provider_priority_optional_record_from_py(Some(priority))?;
+    let context = core_provider_routing_context_from_parts(
+        disables,
+        priority,
+        captured_at,
+    )
+    .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &context)
+}
+
+#[pyfunction]
+fn provider_availability_classify<'py>(
+    py: Python<'py>,
+    context: &Bound<'_, PyDict>,
+    facts: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let context: ProviderRoutingContextWire =
+        provider_priority_dict_from_py(context.as_any(), "context")?;
+    let facts: ProviderAvailabilityFactsWire =
+        provider_priority_dict_from_py(facts.as_any(), "facts")?;
+    let availability = core_classify_provider_availability(&context, &facts)
+        .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &availability)
+}
+
+#[pyfunction]
+fn provider_availability_classify_many<'py>(
+    py: Python<'py>,
+    context: &Bound<'_, PyDict>,
+    facts: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let context: ProviderRoutingContextWire =
+        provider_priority_dict_from_py(context.as_any(), "context")?;
+    let facts: Vec<ProviderAvailabilityFactsWire> =
+        provider_priority_dict_from_py(facts.as_any(), "facts")?;
+    let availability =
+        core_classify_provider_availability_many(&context, &facts)
+            .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &availability)
+}
+
 fn feature_flag_state_error_to_pyerr(
     err: FeatureFlagStateDomainError,
 ) -> PyErr {
@@ -12585,6 +12883,28 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_provider_disable_try_set_relative, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_try_set_until, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_disable_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_priority_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_routing_context_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_availability_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_peek, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_decode, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_set_relative, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_set_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_priority_clear, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_routing_context_get, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_routing_context_from_parts, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_availability_classify, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_availability_classify_many, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_feature_flag_state_wire_schema_version,
         m
@@ -15249,6 +15569,300 @@ mod tests {
                 py_provider_disable_get(py, &home, Some(1.0)).unwrap();
             let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
             assert_eq!(snapshot_value["disables"], json!([]));
+        });
+    }
+
+    #[test]
+    fn provider_priority_bindings_round_trip_conflict_and_clear() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_provider_priority_wire_schema_version(),
+                sase_core::PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION
+            );
+            assert_eq!(
+                py_provider_routing_context_wire_schema_version(),
+                sase_core::PROVIDER_ROUTING_CONTEXT_WIRE_SCHEMA_VERSION
+            );
+            assert_eq!(
+                py_provider_availability_wire_schema_version(),
+                sase_core::PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION
+            );
+
+            let facts = PyDict::new_bound(py);
+            facts.set_item("provider", "codex").unwrap();
+            facts.set_item("registered", true).unwrap();
+            facts.set_item("user_facing", true).unwrap();
+            facts.set_item("cli_available", true).unwrap();
+
+            let first = py_provider_priority_set_relative(
+                py,
+                &home,
+                "codex",
+                "ace",
+                &facts,
+                None,
+                Some(7_200.0),
+                Some(now),
+            )
+            .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            let first_record =
+                json_value_to_py(py, &first_value["record"]).unwrap();
+            assert_eq!(first_value["status"], json!("changed"));
+            assert_eq!(
+                first_value["record"],
+                json!({
+                    "version": 1,
+                    "provider": "codex",
+                    "created_at": now,
+                    "expires_at": now + 7_200.0,
+                    "source": "ace",
+                })
+            );
+
+            let priority =
+                py_provider_priority_get(py, &home, Some(now)).unwrap();
+            let priority_value = py_to_json_value(priority.bind(py)).unwrap();
+            assert_eq!(priority_value, first_value["record"]);
+
+            let claude_facts = PyDict::new_bound(py);
+            claude_facts.set_item("provider", "claude").unwrap();
+            claude_facts.set_item("registered", true).unwrap();
+            claude_facts.set_item("user_facing", true).unwrap();
+            claude_facts.set_item("cli_available", true).unwrap();
+            let conflict = py_provider_priority_set_until(
+                py,
+                &home,
+                "claude",
+                now + 60.0,
+                "ace",
+                &claude_facts,
+                None,
+                Some(now),
+            )
+            .unwrap();
+            let conflict_value = py_to_json_value(conflict.bind(py)).unwrap();
+            assert_eq!(conflict_value["status"], json!("conflict"));
+            assert_eq!(conflict_value["current"], first_value["record"]);
+
+            let replacement = py_provider_priority_set_until(
+                py,
+                &home,
+                "claude",
+                now + 60.0,
+                "ace",
+                &claude_facts,
+                Some(first_record.bind(py)),
+                Some(now),
+            )
+            .unwrap();
+            let replacement_value =
+                py_to_json_value(replacement.bind(py)).unwrap();
+            let replacement_record =
+                json_value_to_py(py, &replacement_value["record"]).unwrap();
+            assert_eq!(replacement_value["status"], json!("changed"));
+            assert_eq!(
+                replacement_value["record"]["provider"],
+                json!("claude")
+            );
+
+            let stale_clear = py_provider_priority_clear(
+                py,
+                &home,
+                Some(first_record.bind(py)),
+                Some(now),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(stale_clear.bind(py)).unwrap()["status"],
+                json!("conflict")
+            );
+            let clear = py_provider_priority_clear(
+                py,
+                &home,
+                Some(replacement_record.bind(py)),
+                Some(now),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(clear.bind(py)).unwrap()["status"],
+                json!("changed")
+            );
+            let second_clear =
+                py_provider_priority_clear(py, &home, None, Some(now)).unwrap();
+            assert_eq!(
+                py_to_json_value(second_clear.bind(py)).unwrap()["status"],
+                json!("unchanged")
+            );
+        });
+    }
+
+    #[test]
+    fn provider_priority_binding_context_and_policy_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            let facts = PyDict::new_bound(py);
+            facts.set_item("provider", "codex").unwrap();
+            facts.set_item("registered", true).unwrap();
+            facts.set_item("user_facing", true).unwrap();
+            facts.set_item("cli_available", true).unwrap();
+            let priority = py_provider_priority_set_relative(
+                py,
+                &home,
+                "codex",
+                "ace",
+                &facts,
+                None,
+                None,
+                Some(now),
+            )
+            .unwrap();
+            let priority_value = py_to_json_value(priority.bind(py)).unwrap();
+            let priority_record =
+                json_value_to_py(py, &priority_value["record"]).unwrap();
+            py_provider_disable_set_relative(
+                py,
+                &home,
+                "grok",
+                "usage_limit",
+                "soft",
+                None,
+                Some(now),
+            )
+            .unwrap();
+
+            let context =
+                py_provider_routing_context_get(py, &home, Some(now)).unwrap();
+            let context_value = py_to_json_value(context.bind(py)).unwrap();
+            assert_eq!(context_value["priority"]["provider"], json!("codex"));
+            assert_eq!(context_value["disables"][0]["provider"], json!("grok"));
+
+            let claude = PyDict::new_bound(py);
+            claude.set_item("provider", "claude").unwrap();
+            claude.set_item("registered", true).unwrap();
+            claude.set_item("user_facing", true).unwrap();
+            claude.set_item("cli_available", true).unwrap();
+            let classified = provider_availability_classify(
+                py,
+                context.bind(py).downcast::<PyDict>().unwrap(),
+                &claude,
+            )
+            .unwrap();
+            let classified_value =
+                py_to_json_value(classified.bind(py)).unwrap();
+            assert_eq!(classified_value["availability"], json!("sparing"));
+            assert_eq!(
+                classified_value["provenance"],
+                json!(["priority_backup"])
+            );
+
+            let many = PyList::empty_bound(py);
+            many.append(claude.as_any()).unwrap();
+            let many_result = provider_availability_classify_many(
+                py,
+                context.bind(py).downcast::<PyDict>().unwrap(),
+                &many,
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(many_result.bind(py)).unwrap()[0],
+                classified_value
+            );
+
+            let bad_bytes = PyBytes::new_bound(py, b"not json");
+            let decoded =
+                py_provider_priority_decode(py, Some(&bad_bytes), Some(now))
+                    .unwrap();
+            let decoded_value = py_to_json_value(decoded.bind(py)).unwrap();
+            assert_eq!(decoded_value["priority"], json!(null));
+            assert_eq!(
+                decoded_value["diagnostics"].as_array().unwrap().len(),
+                1
+            );
+
+            let disables = PyList::empty_bound(py);
+            for item in context_value["disables"].as_array().unwrap() {
+                disables
+                    .append(json_value_to_py(py, item).unwrap())
+                    .unwrap();
+            }
+            let context_from_parts = provider_routing_context_from_parts(
+                py,
+                &disables,
+                priority_record.bind(py),
+                now,
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(context_from_parts.bind(py)).unwrap()
+                    ["priority"],
+                priority_value["record"]
+            );
+        });
+    }
+
+    #[test]
+    fn provider_priority_binding_rejects_invalid_values() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        Python::with_gil(|py| {
+            let facts = PyDict::new_bound(py);
+            facts.set_item("provider", "codex").unwrap();
+            facts.set_item("registered", true).unwrap();
+            facts.set_item("user_facing", true).unwrap();
+            facts.set_item("cli_available", true).unwrap();
+            let error = py_provider_priority_set_relative(
+                py,
+                &home,
+                "",
+                "ace",
+                &facts,
+                None,
+                None,
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let error = py_provider_priority_set_until(
+                py,
+                &home,
+                "codex",
+                1.0,
+                "ace",
+                &facts,
+                None,
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+
+            let mut expected = serde_json::to_value(json!({
+                "version": 1,
+                "provider": "codex",
+                "created_at": 1.0,
+                "expires_at": null,
+                "source": "ace",
+            }))
+            .unwrap();
+            expected["source"] = json!("");
+            let expected_py = json_value_to_py(py, &expected).unwrap();
+            let error = py_provider_priority_clear(
+                py,
+                &home,
+                Some(expected_py.bind(py)),
+                Some(1.0),
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 

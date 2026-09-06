@@ -62,6 +62,7 @@ pub mod prompt_literals;
 mod prompt_rewrite;
 pub mod prompt_stash;
 pub mod provider_disable;
+pub mod provider_priority;
 pub mod query;
 mod reference_path;
 pub mod referenced_by;
@@ -836,6 +837,22 @@ pub use provider_disable::{
     ProviderDisableError, ProviderDisableMode, ProviderDisableSnapshotWire,
     ProviderDisableWire, ProviderDisableWriteOutcomeWire,
     PROVIDER_DISABLE_STATE_FILENAME, PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+};
+pub use provider_priority::{
+    classify_provider_availability, classify_provider_availability_many,
+    clear_provider_priority, decode_provider_priority_bytes,
+    get_provider_priority, get_provider_routing_context,
+    peek_provider_priority, provider_priority_state_path,
+    provider_routing_context_from_parts, set_provider_priority_relative,
+    set_provider_priority_until, ProviderAvailabilityFactsWire,
+    ProviderAvailabilityProvenance, ProviderAvailabilityWire,
+    ProviderEffectiveAvailability, ProviderPriorityDecodeWire,
+    ProviderPriorityError, ProviderPriorityTargetFactsWire,
+    ProviderPriorityWire, ProviderPriorityWriteOutcomeWire,
+    ProviderPriorityWriteStatus, ProviderRoutingContextWire,
+    PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION,
+    PROVIDER_PRIORITY_STATE_FILENAME, PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION,
+    PROVIDER_ROUTING_CONTEXT_WIRE_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, canonicalize_query_with_profile, compile_query,
