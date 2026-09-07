@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.40](https://github.com/sase-org/sase-core/compare/v0.32.39...v0.32.40) - 2026-09-07
+
+### Added
+
+- *(artifact-ref)* resolve document-owned source paths by repository identity
+
 ## [0.32.39](https://github.com/sase-org/sase-core/compare/v0.32.38...v0.32.39) - 2026-09-07
 
 ### Added
