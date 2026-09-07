@@ -9,6 +9,7 @@ pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -382,4 +383,85 @@ pub struct ArtifactRefDocumentScanWire {
     pub links: Vec<ArtifactRefDocumentTargetWire>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+}
+
+/// Provenance for a scanned document link's own source, used to resolve an
+/// unqualified path in its owning repository rather than the viewer's cwd.
+///
+/// `checkout_candidates` are caller-attached, already-known checkout
+/// directories (for example a producer's recorded workspace) tried before
+/// the shared repository inventory. An empty value means the caller has no
+/// stronger evidence than repository identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefDocumentOwnerWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_directory: Option<String>,
+    #[serde(default)]
+    pub checkout_candidates: Vec<String>,
+}
+
+/// Why a target resolution did not land on one exact path, and whether a
+/// later retry (reload, or a newly created checkout) could still succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRefTargetFailureCategoryWire {
+    /// The repository is known, but none of its checkouts exist right now.
+    MissingCheckout,
+    /// The repository and checkout exist, but not at the requested revision.
+    UnavailableRevision,
+    /// More than one equally plausible target was found.
+    Ambiguous,
+    /// A configured permission/filter policy rejected the path outright.
+    DeniedFiltered,
+    /// The lookup itself failed (I/O error, budget exceeded); not a verdict.
+    TemporaryError,
+    /// Every known checkout was searched and the path is not present.
+    ProvenMissing,
+}
+
+impl ArtifactRefTargetFailureCategoryWire {
+    /// Whether this outcome may resolve differently without any input change.
+    pub fn retryable(self) -> bool {
+        !matches!(self, Self::Ambiguous | Self::DeniedFiltered)
+    }
+}
+
+/// One candidate the resolver inspected or selected, kept as evidence rather
+/// than discarded once a decision is made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefTargetCandidateWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub path: String,
+    /// Short evidence tag, e.g. `attached_checkout`, `repository_checkout`,
+    /// `suffix_match`.
+    pub evidence: String,
+}
+
+/// The outcome of resolving one document-owned source-path target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefTargetResolutionWire {
+    pub schema_version: u64,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<ArtifactRefTargetCandidateWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_category: Option<ArtifactRefTargetFailureCategoryWire>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }

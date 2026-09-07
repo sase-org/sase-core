@@ -288,6 +288,8 @@
 //! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
 //! - `artifact_ref_scan_document(text: str, known_kinds: list[str] | None = None) -> dict`
 //! - `artifact_ref_document_scan_wire_schema_version() -> int`
+//! - `artifact_ref_resolve_document_source_target(path: str, owner: dict, context: dict) -> dict`
+//! - `artifact_ref_target_resolution_wire_schema_version() -> int`
 //! - `artifact_ref_wire_schema_version() -> int`
 //! - `prompt_artifact_pool_filename(sha256: str, original_name: str) -> str`
 //! - `prompt_artifact_manifest_parse(data: bytes) -> list[dict]`
@@ -727,16 +729,17 @@ use sase_core::artifact_ref::{
     render_artifact_ref_use_record as core_render_artifact_ref_use_record,
     resolve_artifact_ref as core_resolve_artifact_ref,
     resolve_artifact_ref_list as core_resolve_artifact_ref_list,
+    resolve_document_source_target as core_resolve_document_source_target,
     scan_artifact_ref_document_links as core_scan_artifact_ref_document_links,
     scan_artifact_refs as core_scan_artifact_refs,
     validate_artifact_entry as core_validate_artifact_entry,
     validate_artifact_ref_expansion_format as core_validate_artifact_ref_expansion_format,
     validate_artifact_ref_file_row as core_validate_artifact_ref_file_row,
     validate_artifact_ref_provider_spec as core_validate_artifact_ref_provider_spec,
-    ArtifactEntryWire, ArtifactRefContextWire, ArtifactRefError,
-    ArtifactRefFileVersionRowWire, ArtifactRefProviderSpecWire,
-    ArtifactRefUseRecordWire, ParsedArtifactRefWire,
-    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ArtifactEntryWire, ArtifactRefContextWire, ArtifactRefDocumentOwnerWire,
+    ArtifactRefError, ArtifactRefFileVersionRowWire,
+    ArtifactRefProviderSpecWire, ArtifactRefUseRecordWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_EXPANSION_PLACEHOLDERS,
@@ -746,6 +749,7 @@ use sase_core::artifact_ref::{
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION,
 };
 use sase_core::axe_chop::{
@@ -4942,6 +4946,47 @@ fn py_artifact_ref_scan_document<'py>(
 #[pyo3(name = "artifact_ref_document_scan_wire_schema_version")]
 fn py_artifact_ref_document_scan_wire_schema_version() -> u64 {
     ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION
+}
+
+/// Resolve an unqualified source-path target in its owning repository.
+///
+/// `owner` carries whatever provenance the caller already knows about the
+/// document that named `path` (its own canonical reference, owning project,
+/// repository, revision, source directory, and any already-known checkout
+/// candidates). `context` is the same `ArtifactRefContextWire`-shaped dict
+/// used by `artifact_ref_resolve`, scoped to the document's owning project so
+/// its `repositories` inventory reflects that project's linked repos rather
+/// than the viewer's cwd.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_resolve_document_source_target")]
+fn py_artifact_ref_resolve_document_source_target<'py>(
+    py: Python<'py>,
+    path: &str,
+    owner: &Bound<'py, PyDict>,
+    context: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let owner: ArtifactRefDocumentOwnerWire = serde_json::from_value(
+        py_to_json_value(owner.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "owner is not a valid ArtifactRefDocumentOwnerWire dict: {error}"
+        ))
+    })?;
+    let context = artifact_ref_context_from_pydict(context)?;
+    artifact_ref_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_resolve_document_source_target(path, &owner, &context)
+        }),
+    )
+}
+
+/// Return the artifact-reference target-resolution wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_target_resolution_wire_schema_version")]
+fn py_artifact_ref_target_resolution_wire_schema_version() -> u64 {
+    ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION
 }
 
 /// Return the shared parse/resolution artifact-reference wire version.
@@ -14046,6 +14091,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_ref_document_scan_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_resolve_document_source_target,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_target_resolution_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_kind_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_kind_canonicalize, m)?)?;
@@ -18571,6 +18624,54 @@ MENTORS:
                 json!("plan:202607/plan.md")
             );
             assert_eq!(document_scan["links"][1]["target"], json!("plan:x.md"));
+
+            let linked_repo = temp.path().join("bob-mac-capture");
+            fs::create_dir_all(linked_repo.join("Sources/BobMacCapture"))
+                .unwrap();
+            fs::write(
+                linked_repo.join(
+                    "Sources/BobMacCapture/CaptureKeyCommandRouter.swift",
+                ),
+                "swift",
+            )
+            .unwrap();
+            let repo_context_value = json!({
+                "schema_version": 2,
+                "repositories": [{
+                    "name": "bob-mac-capture",
+                    "checkout_paths": [linked_repo.to_string_lossy()],
+                }],
+            });
+            let repo_context_object =
+                json_value_to_py(py, &repo_context_value).unwrap();
+            let repo_context =
+                repo_context_object.bind(py).downcast::<PyDict>().unwrap();
+            let owner_object = json_value_to_py(py, &json!({})).unwrap();
+            let owner = owner_object.bind(py).downcast::<PyDict>().unwrap();
+            let target_resolved =
+                py_artifact_ref_resolve_document_source_target(
+                    py,
+                    "Sources/BobMacCapture/CaptureKeyCommandRouter.swift",
+                    owner,
+                    repo_context,
+                )
+                .unwrap();
+            let target_resolved =
+                py_to_json_value(target_resolved.bind(py)).unwrap();
+            assert_eq!(target_resolved["schema_version"], json!(1));
+            assert_eq!(target_resolved["status"], json!("exact"));
+            assert_eq!(target_resolved["repository"], json!("bob-mac-capture"));
+            assert_eq!(
+                target_resolved["resolved_path"],
+                json!(linked_repo
+                    .join("Sources/BobMacCapture/CaptureKeyCommandRouter.swift")
+                    .to_string_lossy())
+            );
+            assert_eq!(
+                py_artifact_ref_target_resolution_wire_schema_version(),
+                1
+            );
+
             assert_eq!(py_artifact_ref_document_scan_wire_schema_version(), 1);
             assert_eq!(py_artifact_ref_wire_schema_version(), 5);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());

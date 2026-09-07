@@ -8,6 +8,7 @@ mod kinds;
 mod list;
 mod provider_spec;
 mod ref_files;
+mod repository_resolution;
 mod scanner;
 mod uses;
 mod wire;
@@ -60,6 +61,7 @@ pub use ref_files::{
     ArtifactRefFileVersionRowWire, ArtifactRefFileVersionWire,
     ArtifactRefLogicalFileWire, ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
 };
+pub use repository_resolution::resolve_document_source_target;
 pub use scanner::{
     quote_artifact_ref_argument, scan_artifact_ref_document_links,
     scan_artifact_refs,
@@ -72,20 +74,23 @@ pub use uses::{
 pub use wire::{
     ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
-    ArtifactRefDocumentRootWire, ArtifactRefDocumentScanWire,
-    ArtifactRefDocumentTargetKindWire, ArtifactRefDocumentTargetWire,
-    ArtifactRefError, ArtifactRefFileRootWire, ArtifactRefFragmentWire,
-    ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefDocumentOwnerWire, ArtifactRefDocumentRootWire,
+    ArtifactRefDocumentScanWire, ArtifactRefDocumentTargetKindWire,
+    ArtifactRefDocumentTargetWire, ArtifactRefError, ArtifactRefFileRootWire,
+    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefListEntryWire,
     ArtifactRefListResolutionWire, ArtifactRefPathFilterBatchWire,
     ArtifactRefPayloadWire, ArtifactRefProjectWire,
     ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
-    ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
+    ArtifactRefResolutionWire, ArtifactRefSpanWire,
+    ArtifactRefTargetCandidateWire, ArtifactRefTargetFailureCategoryWire,
+    ArtifactRefTargetResolutionWire, ParsedArtifactRefWire,
     ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 
 use file_roots::resolve_artifact_file_path;
