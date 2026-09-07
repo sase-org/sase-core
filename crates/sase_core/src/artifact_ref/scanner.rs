@@ -1,10 +1,23 @@
-use super::parse_artifact_ref;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
+
+use regex::Regex;
+
 use super::wire::{
-    ArtifactRefPromptCandidateWire, ArtifactRefSpanWire,
+    ArtifactRefDocumentScanWire, ArtifactRefDocumentTargetKindWire,
+    ArtifactRefDocumentTargetWire, ArtifactRefPromptCandidateWire,
+    ArtifactRefSpanWire, ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
 };
+use super::{
+    artifact_ref_kind_catalog, canonical_artifact_ref_kind, parse_artifact_ref,
+    parse_artifact_ref_canonical,
+};
+use crate::artifact_link::{LINKS_BLOCK_END_MARKER, LINKS_BLOCK_START_MARKER};
+use crate::markdown_link_refs::scan_markdown_reference_links;
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
+const URL_TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', '!', '?'];
 
 pub fn scan_artifact_refs(text: &str) -> Vec<ArtifactRefPromptCandidateWire> {
     let mut candidates = Vec::new();
@@ -73,6 +86,759 @@ pub fn scan_artifact_refs(text: &str) -> Vec<ArtifactRefPromptCandidateWire> {
         });
     }
     candidates
+}
+
+/// Scan rendered documents for pager-activatable targets.
+///
+/// Unlike [`scan_artifact_refs`], this document-oriented contract separates
+/// the visible source span from the semantic destination. It understands
+/// Markdown inline/reference links, SASE-generated Links tables, prompt-style
+/// `@kind:payload` refs, unsigiled document refs for configured kinds, URLs,
+/// and the same path shapes the Python pager historically linked.
+pub fn scan_artifact_ref_document_links(
+    text: &str,
+    known_kinds: &[String],
+) -> ArtifactRefDocumentScanWire {
+    let known_labels = known_document_kind_labels(known_kinds);
+    let link_table_ranges = managed_links_table_ranges(text);
+    let mut links = Vec::new();
+    let mut occupied = Vec::new();
+
+    for link in
+        scan_markdown_document_links(text, &known_labels, &link_table_ranges)
+    {
+        occupied.push((link.source_span.start, link.source_span.end));
+        links.push(link);
+    }
+
+    for candidate in scan_artifact_refs(text) {
+        let link = prompt_candidate_document_link(candidate, &known_labels);
+        if link.well_formed {
+            if overlaps(link.source_span.start, link.source_span.end, &occupied)
+            {
+                continue;
+            }
+            occupied.push((link.source_span.start, link.source_span.end));
+        }
+        links.push(link);
+    }
+
+    for link in scan_unsigiled_artifact_refs(text, &known_labels) {
+        if link.well_formed {
+            if overlaps(link.source_span.start, link.source_span.end, &occupied)
+            {
+                continue;
+            }
+            occupied.push((link.source_span.start, link.source_span.end));
+        }
+        links.push(link);
+    }
+
+    for link in scan_document_urls(text, &occupied) {
+        occupied.push((link.source_span.start, link.source_span.end));
+        links.push(link);
+    }
+
+    for link in scan_document_file_paths(text, &occupied) {
+        occupied.push((link.source_span.start, link.source_span.end));
+        links.push(link);
+    }
+
+    links.sort_by_key(|link| {
+        (
+            link.source_span.start,
+            link.source_span.end,
+            link.target_kind.label(),
+        )
+    });
+    ArtifactRefDocumentScanWire {
+        schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+        links,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn known_document_kind_labels(known_kinds: &[String]) -> BTreeSet<String> {
+    let mut labels: BTreeSet<String> = [
+        "agent", "bead", "bug", "chat", "commit", "file", "patch", "plan",
+        "plans", "stitch",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    for descriptor in artifact_ref_kind_catalog() {
+        labels.insert(descriptor.kind);
+        labels.extend(descriptor.aliases);
+    }
+    for raw in known_kinds {
+        let label = raw.trim();
+        if label.is_empty() {
+            continue;
+        }
+        labels.insert(label.to_string());
+        labels.insert(canonical_artifact_ref_kind(label).canonical);
+    }
+    labels
+}
+
+fn prompt_candidate_document_link(
+    candidate: ArtifactRefPromptCandidateWire,
+    known_labels: &BTreeSet<String>,
+) -> ArtifactRefDocumentTargetWire {
+    let well_formed =
+        candidate.well_formed && known_labels.contains(&candidate.kind);
+    let target = canonical_document_artifact_ref(&candidate.reference)
+        .unwrap_or_else(|| candidate.reference.clone());
+    let target_span =
+        span(candidate.kind_span.start, candidate.candidate_span.end);
+    ArtifactRefDocumentTargetWire {
+        schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+        target_kind: ArtifactRefDocumentTargetKindWire::ArtifactRef,
+        text: candidate.text,
+        target: target.clone(),
+        well_formed,
+        source_span: candidate.candidate_span,
+        candidate_span: candidate.candidate_span,
+        target_span,
+        label_span: None,
+        destination_span: None,
+        reference_label: None,
+        markdown_destination: None,
+        hosted_destination: None,
+        artifact_reference: well_formed.then_some(target),
+        quoted: candidate.quoted,
+    }
+}
+
+fn scan_unsigiled_artifact_refs(
+    text: &str,
+    known_labels: &BTreeSet<String>,
+) -> Vec<ArtifactRefDocumentTargetWire> {
+    let labels = sorted_known_labels(known_labels);
+    let mut links = Vec::new();
+    for (start, character) in text.char_indices() {
+        if !character.is_ascii_lowercase()
+            || !has_allowed_left_context(text, start)
+        {
+            continue;
+        }
+        let Some(label) = labels.iter().find(|label| {
+            text[start..].starts_with(label.as_str())
+                && text[start + label.len()..].starts_with(':')
+        }) else {
+            continue;
+        };
+        let synthetic = format!("@{}", &text[start..]);
+        let Some(candidate) = scan_artifact_refs(&synthetic).into_iter().next()
+        else {
+            continue;
+        };
+        if candidate.candidate_span.start != 0 || candidate.kind != **label {
+            continue;
+        }
+        let end = start + candidate.candidate_span.end.saturating_sub(1);
+        let well_formed = candidate.well_formed;
+        let target = canonical_document_artifact_ref(&candidate.reference)
+            .unwrap_or_else(|| candidate.reference.clone());
+        links.push(ArtifactRefDocumentTargetWire {
+            schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+            target_kind: ArtifactRefDocumentTargetKindWire::ArtifactRef,
+            text: text[start..end].to_string(),
+            target: target.clone(),
+            well_formed,
+            source_span: span(start, end),
+            candidate_span: span(start, end),
+            target_span: span(start, end),
+            label_span: None,
+            destination_span: None,
+            reference_label: None,
+            markdown_destination: None,
+            hosted_destination: None,
+            artifact_reference: well_formed.then_some(target),
+            quoted: candidate.quoted,
+        });
+    }
+    links
+}
+
+fn sorted_known_labels(known_labels: &BTreeSet<String>) -> Vec<String> {
+    let mut labels = known_labels.iter().cloned().collect::<Vec<_>>();
+    labels.sort_by(|left, right| {
+        right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+    });
+    labels
+}
+
+#[derive(Debug)]
+struct MarkdownDocumentLink<'a> {
+    source_span: ArtifactRefSpanWire,
+    label_span: ArtifactRefSpanWire,
+    label: &'a str,
+    destination_span: Option<ArtifactRefSpanWire>,
+    destination: String,
+    reference_label: Option<String>,
+}
+
+fn scan_markdown_document_links(
+    text: &str,
+    known_labels: &BTreeSet<String>,
+    link_table_ranges: &[(usize, usize)],
+) -> Vec<ArtifactRefDocumentTargetWire> {
+    let definitions: BTreeMap<String, String> =
+        scan_markdown_reference_links(text)
+            .definitions
+            .into_iter()
+            .map(|definition| (definition.label, definition.destination))
+            .collect();
+    let mut links = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'[' {
+            index += 1;
+            continue;
+        }
+        let Some((label, label_span, first_end)) =
+            scan_markdown_bracket(text, index)
+        else {
+            index += 1;
+            continue;
+        };
+        if bytes.get(first_end) == Some(&b':') {
+            index = first_end;
+            continue;
+        }
+
+        let link = if bytes.get(first_end) == Some(&b'(') {
+            parse_inline_markdown_link(
+                text, index, label, label_span, first_end,
+            )
+        } else if bytes.get(first_end) == Some(&b'[') {
+            parse_full_or_collapsed_reference_link(
+                text,
+                index,
+                label,
+                label_span,
+                first_end,
+                &definitions,
+            )
+        } else {
+            parse_shortcut_reference_link(
+                text,
+                index,
+                label,
+                label_span,
+                first_end,
+                &definitions,
+            )
+        };
+
+        let Some(link) = link else {
+            index += 1;
+            continue;
+        };
+        index = link.source_span.end;
+        links.push(markdown_link_to_document_target(
+            text,
+            link,
+            known_labels,
+            link_table_ranges,
+        ));
+    }
+    links
+}
+
+fn parse_inline_markdown_link<'a>(
+    text: &'a str,
+    source_start: usize,
+    label: &'a str,
+    label_span: ArtifactRefSpanWire,
+    open_paren: usize,
+) -> Option<MarkdownDocumentLink<'a>> {
+    let (destination, destination_span, source_end) =
+        scan_inline_destination(text, open_paren)?;
+    Some(MarkdownDocumentLink {
+        source_span: span(source_start, source_end),
+        label_span,
+        label,
+        destination_span: Some(destination_span),
+        destination,
+        reference_label: None,
+    })
+}
+
+fn parse_full_or_collapsed_reference_link<'a>(
+    text: &'a str,
+    source_start: usize,
+    label: &'a str,
+    label_span: ArtifactRefSpanWire,
+    second_start: usize,
+    definitions: &BTreeMap<String, String>,
+) -> Option<MarkdownDocumentLink<'a>> {
+    let (raw_ref_label, _, source_end) =
+        scan_markdown_bracket(text, second_start)?;
+    let reference_label = if raw_ref_label.is_empty() {
+        unescape_markdown_text(label)
+    } else {
+        unescape_markdown_text(raw_ref_label)
+    };
+    let destination = definitions.get(&reference_label)?;
+    Some(MarkdownDocumentLink {
+        source_span: span(source_start, source_end),
+        label_span,
+        label,
+        destination_span: None,
+        destination: destination.clone(),
+        reference_label: Some(reference_label),
+    })
+}
+
+fn parse_shortcut_reference_link<'a>(
+    _text: &'a str,
+    source_start: usize,
+    label: &'a str,
+    label_span: ArtifactRefSpanWire,
+    source_end: usize,
+    definitions: &BTreeMap<String, String>,
+) -> Option<MarkdownDocumentLink<'a>> {
+    let reference_label = unescape_markdown_text(label);
+    let destination = definitions.get(&reference_label)?;
+    Some(MarkdownDocumentLink {
+        source_span: span(source_start, source_end),
+        label_span,
+        label,
+        destination_span: None,
+        destination: destination.clone(),
+        reference_label: Some(reference_label),
+    })
+}
+
+fn markdown_link_to_document_target(
+    text: &str,
+    link: MarkdownDocumentLink<'_>,
+    known_labels: &BTreeSet<String>,
+    link_table_ranges: &[(usize, usize)],
+) -> ArtifactRefDocumentTargetWire {
+    let label = unescape_markdown_text(link.label);
+    let inside_links_table =
+        contains_position(link_table_ranges, link.source_span.start);
+    let markdown_destination = Some(link.destination.clone());
+    if inside_links_table && is_url_target(&link.destination) {
+        if let Some(reference) =
+            canonical_artifact_ref_from_document_text(&label, known_labels)
+        {
+            return ArtifactRefDocumentTargetWire {
+                schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+                target_kind: ArtifactRefDocumentTargetKindWire::ArtifactRef,
+                text: text[link.source_span.start..link.source_span.end]
+                    .to_string(),
+                target: reference.clone(),
+                well_formed: true,
+                source_span: link.source_span,
+                candidate_span: link.source_span,
+                target_span: link.label_span,
+                label_span: Some(link.label_span),
+                destination_span: link.destination_span,
+                reference_label: link.reference_label,
+                markdown_destination,
+                hosted_destination: Some(link.destination),
+                artifact_reference: Some(reference),
+                quoted: false,
+            };
+        }
+    }
+
+    if let Some(reference) = canonical_artifact_ref_from_document_text(
+        &link.destination,
+        known_labels,
+    ) {
+        return ArtifactRefDocumentTargetWire {
+            schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+            target_kind: ArtifactRefDocumentTargetKindWire::ArtifactRef,
+            text: text[link.source_span.start..link.source_span.end]
+                .to_string(),
+            target: reference.clone(),
+            well_formed: true,
+            source_span: link.source_span,
+            candidate_span: link.source_span,
+            target_span: link.destination_span.unwrap_or(link.label_span),
+            label_span: Some(link.label_span),
+            destination_span: link.destination_span,
+            reference_label: link.reference_label,
+            markdown_destination,
+            hosted_destination: None,
+            artifact_reference: Some(reference),
+            quoted: false,
+        };
+    }
+
+    let target_kind = if is_url_target(&link.destination) {
+        ArtifactRefDocumentTargetKindWire::Url
+    } else {
+        ArtifactRefDocumentTargetKindWire::FilePath
+    };
+    ArtifactRefDocumentTargetWire {
+        schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+        target_kind,
+        text: text[link.source_span.start..link.source_span.end].to_string(),
+        target: link.destination.clone(),
+        well_formed: true,
+        source_span: link.source_span,
+        candidate_span: link.source_span,
+        target_span: link.destination_span.unwrap_or(link.label_span),
+        label_span: Some(link.label_span),
+        destination_span: link.destination_span,
+        reference_label: link.reference_label,
+        markdown_destination,
+        hosted_destination: (target_kind
+            == ArtifactRefDocumentTargetKindWire::Url)
+            .then_some(link.destination),
+        artifact_reference: None,
+        quoted: false,
+    }
+}
+
+fn scan_markdown_bracket(
+    text: &str,
+    start: usize,
+) -> Option<(&str, ArtifactRefSpanWire, usize)> {
+    let content_start = start + 1;
+    let mut escaped = false;
+    for (offset, character) in text[content_start..].char_indices() {
+        if character == '\n' || character == '\r' {
+            return None;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == ']' {
+            let content_end = content_start + offset;
+            return Some((
+                &text[content_start..content_end],
+                span(content_start, content_end),
+                content_end + 1,
+            ));
+        }
+    }
+    None
+}
+
+fn scan_inline_destination(
+    text: &str,
+    open_paren: usize,
+) -> Option<(String, ArtifactRefSpanWire, usize)> {
+    let destination_start = open_paren + 1;
+    if text[destination_start..].starts_with('<') {
+        let content_start = destination_start + 1;
+        let mut escaped = false;
+        for (offset, character) in text[content_start..].char_indices() {
+            if character == '\n' || character == '\r' {
+                return None;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if character == '\\' {
+                escaped = true;
+                continue;
+            }
+            if character == '>' {
+                let content_end = content_start + offset;
+                let close = content_end + 1;
+                if text[close..].starts_with(')') {
+                    return Some((
+                        unescape_markdown_text(
+                            &text[content_start..content_end],
+                        ),
+                        span(content_start, content_end),
+                        close + 1,
+                    ));
+                }
+                return None;
+            }
+        }
+        return None;
+    }
+
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    for (offset, character) in text[destination_start..].char_indices() {
+        if character == '\n' || character == '\r' || character.is_whitespace() {
+            return None;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '(' {
+            paren_depth += 1;
+            continue;
+        }
+        if character == ')' {
+            let at = destination_start + offset;
+            if paren_depth == 0 {
+                return Some((
+                    unescape_markdown_text(&text[destination_start..at]),
+                    span(destination_start, at),
+                    at + 1,
+                ));
+            }
+            paren_depth -= 1;
+        }
+    }
+    None
+}
+
+fn canonical_artifact_ref_from_document_text(
+    raw: &str,
+    known_labels: &BTreeSet<String>,
+) -> Option<String> {
+    let trimmed = raw.trim();
+    let candidate = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    let (kind, _) = candidate.split_once(':')?;
+    if !known_labels.contains(kind) {
+        return None;
+    }
+    canonical_document_artifact_ref(candidate)
+}
+
+fn canonical_document_artifact_ref(value: &str) -> Option<String> {
+    parse_artifact_ref_canonical(value)
+        .ok()
+        .map(|parsed| parsed.reference.rendered)
+}
+
+fn managed_links_table_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut search_start = 0usize;
+    while let Some(relative_start) =
+        text[search_start..].find(LINKS_BLOCK_START_MARKER)
+    {
+        let start = search_start + relative_start;
+        let content_start = start + LINKS_BLOCK_START_MARKER.len();
+        let end = text[content_start..]
+            .find(LINKS_BLOCK_END_MARKER)
+            .map(|relative_end| {
+                content_start + relative_end + LINKS_BLOCK_END_MARKER.len()
+            })
+            .unwrap_or(text.len());
+        ranges.push((start, end));
+        search_start = end;
+    }
+    ranges
+}
+
+fn scan_document_urls(
+    text: &str,
+    occupied: &[(usize, usize)],
+) -> Vec<ArtifactRefDocumentTargetWire> {
+    static URL_PREFIX_RE: OnceLock<Regex> = OnceLock::new();
+    let regex =
+        URL_PREFIX_RE.get_or_init(|| Regex::new(r"(?i)https?://").unwrap());
+    let mut links = Vec::new();
+    for match_ in regex.find_iter(text) {
+        let start = match_.start();
+        if !has_url_left_context(text, start) {
+            continue;
+        }
+        let end = trim_url_end(text, start, scan_url_end(text, start));
+        if end <= start || overlaps(start, end, occupied) {
+            continue;
+        }
+        let target = text[start..end].to_string();
+        links.push(simple_document_link(
+            ArtifactRefDocumentTargetKindWire::Url,
+            start,
+            end,
+            start,
+            target.clone(),
+            target,
+        ));
+    }
+    links
+}
+
+fn scan_url_end(text: &str, start: usize) -> usize {
+    let mut end = start;
+    let mut paren_depth = 0usize;
+    for (offset, character) in text[start..].char_indices() {
+        if character.is_whitespace()
+            || matches!(
+                character,
+                '<' | '>' | '[' | ']' | '{' | '}' | '\'' | '"' | '`'
+            )
+        {
+            break;
+        }
+        if character == '(' {
+            paren_depth += 1;
+        } else if character == ')' {
+            if paren_depth == 0 {
+                break;
+            }
+            paren_depth -= 1;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    end
+}
+
+fn trim_url_end(text: &str, start: usize, mut end: usize) -> usize {
+    while end > start {
+        let Some(character) = text[start..end].chars().next_back() else {
+            break;
+        };
+        if !URL_TRAILING_PUNCTUATION.contains(&character) {
+            break;
+        }
+        end -= character.len_utf8();
+    }
+    end
+}
+
+fn scan_document_file_paths(
+    text: &str,
+    occupied: &[(usize, usize)],
+) -> Vec<ArtifactRefDocumentTargetWire> {
+    static FILE_PATH_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = FILE_PATH_RE.get_or_init(|| {
+        Regex::new(
+            r"@?(?:~?/[\w.+-][\w.+/-]*|\.{1,2}/[\w.+-][\w.+/-]*|\.[\w-]+/[\w.+/-]*|[\w-]+/[\w.+/-]*\.[\w]+)(?::\d+(?::\d+)?)?",
+        )
+        .unwrap()
+    });
+    let mut links = Vec::new();
+    for match_ in regex.find_iter(text) {
+        let start = match_.start();
+        if !has_file_path_left_context(text, start) {
+            continue;
+        }
+        let end = trim_file_path_end(text, start, match_.end());
+        if end <= start || overlaps(start, end, occupied) {
+            continue;
+        }
+        let target_start = if text[start..end].starts_with('@') {
+            start + 1
+        } else {
+            start
+        };
+        let target = text[target_start..end].to_string();
+        links.push(simple_document_link(
+            ArtifactRefDocumentTargetKindWire::FilePath,
+            start,
+            end,
+            target_start,
+            text[start..end].to_string(),
+            target,
+        ));
+    }
+    links
+}
+
+fn trim_file_path_end(text: &str, start: usize, mut end: usize) -> usize {
+    while end > start {
+        let Some(character) = text[start..end].chars().next_back() else {
+            break;
+        };
+        if character != '.' {
+            break;
+        }
+        end -= character.len_utf8();
+    }
+    end
+}
+
+fn simple_document_link(
+    target_kind: ArtifactRefDocumentTargetKindWire,
+    start: usize,
+    end: usize,
+    target_start: usize,
+    text: String,
+    target: String,
+) -> ArtifactRefDocumentTargetWire {
+    let hosted_destination = (target_kind
+        == ArtifactRefDocumentTargetKindWire::Url)
+        .then(|| target.clone());
+    ArtifactRefDocumentTargetWire {
+        schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+        target_kind,
+        text,
+        target,
+        well_formed: true,
+        source_span: span(start, end),
+        candidate_span: span(start, end),
+        target_span: span(target_start, end),
+        label_span: None,
+        destination_span: None,
+        reference_label: None,
+        markdown_destination: None,
+        hosted_destination,
+        artifact_reference: None,
+        quoted: false,
+    }
+}
+
+fn unescape_markdown_text(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut escaped = false;
+    for character in raw.chars() {
+        if escaped {
+            result.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else {
+            result.push(character);
+        }
+    }
+    if escaped {
+        result.push('\\');
+    }
+    result
+}
+
+fn is_url_target(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn has_url_left_context(text: &str, start: usize) -> bool {
+    start == 0
+        || text[..start].chars().next_back().is_some_and(|character| {
+            !character.is_alphanumeric() && character != '_'
+        })
+}
+
+fn has_file_path_left_context(text: &str, start: usize) -> bool {
+    start == 0
+        || text[..start].chars().next_back().is_some_and(|character| {
+            !(character.is_alphanumeric()
+                || matches!(character, '/' | '@' | '.' | '_'))
+        })
+}
+
+fn contains_position(ranges: &[(usize, usize)], position: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| position >= *start && position < *end)
+}
+
+fn overlaps(start: usize, end: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|(range_start, range_end)| {
+        start < *range_end && *range_start < end
+    })
 }
 
 /// Build the candidate for an `@kind:"…"` quoted argument.
@@ -277,6 +1043,133 @@ mod tests {
         let mut candidates = scan_artifact_refs(text);
         assert_eq!(candidates.len(), 1, "{text}");
         candidates.remove(0)
+    }
+
+    fn document_links(text: &str) -> Vec<ArtifactRefDocumentTargetWire> {
+        scan_artifact_ref_document_links(text, &["plan".to_string()])
+            .links
+            .into_iter()
+            .filter(|link| link.well_formed)
+            .collect()
+    }
+
+    #[test]
+    fn document_scan_separates_visible_prompt_ref_from_canonical_target() {
+        let source = r##"é @plans:"a b.md"#L3 and @src/app.py:42"##;
+        let links = document_links(source);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].text, r##"@plans:"a b.md"#L3"##);
+        assert_eq!(links[0].target, "plan:a b.md#L3");
+        assert_eq!(
+            &source[links[0].source_span.start..links[0].source_span.end],
+            links[0].text
+        );
+        assert_eq!(links[0].source_span.start, "é ".len());
+        assert_eq!(
+            links[1].target_kind,
+            ArtifactRefDocumentTargetKindWire::FilePath
+        );
+        assert_eq!(links[1].text, "@src/app.py:42");
+        assert_eq!(links[1].target, "src/app.py:42");
+    }
+
+    #[test]
+    fn document_scan_handles_unsigiled_refs_for_known_kinds() {
+        let links = scan_artifact_ref_document_links(
+            "see plan:202609/pager_target_integrity.md and custom:guide.md",
+            &["plan".to_string(), "custom".to_string()],
+        );
+
+        let targets = links
+            .links
+            .iter()
+            .filter(|link| link.well_formed)
+            .map(|link| link.target.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            ["plan:202609/pager_target_integrity.md", "custom:guide.md"]
+        );
+    }
+
+    #[test]
+    fn document_scan_uses_markdown_destination_for_ordinary_links() {
+        let links = document_links(
+            "open [the plan](plan:202609/pager_target_integrity.md#L4) \
+             and [source](src/sase/pager/link_scan.py:12)",
+        );
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links[0].text,
+            "[the plan](plan:202609/pager_target_integrity.md#L4)"
+        );
+        assert_eq!(links[0].target, "plan:202609/pager_target_integrity.md#L4");
+        assert_eq!(
+            links[1].target_kind,
+            ArtifactRefDocumentTargetKindWire::FilePath
+        );
+        assert_eq!(links[1].target, "src/sase/pager/link_scan.py:12");
+    }
+
+    #[test]
+    fn document_scan_keeps_generated_links_table_ref_and_hosted_url() {
+        let document = concat!(
+            "<!-- sase:links:start -->\n\n",
+            "## Links\n\n",
+            "| Relation | Artifact | Why |\n",
+            "| --- | --- | --- |\n",
+            "| implements | [plan:202609/capture_line_edge_cycling.md][2] | screenshot |\n\n",
+            "[2]: https://github.com/bobs-org/bob-cli/blob/main/.sase/plans/202609/capture_line_edge_cycling.md\n\n",
+            "<!-- sase:links:end -->\n"
+        );
+        let links = document_links(document);
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links[0].text,
+            "[plan:202609/capture_line_edge_cycling.md][2]"
+        );
+        assert_eq!(links[0].target, "plan:202609/capture_line_edge_cycling.md");
+        assert_eq!(
+            links[0].hosted_destination.as_deref(),
+            Some("https://github.com/bobs-org/bob-cli/blob/main/.sase/plans/202609/capture_line_edge_cycling.md")
+        );
+        assert_eq!(
+            links[1].target_kind,
+            ArtifactRefDocumentTargetKindWire::Url
+        );
+        assert_eq!(
+            links[1].target,
+            "https://github.com/bobs-org/bob-cli/blob/main/.sase/plans/202609/capture_line_edge_cycling.md"
+        );
+    }
+
+    #[test]
+    fn document_scan_keeps_urls_whole_without_inner_file_links() {
+        let links = document_links(
+            "see https://example.com/src/foo.py:12?q=a#frag and \
+             https://example.com/a_(b). then src/foo.py:12",
+        );
+
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| (link.target_kind, link.target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    ArtifactRefDocumentTargetKindWire::Url,
+                    "https://example.com/src/foo.py:12?q=a#frag"
+                ),
+                (
+                    ArtifactRefDocumentTargetKindWire::Url,
+                    "https://example.com/a_(b)"
+                ),
+                (ArtifactRefDocumentTargetKindWire::FilePath, "src/foo.py:12"),
+            ]
+        );
     }
 
     #[test]

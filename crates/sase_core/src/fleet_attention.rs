@@ -434,6 +434,11 @@ fn fleet_attention_kind_for(
         | MobileActionKindWire::EpicApproval
         | MobileActionKindWire::Hitl
         | MobileActionKindWire::LaunchApproval
+        | MobileActionKindWire::TaskTriage
+        | MobileActionKindWire::BeadSnooze
+        | MobileActionKindWire::FlagTriage
+        | MobileActionKindWire::BeadStaleCleanup
+        | MobileActionKindWire::PluginsRequired
         | MobileActionKindWire::CustomGate => {
             Some(FleetAttentionKindWire::Gate)
         }

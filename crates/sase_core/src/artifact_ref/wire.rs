@@ -8,6 +8,7 @@ pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 5;
 pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -325,4 +326,60 @@ pub struct ArtifactRefPromptCandidateWire {
     pub payload_span: ArtifactRefSpanWire,
     pub fragment_span: Option<ArtifactRefSpanWire>,
     pub quoted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactRefDocumentTargetKindWire {
+    ArtifactRef,
+    Url,
+    FilePath,
+}
+
+impl ArtifactRefDocumentTargetKindWire {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ArtifactRef => "artifact_ref",
+            Self::Url => "url",
+            Self::FilePath => "file_path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefDocumentTargetWire {
+    pub schema_version: u64,
+    pub target_kind: ArtifactRefDocumentTargetKindWire,
+    /// Exact visible bytes that should receive the pager label.
+    pub text: String,
+    /// Semantic destination for follow/copy/edit. This excludes prompt sigils,
+    /// Markdown delimiters, and reference-label syntax.
+    pub target: String,
+    pub well_formed: bool,
+    pub source_span: ArtifactRefSpanWire,
+    /// Compatibility alias for callers already shaped around prompt candidates.
+    pub candidate_span: ArtifactRefSpanWire,
+    pub target_span: ArtifactRefSpanWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_span: Option<ArtifactRefSpanWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_span: Option<ArtifactRefSpanWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown_destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_reference: Option<String>,
+    #[serde(default)]
+    pub quoted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRefDocumentScanWire {
+    pub schema_version: u64,
+    pub links: Vec<ArtifactRefDocumentTargetWire>,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
 }

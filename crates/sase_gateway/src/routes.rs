@@ -3469,6 +3469,11 @@ fn attachment_candidates(
             }
         }
         MobileActionKindWire::LaunchApproval
+        | MobileActionKindWire::TaskTriage
+        | MobileActionKindWire::BeadSnooze
+        | MobileActionKindWire::FlagTriage
+        | MobileActionKindWire::BeadStaleCleanup
+        | MobileActionKindWire::PluginsRequired
         | MobileActionKindWire::CustomGate
         | MobileActionKindWire::NonAction
         | MobileActionKindWire::Unsupported => {}

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{json, Value as JsonValue};
 
 use super::mobile::{
     pending_action_identity, MobileActionKindWire, MobileActionStateWire,
@@ -50,6 +50,12 @@ pub struct PendingActionWire {
     #[serde(default)]
     pub transports: Vec<PendingActionTransportWire>,
     pub state: MobileActionStateWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled_at_unix: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled_action: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +103,9 @@ pub fn pending_action_from_notification(
             record: BTreeMap::new(),
         }],
         state: MobileActionStateWire::Available,
+        handled_source: None,
+        handled_at_unix: None,
+        handled_action: None,
     })
 }
 
@@ -111,6 +120,11 @@ pub fn register_pending_action(
         let mut next = action.clone();
         if let Some(existing) = store.actions.get(&action.prefix) {
             next.created_at_unix = existing.created_at_unix;
+            next.stale_deadline_unix = existing.stale_deadline_unix;
+            next.state = existing.state;
+            next.handled_source = existing.handled_source.clone();
+            next.handled_at_unix = existing.handled_at_unix;
+            next.handled_action = existing.handled_action.clone();
             for transport in &existing.transports {
                 if !next
                     .transports
@@ -169,6 +183,156 @@ pub fn cleanup_stale_pending_actions(
     })();
     unlock(lock)?;
     result
+}
+
+pub fn merge_pending_action_transport(
+    path: &Path,
+    identifier: &str,
+    transport: &str,
+    record: &BTreeMap<String, JsonValue>,
+    now_unix: f64,
+) -> Result<bool, String> {
+    mutate_pending_action_store(path, |store| {
+        let Some(key) = find_pending_action_key(store, identifier) else {
+            return Ok((false, false));
+        };
+        let entry = store
+            .actions
+            .get_mut(&key)
+            .expect("pending action key came from this store");
+        merge_transport_record(entry, transport, record);
+        entry.updated_at_unix = now_unix;
+        Ok((true, true))
+    })
+}
+
+pub fn mark_pending_action_handled(
+    path: &Path,
+    identifier: &str,
+    source: &str,
+    action: Option<&str>,
+    now_unix: f64,
+) -> Result<bool, String> {
+    mutate_pending_action_store(path, |store| {
+        let Some(key) = find_pending_action_key(store, identifier) else {
+            return Ok((false, false));
+        };
+        let entry = store
+            .actions
+            .get_mut(&key)
+            .expect("pending action key came from this store");
+        apply_handled(entry, source, action, now_unix);
+        Ok((true, true))
+    })
+}
+
+pub fn remove_pending_action(
+    path: &Path,
+    identifier: &str,
+) -> Result<bool, String> {
+    mutate_pending_action_store(path, |store| {
+        let Some(key) = find_pending_action_key(store, identifier) else {
+            return Ok((false, false));
+        };
+        store.actions.remove(&key);
+        Ok((true, true))
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingActionTransportRequestWire {
+    pub operation: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub legacy_path: Option<PathBuf>,
+    pub now_unix: f64,
+    #[serde(default)]
+    pub identifier: Option<String>,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub record: BTreeMap<String, JsonValue>,
+    #[serde(default)]
+    pub plan_file: Option<String>,
+    #[serde(default)]
+    pub identity: BTreeMap<String, String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+pub fn pending_action_transport(
+    request: &PendingActionTransportRequestWire,
+) -> Result<JsonValue, String> {
+    match request.operation.as_str() {
+        "upsert" => {
+            let identifier =
+                required_field(request.identifier.as_deref(), "identifier")?;
+            let transport =
+                required_field(request.transport.as_deref(), "transport")?;
+            upsert_pending_action_transport(
+                &request.path,
+                request.legacy_path.as_deref(),
+                identifier,
+                transport,
+                &request.record,
+                request.now_unix,
+            )?;
+            Ok(JsonValue::Null)
+        }
+        "list" => {
+            let transport =
+                required_field(request.transport.as_deref(), "transport")?;
+            serde_json::to_value(list_pending_action_transport(
+                &request.path,
+                request.legacy_path.as_deref(),
+                transport,
+            )?)
+            .map_err(|error| {
+                format!("failed to serialize pending action transport list: {error}")
+            })
+        }
+        "remove" => {
+            let identifier =
+                required_field(request.identifier.as_deref(), "identifier")?;
+            let transport =
+                required_field(request.transport.as_deref(), "transport")?;
+            Ok(JsonValue::Bool(remove_pending_action_transport(
+                &request.path,
+                request.legacy_path.as_deref(),
+                identifier,
+                transport,
+            )?))
+        }
+        "cleanup" => {
+            let transport =
+                required_field(request.transport.as_deref(), "transport")?;
+            Ok(json!(cleanup_pending_action_transport(
+                &request.path,
+                request.legacy_path.as_deref(),
+                transport,
+                request.now_unix,
+            )?))
+        }
+        "mark_plan_handled" => {
+            let plan_file =
+                required_field(request.plan_file.as_deref(), "plan_file")?;
+            let source = required_field(request.source.as_deref(), "source")?;
+            Ok(json!(mark_plan_pending_actions_handled(
+                &request.path,
+                request.legacy_path.as_deref(),
+                plan_file,
+                &request.identity,
+                source,
+                request.action.as_deref(),
+                request.now_unix,
+            )?))
+        }
+        other => Err(format!(
+            "unknown pending action transport operation: {other}"
+        )),
+    }
 }
 
 pub fn resolve_pending_action_prefix(
@@ -233,6 +397,371 @@ pub fn current_unix_time() -> f64 {
         .unwrap_or(0.0)
 }
 
+fn required_field<'a>(
+    value: Option<&'a str>,
+    field: &str,
+) -> Result<&'a str, String> {
+    value.filter(|value| !value.is_empty()).ok_or_else(|| {
+        format!("pending action transport request missing {field}")
+    })
+}
+
+fn mutate_pending_action_store<T>(
+    path: &Path,
+    mutator: impl FnOnce(&mut PendingActionStoreWire) -> Result<(T, bool), String>,
+) -> Result<T, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut store = read_pending_action_store_unlocked(path)?;
+        let (value, changed) = mutator(&mut store)?;
+        if changed {
+            write_pending_action_store_unlocked(path, &store)?;
+        }
+        Ok(value)
+    })();
+    unlock(lock)?;
+    result
+}
+
+fn find_pending_action_key(
+    store: &PendingActionStoreWire,
+    identifier: &str,
+) -> Option<String> {
+    if store.actions.contains_key(identifier) {
+        return Some(identifier.to_string());
+    }
+    if let Some((key, _entry)) = store
+        .actions
+        .iter()
+        .find(|(_key, entry)| entry.notification_id == identifier)
+    {
+        return Some(key.clone());
+    }
+    let mut matches = store
+        .actions
+        .iter()
+        .filter(|(_key, entry)| entry.notification_id.starts_with(identifier));
+    let (key, _entry) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(key.clone())
+}
+
+fn apply_handled(
+    entry: &mut PendingActionWire,
+    source: &str,
+    action: Option<&str>,
+    now_unix: f64,
+) {
+    entry.state = MobileActionStateWire::AlreadyHandled;
+    entry.handled_source = Some(source.to_string());
+    entry.handled_at_unix = Some(now_unix);
+    entry.updated_at_unix = now_unix;
+    if let Some(action) = action {
+        entry.handled_action = Some(action.to_string());
+    }
+}
+
+fn merge_transport_record(
+    entry: &mut PendingActionWire,
+    transport: &str,
+    record: &BTreeMap<String, JsonValue>,
+) {
+    if let Some(existing) = entry
+        .transports
+        .iter_mut()
+        .find(|item| item.transport == transport)
+    {
+        existing.record.extend(record.clone());
+        return;
+    }
+    entry.transports.push(PendingActionTransportWire {
+        transport: transport.to_string(),
+        record: record.clone(),
+    });
+}
+
+fn upsert_pending_action_transport(
+    path: &Path,
+    legacy_path: Option<&Path>,
+    identifier: &str,
+    transport: &str,
+    record: &BTreeMap<String, JsonValue>,
+    now_unix: f64,
+) -> Result<(), String> {
+    mutate_pending_action_store(path, |store| {
+        if let Some(legacy_path) = legacy_path {
+            merge_legacy_telegram_pending_actions(store, legacy_path)?;
+        }
+        if let Some(key) = find_pending_action_key(store, identifier) {
+            let entry = store
+                .actions
+                .get_mut(&key)
+                .expect("pending action key came from this store");
+            merge_transport_record(entry, transport, record);
+            entry.updated_at_unix = now_unix;
+            return Ok(((), true));
+        }
+        store.actions.insert(
+            identifier.to_string(),
+            pending_action_from_transport_record(
+                identifier, transport, record, now_unix,
+            ),
+        );
+        Ok(((), true))
+    })
+}
+
+fn pending_action_from_transport_record(
+    identifier: &str,
+    transport: &str,
+    record: &BTreeMap<String, JsonValue>,
+    now_unix: f64,
+) -> PendingActionWire {
+    let action = record
+        .get("action")
+        .and_then(JsonValue::as_str)
+        .unwrap_or("")
+        .to_string();
+    PendingActionWire {
+        schema_version: PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
+        prefix: identifier.to_string(),
+        notification_id: record
+            .get("notification_id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or(identifier)
+            .to_string(),
+        action_kind: MobileActionKindWire::from_notification_action(Some(
+            &action,
+        )),
+        action,
+        action_data: record
+            .get("action_data")
+            .and_then(JsonValue::as_object)
+            .map(string_object)
+            .unwrap_or_default(),
+        files: record
+            .get("files")
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        created_at_unix: now_unix,
+        updated_at_unix: now_unix,
+        stale_deadline_unix: now_unix + DEFAULT_PENDING_ACTION_STALE_SECONDS,
+        transports: vec![PendingActionTransportWire {
+            transport: transport.to_string(),
+            record: record.clone(),
+        }],
+        state: MobileActionStateWire::Available,
+        handled_source: None,
+        handled_at_unix: None,
+        handled_action: None,
+    }
+}
+
+fn string_object(
+    values: &serde_json::Map<String, JsonValue>,
+) -> BTreeMap<String, String> {
+    values
+        .iter()
+        .filter_map(|(key, value)| {
+            value.as_str().map(|value| (key.clone(), value.to_string()))
+        })
+        .collect()
+}
+
+fn list_pending_action_transport(
+    path: &Path,
+    legacy_path: Option<&Path>,
+    transport: &str,
+) -> Result<BTreeMap<String, JsonValue>, String> {
+    let store = read_pending_action_store(path, legacy_path)?;
+    Ok(store
+        .actions
+        .iter()
+        .filter_map(|(key, entry)| {
+            transport_action_view(entry, transport, legacy_path.is_some())
+                .map(|record| (key.clone(), record))
+        })
+        .collect())
+}
+
+fn transport_action_view(
+    entry: &PendingActionWire,
+    transport: &str,
+    include_legacy: bool,
+) -> Option<JsonValue> {
+    let transport_record = entry.transports.iter().find(|item| {
+        transport_matches(&item.transport, transport, include_legacy)
+    })?;
+    let mut record: serde_json::Map<String, JsonValue> =
+        transport_record.record.clone().into_iter().collect();
+    record
+        .entry("notification_id".to_string())
+        .or_insert_with(|| json!(entry.notification_id));
+    record
+        .entry("action".to_string())
+        .or_insert_with(|| json!(entry.action));
+    record
+        .entry("action_kind".to_string())
+        .or_insert_with(|| json!(entry.action_kind));
+    record
+        .entry("action_data".to_string())
+        .or_insert_with(|| json!(entry.action_data));
+    record
+        .entry("files".to_string())
+        .or_insert_with(|| json!(entry.files));
+    record
+        .entry("created_at".to_string())
+        .or_insert_with(|| json!(entry.created_at_unix));
+    record
+        .entry("created_at_unix".to_string())
+        .or_insert_with(|| json!(entry.created_at_unix));
+    record
+        .entry("updated_at_unix".to_string())
+        .or_insert_with(|| json!(entry.updated_at_unix));
+    record
+        .entry("stale_deadline_unix".to_string())
+        .or_insert_with(|| json!(entry.stale_deadline_unix));
+    Some(JsonValue::Object(record))
+}
+
+fn remove_pending_action_transport(
+    path: &Path,
+    legacy_path: Option<&Path>,
+    identifier: &str,
+    transport: &str,
+) -> Result<bool, String> {
+    mutate_pending_action_store(path, |store| {
+        if let Some(legacy_path) = legacy_path {
+            merge_legacy_telegram_pending_actions(store, legacy_path)?;
+        }
+        let Some(key) = find_pending_action_key(store, identifier) else {
+            return Ok((false, false));
+        };
+        let entry = store
+            .actions
+            .get_mut(&key)
+            .expect("pending action key came from this store");
+        let before = entry.transports.len();
+        entry.transports.retain(|item| {
+            !transport_matches(&item.transport, transport, true)
+        });
+        let removed = entry.transports.len() != before;
+        let remove_entry = removed
+            && entry.transports.is_empty()
+            && !entry.action_kind.is_gate();
+        if remove_entry {
+            store.actions.remove(&key);
+        }
+        Ok((removed, removed))
+    })
+}
+
+fn cleanup_pending_action_transport(
+    path: &Path,
+    legacy_path: Option<&Path>,
+    transport: &str,
+    now_unix: f64,
+) -> Result<Vec<String>, String> {
+    mutate_pending_action_store(path, |store| {
+        if let Some(legacy_path) = legacy_path {
+            merge_legacy_telegram_pending_actions(store, legacy_path)?;
+        }
+        let mut removed = Vec::new();
+        let mut remove_entries = Vec::new();
+        for (key, entry) in &mut store.actions {
+            if entry.stale_deadline_unix > now_unix {
+                continue;
+            }
+            let before = entry.transports.len();
+            entry.transports.retain(|item| {
+                !transport_matches(&item.transport, transport, true)
+            });
+            if entry.transports.len() == before {
+                continue;
+            }
+            removed.push(key.clone());
+            if entry.transports.is_empty() && !entry.action_kind.is_gate() {
+                remove_entries.push(key.clone());
+            }
+        }
+        for key in remove_entries {
+            store.actions.remove(&key);
+        }
+        let changed = !removed.is_empty();
+        Ok((removed, changed))
+    })
+}
+
+fn mark_plan_pending_actions_handled(
+    path: &Path,
+    legacy_path: Option<&Path>,
+    plan_file: &str,
+    identity: &BTreeMap<String, String>,
+    source: &str,
+    action: Option<&str>,
+    now_unix: f64,
+) -> Result<Vec<String>, String> {
+    if identity.is_empty() {
+        return Ok(Vec::new());
+    }
+    mutate_pending_action_store(path, |store| {
+        if let Some(legacy_path) = legacy_path {
+            merge_legacy_telegram_pending_actions(store, legacy_path)?;
+        }
+        let mut marked = Vec::new();
+        for entry in store.actions.values_mut() {
+            if !matches!(entry.action.as_str(), "PlanApproval" | "EpicApproval")
+                || !entry_plan_file_matches(entry, plan_file)
+                || !entry_identity_matches(entry, identity)
+            {
+                continue;
+            }
+            apply_handled(entry, source, action, now_unix);
+            marked.push(entry.notification_id.clone());
+        }
+        let changed = !marked.is_empty();
+        Ok((marked, changed))
+    })
+}
+
+fn entry_plan_file_matches(entry: &PendingActionWire, plan_file: &str) -> bool {
+    entry.files.iter().any(|file| file == plan_file)
+        || entry
+            .action_data
+            .get("plan_file")
+            .is_some_and(|value| value == plan_file)
+}
+
+fn entry_identity_matches(
+    entry: &PendingActionWire,
+    identity: &BTreeMap<String, String>,
+) -> bool {
+    identity
+        .iter()
+        .any(|(key, value)| entry.action_data.get(key) == Some(value))
+}
+
+fn transport_matches(
+    candidate: &str,
+    transport: &str,
+    include_legacy: bool,
+) -> bool {
+    candidate == transport
+        || (include_legacy
+            && transport == "telegram"
+            && candidate == "telegram_legacy")
+}
+
 fn read_pending_action_store_unlocked(
     path: &Path,
 ) -> Result<PendingActionStoreWire, String> {
@@ -253,6 +782,7 @@ fn write_pending_action_store_unlocked(
 ) -> Result<(), String> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    reap_stale_pending_action_temps(path);
     let tmp_path = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -269,6 +799,44 @@ fn write_pending_action_store_unlocked(
         file.flush().map_err(|e| e.to_string())?;
     }
     fs::rename(&tmp_path, path).map_err(|e| e.to_string())
+}
+
+fn reap_stale_pending_action_temps(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let prefix = format!(".{name}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with(&prefix)
+            || !file_name.ends_with(".tmp")
+            || file_name.len() <= prefix.len() + ".tmp".len()
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age.as_secs_f64() > DEFAULT_PENDING_ACTION_STALE_SECONDS {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn merge_legacy_telegram_pending_actions(
@@ -354,6 +922,9 @@ fn merge_legacy_telegram_pending_actions(
                     record,
                 }],
                 state: MobileActionStateWire::Available,
+                handled_source: None,
+                handled_at_unix: None,
+                handled_action: None,
             },
         );
     }
@@ -403,7 +974,12 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
                 || (response_dir.is_dir()
                     && !(response_dir.join("launch_request.json")).exists())
         }
-        MobileActionKindWire::CustomGate => {
+        MobileActionKindWire::TaskTriage
+        | MobileActionKindWire::BeadSnooze
+        | MobileActionKindWire::FlagTriage
+        | MobileActionKindWire::BeadStaleCleanup
+        | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::CustomGate => {
             let Some(bundle_path) = action_path(notification, "bundle_path")
             else {
                 return false;
@@ -430,7 +1006,12 @@ fn required_target_missing(notification: &NotificationWire) -> bool {
         MobileActionKindWire::Hitl => {
             action_path(notification, "artifacts_dir").is_none()
         }
-        MobileActionKindWire::CustomGate => {
+        MobileActionKindWire::TaskTriage
+        | MobileActionKindWire::BeadSnooze
+        | MobileActionKindWire::FlagTriage
+        | MobileActionKindWire::BeadStaleCleanup
+        | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::CustomGate => {
             action_path(notification, "bundle_path").is_none()
         }
         MobileActionKindWire::NonAction | MobileActionKindWire::Unsupported => {

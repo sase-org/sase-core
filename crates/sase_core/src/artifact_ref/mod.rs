@@ -60,7 +60,10 @@ pub use ref_files::{
     ArtifactRefFileVersionRowWire, ArtifactRefFileVersionWire,
     ArtifactRefLogicalFileWire, ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
 };
-pub use scanner::{quote_artifact_ref_argument, scan_artifact_refs};
+pub use scanner::{
+    quote_artifact_ref_argument, scan_artifact_ref_document_links,
+    scan_artifact_refs,
+};
 pub use uses::{
     parse_artifact_ref_use_manifest, render_artifact_ref_use_record,
     validate_artifact_ref_use_record, ArtifactRefUseRecordWire,
@@ -69,13 +72,16 @@ pub use uses::{
 pub use wire::{
     ArtifactFileSourceWire, ArtifactRefAgentOwnerWire,
     ArtifactRefAgentRootWire, ArtifactRefBeadStoreWire, ArtifactRefContextWire,
-    ArtifactRefDocumentRootWire, ArtifactRefError, ArtifactRefFileRootWire,
-    ArtifactRefFragmentWire, ArtifactRefKindWire, ArtifactRefListEntryWire,
+    ArtifactRefDocumentRootWire, ArtifactRefDocumentScanWire,
+    ArtifactRefDocumentTargetKindWire, ArtifactRefDocumentTargetWire,
+    ArtifactRefError, ArtifactRefFileRootWire, ArtifactRefFragmentWire,
+    ArtifactRefKindWire, ArtifactRefListEntryWire,
     ArtifactRefListResolutionWire, ArtifactRefPathFilterBatchWire,
     ArtifactRefPayloadWire, ArtifactRefProjectWire,
     ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
     ArtifactRefResolutionWire, ArtifactRefSpanWire, ParsedArtifactRefWire,
     ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,

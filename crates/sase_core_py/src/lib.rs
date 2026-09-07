@@ -91,6 +91,13 @@
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
 //! - `classify_notification_tabs(notifications: list[dict]) -> dict`
+//! - `pending_action_from_notification(notification: dict, now: float) -> dict | None`
+//! - `register_pending_action(path: str, action: dict) -> dict`
+//! - `read_pending_action_store(path: str, legacy_path: str | None = None) -> dict`
+//! - `merge_pending_action_transport(path: str, identifier: str, transport: str, record: dict, now: float | None = None) -> bool`
+//! - `mark_pending_action_handled(path: str, identifier: str, source: str, action: str | None = None, now: float | None = None) -> bool`
+//! - `remove_pending_action(path: str, identifier: str) -> bool`
+//! - `pending_action_transport(request: dict) -> object`
 //! - `read_prompt_stash_snapshot(path: str) -> dict`
 //! - `append_prompt_stash(path: str, entry: dict) -> dict`
 //! - `pop_prompt_stash(path: str, ids: list[str]) -> dict`
@@ -268,6 +275,8 @@
 //! - `artifact_ref_path_filter_wire_schema_version() -> int`
 //! - `artifact_ref_filter_path_payloads(kind: str, candidates: list[str], path_globs: list[str] | None = None) -> dict`
 //! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
+//! - `artifact_ref_scan_document(text: str, known_kinds: list[str] | None = None) -> dict`
+//! - `artifact_ref_document_scan_wire_schema_version() -> int`
 //! - `artifact_ref_wire_schema_version() -> int`
 //! - `prompt_artifact_pool_filename(sha256: str, original_name: str) -> str`
 //! - `prompt_artifact_manifest_parse(data: bytes) -> list[dict]`
@@ -707,6 +716,7 @@ use sase_core::artifact_ref::{
     render_artifact_ref_use_record as core_render_artifact_ref_use_record,
     resolve_artifact_ref as core_resolve_artifact_ref,
     resolve_artifact_ref_list as core_resolve_artifact_ref_list,
+    scan_artifact_ref_document_links as core_scan_artifact_ref_document_links,
     scan_artifact_refs as core_scan_artifact_refs,
     validate_artifact_entry as core_validate_artifact_entry,
     validate_artifact_ref_expansion_format as core_validate_artifact_ref_expansion_format,
@@ -716,6 +726,7 @@ use sase_core::artifact_ref::{
     ArtifactRefFileVersionRowWire, ArtifactRefProviderSpecWire,
     ArtifactRefUseRecordWire, ParsedArtifactRefWire,
     ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_ENTRY_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_EXPANSION_PLACEHOLDERS,
     ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
@@ -974,11 +985,20 @@ use sase_core::notifications::{
     apply_notification_state_update as core_apply_notification_state_update,
     apply_notification_state_update_counts as core_apply_notification_state_update_counts,
     classify_notification_tabs as core_classify_notification_tabs,
+    current_unix_time as core_current_unix_time,
+    mark_pending_action_handled as core_mark_pending_action_handled,
+    merge_pending_action_transport as core_merge_pending_action_transport,
+    pending_action_from_notification as core_pending_action_from_notification,
+    pending_action_transport as core_pending_action_transport,
     read_current_notifications_snapshot as core_read_current_notifications_snapshot,
     read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
+    read_pending_action_store as core_read_pending_action_store,
+    register_pending_action as core_register_pending_action,
+    remove_pending_action as core_remove_pending_action,
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     NotificationStateUpdateWire, NotificationWire,
+    PendingActionTransportRequestWire, PendingActionWire,
 };
 use sase_core::perf_logs::{
     perf_logs_query as core_perf_logs_query, PerfLogsQueryWire,
@@ -4866,6 +4886,35 @@ fn py_artifact_ref_scan_prompt<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Scan rendered document text for semantic link targets.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_scan_document")]
+#[pyo3(signature = (text, known_kinds = None))]
+fn py_artifact_ref_scan_document<'py>(
+    py: Python<'py>,
+    text: &str,
+    known_kinds: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let known_kinds = known_kinds.unwrap_or_default();
+    let value = serde_json::to_value(core_scan_artifact_ref_document_links(
+        text,
+        &known_kinds,
+    ))
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal artifact document scan serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the artifact-reference document-scan wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_document_scan_wire_schema_version")]
+fn py_artifact_ref_document_scan_wire_schema_version() -> u64 {
+    ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION
+}
+
 /// Return the shared parse/resolution artifact-reference wire version.
 #[pyfunction]
 #[pyo3(name = "artifact_ref_wire_schema_version")]
@@ -8005,6 +8054,133 @@ fn py_classify_notification_tabs<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Build one pending-action entry from a notification dict.
+#[pyfunction]
+#[pyo3(name = "pending_action_from_notification")]
+fn py_pending_action_from_notification<'py>(
+    py: Python<'py>,
+    notification: &Bound<'py, PyDict>,
+    now_unix: f64,
+) -> PyResult<Option<PyObject>> {
+    let notification = notification_from_pydict(notification)?;
+    let Some(action) =
+        core_pending_action_from_notification(&notification, now_unix)
+    else {
+        return Ok(None);
+    };
+    let value = serde_json::to_value(action).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    Ok(Some(json_value_to_py(py, &value)?))
+}
+
+/// Register one pending action and return the updated store.
+#[pyfunction]
+#[pyo3(name = "register_pending_action")]
+fn py_register_pending_action<'py>(
+    py: Python<'py>,
+    path: &str,
+    action: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let action = pending_action_from_pydict(action)?;
+    let path = PathBuf::from(path);
+    pending_action_result_to_py(
+        py,
+        py.allow_threads(|| core_register_pending_action(&path, &action)),
+    )
+}
+
+/// Read the pending-action store, optionally merged with legacy Telegram rows.
+#[pyfunction]
+#[pyo3(name = "read_pending_action_store")]
+#[pyo3(signature = (path, legacy_path = None))]
+fn py_read_pending_action_store<'py>(
+    py: Python<'py>,
+    path: &str,
+    legacy_path: Option<&str>,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let legacy_path = legacy_path.map(PathBuf::from);
+    pending_action_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_read_pending_action_store(&path, legacy_path.as_deref())
+        }),
+    )
+}
+
+/// Merge a transport-owned record into one existing pending action.
+#[pyfunction]
+#[pyo3(name = "merge_pending_action_transport")]
+#[pyo3(signature = (path, identifier, transport, record, now_unix = None))]
+fn py_merge_pending_action_transport(
+    py: Python<'_>,
+    path: &str,
+    identifier: &str,
+    transport: &str,
+    record: &Bound<'_, PyDict>,
+    now_unix: Option<f64>,
+) -> PyResult<bool> {
+    let record = json_record_from_pydict(record)?;
+    let path = PathBuf::from(path);
+    let now_unix = now_unix.unwrap_or_else(core_current_unix_time);
+    py.allow_threads(|| {
+        core_merge_pending_action_transport(
+            &path, identifier, transport, &record, now_unix,
+        )
+    })
+    .map_err(PyValueError::new_err)
+}
+
+/// Mark one pending action as already handled.
+#[pyfunction]
+#[pyo3(name = "mark_pending_action_handled")]
+#[pyo3(signature = (path, identifier, source, action = None, now_unix = None))]
+fn py_mark_pending_action_handled(
+    py: Python<'_>,
+    path: &str,
+    identifier: &str,
+    source: &str,
+    action: Option<&str>,
+    now_unix: Option<f64>,
+) -> PyResult<bool> {
+    let path = PathBuf::from(path);
+    let now_unix = now_unix.unwrap_or_else(core_current_unix_time);
+    py.allow_threads(|| {
+        core_mark_pending_action_handled(
+            &path, identifier, source, action, now_unix,
+        )
+    })
+    .map_err(PyValueError::new_err)
+}
+
+/// Remove one pending action by full id or unique prefix.
+#[pyfunction]
+#[pyo3(name = "remove_pending_action")]
+fn py_remove_pending_action(
+    py: Python<'_>,
+    path: &str,
+    identifier: &str,
+) -> PyResult<bool> {
+    let path = PathBuf::from(path);
+    py.allow_threads(|| core_remove_pending_action(&path, identifier))
+        .map_err(PyValueError::new_err)
+}
+
+/// Execute a transport-scoped pending-action operation.
+#[pyfunction]
+#[pyo3(name = "pending_action_transport")]
+fn py_pending_action_transport<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = pending_action_transport_request_from_pydict(request)?;
+    let value = py
+        .allow_threads(|| core_pending_action_transport(&request))
+        .map_err(PyValueError::new_err)?;
+    json_value_to_py(py, &value)
+}
+
 // --- Prompt stash store bindings -----------------------------------------
 
 fn prompt_stash_error_to_pyerr(error: PromptStashStoreError) -> PyErr {
@@ -8464,6 +8640,53 @@ fn notification_update_from_pydict(
             "update is not a valid NotificationStateUpdateWire dict: {e}"
         ))
     })
+}
+
+fn pending_action_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<PendingActionWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "action is not a valid PendingActionWire dict: {e}"
+        ))
+    })
+}
+
+fn pending_action_transport_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<PendingActionTransportRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid PendingActionTransportRequestWire dict: {e}"
+        ))
+    })
+}
+
+fn json_record_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<BTreeMap<String, JsonValue>> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "record is not a JSON object with string keys: {e}"
+        ))
+    })
+}
+
+fn pending_action_result_to_py<T>(
+    py: Python<'_>,
+    result: Result<T, String>,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value = serde_json::to_value(result.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
 }
 
 fn query_error_to_pyerr(err: QueryErrorWire) -> PyErr {
@@ -13608,6 +13831,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_filter_path_payloads, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_scan_prompt, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_scan_document, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_document_scan_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_kind_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_ref_kind_canonicalize, m)?)?;
@@ -13849,6 +14077,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pending_action_from_notification, m)?)?;
+    m.add_function(wrap_pyfunction!(py_register_pending_action, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_pending_action_store, m)?)?;
+    m.add_function(wrap_pyfunction!(py_merge_pending_action_transport, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mark_pending_action_handled, m)?)?;
+    m.add_function(wrap_pyfunction!(py_remove_pending_action, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pending_action_transport, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_prompt_stash_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
@@ -17989,6 +18224,8 @@ MENTORS:
                 "artifact_ref_path_filter_wire_schema_version",
                 "artifact_ref_filter_path_payloads",
                 "artifact_ref_scan_prompt",
+                "artifact_ref_scan_document",
+                "artifact_ref_document_scan_wire_schema_version",
                 "artifact_ref_wire_schema_version",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
@@ -18084,6 +18321,21 @@ MENTORS:
             let scanned = py_to_json_value(scanned.bind(py)).unwrap();
             assert_eq!(scanned[0]["candidate_span"]["start"], json!(3));
             assert_eq!(scanned[0]["text"], json!("@plans:x.md"));
+            let document_scan = py_artifact_ref_scan_document(
+                py,
+                "see [plan](plan:202607/plan.md) and @plans:x.md.",
+                None,
+            )
+            .unwrap();
+            let document_scan =
+                py_to_json_value(document_scan.bind(py)).unwrap();
+            assert_eq!(document_scan["schema_version"], json!(1));
+            assert_eq!(
+                document_scan["links"][0]["target"],
+                json!("plan:202607/plan.md")
+            );
+            assert_eq!(document_scan["links"][1]["target"], json!("plan:x.md"));
+            assert_eq!(py_artifact_ref_document_scan_wire_schema_version(), 1);
             assert_eq!(py_artifact_ref_wire_schema_version(), 5);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
             assert_eq!(
@@ -21266,6 +21518,99 @@ MENTORS:
             assert_eq!(value["notifications"][0]["snooze_until"], json!(null));
             assert!(value["notifications"][0]["resurfaced_at"].is_string());
             assert_eq!(value["next_snooze_deadline"], json!(null));
+        });
+    }
+
+    #[test]
+    fn pending_action_bindings_round_trip_transport_records() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (_temp, path) = temp_notification_path("actions.json");
+            let notification_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": "abcd1234-full",
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "axe",
+                    "notes": [],
+                    "files": ["plan.md"],
+                    "action": "PlanApproval",
+                    "action_data": {"response_dir": "/tmp/plan"},
+                    "read": false,
+                    "dismissed": false,
+                    "silent": false,
+                    "muted": false,
+                    "snooze_until": null
+                }),
+            )
+            .unwrap();
+            let notification =
+                notification_obj.bind(py).downcast::<PyDict>().unwrap();
+            let pending =
+                py_pending_action_from_notification(py, notification, 10.0)
+                    .unwrap()
+                    .unwrap();
+            let pending_value = py_to_json_value(pending.bind(py)).unwrap();
+            assert_eq!(pending_value["prefix"], json!("abcd1234"));
+            let pending_dict = pending.bind(py).downcast::<PyDict>().unwrap();
+
+            py_register_pending_action(
+                py,
+                path.to_str().unwrap(),
+                pending_dict,
+            )
+            .unwrap();
+            let record_obj = json_value_to_py(
+                py,
+                &json!({"message_id": 42, "nested": {"keep": true}}),
+            )
+            .unwrap();
+            let record = record_obj.bind(py).downcast::<PyDict>().unwrap();
+            assert!(py_merge_pending_action_transport(
+                py,
+                path.to_str().unwrap(),
+                "abcd1234-full",
+                "telegram",
+                record,
+                Some(20.0),
+            )
+            .unwrap());
+            assert!(py_mark_pending_action_handled(
+                py,
+                path.to_str().unwrap(),
+                "abcd1234",
+                "test",
+                Some("approve"),
+                Some(30.0),
+            )
+            .unwrap());
+
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "operation": "list",
+                    "path": path,
+                    "legacy_path": null,
+                    "now_unix": 40.0,
+                    "transport": "telegram"
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let listed = py_pending_action_transport(py, request).unwrap();
+            let listed = py_to_json_value(listed.bind(py)).unwrap();
+            assert_eq!(listed["abcd1234"]["message_id"], json!(42));
+            assert_eq!(
+                listed["abcd1234"]["action_data"]["response_dir"],
+                json!("/tmp/plan")
+            );
+
+            assert!(py_remove_pending_action(
+                py,
+                path.to_str().unwrap(),
+                "abcd1234-full",
+            )
+            .unwrap());
         });
     }
 

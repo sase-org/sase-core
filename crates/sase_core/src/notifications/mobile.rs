@@ -100,6 +100,11 @@ pub enum MobileActionKindWire {
     Hitl,
     UserQuestion,
     LaunchApproval,
+    TaskTriage,
+    BeadSnooze,
+    FlagTriage,
+    BeadStaleCleanup,
+    PluginsRequired,
     CustomGate,
     NonAction,
     Unsupported,
@@ -113,6 +118,11 @@ impl MobileActionKindWire {
             Some("HITL") => Self::Hitl,
             Some("UserQuestion") => Self::UserQuestion,
             Some("LaunchApproval") => Self::LaunchApproval,
+            Some("TaskTriage") => Self::TaskTriage,
+            Some("BeadSnooze") => Self::BeadSnooze,
+            Some("FlagTriage") => Self::FlagTriage,
+            Some("BeadStaleCleanup") => Self::BeadStaleCleanup,
+            Some("PluginsRequired") => Self::PluginsRequired,
             Some("CustomGate") => Self::CustomGate,
             None => Self::NonAction,
             Some(_) => Self::Unsupported,
@@ -126,6 +136,11 @@ impl MobileActionKindWire {
             Self::Hitl => Some("HITL"),
             Self::UserQuestion => Some("UserQuestion"),
             Self::LaunchApproval => Some("LaunchApproval"),
+            Self::TaskTriage => Some("TaskTriage"),
+            Self::BeadSnooze => Some("BeadSnooze"),
+            Self::FlagTriage => Some("FlagTriage"),
+            Self::BeadStaleCleanup => Some("BeadStaleCleanup"),
+            Self::PluginsRequired => Some("PluginsRequired"),
             Self::CustomGate => Some("CustomGate"),
             Self::NonAction | Self::Unsupported => None,
         }
@@ -139,6 +154,11 @@ impl MobileActionKindWire {
                 | Self::Hitl
                 | Self::UserQuestion
                 | Self::LaunchApproval
+                | Self::TaskTriage
+                | Self::BeadSnooze
+                | Self::FlagTriage
+                | Self::BeadStaleCleanup
+                | Self::PluginsRequired
                 | Self::CustomGate
         )
     }
@@ -150,6 +170,11 @@ impl MobileActionKindWire {
                 | Self::EpicApproval
                 | Self::UserQuestion
                 | Self::LaunchApproval
+                | Self::TaskTriage
+                | Self::BeadSnooze
+                | Self::FlagTriage
+                | Self::BeadStaleCleanup
+                | Self::PluginsRequired
         )
     }
 
@@ -160,6 +185,11 @@ impl MobileActionKindWire {
                 | Self::EpicApproval
                 | Self::UserQuestion
                 | Self::LaunchApproval
+                | Self::TaskTriage
+                | Self::BeadSnooze
+                | Self::FlagTriage
+                | Self::BeadStaleCleanup
+                | Self::PluginsRequired
                 | Self::CustomGate
         )
     }
@@ -171,6 +201,11 @@ impl MobileActionKindWire {
             Self::Hitl => "HITL",
             Self::UserQuestion => "Question",
             Self::LaunchApproval => "Launch approval",
+            Self::TaskTriage => "Task triage",
+            Self::BeadSnooze => "Bead snooze",
+            Self::FlagTriage => "Flag triage",
+            Self::BeadStaleCleanup => "Stale task cleanup",
+            Self::PluginsRequired => "Required plugins",
             Self::CustomGate => "Custom gate",
             Self::NonAction => "Notification",
             Self::Unsupported => "Unsupported action",
@@ -624,7 +659,12 @@ pub fn mobile_action_detail_from_notification(
                 branches: gate_branches_from_notification(notification),
             }
         }
-        MobileActionKindWire::CustomGate => {
+        MobileActionKindWire::TaskTriage
+        | MobileActionKindWire::BeadSnooze
+        | MobileActionKindWire::FlagTriage
+        | MobileActionKindWire::BeadStaleCleanup
+        | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::CustomGate => {
             MobileActionDetailWire::CustomGate {
                 identity,
                 state,
@@ -1505,6 +1545,11 @@ mod tests {
             ("HITL", MobileActionKindWire::Hitl),
             ("UserQuestion", MobileActionKindWire::UserQuestion),
             ("LaunchApproval", MobileActionKindWire::LaunchApproval),
+            ("TaskTriage", MobileActionKindWire::TaskTriage),
+            ("BeadSnooze", MobileActionKindWire::BeadSnooze),
+            ("FlagTriage", MobileActionKindWire::FlagTriage),
+            ("BeadStaleCleanup", MobileActionKindWire::BeadStaleCleanup),
+            ("PluginsRequired", MobileActionKindWire::PluginsRequired),
             ("CustomGate", MobileActionKindWire::CustomGate),
         ];
         for (action, kind) in expected {
