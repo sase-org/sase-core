@@ -1096,6 +1096,13 @@ use sase_core::snippet_session::{
     apply_session_event as core_apply_snippet_session_event,
     SnippetSessionEvent, SnippetSessionState,
 };
+use sase_core::source_language::{
+    logical_filename_from_hints as core_logical_filename_from_hints,
+    resolve_source_language as core_resolve_source_language,
+    source_filename_hints_from_json_value,
+    source_language_request_from_json_value,
+    SOURCE_LANGUAGE_PREFIX_BUDGET_BYTES, SOURCE_LANGUAGE_WIRE_SCHEMA_VERSION,
+};
 use sase_core::status::{
     apply_status_update as core_apply_status_update,
     is_valid_transition as core_is_valid_transition,
@@ -2329,6 +2336,53 @@ fn py_parse_commit_subject<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Return the schema version for source-language binding payloads.
+#[pyfunction]
+#[pyo3(name = "source_language_wire_schema_version")]
+fn py_source_language_wire_schema_version() -> u32 {
+    SOURCE_LANGUAGE_WIRE_SCHEMA_VERSION
+}
+
+/// Return the UTF-8 prefix budget used for shebang and diff sniffing.
+#[pyfunction]
+#[pyo3(name = "source_language_prefix_budget_bytes")]
+fn py_source_language_prefix_budget_bytes() -> usize {
+    SOURCE_LANGUAGE_PREFIX_BUDGET_BYTES
+}
+
+/// Resolve a canonical source language from a request dict.
+#[pyfunction]
+#[pyo3(name = "resolve_source_language")]
+fn py_resolve_source_language<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request_value = py_to_json_value(request.as_any())?;
+    let req = source_language_request_from_json_value(&request_value)
+        .map_err(PyValueError::new_err)?;
+    let selected = core_resolve_source_language(&req);
+    let value = serde_json::to_value(&selected).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Select a logical filename hint from provenance fields.
+#[pyfunction]
+#[pyo3(name = "logical_source_filename")]
+fn py_logical_source_filename<'py>(
+    py: Python<'py>,
+    hints: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let hints_value = py_to_json_value(hints.as_any())?;
+    let hints = source_filename_hints_from_json_value(&hints_value)
+        .map_err(PyValueError::new_err)?;
+    match core_logical_filename_from_hints(&hints) {
+        Some(name) => json_value_to_py(py, &JsonValue::String(name)),
+        None => Ok(py.None()),
+    }
 }
 
 /// Compile a persistent Patch corpus from Python wire dicts.
@@ -13326,6 +13380,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_default_commit_subject_types, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_commit_subject, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_source_language_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_source_language_prefix_budget_bytes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_source_language, m)?)?;
+    m.add_function(wrap_pyfunction!(py_logical_source_filename, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_corpus, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_many, m)?)?;
@@ -15184,6 +15248,54 @@ mod tests {
             assert_eq!(value["description"], json!("expose subject parser"));
             assert_eq!(value["violation"], JsonValue::Null);
             assert_eq!(value["found_type"], JsonValue::Null);
+        });
+    }
+
+    #[test]
+    fn source_language_bindings_round_trip_wire_payloads() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_source_language_wire_schema_version(),
+                SOURCE_LANGUAGE_WIRE_SCHEMA_VERSION
+            );
+            assert_eq!(
+                py_source_language_prefix_budget_bytes(),
+                SOURCE_LANGUAGE_PREFIX_BUDGET_BYTES
+            );
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "category": "raw_file",
+                    "logical_filename": "src/app.py",
+                    "prefix": null
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let selected = py_resolve_source_language(py, request).unwrap();
+            let value = py_to_json_value(selected.bind(py)).unwrap();
+            assert_eq!(value["schema_version"], json!(1));
+            assert_eq!(value["language"], json!("python"));
+            assert_eq!(value["reason"], json!("filename"));
+            assert_eq!(value["supported_text"], json!(true));
+
+            let hints = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "source_path": "/orig/app.py",
+                    "vcs_relpath": "docs/app.py",
+                    "resolved_path": "/objects/abc"
+                }),
+            )
+            .unwrap();
+            let hints = hints.bind(py).downcast::<PyDict>().unwrap();
+            let filename = py_logical_source_filename(py, hints).unwrap();
+            let filename = py_to_json_value(filename.bind(py)).unwrap();
+            assert_eq!(filename, json!("/orig/app.py"));
         });
     }
 

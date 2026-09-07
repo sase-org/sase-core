@@ -75,6 +75,7 @@ pub mod sections;
 mod serde_option;
 pub mod snippet_catalog;
 pub mod snippet_session;
+pub mod source_language;
 pub mod status;
 mod store_lock;
 pub mod suffix;
@@ -1012,6 +1013,14 @@ pub use snippet_catalog::{
     validate_snippet_trigger, ComposedSnippetCatalog, SnippetCall,
     SnippetCallStatus, SnippetDiagnostic, SnippetSourceSpan,
     SnippetTriggerValidation,
+};
+pub use source_language::{
+    logical_filename_from_hints, resolve_source_language,
+    source_filename_hints_from_json_value,
+    source_language_request_from_json_value, SourceCategory,
+    SourceFilenameHintsWire, SourceLanguageRequestWire,
+    SourceLanguageResultWire, SOURCE_LANGUAGE_PREFIX_BUDGET_BYTES,
+    SOURCE_LANGUAGE_WIRE_SCHEMA_VERSION,
 };
 /// Legacy Rust alias retained for compatibility with older status callers.
 pub use status::has_suffix as has_changespec_suffix;
