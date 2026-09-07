@@ -895,9 +895,10 @@ use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
     CacheFreshnessRequestWire, ConnectionPlanWire, CursorReplayRequestWire,
     FleetContractError as FleetContractDomainError,
-    FleetLogicalAgentCountsRequestWire, FocusFleetCountsRequestWire,
-    FollowReconciliationRequestWire, FollowRecordWire,
-    InstallationIdentityMigrateRequestWire,
+    FleetLaunchDecisionRequestWire, FleetLaunchIntentWire,
+    FleetLaunchRequestWire, FleetLogicalAgentCountsRequestWire,
+    FocusFleetCountsRequestWire, FollowReconciliationRequestWire,
+    FollowRecordWire, InstallationIdentityMigrateRequestWire,
     InstallationIdentityRotateRequestWire, LogicalAgentLocatorWire,
     OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
     PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
@@ -11270,6 +11271,58 @@ fn py_fleet_decide_operation_replay<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_validate_launch_intent")]
+fn py_fleet_validate_launch_intent<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: FleetLaunchIntentWire =
+        fleet_wire_from_pydict(intent, "fleet launch intent")?;
+    let result = core_fleet_contract::validate_fleet_launch_intent(&intent)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_launch_payload_fingerprint")]
+fn py_fleet_launch_payload_fingerprint<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: FleetLaunchIntentWire =
+        fleet_wire_from_pydict(intent, "fleet launch intent")?;
+    let result = core_fleet_contract::fleet_launch_payload_fingerprint(&intent)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_launch_request")]
+fn py_fleet_validate_launch_request<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetLaunchRequestWire =
+        fleet_wire_from_pydict(request, "fleet launch request")?;
+    let result = core_fleet_contract::validate_fleet_launch_request(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_decide_launch_replay")]
+fn py_fleet_decide_launch_replay<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetLaunchDecisionRequestWire =
+        fleet_wire_from_pydict(request, "fleet launch decision request")?;
+    let result = core_fleet_contract::decide_fleet_launch_replay(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_validate_connection_plan")]
 fn py_fleet_validate_connection_plan<'py>(
     py: Python<'py>,
@@ -13667,6 +13720,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_decide_operation_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_launch_intent, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_launch_payload_fingerprint, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_launch_request, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_decide_launch_replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_connection_plan, m)?)?;
     m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
@@ -21572,6 +21629,7 @@ MENTORS:
                     "id",
                     "clan",
                     "wait",
+                    "dispatch",
                     "if",
                     "proc",
                     "auto",

@@ -443,6 +443,19 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         dynamic_keyword_role: None,
     },
     DirectiveMetadata {
+        name: "dispatch",
+        alias: None,
+        description: "Send this launch to an enrolled remote machine",
+        argument_hint: ":machine or (machine)",
+        takes_argument: true,
+        allows_multiple: false,
+        syntax_forms: COLON_PAREN,
+        positional_role: Some(DirectiveValueRole::Machine),
+        positional_suggestions: &[],
+        keywords: &[],
+        dynamic_keyword_role: None,
+    },
+    DirectiveMetadata {
         name: "if",
         alias: None,
         description:
@@ -1440,6 +1453,7 @@ mod tests {
                 "id",
                 "clan",
                 "wait",
+                "dispatch",
                 "if",
                 "proc",
                 "auto",
@@ -2189,7 +2203,7 @@ mod tests {
         use super::super::completion::build_directive_clause_candidates;
         use super::super::wire::{
             AgentCompletionEntry, DirectiveCompletionInventories,
-            DirectiveModelAliasKey, DirectiveModelEntry,
+            DirectiveMachineEntry, DirectiveModelAliasKey, DirectiveModelEntry,
         };
 
         let inventories = DirectiveCompletionInventories {
@@ -2240,8 +2254,17 @@ mod tests {
                 project: "sase".to_string(),
             }],
             finalizers: Vec::new(),
+            machines: vec![DirectiveMachineEntry {
+                alias: "apollo".to_string(),
+                display: "apollo".to_string(),
+                provider_ref: "builtin@https".to_string(),
+                installation_id: "sase_inst_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                endpoint: "https://fleet.example.test".to_string(),
+                status: "ok".to_string(),
+                documentation: "Remote workstation".to_string(),
+            }],
             excluded_bead_ids: Vec::new(),
-            enabled_feature_flags: Vec::new(),
+            enabled_feature_flags: vec!["remote_dispatch".to_string()],
         };
 
         let insertions = |text: &str, character: u32| -> Vec<String> {
@@ -2284,6 +2307,7 @@ mod tests {
         assert_eq!(at_end("%clan(research, summary=hi, "), ["tribe="]);
         assert_eq!(at_end("%repeat:"), ["2", "3"]);
         assert_eq!(at_end("%xprompts_enabled:"), ["false", "true"]);
+        assert_eq!(at_end("%dispatch:"), ["apollo"]);
         assert_eq!(at_end("%model(opus, "), ["coder=", "medium="]);
         assert_eq!(at_end("%model(medium, c"), ["coder="]);
         assert_eq!(at_end("%model(opus, coder="), ["opus"]);

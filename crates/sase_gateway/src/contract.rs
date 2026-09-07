@@ -9,8 +9,8 @@ use thiserror::Error;
 use crate::fleet_auth::{
     FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
-    FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
-    FLEET_SCOPE_SUMMARY_READ,
+    FLEET_SCOPE_LAUNCH, FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE,
+    FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
 };
 use crate::wire::{FLEET_API_WIRE_SCHEMA_VERSION, GATEWAY_WIRE_SCHEMA_VERSION};
 use sase_core::{
@@ -1049,6 +1049,16 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "POST",
+                "path": "/api/fleet/v1/launch",
+                "auth": true,
+                "required_scope": FLEET_SCOPE_LAUNCH,
+                "request": "FleetLaunchRequestWire",
+                "success": "FleetLaunchResponseWire",
+                "events_on_success": ["agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
                 "path": "/api/fleet/v1/credential/rotate",
                 "auth": true,
                 "required_scope": FLEET_SCOPE_ROTATE,
@@ -1295,6 +1305,69 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                     "resync_required: FleetResyncRequiredWire; SSE id is snapshot cursor",
                     "heartbeat: { cursor: StoreCursorWire }; no SSE id"
                 ]
+            },
+            "FleetLaunchProjectContextWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "provider_ref": "string|null",
+                "project_id": "string; portable project identity, never a path",
+                "revision": "string|null; published revision evidence",
+                "patch_ref": "string|null; Patch evidence"
+            },
+            "FleetLaunchIntentWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "prompt": "string; stripped source %dispatch directive",
+                "request_id": "string|null",
+                "display_name": "string|null",
+                "name": "string|null",
+                "model": "string|null",
+                "provider": "string|null",
+                "runtime": "string|null",
+                "project": "FleetLaunchProjectContextWire",
+                "dry_run": "bool|null",
+                "follow": "bool",
+                "references": "FleetLaunchReferenceWire[]"
+            },
+            "FleetLaunchRequestWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "key": "ScopedOperationKeyWire",
+                "target_installation_id": "string; pinned target installation",
+                "intent": "FleetLaunchIntentWire",
+                "payload_fingerprint": "PayloadFingerprintWire; canonical intent digest",
+                "acceptance_window_seconds": "f64"
+            },
+            "FleetLaunchReceiptWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "key": "ScopedOperationKeyWire",
+                "payload_fingerprint": "PayloadFingerprintWire",
+                "target_installation_id": "string",
+                "accepted_at_unix_ms": "u64",
+                "expires_at_unix_ms": "u64",
+                "state": "accepted|pending|settled",
+                "logical_locator": "LogicalAgentLocatorWire|null",
+                "instance_locator": "AgentInstanceLocatorWire|null",
+                "message": "string|null; path/token-redacted"
+            },
+            "FleetLaunchResponseWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
+                "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
+                "receipt": "FleetLaunchReceiptWire"
+            },
+            "ScopedOperationKeyWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "controller_id": "string; authenticated controller scope",
+                "operation_id": "string; idempotency key within controller scope"
+            },
+            "PayloadFingerprintWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "schema_version": "u32",
+                "sha256": "lowercase canonical SHA-256 digest"
             },
             "FleetLogicalAgentCountsWire": {
                 "defined_by": "sase_core::fleet_contract",

@@ -6,6 +6,7 @@ pub mod contract;
 pub mod daemon;
 pub mod federation_worker;
 pub mod fleet_auth;
+pub mod fleet_launch;
 pub mod fleet_reads;
 pub mod host_bridge;
 pub mod push;
@@ -44,8 +45,11 @@ pub use fleet_auth::{
     FLEET_CREDENTIAL_TTL_SECONDS, FLEET_SCOPE_BATCH_READ,
     FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
-    FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
-    FLEET_SCOPE_SUMMARY_READ,
+    FLEET_SCOPE_LAUNCH, FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE,
+    FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
+};
+pub use fleet_launch::{
+    FleetLaunchAdmission, FleetLaunchStore, FleetLaunchStoreError,
 };
 pub use fleet_reads::{
     resync_item, FleetEventSubscription, FleetInvalidationHub, FleetReadError,
@@ -81,6 +85,7 @@ pub use wire::{
     FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
     FleetEventStreamItemWire, FleetHelloResponseWire,
     FleetInvalidationEventWire, FleetInvalidationKindWire,
+    FleetLaunchReceiptWire, FleetLaunchRequestWire, FleetLaunchResponseWire,
     FleetLogicalAgentCountsWire, FleetLogicalBatchEntryWire,
     FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
     FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,

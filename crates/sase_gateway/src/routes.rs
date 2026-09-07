@@ -46,9 +46,10 @@ use crate::fleet_auth::{
     FleetCredentialStore, FleetEnrollmentResult, FleetStoreError,
     FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
-    FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE,
-    FLEET_SCOPE_SUMMARY_READ,
+    FLEET_SCOPE_LAUNCH, FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE,
+    FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
 };
+use crate::fleet_launch::{FleetLaunchStore, FleetLaunchStoreError};
 use crate::fleet_reads::{resync_item, FleetReadError, FleetReadService};
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
@@ -69,12 +70,13 @@ use crate::wire::{
     FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
     FleetDetailRequestWire, FleetDetailResponseWire,
     FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
-    FleetEventStreamItemWire, FleetHelloResponseWire,
-    FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
-    FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
-    FleetResyncReasonWire, FleetSummaryResponseWire,
-    FleetTokenRotateRequestWire, FleetTokenRotateResponseWire, GatewayBindWire,
-    GatewayBuildWire, HealthResponseWire, MobileAgentImageLaunchRequestWire,
+    FleetEventStreamItemWire, FleetHelloResponseWire, FleetLaunchRequestWire,
+    FleetLaunchResponseWire, FleetLogicalBatchRequestWire,
+    FleetLogicalBatchResponseWire, FleetProjectEligibilityRequestWire,
+    FleetProjectEligibilityResponseWire, FleetResyncReasonWire,
+    FleetSummaryResponseWire, FleetTokenRotateRequestWire,
+    FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
+    HealthResponseWire, MobileAgentImageLaunchRequestWire,
     MobileAgentKillRequestWire, MobileAgentKillResultWire,
     MobileAgentLaunchResultWire, MobileAgentListRequestWire,
     MobileAgentListResponseWire, MobileAgentResumeOptionsResponseWire,
@@ -117,6 +119,7 @@ pub struct GatewayState {
     attachment_tokens: AttachmentTokenStore,
     push_dispatcher: PushDispatcher,
     fleet_store: FleetCredentialStore,
+    fleet_launches: FleetLaunchStore,
     fleet_reads: FleetReadService,
     fleet_enrollment_limiter: FleetEnrollmentRateLimiter,
     machine_selector: String,
@@ -230,6 +233,7 @@ impl GatewayState {
             ),
             push_dispatcher: PushDispatcher::new(options.push_config),
             fleet_store: FleetCredentialStore::new(options.sase_home.clone()),
+            fleet_launches: FleetLaunchStore::new(options.sase_home.clone()),
             fleet_reads: FleetReadService::new(options.sase_home.clone()),
             fleet_enrollment_limiter: FleetEnrollmentRateLimiter::new(
                 FLEET_ENROLLMENT_RATE_LIMIT,
@@ -754,6 +758,7 @@ fn fleet_v1_routes() -> Router<GatewayState> {
         .route("/content", post(fleet_content))
         .route("/projects/eligibility", post(fleet_project_eligibility))
         .route("/events", get(fleet_events))
+        .route("/launch", post(fleet_launch))
         .route("/credential/rotate", post(fleet_token_rotate))
         .route("/credential/revoke", post(fleet_credential_revoke))
         .layer(DefaultBodyLimit::max(FLEET_REQUEST_BODY_LIMIT_BYTES))
@@ -1036,6 +1041,95 @@ async fn fleet_events(
         }
     };
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn fleet_launch(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetLaunchRequestWire>, JsonRejection>,
+) -> Result<Json<FleetLaunchResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/launch",
+        FLEET_SCOPE_LAUNCH,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+    let admission = state
+        .fleet_launches
+        .reserve(&payload, &installation.installation_id, current_unix_time())
+        .map_err(ApiError::from_fleet_launch_store)?;
+    if !admission.should_launch {
+        return Ok(Json(FleetLaunchResponseWire {
+            schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+            decision: admission.decision,
+            reason: admission.reason,
+            receipt: admission.receipt,
+        }));
+    }
+
+    let launch_request = MobileAgentTextLaunchRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        prompt: payload.intent.prompt.clone(),
+        request_id: payload.intent.request_id.clone(),
+        display_name: payload.intent.display_name.clone(),
+        name: payload.intent.name.clone(),
+        model: payload.intent.model.clone(),
+        provider: payload.intent.provider.clone(),
+        runtime: payload.intent.runtime.clone(),
+        project: Some(payload.intent.project.project_id.clone()),
+        device_id: credential.controller_id.clone(),
+        dry_run: payload.intent.dry_run,
+    };
+
+    match state.agent_bridge.launch_text(&launch_request) {
+        Ok(result) => {
+            let primary_name = launch_primary_name(&result);
+            let message = result
+                .primary
+                .as_ref()
+                .and_then(|slot| slot.message.clone())
+                .or_else(|| primary_name.clone());
+            let receipt = state
+                .fleet_launches
+                .settle(
+                    &admission.receipt,
+                    &result,
+                    &payload.intent.project.project_id,
+                    message,
+                )
+                .map_err(ApiError::from_fleet_launch_store)?;
+            state.audit(
+                credential.controller_id.clone(),
+                "/api/fleet/v1/launch",
+                primary_name.clone(),
+                "success",
+            );
+            publish_agents_changed(&state, "fleet_launch", primary_name)?;
+            Ok(Json(FleetLaunchResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                decision: admission.decision,
+                reason: admission.reason,
+                receipt,
+            }))
+        }
+        Err(error) => {
+            let api_error = ApiError::from_host_bridge(error);
+            state.audit(
+                credential.controller_id,
+                "/api/fleet/v1/launch",
+                None,
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
 }
 
 async fn fleet_token_rotate(
@@ -3156,6 +3250,37 @@ impl ApiError {
         }
     }
 
+    fn from_fleet_launch_store(error: FleetLaunchStoreError) -> Self {
+        match error {
+            FleetLaunchStoreError::Validation(message) => {
+                Self::invalid_request("fleet_launch", message)
+            }
+            FleetLaunchStoreError::Conflict(message) => Self::fleet_error(
+                StatusCode::CONFLICT,
+                ApiErrorCodeWire::InvalidRequest,
+                message,
+                "fleet_launch",
+            ),
+            FleetLaunchStoreError::Expired(message) => Self::fleet_error(
+                StatusCode::GONE,
+                ApiErrorCodeWire::GoneStale,
+                message,
+                "fleet_launch",
+            ),
+            FleetLaunchStoreError::Io { .. }
+            | FleetLaunchStoreError::Json { .. } => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::Internal,
+                    message: error.to_string(),
+                    target: Some("fleet_launch_store".to_string()),
+                    details: None,
+                }),
+            },
+        }
+    }
+
     fn fleet_timeout(target: impl Into<String>) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
@@ -3379,7 +3504,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use axum::{
         body::{to_bytes, Body},
-        http::{Request, StatusCode},
+        http::{HeaderValue, Request, StatusCode},
     };
     use chrono::Duration;
     use serde_json::{json, Value};
@@ -4655,6 +4780,101 @@ exit 4
         assert_eq!(rotate_status, StatusCode::FORBIDDEN);
         assert_eq!(rotate["code"], "scope_denied");
         assert_eq!(rotate["target"], FLEET_SCOPE_ROTATE);
+    }
+
+    #[tokio::test]
+    async fn fleet_launch_accepts_scoped_request_and_returns_receipt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_agent_bridge(&tmp);
+        let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_LAUNCH], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_LAUNCH],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+
+        let intent: sase_core::FleetLaunchIntentWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "prompt": "Do remote work",
+                "request_id": "dispatch-request-1",
+                "display_name": "Dispatch demo",
+                "name": "mobile-demo",
+                "model": "gpt-5",
+                "provider": "codex",
+                "runtime": "codex",
+                "project": {
+                    "schema_version": 1,
+                    "provider_ref": "builtin:https",
+                    "project_id": "sase",
+                    "revision": null,
+                    "patch_ref": "patch-123"
+                },
+                "dry_run": false,
+                "follow": true,
+                "references": []
+            }))
+            .unwrap();
+        let fingerprint =
+            sase_core::fleet_launch_payload_fingerprint(&intent).unwrap();
+        let body = json!({
+            "schema_version": 1,
+            "key": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "operation_id": "dispatch-request-1"
+            },
+            "target_installation_id": bootstrap.pinned_installation_id,
+            "intent": intent,
+            "payload_fingerprint": fingerprint,
+            "acceptance_window_seconds": 30.0
+        });
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/launch",
+            Some(token),
+            Some(body),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        let (status, launch) =
+            json_response_with_state(state.clone(), request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(launch["decision"], "accept_new");
+        assert_eq!(launch["reason"], "unseen_in_window");
+        assert_eq!(launch["receipt"]["state"], "settled");
+        assert_eq!(launch["receipt"]["message"], "mobile-demo");
+        assert_eq!(
+            launch["receipt"]["target_installation_id"],
+            bootstrap.pinned_installation_id
+        );
+        assert_eq!(
+            launch["receipt"]["logical_locator"]["agent_id"],
+            "mobile-demo"
+        );
+
+        let events = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::AgentsChanged {
+                reason,
+                agent_name: Some(name),
+                timestamp: Some(_),
+            } if reason == "fleet_launch" && name == "mobile-demo"
+        )));
     }
 
     #[tokio::test]

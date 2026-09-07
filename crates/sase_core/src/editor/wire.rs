@@ -420,6 +420,7 @@ pub enum DirectiveValueRole {
     Code,
     Duration,
     Language,
+    Machine,
 }
 
 /// Which part of a directive argument clause the cursor is in.
@@ -594,6 +595,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
         "if" | "proc" => Some("typed_launch_units"),
+        "dispatch" => Some("remote_dispatch"),
         _ => None,
     }
 }
@@ -628,6 +630,10 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
             "%proc(bash=\"just check\", timeout=\"20m\", label=\"Scoped verification\")",
             "%proc(python=\"print('ready')\", workspace=false)",
             "%proc(timeout=\"20m\")::\n\n```bash\njust check\n```",
+        ],
+        "dispatch" => &[
+            "%dispatch:apollo Build and test the current project",
+            "%dispatch(apollo) Review the active Patch",
         ],
         _ => &[],
     }
@@ -693,6 +699,17 @@ pub fn directive_snippet_recipes(
                 "%model($1, $2=$3)$0",
                 "%model(model, alias=model)",
                 "Select a model and bind an alias override.",
+            ),
+        ],
+        "dispatch" => vec![
+            colon_recipe("dispatch", "machine"),
+            recipe(
+                "%dispatch(...)",
+                "remote dispatch snippet",
+                "%dispatch(${1:machine}) $0",
+                "%dispatch($1) $0",
+                "%dispatch(machine)",
+                "Send this launch to an enrolled remote machine.",
             ),
         ],
         "id" => vec![
@@ -819,6 +836,7 @@ fn directive_metadata_supports_colon(name: &str) -> bool {
             | "repeat"
             | "auto"
             | "final"
+            | "dispatch"
             | "xprompts_enabled"
     )
 }
@@ -943,6 +961,24 @@ pub struct DirectiveFinalizerEntry {
     pub provenance_id: Option<String>,
 }
 
+/// One enrolled remote-dispatch machine supplied by the host for `%dispatch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectiveMachineEntry {
+    pub alias: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub provider_ref: String,
+    #[serde(default)]
+    pub installation_id: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub documentation: String,
+}
+
 pub const FINALIZER_CATALOG_SCHEMA_VERSION: u32 = 1;
 
 /// Fresh finalizer catalog request sent to the Python editor helper bridge.
@@ -991,6 +1027,8 @@ pub struct DirectiveCompletionInventories {
     pub beads: Vec<BeadCompletionEntry>,
     #[serde(default)]
     pub finalizers: Vec<DirectiveFinalizerEntry>,
+    #[serde(default)]
+    pub machines: Vec<DirectiveMachineEntry>,
     /// Bead IDs that must never be offered (for example the launching
     /// agent's own bead).
     #[serde(default)]

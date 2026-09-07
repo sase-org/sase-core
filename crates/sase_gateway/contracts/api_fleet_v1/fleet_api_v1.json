@@ -251,6 +251,58 @@
       "row_revision": "ResourceRevisionWire|null",
       "schema_version": "u32"
     },
+    "FleetLaunchIntentWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "display_name": "string|null",
+      "dry_run": "bool|null",
+      "follow": "bool",
+      "model": "string|null",
+      "name": "string|null",
+      "project": "FleetLaunchProjectContextWire",
+      "prompt": "string; stripped source %dispatch directive",
+      "provider": "string|null",
+      "references": "FleetLaunchReferenceWire[]",
+      "request_id": "string|null",
+      "runtime": "string|null",
+      "schema_version": "u32"
+    },
+    "FleetLaunchProjectContextWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "patch_ref": "string|null; Patch evidence",
+      "project_id": "string; portable project identity, never a path",
+      "provider_ref": "string|null",
+      "revision": "string|null; published revision evidence",
+      "schema_version": "u32"
+    },
+    "FleetLaunchReceiptWire": {
+      "accepted_at_unix_ms": "u64",
+      "defined_by": "sase_core::fleet_contract",
+      "expires_at_unix_ms": "u64",
+      "instance_locator": "AgentInstanceLocatorWire|null",
+      "key": "ScopedOperationKeyWire",
+      "logical_locator": "LogicalAgentLocatorWire|null",
+      "message": "string|null; path/token-redacted",
+      "payload_fingerprint": "PayloadFingerprintWire",
+      "schema_version": "u32",
+      "state": "accepted|pending|settled",
+      "target_installation_id": "string"
+    },
+    "FleetLaunchRequestWire": {
+      "acceptance_window_seconds": "f64",
+      "defined_by": "sase_core::fleet_contract",
+      "intent": "FleetLaunchIntentWire",
+      "key": "ScopedOperationKeyWire",
+      "payload_fingerprint": "PayloadFingerprintWire; canonical intent digest",
+      "schema_version": "u32",
+      "target_installation_id": "string; pinned target installation"
+    },
+    "FleetLaunchResponseWire": {
+      "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
+      "defined_by": "sase_core::fleet_contract",
+      "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
+      "receipt": "FleetLaunchReceiptWire",
+      "schema_version": "u32"
+    },
     "FleetLogicalAgentCountsWire": {
       "attention": "u64",
       "basis": "FleetCountBasisWire",
@@ -356,6 +408,11 @@
       "rotated_at_unix": "f64|null",
       "schema_version": "u32"
     },
+    "PayloadFingerprintWire": {
+      "defined_by": "sase_core::fleet_contract",
+      "schema_version": "u32",
+      "sha256": "lowercase canonical SHA-256 digest"
+    },
     "ResolvedAgentDetailWire": {
       "content_handles": "ContentHandleWire[]",
       "defined_by": "sase_core::fleet_contract",
@@ -372,6 +429,12 @@
       "defined_by": "sase_core::fleet_contract",
       "logical_key": "string",
       "revision": "u64",
+      "schema_version": "u32"
+    },
+    "ScopedOperationKeyWire": {
+      "controller_id": "string; authenticated controller scope",
+      "defined_by": "sase_core::fleet_contract",
+      "operation_id": "string; idempotency key within controller scope",
       "schema_version": "u32"
     },
     "StoreCursorWire": {
@@ -484,6 +547,20 @@
       "protocol": "server_sent_events",
       "required_scope": "fleet.events.read",
       "success": "FleetEventStreamItemWire stream"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/launch",
+      "request": "FleetLaunchRequestWire",
+      "required_scope": "fleet.launch",
+      "success": "FleetLaunchResponseWire"
     },
     {
       "auth": true,

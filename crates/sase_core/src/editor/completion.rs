@@ -29,7 +29,7 @@ use super::directive::{
     build_bead_completion_candidates, build_directive_keyword_candidates,
     build_directive_static_value_candidates,
     detect_directive_context_at_position, directive_allows_keywords,
-    directive_metadata,
+    directive_is_hidden_from_name_completion_with_flags, directive_metadata,
 };
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
@@ -1559,6 +1559,15 @@ pub fn build_directive_clause_candidates(
             shared_extension: String::new(),
         };
     };
+    if directive_is_hidden_from_name_completion_with_flags(
+        name,
+        &inventories.enabled_feature_flags,
+    ) {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    }
     if name == "wait" {
         return build_wait_completion_candidates_for_form(
             token,
@@ -1602,6 +1611,9 @@ pub fn build_directive_clause_candidates(
             shared_extension: String::new(),
         };
     };
+    if metadata.positional_role == Some(DirectiveValueRole::Machine) {
+        return machine_value_candidates(token, inventories, replacement);
+    }
     // Keyword names are offered only in `DirectiveArgumentKeyword` (and the
     // wait positional mix above). Clan/id positional slots stay free-form.
     build_directive_static_value_candidates(
@@ -1617,6 +1629,17 @@ fn build_directive_value_candidates(
     token: &str,
     replacement: Option<EditorRange>,
 ) -> CompletionList {
+    if context.directive_name.as_deref().is_some_and(|name| {
+        directive_is_hidden_from_name_completion_with_flags(
+            name,
+            &inventories.enabled_feature_flags,
+        )
+    }) {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    }
     match context.value_role() {
         Some(DirectiveValueRole::Bead) => build_bead_completion_candidates(
             &inventories.beads,
@@ -1664,6 +1687,9 @@ fn build_directive_value_candidates(
         Some(DirectiveValueRole::FinalizerInstance) => {
             finalizer_value_candidates(token, inventories, replacement)
         }
+        Some(DirectiveValueRole::Machine) => {
+            machine_value_candidates(token, inventories, replacement)
+        }
         _ => {
             let Some(metadata) = context
                 .directive_name
@@ -1687,6 +1713,59 @@ fn build_directive_value_candidates(
                 .unwrap_or(metadata.positional_suggestions);
             build_directive_static_value_candidates(values, token, replacement)
         }
+    }
+}
+
+fn machine_value_candidates(
+    token: &str,
+    inventories: &DirectiveCompletionInventories,
+    replacement: Option<EditorRange>,
+) -> CompletionList {
+    let partial = token.to_lowercase();
+    let candidates = inventories
+        .machines
+        .iter()
+        .filter(|entry| {
+            entry.alias.to_lowercase().starts_with(&partial)
+                || entry.display.to_lowercase().starts_with(&partial)
+        })
+        .map(|entry| {
+            let display = if entry.display.is_empty() {
+                entry.alias.clone()
+            } else {
+                entry.display.clone()
+            };
+            let detail = [
+                entry.status.as_str(),
+                entry.provider_ref.as_str(),
+                entry.installation_id.as_str(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+            CompletionCandidate {
+                display,
+                insertion: entry.alias.clone(),
+                detail: (!detail.is_empty()).then_some(detail),
+                documentation: (!entry.documentation.is_empty())
+                    .then(|| entry.documentation.clone()),
+                is_dir: false,
+                name: entry.alias.clone(),
+                replacement: replacement.map(|range| EditorTextEdit {
+                    range,
+                    new_text: entry.alias.clone(),
+                }),
+                additional_edits: Vec::new(),
+                kind: "machine".to_string(),
+                project: String::new(),
+                status: entry.status.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
     }
 }
 

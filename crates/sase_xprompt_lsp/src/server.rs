@@ -52,7 +52,7 @@ use sase_core::{
     AtReferenceMenuOptionsWire, AtReferencePathRowWire,
     AtReferencePayloadIndex, AtReferenceStage, CompiledGlossaryCatalog,
     CompletionCandidate, CompletionContextKind, CompletionList,
-    DirectiveClauseKind, DirectiveCompletionInventories,
+    DirectiveClauseKind, DirectiveCompletionInventories, DirectiveMachineEntry,
     DirectiveModelAliasKey, DirectiveSyntaxForm, DirectiveValueRole,
     DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
     GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
@@ -90,9 +90,11 @@ const GLOSSARY_CACHE_TTL: Duration = Duration::from_secs(2);
 /// fresh on every `+` completion request so external rewrites are picked up.
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
+const MACHINE_CATALOG_ENV: &str = "SASE_XPROMPT_MACHINE_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
+const REMOTE_DISPATCH_ENV: &str = "SASE_REMOTE_DISPATCH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -109,6 +111,9 @@ struct ServerConfig {
     /// [`MODEL_CATALOG_ENV`] at startup. The file itself is re-read fresh on
     /// each `%model` argument completion request.
     model_catalog: Option<PathBuf>,
+    /// Path to the materialized `%dispatch` machine catalog. Re-read fresh on
+    /// each dispatch argument completion request.
+    machine_catalog: Option<PathBuf>,
     /// Path to the launcher-materialized artifact-reference catalog. The file
     /// and its enumerated payload inventories are cached briefly; path metadata
     /// changes and explicit refreshes invalidate the cache immediately.
@@ -119,6 +124,8 @@ struct ServerConfig {
     glossary_catalog: Option<PathBuf>,
     /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
     typed_launch_units: bool,
+    /// Startup-resolved `remote_dispatch` flag. Never re-read on keystrokes.
+    remote_dispatch: bool,
 }
 
 impl Default for ServerConfig {
@@ -131,9 +138,11 @@ impl Default for ServerConfig {
             allow_all_markdown: false,
             vcs_project_catalog: vcs_project_catalog_path(),
             model_catalog: model_catalog_path(),
+            machine_catalog: machine_catalog_path(),
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
+            remote_dispatch: remote_dispatch_from_env(),
         }
     }
 }
@@ -441,7 +450,10 @@ impl XpromptLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
-                    &enabled_feature_flags(config.typed_launch_units),
+                    &enabled_feature_flags(
+                        config.typed_launch_units,
+                        config.remote_dispatch,
+                    ),
                     config.snippet_support,
                 ));
             }
@@ -665,6 +677,7 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
+                config.remote_dispatch,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -704,12 +717,17 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
+                config.remote_dispatch,
             ),
             ..DirectiveCompletionInventories::default()
         };
         if needs_model_alias_keys(context) {
             inventories.model_alias_keys =
                 model_alias_keys_from_catalog(config.model_catalog.as_deref());
+        }
+        if needs_machine_entries(context) {
+            inventories.machines =
+                load_machine_catalog(config.machine_catalog.as_deref());
         }
         if !needs_host_catalog(context) {
             return inventories;
@@ -1322,7 +1340,10 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates_with_flags(
                     token,
-                    &enabled_feature_flags(config.typed_launch_units),
+                    &enabled_feature_flags(
+                        config.typed_launch_units,
+                        config.remote_dispatch,
+                    ),
                 )
             }
             CompletionContextKind::DirectiveArgument
@@ -1765,10 +1786,13 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
             .unwrap_or(false),
         vcs_project_catalog: vcs_project_catalog_path(),
         model_catalog: model_catalog_path(),
+        machine_catalog: machine_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
         glossary_catalog: glossary_catalog_path(),
         typed_launch_units: typed_launch_units_from_initialize(params)
             .unwrap_or_else(typed_launch_units_from_env),
+        remote_dispatch: remote_dispatch_from_initialize(params)
+            .unwrap_or_else(remote_dispatch_from_env),
     }
 }
 
@@ -1790,6 +1814,22 @@ fn typed_launch_units_from_env() -> bool {
         .unwrap_or(false)
 }
 
+fn remote_dispatch_from_initialize(params: &InitializeParams) -> Option<bool> {
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("remote_dispatch"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn remote_dispatch_from_env() -> bool {
+    std::env::var(REMOTE_DISPATCH_ENV)
+        .ok()
+        .as_deref()
+        .map(env_flag_enabled)
+        .unwrap_or(false)
+}
+
 fn env_flag_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -1797,12 +1837,18 @@ fn env_flag_enabled(value: &str) -> bool {
     )
 }
 
-fn enabled_feature_flags(typed_launch_units: bool) -> Vec<String> {
+fn enabled_feature_flags(
+    typed_launch_units: bool,
+    remote_dispatch: bool,
+) -> Vec<String> {
+    let mut flags = Vec::new();
     if typed_launch_units {
-        vec!["typed_launch_units".to_string()]
-    } else {
-        Vec::new()
+        flags.push("typed_launch_units".to_string());
     }
+    if remote_dispatch {
+        flags.push("remote_dispatch".to_string());
+    }
+    flags
 }
 
 fn vcs_project_catalog_path() -> Option<PathBuf> {
@@ -1811,6 +1857,10 @@ fn vcs_project_catalog_path() -> Option<PathBuf> {
 
 fn model_catalog_path() -> Option<PathBuf> {
     std::env::var_os(MODEL_CATALOG_ENV).map(PathBuf::from)
+}
+
+fn machine_catalog_path() -> Option<PathBuf> {
+    std::env::var_os(MACHINE_CATALOG_ENV).map(PathBuf::from)
 }
 
 fn artifact_ref_catalog_path() -> Option<PathBuf> {
@@ -1844,6 +1894,11 @@ fn is_directive_argument_context(
 
 fn needs_host_catalog(context: &sase_core::CompletionContext) -> bool {
     needs_agent_entries(context) || needs_bead_entries(context)
+}
+
+fn needs_machine_entries(context: &sase_core::CompletionContext) -> bool {
+    context.directive_name.as_deref() == Some("dispatch")
+        || context.value_role() == Some(DirectiveValueRole::Machine)
 }
 
 fn is_finalizer_value_context(context: &sase_core::CompletionContext) -> bool {
@@ -2769,6 +2824,44 @@ fn load_model_catalog(path: Option<&Path>) -> Vec<ModelCompletionEntryWire> {
                     let entry: ModelCompletionEntryWire =
                         serde_json::from_value(entry.clone()).ok()?;
                     (!entry.value.is_empty()).then_some(entry)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Load the `%dispatch` machine completion catalog from materialized JSON.
+fn load_machine_catalog(path: Option<&Path>) -> Vec<DirectiveMachineEntry> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        warn!("failed to parse machine catalog at {path:?}");
+        return Vec::new();
+    };
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if schema_version != 1 {
+        warn!(
+            "unsupported machine catalog schema_version {schema_version} at {path:?}"
+        );
+        return Vec::new();
+    }
+    value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let entry: DirectiveMachineEntry =
+                        serde_json::from_value(entry.clone()).ok()?;
+                    (!entry.alias.is_empty()).then_some(entry)
                 })
                 .collect()
         })

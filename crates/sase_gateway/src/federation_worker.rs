@@ -11,7 +11,8 @@ use fs2::FileExt;
 use sase_core::fleet_contract::{
     validate_connection_plan, ConnectionPlanWire, FleetCatalogQueryWire,
     FleetContentReadRequestWire, FleetDetailRequestWire,
-    FleetLogicalBatchRequestWire, FleetProjectEligibilityRequestWire,
+    FleetLaunchRequestWire, FleetLogicalBatchRequestWire,
+    FleetProjectEligibilityRequestWire,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -267,6 +268,10 @@ pub enum FederationIpcRequestWire {
         request: FleetProjectEligibilityRequestWire,
         #[serde(default)]
         cache_only: bool,
+    },
+    Launch {
+        target: String,
+        request: Box<FleetLaunchRequestWire>,
     },
     Shutdown,
 }
@@ -805,6 +810,9 @@ mod imp {
                     )
                     .await
             }
+            FederationIpcRequestWire::Launch { target, request } => {
+                state.launch_one(target, *request, deadline).await
+            }
             FederationIpcRequestWire::Shutdown => to_json(serde_json::json!({
                 "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
                 "shutdown": true,
@@ -1017,6 +1025,91 @@ mod imp {
             })
         }
 
+        async fn launch_one(
+            &self,
+            target: String,
+            request: FleetLaunchRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            let host = self.resolve_launch_target(&target).await?;
+            if request.target_installation_id
+                != host.plan.pinned_installation_id
+            {
+                return Err(federation_error(
+                    "quarantined",
+                    "launch request target_installation_id does not match the configured host pin",
+                    Some("target_installation_id"),
+                ));
+            }
+            let payload = with_deadline(deadline, async {
+                let _global =
+                    self.in_flight.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "global request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                let _host =
+                    host.permits.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "host request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                host.launch_remote(&request, deadline).await
+            })
+            .await?;
+            to_json(FederationReadResponseWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                operation: "launch".to_string(),
+                hosts: vec![
+                    host.payload_result("ok", false, None, payload, None)
+                ],
+            })
+        }
+
+        async fn resolve_launch_target(
+            &self,
+            target: &str,
+        ) -> Result<Arc<RemoteHost>, FederationErrorWire> {
+            let target = target.trim();
+            if target.is_empty() {
+                return Err(federation_error(
+                    "invalid_request",
+                    "launch target must be non-empty",
+                    Some("target"),
+                ));
+            }
+            let hosts = self.hosts.read().await;
+            if let Some(host) = hosts.get(target) {
+                return Ok(host.clone());
+            }
+            let matches = hosts
+                .values()
+                .filter(|host| host.alias.as_deref() == Some(target))
+                .cloned()
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [host] => Ok(host.clone()),
+                [] => Err(federation_error(
+                    "not_found",
+                    "no configured dispatch host matches the launch target",
+                    Some("target"),
+                )),
+                _ => Err(federation_error(
+                    "invalid_request",
+                    "launch target alias matches multiple configured hosts",
+                    Some("target"),
+                )),
+            }
+        }
+
         fn cache_path_limits_owned(&self) -> OwnedCachePathLimits {
             OwnedCachePathLimits {
                 path: cache_path(&self.config.sase_home),
@@ -1227,6 +1320,21 @@ mod imp {
                     .await
                 }
             }
+        }
+
+        async fn launch_remote(
+            &self,
+            request: &FleetLaunchRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            self.ensure_hello(deadline).await?;
+            self.http_json(
+                Method::POST,
+                "/launch",
+                Some(to_json(request)?),
+                deadline,
+            )
+            .await
         }
 
         async fn http_json(
@@ -1908,6 +2016,7 @@ fn federation_capabilities() -> Vec<String> {
         "fleet.detail".to_string(),
         "fleet.content_range".to_string(),
         "fleet.project_eligibility".to_string(),
+        "fleet.launch".to_string(),
         "cache.read".to_string(),
         "cache.persist".to_string(),
     ]

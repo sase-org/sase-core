@@ -7,6 +7,7 @@ pub use sase_core::fleet_contract::{
     FleetContentReadRequestWire, FleetContentReadResponseWire,
     FleetDetailRequestWire, FleetDetailResponseWire, FleetEventStreamItemWire,
     FleetInvalidationEventWire, FleetInvalidationKindWire,
+    FleetLaunchReceiptWire, FleetLaunchRequestWire, FleetLaunchResponseWire,
     FleetLogicalAgentCountsWire, FleetLogicalBatchEntryWire,
     FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
     FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
