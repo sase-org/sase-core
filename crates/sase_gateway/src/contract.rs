@@ -7,6 +7,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 use crate::fleet_auth::{
+    FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE,
     FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
     FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE, FLEET_SCOPE_PROJECTS_READ,
@@ -1069,6 +1070,26 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "POST",
+                "path": "/api/fleet/v1/attention",
+                "auth": true,
+                "required_scope": FLEET_SCOPE_ATTENTION_READ,
+                "request": "FleetLogicalBatchRequestWire",
+                "success": "FleetAttentionSnapshotWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
+                "path": "/api/fleet/v1/attention/resolve",
+                "auth": true,
+                "required_scope": FLEET_SCOPE_ATTENTION_RESOLVE,
+                "request": "FleetAttentionRequestWire",
+                "success": "FleetAttentionResponseWire",
+                "already_settled": "200 FleetAttentionResponseWire receipt.outcome=already_settled",
+                "events_on_success": ["notifications_changed", "agents_changed"],
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "POST",
                 "path": "/api/fleet/v1/credential/rotate",
                 "auth": true,
                 "required_scope": FLEET_SCOPE_ROTATE,
@@ -1410,6 +1431,92 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
                 "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
                 "receipt": "FleetMutationReceiptWire"
+            },
+            "FleetAttentionRequestKeyWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "origin_installation_id": "string",
+                "request_id": "string; owner's opaque notification identity",
+                "pending_action_prefix": "string; the same prefix `sase gate answer` consumes"
+            },
+            "FleetAttentionOptionWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "id": "string; opaque",
+                "label": "string"
+            },
+            "FleetAttentionEntryWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "path_privacy": "never includes a bundle path, response directory, request path, preview path, PID, or credential",
+                "schema_version": "u32",
+                "kind": "question|gate",
+                "state": "pending|settled|expired|unknown",
+                "request_key": "FleetAttentionRequestKeyWire",
+                "revision": "u64; content fingerprint, stable across reconnects",
+                "logical_key": "string|null",
+                "logical_locator": "LogicalAgentLocatorWire|null",
+                "title": "string",
+                "summary": "string; bounded",
+                "options": "FleetAttentionOptionWire[]",
+                "feedback_required": "bool",
+                "question_form": "object|null",
+                "preview": "ContentHandleWire|null",
+                "settled_by_host_label": "string|null",
+                "settled_response": "object|null"
+            },
+            "FleetAttentionSnapshotWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "entries": "FleetAttentionEntryWire[]",
+                "observed_at_unix": "f64"
+            },
+            "FleetAttentionIntentWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "kind": "question|gate",
+                "request_key": "FleetAttentionRequestKeyWire",
+                "observed_revision": "u64",
+                "selected_option_ids": "string[]; gate only",
+                "feedback": "string|null; gate only",
+                "question_choice": "answer|custom|null; question only",
+                "question_index": "u32|null",
+                "selected_option_id": "string|null",
+                "selected_option_label": "string|null",
+                "selected_option_index": "u32|null",
+                "custom_answer": "string|null",
+                "global_note": "string|null"
+            },
+            "FleetAttentionRequestWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "key": "ScopedOperationKeyWire",
+                "target_installation_id": "string; pinned target installation",
+                "intent": "FleetAttentionIntentWire",
+                "payload_fingerprint": "PayloadFingerprintWire; canonical intent digest",
+                "acceptance_window_seconds": "f64"
+            },
+            "FleetAttentionReceiptWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "key": "ScopedOperationKeyWire",
+                "payload_fingerprint": "PayloadFingerprintWire",
+                "target_installation_id": "string",
+                "request_key": "FleetAttentionRequestKeyWire",
+                "observed_revision": "u64",
+                "accepted_at_unix_ms": "u64",
+                "expires_at_unix_ms": "u64",
+                "state": "accepted|pending|settled",
+                "outcome": "applied|already_settled|stale_revision|unknown_request|capability_missing|precondition_failed|null",
+                "settled_by_host_label": "string|null",
+                "settled_response": "object|null",
+                "message": "string|null; path/token-redacted"
+            },
+            "FleetAttentionResponseWire": {
+                "defined_by": "sase_core::fleet_attention",
+                "schema_version": "u32",
+                "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
+                "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
+                "receipt": "FleetAttentionReceiptWire"
             },
             "ScopedOperationKeyWire": {
                 "defined_by": "sase_core::fleet_contract",

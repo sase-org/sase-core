@@ -16,6 +16,10 @@ use sase_core::{
         AgentArtifactScanOptionsWire, AgentMetaWire, DoneMarkerWire,
         FamilyShellWire,
     },
+    fleet_attention::{
+        FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
+        FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
+    },
     fleet_contract::{
         classify_cursor_replay, count_logical_agents,
         cursor_replay_reason_to_resync_reason, ensure_installation_identity,
@@ -623,6 +627,7 @@ fn resolve_record(
         is_terminal,
         liveness,
         &content_handles,
+        record.pending_question.is_some(),
     );
     let detail =
         project_resolved_agent_detail(&ResolvedAgentProjectionRequestWire {
@@ -753,6 +758,7 @@ fn lifecycle_and_content_capabilities(
     is_terminal: bool,
     liveness: OwnerLivenessWire,
     content_handles: &[ContentHandleWire],
+    has_pending_question: bool,
 ) -> Vec<String> {
     let mut caps = Vec::new();
     if row_kind == FleetRowKindWire::AgentShell && !is_terminal {
@@ -761,6 +767,12 @@ fn lifecycle_and_content_capabilities(
         if liveness == OwnerLivenessWire::Alive {
             caps.push(FLEET_MUTATION_CAPABILITY_STOP.to_string());
         }
+    }
+    if !is_terminal && has_pending_question {
+        caps.push(FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION.to_string());
+    }
+    if !is_terminal && row_kind == FleetRowKindWire::Gate {
+        caps.push(FLEET_ATTENTION_CAPABILITY_APPROVE_GATE.to_string());
     }
     if !content_handles.is_empty() {
         caps.push("content.range".to_string());

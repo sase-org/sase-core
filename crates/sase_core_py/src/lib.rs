@@ -191,6 +191,11 @@
 //! - `fleet_validate_mutation_request(request: dict) -> dict`
 //! - `fleet_evaluate_mutation_precondition(intent: dict, observed: dict | None) -> dict`
 //! - `fleet_partition_bulk_targets(targets: list[dict]) -> dict`
+//! - `fleet_project_attention(origin_installation_id: str, rows: list[dict], resolved: list[dict], observed_at_unix: float) -> dict`
+//! - `fleet_attention_payload_fingerprint(intent: dict) -> dict`
+//! - `fleet_validate_attention_request(request: dict) -> dict`
+//! - `fleet_evaluate_attention_precondition(intent: dict, capabilities: dict, observed: dict | None = None) -> dict`
+//! - `fleet_decide_attention_notices(current: list[dict], ledger: list[dict], retention_window_seconds: float, now_unix: float) -> dict`
 //! - `fleet_validate_connection_plan(plan: dict) -> dict`
 //! - `federation_worker_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
@@ -895,10 +900,16 @@ use sase_core::finalizer::{
     FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
     FINALIZER_WIRE_SCHEMA_VERSION,
 };
+use sase_core::fleet_attention::{
+    self as core_fleet_attention, FleetAttentionEntryWire,
+    FleetAttentionIntentWire, FleetAttentionLogicalIdentityWire,
+    FleetAttentionNoticeLedgerEntryWire, FleetAttentionNotificationRowWire,
+    FleetAttentionRequestWire,
+};
 use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
-    CacheFreshnessRequestWire, ConnectionPlanWire, CursorReplayRequestWire,
-    FleetContractError as FleetContractDomainError,
+    CacheFreshnessRequestWire, CapabilitySetWire, ConnectionPlanWire,
+    CursorReplayRequestWire, FleetContractError as FleetContractDomainError,
     FleetLaunchDecisionRequestWire, FleetLaunchIntentWire,
     FleetLaunchRequestWire, FleetLogicalAgentCountsRequestWire,
     FocusFleetCountsRequestWire, FollowReconciliationRequestWire,
@@ -11417,6 +11428,145 @@ fn py_fleet_partition_bulk_targets<'py>(
     fleet_wire_to_py(py, &result)
 }
 
+fn fleet_wire_list_from_pylist<T: DeserializeOwned>(
+    items: &Bound<'_, PyList>,
+    label: &str,
+) -> PyResult<Vec<T>> {
+    let mut parsed = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let dict = item.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err(format!("{label} entries must be objects"))
+        })?;
+        parsed.push(fleet_wire_from_pydict(dict, label)?);
+    }
+    Ok(parsed)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_project_attention")]
+fn py_fleet_project_attention<'py>(
+    py: Python<'py>,
+    origin_installation_id: &str,
+    rows: &Bound<'py, PyList>,
+    resolved: &Bound<'py, PyList>,
+    observed_at_unix: f64,
+) -> PyResult<PyObject> {
+    let origin_installation_id = origin_installation_id.to_string();
+    let rows: Vec<FleetAttentionNotificationRowWire> =
+        fleet_wire_list_from_pylist(rows, "fleet attention notification row")?;
+    let resolved: Vec<FleetAttentionLogicalIdentityWire> =
+        fleet_wire_list_from_pylist(
+            resolved,
+            "fleet attention logical identity",
+        )?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::project_fleet_attention(
+                &origin_installation_id,
+                &rows,
+                &resolved,
+                observed_at_unix,
+            )
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_attention_payload_fingerprint")]
+fn py_fleet_attention_payload_fingerprint<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: FleetAttentionIntentWire =
+        fleet_wire_from_pydict(intent, "fleet attention intent")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::fleet_attention_payload_fingerprint(&intent)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_attention_request")]
+fn py_fleet_validate_attention_request<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetAttentionRequestWire =
+        fleet_wire_from_pydict(request, "fleet attention request")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::validate_fleet_attention_request(&request)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "fleet_evaluate_attention_precondition",
+    signature = (intent, capabilities, observed=None)
+)]
+fn py_fleet_evaluate_attention_precondition<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+    capabilities: &Bound<'py, PyDict>,
+    observed: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let intent: FleetAttentionIntentWire =
+        fleet_wire_from_pydict(intent, "fleet attention intent")?;
+    let observed_entry = match observed {
+        Some(value) => Some(fleet_wire_from_pydict::<FleetAttentionEntryWire>(
+            value,
+            "observed fleet attention entry",
+        )?),
+        None => None,
+    };
+    let capabilities: CapabilitySetWire =
+        fleet_wire_from_pydict(capabilities, "fleet attention capabilities")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::evaluate_attention_precondition(
+                &intent,
+                observed_entry.as_ref(),
+                &capabilities,
+            )
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_decide_attention_notices")]
+fn py_fleet_decide_attention_notices<'py>(
+    py: Python<'py>,
+    current: &Bound<'py, PyList>,
+    ledger: &Bound<'py, PyList>,
+    retention_window_seconds: f64,
+    now_unix: f64,
+) -> PyResult<PyObject> {
+    let current: Vec<FleetAttentionEntryWire> =
+        fleet_wire_list_from_pylist(current, "fleet attention entry")?;
+    let ledger: Vec<FleetAttentionNoticeLedgerEntryWire> =
+        fleet_wire_list_from_pylist(
+            ledger,
+            "fleet attention notice ledger entry",
+        )?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::decide_attention_notices(
+                &current,
+                &ledger,
+                retention_window_seconds,
+                now_unix,
+            )
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
 #[pyfunction]
 #[pyo3(name = "federation_worker_main")]
 fn py_federation_worker_main(
@@ -13817,6 +13967,17 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_partition_bulk_targets, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_project_attention, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_attention_payload_fingerprint,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_attention_request, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_evaluate_attention_precondition,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_decide_attention_notices, m)?)?;
     m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;

@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+pub use sase_core::fleet_attention::{
+    FleetAttentionEntryWire, FleetAttentionIntentWire, FleetAttentionKindWire,
+    FleetAttentionLogicalIdentityWire, FleetAttentionNotificationRowWire,
+    FleetAttentionOutcomeWire, FleetAttentionPreconditionDecisionWire,
+    FleetAttentionPreconditionReasonWire, FleetAttentionReceiptWire,
+    FleetAttentionRequestWire, FleetAttentionResponseWire,
+    FleetAttentionSnapshotWire,
+};
 pub use sase_core::fleet_contract::{
     CapabilitySetWire, FleetAuthoritativeSnapshotWire,
     FleetCatalogPageSelectionWire, FleetCatalogPageWire, FleetCatalogQueryWire,

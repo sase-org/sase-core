@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     convert::Infallible,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
@@ -40,10 +40,12 @@ use tower_http::trace::TraceLayer;
 #[cfg(test)]
 use sase_core::notifications::MobileActionStateWire;
 
+use crate::fleet_attention::{FleetAttentionStore, FleetAttentionStoreError};
 use crate::fleet_auth::{
     credential_has_scope, current_unix_time, fleet_capabilities,
     negotiate_fleet_protocol_version, FleetAuthentication,
     FleetCredentialStore, FleetEnrollmentResult, FleetStoreError,
+    FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE,
     FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
     FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE, FLEET_SCOPE_PROJECTS_READ,
@@ -123,6 +125,7 @@ pub struct GatewayState {
     fleet_store: FleetCredentialStore,
     fleet_launches: FleetLaunchStore,
     fleet_mutations: FleetMutationStore,
+    fleet_attention: FleetAttentionStore,
     fleet_reads: FleetReadService,
     fleet_enrollment_limiter: FleetEnrollmentRateLimiter,
     machine_selector: String,
@@ -238,6 +241,9 @@ impl GatewayState {
             fleet_store: FleetCredentialStore::new(options.sase_home.clone()),
             fleet_launches: FleetLaunchStore::new(options.sase_home.clone()),
             fleet_mutations: FleetMutationStore::new(options.sase_home.clone()),
+            fleet_attention: FleetAttentionStore::new(
+                options.sase_home.clone(),
+            ),
             fleet_reads: FleetReadService::new(options.sase_home.clone()),
             fleet_enrollment_limiter: FleetEnrollmentRateLimiter::new(
                 FLEET_ENROLLMENT_RATE_LIMIT,
@@ -764,6 +770,8 @@ fn fleet_v1_routes() -> Router<GatewayState> {
         .route("/events", get(fleet_events))
         .route("/launch", post(fleet_launch))
         .route("/mutate", post(fleet_mutate))
+        .route("/attention", post(fleet_attention_read))
+        .route("/attention/resolve", post(fleet_attention_resolve))
         .route("/credential/rotate", post(fleet_token_rotate))
         .route("/credential/revoke", post(fleet_credential_revoke))
         .layer(DefaultBodyLimit::max(FLEET_REQUEST_BODY_LIMIT_BYTES))
@@ -1345,6 +1353,446 @@ fn mutation_result_locator(
         agent_id: agent_id.to_string(),
         family_id: payload.intent.target.logical.family_id.clone(),
     })
+}
+
+async fn fleet_attention_read(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetLogicalBatchRequestWire>, JsonRejection>,
+) -> Result<Json<sase_core::FleetAttentionSnapshotWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/attention",
+        FLEET_SCOPE_ATTENTION_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+    let batch = state
+        .fleet_reads
+        .batch_lookup(payload)
+        .await
+        .map_err(ApiError::from_fleet_read)?;
+    let resolved: Vec<sase_core::FleetAttentionLogicalIdentityWire> =
+        batch
+            .entries
+            .into_iter()
+            .filter_map(|entry| entry.summary)
+            .map(|summary| sase_core::FleetAttentionLogicalIdentityWire {
+                schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                agent_label: summary.labels.agent_label.clone().unwrap_or_else(
+                    || summary.logical_locator.agent_id.clone(),
+                ),
+                logical_key: summary.logical_key,
+                logical_locator: summary.logical_locator,
+            })
+            .collect();
+    // With no resolved followed row, no notification read happens at all:
+    // attention stays scoped to logical keys this viewer already follows.
+    if resolved.is_empty() {
+        return Ok(Json(sase_core::FleetAttentionSnapshotWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            entries: Vec::new(),
+            observed_at_unix: current_unix_time(),
+        }));
+    }
+    let allowed_labels: BTreeSet<&str> = resolved
+        .iter()
+        .map(|identity| identity.agent_label.as_str())
+        .collect();
+    let notifications = state
+        .notification_bridge
+        .list_notifications(false)
+        .map_err(ApiError::from_host_bridge)?;
+    let rows: Vec<sase_core::FleetAttentionNotificationRowWire> = notifications
+        .notifications
+        .iter()
+        .filter(|notification| {
+            attention_correlation_label(notification)
+                .is_some_and(|label| allowed_labels.contains(label))
+        })
+        .map(
+            |notification| sase_core::FleetAttentionNotificationRowWire {
+                schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                state: state.notification_bridge.action_state(notification),
+                notification: notification.clone(),
+            },
+        )
+        .collect();
+    let snapshot = sase_core::project_fleet_attention(
+        &installation.installation_id,
+        &rows,
+        &resolved,
+        current_unix_time(),
+    )
+    .map_err(|error| {
+        ApiError::invalid_request("attention", error.to_string())
+    })?;
+    Ok(Json(snapshot))
+}
+
+/// The agent-label signal used to correlate a notification to a followed
+/// row: the gate producer's declared `origin_agent`, or (for a question) the
+/// asking agent's own `sender` identity.
+fn attention_correlation_label(
+    notification: &NotificationWire,
+) -> Option<&str> {
+    let kind = MobileActionKindWire::from_notification_action(
+        notification.action.as_deref(),
+    );
+    if kind == MobileActionKindWire::UserQuestion {
+        return Some(notification.sender.as_str());
+    }
+    if kind.is_gate() {
+        return notification
+            .action_data
+            .get("origin_agent")
+            .map(String::as_str);
+    }
+    None
+}
+
+async fn fleet_attention_resolve(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<sase_core::FleetAttentionRequestWire>, JsonRejection>,
+) -> Result<Json<sase_core::FleetAttentionResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/attention/resolve",
+        FLEET_SCOPE_ATTENTION_RESOLVE,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+
+    let entry = current_attention_entry(
+        &state,
+        &installation.installation_id,
+        &payload.intent.request_key,
+    )?;
+    // The bridge's own pending-action state is this host's ground truth for
+    // whether the required attention capability is currently available; a
+    // row that has gone terminal since the last bulk read simply stops
+    // being Pending, which the precondition already refuses on its own.
+    let capabilities = sase_core::CapabilitySetWire {
+        schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+        resource: match &entry {
+            Some(entry)
+                if entry.state
+                    == sase_core::FleetAttentionStateWire::Pending =>
+            {
+                vec![payload.intent.kind.required_capability().to_string()]
+            }
+            _ => Vec::new(),
+        },
+        host: Vec::new(),
+        protocol: vec!["fleet.v1".to_string()],
+    };
+    let precondition = sase_core::evaluate_attention_precondition(
+        &payload.intent,
+        entry.as_ref(),
+        &capabilities,
+    )
+    .map_err(|error| ApiError::invalid_request("intent", error.to_string()))?;
+
+    let admission = state
+        .fleet_attention
+        .reserve(&payload, &installation.installation_id, current_unix_time())
+        .map_err(ApiError::from_fleet_attention_store)?;
+    let request_id = payload.intent.request_key.request_id.clone();
+
+    let receipt = match admission.decision {
+        sase_core::OperationDecisionKindWire::Expired => {
+            return Err(ApiError::from_fleet_attention_store(
+                FleetAttentionStoreError::Expired(format!(
+                    "{:?}",
+                    admission.reason
+                )),
+            ));
+        }
+        sase_core::OperationDecisionKindWire::Conflict
+        | sase_core::OperationDecisionKindWire::PreconditionMismatch => {
+            return Err(ApiError::from_fleet_attention_store(
+                FleetAttentionStoreError::Conflict(format!(
+                    "{:?}",
+                    admission.reason
+                )),
+            ));
+        }
+        // A replayed submission never re-consults the row: the receipt was
+        // already settled (successfully or as a typed refusal) the first
+        // time this exact key and payload were seen.
+        sase_core::OperationDecisionKindWire::ReturnOriginalReceipt => {
+            admission.receipt
+        }
+        sase_core::OperationDecisionKindWire::AcceptNew
+            if precondition.allowed =>
+        {
+            match execute_fleet_attention(&state, &payload.intent) {
+                Ok((outcome, settled_response, message)) => {
+                    let receipt = state
+                        .fleet_attention
+                        .settle(
+                            &admission.receipt,
+                            outcome,
+                            Some(state.host_label.clone()),
+                            settled_response,
+                            message,
+                        )
+                        .map_err(ApiError::from_fleet_attention_store)?;
+                    state.audit(
+                        credential.controller_id.clone(),
+                        "/api/fleet/v1/attention/resolve",
+                        Some(request_id.clone()),
+                        "success",
+                    );
+                    publish_notifications_changed(
+                        &state,
+                        "fleet_attention_resolve",
+                        Some(request_id.clone()),
+                        None,
+                    )?;
+                    publish_agents_changed(
+                        &state,
+                        "fleet_attention_resolve",
+                        None,
+                    )?;
+                    receipt
+                }
+                Err(api_error) => {
+                    state.audit(
+                        credential.controller_id,
+                        "/api/fleet/v1/attention/resolve",
+                        Some(request_id),
+                        api_error.wire.code.outcome_label(),
+                    );
+                    return Err(api_error);
+                }
+            }
+        }
+        // The row itself refuses this intent (already settled, stale,
+        // unknown, capability missing, or an invalid option): settle this
+        // operation key against that typed, host-named refusal rather than
+        // a bare HTTP error, so a losing controller gets a structured
+        // result instead of a failure and never a second execution.
+        sase_core::OperationDecisionKindWire::AcceptNew => {
+            let (outcome, settled_by_host_label, settled_response, message) =
+                attention_refusal_settlement(
+                    &state,
+                    &precondition,
+                    &payload.intent.request_key,
+                )
+                .map_err(ApiError::from_fleet_attention_store)?;
+            let receipt = state
+                .fleet_attention
+                .settle(
+                    &admission.receipt,
+                    outcome,
+                    settled_by_host_label,
+                    settled_response,
+                    Some(message),
+                )
+                .map_err(ApiError::from_fleet_attention_store)?;
+            state.audit(
+                credential.controller_id,
+                "/api/fleet/v1/attention/resolve",
+                Some(request_id),
+                &format!("{:?}", precondition.reason),
+            );
+            receipt
+        }
+    };
+    Ok(Json(sase_core::FleetAttentionResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        decision: admission.decision,
+        reason: admission.reason,
+        receipt,
+    }))
+}
+
+type FleetAttentionRefusalSettlement = (
+    sase_core::FleetAttentionOutcomeWire,
+    Option<String>,
+    Option<JsonValue>,
+    String,
+);
+
+/// Map a precondition refusal to the settlement `execute_fleet_attention`
+/// would otherwise have produced, naming this host in the message. For
+/// `already_settled`, prefers the real settled receipt this journal already
+/// recorded (from whichever operation key answered first) over the bare
+/// notification-state signal, so a losing controller sees the actual
+/// settled result rather than a generic message.
+fn attention_refusal_settlement(
+    state: &GatewayState,
+    precondition: &sase_core::FleetAttentionPreconditionDecisionWire,
+    request_key: &sase_core::FleetAttentionRequestKeyWire,
+) -> Result<FleetAttentionRefusalSettlement, FleetAttentionStoreError> {
+    use sase_core::FleetAttentionPreconditionReasonWire;
+    if precondition.reason
+        == FleetAttentionPreconditionReasonWire::AlreadySettled
+    {
+        let prior = state
+            .fleet_attention
+            .find_settled_by_request_key(request_key)?;
+        let host_label = prior
+            .as_ref()
+            .and_then(|receipt| receipt.settled_by_host_label.clone())
+            .or_else(|| precondition.settled_by_host_label.clone())
+            .unwrap_or_else(|| state.host_label.clone());
+        let settled_response = prior
+            .and_then(|receipt| receipt.settled_response)
+            .or_else(|| precondition.settled_response.clone());
+        return Ok((
+            sase_core::FleetAttentionOutcomeWire::AlreadySettled,
+            Some(host_label.clone()),
+            settled_response,
+            format!("Already answered on {host_label}"),
+        ));
+    }
+    let host = state.host_label.clone();
+    let (outcome, message) = match precondition.reason {
+        FleetAttentionPreconditionReasonWire::StaleRevision => (
+            sase_core::FleetAttentionOutcomeWire::StaleRevision,
+            format!("Attention revision is stale on {host}"),
+        ),
+        FleetAttentionPreconditionReasonWire::UnknownRequest => (
+            sase_core::FleetAttentionOutcomeWire::UnknownRequest,
+            format!("Attention request was not found on {host}"),
+        ),
+        FleetAttentionPreconditionReasonWire::CapabilityMissing => (
+            sase_core::FleetAttentionOutcomeWire::CapabilityMissing,
+            format!(
+                "Attention capability {} missing on {host}",
+                precondition.required_capability
+            ),
+        ),
+        FleetAttentionPreconditionReasonWire::InvalidOption => (
+            sase_core::FleetAttentionOutcomeWire::PreconditionFailed,
+            format!("Attention option is invalid on {host}"),
+        ),
+        FleetAttentionPreconditionReasonWire::Ok
+        | FleetAttentionPreconditionReasonWire::AlreadySettled => (
+            sase_core::FleetAttentionOutcomeWire::PreconditionFailed,
+            format!("Attention precondition refused on {host}"),
+        ),
+    };
+    Ok((outcome, Some(host), None, message))
+}
+
+/// Re-project the single attention entry `request_key` currently refers to,
+/// including a dismissed/already-settled notification, so a losing
+/// controller can still be told the settled result.
+fn current_attention_entry(
+    state: &GatewayState,
+    installation_id: &str,
+    request_key: &sase_core::FleetAttentionRequestKeyWire,
+) -> Result<Option<sase_core::FleetAttentionEntryWire>, ApiError> {
+    let snapshot = state
+        .notification_bridge
+        .list_notifications(true)
+        .map_err(ApiError::from_host_bridge)?;
+    let Some(notification) = snapshot
+        .notifications
+        .iter()
+        .find(|notification| notification.id == request_key.request_id)
+    else {
+        return Ok(None);
+    };
+    let row = sase_core::FleetAttentionNotificationRowWire {
+        schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+        state: state.notification_bridge.action_state(notification),
+        notification: notification.clone(),
+    };
+    let projected = sase_core::project_fleet_attention(
+        installation_id,
+        std::slice::from_ref(&row),
+        &[],
+        current_unix_time(),
+    )
+    .map_err(|error| {
+        ApiError::invalid_request("intent.request_key", error.to_string())
+    })?;
+    Ok(projected.entries.into_iter().next())
+}
+
+type FleetAttentionExecution = (
+    sase_core::FleetAttentionOutcomeWire,
+    Option<JsonValue>,
+    Option<String>,
+);
+
+fn execute_fleet_attention(
+    state: &GatewayState,
+    intent: &sase_core::FleetAttentionIntentWire,
+) -> Result<FleetAttentionExecution, ApiError> {
+    let prefix = intent.request_key.request_id.clone();
+    let already_handled_message =
+        || Some(format!("Already answered on {}", state.host_label));
+    match intent.kind {
+        sase_core::FleetAttentionKindWire::Gate => {
+            let request = GateActionRequestWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                prefix,
+                selected_option_ids: intent.selected_option_ids.clone(),
+                feedback: intent.feedback.clone(),
+                option_inputs: None,
+            };
+            match state.notification_bridge.execute_gate_action(&request) {
+                Ok(result) => Ok((
+                    sase_core::FleetAttentionOutcomeWire::Applied,
+                    Some(result.response_json),
+                    result.message,
+                )),
+                Err(HostBridgeError::ActionAlreadyHandled(_)) => Ok((
+                    sase_core::FleetAttentionOutcomeWire::AlreadySettled,
+                    None,
+                    already_handled_message(),
+                )),
+                Err(error) => Err(ApiError::from_host_bridge(error)),
+            }
+        }
+        sase_core::FleetAttentionKindWire::Question => {
+            let choice = intent
+                .question_choice
+                .unwrap_or(QuestionActionChoiceWire::Answer);
+            let request = QuestionActionRequestWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                prefix,
+                choice,
+                question_index: intent.question_index,
+                selected_option_id: intent.selected_option_id.clone(),
+                selected_option_label: intent.selected_option_label.clone(),
+                selected_option_index: intent.selected_option_index,
+                custom_answer: intent.custom_answer.clone(),
+                global_note: intent.global_note.clone(),
+            };
+            match state.notification_bridge.execute_question_action(&request) {
+                Ok(result) => Ok((
+                    sase_core::FleetAttentionOutcomeWire::Applied,
+                    Some(result.response_json),
+                    result.message,
+                )),
+                Err(HostBridgeError::ActionAlreadyHandled(_)) => Ok((
+                    sase_core::FleetAttentionOutcomeWire::AlreadySettled,
+                    None,
+                    already_handled_message(),
+                )),
+                Err(error) => Err(ApiError::from_host_bridge(error)),
+            }
+        }
+    }
 }
 
 async fn fleet_token_rotate(
@@ -3543,6 +3991,37 @@ impl ApiError {
         }
     }
 
+    fn from_fleet_attention_store(error: FleetAttentionStoreError) -> Self {
+        match error {
+            FleetAttentionStoreError::Validation(message) => {
+                Self::invalid_request("fleet_attention", message)
+            }
+            FleetAttentionStoreError::Conflict(message) => Self::fleet_error(
+                StatusCode::CONFLICT,
+                ApiErrorCodeWire::InvalidRequest,
+                message,
+                "fleet_attention",
+            ),
+            FleetAttentionStoreError::Expired(message) => Self::fleet_error(
+                StatusCode::GONE,
+                ApiErrorCodeWire::GoneStale,
+                message,
+                "fleet_attention",
+            ),
+            FleetAttentionStoreError::Io { .. }
+            | FleetAttentionStoreError::Json { .. } => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::Internal,
+                    message: error.to_string(),
+                    target: Some("fleet_attention_store".to_string()),
+                    details: None,
+                }),
+            },
+        }
+    }
+
     fn from_fleet_launch_store(error: FleetLaunchStoreError) -> Self {
         match error {
             FleetLaunchStoreError::Validation(message) => {
@@ -5530,6 +6009,788 @@ exit 4
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["code"], "bridge_unavailable");
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeAttentionNotificationBridge {
+        notifications: Mutex<Vec<NotificationWire>>,
+        handled: Mutex<std::collections::HashSet<String>>,
+        next_gate_error: Mutex<Option<HostBridgeError>>,
+        next_question_error: Mutex<Option<HostBridgeError>>,
+        gate_calls: Mutex<Vec<GateActionRequestWire>>,
+        question_calls: Mutex<Vec<QuestionActionRequestWire>>,
+        list_calls: Mutex<u32>,
+    }
+
+    impl FakeAttentionNotificationBridge {
+        fn with_notifications(notifications: Vec<NotificationWire>) -> Self {
+            Self {
+                notifications: Mutex::new(notifications),
+                ..Default::default()
+            }
+        }
+    }
+
+    impl NotificationHostBridge for FakeAttentionNotificationBridge {
+        fn list_notifications(
+            &self,
+            _include_dismissed: bool,
+        ) -> Result<
+            sase_core::notifications::NotificationStoreSnapshotWire,
+            HostBridgeError,
+        > {
+            *self.list_calls.lock().unwrap() += 1;
+            Ok(sase_core::notifications::NotificationStoreSnapshotWire {
+                schema_version:
+                    sase_core::notifications::NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+                notifications: self.notifications.lock().unwrap().clone(),
+                counts: sase_core::notifications::NotificationCountsWire::default(),
+                tabs: Vec::new(),
+                expired_ids: Vec::new(),
+                next_snooze_deadline: None,
+                stats: sase_core::notifications::NotificationStoreStatsWire::default(),
+            })
+        }
+
+        fn action_state(
+            &self,
+            notification: &NotificationWire,
+        ) -> MobileActionStateWire {
+            if self.handled.lock().unwrap().contains(&notification.id) {
+                MobileActionStateWire::AlreadyHandled
+            } else {
+                MobileActionStateWire::Available
+            }
+        }
+
+        fn execute_gate_action(
+            &self,
+            request: &GateActionRequestWire,
+        ) -> Result<ActionResultWire, HostBridgeError> {
+            self.gate_calls.lock().unwrap().push(request.clone());
+            if let Some(error) = self.next_gate_error.lock().unwrap().take() {
+                return Err(error);
+            }
+            self.handled.lock().unwrap().insert(request.prefix.clone());
+            Ok(ActionResultWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                action_kind: MobileActionKindWire::CustomGate,
+                prefix: request.prefix.clone(),
+                notification_id: Some(request.prefix.clone()),
+                state: MobileActionStateWire::AlreadyHandled,
+                response_file: "response.json".to_string(),
+                response_json: json!({
+                    "selected_option_ids": request.selected_option_ids,
+                }),
+                message: Some("Approved".to_string()),
+            })
+        }
+
+        fn execute_question_action(
+            &self,
+            request: &QuestionActionRequestWire,
+        ) -> Result<ActionResultWire, HostBridgeError> {
+            self.question_calls.lock().unwrap().push(request.clone());
+            if let Some(error) = self.next_question_error.lock().unwrap().take()
+            {
+                return Err(error);
+            }
+            self.handled.lock().unwrap().insert(request.prefix.clone());
+            Ok(ActionResultWire {
+                schema_version: MOBILE_NOTIFICATION_WIRE_SCHEMA_VERSION,
+                action_kind: MobileActionKindWire::UserQuestion,
+                prefix: request.prefix.clone(),
+                notification_id: Some(request.prefix.clone()),
+                state: MobileActionStateWire::AlreadyHandled,
+                response_file: "response.json".to_string(),
+                response_json: json!({"answer": "42"}),
+                message: Some("Answered".to_string()),
+            })
+        }
+    }
+
+    fn attention_gate_notification(
+        id: &str,
+        origin_agent: &str,
+        request_path: &str,
+    ) -> NotificationWire {
+        let mut action_data = BTreeMap::new();
+        action_data
+            .insert("origin_agent".to_string(), origin_agent.to_string());
+        action_data
+            .insert("gate_title".to_string(), "Approve deploy".to_string());
+        action_data
+            .insert("request_path".to_string(), request_path.to_string());
+        NotificationWire {
+            id: id.to_string(),
+            timestamp: "2026-09-07T00:00:00Z".to_string(),
+            sender: "axe".to_string(),
+            action: Some("CustomGate".to_string()),
+            action_data,
+            notes: vec!["Please approve the deploy".to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn write_gate_envelope(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "schema_version": 3,
+                "options": [{"id": "approve", "label": "Approve"}],
+                "branches": [["approve"]]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn attention_question_notification(
+        id: &str,
+        sender: &str,
+    ) -> NotificationWire {
+        let mut action_data = BTreeMap::new();
+        action_data.insert("question_count".to_string(), "1".to_string());
+        NotificationWire {
+            id: id.to_string(),
+            timestamp: "2026-09-07T00:00:00Z".to_string(),
+            sender: sender.to_string(),
+            action: Some("UserQuestion".to_string()),
+            action_data,
+            notes: vec!["What should we do next?".to_string()],
+            ..Default::default()
+        }
+    }
+
+    async fn post_attention_read(
+        state: GatewayState,
+        token: &str,
+        logical_keys: Vec<String>,
+    ) -> (StatusCode, Value) {
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/attention",
+            Some(token),
+            Some(json!({
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "logical_keys": logical_keys,
+            })),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        json_response_with_state(state, request).await
+    }
+
+    fn attention_request_key(
+        origin_installation_id: &str,
+        request_id: &str,
+    ) -> sase_core::FleetAttentionRequestKeyWire {
+        sase_core::FleetAttentionRequestKeyWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            origin_installation_id: origin_installation_id.to_string(),
+            request_id: request_id.to_string(),
+            pending_action_prefix: request_id.chars().take(8).collect(),
+        }
+    }
+
+    fn attention_resolve_body(
+        intent: sase_core::FleetAttentionIntentWire,
+        target_installation_id: &str,
+        controller_id: &str,
+        operation_id: &str,
+    ) -> Value {
+        let fingerprint =
+            sase_core::fleet_attention_payload_fingerprint(&intent).unwrap();
+        json!({
+            "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            "key": {
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "controller_id": controller_id,
+                "operation_id": operation_id
+            },
+            "target_installation_id": target_installation_id,
+            "intent": intent,
+            "payload_fingerprint": fingerprint,
+            "acceptance_window_seconds": 30.0
+        })
+    }
+
+    async fn post_attention_resolve(
+        state: GatewayState,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/attention/resolve",
+            Some(token),
+            Some(body),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        json_response_with_state(state, request).await
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_denies_missing_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (token, _installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_HELLO]).await;
+        let (status, body) =
+            post_attention_read(state.clone(), &token, Vec::new()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "scope_denied");
+        assert_eq!(body["target"], FLEET_SCOPE_ATTENTION_READ);
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Gate,
+            request_key: attention_request_key(
+                "sase_inst_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "gate-0001",
+            ),
+            observed_revision: 1,
+            selected_option_ids: vec!["approve".to_string()],
+            feedback: None,
+            question_choice: None,
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: None,
+            global_note: None,
+        };
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_HELLO]).await;
+        let body = attention_resolve_body(
+            intent,
+            &installation_id,
+            "controller-a",
+            "op-1",
+        );
+        let (status, body) = post_attention_resolve(state, &token, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "scope_denied");
+        assert_eq!(body["target"], FLEET_SCOPE_ATTENTION_RESOLVE);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_read_empty_request_touches_no_notification_store()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bridge = Arc::new(FakeAttentionNotificationBridge::default());
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, _installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;
+
+        let (status, snapshot) =
+            post_attention_read(state, &token, Vec::new()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(snapshot["entries"], json!([]));
+        assert_eq!(*bridge.list_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_read_projects_correlated_gate_and_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+
+        let envelope_path = tmp.path().join("gate_request.json");
+        write_gate_envelope(&envelope_path);
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_gate_notification(
+                    "gate-00000001",
+                    &agent_label,
+                    envelope_path.to_str().unwrap(),
+                ),
+                attention_question_notification("question-0001", &agent_label),
+                // A different agent's gate must never be returned for this
+                // followed row.
+                attention_gate_notification(
+                    "gate-99999999",
+                    "someone-elses-agent",
+                    envelope_path.to_str().unwrap(),
+                ),
+            ]),
+        );
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, _installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;
+
+        let (status, snapshot) = post_attention_read(
+            state,
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let entries = snapshot["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let gate_entry = entries
+            .iter()
+            .find(|entry| entry["kind"] == "gate")
+            .unwrap();
+        assert_eq!(gate_entry["logical_key"], summary.logical_key);
+        assert_eq!(gate_entry["options"][0]["id"], "approve");
+        let question_entry = entries
+            .iter()
+            .find(|entry| entry["kind"] == "question")
+            .unwrap();
+        assert_eq!(question_entry["logical_key"], summary.logical_key);
+        assert_eq!(*bridge.list_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_gate_settles_replays_and_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+
+        let envelope_path = tmp.path().join("gate_request.json");
+        write_gate_envelope(&envelope_path);
+        let bridge =
+            Arc::new(FakeAttentionNotificationBridge::with_notifications(
+                vec![attention_gate_notification(
+                    "gate-00000001",
+                    &agent_label,
+                    envelope_path.to_str().unwrap(),
+                )],
+            ));
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+
+        let (read_status, snapshot) = post_attention_read(
+            state.clone(),
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        assert_eq!(read_status, StatusCode::OK);
+        let revision = snapshot["entries"][0]["revision"].as_u64().unwrap();
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Gate,
+            request_key: attention_request_key(
+                &installation_id,
+                "gate-00000001",
+            ),
+            observed_revision: revision,
+            selected_option_ids: vec!["approve".to_string()],
+            feedback: Some("Looks good".to_string()),
+            question_choice: None,
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: None,
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            intent.clone(),
+            &installation_id,
+            "controller-a",
+            "op-1",
+        );
+        let (status, resolved) =
+            post_attention_resolve(state.clone(), &token, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["decision"], "accept_new");
+        assert_eq!(resolved["receipt"]["state"], "settled");
+        assert_eq!(resolved["receipt"]["outcome"], "applied");
+        assert_eq!(
+            resolved["receipt"]["settled_response"]["selected_option_ids"],
+            json!(["approve"])
+        );
+        assert_eq!(bridge.gate_calls.lock().unwrap().len(), 1);
+
+        // Identical key and payload replays the original receipt rather
+        // than re-executing against the bridge.
+        let (replay_status, replayed) =
+            post_attention_resolve(state.clone(), &token, body).await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(replayed["decision"], "return_original_receipt");
+        assert_eq!(replayed["receipt"], resolved["receipt"]);
+        assert_eq!(bridge.gate_calls.lock().unwrap().len(), 1);
+
+        // The same operation key with a changed payload conflicts.
+        let mut changed_intent = intent;
+        changed_intent.feedback = Some("Changed my mind".to_string());
+        let changed_body = attention_resolve_body(
+            changed_intent,
+            &installation_id,
+            "controller-a",
+            "op-1",
+        );
+        let (conflict_status, conflict) =
+            post_attention_resolve(state, &token, changed_body).await;
+        assert_eq!(conflict_status, StatusCode::CONFLICT, "{conflict}");
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_refuses_stale_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_question_notification("question-0001", &agent_label),
+            ]),
+        );
+        state.notification_bridge = DynNotificationHostBridge::new(bridge);
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Question,
+            request_key: attention_request_key(
+                &installation_id,
+                "question-0001",
+            ),
+            observed_revision: 0,
+            selected_option_ids: Vec::new(),
+            feedback: None,
+            question_choice: Some(QuestionActionChoiceWire::Custom),
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: Some("Ship it".to_string()),
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            intent,
+            &installation_id,
+            "controller-a",
+            "op-stale",
+        );
+        let (status, body) = post_attention_resolve(state, &token, body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["decision"], "accept_new");
+        assert_eq!(body["receipt"]["state"], "settled");
+        assert_eq!(body["receipt"]["outcome"], "stale_revision");
+        assert_eq!(body["receipt"]["settled_by_host_label"], "test-host");
+        assert_eq!(
+            body["receipt"]["message"],
+            "Attention revision is stale on test-host"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_second_controller_gets_already_settled() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_question_notification("question-0002", &agent_label),
+            ]),
+        );
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+
+        let (_status, snapshot) = post_attention_read(
+            state.clone(),
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        let revision = snapshot["entries"][0]["revision"].as_u64().unwrap();
+
+        let base_intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Question,
+            request_key: attention_request_key(
+                &installation_id,
+                "question-0002",
+            ),
+            observed_revision: revision,
+            selected_option_ids: Vec::new(),
+            feedback: None,
+            question_choice: Some(QuestionActionChoiceWire::Custom),
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: Some("Ship it".to_string()),
+            global_note: None,
+        };
+
+        let first_body = attention_resolve_body(
+            base_intent.clone(),
+            &installation_id,
+            "controller-a",
+            "op-first",
+        );
+        let (first_status, first) =
+            post_attention_resolve(state.clone(), &token, first_body).await;
+        assert_eq!(first_status, StatusCode::OK, "{first}");
+        assert_eq!(first["receipt"]["outcome"], "applied");
+
+        // A second controller submits a distinct operation key against the
+        // same request; the bridge now reports it AlreadyHandled.
+        let second_body = attention_resolve_body(
+            base_intent,
+            &installation_id,
+            "controller-b",
+            "op-second",
+        );
+        let (second_status, second) =
+            post_attention_resolve(state, &token, second_body).await;
+        assert_eq!(second_status, StatusCode::OK, "{second}");
+        assert_eq!(second["decision"], "accept_new");
+        assert_eq!(second["receipt"]["outcome"], "already_settled");
+        assert_eq!(second["receipt"]["settled_by_host_label"], "test-host");
+        assert_eq!(
+            second["receipt"]["message"],
+            "Already answered on test-host"
+        );
+        assert_eq!(
+            second["receipt"]["settled_response"]["answer"],
+            first["receipt"]["settled_response"]["answer"]
+        );
+        // Only the first controller's submission actually executed.
+        assert_eq!(bridge.question_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_settles_unknown_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bridge = Arc::new(FakeAttentionNotificationBridge::default());
+        state.notification_bridge = DynNotificationHostBridge::new(bridge);
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Gate,
+            request_key: attention_request_key(
+                &installation_id,
+                "no-such-gate",
+            ),
+            observed_revision: 0,
+            selected_option_ids: vec!["approve".to_string()],
+            feedback: None,
+            question_choice: None,
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: None,
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            intent,
+            &installation_id,
+            "controller-a",
+            "op-unknown",
+        );
+        let (status, body) = post_attention_resolve(state, &token, body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["receipt"]["state"], "settled");
+        assert_eq!(body["receipt"]["outcome"], "unknown_request");
+        assert_eq!(
+            body["receipt"]["message"],
+            "Attention request was not found on test-host"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_maps_bridge_race_to_already_settled() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_question_notification("question-0003", &agent_label),
+            ]),
+        );
+        *bridge.next_question_error.lock().unwrap() = Some(
+            HostBridgeError::ActionAlreadyHandled("question-0003".to_string()),
+        );
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+        let (_status, snapshot) = post_attention_read(
+            state.clone(),
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        let revision = snapshot["entries"][0]["revision"].as_u64().unwrap();
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Question,
+            request_key: attention_request_key(
+                &installation_id,
+                "question-0003",
+            ),
+            observed_revision: revision,
+            selected_option_ids: Vec::new(),
+            feedback: None,
+            question_choice: Some(QuestionActionChoiceWire::Custom),
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: Some("Ship it".to_string()),
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            intent,
+            &installation_id,
+            "controller-a",
+            "op-race",
+        );
+        let (status, resolved) =
+            post_attention_resolve(state, &token, body).await;
+        assert_eq!(status, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["receipt"]["outcome"], "already_settled");
+        assert_eq!(
+            resolved["receipt"]["message"],
+            "Already answered on test-host"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_publishes_invalidation_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_question_notification("question-0004", &agent_label),
+            ]),
+        );
+        state.notification_bridge = DynNotificationHostBridge::new(bridge);
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+        let (_status, snapshot) = post_attention_read(
+            state.clone(),
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        let revision = snapshot["entries"][0]["revision"].as_u64().unwrap();
+
+        let intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Question,
+            request_key: attention_request_key(
+                &installation_id,
+                "question-0004",
+            ),
+            observed_revision: revision,
+            selected_option_ids: Vec::new(),
+            feedback: None,
+            question_choice: Some(QuestionActionChoiceWire::Custom),
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: Some("Ship it".to_string()),
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            intent,
+            &installation_id,
+            "controller-a",
+            "op-events",
+        );
+        let (status, _resolved) =
+            post_attention_resolve(state.clone(), &token, body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let events = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::NotificationsChanged {
+                reason,
+                notification_id: Some(id),
+                ..
+            } if reason == "fleet_attention_resolve" && id == "question-0004"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::AgentsChanged { reason, .. }
+                if reason == "fleet_attention_resolve"
+        )));
     }
 
     #[tokio::test]

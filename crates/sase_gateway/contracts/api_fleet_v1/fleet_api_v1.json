@@ -83,6 +83,92 @@
       "supports_growth": "bool",
       "supports_range": "bool"
     },
+    "FleetAttentionEntryWire": {
+      "defined_by": "sase_core::fleet_attention",
+      "feedback_required": "bool",
+      "kind": "question|gate",
+      "logical_key": "string|null",
+      "logical_locator": "LogicalAgentLocatorWire|null",
+      "options": "FleetAttentionOptionWire[]",
+      "path_privacy": "never includes a bundle path, response directory, request path, preview path, PID, or credential",
+      "preview": "ContentHandleWire|null",
+      "question_form": "object|null",
+      "request_key": "FleetAttentionRequestKeyWire",
+      "revision": "u64; content fingerprint, stable across reconnects",
+      "schema_version": "u32",
+      "settled_by_host_label": "string|null",
+      "settled_response": "object|null",
+      "state": "pending|settled|expired|unknown",
+      "summary": "string; bounded",
+      "title": "string"
+    },
+    "FleetAttentionIntentWire": {
+      "custom_answer": "string|null",
+      "defined_by": "sase_core::fleet_attention",
+      "feedback": "string|null; gate only",
+      "global_note": "string|null",
+      "kind": "question|gate",
+      "observed_revision": "u64",
+      "question_choice": "answer|custom|null; question only",
+      "question_index": "u32|null",
+      "request_key": "FleetAttentionRequestKeyWire",
+      "schema_version": "u32",
+      "selected_option_id": "string|null",
+      "selected_option_ids": "string[]; gate only",
+      "selected_option_index": "u32|null",
+      "selected_option_label": "string|null"
+    },
+    "FleetAttentionOptionWire": {
+      "defined_by": "sase_core::fleet_attention",
+      "id": "string; opaque",
+      "label": "string",
+      "schema_version": "u32"
+    },
+    "FleetAttentionReceiptWire": {
+      "accepted_at_unix_ms": "u64",
+      "defined_by": "sase_core::fleet_attention",
+      "expires_at_unix_ms": "u64",
+      "key": "ScopedOperationKeyWire",
+      "message": "string|null; path/token-redacted",
+      "observed_revision": "u64",
+      "outcome": "applied|already_settled|stale_revision|unknown_request|capability_missing|precondition_failed|null",
+      "payload_fingerprint": "PayloadFingerprintWire",
+      "request_key": "FleetAttentionRequestKeyWire",
+      "schema_version": "u32",
+      "settled_by_host_label": "string|null",
+      "settled_response": "object|null",
+      "state": "accepted|pending|settled",
+      "target_installation_id": "string"
+    },
+    "FleetAttentionRequestKeyWire": {
+      "defined_by": "sase_core::fleet_attention",
+      "origin_installation_id": "string",
+      "pending_action_prefix": "string; the same prefix `sase gate answer` consumes",
+      "request_id": "string; owner's opaque notification identity",
+      "schema_version": "u32"
+    },
+    "FleetAttentionRequestWire": {
+      "acceptance_window_seconds": "f64",
+      "defined_by": "sase_core::fleet_attention",
+      "intent": "FleetAttentionIntentWire",
+      "key": "ScopedOperationKeyWire",
+      "payload_fingerprint": "PayloadFingerprintWire; canonical intent digest",
+      "schema_version": "u32",
+      "target_installation_id": "string; pinned target installation"
+    },
+    "FleetAttentionResponseWire": {
+      "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
+      "defined_by": "sase_core::fleet_attention",
+      "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
+      "receipt": "FleetAttentionReceiptWire",
+      "schema_version": "u32"
+    },
+    "FleetAttentionSnapshotWire": {
+      "defined_by": "sase_core::fleet_attention",
+      "entries": "FleetAttentionEntryWire[]",
+      "observed_at_unix": "f64",
+      "schema_version": "u32"
+    },
     "FleetAuthoritativeSnapshotWire": {
       "count_revision": "u64|null",
       "counts": "FleetLogicalAgentCountsWire",
@@ -618,6 +704,33 @@
       "request": "FleetMutationRequestWire",
       "required_scope": "fleet.mutate",
       "success": "FleetMutationResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/attention",
+      "request": "FleetLogicalBatchRequestWire",
+      "required_scope": "fleet.attention.read",
+      "success": "FleetAttentionSnapshotWire"
+    },
+    {
+      "already_settled": "200 FleetAttentionResponseWire receipt.outcome=already_settled",
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "notifications_changed",
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/attention/resolve",
+      "request": "FleetAttentionRequestWire",
+      "required_scope": "fleet.attention.resolve",
+      "success": "FleetAttentionResponseWire"
     },
     {
       "auth": true,

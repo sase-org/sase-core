@@ -43,6 +43,7 @@ pub mod external_pr;
 pub mod feature_flag_state;
 pub mod fenced_code;
 pub mod finalizer;
+pub mod fleet_attention;
 pub mod fleet_contract;
 pub mod fleet_mutation;
 pub mod git_query;
@@ -682,6 +683,24 @@ pub use finalizer::{
     FinalizerSelectorOpWire, FinalizerSubmissionEnvelopeWire,
     FinalizerSubmissionPayloadWire, FinalizerSubmissionValidationWire,
     FinalizerTriggerKindWire, FINALIZER_WIRE_SCHEMA_VERSION,
+};
+pub use fleet_attention::{
+    decide_attention_notices, decide_fleet_attention_replay,
+    evaluate_attention_precondition, fleet_attention_payload_fingerprint,
+    project_fleet_attention, validate_fleet_attention_intent,
+    validate_fleet_attention_request, DurableFleetAttentionRecordWire,
+    FleetAttentionDecisionRequestWire, FleetAttentionDecisionWire,
+    FleetAttentionEntryWire, FleetAttentionIntentWire, FleetAttentionKindWire,
+    FleetAttentionLogicalIdentityWire, FleetAttentionNoticeDecisionWire,
+    FleetAttentionNoticeLedgerEntryWire, FleetAttentionNotificationRowWire,
+    FleetAttentionOptionWire, FleetAttentionOutcomeWire,
+    FleetAttentionPreconditionDecisionWire,
+    FleetAttentionPreconditionReasonWire, FleetAttentionQuestionFormWire,
+    FleetAttentionReceiptWire, FleetAttentionRequestKeyWire,
+    FleetAttentionRequestWire, FleetAttentionResponseWire,
+    FleetAttentionSnapshotWire, FleetAttentionStateWire,
+    FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
+    FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
 };
 pub use fleet_contract::{
     classify_cursor_replay, count_focus_and_fleet, count_logical_agents,

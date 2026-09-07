@@ -8,6 +8,7 @@ use std::{
 };
 
 use fs2::FileExt;
+use sase_core::fleet_attention::FleetAttentionRequestWire;
 use sase_core::fleet_contract::{
     validate_connection_plan, ConnectionPlanWire, FleetCatalogQueryWire,
     FleetContentReadRequestWire, FleetDetailRequestWire,
@@ -270,6 +271,11 @@ pub enum FederationIpcRequestWire {
         #[serde(default)]
         cache_only: bool,
     },
+    Attention {
+        request: FleetLogicalBatchRequestWire,
+        #[serde(default)]
+        cache_only: bool,
+    },
     Launch {
         target: String,
         request: Box<FleetLaunchRequestWire>,
@@ -277,6 +283,10 @@ pub enum FederationIpcRequestWire {
     Mutate {
         target: String,
         request: Box<FleetMutationRequestWire>,
+    },
+    ResolveAttention {
+        target: String,
+        request: Box<FleetAttentionRequestWire>,
     },
     Shutdown,
 }
@@ -815,11 +825,28 @@ mod imp {
                     )
                     .await
             }
+            FederationIpcRequestWire::Attention {
+                request,
+                cache_only,
+            } => {
+                state
+                    .read_all(
+                        ReadOperation::Attention(request),
+                        cache_only,
+                        deadline,
+                    )
+                    .await
+            }
             FederationIpcRequestWire::Launch { target, request } => {
                 state.launch_one(target, *request, deadline).await
             }
             FederationIpcRequestWire::Mutate { target, request } => {
                 state.mutate_one(target, *request, deadline).await
+            }
+            FederationIpcRequestWire::ResolveAttention { target, request } => {
+                state
+                    .resolve_attention_one(target, *request, deadline)
+                    .await
             }
             FederationIpcRequestWire::Shutdown => to_json(serde_json::json!({
                 "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
@@ -1131,6 +1158,55 @@ mod imp {
             })
         }
 
+        async fn resolve_attention_one(
+            &self,
+            target: String,
+            request: FleetAttentionRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            let host = self.resolve_launch_target(&target).await?;
+            if request.target_installation_id
+                != host.plan.pinned_installation_id
+            {
+                return Err(federation_error(
+                    "quarantined",
+                    "attention resolve request target_installation_id does not match the configured host pin",
+                    Some("target_installation_id"),
+                ));
+            }
+            let payload = with_deadline(deadline, async {
+                let _global =
+                    self.in_flight.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "global request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                let _host =
+                    host.permits.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "host request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                host.resolve_attention_remote(&request, deadline).await
+            })
+            .await?;
+            to_json(FederationReadResponseWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                operation: "resolve_attention".to_string(),
+                hosts: vec![
+                    host.payload_result("ok", false, None, payload, None)
+                ],
+            })
+        }
+
         async fn resolve_launch_target(
             &self,
             target: &str,
@@ -1376,6 +1452,15 @@ mod imp {
                     )
                     .await
                 }
+                ReadOperation::Attention(request) => {
+                    self.http_json(
+                        Method::POST,
+                        "/attention",
+                        Some(to_json(request)?),
+                        deadline,
+                    )
+                    .await
+                }
             }
         }
 
@@ -1403,6 +1488,21 @@ mod imp {
             self.http_json(
                 Method::POST,
                 "/mutate",
+                Some(to_json(request)?),
+                deadline,
+            )
+            .await
+        }
+
+        async fn resolve_attention_remote(
+            &self,
+            request: &FleetAttentionRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            self.ensure_hello(deadline).await?;
+            self.http_json(
+                Method::POST,
+                "/attention/resolve",
                 Some(to_json(request)?),
                 deadline,
             )
@@ -1464,6 +1564,7 @@ mod imp {
         Detail(FleetDetailRequestWire),
         ContentRange(FleetContentReadRequestWire),
         ProjectEligibility(FleetProjectEligibilityRequestWire),
+        Attention(FleetLogicalBatchRequestWire),
     }
 
     impl ReadOperation {
@@ -1475,6 +1576,7 @@ mod imp {
                 Self::Detail(_) => "detail",
                 Self::ContentRange(_) => "content_range",
                 Self::ProjectEligibility(_) => "project_eligibility",
+                Self::Attention(_) => "attention",
             }
         }
 
@@ -1486,6 +1588,7 @@ mod imp {
                 Self::Detail(request) => to_json(request)?,
                 Self::ContentRange(request) => to_json(request)?,
                 Self::ProjectEligibility(request) => to_json(request)?,
+                Self::Attention(request) => to_json(request)?,
             };
             Ok(format!("{}:{payload}", self.name()))
         }
@@ -2096,6 +2199,158 @@ mod imp {
             assert_eq!(response.error.unwrap().code, "deadline");
         }
 
+        fn sample_attention_request(
+            installation_id: &str,
+        ) -> FleetAttentionRequestWire {
+            let intent = sase_core::FleetAttentionIntentWire {
+                schema_version: 1,
+                kind: sase_core::FleetAttentionKindWire::Gate,
+                request_key: sase_core::FleetAttentionRequestKeyWire {
+                    schema_version: 1,
+                    origin_installation_id: installation_id.to_string(),
+                    request_id: "gate-00000001".to_string(),
+                    pending_action_prefix: "gate-000".to_string(),
+                },
+                observed_revision: 1,
+                selected_option_ids: vec!["approve".to_string()],
+                feedback: None,
+                question_choice: None,
+                question_index: None,
+                selected_option_id: None,
+                selected_option_label: None,
+                selected_option_index: None,
+                custom_answer: None,
+                global_note: None,
+            };
+            let fingerprint =
+                sase_core::fleet_attention_payload_fingerprint(&intent)
+                    .unwrap();
+            FleetAttentionRequestWire {
+                schema_version: 1,
+                key: sase_core::ScopedOperationKeyWire {
+                    schema_version: 1,
+                    controller_id: "controller-1".to_string(),
+                    operation_id: "op-1".to_string(),
+                },
+                target_installation_id: installation_id.to_string(),
+                intent,
+                payload_fingerprint: fingerprint,
+                acceptance_window_seconds: 30.0,
+            }
+        }
+
+        #[tokio::test]
+        async fn resolve_attention_rejects_unknown_alias_pin_mismatch_and_deadline(
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = Arc::new(FederationWorkerState::new(
+                FederationWorkerConfig::new(tmp.path()),
+            ));
+            let installation = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "a".repeat(64)
+            );
+            let request = sample_attention_request(&installation);
+            let missing = state
+                .resolve_attention_one(
+                    "apollo".to_string(),
+                    request.clone(),
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(missing.code, "not_found");
+
+            let other = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "b".repeat(64)
+            );
+            state
+                .replace_config(vec![FederationHostConfigWire {
+                    schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                    alias: Some("apollo".to_string()),
+                    plan: ConnectionPlanWire {
+                        schema_version: 1,
+                        provider_ref: "builtin:https".to_string(),
+                        endpoint: "https://apollo.example".to_string(),
+                        credential_ref: "cred-1".to_string(),
+                        pinned_installation_id: other,
+                        connection_kind:
+                            sase_core::FleetConnectionKindWire::Gateway,
+                        tls: sase_core::TlsTrustSettingsWire {
+                            schema_version: 1,
+                            mode: sase_core::TlsTrustModeWire::SystemRoots,
+                            ca_ref: None,
+                            server_name_ref: None,
+                        },
+                    },
+                    bearer_token: "token".to_string(),
+                }])
+                .await
+                .unwrap();
+            let pin = state
+                .resolve_attention_one(
+                    "apollo".to_string(),
+                    request,
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(pin.code, "quarantined");
+
+            let envelope = FederationIpcRequestEnvelopeWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                request_id: "req-1".to_string(),
+                deadline_unix_ms: Some(1),
+                operation: FederationIpcRequestWire::ResolveAttention {
+                    target: "apollo".to_string(),
+                    request: Box::new(sample_attention_request(&installation)),
+                },
+            };
+            let response = handle_request(state, envelope).await;
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, "deadline");
+        }
+
+        #[tokio::test]
+        async fn attention_read_returns_empty_hosts_when_unconfigured() {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = Arc::new(FederationWorkerState::new(
+                FederationWorkerConfig::new(tmp.path()),
+            ));
+            let result = state
+                .read_all(
+                    ReadOperation::Attention(FleetLogicalBatchRequestWire {
+                        schema_version: 1,
+                        logical_keys: vec!["logical:alpha".to_string()],
+                    }),
+                    false,
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["operation"], "attention");
+            assert_eq!(result["hosts"], json!([]));
+        }
+
+        #[test]
+        fn attention_read_operation_cache_key_is_namespaced_and_stable() {
+            let request = FleetLogicalBatchRequestWire {
+                schema_version: 1,
+                logical_keys: vec!["logical:alpha".to_string()],
+            };
+            let operation = ReadOperation::Attention(request.clone());
+            assert_eq!(operation.name(), "attention");
+            let key = operation.cache_key().unwrap();
+            assert!(key.starts_with("attention:"));
+            assert_eq!(
+                key,
+                ReadOperation::Attention(request).cache_key().unwrap()
+            );
+        }
+
         #[test]
         fn fleet_endpoint_join_accepts_api_bases() {
             assert_eq!(
@@ -2218,6 +2473,8 @@ fn federation_capabilities() -> Vec<String> {
         "fleet.project_eligibility".to_string(),
         "fleet.launch".to_string(),
         "fleet.mutate".to_string(),
+        "fleet.attention".to_string(),
+        "fleet.resolve_attention".to_string(),
         "cache.read".to_string(),
         "cache.persist".to_string(),
     ]

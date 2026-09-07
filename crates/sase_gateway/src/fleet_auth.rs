@@ -47,6 +47,8 @@ pub const FLEET_SCOPE_DETAIL_READ: &str = "fleet.detail.read";
 pub const FLEET_SCOPE_CONTENT_READ: &str = "fleet.content.read";
 pub const FLEET_SCOPE_PROJECTS_READ: &str = "fleet.projects.read";
 pub const FLEET_SCOPE_EVENTS_READ: &str = "fleet.events.read";
+pub const FLEET_SCOPE_ATTENTION_READ: &str = "fleet.attention.read";
+pub const FLEET_SCOPE_ATTENTION_RESOLVE: &str = "fleet.attention.resolve";
 
 const MAX_AUTH_FILE_BYTES: u64 = 512 * 1024;
 const MAX_LABEL_BYTES: usize = 256;
@@ -722,6 +724,8 @@ pub fn default_fleet_scopes() -> Vec<String> {
         FLEET_SCOPE_HELLO.to_string(),
         FLEET_SCOPE_PROJECTS_READ.to_string(),
         FLEET_SCOPE_SUMMARY_READ.to_string(),
+        FLEET_SCOPE_ATTENTION_READ.to_string(),
+        FLEET_SCOPE_ATTENTION_RESOLVE.to_string(),
     ]
 }
 
