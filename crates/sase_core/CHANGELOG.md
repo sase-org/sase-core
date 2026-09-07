@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.38](https://github.com/sase-org/sase-core/compare/v0.32.37...v0.32.38) - 2026-09-07
+
+### Added
+
+- *(provider-usage)* add observation and public read contracts
+- Move Telegram to the shared pending-action API (sase-x7.4)
+
 ### Added
 
 - *(provider-usage)* add subscription capacity observation and public read contracts
