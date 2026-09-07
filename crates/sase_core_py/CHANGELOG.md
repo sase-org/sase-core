@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.34](https://github.com/sase-org/sase-core/compare/v0.32.33...v0.32.34) - 2026-09-07
+
+### Added
+
+- *(axe)* normalize chop subprocess diagnostics
+
 ## [0.32.33](https://github.com/sase-org/sase-core/compare/v0.32.32...v0.32.33) - 2026-09-07
 
 ### Added
