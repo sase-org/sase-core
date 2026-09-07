@@ -1767,15 +1767,19 @@ mod tests {
     fn notice_dedupe_suppresses_reconnect_and_announces_new_revision() {
         let intent = gate_intent("notif-1", 1);
         let entry = entry_for(&intent);
-        let first =
-            decide_attention_notices(&[entry.clone()], &[], 3600.0, 100.0)
-                .unwrap();
+        let first = decide_attention_notices(
+            std::slice::from_ref(&entry),
+            &[],
+            3600.0,
+            100.0,
+        )
+        .unwrap();
         assert_eq!(first.to_announce.len(), 1);
         assert!(first.suppressed.is_empty());
 
         // A reconnect with the identical revision announces nothing.
         let second = decide_attention_notices(
-            &[entry.clone()],
+            std::slice::from_ref(&entry),
             &first.ledger,
             3600.0,
             101.0,
