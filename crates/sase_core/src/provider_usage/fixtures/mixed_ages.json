@@ -1,0 +1,174 @@
+{
+  "now": 1800000000.0,
+  "cadence_seconds": 300.0,
+  "warn_percent": 75.0,
+  "critical_percent": 90.0,
+  "observations": [
+    {
+      "schema_version": 1,
+      "provider": "alpha",
+      "context_id": "ctx-alpha",
+      "account_generation": 1,
+      "ordering_token": 1799998500.0,
+      "received_at": 1799999970.0,
+      "source": "probe",
+      "outcome": "ok",
+      "reason_code": null,
+      "diagnostic": null,
+      "completeness": "complete",
+      "account_mode": "subscription",
+      "plan": null,
+      "windows": [
+        {
+          "key": "fresh",
+          "label": "Fresh shared",
+          "used_percent": 40.0,
+          "resets_at": 1800007200.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999970.0,
+          "source": "stream_event",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "stale",
+          "label": "Stale shared",
+          "used_percent": 90.0,
+          "resets_at": 1800007200.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999100.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "old",
+          "label": "Unknown-age shared",
+          "used_percent": 95.0,
+          "resets_at": 1800007200.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799998500.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "schema_version": 1,
+    "generated_at": 1800000000.0,
+    "collection_health": "ok",
+    "attention": {
+      "kind": "very_low",
+      "provider": "alpha",
+      "window_key": "old"
+    },
+    "providers": [
+      {
+        "provider": "alpha",
+        "context_ref": "ctx-alpha",
+        "account_generation": 1,
+        "collection_status": "ok",
+        "collection_reason": null,
+        "completeness": "complete",
+        "last_attempt_at": 1799999970.0,
+        "last_full_observation_at": 1799998500.0,
+        "diagnostic": null,
+        "account_mode": "subscription",
+        "plan": null,
+        "summary": {
+          "remaining_percent": 60.0,
+          "used_percent": 40.0,
+          "limiting_window_keys": ["fresh"],
+          "scope": { "kind": "account" },
+          "completeness": "partial",
+          "freshness": "fresh"
+        },
+        "attention": {
+          "kind": "very_low",
+          "provider": "alpha",
+          "window_key": "old"
+        },
+        "known_constraints": [
+          {
+            "window_key": "old",
+            "vendor_state": "allowed",
+            "used_percent": 95.0,
+            "remaining_percent": 5.0,
+            "freshness": "unknown",
+            "reset_passed": false,
+            "observed_at": 1799998500.0,
+            "attention": "very_low"
+          },
+          {
+            "window_key": "stale",
+            "vendor_state": "allowed",
+            "used_percent": 90.0,
+            "remaining_percent": 10.0,
+            "freshness": "stale",
+            "reset_passed": false,
+            "observed_at": 1799999100.0,
+            "attention": "very_low"
+          }
+        ],
+        "windows": [
+          {
+            "key": "fresh",
+            "label": "Fresh shared",
+            "used_percent": 40.0,
+            "remaining_percent": 60.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800007200.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 30.0,
+            "observed_at": 1799999970.0,
+            "source": "stream_event",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          },
+          {
+            "key": "old",
+            "label": "Unknown-age shared",
+            "used_percent": 95.0,
+            "remaining_percent": 5.0,
+            "exceeded_by_percent": null,
+            "freshness": "unknown",
+            "reset_passed": false,
+            "resets_at": 1800007200.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 1500.0,
+            "observed_at": 1799998500.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          },
+          {
+            "key": "stale",
+            "label": "Stale shared",
+            "used_percent": 90.0,
+            "remaining_percent": 10.0,
+            "exceeded_by_percent": null,
+            "freshness": "stale",
+            "reset_passed": false,
+            "resets_at": 1800007200.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 900.0,
+            "observed_at": 1799999100.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          }
+        ]
+      }
+    ]
+  }
+}

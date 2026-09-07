@@ -1,0 +1,84 @@
+{
+  "now": 1800000000.0,
+  "cadence_seconds": 300.0,
+  "warn_percent": 75.0,
+  "critical_percent": 90.0,
+  "observations": [
+    {
+      "schema_version": 1,
+      "provider": "alpha",
+      "context_id": "ctx-alpha",
+      "account_generation": 1,
+      "ordering_token": 1799999970.0,
+      "received_at": 1799999975.0,
+      "source": "probe",
+      "outcome": "ok",
+      "reason_code": null,
+      "diagnostic": null,
+      "completeness": "complete",
+      "account_mode": "subscription",
+      "plan": null,
+      "windows": [
+        {
+          "key": "week",
+          "label": "Weekly allowance",
+          "used_percent": 40.0,
+          "resets_at": 1799999999.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999970.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "schema_version": 1,
+    "generated_at": 1800000000.0,
+    "collection_health": "ok",
+    "attention": null,
+    "providers": [
+      {
+        "provider": "alpha",
+        "context_ref": "ctx-alpha",
+        "account_generation": 1,
+        "collection_status": "ok",
+        "collection_reason": null,
+        "completeness": "complete",
+        "last_attempt_at": 1799999975.0,
+        "last_full_observation_at": 1799999970.0,
+        "diagnostic": null,
+        "account_mode": "subscription",
+        "plan": null,
+        "summary": null,
+        "attention": {
+          "kind": "none",
+          "provider": "alpha",
+          "window_key": null
+        },
+        "known_constraints": [],
+        "windows": [
+          {
+            "key": "week",
+            "label": "Weekly allowance",
+            "used_percent": 40.0,
+            "remaining_percent": 60.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": true,
+            "resets_at": 1799999999.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 30.0,
+            "observed_at": 1799999970.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          }
+        ]
+      }
+    ]
+  }
+}

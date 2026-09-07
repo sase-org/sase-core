@@ -231,6 +231,15 @@
 //! - `provider_routing_context_from_parts(disables: list[dict], priority: dict | None, captured_at: float) -> dict`
 //! - `provider_availability_classify(context: dict, facts: dict) -> dict`
 //! - `provider_availability_classify_many(context: dict, facts: list[dict]) -> list[dict]`
+//! - `provider_usage_observation_schema_version() -> int`
+//! - `provider_usage_public_schema_version() -> int`
+//! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
+//! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
+//! - `provider_usage_remaining_percent(used_percent: float) -> float`
+//! - `provider_usage_format_remaining_text(used_percent: float) -> str`
+//! - `provider_usage_classify_freshness(observed_at: float, now: float, cadence_seconds: float = 300) -> str`
+//! - `provider_usage_window_applies(applicability: dict, model_id: str | None = None) -> str`
+//! - `provider_usage_summarize_for_model(windows: list[dict], model_id: str) -> dict | None`
 //! - `resolve_effective_effort(explicit_effort: str | None = None, alias_effort: str | None = None, temporary_effort: str | None = None, configured_effort: str | None = None) -> dict`
 //! - `size_model_route(size: str) -> dict`
 //! - `select_epic_land_model(explicit_model: str | None, phase_count: int, threshold: int, epic_lander_model: str, big_epic_lander_model: str) -> dict`
@@ -1085,6 +1094,21 @@ use sase_core::provider_priority::{
     ProviderPriorityError as ProviderPriorityDomainError,
     ProviderPriorityTargetFactsWire, ProviderPriorityWire,
     ProviderRoutingContextWire,
+};
+use sase_core::provider_usage::{
+    classify_freshness as core_classify_freshness,
+    format_remaining_text as core_format_remaining_text,
+    project_usage_snapshot as core_project_usage_snapshot,
+    remaining_percent as core_remaining_percent,
+    summarize_usage_windows as core_summarize_usage_windows,
+    usage_window_applies as core_usage_window_applies,
+    validate_usage_observation as core_validate_usage_observation,
+    ProviderUsageError as ProviderUsageDomainError,
+    ProviderUsageObservationWire, UsageApplicabilityWire,
+    UsagePublicWindowWire, DEFAULT_USAGE_CADENCE_SECONDS,
+    DEFAULT_USAGE_CRITICAL_PERCENT, DEFAULT_USAGE_WARN_PERCENT,
+    PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -11228,6 +11252,127 @@ fn provider_availability_classify_many<'py>(
     provider_priority_wire_to_py(py, &availability)
 }
 
+fn provider_usage_error_to_pyerr(err: ProviderUsageDomainError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_observation_schema_version")]
+fn py_provider_usage_observation_schema_version() -> u32 {
+    PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_public_schema_version")]
+fn py_provider_usage_public_schema_version() -> u32 {
+    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_validate_observation")]
+fn py_provider_usage_validate_observation<'py>(
+    py: Python<'py>,
+    observation: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let observation: ProviderUsageObservationWire =
+        provider_priority_dict_from_py(observation.as_any(), "observation")?;
+    let validated = core_validate_usage_observation(observation, now)
+        .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &validated)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_usage_project_snapshot",
+    signature = (
+        observations,
+        now,
+        cadence_seconds = DEFAULT_USAGE_CADENCE_SECONDS,
+        warn_percent = DEFAULT_USAGE_WARN_PERCENT,
+        critical_percent = DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+)]
+fn py_provider_usage_project_snapshot<'py>(
+    py: Python<'py>,
+    observations: &Bound<'_, PyList>,
+    now: f64,
+    cadence_seconds: f64,
+    warn_percent: f64,
+    critical_percent: f64,
+) -> PyResult<PyObject> {
+    let observations: Vec<ProviderUsageObservationWire> =
+        provider_priority_dict_from_py(observations.as_any(), "observations")?;
+    let snapshot = core_project_usage_snapshot(
+        &observations,
+        now,
+        cadence_seconds,
+        warn_percent,
+        critical_percent,
+    )
+    .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &snapshot)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_remaining_percent")]
+fn py_provider_usage_remaining_percent(used_percent: f64) -> PyResult<f64> {
+    core_remaining_percent(used_percent).map_err(provider_usage_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_format_remaining_text")]
+fn py_provider_usage_format_remaining_text(
+    used_percent: f64,
+) -> PyResult<String> {
+    core_format_remaining_text(used_percent)
+        .map_err(provider_usage_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_usage_classify_freshness",
+    signature = (observed_at, now, cadence_seconds = DEFAULT_USAGE_CADENCE_SECONDS)
+)]
+fn py_provider_usage_classify_freshness(
+    observed_at: f64,
+    now: f64,
+    cadence_seconds: f64,
+) -> PyResult<&'static str> {
+    Ok(core_classify_freshness(observed_at, now, cadence_seconds)
+        .map_err(provider_usage_error_to_pyerr)?
+        .as_str())
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_usage_window_applies",
+    signature = (applicability, model_id = None)
+)]
+fn py_provider_usage_window_applies(
+    applicability: &Bound<'_, PyDict>,
+    model_id: Option<&str>,
+) -> PyResult<&'static str> {
+    let applicability: UsageApplicabilityWire = provider_priority_dict_from_py(
+        applicability.as_any(),
+        "applicability",
+    )?;
+    Ok(core_usage_window_applies(&applicability, model_id).as_str())
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_summarize_for_model")]
+fn py_provider_usage_summarize_for_model<'py>(
+    py: Python<'py>,
+    windows: &Bound<'_, PyList>,
+    model_id: &str,
+) -> PyResult<PyObject> {
+    let windows: Vec<UsagePublicWindowWire> =
+        provider_priority_dict_from_py(windows.as_any(), "windows")?;
+    let summary = core_summarize_usage_windows(&windows, Some(model_id));
+    serialize_to_py(py, &summary)
+}
+
 fn feature_flag_state_error_to_pyerr(
     err: FeatureFlagStateDomainError,
 ) -> PyErr {
@@ -14203,6 +14348,30 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(provider_routing_context_from_parts, m)?)?;
     m.add_function(wrap_pyfunction!(provider_availability_classify, m)?)?;
     m.add_function(wrap_pyfunction!(provider_availability_classify_many, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_observation_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_public_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_validate_observation,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_project_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_remaining_percent, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_format_remaining_text,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_classify_freshness, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_window_applies, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_summarize_for_model,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_feature_flag_state_wire_schema_version,
         m
@@ -22462,6 +22631,128 @@ MENTORS:
                 .all(|candidate| {
                     !candidate["insertion"].as_str().unwrap().ends_with('=')
                 }));
+        });
+    }
+
+    #[test]
+    fn provider_usage_bindings_project_remaining_and_reject_invalid() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let now = 1_800_000_000.0;
+            assert_eq!(py_provider_usage_observation_schema_version(), 1);
+            assert_eq!(py_provider_usage_public_schema_version(), 1);
+            assert_eq!(
+                py_provider_usage_remaining_percent(12.5).unwrap(),
+                87.5
+            );
+            assert_eq!(
+                py_provider_usage_format_remaining_text(0.4).unwrap(),
+                "99% left"
+            );
+            assert_eq!(
+                py_provider_usage_classify_freshness(now - 900.0, now, 300.0)
+                    .unwrap(),
+                "stale"
+            );
+
+            let observation = json!({
+                "schema_version": 1,
+                "provider": "alpha",
+                "context_id": "ctx-alpha",
+                "account_generation": 1,
+                "ordering_token": now - 10.0,
+                "received_at": now - 5.0,
+                "source": "probe",
+                "outcome": "ok",
+                "reason_code": null,
+                "diagnostic": null,
+                "completeness": "complete",
+                "account_mode": "subscription",
+                "plan": null,
+                "windows": [{
+                    "key": "week",
+                    "label": "Weekly",
+                    "used_percent": 94.0,
+                    "resets_at": now + 3600.0,
+                    "duration_seconds": null,
+                    "period_start": null,
+                    "applicability": {"kind": "account"},
+                    "observed_at": now - 10.0,
+                    "source": "probe",
+                    "vendor_state": "allowed"
+                }]
+            });
+            let observation_obj = json_value_to_py(py, &observation).unwrap();
+            let observation_dict =
+                observation_obj.bind(py).downcast::<PyDict>().unwrap();
+            let validated = py_provider_usage_validate_observation(
+                py,
+                observation_dict,
+                now,
+            )
+            .unwrap();
+            let validated_value = py_to_json_value(validated.bind(py)).unwrap();
+            assert_eq!(validated_value["provider"], json!("alpha"));
+
+            let observations = PyList::empty_bound(py);
+            observations.append(observation_dict.as_any()).unwrap();
+            let snapshot = py_provider_usage_project_snapshot(
+                py,
+                &observations,
+                now,
+                300.0,
+                75.0,
+                90.0,
+            )
+            .unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["schema_version"], json!(1));
+            assert_eq!(
+                snapshot_value["providers"][0]["windows"][0]
+                    ["remaining_percent"],
+                json!(6.0)
+            );
+            assert_eq!(
+                snapshot_value["providers"][0]["summary"]["remaining_percent"],
+                json!(6.0)
+            );
+
+            let windows = snapshot_value["providers"][0]["windows"]
+                .as_array()
+                .unwrap();
+            let window_list = PyList::empty_bound(py);
+            for window in windows {
+                window_list
+                    .append(json_value_to_py(py, window).unwrap())
+                    .unwrap();
+            }
+            let model_summary =
+                py_provider_usage_summarize_for_model(py, &window_list, "x-1")
+                    .unwrap();
+            let model_value = py_to_json_value(model_summary.bind(py)).unwrap();
+            assert_eq!(model_value["remaining_percent"], json!(6.0));
+
+            let account =
+                json_value_to_py(py, &json!({"kind": "account"})).unwrap();
+            let account_dict = account.bind(py).downcast::<PyDict>().unwrap();
+            assert_eq!(
+                py_provider_usage_window_applies(account_dict, Some("x-1"))
+                    .unwrap(),
+                "applies"
+            );
+
+            let error = py_provider_usage_remaining_percent(-1.0).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            let error = py_provider_usage_project_snapshot(
+                py,
+                &observations,
+                now,
+                30.0,
+                75.0,
+                90.0,
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 }

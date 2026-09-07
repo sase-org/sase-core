@@ -67,6 +67,7 @@ mod prompt_rewrite;
 pub mod prompt_stash;
 pub mod provider_disable;
 pub mod provider_priority;
+pub mod provider_usage;
 pub mod query;
 mod reference_path;
 pub mod referenced_by;
@@ -980,6 +981,23 @@ pub use provider_priority::{
     PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION,
     PROVIDER_PRIORITY_STATE_FILENAME, PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION,
     PROVIDER_ROUTING_CONTEXT_WIRE_SCHEMA_VERSION,
+};
+pub use provider_usage::{
+    classify_freshness, exceeded_by_percent, format_remaining_text,
+    project_usage_snapshot, remaining_percent, reset_has_passed,
+    summarize_usage_windows, usage_known_constraints, usage_window_applies,
+    validate_usage_cadence, validate_usage_observation,
+    validate_usage_thresholds, ProviderUsageError,
+    ProviderUsageObservationWire, UsageApplicabilityMatch,
+    UsageApplicabilityWire, UsageAttentionKind, UsageAttentionWire,
+    UsageCollectionHealth, UsageCollectionOutcome, UsageCompleteness,
+    UsageFreshness, UsageKnownConstraintWire, UsagePublicProviderWire,
+    UsagePublicSnapshotWire, UsagePublicWindowWire, UsageReasonCode,
+    UsageScopedSummaryWire, UsageSource, UsageVendorState,
+    UsageWindowObservationWire, DEFAULT_USAGE_CADENCE_SECONDS,
+    DEFAULT_USAGE_CRITICAL_PERCENT, DEFAULT_USAGE_WARN_PERCENT,
+    MIN_USAGE_CADENCE_SECONDS, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, canonicalize_query_with_profile, compile_query,

@@ -1,0 +1,203 @@
+{
+  "now": 1800000000.0,
+  "cadence_seconds": 300.0,
+  "warn_percent": 75.0,
+  "critical_percent": 90.0,
+  "observations": [
+    {
+      "schema_version": 1,
+      "provider": "alpha",
+      "context_id": "ctx-alpha",
+      "account_generation": 1,
+      "ordering_token": 1799999990.0,
+      "received_at": 1799999995.0,
+      "source": "probe",
+      "outcome": "ok",
+      "reason_code": null,
+      "diagnostic": null,
+      "completeness": "complete",
+      "account_mode": "subscription",
+      "plan": null,
+      "windows": [
+        {
+          "key": "zero",
+          "label": "Unused window",
+          "used_percent": 0.0,
+          "resets_at": 1800003600.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999990.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "fractional",
+          "label": "Fractional use",
+          "used_percent": 0.4,
+          "resets_at": 1800003600.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999990.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "full",
+          "label": "Exact exhaustion",
+          "used_percent": 100.0,
+          "resets_at": 1800003600.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999990.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "overage",
+          "label": "Exceeded allowance",
+          "used_percent": 112.5,
+          "resets_at": 1800003600.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999990.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "schema_version": 1,
+    "generated_at": 1800000000.0,
+    "collection_health": "ok",
+    "attention": {
+      "kind": "very_low",
+      "provider": "alpha",
+      "window_key": "full"
+    },
+    "providers": [
+      {
+        "provider": "alpha",
+        "context_ref": "ctx-alpha",
+        "account_generation": 1,
+        "collection_status": "ok",
+        "collection_reason": null,
+        "completeness": "complete",
+        "last_attempt_at": 1799999995.0,
+        "last_full_observation_at": 1799999990.0,
+        "diagnostic": null,
+        "account_mode": "subscription",
+        "plan": null,
+        "summary": {
+          "remaining_percent": 0.0,
+          "used_percent": 100.0,
+          "limiting_window_keys": ["full", "overage"],
+          "scope": { "kind": "account" },
+          "completeness": "complete",
+          "freshness": "fresh"
+        },
+        "attention": {
+          "kind": "very_low",
+          "provider": "alpha",
+          "window_key": "full"
+        },
+        "known_constraints": [
+          {
+            "window_key": "full",
+            "vendor_state": "allowed",
+            "used_percent": 100.0,
+            "remaining_percent": 0.0,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "observed_at": 1799999990.0,
+            "attention": "very_low"
+          },
+          {
+            "window_key": "overage",
+            "vendor_state": "allowed",
+            "used_percent": 112.5,
+            "remaining_percent": 0.0,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "observed_at": 1799999990.0,
+            "attention": "very_low"
+          }
+        ],
+        "windows": [
+          {
+            "key": "fractional",
+            "label": "Fractional use",
+            "used_percent": 0.4,
+            "remaining_percent": 99.6,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800003600.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 10.0,
+            "observed_at": 1799999990.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          },
+          {
+            "key": "full",
+            "label": "Exact exhaustion",
+            "used_percent": 100.0,
+            "remaining_percent": 0.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800003600.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 10.0,
+            "observed_at": 1799999990.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          },
+          {
+            "key": "overage",
+            "label": "Exceeded allowance",
+            "used_percent": 112.5,
+            "remaining_percent": 0.0,
+            "exceeded_by_percent": 12.5,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800003600.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 10.0,
+            "observed_at": 1799999990.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          },
+          {
+            "key": "zero",
+            "label": "Unused window",
+            "used_percent": 0.0,
+            "remaining_percent": 100.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800003600.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 10.0,
+            "observed_at": 1799999990.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          }
+        ]
+      }
+    ]
+  }
+}

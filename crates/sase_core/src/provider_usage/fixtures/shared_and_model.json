@@ -1,0 +1,159 @@
+{
+  "now": 1800000000.0,
+  "cadence_seconds": 300.0,
+  "warn_percent": 75.0,
+  "critical_percent": 90.0,
+  "observations": [
+    {
+      "schema_version": 1,
+      "provider": "alpha",
+      "context_id": "ctx-alpha",
+      "account_generation": 2,
+      "ordering_token": 1799999980.0,
+      "received_at": 1799999988.0,
+      "source": "probe",
+      "outcome": "ok",
+      "reason_code": null,
+      "diagnostic": null,
+      "completeness": "complete",
+      "account_mode": "subscription",
+      "plan": "pro",
+      "windows": [
+        {
+          "key": "shared",
+          "label": "All models",
+          "used_percent": 20.0,
+          "resets_at": 1800007200.0,
+          "duration_seconds": 604800.0,
+          "period_start": 1799402400.0,
+          "applicability": { "kind": "account" },
+          "observed_at": 1799999980.0,
+          "source": "probe",
+          "vendor_state": "allowed"
+        },
+        {
+          "key": "model:x",
+          "label": "Model X week",
+          "used_percent": 94.0,
+          "resets_at": 1800007200.0,
+          "duration_seconds": null,
+          "period_start": null,
+          "applicability": {
+            "kind": "models",
+            "model_ids": ["x-1"]
+          },
+          "observed_at": 1799999980.0,
+          "source": "probe",
+          "vendor_state": "warning"
+        }
+      ]
+    }
+  ],
+  "model_summaries": {
+    "x-1": {
+      "remaining_percent": 6.0,
+      "used_percent": 94.0,
+      "limiting_window_keys": ["model:x"],
+      "scope": { "kind": "models", "model_ids": ["x-1"] },
+      "completeness": "complete",
+      "freshness": "fresh"
+    },
+    "y-1": {
+      "remaining_percent": 80.0,
+      "used_percent": 20.0,
+      "limiting_window_keys": ["shared"],
+      "scope": { "kind": "account" },
+      "completeness": "complete",
+      "freshness": "fresh"
+    }
+  },
+  "expected": {
+    "schema_version": 1,
+    "generated_at": 1800000000.0,
+    "collection_health": "ok",
+    "attention": {
+      "kind": "very_low",
+      "provider": "alpha",
+      "window_key": "model:x"
+    },
+    "providers": [
+      {
+        "provider": "alpha",
+        "context_ref": "ctx-alpha",
+        "account_generation": 2,
+        "collection_status": "ok",
+        "collection_reason": null,
+        "completeness": "complete",
+        "last_attempt_at": 1799999988.0,
+        "last_full_observation_at": 1799999980.0,
+        "diagnostic": null,
+        "account_mode": "subscription",
+        "plan": "pro",
+        "summary": {
+          "remaining_percent": 6.0,
+          "used_percent": 94.0,
+          "limiting_window_keys": ["model:x"],
+          "scope": { "kind": "models", "model_ids": ["x-1"] },
+          "completeness": "complete",
+          "freshness": "fresh"
+        },
+        "attention": {
+          "kind": "very_low",
+          "provider": "alpha",
+          "window_key": "model:x"
+        },
+        "known_constraints": [
+          {
+            "window_key": "model:x",
+            "vendor_state": "warning",
+            "used_percent": 94.0,
+            "remaining_percent": 6.0,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "observed_at": 1799999980.0,
+            "attention": "very_low"
+          }
+        ],
+        "windows": [
+          {
+            "key": "model:x",
+            "label": "Model X week",
+            "used_percent": 94.0,
+            "remaining_percent": 6.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800007200.0,
+            "duration_seconds": null,
+            "period_start": null,
+            "age_seconds": 20.0,
+            "observed_at": 1799999980.0,
+            "source": "probe",
+            "vendor_state": "warning",
+            "applicability": {
+              "kind": "models",
+              "model_ids": ["x-1"]
+            }
+          },
+          {
+            "key": "shared",
+            "label": "All models",
+            "used_percent": 20.0,
+            "remaining_percent": 80.0,
+            "exceeded_by_percent": null,
+            "freshness": "fresh",
+            "reset_passed": false,
+            "resets_at": 1800007200.0,
+            "duration_seconds": 604800.0,
+            "period_start": 1799402400.0,
+            "age_seconds": 20.0,
+            "observed_at": 1799999980.0,
+            "source": "probe",
+            "vendor_state": "allowed",
+            "applicability": { "kind": "account" }
+          }
+        ]
+      }
+    ]
+  }
+}
