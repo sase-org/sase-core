@@ -1082,22 +1082,12 @@ mod tests {
             id: id.to_string(),
             timestamp: "2026-05-06T12:00:00+00:00".to_string(),
             sender: "test".to_string(),
-            icon: None,
-            color: None,
-            notes: Vec::new(),
-            files: Vec::new(),
-            tags: Vec::new(),
             action: Some(action.to_string()),
             action_data: BTreeMap::from([(
                 dir_key.to_string(),
                 dir.display().to_string(),
             )]),
-            read: false,
-            dismissed: false,
-            silent: false,
-            muted: false,
-            snooze_until: None,
-            resurfaced_at: None,
+            ..NotificationWire::default()
         }
     }
 

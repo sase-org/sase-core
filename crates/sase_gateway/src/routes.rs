@@ -4563,19 +4563,9 @@ mod tests {
             } else {
                 "user-workflow".to_string()
             },
-            icon: None,
-            color: None,
             notes: vec![format!("note {id}")],
-            files: Vec::new(),
-            tags: Vec::new(),
             action: action.map(str::to_string),
-            action_data: Default::default(),
-            read: false,
-            dismissed: false,
-            silent: false,
-            muted: false,
-            snooze_until: None,
-            resurfaced_at: None,
+            ..NotificationWire::default()
         };
         if action == Some("PlanApproval") {
             notification.action_data.insert(

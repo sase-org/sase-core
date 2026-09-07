@@ -4,6 +4,27 @@ use serde::{Deserialize, Serialize};
 
 pub const NOTIFICATION_STORE_WIRE_SCHEMA_VERSION: u32 = 1;
 
+/// Hard cap on a stored plus-one note after trim/collapse.
+pub const NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS: usize = 2000;
+
+/// Hard cap on stored plus-one entries per notification row.
+pub const NOTIFICATION_PLUS_ONE_MAX_ENTRIES: usize = 500;
+
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// One append-only corroboration entry on a notification row.
+///
+/// Unlike bead +1 evidence, the same sender may appear repeatedly: a
+/// notification +1 is a new occurrence in time, not one-per-reporter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPlusOneWire {
+    pub timestamp: String,
+    pub sender: String,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationWire {
     pub id: String,
@@ -36,6 +57,95 @@ pub struct NotificationWire {
     pub snooze_until: Option<String>,
     #[serde(default)]
     pub resurfaced_at: Option<String>,
+    /// Append-only occurrence notes. Empty on rows that have never been +1'd.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plus_ones: Vec<NotificationPlusOneWire>,
+    /// Count of plus-one entries dropped after the stored-entry cap.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub plus_ones_dropped: u32,
+    /// Sender-scoped opaque exact-match key used by create-or-plus-one upsert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_key: Option<String>,
+}
+
+impl NotificationWire {
+    /// Displayed +1 count: stored entries plus any overflow drops.
+    pub fn plus_one_count(&self) -> u64 {
+        self.plus_ones.len() as u64 + u64::from(self.plus_ones_dropped)
+    }
+}
+
+/// Request to append one plus-one, by id or `(sender, dedup_key)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPlusOneRequestWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationPlusOneActionWire {
+    Applied,
+    #[default]
+    NoMatch,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPlusOneOutcomeWire {
+    pub schema_version: u32,
+    pub action: NotificationPlusOneActionWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub plus_one_count: u64,
+    pub plus_ones_dropped: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<NotificationWire>,
+}
+
+/// Create a fully minted row, or +1 the newest `(sender, dedup_key)` match.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationUpsertRequestWire {
+    pub notification: NotificationWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus_one_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plus_one_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationUpsertActionWire {
+    #[default]
+    Created,
+    PlusOned,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationUpsertOutcomeWire {
+    pub schema_version: u32,
+    pub action: NotificationUpsertActionWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub plus_one_count: u64,
+    pub plus_ones_dropped: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<NotificationWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

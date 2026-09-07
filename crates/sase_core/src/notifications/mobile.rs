@@ -1031,8 +1031,6 @@ mod tests {
             id: "abcdef1234567890".to_string(),
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "planner".to_string(),
-            icon: None,
-            color: None,
             notes: vec!["Plan ready for review".to_string()],
             files: vec!["/tmp/plan.md".to_string()],
             tags: vec!["plan".to_string(), "review".to_string()],
@@ -1041,12 +1039,7 @@ mod tests {
                 ("response_dir", "/tmp/agent"),
                 ("llm_provider", "codex"),
             ]),
-            read: false,
-            dismissed: false,
-            silent: false,
-            muted: false,
-            snooze_until: None,
-            resurfaced_at: None,
+            ..NotificationWire::default()
         }
     }
 
@@ -1055,19 +1048,12 @@ mod tests {
             id: "epic1234567890".to_string(),
             timestamp: "2026-07-16T15:30:00Z".to_string(),
             sender: "planner".to_string(),
-            icon: None,
-            color: None,
             notes: vec!["Epic ready for review".to_string()],
             files: vec!["/tmp/epic.md".to_string()],
             tags: vec!["epic".to_string(), "review".to_string()],
             action: Some("EpicApproval".to_string()),
             action_data: _action_data(&[("response_dir", "/tmp/epic")]),
-            read: false,
-            dismissed: false,
-            silent: false,
-            muted: false,
-            snooze_until: None,
-            resurfaced_at: None,
+            ..NotificationWire::default()
         }
     }
 
@@ -1270,8 +1256,6 @@ mod tests {
             id: "launch1234567890".to_string(),
             timestamp: "2026-05-06T15:30:00Z".to_string(),
             sender: "launch".to_string(),
-            icon: None,
-            color: None,
             notes: vec!["Launch request ready".to_string()],
             files: vec![
                 "/tmp/launch_preview.md".to_string(),
@@ -1286,12 +1270,7 @@ mod tests {
                 ("source_surface", "agent"),
                 ("slot_count", "3"),
             ]),
-            read: false,
-            dismissed: false,
-            silent: false,
-            muted: false,
-            snooze_until: None,
-            resurfaced_at: None,
+            ..NotificationWire::default()
         };
 
         let detail = mobile_action_detail_from_notification(

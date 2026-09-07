@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(notifications)* export plus-one append and upsert bindings
+
 ## [0.32.38](https://github.com/sase-org/sase-core/compare/v0.32.37...v0.32.38) - 2026-09-07
 
 ### Added

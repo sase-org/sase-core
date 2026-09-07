@@ -88,6 +88,8 @@
 //! - `apply_notification_state_update_counts(path: str, update: dict) -> dict`
 //! - `append_notification(path: str, notification: dict) -> dict`
 //! - `append_notification_counts(path: str, notification: dict) -> dict`
+//! - `append_notification_plus_one(path: str, request: dict) -> dict`
+//! - `upsert_notification(path: str, request: dict) -> dict`
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
 //! - `classify_notification_tabs(notifications: list[dict]) -> dict`
@@ -991,6 +993,7 @@ use sase_core::model_route::{
 use sase_core::notifications::{
     append_notification as core_append_notification,
     append_notification_counts as core_append_notification_counts,
+    append_notification_plus_one as core_append_notification_plus_one,
     apply_notification_state_update as core_apply_notification_state_update,
     apply_notification_state_update_counts as core_apply_notification_state_update_counts,
     classify_notification_tabs as core_classify_notification_tabs,
@@ -1006,7 +1009,9 @@ use sase_core::notifications::{
     remove_pending_action as core_remove_pending_action,
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
-    NotificationStateUpdateWire, NotificationWire,
+    upsert_notification as core_upsert_notification,
+    NotificationPlusOneRequestWire, NotificationStateUpdateWire,
+    NotificationUpsertRequestWire, NotificationWire,
     PendingActionTransportRequestWire, PendingActionWire,
 };
 use sase_core::perf_logs::{
@@ -8021,6 +8026,44 @@ fn py_append_notification_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Append one plus-one entry by id or `(sender, dedup_key)`.
+#[pyfunction]
+#[pyo3(name = "append_notification_plus_one")]
+fn py_append_notification_plus_one<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = plus_one_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_append_notification_plus_one(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Create a minted notification or +1 the matching `(sender, dedup_key)` row.
+#[pyfunction]
+#[pyo3(name = "upsert_notification")]
+fn py_upsert_notification<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = upsert_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_upsert_notification(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Rewrite the notification JSONL store from notification dicts.
 #[pyfunction]
 #[pyo3(name = "rewrite_notifications")]
@@ -8653,6 +8696,28 @@ fn notifications_from_py_list(
         values.push(notification);
     }
     Ok(values)
+}
+
+fn plus_one_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationPlusOneRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationPlusOneRequestWire dict: {e}"
+        ))
+    })
+}
+
+fn upsert_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationUpsertRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationUpsertRequestWire dict: {e}"
+        ))
+    })
 }
 
 fn notification_update_from_pydict(
@@ -14219,6 +14284,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_append_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_notification_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_append_notification_plus_one, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsert_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
@@ -21968,6 +22035,87 @@ MENTORS:
                 path.with_file_name("notifications.jsonl.lock"),
             );
             let _ = fs::remove_dir(path.parent().unwrap());
+        });
+    }
+
+    #[test]
+    fn notification_plus_one_and_upsert_bindings_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let (_temp, path) = temp_notification_path("notifications.jsonl");
+            let created_obj = json_value_to_py(
+                py,
+                &json!({
+                    "notification": {
+                        "id": "n1",
+                        "timestamp": "2026-04-30T12:00:00+00:00",
+                        "sender": "ci_watch",
+                        "notes": ["CI failure: a"],
+                        "dedup_key": "combo"
+                    },
+                    "plus_one_note": "first",
+                    "plus_one_timestamp": "2026-04-30T12:00:00+00:00"
+                }),
+            )
+            .unwrap();
+            let created = created_obj.bind(py).downcast::<PyDict>().unwrap();
+            let created_outcome =
+                py_upsert_notification(py, path.to_str().unwrap(), created)
+                    .unwrap();
+            let created_value =
+                py_to_json_value(created_outcome.bind(py)).unwrap();
+            assert_eq!(created_value["action"], json!("created"));
+            assert_eq!(created_value["id"], json!("n1"));
+
+            let plus_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": "n1",
+                    "timestamp": "2026-04-30T13:00:00+00:00",
+                    "sender": "ci_watch",
+                    "note": "  churn  again  "
+                }),
+            )
+            .unwrap();
+            let plus = plus_obj.bind(py).downcast::<PyDict>().unwrap();
+            let plus_outcome = py_append_notification_plus_one(
+                py,
+                path.to_str().unwrap(),
+                plus,
+            )
+            .unwrap();
+            let plus_value = py_to_json_value(plus_outcome.bind(py)).unwrap();
+            assert_eq!(plus_value["action"], json!("applied"));
+            assert_eq!(plus_value["plus_one_count"], json!(1));
+            assert_eq!(
+                plus_value["notification"]["plus_ones"][0]["note"],
+                json!("churn again")
+            );
+
+            let upsert_obj = json_value_to_py(
+                py,
+                &json!({
+                    "notification": {
+                        "id": "n2",
+                        "timestamp": "2026-04-30T14:00:00+00:00",
+                        "sender": "ci_watch",
+                        "notes": ["ignored"],
+                        "dedup_key": "combo"
+                    },
+                    "plus_one_note": "second",
+                    "plus_one_timestamp": "2026-04-30T14:00:00+00:00"
+                }),
+            )
+            .unwrap();
+            let upsert = upsert_obj.bind(py).downcast::<PyDict>().unwrap();
+            let upsert_outcome =
+                py_upsert_notification(py, path.to_str().unwrap(), upsert)
+                    .unwrap();
+            let upsert_value =
+                py_to_json_value(upsert_outcome.bind(py)).unwrap();
+            assert_eq!(upsert_value["action"], json!("plus_oned"));
+            assert_eq!(upsert_value["id"], json!("n1"));
+            assert_eq!(upsert_value["plus_one_count"], json!(2));
         });
     }
 

@@ -11,9 +11,14 @@ use fs2::FileExt;
 use super::tabs::{tab_key_for, tabs_and_counts_for};
 use super::wire::{
     NotificationAgentKeyWire, NotificationCountsWire,
+    NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
+    NotificationPlusOneRequestWire, NotificationPlusOneWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
-    NotificationWire, NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    NotificationUpsertActionWire, NotificationUpsertOutcomeWire,
+    NotificationUpsertRequestWire, NotificationWire,
+    NOTIFICATION_PLUS_ONE_MAX_ENTRIES, NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
+    NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };
 
 const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -485,6 +490,310 @@ fn apply_notification_state_update_with_options(
 
     unlock(lock)?;
     result
+}
+
+/// Append one plus-one entry, addressed by exact id or `(sender, dedup_key)`.
+///
+/// A +1 never mutates `timestamp`, `resurfaced_at`, or any state flag. Missing
+/// targets return `action: no_match` without writing. Invalid notes, senders,
+/// or timestamps are errors.
+pub fn append_notification_plus_one(
+    path: &Path,
+    request: &NotificationPlusOneRequestWire,
+) -> Result<NotificationPlusOneOutcomeWire, String> {
+    validate_plus_one_target(request)?;
+    let prepared = PreparedPlusOne::from_parts(
+        &request.timestamp,
+        &request.sender,
+        &request.note,
+    )?;
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let result = (|| {
+        let (mut rows, _) = read_rows_unlocked(path, true)?;
+        let Some(index) = find_plus_one_target(&rows, request) else {
+            return Ok(NotificationPlusOneOutcomeWire {
+                schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+                action: NotificationPlusOneActionWire::NoMatch,
+                id: None,
+                plus_one_count: 0,
+                plus_ones_dropped: 0,
+                notification: None,
+            });
+        };
+        apply_prepared_plus_one(&mut rows[index], &prepared);
+        let notification = rows[index].clone();
+        merge_and_rewrite_notifications_unlocked(path, &rows)?;
+        Ok(applied_plus_one_outcome(notification))
+    })();
+
+    unlock(lock)?;
+    result
+}
+
+/// Create a minted row, or +1 the newest matching `(sender, dedup_key)` row.
+///
+/// No `dedup_key` is today's append. A matching key appends a +1 instead of
+/// creating. `supersedes` retires matching rows only on the create branch.
+pub fn upsert_notification(
+    path: &Path,
+    request: &NotificationUpsertRequestWire,
+) -> Result<NotificationUpsertOutcomeWire, String> {
+    let notification = &request.notification;
+    let dedup_key = notification
+        .dedup_key
+        .as_deref()
+        .filter(|key| !key.is_empty());
+    let Some(dedup_key) = dedup_key else {
+        return append_as_created(path, notification);
+    };
+
+    let plus_one_note = request
+        .plus_one_note
+        .as_deref()
+        .ok_or_else(|| "dedup_key requires plus_one_note".to_string())?;
+    let plus_one_timestamp = request
+        .plus_one_timestamp
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(notification.timestamp.as_str());
+    let prepared = PreparedPlusOne::from_parts(
+        plus_one_timestamp,
+        &notification.sender,
+        plus_one_note,
+    )?;
+    let retirement = request
+        .supersedes
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .map(|old_key| {
+            PreparedPlusOne::from_parts(
+                plus_one_timestamp,
+                &notification.sender,
+                &supersede_note(notification),
+            )
+            .map(|prepared| (old_key.to_string(), prepared))
+        })
+        .transpose()?;
+
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let result = (|| {
+        let (mut rows, _) = read_rows_unlocked(path, true)?;
+        if let Some(index) = find_newest_matching_index(&rows, |row| {
+            row.sender == notification.sender
+                && row.dedup_key.as_deref() == Some(dedup_key)
+        }) {
+            apply_prepared_plus_one(&mut rows[index], &prepared);
+            let updated = rows[index].clone();
+            merge_and_rewrite_notifications_unlocked(path, &rows)?;
+            return Ok(plus_oned_upsert_outcome(updated));
+        }
+
+        let mut superseded_ids = Vec::new();
+        if let Some((old_key, retirement)) = retirement.as_ref() {
+            for row in &mut rows {
+                if row.sender == notification.sender
+                    && row.dedup_key.as_deref() == Some(old_key.as_str())
+                {
+                    apply_prepared_plus_one(row, retirement);
+                    row.dismissed = true;
+                    superseded_ids.push(row.id.clone());
+                }
+            }
+        }
+
+        rows.push(notification.clone());
+        merge_and_rewrite_notifications_unlocked(path, &rows)?;
+        Ok(created_upsert_outcome(notification.clone(), superseded_ids))
+    })();
+
+    unlock(lock)?;
+    result
+}
+
+#[derive(Debug, Clone)]
+struct PreparedPlusOne {
+    timestamp: String,
+    sender: String,
+    note: String,
+}
+
+impl PreparedPlusOne {
+    fn from_parts(
+        timestamp: &str,
+        sender: &str,
+        note: &str,
+    ) -> Result<Self, String> {
+        let sender = sender.trim();
+        if sender.is_empty() {
+            return Err("plus-one sender cannot be empty or blank".to_string());
+        }
+        parse_aware_utc(timestamp, "plus-one timestamp")?;
+        Ok(Self {
+            timestamp: timestamp.to_string(),
+            sender: sender.to_string(),
+            note: normalize_plus_one_note(note)?,
+        })
+    }
+}
+
+fn normalize_plus_one_note(note: &str) -> Result<String, String> {
+    let collapsed = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return Err("plus-one note cannot be empty or blank".to_string());
+    }
+    Ok(collapsed
+        .chars()
+        .take(NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS)
+        .collect())
+}
+
+fn validate_plus_one_target(
+    request: &NotificationPlusOneRequestWire,
+) -> Result<(), String> {
+    let has_id = request
+        .id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|id| !id.is_empty());
+    let has_key = request
+        .dedup_key
+        .as_deref()
+        .is_some_and(|key| !key.is_empty());
+    if has_id || has_key {
+        Ok(())
+    } else {
+        Err("plus-one request requires id or dedup_key".to_string())
+    }
+}
+
+fn find_plus_one_target(
+    rows: &[NotificationWire],
+    request: &NotificationPlusOneRequestWire,
+) -> Option<usize> {
+    let id = request
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(id) = id {
+        return find_newest_matching_index(rows, |row| row.id == id);
+    }
+    let key = request.dedup_key.as_deref().filter(|key| !key.is_empty())?;
+    let sender = request.sender.trim();
+    if sender.is_empty() {
+        return None;
+    }
+    find_newest_matching_index(rows, |row| {
+        row.sender == sender && row.dedup_key.as_deref() == Some(key)
+    })
+}
+
+fn find_newest_matching_index(
+    rows: &[NotificationWire],
+    predicate: impl Fn(&NotificationWire) -> bool,
+) -> Option<usize> {
+    let mut best: Option<(usize, DateTime<Utc>)> = None;
+    for (index, row) in rows.iter().enumerate() {
+        if !predicate(row) {
+            continue;
+        }
+        let timestamp = DateTime::parse_from_rfc3339(&row.timestamp)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| DateTime::<Utc>::from(UNIX_EPOCH));
+        match best {
+            None => best = Some((index, timestamp)),
+            Some((_, best_timestamp)) if timestamp >= best_timestamp => {
+                best = Some((index, timestamp));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+fn apply_prepared_plus_one(
+    row: &mut NotificationWire,
+    plus_one: &PreparedPlusOne,
+) {
+    row.plus_ones.push(NotificationPlusOneWire {
+        timestamp: plus_one.timestamp.clone(),
+        sender: plus_one.sender.clone(),
+        note: plus_one.note.clone(),
+    });
+    while row.plus_ones.len() > NOTIFICATION_PLUS_ONE_MAX_ENTRIES {
+        row.plus_ones.remove(0);
+        row.plus_ones_dropped = row.plus_ones_dropped.saturating_add(1);
+    }
+}
+
+fn supersede_note(notification: &NotificationWire) -> String {
+    let summary = notification
+        .notes
+        .first()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+        .unwrap_or(notification.id.as_str());
+    format!("superseded by: {summary}")
+}
+
+fn append_as_created(
+    path: &Path,
+    notification: &NotificationWire,
+) -> Result<NotificationUpsertOutcomeWire, String> {
+    let outcome = append_notification(path, notification)?;
+    let stored = outcome
+        .notifications
+        .into_iter()
+        .find(|row| row.id == notification.id)
+        .unwrap_or_else(|| notification.clone());
+    Ok(created_upsert_outcome(stored, Vec::new()))
+}
+
+fn applied_plus_one_outcome(
+    notification: NotificationWire,
+) -> NotificationPlusOneOutcomeWire {
+    NotificationPlusOneOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        action: NotificationPlusOneActionWire::Applied,
+        id: Some(notification.id.clone()),
+        plus_one_count: notification.plus_one_count(),
+        plus_ones_dropped: notification.plus_ones_dropped,
+        notification: Some(notification),
+    }
+}
+
+fn plus_oned_upsert_outcome(
+    notification: NotificationWire,
+) -> NotificationUpsertOutcomeWire {
+    NotificationUpsertOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        action: NotificationUpsertActionWire::PlusOned,
+        id: Some(notification.id.clone()),
+        plus_one_count: notification.plus_one_count(),
+        plus_ones_dropped: notification.plus_ones_dropped,
+        superseded_ids: Vec::new(),
+        notification: Some(notification),
+    }
+}
+
+fn created_upsert_outcome(
+    notification: NotificationWire,
+    superseded_ids: Vec<String>,
+) -> NotificationUpsertOutcomeWire {
+    NotificationUpsertOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        action: NotificationUpsertActionWire::Created,
+        id: Some(notification.id.clone()),
+        plus_one_count: notification.plus_one_count(),
+        plus_ones_dropped: notification.plus_ones_dropped,
+        superseded_ids,
+        notification: Some(notification),
+    }
 }
 
 fn read_rows(
