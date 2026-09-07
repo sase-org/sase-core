@@ -18,6 +18,7 @@ pub mod agent_group_archive;
 pub mod agent_identity;
 pub mod agent_launch;
 pub mod agent_name_template;
+pub mod agent_ownership;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
@@ -218,6 +219,26 @@ pub use agent_name_template::{
     render_agent_name_template, validate_agent_name_template_token,
     AgentNameTemplate, AgentNameTemplateError, AGENT_NAME_TEMPLATE_ALPHABET,
     AGENT_NAME_TEMPLATE_MARKER,
+};
+pub use agent_ownership::{
+    agent_ownership_batch_request_from_json_value, plan_agent_ownership_batch,
+    AgentCleanupEffectWire, AgentCleanupReservationWire,
+    AgentCleanupRootPlanWire, AgentCleanupRootWire,
+    AgentExpectedOwnerPredicateWire, AgentExpectedOwnerWire,
+    AgentMarkerStateWire, AgentNameRegistryEntryWire,
+    AgentNameRegistryMergeWire, AgentNameReservationAcceptedWire,
+    AgentNameReservationBlockedWire, AgentNameReservationOperationWire,
+    AgentNameReservationRequestWire, AgentOwnershipBatchError,
+    AgentOwnershipBatchPlanWire, AgentOwnershipBatchRequestWire,
+    AgentOwnershipClosureWire, AgentOwnershipOwnerDecisionWire,
+    AgentOwnershipSlotWire, AgentOwnershipSourceKindWire,
+    AgentOwnershipSourceRecordWire, AgentProcessIdentityWire,
+    AgentSourceSignatureWire, AGENT_OWNERSHIP_BATCH_WIRE_SCHEMA_VERSION,
+    CLEANUP_EFFECT_ARTIFACT_DIR, CLEANUP_EFFECT_BUNDLE_PATH,
+    CLEANUP_OUTCOME_BLOCKED, CLEANUP_OUTCOME_PRESERVED,
+    CLEANUP_OUTCOME_SELECTED, REGISTRY_MERGE_ACTION_NO_OP,
+    REGISTRY_MERGE_ACTION_REMOVE, REGISTRY_MERGE_ACTION_UPSERT,
+    RESERVATION_KIND_CLEANUP_IN_PROGRESS,
 };
 pub use agent_runtime::{
     aggregate_clan_runtime, aggregate_clan_runtime_records,

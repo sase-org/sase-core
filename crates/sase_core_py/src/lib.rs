@@ -53,6 +53,8 @@
 //! - `save_dismissed_bundle(bundle_root: str, bundle: dict) -> dict`
 //! - `delete_agent_artifacts(artifacts_dir: str) -> dict`
 //! - `release_workspace_from_content(content: str, workspace_num: int, workflow: str | None, cl_name: str | None) -> dict`
+//! - `agent_ownership_batch_wire_schema_version() -> int`
+//! - `plan_agent_ownership_batch(request: dict) -> dict`
 //! - `mark_hook_agents_as_killed(hooks: list[dict], suffixes: list[str]) -> list[dict]`
 //! - `mark_mentor_agents_as_killed(mentors: list[dict], suffixes: list[str]) -> list[dict]`
 //! - `mark_comment_agents_as_killed(comments: list[dict], suffixes: list[str]) -> list[dict]`
@@ -575,6 +577,10 @@ use sase_core::agent_name_template::{
     parse_agent_name_template as core_parse_agent_name_template,
     render_agent_name_template as core_render_agent_name_template,
     AgentNameTemplateKey,
+};
+use sase_core::agent_ownership::{
+    agent_ownership_batch_request_from_json_value,
+    plan_agent_ownership_batch as core_plan_agent_ownership_batch,
 };
 use sase_core::agent_runtime::{
     aggregate_clan_runtime as core_aggregate_clan_runtime,
@@ -3452,6 +3458,33 @@ fn py_plan_agent_cleanup<'py>(
         })?;
     let plan = core_plan_agent_cleanup(&wire_targets, &req)
         .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&plan).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_ownership_batch_wire_schema_version")]
+fn py_agent_ownership_batch_wire_schema_version() -> u32 {
+    sase_core::AGENT_OWNERSHIP_BATCH_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "plan_agent_ownership_batch")]
+fn py_plan_agent_ownership_batch<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request_value = py_to_json_value(request.as_any())?;
+    let req = agent_ownership_batch_request_from_json_value(&request_value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid AgentOwnershipBatchRequestWire dict: {e}"
+            ))
+        })?;
+    let plan = core_plan_agent_ownership_batch(&req)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let value = serde_json::to_value(&plan).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -13088,6 +13121,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_agent_cleanup_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_ownership_batch_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_plan_agent_ownership_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifacts, m)?)?;
@@ -20501,6 +20539,127 @@ MENTORS:
             let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
 
             let err = py_plan_agent_cleanup(py, &targets, request).unwrap_err();
+            assert!(err.to_string().contains("schema mismatch"));
+        });
+    }
+
+    #[test]
+    fn plan_agent_ownership_batch_binding_round_trips_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": sase_core::AGENT_OWNERSHIP_BATCH_WIRE_SCHEMA_VERSION,
+                    "owner": {"username": "alice", "machine_name": "athena"},
+                    "known_owner_roots": ["athena", "alice.athena"],
+                    "logical_slots": [{
+                        "slot_id": "phase-1",
+                        "requested_name": "alpha",
+                        "expected_bead_id": "sase-xr.2",
+                        "expected_assignee": "sase-xr.2",
+                        "expected_owner": {
+                            "name": "alpha",
+                            "raw_suffix": "ts-a",
+                            "artifacts_dir": "/projects/proj/artifacts/workflow/ts-a",
+                            "reservation_kind": "claimed",
+                            "marker_state": {
+                                "status": "DONE",
+                                "terminal": true,
+                                "cleanup_allowed": true
+                            }
+                        }
+                    }],
+                    "cleanup_roots": [{
+                        "root_id": "phase-1",
+                        "requested_name": "alpha",
+                        "expected_bead_id": "sase-xr.2",
+                        "expected_assignee": "sase-xr.2",
+                        "expected_owner": {
+                            "name": "alpha",
+                            "agent_name": "alpha",
+                            "raw_suffix": "ts-a",
+                            "artifacts_dir": "/projects/proj/artifacts/workflow/ts-a",
+                            "reservation_kind": "claimed",
+                            "marker_state": {
+                                "status": "DONE",
+                                "terminal": true,
+                                "cleanup_allowed": true
+                            }
+                        }
+                    }],
+                    "source_records": [{
+                        "record_id": "artifact-a",
+                        "source_kind": "artifact",
+                        "artifact_dir": "/projects/proj/artifacts/workflow/ts-a",
+                        "raw_suffix": "ts-a",
+                        "canonical_names": ["alpha"],
+                        "relation_refs": [],
+                        "outgoing_suffixes": []
+                    }],
+                    "reservation_snapshot": [{
+                        "name": "alpha",
+                        "source": "artifact",
+                        "origin": "local",
+                        "artifacts_dir": "/projects/proj/artifacts/workflow/ts-a",
+                        "reservation_kind": "planned"
+                    }],
+                    "reservation_requests": [{
+                        "request_id": "claim-alpha",
+                        "operation": "claim_planned",
+                        "name": "alice.athena.alpha",
+                        "artifact_dir": "/projects/proj/artifacts/workflow/ts-a"
+                    }]
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result = py_plan_agent_ownership_batch(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(
+                value["schema_version"],
+                json!(sase_core::AGENT_OWNERSHIP_BATCH_WIRE_SCHEMA_VERSION)
+            );
+            assert_eq!(
+                value["selected_owners"][0]["root_id"],
+                json!("phase-1")
+            );
+            assert_eq!(
+                value["cleanup_closure"]["artifact_dirs"],
+                json!(["/projects/proj/artifacts/workflow/ts-a"])
+            );
+            assert_eq!(
+                value["slot_owner_predicates"][0]["expected_bead_id"],
+                json!("sase-xr.2")
+            );
+            assert_eq!(
+                value["reservation_decisions"][0]["storage_name"],
+                json!("alpha")
+            );
+            assert_eq!(
+                value["registry_merge_plan"][0]["expected"]["reservation_kind"],
+                json!("planned")
+            );
+        });
+    }
+
+    #[test]
+    fn plan_agent_ownership_batch_binding_rejects_schema_mismatch() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 999,
+                    "owner": {"username": "alice", "machine_name": "athena"}
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let err = py_plan_agent_ownership_batch(py, request).unwrap_err();
             assert!(err.to_string().contains("schema mismatch"));
         });
     }
