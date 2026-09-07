@@ -9,6 +9,7 @@
 mod bookkeeping;
 mod config;
 mod decision;
+mod diagnostics;
 mod targets;
 mod validation;
 mod wire;
@@ -20,6 +21,11 @@ pub use config::{
     parse_chop_duration, split_axe_description, validate_axe_config,
 };
 pub use decision::evaluate_chop_decision;
+pub use diagnostics::{
+    normalize_chop_subprocess_diagnostic, ChopSubprocessDiagnosticRequestWire,
+    ChopSubprocessDiagnosticWire, ChopSubprocessOutputStatusWire,
+    CHOP_SUBPROCESS_DIAGNOSTIC_MAX_BYTES, CHOP_SUBPROCESS_DIAGNOSTIC_MAX_LINES,
+};
 pub use targets::expand_chop_targets;
 pub use validation::{
     derive_chop_agent_name, parse_chop_result, validate_chop_proposal,

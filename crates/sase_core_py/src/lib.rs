@@ -222,6 +222,7 @@
 //! - `validate_chop_result(result: dict) -> dict`
 //! - `validate_chop_proposal(proposal: dict, index: int, prior_ids: list[str]) -> dict`
 //! - `derive_chop_agent_name(chop_name: str, target_key: str | None, proposal_index: int, run_token: str | None = None) -> str`
+//! - `normalize_chop_subprocess_diagnostic(request: dict) -> dict`
 //! - `evaluate_chop_decision(request: dict) -> dict`
 //! - `apply_chop_checkpoint_update(request: dict) -> dict`
 //! - `check_and_record_chop_once_per(request: dict) -> dict`
@@ -722,6 +723,7 @@ use sase_core::axe_chop::{
     derive_chop_agent_name as core_derive_chop_agent_name,
     evaluate_chop_decision as core_evaluate_chop_decision,
     expand_chop_targets as core_expand_chop_targets,
+    normalize_chop_subprocess_diagnostic as core_normalize_chop_subprocess_diagnostic,
     parse_chop_duration as core_parse_chop_duration,
     parse_chop_result as core_parse_chop_result,
     release_chop_once_per as core_release_chop_once_per,
@@ -732,9 +734,9 @@ use sase_core::axe_chop::{
     AxeConfigValidationRequestWire, ChopCheckpointUpdateRequestWire,
     ChopDecisionRequestWire, ChopEngineError, ChopLaunchProposalWire,
     ChopOncePerReleaseRequestWire, ChopOncePerRequestWire,
-    ChopResultDocumentWire, ChopTargetExpansionRequestWire,
-    CHOP_ENGINE_SCHEMA_VERSION, CHOP_RESULT_SCHEMA_VERSION,
-    CHOP_STATE_SCHEMA_VERSION,
+    ChopResultDocumentWire, ChopSubprocessDiagnosticRequestWire,
+    ChopTargetExpansionRequestWire, CHOP_ENGINE_SCHEMA_VERSION,
+    CHOP_RESULT_SCHEMA_VERSION, CHOP_STATE_SCHEMA_VERSION,
 };
 use sase_core::axe_overrun::{
     classify_chop_overrun as core_classify_chop_overrun, ChopOverrunError,
@@ -9864,6 +9866,23 @@ fn py_chop_state_schema_version() -> u32 {
     CHOP_STATE_SCHEMA_VERSION
 }
 
+/// Normalize and bound one captured AXE subprocess failure diagnostic.
+#[pyfunction]
+#[pyo3(name = "normalize_chop_subprocess_diagnostic")]
+fn py_normalize_chop_subprocess_diagnostic<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ChopSubprocessDiagnosticRequestWire =
+        chop_request_from_pydict(
+            request,
+            "chop subprocess diagnostic request",
+        )?;
+    let result = core_normalize_chop_subprocess_diagnostic(&request)
+        .map_err(chop_error_to_pyerr)?;
+    chop_result_to_py(py, &result)
+}
+
 /// Parse and validate a script-written chop result JSON document.
 #[pyfunction]
 #[pyo3(name = "parse_chop_result")]
@@ -13524,6 +13543,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_result_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_state_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_normalize_chop_subprocess_diagnostic,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_parse_chop_result, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_chop_result, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_chop_proposal, m)?)?;
@@ -19421,6 +19444,59 @@ MENTORS:
                     "text": "éévalue",
                     "omitted_lines": 1,
                     "omitted_chars": 6
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn chop_subprocess_diagnostic_binding_returns_plain_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_normalize_chop_subprocess_diagnostic,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "run_id": "20260906T211142_996558",
+                    "exit_code": -7,
+                    "source_log_path": "/tmp/run.log",
+                    "output": "\u{1b}[31mplain failure\u{1b}[0m\nhttps://api.telegram.org/bot123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi/getUpdates\ntelegram.error.TimedOut: Timed out",
+                    "input_omitted_bytes": 4,
+                    "had_decode_errors": true,
+                    "max_lines": 2,
+                    "max_bytes": 200
+                }),
+            )
+            .unwrap();
+            let value = module
+                .getattr("normalize_chop_subprocess_diagnostic")
+                .unwrap()
+                .call1((request,))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "run_id": "20260906T211142_996558",
+                    "exit_code": -7,
+                    "source_log_path": "/tmp/run.log",
+                    "output_status": "captured",
+                    "unavailable_reason": null,
+                    "output_excerpt": "https://api.telegram.org/bot<redacted>/getUpdates\ntelegram.error.TimedOut: Timed out",
+                    "truncated": true,
+                    "omitted_lines": 1,
+                    "omitted_bytes": 4,
+                    "had_decode_errors": true
                 })
             );
         });
