@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.36](https://github.com/sase-org/sase-core/compare/v0.32.35...v0.32.36) - 2026-09-07
+
+### Added
+
+- *(fleet)* add journaled mutation contract and mutate gateway
+
 ## [0.32.35](https://github.com/sase-org/sase-core/compare/v0.32.34...v0.32.35) - 2026-09-07
 
 ### Added
