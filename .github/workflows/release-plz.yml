@@ -206,6 +206,8 @@ jobs:
           /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
           /tmp/smoke/bin/python -c "import sase_core_rs; print('import ok')"
           /tmp/smoke/bin/python -c "import sase_core_rs; print('parse_query ok:', sase_core_rs.parse_query('status:Ready'))"
+          /tmp/smoke/bin/python -c "from pathlib import Path; assert Path('/tmp/smoke/bin/sase_federation_worker').is_file()"
+          /tmp/smoke/bin/python -c "import sase_core_rs.federation_worker as worker; assert callable(worker.main)"
           /tmp/smoke/bin/python - <<'PY'
           import sase_core_rs
           try:
@@ -254,6 +256,8 @@ jobs:
           /tmp/smoke/bin/pip install --upgrade pip
           /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
           /tmp/smoke/bin/python -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+          /tmp/smoke/bin/python -c "from pathlib import Path; assert Path('/tmp/smoke/bin/sase_federation_worker').is_file()"
+          /tmp/smoke/bin/python -c "import sase_core_rs.federation_worker as worker; assert callable(worker.main)"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -296,6 +300,8 @@ jobs:
           $wheel = Get-ChildItem crates\sase_core_py\dist\*.whl | Select-Object -First 1
           & $env:TEMP\smoke\Scripts\python.exe -m pip install $wheel.FullName
           & $env:TEMP\smoke\Scripts\python.exe -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+          & $env:TEMP\smoke\Scripts\python.exe -c "from pathlib import Path; import os; assert (Path(os.environ['TEMP']) / 'smoke' / 'Scripts' / 'sase_federation_worker.exe').is_file()"
+          & $env:TEMP\smoke\Scripts\python.exe -c "import sase_core_rs.federation_worker as worker; assert callable(worker.main)"
 
       - uses: actions/upload-artifact@v4
         with:

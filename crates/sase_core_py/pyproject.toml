@@ -34,6 +34,9 @@ Homepage = "https://github.com/sase-org/sase-core"
 Repository = "https://github.com/sase-org/sase-core"
 Issues = "https://github.com/sase-org/sase-core/issues"
 
+[project.scripts]
+sase_federation_worker = "sase_core_rs.federation_worker:main"
+
 # Distribution name (`sase-core-rs`) differs from the import module name
 # (`sase_core_rs`). The crate name `sase_core_py` is the Cargo crate name
 # only; consumers `import sase_core_rs` and `pip install sase-core-rs`.

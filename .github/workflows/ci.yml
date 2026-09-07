@@ -85,6 +85,8 @@ jobs:
           /tmp/smoke/bin/pip install crates/sase_core_py/dist/*.whl
           /tmp/smoke/bin/python -c "import sase_core_rs; print('ok')"
           /tmp/smoke/bin/python -c "import sase_core_rs; print(sase_core_rs.parse_query('status:Ready'))"
+          /tmp/smoke/bin/python -c "from pathlib import Path; assert Path('/tmp/smoke/bin/sase_federation_worker').is_file()"
+          /tmp/smoke/bin/python -c "import sase_core_rs.federation_worker as worker; assert callable(worker.main)"
           /tmp/smoke/bin/python -c "
           import sase_core_rs
           # '(' is a syntactically incomplete query: parser sees '(' then

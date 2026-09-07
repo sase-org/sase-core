@@ -34,6 +34,7 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 sase_core = { workspace = true }
+sase_gateway = { path = "../sase_gateway", version = "0.32.31" }
 pyo3 = { version = "0.22", features = ["abi3-py312"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

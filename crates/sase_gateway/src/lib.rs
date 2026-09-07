@@ -4,6 +4,7 @@
 
 pub mod contract;
 pub mod daemon;
+pub mod federation_worker;
 pub mod fleet_auth;
 pub mod fleet_reads;
 pub mod host_bridge;
@@ -23,6 +24,16 @@ pub use daemon::{
     mobile_gateway_config, run_daemon, sanitize_host_identity,
     validate_daemon_config, DaemonConfig, DaemonRunError, DaemonRuntime,
     DaemonRuntimePaths, DaemonShutdown, DaemonState,
+};
+pub use federation_worker::{
+    default_federation_socket_path, run_federation_worker,
+    run_federation_worker_blocking, run_federation_worker_cli,
+    FederationErrorWire, FederationHealthWire, FederationHostConfigWire,
+    FederationHostResultWire, FederationIpcRequestEnvelopeWire,
+    FederationIpcRequestWire, FederationIpcResponseEnvelopeWire,
+    FederationReadResponseWire, FederationWorkerConfig, FederationWorkerError,
+    FEDERATION_IPC_SCHEMA_VERSION, FEDERATION_MAX_FRAME_BYTES,
+    FEDERATION_WORKER_SERVICE,
 };
 pub use fleet_auth::{
     credential_has_scope, current_unix_time, default_fleet_scopes,

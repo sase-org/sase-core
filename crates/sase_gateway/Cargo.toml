@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "sase_gateway"
 path = "src/main.rs"
 
+[[bin]]
+name = "sase_federation_worker"
+path = "src/federation_worker_main.rs"
+
 [dependencies]
 async-stream = { workspace = true }
 axum = { workspace = true }

@@ -186,6 +186,7 @@
 //! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
 //! - `fleet_decide_operation_replay(request: dict) -> dict`
 //! - `fleet_validate_connection_plan(plan: dict) -> dict`
+//! - `federation_worker_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
 //! - `fleet_classify_cache_freshness(request: dict) -> dict`
 //! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
@@ -11230,6 +11231,16 @@ fn py_fleet_validate_connection_plan<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "federation_worker_main")]
+fn py_federation_worker_main(
+    py: Python<'_>,
+    args: Vec<String>,
+) -> PyResult<()> {
+    py.allow_threads(|| sase_gateway::run_federation_worker_cli(args))
+        .map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_classify_runtime_duration")]
 fn py_fleet_classify_runtime_duration<'py>(
     py: Python<'py>,
@@ -13596,6 +13607,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_decide_operation_replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_connection_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
