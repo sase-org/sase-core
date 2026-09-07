@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.37](https://github.com/sase-org/sase-core/compare/v0.32.36...v0.32.37) - 2026-09-07
+
+### Added
+
+- *(source-language)* add pager language policy and wire API
+- *(fleet)* add attention contract, gateway routes, and federation ops
+
+### Other
+
+- Fix sase-core Clippy CI failures
+
 ## [0.32.36](https://github.com/sase-org/sase-core/compare/v0.32.35...v0.32.36) - 2026-09-07
 
 ### Added
