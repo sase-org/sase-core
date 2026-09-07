@@ -37,6 +37,7 @@ pub const FLEET_BOOTSTRAP_TTL_SECONDS: f64 = 10.0 * 60.0;
 pub const FLEET_CREDENTIAL_TTL_SECONDS: f64 = 90.0 * 24.0 * 60.0 * 60.0;
 pub const FLEET_SCOPE_HELLO: &str = "fleet.hello";
 pub const FLEET_SCOPE_LAUNCH: &str = "fleet.launch";
+pub const FLEET_SCOPE_MUTATE: &str = "fleet.mutate";
 pub const FLEET_SCOPE_ROTATE: &str = "fleet.credential.rotate";
 pub const FLEET_SCOPE_REVOKE: &str = "fleet.credential.revoke";
 pub const FLEET_SCOPE_SUMMARY_READ: &str = "fleet.summary.read";
@@ -715,6 +716,7 @@ pub fn default_fleet_scopes() -> Vec<String> {
         FLEET_SCOPE_DETAIL_READ.to_string(),
         FLEET_SCOPE_EVENTS_READ.to_string(),
         FLEET_SCOPE_LAUNCH.to_string(),
+        FLEET_SCOPE_MUTATE.to_string(),
         FLEET_SCOPE_REVOKE.to_string(),
         FLEET_SCOPE_ROTATE.to_string(),
         FLEET_SCOPE_HELLO.to_string(),

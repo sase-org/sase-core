@@ -44,6 +44,7 @@ pub mod feature_flag_state;
 pub mod fenced_code;
 pub mod finalizer;
 pub mod fleet_contract;
+pub mod fleet_mutation;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -752,6 +753,19 @@ pub use fleet_contract::{
     FLEET_READ_MAX_CONTENT_BYTES, FLEET_READ_MAX_FILTER_BYTES,
     FLEET_READ_MAX_PAGE_ROWS, FLEET_READ_MAX_PROJECT_IDS,
     FLEET_READ_MAX_QUERY_BYTES, FLEET_READ_MAX_REPLAY_EVENTS,
+};
+pub use fleet_mutation::{
+    decide_fleet_mutation_replay, evaluate_mutation_precondition,
+    fleet_mutation_payload_fingerprint, partition_bulk_targets,
+    validate_fleet_mutation_intent, validate_fleet_mutation_request,
+    DurableFleetMutationRecordWire, FleetBulkOriginGroupWire,
+    FleetBulkPartitionWire, FleetBulkTargetWire,
+    FleetMutationDecisionRequestWire, FleetMutationDecisionWire,
+    FleetMutationIntentWire, FleetMutationKindWire, FleetMutationOutcomeWire,
+    FleetMutationPreconditionDecisionWire, FleetMutationPreconditionReasonWire,
+    FleetMutationReceiptWire, FleetMutationRequestWire,
+    FleetMutationResponseWire, FLEET_MUTATION_CAPABILITY_FORK,
+    FLEET_MUTATION_CAPABILITY_RETRY, FLEET_MUTATION_CAPABILITY_STOP,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

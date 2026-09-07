@@ -14,6 +14,7 @@ use sase_core::fleet_contract::{
     FleetLaunchRequestWire, FleetLogicalBatchRequestWire,
     FleetProjectEligibilityRequestWire,
 };
+use sase_core::fleet_mutation::FleetMutationRequestWire;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -272,6 +273,10 @@ pub enum FederationIpcRequestWire {
     Launch {
         target: String,
         request: Box<FleetLaunchRequestWire>,
+    },
+    Mutate {
+        target: String,
+        request: Box<FleetMutationRequestWire>,
     },
     Shutdown,
 }
@@ -813,6 +818,9 @@ mod imp {
             FederationIpcRequestWire::Launch { target, request } => {
                 state.launch_one(target, *request, deadline).await
             }
+            FederationIpcRequestWire::Mutate { target, request } => {
+                state.mutate_one(target, *request, deadline).await
+            }
             FederationIpcRequestWire::Shutdown => to_json(serde_json::json!({
                 "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
                 "shutdown": true,
@@ -1068,6 +1076,55 @@ mod imp {
             to_json(FederationReadResponseWire {
                 schema_version: FEDERATION_IPC_SCHEMA_VERSION,
                 operation: "launch".to_string(),
+                hosts: vec![
+                    host.payload_result("ok", false, None, payload, None)
+                ],
+            })
+        }
+
+        async fn mutate_one(
+            &self,
+            target: String,
+            request: FleetMutationRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            let host = self.resolve_launch_target(&target).await?;
+            if request.target_installation_id
+                != host.plan.pinned_installation_id
+            {
+                return Err(federation_error(
+                    "quarantined",
+                    "mutation request target_installation_id does not match the configured host pin",
+                    Some("target_installation_id"),
+                ));
+            }
+            let payload = with_deadline(deadline, async {
+                let _global =
+                    self.in_flight.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "global request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                let _host =
+                    host.permits.clone().acquire_owned().await.map_err(
+                        |_| {
+                            federation_error(
+                                "unavailable",
+                                "host request limiter is closed",
+                                Some("concurrency"),
+                            )
+                        },
+                    )?;
+                host.mutate_remote(&request, deadline).await
+            })
+            .await?;
+            to_json(FederationReadResponseWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                operation: "mutate".to_string(),
                 hosts: vec![
                     host.payload_result("ok", false, None, payload, None)
                 ],
@@ -1331,6 +1388,21 @@ mod imp {
             self.http_json(
                 Method::POST,
                 "/launch",
+                Some(to_json(request)?),
+                deadline,
+            )
+            .await
+        }
+
+        async fn mutate_remote(
+            &self,
+            request: &FleetMutationRequestWire,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            self.ensure_hello(deadline).await?;
+            self.http_json(
+                Method::POST,
+                "/mutate",
                 Some(to_json(request)?),
                 deadline,
             )
@@ -1896,6 +1968,134 @@ mod imp {
             assert!(empty.get("host-a", "summary:{}").is_none());
         }
 
+        fn sample_mutation_request(
+            installation_id: &str,
+        ) -> FleetMutationRequestWire {
+            let target = sase_core::AgentInstanceLocatorWire {
+                schema_version: 1,
+                logical: sase_core::LogicalAgentLocatorWire {
+                    schema_version: 1,
+                    project: sase_core::ProjectLocatorWire {
+                        schema_version: 1,
+                        origin: sase_core::OriginLocatorWire {
+                            schema_version: 1,
+                            installation_id: installation_id.to_string(),
+                        },
+                        project_id: "proj".to_string(),
+                    },
+                    agent_id: "alpha".to_string(),
+                    family_id: None,
+                },
+                shell_id: "ace-run".to_string(),
+                run_id: "20260906120000".to_string(),
+                attempt_id: "attempt-0".to_string(),
+            };
+            let logical_key =
+                sase_core::logical_locator_key(&target.logical).unwrap();
+            FleetMutationRequestWire {
+                schema_version: 1,
+                key: sase_core::ScopedOperationKeyWire {
+                    schema_version: 1,
+                    controller_id: "controller-1".to_string(),
+                    operation_id: "op-1".to_string(),
+                },
+                target_installation_id: installation_id.to_string(),
+                intent: sase_core::FleetMutationIntentWire {
+                    schema_version: 1,
+                    kind: sase_core::FleetMutationKindWire::Stop,
+                    row_revision: sase_core::ResourceRevisionWire {
+                        schema_version: 1,
+                        logical_key,
+                        revision: 1,
+                    },
+                    target,
+                    reason: Some("stop".to_string()),
+                    fork_prompt: None,
+                    kill_source_first: None,
+                    follow: false,
+                },
+                payload_fingerprint: sase_core::PayloadFingerprintWire {
+                    schema_version: 1,
+                    sha256: "a".repeat(64),
+                },
+                acceptance_window_seconds: 30.0,
+            }
+        }
+
+        #[tokio::test]
+        async fn mutate_rejects_unknown_alias_pin_mismatch_and_deadline() {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = Arc::new(FederationWorkerState::new(
+                FederationWorkerConfig::new(tmp.path()),
+            ));
+            let installation = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "a".repeat(64)
+            );
+            let request = sample_mutation_request(&installation);
+            let missing = state
+                .mutate_one(
+                    "apollo".to_string(),
+                    request.clone(),
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(missing.code, "not_found");
+
+            let other = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "b".repeat(64)
+            );
+            state
+                .replace_config(vec![FederationHostConfigWire {
+                    schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                    alias: Some("apollo".to_string()),
+                    plan: ConnectionPlanWire {
+                        schema_version: 1,
+                        provider_ref: "builtin:https".to_string(),
+                        endpoint: "https://apollo.example".to_string(),
+                        credential_ref: "cred-1".to_string(),
+                        pinned_installation_id: other,
+                        connection_kind:
+                            sase_core::FleetConnectionKindWire::Gateway,
+                        tls: sase_core::TlsTrustSettingsWire {
+                            schema_version: 1,
+                            mode: sase_core::TlsTrustModeWire::SystemRoots,
+                            ca_ref: None,
+                            server_name_ref: None,
+                        },
+                    },
+                    bearer_token: "token".to_string(),
+                }])
+                .await
+                .unwrap();
+            let pin = state
+                .mutate_one(
+                    "apollo".to_string(),
+                    request,
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(pin.code, "quarantined");
+
+            let envelope = FederationIpcRequestEnvelopeWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                request_id: "req-1".to_string(),
+                deadline_unix_ms: Some(1),
+                operation: FederationIpcRequestWire::Mutate {
+                    target: "apollo".to_string(),
+                    request: Box::new(sample_mutation_request(&installation)),
+                },
+            };
+            let response = handle_request(state, envelope).await;
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, "deadline");
+        }
+
         #[test]
         fn fleet_endpoint_join_accepts_api_bases() {
             assert_eq!(
@@ -2017,6 +2217,7 @@ fn federation_capabilities() -> Vec<String> {
         "fleet.content_range".to_string(),
         "fleet.project_eligibility".to_string(),
         "fleet.launch".to_string(),
+        "fleet.mutate".to_string(),
         "cache.read".to_string(),
         "cache.persist".to_string(),
     ]

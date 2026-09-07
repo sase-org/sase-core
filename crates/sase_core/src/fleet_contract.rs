@@ -52,11 +52,11 @@ const LOCK_TIMEOUT_ENV: &str = "SASE_FLEET_IDENTITY_LOCK_TIMEOUT";
 const LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_secs(2);
 const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_IDENTIFIER_BYTES: usize = 128;
-const MAX_LABEL_BYTES: usize = 256;
+pub(crate) const MAX_LABEL_BYTES: usize = 256;
 const MAX_KEY_BYTES: usize = 1024;
 const MAX_CAPABILITY_BYTES: usize = 80;
-const MAX_INTENT_BYTES: usize = 512;
-const MAX_LAUNCH_PROMPT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_INTENT_BYTES: usize = 512;
+pub(crate) const MAX_LAUNCH_PROMPT_BYTES: usize = 64 * 1024;
 const PAYLOAD_FINGERPRINT_DOMAIN: &[u8] = b"sase-fleet-operation-payload-v1\0";
 
 /// Default catalog page size for fleet reads.
@@ -2670,7 +2670,7 @@ impl ResourceRevisionWire {
         validate_key("resource revision logical_key", &self.logical_key)
     }
 
-    fn validate_for_logical(
+    pub(crate) fn validate_for_logical(
         &self,
         logical: &LogicalAgentLocatorWire,
     ) -> Result<(), FleetContractError> {
@@ -2739,7 +2739,7 @@ impl StoreCursorWire {
 }
 
 impl ScopedOperationKeyWire {
-    fn validate(&self) -> Result<(), FleetContractError> {
+    pub(crate) fn validate(&self) -> Result<(), FleetContractError> {
         validate_schema("scoped operation key", self.schema_version)?;
         validate_reference_id("controller_id", &self.controller_id)?;
         validate_reference_id("operation_id", &self.operation_id)
@@ -2747,7 +2747,7 @@ impl ScopedOperationKeyWire {
 }
 
 impl PayloadFingerprintWire {
-    fn validate(&self) -> Result<(), FleetContractError> {
+    pub(crate) fn validate(&self) -> Result<(), FleetContractError> {
         validate_schema("payload fingerprint", self.schema_version)?;
         validate_sha256_digest("payload fingerprint", &self.sha256)
     }
@@ -3938,7 +3938,9 @@ fn content_capability(value: &str) -> bool {
     matches!(value, "content.read" | "content.tail" | "content.range")
 }
 
-fn logical_key_unchecked(locator: &LogicalAgentLocatorWire) -> String {
+pub(crate) fn logical_key_unchecked(
+    locator: &LogicalAgentLocatorWire,
+) -> String {
     length_key([
         ("origin", locator.project.origin.installation_id.as_str()),
         ("project", locator.project.project_id.as_str()),
@@ -4027,7 +4029,7 @@ fn validate_installation_record(
     Ok(())
 }
 
-fn validate_schema(
+pub(crate) fn validate_schema(
     label: &str,
     version: u32,
 ) -> Result<(), FleetContractError> {
@@ -4039,7 +4041,9 @@ fn validate_schema(
     Ok(())
 }
 
-fn validate_installation_id(value: &str) -> Result<(), FleetContractError> {
+pub(crate) fn validate_installation_id(
+    value: &str,
+) -> Result<(), FleetContractError> {
     if !value.starts_with(FLEET_INSTALLATION_ID_PREFIX) {
         return Err(FleetContractError::Validation(format!(
             "installation_id must start with {FLEET_INSTALLATION_ID_PREFIX:?}"
@@ -4163,7 +4167,7 @@ fn validate_key(field: &str, value: &str) -> Result<(), FleetContractError> {
     Ok(())
 }
 
-fn validate_label(
+pub(crate) fn validate_label(
     field: &str,
     value: &str,
     max_bytes: usize,
@@ -4186,7 +4190,7 @@ fn validate_label(
     Ok(())
 }
 
-fn validate_timestamp(
+pub(crate) fn validate_timestamp(
     field: &str,
     value: f64,
 ) -> Result<(), FleetContractError> {
@@ -4198,7 +4202,7 @@ fn validate_timestamp(
     Ok(())
 }
 
-fn validate_non_negative_seconds(
+pub(crate) fn validate_non_negative_seconds(
     field: &str,
     value: f64,
 ) -> Result<(), FleetContractError> {
@@ -4265,7 +4269,7 @@ fn validate_absolute_https_endpoint(
     Ok(())
 }
 
-fn reject_path_like(
+pub(crate) fn reject_path_like(
     field: &str,
     value: &str,
 ) -> Result<(), FleetContractError> {
@@ -4282,7 +4286,7 @@ fn reject_path_like(
     Ok(())
 }
 
-fn reject_secretish(
+pub(crate) fn reject_secretish(
     field: &str,
     value: &str,
 ) -> Result<(), FleetContractError> {
@@ -4314,7 +4318,10 @@ fn trim_to_limit(value: &str, max_bytes: usize) -> String {
     value[..end].to_string()
 }
 
-fn timestamp_ms(field: &str, value: f64) -> Result<u64, FleetContractError> {
+pub(crate) fn timestamp_ms(
+    field: &str,
+    value: f64,
+) -> Result<u64, FleetContractError> {
     validate_timestamp(field, value)?;
     let millis = value * 1000.0;
     if millis > u64::MAX as f64 {
@@ -4325,7 +4332,10 @@ fn timestamp_ms(field: &str, value: f64) -> Result<u64, FleetContractError> {
     Ok(millis.round() as u64)
 }
 
-fn duration_ms(field: &str, value: f64) -> Result<u64, FleetContractError> {
+pub(crate) fn duration_ms(
+    field: &str,
+    value: f64,
+) -> Result<u64, FleetContractError> {
     validate_non_negative_seconds(field, value)?;
     let millis = value * 1000.0;
     if millis > u64::MAX as f64 {

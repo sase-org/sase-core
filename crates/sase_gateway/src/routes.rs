@@ -46,10 +46,11 @@ use crate::fleet_auth::{
     FleetCredentialStore, FleetEnrollmentResult, FleetStoreError,
     FLEET_SCOPE_BATCH_READ, FLEET_SCOPE_CATALOG_READ, FLEET_SCOPE_CONTENT_READ,
     FLEET_SCOPE_DETAIL_READ, FLEET_SCOPE_EVENTS_READ, FLEET_SCOPE_HELLO,
-    FLEET_SCOPE_LAUNCH, FLEET_SCOPE_PROJECTS_READ, FLEET_SCOPE_REVOKE,
-    FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
+    FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE, FLEET_SCOPE_PROJECTS_READ,
+    FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
 };
 use crate::fleet_launch::{FleetLaunchStore, FleetLaunchStoreError};
+use crate::fleet_mutations::{FleetMutationStore, FleetMutationStoreError};
 use crate::fleet_reads::{resync_item, FleetReadError, FleetReadService};
 use crate::host_bridge::{
     AgentHostBridge, CommandAgentHostBridge, CommandHelperHostBridge,
@@ -72,27 +73,28 @@ use crate::wire::{
     FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
     FleetEventStreamItemWire, FleetHelloResponseWire, FleetLaunchRequestWire,
     FleetLaunchResponseWire, FleetLogicalBatchRequestWire,
-    FleetLogicalBatchResponseWire, FleetProjectEligibilityRequestWire,
+    FleetLogicalBatchResponseWire, FleetMutationRequestWire,
+    FleetMutationResponseWire, FleetProjectEligibilityRequestWire,
     FleetProjectEligibilityResponseWire, FleetResyncReasonWire,
     FleetSummaryResponseWire, FleetTokenRotateRequestWire,
     FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
-    HealthResponseWire, MobileAgentImageLaunchRequestWire,
-    MobileAgentKillRequestWire, MobileAgentKillResultWire,
-    MobileAgentLaunchResultWire, MobileAgentListRequestWire,
-    MobileAgentListResponseWire, MobileAgentResumeOptionsResponseWire,
-    MobileAgentRetryRequestWire, MobileAgentRetryResultWire,
-    MobileAgentTextLaunchRequestWire, MobileBeadListRequestWire,
-    MobileBeadListResponseWire, MobileBeadShowRequestWire,
-    MobileBeadShowResponseWire, MobileChangeSpecTagListRequestWire,
-    MobileChangeSpecTagListResponseWire, MobileUpdateStartRequestWire,
-    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
-    MobileUpdateStatusResponseWire, MobileXpromptCatalogRequestWire,
-    MobileXpromptCatalogResponseWire, NotificationStateMutationResponseWire,
-    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
-    PairStartResponseWire, PushSubscriptionDeleteResponseWire,
-    PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
-    PushSubscriptionRequestWire, SessionResponseWire, StoreCursorWire,
-    GATEWAY_WIRE_SCHEMA_VERSION,
+    HealthResponseWire, MobileAgentForkRequestWire,
+    MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
+    MobileAgentKillResultWire, MobileAgentLaunchResultWire,
+    MobileAgentListRequestWire, MobileAgentListResponseWire,
+    MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
+    MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
+    MobileBeadListRequestWire, MobileBeadListResponseWire,
+    MobileBeadShowRequestWire, MobileBeadShowResponseWire,
+    MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
+    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
+    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
+    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
+    NotificationStateMutationResponseWire, PairFinishRequestWire,
+    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
+    PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
+    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
+    SessionResponseWire, StoreCursorWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
@@ -120,6 +122,7 @@ pub struct GatewayState {
     push_dispatcher: PushDispatcher,
     fleet_store: FleetCredentialStore,
     fleet_launches: FleetLaunchStore,
+    fleet_mutations: FleetMutationStore,
     fleet_reads: FleetReadService,
     fleet_enrollment_limiter: FleetEnrollmentRateLimiter,
     machine_selector: String,
@@ -234,6 +237,7 @@ impl GatewayState {
             push_dispatcher: PushDispatcher::new(options.push_config),
             fleet_store: FleetCredentialStore::new(options.sase_home.clone()),
             fleet_launches: FleetLaunchStore::new(options.sase_home.clone()),
+            fleet_mutations: FleetMutationStore::new(options.sase_home.clone()),
             fleet_reads: FleetReadService::new(options.sase_home.clone()),
             fleet_enrollment_limiter: FleetEnrollmentRateLimiter::new(
                 FLEET_ENROLLMENT_RATE_LIMIT,
@@ -759,6 +763,7 @@ fn fleet_v1_routes() -> Router<GatewayState> {
         .route("/projects/eligibility", post(fleet_project_eligibility))
         .route("/events", get(fleet_events))
         .route("/launch", post(fleet_launch))
+        .route("/mutate", post(fleet_mutate))
         .route("/credential/rotate", post(fleet_token_rotate))
         .route("/credential/revoke", post(fleet_credential_revoke))
         .layer(DefaultBodyLimit::max(FLEET_REQUEST_BODY_LIMIT_BYTES))
@@ -1130,6 +1135,216 @@ async fn fleet_launch(
             Err(api_error)
         }
     }
+}
+
+async fn fleet_mutate(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<Json<FleetMutationRequestWire>, JsonRejection>,
+) -> Result<Json<FleetMutationResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    let credential = fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/mutate",
+        FLEET_SCOPE_MUTATE,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+    let logical_key =
+        sase_core::logical_locator_key(&payload.intent.target.logical)
+            .map_err(|error| {
+                ApiError::invalid_request("intent.target", error.to_string())
+            })?;
+    let observed = match state
+        .fleet_reads
+        .detail(sase_core::FleetDetailRequestWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            logical_key,
+        })
+        .await
+    {
+        Ok(detail) => Some(detail.detail.summary),
+        Err(FleetReadError::NotFound(_)) => None,
+        Err(error) => return Err(ApiError::from_fleet_read(error)),
+    };
+    let precondition = sase_core::evaluate_mutation_precondition(
+        &payload.intent,
+        observed.as_ref(),
+    )
+    .map_err(|error| ApiError::invalid_request("intent", error.to_string()))?;
+    if !precondition.allowed {
+        return Err(ApiError::from_mutation_precondition(&precondition));
+    }
+    let admission = state
+        .fleet_mutations
+        .reserve(&payload, &installation.installation_id, current_unix_time())
+        .map_err(ApiError::from_fleet_mutation_store)?;
+    if !admission.should_execute {
+        match admission.decision {
+            sase_core::OperationDecisionKindWire::Conflict => {
+                return Err(ApiError::from_fleet_mutation_store(
+                    FleetMutationStoreError::Conflict(format!(
+                        "{:?}",
+                        admission.reason
+                    )),
+                ));
+            }
+            sase_core::OperationDecisionKindWire::Expired => {
+                return Err(ApiError::from_fleet_mutation_store(
+                    FleetMutationStoreError::Expired(format!(
+                        "{:?}",
+                        admission.reason
+                    )),
+                ));
+            }
+            _ => {
+                return Ok(Json(FleetMutationResponseWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    decision: admission.decision,
+                    reason: admission.reason,
+                    receipt: admission.receipt,
+                }));
+            }
+        }
+    }
+
+    let agent_name = payload.intent.target.logical.agent_id.clone();
+    let executed = execute_fleet_mutation(
+        &state,
+        credential.controller_id.as_deref(),
+        &payload,
+        &agent_name,
+    );
+    match executed {
+        Ok((result_locator, instance_locator, message, primary_name)) => {
+            let receipt = state
+                .fleet_mutations
+                .settle(
+                    &admission.receipt,
+                    payload.intent.kind,
+                    result_locator,
+                    instance_locator,
+                    message,
+                )
+                .map_err(ApiError::from_fleet_mutation_store)?;
+            state.audit(
+                credential.controller_id.clone(),
+                "/api/fleet/v1/mutate",
+                primary_name.clone(),
+                "success",
+            );
+            publish_agents_changed(&state, "fleet_mutate", primary_name)?;
+            Ok(Json(FleetMutationResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                decision: admission.decision,
+                reason: admission.reason,
+                receipt,
+            }))
+        }
+        Err(api_error) => {
+            state.audit(
+                credential.controller_id,
+                "/api/fleet/v1/mutate",
+                Some(agent_name),
+                api_error.wire.code.outcome_label(),
+            );
+            Err(api_error)
+        }
+    }
+}
+
+type FleetMutationExecution = (
+    Option<sase_core::LogicalAgentLocatorWire>,
+    Option<sase_core::AgentInstanceLocatorWire>,
+    Option<String>,
+    Option<String>,
+);
+
+fn execute_fleet_mutation(
+    state: &GatewayState,
+    controller_id: Option<&str>,
+    payload: &FleetMutationRequestWire,
+    agent_name: &str,
+) -> Result<FleetMutationExecution, ApiError> {
+    match payload.intent.kind {
+        sase_core::FleetMutationKindWire::Stop => {
+            let request = MobileAgentKillRequestWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                reason: payload.intent.reason.clone(),
+                device_id: controller_id.map(str::to_string),
+            };
+            let result = state
+                .agent_bridge
+                .kill_agent(agent_name, &request)
+                .map_err(ApiError::from_host_bridge)?;
+            Ok((
+                Some(payload.intent.target.logical.clone()),
+                Some(payload.intent.target.clone()),
+                result.message.clone().or(Some(result.status.clone())),
+                Some(result.name),
+            ))
+        }
+        sase_core::FleetMutationKindWire::Retry => {
+            let request = MobileAgentRetryRequestWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                request_id: None,
+                prompt_override: None,
+                dry_run: None,
+                kill_source_first: payload.intent.kill_source_first,
+                device_id: controller_id.map(str::to_string),
+            };
+            let result = state
+                .agent_bridge
+                .retry_agent(agent_name, &request)
+                .map_err(ApiError::from_host_bridge)?;
+            let primary_name = launch_primary_name(&result.launch);
+            Ok((
+                mutation_result_locator(payload, primary_name.as_deref()),
+                None,
+                primary_name.clone(),
+                primary_name,
+            ))
+        }
+        sase_core::FleetMutationKindWire::Fork => {
+            let prompt = payload.intent.fork_prompt.clone().unwrap_or_default();
+            let request = MobileAgentForkRequestWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                request_id: None,
+                prompt,
+                dry_run: None,
+                device_id: controller_id.map(str::to_string),
+            };
+            let result = state
+                .agent_bridge
+                .fork_agent(agent_name, &request)
+                .map_err(ApiError::from_host_bridge)?;
+            let primary_name = launch_primary_name(&result.launch);
+            Ok((
+                mutation_result_locator(payload, primary_name.as_deref()),
+                None,
+                primary_name.clone(),
+                primary_name,
+            ))
+        }
+    }
+}
+
+fn mutation_result_locator(
+    payload: &FleetMutationRequestWire,
+    agent_id: Option<&str>,
+) -> Option<sase_core::LogicalAgentLocatorWire> {
+    let agent_id = agent_id.filter(|value| !value.trim().is_empty())?;
+    Some(sase_core::LogicalAgentLocatorWire {
+        schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+        project: payload.intent.target.logical.project.clone(),
+        agent_id: agent_id.to_string(),
+        family_id: payload.intent.target.logical.family_id.clone(),
+    })
 }
 
 async fn fleet_token_rotate(
@@ -3250,6 +3465,84 @@ impl ApiError {
         }
     }
 
+    fn from_fleet_mutation_store(error: FleetMutationStoreError) -> Self {
+        match error {
+            FleetMutationStoreError::Validation(message) => {
+                Self::invalid_request("fleet_mutate", message)
+            }
+            FleetMutationStoreError::Conflict(message) => Self::fleet_error(
+                StatusCode::CONFLICT,
+                ApiErrorCodeWire::InvalidRequest,
+                message,
+                "fleet_mutate",
+            ),
+            FleetMutationStoreError::Expired(message) => Self::fleet_error(
+                StatusCode::GONE,
+                ApiErrorCodeWire::GoneStale,
+                message,
+                "fleet_mutate",
+            ),
+            FleetMutationStoreError::Io { .. }
+            | FleetMutationStoreError::Json { .. } => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                wire: Box::new(ApiErrorWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    code: ApiErrorCodeWire::Internal,
+                    message: error.to_string(),
+                    target: Some("fleet_mutation_store".to_string()),
+                    details: None,
+                }),
+            },
+        }
+    }
+
+    fn from_mutation_precondition(
+        decision: &sase_core::FleetMutationPreconditionDecisionWire,
+    ) -> Self {
+        use sase_core::FleetMutationPreconditionReasonWire;
+        match decision.reason {
+            FleetMutationPreconditionReasonWire::Ok => {
+                Self::invalid_request("fleet_mutate", "precondition unexpectedly allowed")
+            }
+            FleetMutationPreconditionReasonWire::UnknownRow => Self::fleet_error(
+                StatusCode::NOT_FOUND,
+                ApiErrorCodeWire::AgentNotFound,
+                "fleet mutation target row was not found",
+                "intent.target",
+            ),
+            FleetMutationPreconditionReasonWire::InstanceMismatch => {
+                Self::fleet_error(
+                    StatusCode::CONFLICT,
+                    ApiErrorCodeWire::ConflictAlreadyHandled,
+                    "fleet mutation target instance does not match the current run",
+                    "intent.target",
+                )
+            }
+            FleetMutationPreconditionReasonWire::StaleRevision => Self::fleet_stale(
+                "intent.row_revision",
+            ),
+            FleetMutationPreconditionReasonWire::CapabilityMissing => {
+                Self::fleet_error(
+                    StatusCode::FORBIDDEN,
+                    ApiErrorCodeWire::UnsupportedAction,
+                    format!(
+                        "missing lifecycle capability {}",
+                        decision.required_capability
+                    ),
+                    "capabilities",
+                )
+            }
+            FleetMutationPreconditionReasonWire::AlreadyTerminal => {
+                Self::fleet_error(
+                    StatusCode::CONFLICT,
+                    ApiErrorCodeWire::AgentNotRunning,
+                    "fleet mutation target is already terminal",
+                    "intent.target",
+                )
+            }
+        }
+    }
+
     fn from_fleet_launch_store(error: FleetLaunchStoreError) -> Self {
         match error {
             FleetLaunchStoreError::Validation(message) => {
@@ -3968,6 +4261,11 @@ mod tests {
                     message: None,
                 },
                 retry_response: MobileAgentRetryResultWire {
+                    schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                    source_agent: "mobile-demo".to_string(),
+                    launch: launch.clone(),
+                },
+                fork_response: crate::wire::MobileAgentForkResultWire {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                     source_agent: "mobile-demo".to_string(),
                     launch,
@@ -4875,6 +5173,363 @@ exit 4
                 timestamp: Some(_),
             } if reason == "fleet_launch" && name == "mobile-demo"
         )));
+    }
+
+    fn seed_fleet_agent(
+        home: &std::path::Path,
+        name: &str,
+        live: bool,
+        proc: bool,
+    ) {
+        use sase_core::agent_scan::AgentArtifactScanOptionsWire;
+        let projects = home.join("projects");
+        let project = projects.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("proj.sase"),
+            format!(
+                "NAME: proj\nWORKSPACE_DIR: {}\nPROJECT_STATE: enabled\n",
+                project.display()
+            ),
+        )
+        .unwrap();
+        let artifact = project
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260906120000");
+        std::fs::create_dir_all(&artifact).unwrap();
+        let mut meta = serde_json::json!({
+            "name": name,
+            "model": "gpt-5",
+            "llm_provider": "codex"
+        });
+        if proc {
+            meta["proc_id"] = serde_json::json!("proc-1");
+        }
+        std::fs::write(
+            artifact.join("agent_meta.json"),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+        if live {
+            std::fs::write(
+                artifact.join("running.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "pid": i64::from(std::process::id())
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        } else {
+            std::fs::write(
+                artifact.join("done.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "name": name,
+                    "status": "completed"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        sase_core::rebuild_agent_artifact_index(
+            &home.join("agent_artifact_index.sqlite"),
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+    }
+
+    async fn enroll_mutate(
+        state: &GatewayState,
+        scopes: &[&str],
+    ) -> (String, String) {
+        let bootstrap = fleet_bootstrap(state, scopes, None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                scopes,
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        (
+            enrolled["token"].as_str().unwrap().to_string(),
+            bootstrap.pinned_installation_id,
+        )
+    }
+
+    async fn first_summary(
+        state: &GatewayState,
+    ) -> sase_core::ResolvedAgentSummaryWire {
+        let page = state
+            .fleet_reads
+            .catalog(sase_core::FleetCatalogQueryWire {
+                schema_version: 1,
+                cursor: None,
+                limit: Some(10),
+                project_ids: Vec::new(),
+                query: None,
+                status_buckets: Vec::new(),
+                include_terminal: true,
+            })
+            .await
+            .unwrap();
+        page.page.rows.into_iter().next().expect("seeded fleet row")
+    }
+
+    fn mutation_body(
+        summary: &sase_core::ResolvedAgentSummaryWire,
+        installation_id: &str,
+        kind: &str,
+        operation_id: &str,
+        extra: serde_json::Value,
+    ) -> Value {
+        let mut intent = json!({
+            "schema_version": 1,
+            "kind": kind,
+            "target": summary.exact_locator.clone().expect("exact locator"),
+            "row_revision": summary.row_revision.clone(),
+            "reason": extra.get("reason").cloned().unwrap_or(Value::Null),
+            "fork_prompt": extra.get("fork_prompt").cloned().unwrap_or(Value::Null),
+            "kill_source_first": extra.get("kill_source_first").cloned().unwrap_or(Value::Null),
+            "follow": extra.get("follow").and_then(Value::as_bool).unwrap_or(false)
+        });
+        if extra.get("run_id").is_some() {
+            intent["target"]["run_id"] = extra["run_id"].clone();
+        }
+        if extra.get("revision").is_some() {
+            intent["row_revision"]["revision"] = extra["revision"].clone();
+        }
+        let intent_wire: sase_core::FleetMutationIntentWire =
+            serde_json::from_value(intent.clone()).unwrap();
+        let fingerprint =
+            sase_core::fleet_mutation_payload_fingerprint(&intent_wire)
+                .unwrap();
+        json!({
+            "schema_version": 1,
+            "key": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "operation_id": operation_id
+            },
+            "target_installation_id": installation_id,
+            "intent": intent,
+            "payload_fingerprint": fingerprint,
+            "acceptance_window_seconds": 30.0
+        })
+    }
+
+    async fn post_mutate(
+        state: GatewayState,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/mutate",
+            Some(token),
+            Some(body),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        json_response_with_state(state, request).await
+    }
+
+    #[tokio::test]
+    async fn fleet_mutate_denies_missing_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_HELLO]).await;
+        let summary = first_summary(&state).await;
+        let (status, body) = post_mutate(
+            state,
+            &token,
+            mutation_body(
+                &summary,
+                &installation_id,
+                "stop",
+                "op-stop",
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "scope_denied");
+        assert_eq!(body["target"], FLEET_SCOPE_MUTATE);
+    }
+
+    #[tokio::test]
+    async fn fleet_mutate_stop_settles_and_replays() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let body = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-stop",
+            json!({"reason": "user-stop"}),
+        );
+        let (status, mutate) =
+            post_mutate(state.clone(), &token, body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(mutate["decision"], "accept_new");
+        assert_eq!(mutate["receipt"]["state"], "settled");
+        assert_eq!(mutate["receipt"]["outcome"], "applied");
+        let (replay_status, replay) =
+            post_mutate(state.clone(), &token, body).await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(replay["decision"], "return_original_receipt");
+        assert_eq!(replay["receipt"], mutate["receipt"]);
+        let events = state
+            .event_hub
+            .replay_after("0000000000000000")
+            .unwrap()
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            EventPayloadWire::AgentsChanged {
+                reason,
+                agent_name: Some(name),
+                timestamp: Some(_),
+            } if reason == "fleet_mutate" && name == "mobile-demo"
+        )));
+    }
+
+    #[tokio::test]
+    async fn fleet_mutate_changed_payload_conflicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let first = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-stop",
+            json!({"reason": "first"}),
+        );
+        let (status, _) = post_mutate(state.clone(), &token, first).await;
+        assert_eq!(status, StatusCode::OK);
+        let second = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-stop",
+            json!({"reason": "second"}),
+        );
+        let (status, _body) = post_mutate(state, &token, second).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let stale = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-stale",
+            json!({"revision": 99, "reason": "stale"}),
+        );
+        let (status, body) = post_mutate(state.clone(), &token, stale).await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_eq!(body["code"], "gone_stale");
+        let superseded = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-instance",
+            json!({"run_id": "other-run", "reason": "old"}),
+        );
+        let (status, body) = post_mutate(state, &token, superseded).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "conflict_already_handled");
+    }
+
+    #[tokio::test]
+    async fn fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", false, false);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let (status, body) = post_mutate(
+            state,
+            &token,
+            mutation_body(
+                &summary,
+                &installation_id,
+                "stop",
+                "op-term",
+                json!({"reason": "late"}),
+            ),
+        )
+        .await;
+        assert!(
+            status == StatusCode::FORBIDDEN || status == StatusCode::CONFLICT,
+            "{status} {body}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, true);
+        let state = state_for_agent_bridge(&tmp);
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let (status, body) = post_mutate(
+            state,
+            &token,
+            mutation_body(
+                &summary,
+                &installation_id,
+                "stop",
+                "op-cap",
+                json!({"reason": "nope"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "unsupported_action");
+
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let state = state_for_tmp(&tmp, Duration::minutes(5));
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+        let summary = first_summary(&state).await;
+        let (status, body) = post_mutate(
+            state,
+            &token,
+            mutation_body(
+                &summary,
+                &installation_id,
+                "stop",
+                "op-bridge",
+                json!({"reason": "bridge"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["code"], "bridge_unavailable");
     }
 
     #[tokio::test]

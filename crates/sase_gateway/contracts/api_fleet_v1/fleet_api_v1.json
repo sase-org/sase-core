@@ -333,6 +333,49 @@
       "freshness": "FleetSnapshotFreshnessWire",
       "schema_version": "u32"
     },
+    "FleetMutationIntentWire": {
+      "defined_by": "sase_core::fleet_mutation",
+      "follow": "bool",
+      "fork_prompt": "string|null; required for fork",
+      "kill_source_first": "bool|null; retry only",
+      "kind": "stop|retry|fork",
+      "reason": "string|null; bounded, path/secret-redacted",
+      "row_revision": "ResourceRevisionWire",
+      "schema_version": "u32",
+      "target": "AgentInstanceLocatorWire"
+    },
+    "FleetMutationReceiptWire": {
+      "accepted_at_unix_ms": "u64",
+      "defined_by": "sase_core::fleet_mutation",
+      "expires_at_unix_ms": "u64",
+      "instance_locator": "AgentInstanceLocatorWire|null",
+      "key": "ScopedOperationKeyWire",
+      "logical_locator": "LogicalAgentLocatorWire|null",
+      "message": "string|null; path/token-redacted",
+      "outcome": "applied|already_settled|precondition_failed|capability_missing|already_terminal|unknown_row|instance_mismatch|stale_revision|null",
+      "payload_fingerprint": "PayloadFingerprintWire",
+      "resource_revision": "ResourceRevisionWire",
+      "schema_version": "u32",
+      "state": "accepted|pending|settled",
+      "target": "AgentInstanceLocatorWire",
+      "target_installation_id": "string"
+    },
+    "FleetMutationRequestWire": {
+      "acceptance_window_seconds": "f64",
+      "defined_by": "sase_core::fleet_mutation",
+      "intent": "FleetMutationIntentWire",
+      "key": "ScopedOperationKeyWire",
+      "payload_fingerprint": "PayloadFingerprintWire; canonical intent digest",
+      "schema_version": "u32",
+      "target_installation_id": "string; pinned target installation"
+    },
+    "FleetMutationResponseWire": {
+      "decision": "accept_new|return_original_receipt|conflict|expired|precondition_mismatch",
+      "defined_by": "sase_core::fleet_mutation",
+      "reason": "unseen_in_window|same_scoped_key_and_payload|same_scoped_key_different_payload|expired_or_tombstoned_key|target_or_revision_mismatch",
+      "receipt": "FleetMutationReceiptWire",
+      "schema_version": "u32"
+    },
     "FleetProjectEligibilityRequestWire": {
       "defined_by": "sase_core::fleet_contract",
       "limit": "u32|null; max 200",
@@ -561,6 +604,20 @@
       "request": "FleetLaunchRequestWire",
       "required_scope": "fleet.launch",
       "success": "FleetLaunchResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "events_on_success": [
+        "agents_changed"
+      ],
+      "method": "POST",
+      "path": "/api/fleet/v1/mutate",
+      "request": "FleetMutationRequestWire",
+      "required_scope": "fleet.mutate",
+      "success": "FleetMutationResponseWire"
     },
     {
       "auth": true,

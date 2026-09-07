@@ -187,6 +187,10 @@
 //! - `fleet_classify_cursor_replay(request: dict) -> dict`
 //! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
 //! - `fleet_decide_operation_replay(request: dict) -> dict`
+//! - `fleet_mutation_payload_fingerprint(intent: dict) -> dict`
+//! - `fleet_validate_mutation_request(request: dict) -> dict`
+//! - `fleet_evaluate_mutation_precondition(intent: dict, observed: dict | None) -> dict`
+//! - `fleet_partition_bulk_targets(targets: list[dict]) -> dict`
 //! - `fleet_validate_connection_plan(plan: dict) -> dict`
 //! - `federation_worker_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
@@ -903,6 +907,10 @@ use sase_core::fleet_contract::{
     OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
     PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
     ResolvedAgentSummaryWire, RuntimeDurationRequestWire,
+};
+use sase_core::fleet_mutation::{
+    self as core_fleet_mutation, FleetMutationIntentWire,
+    FleetMutationRequestWire,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -11336,6 +11344,80 @@ fn py_fleet_validate_connection_plan<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_mutation_payload_fingerprint")]
+fn py_fleet_mutation_payload_fingerprint<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: FleetMutationIntentWire =
+        fleet_wire_from_pydict(intent, "fleet mutation intent")?;
+    let result =
+        core_fleet_mutation::fleet_mutation_payload_fingerprint(&intent)
+            .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_mutation_request")]
+fn py_fleet_validate_mutation_request<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetMutationRequestWire =
+        fleet_wire_from_pydict(request, "fleet mutation request")?;
+    let result = core_fleet_mutation::validate_fleet_mutation_request(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "fleet_evaluate_mutation_precondition",
+    signature = (intent, observed=None)
+)]
+fn py_fleet_evaluate_mutation_precondition<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+    observed: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let intent: FleetMutationIntentWire =
+        fleet_wire_from_pydict(intent, "fleet mutation intent")?;
+    let observed_summary = match observed {
+        Some(value) => {
+            Some(fleet_wire_from_pydict::<ResolvedAgentSummaryWire>(
+                value,
+                "observed resolved agent summary",
+            )?)
+        }
+        None => None,
+    };
+    let result = core_fleet_mutation::evaluate_mutation_precondition(
+        &intent,
+        observed_summary.as_ref(),
+    )
+    .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_partition_bulk_targets")]
+fn py_fleet_partition_bulk_targets<'py>(
+    py: Python<'py>,
+    targets: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let mut parsed = Vec::with_capacity(targets.len());
+    for item in targets.iter() {
+        let dict = item.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err("fleet bulk targets must be objects")
+        })?;
+        parsed.push(fleet_wire_from_pydict(dict, "fleet bulk target")?);
+    }
+    let result = core_fleet_mutation::partition_bulk_targets(&parsed)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "federation_worker_main")]
 fn py_federation_worker_main(
     py: Python<'_>,
@@ -13725,6 +13807,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_validate_launch_request, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_decide_launch_replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_connection_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_mutation_payload_fingerprint,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_mutation_request, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_evaluate_mutation_precondition,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_partition_bulk_targets, m)?)?;
     m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;

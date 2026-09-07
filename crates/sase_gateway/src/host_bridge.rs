@@ -23,6 +23,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::wire::{
+    MobileAgentForkRequestWire, MobileAgentForkResultWire,
     MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
     MobileAgentKillResultWire, MobileAgentLaunchResultWire,
     MobileAgentListRequestWire, MobileAgentListResponseWire,
@@ -80,6 +81,14 @@ impl DynAgentHostBridge {
         request: &MobileAgentRetryRequestWire,
     ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
         self.0.retry_agent(name, request)
+    }
+
+    pub fn fork_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentForkRequestWire,
+    ) -> Result<MobileAgentForkResultWire, HostBridgeError> {
+        self.0.fork_agent(name, request)
     }
 }
 
@@ -140,6 +149,16 @@ pub trait AgentHostBridge: Send + Sync {
         _name: &str,
         _request: &MobileAgentRetryRequestWire,
     ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
+        Err(HostBridgeError::BridgeUnavailable(
+            "agent_bridge".to_string(),
+        ))
+    }
+
+    fn fork_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentForkRequestWire,
+    ) -> Result<MobileAgentForkResultWire, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "agent_bridge".to_string(),
         ))
@@ -326,6 +345,24 @@ impl AgentHostBridge for CommandAgentHostBridge {
                 "prompt_override": request.prompt_override.clone(),
                 "dry_run": request.dry_run,
                 "kill_source_first": request.kill_source_first,
+                "device_id": request.device_id.clone(),
+            }),
+        )
+    }
+
+    fn fork_agent(
+        &self,
+        name: &str,
+        request: &MobileAgentForkRequestWire,
+    ) -> Result<MobileAgentForkResultWire, HostBridgeError> {
+        self.invoke(
+            "fork-agent",
+            &serde_json::json!({
+                "schema_version": request.schema_version,
+                "name": name,
+                "request_id": request.request_id.clone(),
+                "prompt": request.prompt.clone(),
+                "dry_run": request.dry_run,
                 "device_id": request.device_id.clone(),
             }),
         )
@@ -758,6 +795,7 @@ pub struct StaticAgentHostBridge {
     pub image_launch_response: MobileAgentLaunchResultWire,
     pub kill_response: MobileAgentKillResultWire,
     pub retry_response: MobileAgentRetryResultWire,
+    pub fork_response: MobileAgentForkResultWire,
 }
 
 impl AgentHostBridge for StaticAgentHostBridge {
@@ -802,6 +840,14 @@ impl AgentHostBridge for StaticAgentHostBridge {
         _request: &MobileAgentRetryRequestWire,
     ) -> Result<MobileAgentRetryResultWire, HostBridgeError> {
         Ok(self.retry_response.clone())
+    }
+
+    fn fork_agent(
+        &self,
+        _name: &str,
+        _request: &MobileAgentForkRequestWire,
+    ) -> Result<MobileAgentForkResultWire, HostBridgeError> {
+        Ok(self.fork_response.clone())
     }
 }
 
