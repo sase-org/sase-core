@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.48](https://github.com/sase-org/sase-core/compare/v0.32.47...v0.32.48) - 2026-09-08
+
+### Added
+
+- *(core)* add artifact_link_eligibility policy module
+- *(core)* decide managed origin reconciliation
+
+### Fixed
+
+- *(model-alias)* exclude jinja shortcut regions
+
 ## [0.32.47](https://github.com/sase-org/sase-core/compare/v0.32.46...v0.32.47) - 2026-09-08
 
 ### Added
