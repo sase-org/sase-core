@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.41](https://github.com/sase-org/sase-core/compare/v0.32.40...v0.32.41) - 2026-09-08
+
+### Fixed
+
+- *(artifact-ref)* make document source resolution repository-owned
+
 ## [0.32.40](https://github.com/sase-org/sase-core/compare/v0.32.39...v0.32.40) - 2026-09-07
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.41](https://github.com/sase-org/sase-core/compare/v0.32.40...v0.32.41) - 2026-09-08
+
+### Added
+
+- *(editor)* drop the removed remote_dispatch directive gate (sase-xe)
+
+### Fixed
+
+- *(artifact-ref)* make document source resolution repository-owned
+
 ### Fixed
 
 - *(artifact-ref)* make document-owned source resolution honor source
