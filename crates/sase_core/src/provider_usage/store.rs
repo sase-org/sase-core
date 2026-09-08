@@ -2,9 +2,19 @@
 //!
 //! The store keeps normalized provider observations only. It owns account
 //! generation fencing, complete/partial inventory merges, and refresh
-//! reservation primitives; provider subprocess execution remains outside the
-//! core crate.
+//! reservation primitives and refresh admission; provider subprocess
+//! execution remains outside the core crate.
 
+use super::refresh::{
+    empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
+    refresh_backoff_seconds, validate_refresh_cadence,
+    ProviderUsageRefreshAdmissionStatus, ProviderUsageRefreshAdmitOutcomeWire,
+    ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
+    ProviderUsageRefreshDueOutcomeWire, ProviderUsageRefreshDueRequestWire,
+    ProviderUsageRefreshMarkDueOutcomeWire,
+    ProviderUsageRefreshMarkDueRequestWire, ProviderUsageRefreshScheduleWire,
+    USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
+};
 use super::{
     project_window, sanitize_diagnostic, summarize_filtered_windows,
     usage_window_applies, validate_ident, validate_now, validate_usage_cadence,
@@ -38,6 +48,7 @@ const LOCK_TIMEOUT_ENV: &str = "SASE_PROVIDER_USAGE_LOCK_TIMEOUT_SECONDS";
 const LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_millis(250);
 const MAX_STORE_BYTES: usize = 512 * 1024;
 const MAX_RESERVATIONS: usize = 128;
+const MAX_SCHEDULES: usize = 128;
 const MAX_RESERVATION_TTL_SECONDS: f64 = 3_600.0;
 const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 const RESERVATION_KEY_SEPARATOR: char = '\u{1f}';
@@ -154,12 +165,15 @@ struct ProviderUsageStoreStateWire {
     version: u32,
     providers: BTreeMap<String, Value>,
     reservations: BTreeMap<String, Value>,
+    #[serde(default)]
+    schedules: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
 struct DecodedUsageState {
     providers: BTreeMap<String, ProviderUsageStoredProviderWire>,
     reservations: BTreeMap<String, ProviderUsageRefreshReservationWire>,
+    schedules: BTreeMap<String, ProviderUsageRefreshScheduleWire>,
     diagnostics: Vec<ProviderUsageStoreDiagnosticWire>,
 }
 
@@ -315,6 +329,9 @@ pub fn prepare_provider_usage_account_context(
                 state
                     .reservations
                     .retain(|_, reservation| reservation.provider != provider);
+                state
+                    .schedules
+                    .retain(|_, schedule| schedule.provider != provider);
                 changed = true;
             }
             if changed {
@@ -415,6 +432,214 @@ pub fn release_provider_usage_refresh(
                 write_state_unlocked(sase_home, &state)?;
             }
             Ok(removed)
+        },
+    )
+}
+
+pub fn evaluate_provider_usage_refresh_due(
+    sase_home: &Path,
+    request: ProviderUsageRefreshDueRequestWire,
+    now: f64,
+) -> Result<ProviderUsageRefreshDueOutcomeWire, ProviderUsageStoreError> {
+    validate_now(now)?;
+    let request = validate_due_request(request)?;
+    with_usage_lock(
+        sase_home,
+        LockMode::Shared,
+        "evaluate_provider_usage_refresh_due",
+        || {
+            let state = read_state_unlocked(sase_home, now)?;
+            Ok(due_outcome_from_state(&state, &request, now))
+        },
+    )
+}
+
+pub fn admit_provider_usage_refresh(
+    sase_home: &Path,
+    request: ProviderUsageRefreshAdmitRequestWire,
+    now: f64,
+) -> Result<ProviderUsageRefreshAdmitOutcomeWire, ProviderUsageStoreError> {
+    validate_now(now)?;
+    let request = validate_admit_request(request)?;
+    with_usage_lock(
+        sase_home,
+        LockMode::Exclusive,
+        "admit_provider_usage_refresh",
+        || {
+            let mut state = read_state_unlocked(sase_home, now)?;
+            prune_expired_reservations(&mut state.reservations, now);
+            let due_request = ProviderUsageRefreshDueRequestWire {
+                provider: request.provider.clone(),
+                context_id: request.context_id.clone(),
+                account_generation: request.account_generation,
+                cadence_seconds: request.cadence_seconds,
+                explicit: request.explicit,
+            };
+            let due = due_outcome_from_state(&state, &due_request, now);
+            if !due.due {
+                return Ok(ProviderUsageRefreshAdmitOutcomeWire {
+                    version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                    status: ProviderUsageRefreshAdmissionStatus::Deferred,
+                    reason: Some(due.reason),
+                    due_at: due.due_at,
+                    reservation: None,
+                });
+            }
+            let key = reservation_key(
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            if let Some(existing) = state.reservations.get(&key) {
+                return Ok(ProviderUsageRefreshAdmitOutcomeWire {
+                    version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                    status: ProviderUsageRefreshAdmissionStatus::Joined,
+                    reason: Some("joined".to_string()),
+                    due_at: None,
+                    reservation: Some(existing.clone()),
+                });
+            }
+            if state.reservations.len() >= MAX_RESERVATIONS {
+                return Err(ProviderUsageStoreError::Validation(format!(
+                    "provider-usage store has more than {MAX_RESERVATIONS} refresh reservations"
+                )));
+            }
+            let reservation = ProviderUsageRefreshReservationWire {
+                version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                provider: request.provider.clone(),
+                context_id: request.context_id.clone(),
+                account_generation: request.account_generation,
+                operation_id: request.operation_id.clone(),
+                lease_id: generate_lease_id(),
+                reserved_at: now,
+                expires_at: now + request.ttl_seconds,
+            };
+            state.reservations.insert(key.clone(), reservation.clone());
+            let mut schedule = take_schedule(
+                &mut state,
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            schedule.last_started_at = Some(now);
+            state.schedules.insert(key, schedule);
+            write_state_unlocked(sase_home, &state)?;
+            Ok(ProviderUsageRefreshAdmitOutcomeWire {
+                version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                status: ProviderUsageRefreshAdmissionStatus::Reserved,
+                reason: Some(due.reason),
+                due_at: None,
+                reservation: Some(reservation),
+            })
+        },
+    )
+}
+
+pub fn mark_provider_usage_refresh_due(
+    sase_home: &Path,
+    request: ProviderUsageRefreshMarkDueRequestWire,
+    now: f64,
+) -> Result<ProviderUsageRefreshMarkDueOutcomeWire, ProviderUsageStoreError> {
+    validate_now(now)?;
+    let request = validate_mark_due_request(request)?;
+    with_usage_lock(
+        sase_home,
+        LockMode::Exclusive,
+        "mark_provider_usage_refresh_due",
+        || {
+            let mut state = read_state_unlocked(sase_home, now)?;
+            let key = reservation_key(
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            let mut schedule = take_schedule(
+                &mut state,
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            let due_at = request.due_at.unwrap_or(now);
+            let already_pending = schedule.due_at.is_some_and(|existing| {
+                existing <= due_at
+                    && schedule.due_reason.as_deref()
+                        == Some(request.reason.as_str())
+            });
+            if already_pending {
+                state.schedules.insert(key, schedule.clone());
+                return Ok(ProviderUsageRefreshMarkDueOutcomeWire {
+                    version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                    marked: false,
+                    due_at: schedule.due_at.unwrap_or(due_at),
+                    reason: request.reason,
+                });
+            }
+            schedule.due_at = Some(due_at);
+            schedule.due_reason = Some(request.reason.clone());
+            state.schedules.insert(key, schedule);
+            write_state_unlocked(sase_home, &state)?;
+            Ok(ProviderUsageRefreshMarkDueOutcomeWire {
+                version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                marked: true,
+                due_at,
+                reason: request.reason,
+            })
+        },
+    )
+}
+
+pub fn record_provider_usage_refresh_attempt(
+    sase_home: &Path,
+    request: ProviderUsageRefreshAttemptWire,
+    now: f64,
+) -> Result<ProviderUsageRefreshScheduleWire, ProviderUsageStoreError> {
+    validate_now(now)?;
+    let request = validate_attempt_request(request)?;
+    with_usage_lock(
+        sase_home,
+        LockMode::Exclusive,
+        "record_provider_usage_refresh_attempt",
+        || {
+            let mut state = read_state_unlocked(sase_home, now)?;
+            let key = reservation_key(
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            let mut schedule = take_schedule(
+                &mut state,
+                &request.provider,
+                &request.context_id,
+                request.account_generation,
+            );
+            schedule.last_finished_at = Some(now);
+            if refresh_attempt_succeeded(&request.outcome) {
+                schedule.last_success_at = Some(now);
+                schedule.consecutive_failures = 0;
+                schedule.backoff_until = None;
+                schedule.retry_after_until = None;
+            } else {
+                schedule.consecutive_failures =
+                    schedule.consecutive_failures.saturating_add(1);
+                let backoff = refresh_backoff_seconds(
+                    schedule.consecutive_failures,
+                    request.cadence_seconds,
+                );
+                schedule.backoff_until = Some(now + backoff);
+                if let Some(retry_after) = request.retry_after_seconds {
+                    schedule.retry_after_until =
+                        Some(now + retry_after.max(0.0));
+                }
+            }
+            if schedule.due_at.is_some_and(|due_at| due_at <= now) {
+                schedule.due_at = None;
+                schedule.due_reason = None;
+            }
+            schedule.cooldown_until =
+                Some(now + USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS);
+            state.schedules.insert(key, schedule.clone());
+            write_state_unlocked(sase_home, &state)?;
+            Ok(schedule)
         },
     )
 }
@@ -923,6 +1148,7 @@ fn read_state_unlocked(
     }
     let mut providers = BTreeMap::new();
     let mut reservations = BTreeMap::new();
+    let mut schedules = BTreeMap::new();
     let mut diagnostics = Vec::new();
     if raw.providers.len() > MAX_OBSERVATIONS {
         diagnostics.push(store_diagnostic(
@@ -952,9 +1178,29 @@ fn read_state_unlocked(
             Err(message) => diagnostics.push(store_diagnostic(None, message)),
         }
     }
+    if raw.schedules.len() > MAX_SCHEDULES {
+        diagnostics.push(store_diagnostic(
+            None,
+            format!(
+                "provider-usage store has more than {MAX_SCHEDULES} refresh schedules"
+            ),
+        ));
+    } else {
+        for (key, value) in raw.schedules {
+            match decode_schedule(&key, value) {
+                Ok(schedule) => {
+                    schedules.insert(key, schedule);
+                }
+                Err(message) => {
+                    diagnostics.push(store_diagnostic(None, message));
+                }
+            }
+        }
+    }
     Ok(DecodedUsageState {
         providers,
         reservations,
+        schedules,
         diagnostics,
     })
 }
@@ -988,6 +1234,15 @@ fn write_state_unlocked(
             .iter()
             .map(|(key, reservation)| {
                 serde_json::to_value(reservation)
+                    .map(|value| (key.clone(), value))
+                    .map_err(ProviderUsageStoreError::Json)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?,
+        schedules: state
+            .schedules
+            .iter()
+            .map(|(key, schedule)| {
+                serde_json::to_value(schedule)
                     .map(|value| (key.clone(), value))
                     .map_err(ProviderUsageStoreError::Json)
             })
@@ -1031,8 +1286,37 @@ fn empty_decoded_state() -> DecodedUsageState {
     DecodedUsageState {
         providers: BTreeMap::new(),
         reservations: BTreeMap::new(),
+        schedules: BTreeMap::new(),
         diagnostics: Vec::new(),
     }
+}
+
+fn decode_schedule(
+    key: &str,
+    value: Value,
+) -> Result<ProviderUsageRefreshScheduleWire, String> {
+    let schedule: ProviderUsageRefreshScheduleWire =
+        serde_json::from_value(value).map_err(|error| {
+            format!("provider usage schedule is not valid v1 JSON: {error}")
+        })?;
+    if schedule.version != PROVIDER_USAGE_STORE_SCHEMA_VERSION {
+        return Err(format!(
+            "provider usage schedule version must be {}, got {}",
+            PROVIDER_USAGE_STORE_SCHEMA_VERSION, schedule.version
+        ));
+    }
+    let expected = reservation_key(
+        &schedule.provider,
+        &schedule.context_id,
+        schedule.account_generation,
+    );
+    if expected != key {
+        return Err(
+            "provider usage schedule key does not match provider context"
+                .to_string(),
+        );
+    }
+    Ok(schedule)
 }
 
 fn decode_provider_record(
@@ -1246,6 +1530,150 @@ fn reservation_key(
     format!(
         "{provider}{RESERVATION_KEY_SEPARATOR}{account_generation}{RESERVATION_KEY_SEPARATOR}{context_id}"
     )
+}
+
+fn take_schedule(
+    state: &mut DecodedUsageState,
+    provider: &str,
+    context_id: &str,
+    account_generation: u64,
+) -> ProviderUsageRefreshScheduleWire {
+    let key = reservation_key(provider, context_id, account_generation);
+    state.schedules.remove(&key).unwrap_or_else(|| {
+        empty_refresh_schedule(provider, context_id, account_generation)
+    })
+}
+
+fn due_outcome_from_state(
+    state: &DecodedUsageState,
+    request: &ProviderUsageRefreshDueRequestWire,
+    now: f64,
+) -> ProviderUsageRefreshDueOutcomeWire {
+    let key = reservation_key(
+        &request.provider,
+        &request.context_id,
+        request.account_generation,
+    );
+    let schedule = state.schedules.get(&key);
+    let record = state.providers.get(&request.provider).filter(|row| {
+        row.context_id == request.context_id
+            && row.account_generation == request.account_generation
+    });
+    let last_full = record.and_then(|row| row.last_full_observation_at);
+    let reset_passed = record.is_some_and(|row| {
+        row.windows.values().any(|stored| {
+            stored.window.resets_at.is_some_and(|reset| reset <= now)
+        })
+    });
+    let decision = evaluate_refresh_due(
+        now,
+        request.cadence_seconds,
+        request.explicit,
+        schedule,
+        last_full,
+        reset_passed,
+    );
+    ProviderUsageRefreshDueOutcomeWire {
+        version: PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+        due: decision.due,
+        reason: decision.reason.to_string(),
+        due_at: decision.next_at,
+    }
+}
+
+fn validate_due_request(
+    request: ProviderUsageRefreshDueRequestWire,
+) -> Result<ProviderUsageRefreshDueRequestWire, ProviderUsageStoreError> {
+    let provider =
+        validate_ident("provider", &request.provider, super::MAX_PROVIDER_LEN)?;
+    let context_id =
+        validate_ident("context_id", &request.context_id, MAX_CONTEXT_LEN)?;
+    let cadence_seconds = validate_refresh_cadence(request.cadence_seconds)
+        .map_err(ProviderUsageStoreError::Validation)?;
+    Ok(ProviderUsageRefreshDueRequestWire {
+        provider,
+        context_id,
+        account_generation: request.account_generation,
+        cadence_seconds,
+        explicit: request.explicit,
+    })
+}
+
+fn validate_admit_request(
+    request: ProviderUsageRefreshAdmitRequestWire,
+) -> Result<ProviderUsageRefreshAdmitRequestWire, ProviderUsageStoreError> {
+    let reservation = validate_reservation_request(
+        ProviderUsageRefreshReservationRequestWire {
+            provider: request.provider,
+            context_id: request.context_id,
+            account_generation: request.account_generation,
+            operation_id: request.operation_id,
+            ttl_seconds: request.ttl_seconds,
+        },
+    )?;
+    let cadence_seconds = validate_refresh_cadence(request.cadence_seconds)
+        .map_err(ProviderUsageStoreError::Validation)?;
+    Ok(ProviderUsageRefreshAdmitRequestWire {
+        provider: reservation.provider,
+        context_id: reservation.context_id,
+        account_generation: reservation.account_generation,
+        operation_id: reservation.operation_id,
+        ttl_seconds: reservation.ttl_seconds,
+        cadence_seconds,
+        explicit: request.explicit,
+    })
+}
+
+fn validate_mark_due_request(
+    request: ProviderUsageRefreshMarkDueRequestWire,
+) -> Result<ProviderUsageRefreshMarkDueRequestWire, ProviderUsageStoreError> {
+    let provider =
+        validate_ident("provider", &request.provider, super::MAX_PROVIDER_LEN)?;
+    let context_id =
+        validate_ident("context_id", &request.context_id, MAX_CONTEXT_LEN)?;
+    let reason = validate_ident("due reason", &request.reason, MAX_KEY_LEN)?;
+    if let Some(due_at) = request.due_at {
+        if !due_at.is_finite() || due_at <= 0.0 {
+            return Err(ProviderUsageStoreError::Validation(
+                "due_at must be a finite positive timestamp".to_string(),
+            ));
+        }
+    }
+    Ok(ProviderUsageRefreshMarkDueRequestWire {
+        provider,
+        context_id,
+        account_generation: request.account_generation,
+        reason,
+        due_at: request.due_at,
+    })
+}
+
+fn validate_attempt_request(
+    request: ProviderUsageRefreshAttemptWire,
+) -> Result<ProviderUsageRefreshAttemptWire, ProviderUsageStoreError> {
+    let provider =
+        validate_ident("provider", &request.provider, super::MAX_PROVIDER_LEN)?;
+    let context_id =
+        validate_ident("context_id", &request.context_id, MAX_CONTEXT_LEN)?;
+    let outcome = validate_ident("outcome", &request.outcome, MAX_KEY_LEN)?;
+    let cadence_seconds = validate_refresh_cadence(request.cadence_seconds)
+        .map_err(ProviderUsageStoreError::Validation)?;
+    if let Some(retry_after) = request.retry_after_seconds {
+        if !retry_after.is_finite() || retry_after < 0.0 {
+            return Err(ProviderUsageStoreError::Validation(
+                "retry_after_seconds must be a finite nonnegative number"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(ProviderUsageRefreshAttemptWire {
+        provider,
+        context_id,
+        account_generation: request.account_generation,
+        outcome,
+        retry_after_seconds: request.retry_after_seconds,
+        cadence_seconds,
+    })
 }
 
 fn store_diagnostic(

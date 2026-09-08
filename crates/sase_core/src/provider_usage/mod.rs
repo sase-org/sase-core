@@ -10,11 +10,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod refresh;
 mod store;
 
+pub use refresh::{
+    empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
+    refresh_backoff_seconds, ProviderUsageRefreshAdmissionStatus,
+    ProviderUsageRefreshAdmitOutcomeWire, ProviderUsageRefreshAdmitRequestWire,
+    ProviderUsageRefreshAttemptWire, ProviderUsageRefreshDueOutcomeWire,
+    ProviderUsageRefreshDueRequestWire, ProviderUsageRefreshMarkDueOutcomeWire,
+    ProviderUsageRefreshMarkDueRequestWire, ProviderUsageRefreshScheduleWire,
+    RefreshDueDecision, MAX_USAGE_REFRESH_BACKOFF_SECONDS,
+    USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
+};
 pub use store::{
-    load_provider_usage_store, prepare_provider_usage_account_context,
-    provider_usage_state_path, record_provider_usage_observation,
+    admit_provider_usage_refresh, evaluate_provider_usage_refresh_due,
+    load_provider_usage_store, mark_provider_usage_refresh_due,
+    prepare_provider_usage_account_context, provider_usage_state_path,
+    record_provider_usage_observation, record_provider_usage_refresh_attempt,
     release_provider_usage_refresh, reserve_provider_usage_refresh,
     ProviderUsageAccountContextWire,
     ProviderUsageRefreshReservationOutcomeWire,

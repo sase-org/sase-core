@@ -242,6 +242,10 @@
 //! - `provider_usage_prepare_account_context(sase_home: str, provider: str, context_id: str, now: float) -> dict`
 //! - `provider_usage_reserve_refresh(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_release_refresh(sase_home: str, provider: str, context_id: str, account_generation: int, lease_id: str, now: float) -> bool`
+//! - `provider_usage_refresh_due(sase_home: str, request: dict, now: float) -> dict`
+//! - `provider_usage_admit_refresh(sase_home: str, request: dict, now: float) -> dict`
+//! - `provider_usage_mark_refresh_due(sase_home: str, request: dict, now: float) -> dict`
+//! - `provider_usage_record_refresh_attempt(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
 //! - `provider_usage_remaining_percent(used_percent: float) -> float`
@@ -1112,13 +1116,17 @@ use sase_core::provider_priority::{
     ProviderRoutingContextWire,
 };
 use sase_core::provider_usage::{
+    admit_provider_usage_refresh as core_admit_provider_usage_refresh,
     classify_freshness as core_classify_freshness,
+    evaluate_provider_usage_refresh_due as core_evaluate_provider_usage_refresh_due,
     format_remaining_text as core_format_remaining_text,
     load_provider_usage_store as core_load_provider_usage_store,
+    mark_provider_usage_refresh_due as core_mark_provider_usage_refresh_due,
     prepare_provider_usage_account_context as core_prepare_provider_usage_account_context,
     project_usage_snapshot as core_project_usage_snapshot,
     provider_usage_state_path as core_provider_usage_state_path,
     record_provider_usage_observation as core_record_provider_usage_observation,
+    record_provider_usage_refresh_attempt as core_record_provider_usage_refresh_attempt,
     release_provider_usage_refresh as core_release_provider_usage_refresh,
     remaining_percent as core_remaining_percent,
     reserve_provider_usage_refresh as core_reserve_provider_usage_refresh,
@@ -1126,7 +1134,10 @@ use sase_core::provider_usage::{
     usage_window_applies as core_usage_window_applies,
     validate_usage_observation as core_validate_usage_observation,
     ProviderUsageError as ProviderUsageDomainError,
-    ProviderUsageObservationWire, ProviderUsageRefreshReservationRequestWire,
+    ProviderUsageObservationWire, ProviderUsageRefreshAdmitRequestWire,
+    ProviderUsageRefreshAttemptWire, ProviderUsageRefreshDueRequestWire,
+    ProviderUsageRefreshMarkDueRequestWire,
+    ProviderUsageRefreshReservationRequestWire,
     ProviderUsageStoreError as ProviderUsageStoreDomainError,
     UsageApplicabilityWire, UsagePublicWindowWire,
     DEFAULT_USAGE_CADENCE_SECONDS, DEFAULT_USAGE_CRITICAL_PERCENT,
@@ -11538,6 +11549,82 @@ fn py_provider_usage_release_refresh(
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_refresh_due")]
+fn py_provider_usage_refresh_due<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageRefreshDueRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_evaluate_provider_usage_refresh_due(&home, request, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_admit_refresh")]
+fn py_provider_usage_admit_refresh<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageRefreshAdmitRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_admit_provider_usage_refresh(&home, request, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_mark_refresh_due")]
+fn py_provider_usage_mark_refresh_due<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageRefreshMarkDueRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_mark_provider_usage_refresh_due(&home, request, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_record_refresh_attempt")]
+fn py_provider_usage_record_refresh_attempt<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageRefreshAttemptWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_record_provider_usage_refresh_attempt(&home, request, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_validate_observation")]
 fn py_provider_usage_validate_observation<'py>(
     py: Python<'py>,
@@ -14648,6 +14735,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_reserve_refresh, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_release_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_refresh_due, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_admit_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_mark_refresh_due, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_record_refresh_attempt,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_validate_observation,
         m
