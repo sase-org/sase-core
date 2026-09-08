@@ -235,6 +235,13 @@
 //! - `provider_availability_classify_many(context: dict, facts: list[dict]) -> list[dict]`
 //! - `provider_usage_observation_schema_version() -> int`
 //! - `provider_usage_public_schema_version() -> int`
+//! - `provider_usage_store_schema_version() -> int`
+//! - `provider_usage_state_path(sase_home: str) -> str`
+//! - `provider_usage_load(sase_home: str, now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
+//! - `provider_usage_record_observation(sase_home: str, observation: dict, now: float) -> dict`
+//! - `provider_usage_prepare_account_context(sase_home: str, provider: str, context_id: str, now: float) -> dict`
+//! - `provider_usage_reserve_refresh(sase_home: str, request: dict, now: float) -> dict`
+//! - `provider_usage_release_refresh(sase_home: str, provider: str, context_id: str, account_generation: int, lease_id: str, now: float) -> bool`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
 //! - `provider_usage_remaining_percent(used_percent: float) -> float`
@@ -1107,17 +1114,24 @@ use sase_core::provider_priority::{
 use sase_core::provider_usage::{
     classify_freshness as core_classify_freshness,
     format_remaining_text as core_format_remaining_text,
+    load_provider_usage_store as core_load_provider_usage_store,
+    prepare_provider_usage_account_context as core_prepare_provider_usage_account_context,
     project_usage_snapshot as core_project_usage_snapshot,
+    provider_usage_state_path as core_provider_usage_state_path,
+    record_provider_usage_observation as core_record_provider_usage_observation,
+    release_provider_usage_refresh as core_release_provider_usage_refresh,
     remaining_percent as core_remaining_percent,
+    reserve_provider_usage_refresh as core_reserve_provider_usage_refresh,
     summarize_usage_windows as core_summarize_usage_windows,
     usage_window_applies as core_usage_window_applies,
     validate_usage_observation as core_validate_usage_observation,
     ProviderUsageError as ProviderUsageDomainError,
-    ProviderUsageObservationWire, UsageApplicabilityWire,
-    UsagePublicWindowWire, DEFAULT_USAGE_CADENCE_SECONDS,
-    DEFAULT_USAGE_CRITICAL_PERCENT, DEFAULT_USAGE_WARN_PERCENT,
-    PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
-    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION,
+    ProviderUsageObservationWire, ProviderUsageRefreshReservationRequestWire,
+    ProviderUsageStoreError as ProviderUsageStoreDomainError,
+    UsageApplicabilityWire, UsagePublicWindowWire,
+    DEFAULT_USAGE_CADENCE_SECONDS, DEFAULT_USAGE_CRITICAL_PERCENT,
+    DEFAULT_USAGE_WARN_PERCENT, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION, PROVIDER_USAGE_STORE_SCHEMA_VERSION,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -11366,6 +11380,24 @@ fn provider_usage_error_to_pyerr(err: ProviderUsageDomainError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
+fn provider_usage_store_error_to_pyerr(
+    err: ProviderUsageStoreDomainError,
+) -> PyErr {
+    let message = err.to_string();
+    match err {
+        ProviderUsageStoreDomainError::Validation(_) => {
+            PyValueError::new_err(message)
+        }
+        ProviderUsageStoreDomainError::LockTimeout(_) => {
+            PyTimeoutError::new_err(message)
+        }
+        ProviderUsageStoreDomainError::Io(_)
+        | ProviderUsageStoreDomainError::Json(_) => {
+            PyRuntimeError::new_err(message)
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(name = "provider_usage_observation_schema_version")]
 fn py_provider_usage_observation_schema_version() -> u32 {
@@ -11376,6 +11408,133 @@ fn py_provider_usage_observation_schema_version() -> u32 {
 #[pyo3(name = "provider_usage_public_schema_version")]
 fn py_provider_usage_public_schema_version() -> u32 {
     PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_store_schema_version")]
+fn py_provider_usage_store_schema_version() -> u32 {
+    PROVIDER_USAGE_STORE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_state_path")]
+fn py_provider_usage_state_path(sase_home: &str) -> String {
+    core_provider_usage_state_path(&PathBuf::from(sase_home))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "provider_usage_load",
+    signature = (
+        sase_home,
+        now,
+        cadence_seconds = DEFAULT_USAGE_CADENCE_SECONDS,
+        warn_percent = DEFAULT_USAGE_WARN_PERCENT,
+        critical_percent = DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+)]
+fn py_provider_usage_load<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: f64,
+    cadence_seconds: f64,
+    warn_percent: f64,
+    critical_percent: f64,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let read = py
+        .allow_threads(|| {
+            core_load_provider_usage_store(
+                &home,
+                now,
+                cadence_seconds,
+                warn_percent,
+                critical_percent,
+            )
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &read)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_record_observation")]
+fn py_provider_usage_record_observation<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    observation: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let observation: ProviderUsageObservationWire =
+        provider_priority_dict_from_py(observation.as_any(), "observation")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_record_provider_usage_observation(&home, observation, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_prepare_account_context")]
+fn py_provider_usage_prepare_account_context<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    provider: &str,
+    context_id: &str,
+    now: f64,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let context = py
+        .allow_threads(|| {
+            core_prepare_provider_usage_account_context(
+                &home, provider, context_id, now,
+            )
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &context)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_reserve_refresh")]
+fn py_provider_usage_reserve_refresh<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageRefreshReservationRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_reserve_provider_usage_refresh(&home, request, now)
+        })
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_release_refresh")]
+fn py_provider_usage_release_refresh(
+    sase_home: &str,
+    provider: &str,
+    context_id: &str,
+    account_generation: u64,
+    lease_id: &str,
+    now: f64,
+) -> PyResult<bool> {
+    core_release_provider_usage_refresh(
+        &PathBuf::from(sase_home),
+        provider,
+        context_id,
+        account_generation,
+        lease_id,
+        now,
+    )
+    .map_err(provider_usage_store_error_to_pyerr)
 }
 
 #[pyfunction]
@@ -14477,6 +14636,19 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        py_provider_usage_store_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_state_path, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_load, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_record_observation, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_prepare_account_context,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_reserve_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_release_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(
         py_provider_usage_validate_observation,
         m
     )?)?;
@@ -14671,6 +14843,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use tempfile::tempdir;
 
     fn append_json<'py>(
         py: Python<'py>,
@@ -23125,6 +23298,135 @@ MENTORS:
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn provider_usage_store_bindings_record_load_context_and_reserve() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let now = 1_800_000_000.0;
+            let temp = tempdir().unwrap();
+            let home = temp.path().to_string_lossy().to_string();
+            assert_eq!(py_provider_usage_store_schema_version(), 1);
+            assert!(py_provider_usage_state_path(&home)
+                .ends_with("llm_provider_usage.json"));
+
+            let observation = json!({
+                "schema_version": 1,
+                "provider": "alpha",
+                "context_id": "ctx-alpha",
+                "account_generation": 1,
+                "ordering_token": now - 10.0,
+                "received_at": now - 5.0,
+                "source": "probe",
+                "outcome": "ok",
+                "reason_code": null,
+                "diagnostic": null,
+                "completeness": "complete",
+                "authoritative_empty": false,
+                "account_mode": "subscription",
+                "plan": null,
+                "windows": [{
+                    "key": "week",
+                    "label": "Weekly",
+                    "used_percent": 94.0,
+                    "resets_at": now + 3600.0,
+                    "duration_seconds": null,
+                    "period_start": null,
+                    "applicability": {"kind": "account"},
+                    "observed_at": now - 10.0,
+                    "source": "probe",
+                    "vendor_state": "allowed"
+                }]
+            });
+            let observation_obj = json_value_to_py(py, &observation).unwrap();
+            let observation_dict =
+                observation_obj.bind(py).downcast::<PyDict>().unwrap();
+            let write = py_provider_usage_record_observation(
+                py,
+                &home,
+                observation_dict,
+                now,
+            )
+            .unwrap();
+            let write_value = py_to_json_value(write.bind(py)).unwrap();
+            assert_eq!(write_value["status"], json!("recorded"));
+            assert_eq!(write_value["accepted"], json!(true));
+
+            let read =
+                py_provider_usage_load(py, &home, now, 300.0, 75.0, 90.0)
+                    .unwrap();
+            let read_value = py_to_json_value(read.bind(py)).unwrap();
+            assert_eq!(read_value["version"], json!(1));
+            assert_eq!(
+                read_value["snapshot"]["providers"][0]["windows"][0]
+                    ["remaining_percent"],
+                json!(6.0)
+            );
+
+            let context = py_provider_usage_prepare_account_context(
+                py,
+                &home,
+                "alpha",
+                "ctx-beta",
+                now + 1.0,
+            )
+            .unwrap();
+            let context_value = py_to_json_value(context.bind(py)).unwrap();
+            assert_eq!(context_value["account_generation"], json!(2));
+            assert_eq!(context_value["changed"], json!(true));
+
+            let stale = py_provider_usage_record_observation(
+                py,
+                &home,
+                observation_dict,
+                now + 2.0,
+            )
+            .unwrap();
+            let stale_value = py_to_json_value(stale.bind(py)).unwrap();
+            assert_eq!(stale_value["status"], json!("stale_writer"));
+            assert_eq!(stale_value["accepted"], json!(false));
+
+            let request = json!({
+                "provider": "alpha",
+                "context_id": "ctx-beta",
+                "account_generation": 2,
+                "operation_id": "op-1",
+                "ttl_seconds": 10.0
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let first = py_provider_usage_reserve_refresh(
+                py,
+                &home,
+                request_dict,
+                now + 2.0,
+            )
+            .unwrap();
+            let first_value = py_to_json_value(first.bind(py)).unwrap();
+            assert_eq!(first_value["status"], json!("reserved"));
+            let joined = py_provider_usage_reserve_refresh(
+                py,
+                &home,
+                request_dict,
+                now + 3.0,
+            )
+            .unwrap();
+            let joined_value = py_to_json_value(joined.bind(py)).unwrap();
+            assert_eq!(joined_value["status"], json!("joined"));
+            let lease_id =
+                first_value["reservation"]["lease_id"].as_str().unwrap();
+            assert!(py_provider_usage_release_refresh(
+                &home,
+                "alpha",
+                "ctx-beta",
+                2,
+                lease_id,
+                now + 4.0,
+            )
+            .unwrap());
         });
     }
 }

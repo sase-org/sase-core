@@ -984,11 +984,20 @@ pub use provider_priority::{
 };
 pub use provider_usage::{
     classify_freshness, exceeded_by_percent, format_remaining_text,
-    project_usage_snapshot, remaining_percent, reset_has_passed,
+    load_provider_usage_store, prepare_provider_usage_account_context,
+    project_usage_snapshot, provider_usage_state_path,
+    record_provider_usage_observation, release_provider_usage_refresh,
+    remaining_percent, reserve_provider_usage_refresh, reset_has_passed,
     summarize_usage_windows, usage_known_constraints, usage_window_applies,
     validate_usage_cadence, validate_usage_observation,
-    validate_usage_thresholds, ProviderUsageError,
-    ProviderUsageObservationWire, UsageApplicabilityMatch,
+    validate_usage_thresholds, ProviderUsageAccountContextWire,
+    ProviderUsageError, ProviderUsageObservationWire,
+    ProviderUsageRefreshReservationOutcomeWire,
+    ProviderUsageRefreshReservationRequestWire,
+    ProviderUsageRefreshReservationStatus, ProviderUsageRefreshReservationWire,
+    ProviderUsageStoreDiagnosticWire, ProviderUsageStoreError,
+    ProviderUsageStoreReadWire, ProviderUsageStoreWriteOutcomeWire,
+    ProviderUsageStoreWriteStatus, UsageApplicabilityMatch,
     UsageApplicabilityWire, UsageAttentionKind, UsageAttentionWire,
     UsageCollectionHealth, UsageCollectionOutcome, UsageCompleteness,
     UsageFreshness, UsageKnownConstraintWire, UsagePublicProviderWire,
@@ -997,7 +1006,8 @@ pub use provider_usage::{
     UsageWindowObservationWire, DEFAULT_USAGE_CADENCE_SECONDS,
     DEFAULT_USAGE_CRITICAL_PERCENT, DEFAULT_USAGE_WARN_PERCENT,
     MIN_USAGE_CADENCE_SECONDS, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
-    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION,
+    PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION, PROVIDER_USAGE_STATE_FILENAME,
+    PROVIDER_USAGE_STORE_SCHEMA_VERSION,
 };
 pub use query::{
     canonicalize_query, canonicalize_query_with_profile, compile_query,

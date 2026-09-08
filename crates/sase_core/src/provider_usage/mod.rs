@@ -1,13 +1,30 @@
 //! Subscription-capacity observation and public read contracts.
 //!
-//! Collectors normalize vendor payloads onto these types. Persistence, probe
-//! transport, and UI are owned by later phases. This module validates
-//! observations, classifies freshness and scope, derives remaining
-//! percentage, and projects the versioned public read model.
+//! Collectors normalize vendor payloads onto these types. This module
+//! validates observations, classifies freshness and scope, derives remaining
+//! percentage, projects the versioned public read model, and persists the
+//! machine-local provider-usage cache. Probe transport and UI are owned by
+//! later phases.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
+
+mod store;
+
+pub use store::{
+    load_provider_usage_store, prepare_provider_usage_account_context,
+    provider_usage_state_path, record_provider_usage_observation,
+    release_provider_usage_refresh, reserve_provider_usage_refresh,
+    ProviderUsageAccountContextWire,
+    ProviderUsageRefreshReservationOutcomeWire,
+    ProviderUsageRefreshReservationRequestWire,
+    ProviderUsageRefreshReservationStatus, ProviderUsageRefreshReservationWire,
+    ProviderUsageStoreDiagnosticWire, ProviderUsageStoreError,
+    ProviderUsageStoreReadWire, ProviderUsageStoreWriteOutcomeWire,
+    ProviderUsageStoreWriteStatus, PROVIDER_USAGE_STATE_FILENAME,
+    PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+};
 
 pub const PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION: u32 = 1;

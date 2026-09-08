@@ -2,6 +2,8 @@ use super::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::fs;
+use tempfile::tempdir;
 
 const NOW: f64 = 1_800_000_000.0;
 const CADENCE: f64 = 300.0;
@@ -103,6 +105,25 @@ fn valid_window() -> UsageWindowObservationWire {
     }
 }
 
+fn named_window(
+    key: &str,
+    used_percent: f64,
+    observed_at: f64,
+) -> UsageWindowObservationWire {
+    UsageWindowObservationWire {
+        key: key.to_string(),
+        label: format!("{key} allowance"),
+        used_percent,
+        resets_at: Some(NOW + 3_600.0),
+        duration_seconds: None,
+        period_start: None,
+        applicability: UsageApplicabilityWire::Account,
+        observed_at,
+        source: UsageSource::Probe,
+        vendor_state: UsageVendorState::Allowed,
+    }
+}
+
 fn valid_observation() -> ProviderUsageObservationWire {
     ProviderUsageObservationWire {
         schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
@@ -120,6 +141,33 @@ fn valid_observation() -> ProviderUsageObservationWire {
         account_mode: Some("subscription".to_string()),
         plan: None,
         windows: vec![valid_window()],
+    }
+}
+
+fn usage_observation(
+    provider: &str,
+    context_id: &str,
+    account_generation: u64,
+    ordering_token: f64,
+    completeness: UsageCompleteness,
+    windows: Vec<UsageWindowObservationWire>,
+) -> ProviderUsageObservationWire {
+    ProviderUsageObservationWire {
+        schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+        provider: provider.to_string(),
+        context_id: context_id.to_string(),
+        account_generation,
+        ordering_token,
+        received_at: ordering_token + 1.0,
+        source: UsageSource::Probe,
+        outcome: UsageCollectionOutcome::Ok,
+        reason_code: None,
+        diagnostic: None,
+        completeness,
+        authoritative_empty: false,
+        account_mode: Some("subscription".to_string()),
+        plan: None,
+        windows,
     }
 }
 
@@ -331,6 +379,370 @@ fn rejects_duplicate_keys_empty_ok_and_impossible_periods() {
     observation.windows[0].duration_seconds = Some(999.0);
     let error = validate_usage_observation(observation, NOW).unwrap_err();
     assert!(error.to_string().contains("period does not match"));
+}
+
+#[test]
+fn usage_store_merges_partial_updates_and_fences_tombstones() {
+    let temp = tempdir().unwrap();
+    let full = usage_observation(
+        "claude",
+        "ctx-1",
+        1,
+        NOW - 100.0,
+        UsageCompleteness::Complete,
+        vec![
+            named_window("session", 20.0, NOW - 100.0),
+            named_window("week", 30.0, NOW - 100.0),
+        ],
+    );
+    assert_eq!(
+        record_provider_usage_observation(temp.path(), full, NOW)
+            .unwrap()
+            .status,
+        ProviderUsageStoreWriteStatus::Recorded
+    );
+
+    let partial = usage_observation(
+        "claude",
+        "ctx-1",
+        1,
+        NOW - 50.0,
+        UsageCompleteness::Partial,
+        vec![named_window("week", 95.0, NOW - 50.0)],
+    );
+    record_provider_usage_observation(temp.path(), partial, NOW).unwrap();
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    let provider = &snapshot.providers[0];
+    assert_eq!(
+        provider
+            .windows
+            .iter()
+            .map(|window| window.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session", "week"]
+    );
+    assert_eq!(
+        provider.summary.as_ref().unwrap().limiting_window_keys,
+        vec!["week"]
+    );
+
+    let newer_complete = usage_observation(
+        "claude",
+        "ctx-1",
+        1,
+        NOW - 20.0,
+        UsageCompleteness::Complete,
+        vec![named_window("session", 25.0, NOW - 20.0)],
+    );
+    record_provider_usage_observation(temp.path(), newer_complete, NOW)
+        .unwrap();
+
+    let stale_partial = usage_observation(
+        "claude",
+        "ctx-1",
+        1,
+        NOW - 30.0,
+        UsageCompleteness::Partial,
+        vec![named_window("week", 1.0, NOW - 30.0)],
+    );
+    let stale =
+        record_provider_usage_observation(temp.path(), stale_partial, NOW)
+            .unwrap();
+    assert_eq!(stale.status, ProviderUsageStoreWriteStatus::Unchanged);
+    assert!(!stale.accepted);
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(
+        snapshot.providers[0]
+            .windows
+            .iter()
+            .map(|window| window.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session"]
+    );
+    assert_eq!(
+        snapshot.providers[0].last_full_observation_at,
+        Some(NOW - 20.0)
+    );
+}
+
+#[test]
+fn usage_store_preserves_windows_after_failed_newer_attempt() {
+    let temp = tempdir().unwrap();
+    let full = usage_observation(
+        "codex",
+        "ctx-1",
+        1,
+        NOW - 40.0,
+        UsageCompleteness::Complete,
+        vec![named_window("weekly", 85.0, NOW - 40.0)],
+    );
+    record_provider_usage_observation(temp.path(), full, NOW).unwrap();
+
+    let mut failed = usage_observation(
+        "codex",
+        "ctx-1",
+        1,
+        NOW - 10.0,
+        UsageCompleteness::Partial,
+        vec![],
+    );
+    failed.outcome = UsageCollectionOutcome::Error;
+    failed.reason_code = Some(UsageReasonCode::Timeout);
+    failed.diagnostic = Some("probe timed out".to_string());
+    record_provider_usage_observation(temp.path(), failed, NOW).unwrap();
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    let provider = &snapshot.providers[0];
+    assert_eq!(provider.collection_status, UsageCollectionOutcome::Error);
+    assert_eq!(provider.collection_reason, Some(UsageReasonCode::Timeout));
+    assert_eq!(provider.windows.len(), 1);
+    assert!(provider.summary.is_none());
+    assert_eq!(
+        provider.known_constraints[0].attention,
+        UsageAttentionKind::Low
+    );
+}
+
+#[test]
+fn usage_store_advances_generation_and_rejects_stale_writers() {
+    let temp = tempdir().unwrap();
+    let first = usage_observation(
+        "grok",
+        "ctx-1",
+        1,
+        NOW - 20.0,
+        UsageCompleteness::Complete,
+        vec![named_window("week", 40.0, NOW - 20.0)],
+    );
+    record_provider_usage_observation(temp.path(), first, NOW).unwrap();
+
+    let context = prepare_provider_usage_account_context(
+        temp.path(),
+        "grok",
+        "ctx-2",
+        NOW - 10.0,
+    )
+    .unwrap();
+    assert_eq!(context.account_generation, 2);
+    assert!(context.changed);
+
+    let stale = usage_observation(
+        "grok",
+        "ctx-1",
+        1,
+        NOW - 5.0,
+        UsageCompleteness::Complete,
+        vec![named_window("week", 1.0, NOW - 5.0)],
+    );
+    let outcome =
+        record_provider_usage_observation(temp.path(), stale, NOW).unwrap();
+    assert_eq!(outcome.status, ProviderUsageStoreWriteStatus::StaleWriter);
+    assert!(!outcome.accepted);
+    assert_eq!(outcome.account_generation, 2);
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(snapshot.providers[0].context_ref, "ctx-2");
+    assert_eq!(snapshot.providers[0].account_generation, 2);
+    assert!(snapshot.providers[0].windows.is_empty());
+    assert_eq!(
+        snapshot.providers[0].collection_reason,
+        Some(UsageReasonCode::AccountContextChanged)
+    );
+
+    let current = usage_observation(
+        "grok",
+        "ctx-2",
+        2,
+        NOW - 3.0,
+        UsageCompleteness::Complete,
+        vec![named_window("week", 60.0, NOW - 3.0)],
+    );
+    record_provider_usage_observation(temp.path(), current, NOW).unwrap();
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(
+        snapshot.providers[0].collection_status,
+        UsageCollectionOutcome::Ok
+    );
+    assert_eq!(snapshot.providers[0].windows.len(), 1);
+}
+
+#[test]
+fn usage_store_reports_bad_provider_records_without_repairing_on_read() {
+    let temp = tempdir().unwrap();
+    let valid = usage_observation(
+        "alpha",
+        "ctx-alpha",
+        1,
+        NOW - 20.0,
+        UsageCompleteness::Complete,
+        vec![named_window("week", 10.0, NOW - 20.0)],
+    );
+    record_provider_usage_observation(temp.path(), valid, NOW).unwrap();
+    let path = provider_usage_state_path(temp.path());
+    let mut raw: Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    raw["providers"]["broken"] = json!({
+        "version": 1,
+        "provider": "not-broken",
+        "context_id": "ctx",
+        "account_generation": 1
+    });
+    fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    let read = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap();
+
+    assert_eq!(read.snapshot.providers.len(), 1);
+    assert_eq!(read.snapshot.providers[0].provider, "alpha");
+    assert_eq!(
+        read.snapshot.collection_health,
+        UsageCollectionHealth::Partial
+    );
+    assert_eq!(read.diagnostics.len(), 1);
+    assert_eq!(read.diagnostics[0].provider.as_deref(), Some("broken"));
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn usage_refresh_reservations_join_release_and_expire() {
+    let temp = tempdir().unwrap();
+    let request = ProviderUsageRefreshReservationRequestWire {
+        provider: "codex".to_string(),
+        context_id: "ctx".to_string(),
+        account_generation: 1,
+        operation_id: "op-1".to_string(),
+        ttl_seconds: 10.0,
+    };
+    let first =
+        reserve_provider_usage_refresh(temp.path(), request.clone(), NOW)
+            .unwrap();
+    assert_eq!(
+        first.status,
+        ProviderUsageRefreshReservationStatus::Reserved
+    );
+    let joined =
+        reserve_provider_usage_refresh(temp.path(), request.clone(), NOW + 1.0)
+            .unwrap();
+    assert_eq!(joined.status, ProviderUsageRefreshReservationStatus::Joined);
+    assert_eq!(joined.reservation.lease_id, first.reservation.lease_id);
+    assert!(!release_provider_usage_refresh(
+        temp.path(),
+        "codex",
+        "ctx",
+        1,
+        "wrong-lease",
+        NOW + 2.0,
+    )
+    .unwrap());
+    assert!(release_provider_usage_refresh(
+        temp.path(),
+        "codex",
+        "ctx",
+        1,
+        &first.reservation.lease_id,
+        NOW + 3.0,
+    )
+    .unwrap());
+    let next = reserve_provider_usage_refresh(
+        temp.path(),
+        request.clone(),
+        NOW + 11.0,
+    )
+    .unwrap();
+    assert_eq!(next.status, ProviderUsageRefreshReservationStatus::Reserved);
+}
+
+#[test]
+fn usage_store_uses_private_file_permissions_and_ignores_temp_siblings() {
+    let temp = tempdir().unwrap();
+    let temp_sibling =
+        temp.path().join(".llm_provider_usage.json.interrupted.tmp");
+    fs::write(&temp_sibling, b"not complete").unwrap();
+    let observation = usage_observation(
+        "alpha",
+        "ctx-alpha",
+        1,
+        NOW - 20.0,
+        UsageCompleteness::Complete,
+        vec![named_window("week", 10.0, NOW - 20.0)],
+    );
+    record_provider_usage_observation(temp.path(), observation, NOW).unwrap();
+    assert!(temp_sibling.exists());
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(snapshot.providers.len(), 1);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir_mode =
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(provider_usage_state_path(temp.path()))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+    }
 }
 
 #[test]
