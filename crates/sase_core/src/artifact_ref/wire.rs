@@ -389,9 +389,11 @@ pub struct ArtifactRefDocumentScanWire {
 /// unqualified path in its owning repository rather than the viewer's cwd.
 ///
 /// `checkout_candidates` are caller-attached, already-known checkout
-/// directories (for example a producer's recorded workspace) tried before
-/// the shared repository inventory. An empty value means the caller has no
-/// stronger evidence than repository identity.
+/// directories (for example a producer's recorded workspace). They are
+/// identified against the repository inventory before selection; stale
+/// attached paths fall through to live same-repository checkouts instead
+/// of terminating as `missing_checkout`. An empty value means the caller
+/// has no stronger evidence than repository identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefDocumentOwnerWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,6 +408,13 @@ pub struct ArtifactRefDocumentOwnerWire {
     pub source_directory: Option<String>,
     #[serde(default)]
     pub checkout_candidates: Vec<String>,
+    /// Optional POSIX globs applied to the requested source path before any
+    /// checkout is probed. `None` means the host has no repository-source
+    /// path policy and every safe payload is eligible. `Some(vec![])` is an
+    /// explicit empty policy and denies every path. Typed-document
+    /// `path_globs` on document roots are a separate resolver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_globs: Option<Vec<String>>,
 }
 
 /// Why a target resolution did not land on one exact path, and whether a

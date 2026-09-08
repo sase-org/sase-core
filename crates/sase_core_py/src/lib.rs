@@ -18665,6 +18665,8 @@ MENTORS:
                 target_resolved["resolved_path"],
                 json!(linked_repo
                     .join("Sources/BobMacCapture/CaptureKeyCommandRouter.swift")
+                    .canonicalize()
+                    .unwrap()
                     .to_string_lossy())
             );
             assert_eq!(
@@ -18716,6 +18718,84 @@ MENTORS:
             );
             assert_eq!(py_artifact_ref_context_wire_schema_version(), 2);
             assert_eq!(py_artifact_ref_path_filter_wire_schema_version(), 1);
+        });
+    }
+
+    #[test]
+    fn artifact_ref_document_source_target_round_trips_stale_and_source_dir() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("live");
+        let source_dir = live.join("Sources/BobMacCapture");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("Router.swift"), "swift").unwrap();
+        Python::with_gil(|py| {
+            let context_value = json!({
+                "schema_version": 2,
+                "repositories": [{
+                    "name": "capture",
+                    "checkout_paths": [live.to_string_lossy()],
+                }],
+            });
+            let context_object = json_value_to_py(py, &context_value).unwrap();
+            let context = context_object.bind(py).downcast::<PyDict>().unwrap();
+            let stale = temp.path().join("deleted-producer");
+            let owner_value = json!({
+                "repository": "capture",
+                "source_directory": source_dir.to_string_lossy(),
+                "checkout_candidates": [stale.to_string_lossy()],
+            });
+            let owner_object = json_value_to_py(py, &owner_value).unwrap();
+            let owner = owner_object.bind(py).downcast::<PyDict>().unwrap();
+            let resolved = py_artifact_ref_resolve_document_source_target(
+                py,
+                "Router.swift",
+                owner,
+                context,
+            )
+            .unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(resolved["status"], json!("exact"));
+            assert_eq!(resolved["repository"], json!("capture"));
+            assert_eq!(
+                resolved["resolved_path"],
+                json!(source_dir
+                    .join("Router.swift")
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy())
+            );
+
+            let denied_owner_value = json!({
+                "path_globs": ["src/**", "!src/secret.rs"],
+            });
+            let denied_owner_object =
+                json_value_to_py(py, &denied_owner_value).unwrap();
+            let denied_owner =
+                denied_owner_object.bind(py).downcast::<PyDict>().unwrap();
+            let denied_context_value = json!({
+                "schema_version": 2,
+                "repositories": [{
+                    "name": "capture",
+                    "checkout_paths": [live.to_string_lossy()],
+                }],
+            });
+            fs::create_dir_all(live.join("src")).unwrap();
+            fs::write(live.join("src/secret.rs"), "secret").unwrap();
+            let denied_context_object =
+                json_value_to_py(py, &denied_context_value).unwrap();
+            let denied_context =
+                denied_context_object.bind(py).downcast::<PyDict>().unwrap();
+            let denied = py_artifact_ref_resolve_document_source_target(
+                py,
+                "src/secret.rs",
+                denied_owner,
+                denied_context,
+            )
+            .unwrap();
+            let denied = py_to_json_value(denied.bind(py)).unwrap();
+            assert_eq!(denied["status"], json!("denied"));
+            assert_eq!(denied["failure_category"], json!("denied_filtered"));
         });
     }
 

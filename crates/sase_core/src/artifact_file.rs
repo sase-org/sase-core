@@ -42,6 +42,9 @@ pub use trash::{
     ArtifactFileTrashRequestWire, ArtifactFileTrashRestoreRequestWire,
     ArtifactFileTrashRestoreWire,
 };
+pub(crate) use vcs::{
+    checkout_head_sha, git_object_exists_at_revision, peel_to_commit_sha,
+};
 pub use vcs::{
     materialize_vcs_artifact_file, ArtifactFileVcsMaterializationRequestWire,
     ArtifactFileVcsMaterializationWire,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(artifact-ref)* make document-owned source resolution honor source
+  directories, same-repository stale-checkout fallback, directories,
+  revision proof, and optional owner path filters
+
 ## [0.32.40](https://github.com/sase-org/sase-core/compare/v0.32.39...v0.32.40) - 2026-09-07
 
 ### Added

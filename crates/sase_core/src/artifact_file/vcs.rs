@@ -238,6 +238,73 @@ fn read_blob(checkout: &Path, sha: &str, relpath: &str) -> Option<Vec<u8>> {
     run_git(checkout, &["cat-file", "blob", &spec])
 }
 
+/// Return the current HEAD commit SHA for *checkout*, when one bounded
+/// `git rev-parse` invocation can prove it.
+pub(crate) fn checkout_head_sha(checkout: &Path) -> Option<String> {
+    let output = run_git(checkout, &["rev-parse", "HEAD"])?;
+    parse_git_sha(&output)
+}
+
+/// Peel *revision* to a commit SHA in *checkout* with one bounded
+/// `git rev-parse --verify`. Rejects tokens that could be extra Git options.
+pub(crate) fn peel_to_commit_sha(
+    checkout: &Path,
+    revision: &str,
+) -> Option<String> {
+    if !safe_revision_token(revision) {
+        return None;
+    }
+    let spec = format!("{}^{{commit}}", revision.trim());
+    let output = run_git(checkout, &["rev-parse", "--verify", &spec])?;
+    parse_git_sha(&output)
+}
+
+/// Return whether Git can name an object at *revision*:*relpath* in
+/// *checkout*. Used to diagnose a requested historical path without
+/// treating the current worktree as that revision.
+pub(crate) fn git_object_exists_at_revision(
+    checkout: &Path,
+    revision: &str,
+    relpath: &str,
+) -> bool {
+    if !safe_revision_token(revision) || !safe_git_relpath(relpath) {
+        return false;
+    }
+    let spec = format!("{}:{relpath}", revision.trim());
+    run_git(checkout, &["cat-file", "-e", &spec]).is_some()
+}
+
+fn parse_git_sha(output: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(output).ok()?.trim();
+    looks_like_git_sha(text).then(|| text.to_ascii_lowercase())
+}
+
+fn looks_like_git_sha(value: &str) -> bool {
+    (7..=40).contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn safe_revision_token(revision: &str) -> bool {
+    let revision = revision.trim();
+    if revision.is_empty() || revision.starts_with('-') {
+        return false;
+    }
+    if revision.contains("..") {
+        return false;
+    }
+    revision.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'.' | b'_' | b'/' | b'-')
+    })
+}
+
+fn safe_git_relpath(relpath: &str) -> bool {
+    !relpath.is_empty()
+        && !relpath.starts_with('/')
+        && !relpath.contains('\0')
+        && !relpath.contains("..")
+}
+
 fn history_for_path(
     checkout: &Path,
     relpath: &str,
@@ -469,5 +536,28 @@ mod tests {
         request.suffix = "/../../outside".to_string();
         assert_eq!(materialize_vcs_artifact_file(&request).status, "missing");
         assert!(!fixture._temp.path().join("outside").exists());
+    }
+
+    #[test]
+    fn checkout_head_and_historical_path_use_bounded_git() {
+        let fixture = init_repo();
+        assert_eq!(
+            checkout_head_sha(&fixture.repo).as_deref(),
+            Some(fixture.sha.as_str())
+        );
+        assert_eq!(
+            peel_to_commit_sha(&fixture.repo, &fixture.sha[..7]),
+            Some(fixture.sha.clone())
+        );
+        assert!(git_object_exists_at_revision(
+            &fixture.repo,
+            &fixture.sha,
+            &fixture.relpath
+        ));
+        assert!(!git_object_exists_at_revision(
+            &fixture.repo,
+            &fixture.sha,
+            "missing/path.txt"
+        ));
     }
 }
