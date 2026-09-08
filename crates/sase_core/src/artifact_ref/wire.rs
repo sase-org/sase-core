@@ -249,6 +249,13 @@ pub struct ArtifactRefContextWire {
     /// UTC's. `None`/`0` preserves prior UTC-only behavior.
     #[serde(default)]
     pub utc_offset_seconds: Option<i32>,
+    /// Project this context's repository inventory was assembled for.
+    /// Used with `ArtifactRefDocumentOwnerWire.project_key` so a viewer
+    /// project's checkouts cannot satisfy a different owner project.
+    /// Absent on schema-2 payloads that predate the field; the resolver
+    /// then withholds inventory when the owner asserts a project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_project: Option<String>,
 }
 
 impl Default for ArtifactRefContextWire {
@@ -267,6 +274,7 @@ impl Default for ArtifactRefContextWire {
             home_dir: None,
             file_capture_max_bytes: None,
             utc_offset_seconds: None,
+            selected_project: None,
         }
     }
 }
@@ -394,6 +402,13 @@ pub struct ArtifactRefDocumentScanWire {
 /// attached paths fall through to live same-repository checkouts instead
 /// of terminating as `missing_checkout`. An empty value means the caller
 /// has no stronger evidence than repository identity.
+///
+/// `source_directory` is eligible only when it sits inside one of those
+/// attached checkouts or a live inventory checkout of an eligible
+/// repository. Setting `repository` does not relabel an unrelated path.
+/// `project_key` must agree with the context's `selected_project` before
+/// inventory checkouts participate; attached producer checkouts remain
+/// usable without that agreement.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRefDocumentOwnerWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]

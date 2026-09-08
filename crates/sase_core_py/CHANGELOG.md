@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(artifact-ref)* require proved owner provenance before source-directory hits
+
 ## [0.32.41](https://github.com/sase-org/sase-core/compare/v0.32.40...v0.32.41) - 2026-09-08
 
 ### Fixed

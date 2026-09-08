@@ -14,15 +14,28 @@
 //!
 //! 1. Optional owner `path_globs`. A denial is terminal and is never
 //!    recovered by a later probe.
-//! 2. `owner.source_directory` when that directory is valid provenance.
+//! 2. `owner.source_directory` when that directory is proved to belong to
+//!    an eligible owner repository: it must sit inside a live attached
+//!    checkout or a live inventory checkout. Setting `owner.repository`
+//!    never relabels an unrelated directory as that repository.
 //! 3. Caller-attached checkout candidates, identified against the
 //!    inventory (or the owner's repository name) rather than treated as a
-//!    first-hit list of unrelated roots.
+//!    first-hit list of unrelated roots. These correlated producer
+//!    workspaces are trusted even when inventory is withheld.
 //! 4. Live checkouts of the same identified repository, including when
-//!    every attached path is stale.
+//!    every attached path or source directory is stale, but only when
+//!    owner project identity agrees with the context.
 //! 5. A bounded suffix search across each candidate repository's first
 //!    available checkout, for a path that has drifted under a renamed
 //!    parent directory.
+//!
+//! `owner.project_key` constrains inventory search. Inventory checkouts
+//! participate only when `context.selected_project` agrees with that key
+//! through the project catalog (name, key, aliases, or `gh_` provider
+//! slug). A context that omits `selected_project` cannot prove agreement,
+//! so inventory is withheld rather than treating the catalog as the
+//! viewer's project. Attached producer checkouts stay eligible without
+//! that agreement.
 //!
 //! Files and directories share this decision path. Distinct repositories
 //! that both contain a matching path are ambiguous, not a first-hit guess;
@@ -43,8 +56,9 @@ use super::filter::ArtifactPathFilter;
 use super::{
     validate_artifact_ref_context, validate_path_payload,
     ArtifactRefContextWire, ArtifactRefDocumentOwnerWire, ArtifactRefError,
-    ArtifactRefRepositoryWire, ArtifactRefTargetCandidateWire,
-    ArtifactRefTargetFailureCategoryWire, ArtifactRefTargetResolutionWire,
+    ArtifactRefProjectWire, ArtifactRefRepositoryWire,
+    ArtifactRefTargetCandidateWire, ArtifactRefTargetFailureCategoryWire,
+    ArtifactRefTargetResolutionWire,
     ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 
@@ -103,7 +117,8 @@ fn resolve_with_budget(
         ));
     }
 
-    let searches = build_repo_searches(owner, context);
+    let include_inventory = inventory_is_in_scope(owner, context);
+    let searches = build_repo_searches(owner, context, include_inventory);
     let any_live_checkout = searches
         .iter()
         .any(|search| search.bases.iter().any(|base| base.root.is_dir()));
@@ -182,7 +197,8 @@ fn resolve_with_budget(
     }
 
     if searches.is_empty() || !any_live_checkout {
-        let diagnostic = missing_checkout_diagnostic(owner, &searches);
+        let diagnostic =
+            missing_checkout_diagnostic(owner, &searches, include_inventory);
         return Ok(unresolved(
             ArtifactRefTargetFailureCategoryWire::MissingCheckout,
             candidates,
@@ -331,6 +347,7 @@ fn posix_payload(path: &Path) -> String {
 fn build_repo_searches(
     owner: &ArtifactRefDocumentOwnerWire,
     context: &ArtifactRefContextWire,
+    include_inventory: bool,
 ) -> Vec<RepoSearch> {
     let mut searches: Vec<RepoSearch> = Vec::new();
     for checkout in &owner.checkout_candidates {
@@ -351,6 +368,10 @@ fn build_repo_searches(
                 evidence: "attached_checkout",
             },
         );
+    }
+
+    if !include_inventory {
+        return searches;
     }
 
     let scoped_inventory: Vec<&ArtifactRefRepositoryWire> =
@@ -463,10 +484,7 @@ fn probe_source_relative(
     if !is_existing_target(&path) {
         return None;
     }
-    let (id, git_root) = identify_source_hit(&source_root, owner, searches);
-    if !source_hit_in_owner_scope(&id, &path, owner, searches) {
-        return None;
-    }
+    let (id, git_root) = identify_source_hit(&source_root, searches)?;
     Some(Hit {
         id,
         path,
@@ -476,41 +494,10 @@ fn probe_source_relative(
     })
 }
 
-fn source_hit_in_owner_scope(
-    id: &RepoId,
-    path: &Path,
-    owner: &ArtifactRefDocumentOwnerWire,
-    searches: &[RepoSearch],
-) -> bool {
-    let Some(requested) = owner.repository.as_deref() else {
-        return true;
-    };
-    match id {
-        RepoId::Named(name) => {
-            name == requested
-                || searches.iter().any(|search| {
-                    matches!(&search.id, RepoId::Named(existing) if existing == name)
-                        && search.bases.iter().any(|base| {
-                            path.starts_with(&base.root)
-                                || path.starts_with(&base.git_root)
-                        })
-                })
-        }
-        RepoId::Anonymous(_) => searches.is_empty()
-            || searches.iter().any(|search| {
-                search.bases.iter().any(|base| {
-                    path.starts_with(&base.root)
-                        || path.starts_with(&base.git_root)
-                })
-            }),
-    }
-}
-
 fn identify_source_hit(
     source_root: &Path,
-    owner: &ArtifactRefDocumentOwnerWire,
     searches: &[RepoSearch],
-) -> (RepoId, PathBuf) {
+) -> Option<(RepoId, PathBuf)> {
     let mut best: Option<(usize, RepoId, PathBuf)> = None;
     for search in searches {
         for base in &search.bases {
@@ -528,16 +515,7 @@ fn identify_source_hit(
             }
         }
     }
-    if let Some((_, id, git_root)) = best {
-        return (id, git_root);
-    }
-    if let Some(name) = owner.repository.clone() {
-        return (RepoId::Named(name), source_root.to_path_buf());
-    }
-    (
-        RepoId::Anonymous(source_root.to_path_buf()),
-        source_root.to_path_buf(),
-    )
+    best.map(|(_, id, git_root)| (id, git_root))
 }
 
 fn probe_repo_direct(
@@ -695,7 +673,15 @@ fn revision_unavailable(
 fn missing_checkout_diagnostic(
     owner: &ArtifactRefDocumentOwnerWire,
     searches: &[RepoSearch],
+    include_inventory: bool,
 ) -> String {
+    if !include_inventory {
+        if let Some(key) = nonempty_token(owner.project_key.as_deref()) {
+            return format!(
+                "owner project {key:?} does not agree with the resolution context's selected project"
+            );
+        }
+    }
     if searches.is_empty() {
         return match owner.repository.as_deref() {
             Some(name) => format!(
@@ -708,6 +694,81 @@ fn missing_checkout_diagnostic(
         };
     }
     "none of the identified repository's checkouts exist locally".to_string()
+}
+
+fn inventory_is_in_scope(
+    owner: &ArtifactRefDocumentOwnerWire,
+    context: &ArtifactRefContextWire,
+) -> bool {
+    let Some(owner_key) = nonempty_token(owner.project_key.as_deref()) else {
+        return true;
+    };
+    let Some(selected) = nonempty_token(context.selected_project.as_deref())
+    else {
+        // The owner asserted a project, but this context does not name the
+        // project its repositories belong to. `context.projects` lists every
+        // registered project, so matching that catalog is not agreement
+        // with *this* inventory.
+        return false;
+    };
+    project_identity_agrees(owner_key, selected, &context.projects)
+}
+
+fn project_identity_agrees(
+    owner_key: &str,
+    selected: &str,
+    projects: &[ArtifactRefProjectWire],
+) -> bool {
+    if identity_tokens_match(owner_key, selected)
+        || provider_slug_agrees(owner_key, selected)
+    {
+        return true;
+    }
+    projects.iter().any(|project| {
+        project_matches(project, owner_key)
+            && project_matches(project, selected)
+    })
+}
+
+fn project_matches(project: &ArtifactRefProjectWire, token: &str) -> bool {
+    identity_tokens_match(&project.name, token)
+        || identity_tokens_match(&project.key, token)
+        || project
+            .aliases
+            .iter()
+            .any(|alias| identity_tokens_match(alias, token))
+        || project_provider_slug(&project.key)
+            .is_some_and(|slug| identity_tokens_match(&slug, token))
+}
+
+fn provider_slug_agrees(left: &str, right: &str) -> bool {
+    match (project_provider_slug(left), project_provider_slug(right)) {
+        (Some(left_slug), Some(right_slug)) => {
+            identity_tokens_match(&left_slug, &right_slug)
+        }
+        (Some(left_slug), None) => identity_tokens_match(&left_slug, right),
+        (None, Some(right_slug)) => identity_tokens_match(left, &right_slug),
+        (None, None) => false,
+    }
+}
+
+fn project_provider_slug(project_key: &str) -> Option<String> {
+    let rest = project_key.strip_prefix("gh_")?;
+    let (owner, repository) = rest.split_once("__")?;
+    if owner.is_empty() || repository.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repository}"))
+}
+
+fn identity_tokens_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
+fn nonempty_token(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|token| !token.is_empty())
 }
 
 fn repository_matches(repo: &ArtifactRefRepositoryWire, name: &str) -> bool {
@@ -871,7 +932,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::artifact_ref::ArtifactRefRepositoryWire;
+    use crate::artifact_ref::{
+        ArtifactRefProjectWire, ArtifactRefRepositoryWire,
+    };
 
     fn repo(name: &str, checkout_paths: &[&Path]) -> ArtifactRefRepositoryWire {
         ArtifactRefRepositoryWire {
@@ -888,6 +951,14 @@ mod tests {
 
     fn owner() -> ArtifactRefDocumentOwnerWire {
         ArtifactRefDocumentOwnerWire::default()
+    }
+
+    fn project(name: &str, key: &str) -> ArtifactRefProjectWire {
+        ArtifactRefProjectWire {
+            name: name.to_string(),
+            key: key.to_string(),
+            aliases: Vec::new(),
+        }
     }
 
     fn path_str(path: &Path) -> String {
@@ -1221,6 +1292,218 @@ mod tests {
         assert_eq!(
             resolution.resolved_path.as_deref(),
             Some(path_str(&source_dir.join("Router.swift")).as_str())
+        );
+    }
+
+    #[test]
+    fn out_of_inventory_source_directory_is_not_relabeled_as_owner_repo() {
+        let temp = tempdir().unwrap();
+        let owner_checkout = temp.path().join("owner-checkout");
+        fs::create_dir_all(&owner_checkout).unwrap();
+        let foreign = temp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("secret.py"), "secret").unwrap();
+        let mut owner = owner();
+        owner.repository = Some("owner".to_string());
+        owner.source_directory = Some(foreign.to_string_lossy().into_owned());
+        let context = ArtifactRefContextWire {
+            repositories: vec![repo("owner", &[&owner_checkout])],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("secret.py", &owner, &context)
+                .unwrap();
+
+        assert_ne!(resolution.status, "exact");
+        assert!(resolution.resolved_path.is_none());
+        assert_ne!(
+            resolution.resolved_path.as_deref(),
+            Some(path_str(&foreign.join("secret.py")).as_str())
+        );
+        assert_eq!(
+            resolution.failure_category,
+            Some(ArtifactRefTargetFailureCategoryWire::ProvenMissing)
+        );
+    }
+
+    #[test]
+    fn owner_repository_mismatch_does_not_use_foreign_source_directory() {
+        let temp = tempdir().unwrap();
+        let owner_repo = temp.path().join("owner-repo");
+        let foreign_repo = temp.path().join("foreign-repo");
+        fs::create_dir_all(owner_repo.join("src")).unwrap();
+        fs::create_dir_all(foreign_repo.join("src")).unwrap();
+        fs::write(foreign_repo.join("src/lib.rs"), "foreign").unwrap();
+        let mut owner = owner();
+        owner.repository = Some("owner".to_string());
+        owner.source_directory =
+            Some(foreign_repo.to_string_lossy().into_owned());
+        let context = ArtifactRefContextWire {
+            repositories: vec![
+                repo("owner", &[&owner_repo]),
+                repo("foreign", &[&foreign_repo]),
+            ],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("src/lib.rs", &owner, &context)
+                .unwrap();
+
+        assert_eq!(resolution.status, "missing");
+        assert!(resolution.resolved_path.is_none());
+        assert!(resolution.candidates.iter().all(|candidate| {
+            candidate.repository.as_deref() != Some("foreign")
+        }));
+    }
+
+    #[test]
+    fn owner_project_mismatch_does_not_use_viewer_inventory() {
+        let temp = tempdir().unwrap();
+        let viewer = temp.path().join("viewer");
+        fs::create_dir_all(viewer.join("src")).unwrap();
+        fs::write(viewer.join("src/secret.py"), "viewer").unwrap();
+        let mut owner = owner();
+        owner.project_key = Some("bob-cli".to_string());
+        owner.repository = Some("capture".to_string());
+        owner.source_directory = Some(viewer.to_string_lossy().into_owned());
+        let context = ArtifactRefContextWire {
+            selected_project: Some("sase".to_string()),
+            projects: vec![
+                project("sase", "gh_sase-org__sase"),
+                project("bob-cli", "gh_acme__bob-cli"),
+            ],
+            repositories: vec![repo("capture", &[&viewer])],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("src/secret.py", &owner, &context)
+                .unwrap();
+
+        assert_eq!(resolution.status, "missing_checkout");
+        assert!(resolution.resolved_path.is_none());
+        assert!(resolution
+            .diagnostic
+            .as_deref()
+            .is_some_and(|text| text.contains("bob-cli")));
+    }
+
+    #[test]
+    fn unavailable_project_context_does_not_use_inventory() {
+        let temp = tempdir().unwrap();
+        let live = temp.path().join("repo");
+        fs::create_dir_all(live.join("src")).unwrap();
+        fs::write(live.join("src/lib.rs"), "code").unwrap();
+        let mut owner = owner();
+        owner.project_key = Some("bob-cli".to_string());
+        owner.repository = Some("core".to_string());
+        let context = ArtifactRefContextWire {
+            repositories: vec![repo("core", &[&live])],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("src/lib.rs", &owner, &context)
+                .unwrap();
+
+        assert_eq!(resolution.status, "missing_checkout");
+        assert!(resolution.resolved_path.is_none());
+        assert!(resolution
+            .diagnostic
+            .as_deref()
+            .is_some_and(|text| text.contains("bob-cli")));
+    }
+
+    #[test]
+    fn source_directory_nested_inside_valid_checkout_with_project_agreement() {
+        let temp = tempdir().unwrap();
+        let live = temp.path().join("repo");
+        let source_dir = live.join("Sources/BobMacCapture");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("Router.swift"), "swift").unwrap();
+        let mut owner = owner();
+        owner.project_key = Some("gh_acme__bob-cli".to_string());
+        owner.repository = Some("capture".to_string());
+        owner.source_directory =
+            Some(source_dir.to_string_lossy().into_owned());
+        let context = ArtifactRefContextWire {
+            selected_project: Some("bob-cli".to_string()),
+            projects: vec![project("bob-cli", "gh_acme__bob-cli")],
+            repositories: vec![repo("capture", &[&live])],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("Router.swift", &owner, &context)
+                .unwrap();
+
+        assert_eq!(resolution.status, "exact");
+        assert_eq!(resolution.repository.as_deref(), Some("capture"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(path_str(&source_dir.join("Router.swift")).as_str())
+        );
+    }
+
+    #[test]
+    fn correlated_producer_workspace_resolves_without_inventory() {
+        let temp = tempdir().unwrap();
+        let producer = temp.path().join("producer-workspace");
+        let source_dir = producer.join("Sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("Router.swift"), "swift").unwrap();
+        let mut owner = owner();
+        owner.project_key = Some("bob-cli".to_string());
+        owner.repository = Some("capture".to_string());
+        owner.source_directory =
+            Some(source_dir.to_string_lossy().into_owned());
+        owner.checkout_candidates =
+            vec![producer.to_string_lossy().into_owned()];
+
+        let resolution = resolve_document_source_target(
+            "Router.swift",
+            &owner,
+            &ArtifactRefContextWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(resolution.status, "exact");
+        assert_eq!(resolution.repository.as_deref(), Some("capture"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(path_str(&source_dir.join("Router.swift")).as_str())
+        );
+    }
+
+    #[test]
+    fn stale_source_directory_falls_through_to_live_same_repo_inventory() {
+        let temp = tempdir().unwrap();
+        let stale = temp.path().join("deleted-producer/Sources");
+        let live = temp.path().join("live-checkout");
+        fs::create_dir_all(live.join("src")).unwrap();
+        fs::write(live.join("src/lib.rs"), "code").unwrap();
+        let mut owner = owner();
+        owner.project_key = Some("core".to_string());
+        owner.repository = Some("core".to_string());
+        owner.source_directory = Some(stale.to_string_lossy().into_owned());
+        let context = ArtifactRefContextWire {
+            selected_project: Some("core".to_string()),
+            projects: vec![project("core", "core")],
+            repositories: vec![repo("core", &[&live])],
+            ..Default::default()
+        };
+
+        let resolution =
+            resolve_document_source_target("src/lib.rs", &owner, &context)
+                .unwrap();
+
+        assert_eq!(resolution.status, "exact");
+        assert_eq!(resolution.repository.as_deref(), Some("core"));
+        assert_eq!(
+            resolution.resolved_path.as_deref(),
+            Some(path_str(&live.join("src/lib.rs")).as_str())
         );
     }
 

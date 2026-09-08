@@ -18800,6 +18800,49 @@ MENTORS:
     }
 
     #[test]
+    fn artifact_ref_document_source_target_rejects_out_of_inventory_source_dir()
+    {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let owner_checkout = temp.path().join("owner-checkout");
+        fs::create_dir_all(&owner_checkout).unwrap();
+        let foreign = temp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("secret.py"), "secret").unwrap();
+        Python::with_gil(|py| {
+            let context_value = json!({
+                "schema_version": 2,
+                "repositories": [{
+                    "name": "owner",
+                    "checkout_paths": [owner_checkout.to_string_lossy()],
+                }],
+            });
+            let context_object = json_value_to_py(py, &context_value).unwrap();
+            let context = context_object.bind(py).downcast::<PyDict>().unwrap();
+            let owner_value = json!({
+                "repository": "owner",
+                "source_directory": foreign.to_string_lossy(),
+            });
+            let owner_object = json_value_to_py(py, &owner_value).unwrap();
+            let owner = owner_object.bind(py).downcast::<PyDict>().unwrap();
+            let resolved = py_artifact_ref_resolve_document_source_target(
+                py,
+                "secret.py",
+                owner,
+                context,
+            )
+            .unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_ne!(resolved["status"], json!("exact"));
+            assert!(
+                resolved.get("resolved_path").is_none()
+                    || resolved["resolved_path"].is_null()
+            );
+            assert_eq!(resolved["failure_category"], json!("proven_missing"));
+        });
+    }
+
+    #[test]
     fn artifact_ref_contract_bindings_round_trip_json_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
