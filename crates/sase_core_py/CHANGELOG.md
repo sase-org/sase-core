@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.45](https://github.com/sase-org/sase-core/compare/v0.32.44...v0.32.45) - 2026-09-08
+
+### Added
+
+- *(editor)* add model alias shortcut contract
+
 ## [0.32.44](https://github.com/sase-org/sase-core/compare/v0.32.43...v0.32.44) - 2026-09-08
 
 ### Added
