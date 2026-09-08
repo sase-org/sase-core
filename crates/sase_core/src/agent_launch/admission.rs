@@ -8,6 +8,9 @@ use super::{
     AgentUnitWire, LaunchOutcomeWire, LaunchPlanWire, LaunchUnitPayloadWire,
     LaunchUnitResultWire, WaitTargetWire,
 };
+use crate::queue_directive::{
+    format_queue_directive, queue_directive_enabled, QueueFieldsWire,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -346,6 +349,13 @@ pub fn admission_unit_results(
 }
 
 pub fn agent_unit_dispatch_prompt(agent: &AgentUnitWire) -> String {
+    agent_unit_dispatch_prompt_with_flags(agent, &[])
+}
+
+pub fn agent_unit_dispatch_prompt_with_flags(
+    agent: &AgentUnitWire,
+    enabled_feature_flags: &[String],
+) -> String {
     let mut lines = agent.identity_directive_lines();
     match (&agent.model, &agent.reasoning_effort) {
         (Some(model), Some(effort)) => {
@@ -369,11 +379,20 @@ pub fn agent_unit_dispatch_prompt(agent: &AgentUnitWire) -> String {
     if agent.hidden {
         lines.push("%hide".to_string());
     }
-    if let Some(runners) = agent.wait_runners {
-        lines.push(format!("%wait(runners={runners})"));
-    }
-    if let Some(priority) = agent.wait_priority {
-        lines.push(format!("%wait(priority={priority})"));
+    if queue_directive_enabled(enabled_feature_flags) {
+        if let Some(directive) = format_queue_directive(&QueueFieldsWire {
+            runners: agent.wait_runners,
+            priority: agent.wait_priority,
+        }) {
+            lines.push(directive);
+        }
+    } else {
+        if let Some(runners) = agent.wait_runners {
+            lines.push(format!("%wait(runners={runners})"));
+        }
+        if let Some(priority) = agent.wait_priority {
+            lines.push(format!("%wait(priority={priority})"));
+        }
     }
     if !agent.prompt.is_empty() {
         lines.push(agent.prompt.clone());
@@ -841,6 +860,19 @@ mod tests {
         assert!(prompt.contains("Review the diff"));
         assert!(!prompt.contains("%wait:"));
         assert!(!prompt.contains("%if"));
+
+        let queued = agent_unit_dispatch_prompt_with_flags(
+            &AgentUnitWire {
+                prompt: "Review the diff".to_string(),
+                wait_runners: Some(2),
+                wait_priority: Some(1),
+                ..Default::default()
+            },
+            &["queue_directive".to_string()],
+        );
+        assert!(queued.contains("%queue(runners=2, priority=1)"));
+        assert!(!queued.contains("%wait(runners="));
+        assert!(!queued.contains("%wait(priority="));
     }
 
     #[test]

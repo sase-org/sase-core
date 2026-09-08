@@ -358,6 +358,9 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `directive_contract() -> list[dict]`
+//! - `collect_queue_fields(occurrences: list[dict]) -> dict`
+//! - `format_queue_directive(fields: dict) -> str | None`
+//! - `queue_directive_flag_key() -> str`
 //! - `code_value_wire_schema_version() -> int`
 //! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
@@ -579,7 +582,7 @@ use sase_core::agent_identity::{
 };
 use sase_core::agent_launch::{
     admission_unit_results as core_admission_unit_results,
-    agent_unit_dispatch_prompt as core_agent_unit_dispatch_prompt,
+    agent_unit_dispatch_prompt_with_flags as core_agent_unit_dispatch_prompt_with_flags,
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
     build_condition_context as core_build_condition_context,
@@ -594,7 +597,7 @@ use sase_core::agent_launch::{
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content as core_plan_transfer_workspace_claim_from_content,
-    plan_typed_launch_units as core_plan_typed_launch_units,
+    plan_typed_launch_units_with_flags as core_plan_typed_launch_units_with_flags,
     prepare_agent_launch as core_prepare_agent_launch,
     prepare_proc_script as core_prepare_proc_script,
     proc_script_argv as core_proc_script_argv,
@@ -1249,6 +1252,12 @@ use sase_core::vcs_log::{
 use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
+use sase_core::{
+    collect_queue_fields as core_collect_queue_fields,
+    format_queue_directive as core_format_queue_directive,
+    queue_directive_flag_key as core_queue_directive_flag_key, QueueFieldsWire,
+    QueueOccurrenceWire,
+};
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
     editor_detect_model_alias_shortcut_context as core_detect_model_alias_shortcut_context,
@@ -13104,16 +13113,22 @@ fn py_plan_agent_launch_fanout<'py>(
 /// Plan a pure typed Agent/Proc launch graph without launching children.
 #[pyfunction]
 #[pyo3(name = "plan_typed_launch_units")]
-#[pyo3(signature = (prompt, launch_kind = None, selected_project = None))]
+#[pyo3(signature = (prompt, launch_kind = None, selected_project = None, enabled_feature_flags = None))]
 fn py_plan_typed_launch_units<'py>(
     py: Python<'py>,
     prompt: &str,
     launch_kind: Option<&str>,
     selected_project: Option<&str>,
+    enabled_feature_flags: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
-    let plan =
-        core_plan_typed_launch_units(prompt, launch_kind, selected_project)
-            .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let flags = enabled_feature_flags.unwrap_or_default();
+    let plan = core_plan_typed_launch_units_with_flags(
+        prompt,
+        launch_kind,
+        selected_project,
+        &flags,
+    )
+    .map_err(|err| PyValueError::new_err(format!("{err}")))?;
     let value = serde_json::to_value(&plan).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -13242,12 +13257,54 @@ fn py_dispatch_fingerprint(
 
 #[pyfunction]
 #[pyo3(name = "agent_unit_dispatch_prompt")]
-fn py_agent_unit_dispatch_prompt(agent: &Bound<'_, PyAny>) -> PyResult<String> {
+#[pyo3(signature = (agent, enabled_feature_flags = None))]
+fn py_agent_unit_dispatch_prompt(
+    agent: &Bound<'_, PyAny>,
+    enabled_feature_flags: Option<Vec<String>>,
+) -> PyResult<String> {
     let agent: AgentUnitWire = serde_json::from_value(py_to_json_value(agent)?)
         .map_err(|err| {
             PyValueError::new_err(format!("invalid agent unit: {err}"))
         })?;
-    Ok(core_agent_unit_dispatch_prompt(&agent))
+    let flags = enabled_feature_flags.unwrap_or_default();
+    Ok(core_agent_unit_dispatch_prompt_with_flags(&agent, &flags))
+}
+
+#[pyfunction]
+#[pyo3(name = "collect_queue_fields")]
+fn py_collect_queue_fields<'py>(
+    py: Python<'py>,
+    occurrences: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let occurrences: Vec<QueueOccurrenceWire> = serde_json::from_value(
+        py_to_json_value(occurrences)?,
+    )
+    .map_err(|err| {
+        PyValueError::new_err(format!("invalid queue occurrences: {err}"))
+    })?;
+    let result = core_collect_queue_fields(&occurrences);
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "format_queue_directive")]
+fn py_format_queue_directive(
+    fields: &Bound<'_, PyAny>,
+) -> PyResult<Option<String>> {
+    let fields: QueueFieldsWire =
+        serde_json::from_value(py_to_json_value(fields)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid queue fields: {err}"))
+        })?;
+    Ok(core_format_queue_directive(&fields))
+}
+
+#[pyfunction]
+#[pyo3(name = "queue_directive_flag_key")]
+fn py_queue_directive_flag_key() -> &'static str {
+    core_queue_directive_flag_key()
 }
 
 #[pyfunction]
@@ -15140,6 +15197,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_directive_contract, m)?)?;
     m.add_function(wrap_pyfunction!(py_directive_completion_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_directive_completion_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(py_collect_queue_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(py_format_queue_directive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_queue_directive_flag_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
@@ -24016,6 +24076,7 @@ MENTORS:
                     "id",
                     "clan",
                     "wait",
+                    "queue",
                     "dispatch",
                     "if",
                     "proc",
@@ -24026,6 +24087,41 @@ MENTORS:
                     "xprompts_enabled",
                 ]
             );
+            let queue = contract
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == "queue")
+                .unwrap();
+            assert_eq!(queue["alias"], json!("q"));
+            assert_eq!(queue["feature_flag"], json!("queue_directive"));
+            assert_eq!(py_queue_directive_flag_key(), "queue_directive");
+            let occurrences = json_value_to_py(
+                py,
+                &json!([{
+                    "source": "%q:5",
+                    "source_span": [0, 4],
+                    "args": [{"value": "5"}],
+                    "has_plus_suffix": false
+                }]),
+            )
+            .unwrap();
+            let collected =
+                py_collect_queue_fields(py, occurrences.bind(py)).unwrap();
+            let collected = py_to_json_value(collected.bind(py)).unwrap();
+            assert_eq!(collected["fields"]["runners"], json!(5));
+            assert!(collected["errors"].as_array().unwrap().is_empty());
+            let formatted = py_format_queue_directive(
+                json_value_to_py(py, &json!({"runners": 5, "priority": 20}))
+                    .unwrap()
+                    .bind(py),
+            )
+            .unwrap();
+            assert_eq!(
+                formatted.as_deref(),
+                Some("%queue(runners=5, priority=20)")
+            );
+
             let wait = contract
                 .as_array()
                 .unwrap()

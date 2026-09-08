@@ -36,6 +36,19 @@ pub fn hover_at_position(
             });
         }
 
+        if context.kind == CompletionContextKind::DirectiveName {
+            let token = context.token.as_ref()?;
+            let raw = token.text.strip_prefix('%').unwrap_or(&token.text);
+            let metadata = directive_metadata(raw)?;
+            return Some(HoverPayload {
+                range: token.range,
+                markdown: format!(
+                    "**%{}**\n\n{}",
+                    metadata.name, metadata.description
+                ),
+            });
+        }
+
         if matches!(
             context.kind,
             CompletionContextKind::DirectiveArgument

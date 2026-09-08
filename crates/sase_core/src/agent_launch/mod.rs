@@ -5,7 +5,8 @@ mod condition;
 mod proc_runtime;
 
 pub use admission::{
-    admission_unit_results, agent_unit_dispatch_prompt, dispatch_fingerprint,
+    admission_unit_results, agent_unit_dispatch_prompt,
+    agent_unit_dispatch_prompt_with_flags, dispatch_fingerprint,
     next_admission_actions, reconcile_admission_journal, summarize_admission,
     wait_target_key, LaunchAdmissionActionWire,
     LaunchAdmissionJournalEntryWire, LaunchAdmissionSummaryWire,
@@ -40,6 +41,11 @@ use crate::fenced_code::{
     scan_directive_owned_fences, CodeLanguage, CodeValue, CodeValueWire,
 };
 use crate::prompt_literals::inline_code_ranges;
+use crate::queue_directive::{
+    collect_queue_fields, queue_directive_disabled_message,
+    queue_directive_enabled, QueueArgWire, QueueFieldsWire,
+    QueueOccurrenceWire,
+};
 use crate::xprompt_text_block::find_text_block_close_for_args;
 use chrono::{Duration, NaiveDateTime};
 use regex::Regex;
@@ -808,17 +814,33 @@ pub fn plan_typed_launch_units(
     launch_kind: Option<&str>,
     selected_project: Option<&str>,
 ) -> Result<LaunchPlanWire, AgentLaunchFanoutPlanError> {
+    plan_typed_launch_units_with_flags(
+        prompt,
+        launch_kind,
+        selected_project,
+        &[],
+    )
+}
+
+pub fn plan_typed_launch_units_with_flags(
+    prompt: &str,
+    launch_kind: Option<&str>,
+    selected_project: Option<&str>,
+    enabled_feature_flags: &[String],
+) -> Result<LaunchPlanWire, AgentLaunchFanoutPlanError> {
     let fanout = plan_agent_launch_fanout(prompt, launch_kind)?;
     let plan_project = selected_project
         .map(str::to_string)
         .or_else(|| project_context_from_prompt(prompt));
     let mut diagnostics = Vec::new();
     let mut raw_units = Vec::with_capacity(fanout.slots.len());
+    let queue_enabled = queue_directive_enabled(enabled_feature_flags);
 
     for slot in &fanout.slots {
         raw_units.push(classify_typed_launch_unit(
             slot,
             plan_project.as_deref(),
+            queue_enabled,
             &mut diagnostics,
         ));
     }
@@ -887,6 +909,7 @@ struct ParsedProcDirective {
 fn classify_typed_launch_unit(
     slot: &LaunchFanoutSlotWire,
     selected_project: Option<&str>,
+    queue_enabled: bool,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) -> RawLaunchUnit {
     let prompt = slot.prompt.as_str();
@@ -916,8 +939,8 @@ fn classify_typed_launch_unit(
     let mut auto_enabled = false;
     let mut auto_mode: Option<String> = None;
     let mut finalizers = Vec::new();
-    let mut wait_runners: Option<u32> = None;
-    let mut wait_priority: Option<i32> = None;
+    let mut wait_queue = QueueFieldsWire::default();
+    let mut queue_occurrences = Vec::new();
     let mut proc_forbidden_directives = Vec::new();
 
     let scan = scan_directive_owned_fences(prompt);
@@ -1038,11 +1061,16 @@ fn classify_typed_launch_unit(
                     prompt,
                     &directive,
                     &logical_id,
+                    queue_enabled,
                     &mut raw_waits,
-                    &mut wait_runners,
-                    &mut wait_priority,
+                    &mut wait_queue,
                     diagnostics,
                 );
+            }
+            "queue" => {
+                regions_to_remove.push((directive.start, directive.end));
+                queue_occurrences
+                    .push(queue_occurrence_from_directive(prompt, &directive));
             }
             "id" => {
                 regions_to_remove.push((directive.start, directive.end));
@@ -1146,6 +1174,34 @@ fn classify_typed_launch_unit(
                 regions_to_remove.push((directive.start, directive.end));
             }
             _ => {}
+        }
+    }
+
+    if !queue_occurrences.is_empty() {
+        if !queue_enabled {
+            for occurrence in &queue_occurrences {
+                diagnostics.push(typed_unit_diagnostic(
+                    "queue-directive-disabled",
+                    &queue_directive_disabled_message(),
+                    &logical_id,
+                    Some(occurrence.source_span),
+                ));
+            }
+        } else if proc_code.is_some() {
+            proc_forbidden_directives.push("%queue".to_string());
+        } else {
+            let collected = collect_queue_fields(&queue_occurrences);
+            for error in collected.errors {
+                diagnostics.push(typed_unit_diagnostic(
+                    &error.code,
+                    &error.message,
+                    &logical_id,
+                    error.source_span,
+                ));
+            }
+            if let Some(fields) = collected.fields {
+                wait_queue = fields;
+            }
         }
     }
 
@@ -1258,8 +1314,8 @@ fn classify_typed_launch_unit(
             auto_enabled,
             auto_mode,
             finalizers,
-            wait_runners,
-            wait_priority,
+            wait_runners: wait_queue.runners,
+            wait_priority: wait_queue.priority,
         })
     };
 
@@ -1401,13 +1457,37 @@ fn parse_code_language(
     })
 }
 
+fn queue_occurrence_from_directive(
+    prompt: &str,
+    directive: &DirectiveOccurrence,
+) -> QueueOccurrenceWire {
+    let args = directive
+        .args
+        .iter()
+        .map(|arg| {
+            let (name, value_raw) = split_named_directive_arg(arg);
+            QueueArgWire {
+                name,
+                value: unquote_directive_arg_value(value_raw.trim()),
+            }
+        })
+        .filter(|arg| arg.name.is_some() || !arg.value.is_empty())
+        .collect();
+    QueueOccurrenceWire {
+        source: prompt[directive.start..directive.end].to_string(),
+        source_span: [directive.start, directive.end],
+        args,
+        has_plus_suffix: directive.has_plus_suffix,
+    }
+}
+
 fn parse_wait_directive(
     prompt: &str,
     directive: &DirectiveOccurrence,
     logical_id: &str,
+    queue_enabled: bool,
     raw_waits: &mut Vec<RawWaitTarget>,
-    wait_runners: &mut Option<u32>,
-    wait_priority: &mut Option<i32>,
+    wait_queue: &mut QueueFieldsWire,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
     let span = [directive.start, directive.end];
@@ -1442,8 +1522,26 @@ fn parse_wait_directive(
             Some("proc") => raw_waits.push(raw_wait("proc", value, span, source.clone())),
             Some("bead") => raw_waits.push(raw_wait("bead", value, span, source.clone())),
             Some("time") => raw_waits.push(raw_wait("time", value, span, source.clone())),
+            Some("runners") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-runners-moved",
+                "%wait(runners=...) has moved to %queue. Use %queue(runners=N) or %q:N, and keep dependencies on %wait.",
+                logical_id,
+                Some(span),
+            )),
+            Some("priority") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-priority-moved",
+                "%wait(priority=...) has moved to %queue. Use %queue(priority=N) or %q(p=N), and keep dependencies on %wait.",
+                logical_id,
+                Some(span),
+            )),
+            Some("p") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-p-unsupported",
+                "%wait(p=...) is unsupported. Use %queue(priority=...) or %q(p=...).",
+                logical_id,
+                Some(span),
+            )),
             Some("runners") => match value.parse::<u32>() {
-                Ok(parsed) => *wait_runners = Some(parsed),
+                Ok(parsed) => wait_queue.runners = Some(parsed),
                 Err(_) => diagnostics.push(typed_unit_diagnostic(
                     "invalid-wait-runners",
                     "%wait(runners=...) requires a non-negative integer.",
@@ -1452,7 +1550,7 @@ fn parse_wait_directive(
                 )),
             },
             Some("priority") => match value.parse::<i32>() {
-                Ok(parsed) => *wait_priority = Some(parsed),
+                Ok(parsed) => wait_queue.priority = Some(parsed),
                 Err(_) => diagnostics.push(typed_unit_diagnostic(
                     "invalid-wait-priority",
                     "%wait(priority=...) requires an integer.",
@@ -1462,9 +1560,15 @@ fn parse_wait_directive(
             },
             Some(key) => diagnostics.push(typed_unit_diagnostic(
                 "unknown-wait-target",
-                &format!(
-                    "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, time=, runners=, or priority=."
-                ),
+                &if queue_enabled {
+                    format!(
+                        "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, or time=. Queue controls belong on %queue."
+                    )
+                } else {
+                    format!(
+                        "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, time=, runners=, or priority=."
+                    )
+                },
                 logical_id,
                 Some(span),
             )),
@@ -6576,5 +6680,148 @@ Keep this comma, and the rest of the prose in the summary.";
         assert!(!decision.may_proceed);
         assert!(decision.conflict);
         assert!(decision.reason.contains("disagree"));
+    }
+
+    fn queue_flags() -> Vec<String> {
+        vec!["queue_directive".to_string()]
+    }
+
+    fn plan_queue(prompt: &str) -> LaunchPlanWire {
+        plan_typed_launch_units_with_flags(
+            prompt,
+            Some("auto"),
+            Some("sase"),
+            &queue_flags(),
+        )
+        .unwrap()
+    }
+
+    fn plan_queue_err(prompt: &str) -> AgentLaunchFanoutPlanError {
+        plan_typed_launch_units_with_flags(
+            prompt,
+            Some("auto"),
+            Some("sase"),
+            &queue_flags(),
+        )
+        .unwrap_err()
+    }
+
+    fn agent_fields(
+        plan: &LaunchPlanWire,
+    ) -> (Option<u32>, Option<i32>, String) {
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => (
+                agent.wait_runners,
+                agent.wait_priority,
+                agent.prompt.clone(),
+            ),
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_flag_off_keeps_wait_queue_fields_and_rejects_queue() {
+        let plan = plan_typed_launch_units(
+            "%wait(runners=2, priority=1)\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap();
+        let (runners, priority, prompt) = agent_fields(&plan);
+        assert_eq!(runners, Some(2));
+        assert_eq!(priority, Some(1));
+        assert_eq!(prompt, "Do work");
+
+        let err = plan_typed_launch_units(
+            "%q:5\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("queue_directive"));
+    }
+
+    #[test]
+    fn typed_launch_flag_on_parses_queue_spellings_and_round_trips() {
+        for prompt in [
+            "%q:5\nDo work",
+            "%queue:5\nDo work",
+            "%q(5)\nDo work",
+            "%queue(runners=5)\nDo work",
+        ] {
+            let plan = plan_queue(prompt);
+            let (runners, priority, cleaned) = agent_fields(&plan);
+            assert_eq!(runners, Some(5), "{prompt}");
+            assert_eq!(priority, None, "{prompt}");
+            assert_eq!(cleaned, "Do work", "{prompt}");
+            assert!(!cleaned.contains("%q"), "{prompt}");
+        }
+        let both = plan_queue("%w(builder, time=5m) %q(1, p=20)\nDo work");
+        match &both.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.wait_runners, Some(1));
+                assert_eq!(agent.wait_priority, Some(20));
+                assert_eq!(agent.prompt, "Do work");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert_eq!(both.units[0].waits.len(), 2);
+        let rebuilt = crate::agent_unit_dispatch_prompt_with_flags(
+            match &both.units[0].payload {
+                LaunchUnitPayloadWire::Agent(agent) => agent,
+                other => panic!("expected agent payload, got {other:?}"),
+            },
+            &queue_flags(),
+        );
+        assert!(rebuilt.contains("%queue(runners=1, priority=20)"));
+        assert!(!rebuilt.contains("%wait(runners="));
+        assert!(!rebuilt.contains("%wait(priority="));
+    }
+
+    #[test]
+    fn typed_launch_flag_on_rejects_wait_queue_keywords_and_proc_queue() {
+        let runners = plan_queue_err("%wait(runners=5)\nDo work");
+        assert!(runners.to_string().contains("%queue"));
+        let priority = plan_queue_err("%wait(priority=10)\nDo work");
+        assert!(priority.to_string().contains("%queue"));
+        let plus = plan_queue_err("%wait(p=20)\nDo work");
+        assert!(plus.to_string().contains("%queue"));
+        let empty = plan_queue_err("%q\nDo work");
+        assert!(empty.to_string().contains("bare %q"));
+        let proc = plan_typed_launch_units_with_flags(
+            "%queue(runners=1)\n%proc(\"just check\")",
+            Some("auto"),
+            Some("sase"),
+            &queue_flags(),
+        )
+        .unwrap_err();
+        assert!(proc.to_string().contains("not valid on %proc"));
+    }
+
+    #[test]
+    fn typed_launch_flag_on_composes_disjoint_queue_and_fanout() {
+        let plan = plan_typed_launch_units_with_flags(
+            "%q:0 %queue(priority=10)\nFirst\n---\n%q(p=1)\nSecond",
+            Some("multi_prompt"),
+            Some("sase"),
+            &queue_flags(),
+        )
+        .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.wait_runners, Some(0));
+                assert_eq!(agent.wait_priority, Some(10));
+                assert_eq!(agent.prompt, "First");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        match &plan.units[1].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.wait_runners, None);
+                assert_eq!(agent.wait_priority, Some(1));
+                assert_eq!(agent.prompt, "Second");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
     }
 }

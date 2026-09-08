@@ -26,10 +26,11 @@ use super::at_reference::{
     AtReferencePayloadRowWire, AtReferenceStage,
 };
 use super::directive::{
-    build_bead_completion_candidates, build_directive_keyword_candidates,
-    build_directive_static_value_candidates,
+    build_bead_completion_candidates, build_directive_static_value_candidates,
+    build_filtered_directive_keyword_candidates,
     detect_directive_context_at_position, directive_allows_keywords,
     directive_is_hidden_from_name_completion_with_flags, directive_metadata,
+    wait_queue_keyword_retired,
 };
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
@@ -1434,6 +1435,24 @@ pub fn build_wait_completion_candidates_for_form(
     selected_values: &[String],
     syntax_form: DirectiveSyntaxForm,
 ) -> CompletionList {
+    build_wait_completion_candidates_for_form_with_flags(
+        token,
+        replacement_range,
+        entries,
+        selected_values,
+        syntax_form,
+        &[],
+    )
+}
+
+pub fn build_wait_completion_candidates_for_form_with_flags(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+    syntax_form: DirectiveSyntaxForm,
+    enabled_feature_flags: &[String],
+) -> CompletionList {
     let mut candidates = Vec::new();
     let wait = directive_metadata("wait");
     if !token.contains('=')
@@ -1448,11 +1467,12 @@ pub fn build_wait_completion_candidates_for_form(
             .collect();
         if let Some(metadata) = wait {
             candidates.extend(
-                build_directive_keyword_candidates(
+                build_filtered_directive_keyword_candidates(
                     metadata,
                     token,
                     &selected_keywords,
                     replacement_range,
+                    enabled_feature_flags,
                 )
                 .candidates,
             );
@@ -1493,6 +1513,74 @@ pub fn build_identity_target_candidates(
     )
 }
 
+fn build_queue_completion_candidates(
+    context: &CompletionContext,
+    inventories: &DirectiveCompletionInventories,
+    token: &str,
+    replacement: Option<EditorRange>,
+) -> CompletionList {
+    let Some(metadata) = directive_metadata("queue") else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+    let syntax_form = context
+        .syntax_form()
+        .unwrap_or(DirectiveSyntaxForm::Parenthesized);
+    let mut selected_keywords = context.selected_keywords().to_vec();
+    if queue_has_positional_runners(&context.selected_values) {
+        selected_keywords.push("runners".to_string());
+    }
+    let mut candidates = Vec::new();
+    if !token.contains('=') && directive_allows_keywords(metadata, syntax_form)
+    {
+        candidates.extend(
+            build_filtered_directive_keyword_candidates(
+                metadata,
+                token,
+                &selected_keywords,
+                replacement,
+                &inventories.enabled_feature_flags,
+            )
+            .candidates,
+        );
+    }
+    if !queue_has_runners_assignment(
+        &context.selected_values,
+        &selected_keywords,
+    ) {
+        candidates.extend(
+            build_directive_static_value_candidates(
+                metadata.positional_suggestions,
+                token,
+                replacement,
+            )
+            .candidates,
+        );
+    }
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
+    }
+}
+
+fn queue_has_positional_runners(selected_values: &[String]) -> bool {
+    selected_values
+        .iter()
+        .any(|value| !value.contains('=') && !value.trim().is_empty())
+}
+
+fn queue_has_runners_assignment(
+    selected_values: &[String],
+    selected_keywords: &[String],
+) -> bool {
+    queue_has_positional_runners(selected_values)
+        || selected_keywords
+            .iter()
+            .any(|keyword| keyword.eq_ignore_ascii_case("runners"))
+}
+
 pub fn build_directive_clause_candidates(
     context: &CompletionContext,
     inventories: &DirectiveCompletionInventories,
@@ -1516,11 +1604,12 @@ pub fn build_directive_clause_candidates(
                 .as_deref()
                 .and_then(directive_metadata)
             {
-                let mut list = build_directive_keyword_candidates(
+                let mut list = build_filtered_directive_keyword_candidates(
                     metadata,
                     token,
                     context.selected_keywords(),
                     replacement,
+                    &inventories.enabled_feature_flags,
                 );
                 if metadata.dynamic_keyword_role
                     == Some(DirectiveValueRole::ModelAliasKey)
@@ -1569,7 +1658,7 @@ pub fn build_directive_clause_candidates(
         };
     }
     if name == "wait" {
-        return build_wait_completion_candidates_for_form(
+        return build_wait_completion_candidates_for_form_with_flags(
             token,
             replacement,
             &inventories.agents,
@@ -1577,6 +1666,15 @@ pub fn build_directive_clause_candidates(
             context
                 .syntax_form()
                 .unwrap_or(DirectiveSyntaxForm::Parenthesized),
+            &inventories.enabled_feature_flags,
+        );
+    }
+    if name == "queue" {
+        return build_queue_completion_candidates(
+            context,
+            inventories,
+            token,
+            replacement,
         );
     }
     if name == "model" {
@@ -1635,6 +1733,17 @@ fn build_directive_value_candidates(
             &inventories.enabled_feature_flags,
         )
     }) {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    }
+    if context.directive_name.as_deref() == Some("wait")
+        && wait_queue_keyword_retired(
+            context.active_keyword().unwrap_or_default(),
+            &inventories.enabled_feature_flags,
+        )
+    {
         return CompletionList {
             candidates: Vec::new(),
             shared_extension: String::new(),

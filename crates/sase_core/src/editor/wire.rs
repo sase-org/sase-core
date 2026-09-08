@@ -595,6 +595,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
         "if" | "proc" => Some("typed_launch_units"),
+        "queue" => Some("queue_directive"),
         _ => None,
     }
 }
@@ -634,6 +635,12 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
             "%dispatch:apollo Build and test the current project",
             "%dispatch(apollo) Review the active Patch",
         ],
+        "queue" => &[
+            "%q:5",
+            "%queue(runners=5)",
+            "%q(p=20)",
+            "%queue(runners=5, priority=20)",
+        ],
         _ => &[],
     }
 }
@@ -660,6 +667,25 @@ pub fn directive_snippet_recipes(
                 "%clan($1, tribe=$2)$0",
                 "%clan(name, tribe=tribe)",
                 "Declare a parallel clan and assign it to a tribe.",
+            ),
+        ],
+        "queue" => vec![
+            colon_recipe("queue", "5"),
+            recipe(
+                "%q:...",
+                "directive snippet",
+                "%q:${1:5}$0",
+                "%q:$1$0",
+                "%q:5",
+                "Set a runner-queue admission threshold with the short alias.",
+            ),
+            recipe(
+                "%queue(runners=..., priority=...)",
+                "directive snippet",
+                "%queue(runners=${1:5}, priority=${2:10})$0",
+                "%queue(runners=$1, priority=$2)$0",
+                "%queue(runners=5, priority=10)",
+                "Set both queue admission threshold and priority.",
             ),
         ],
         "wait" => vec![
@@ -832,6 +858,7 @@ fn directive_metadata_supports_colon(name: &str) -> bool {
             | "id"
             | "clan"
             | "wait"
+            | "queue"
             | "repeat"
             | "auto"
             | "final"

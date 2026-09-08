@@ -71,6 +71,7 @@ pub mod provider_disable;
 pub mod provider_priority;
 pub mod provider_usage;
 pub mod query;
+pub mod queue_directive;
 mod reference_path;
 pub mod referenced_by;
 pub mod runner_limit_override;
@@ -181,6 +182,7 @@ pub use agent_identity::{
 };
 pub use agent_launch::{
     admission_unit_results, agent_unit_dispatch_prompt,
+    agent_unit_dispatch_prompt_with_flags,
     allocate_and_claim_workspace_from_content, allocate_launch_timestamp_batch,
     build_condition_context, classify_condition_status,
     cleanup_proc_private_inputs, condition_command_argv,
@@ -189,12 +191,12 @@ pub use agent_launch::{
     list_workspace_claims_from_content, next_admission_actions,
     parse_proc_duration_seconds, plan_claim_workspace_from_content,
     plan_transfer_workspace_claim_from_content, plan_typed_launch_units,
-    prepare_agent_launch, prepare_proc_script, proc_script_argv,
-    reconcile_admission_journal, resolve_proc_execution_cwd, safe_launch_name,
-    sanitize_safe_inputs, sanitized_condition_env, sanitized_proc_env,
-    summarize_admission, validate_proc_workspace_intent,
-    validate_standalone_proc_shell_name, wait_target_key,
-    AgentLaunchPreparationError, AgentLaunchPreparedWire,
+    plan_typed_launch_units_with_flags, prepare_agent_launch,
+    prepare_proc_script, proc_script_argv, reconcile_admission_journal,
+    resolve_proc_execution_cwd, safe_launch_name, sanitize_safe_inputs,
+    sanitized_condition_env, sanitized_proc_env, summarize_admission,
+    validate_proc_workspace_intent, validate_standalone_proc_shell_name,
+    wait_target_key, AgentLaunchPreparationError, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, AgentUnitWire, ConditionCheckWire,
     ConditionContextWire, ConditionEvalRequestWire, ConditionEvalResultWire,
     ConditionLogicalUnitWire, ConditionWaitedOutcomeWire,
@@ -620,6 +622,7 @@ pub use editor::{
     named_args_skeleton as editor_named_args_skeleton,
     placeholder_input_names as editor_placeholder_input_names,
     plan_model_alias_shortcut_edit as editor_plan_model_alias_shortcut_edit,
+    queue_directive_diagnostics as editor_queue_directive_diagnostics,
     rank_and_filter_bead_entries as editor_rank_and_filter_bead_entries,
     raw_placeholder_fields as editor_raw_placeholder_fields,
     substitute_raw_placeholders as editor_substitute_raw_placeholders,
@@ -1061,6 +1064,13 @@ pub use query::{
     QueryEvaluationContext, QueryExprWire, QueryFieldSpec, QueryFieldValues,
     QueryMacroSpec, QueryPredicateFacts, QueryProgram, QueryProgramWire,
     QueryRow, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
+};
+pub use queue_directive::{
+    collect_queue_fields, format_queue_directive,
+    queue_directive_disabled_message, queue_directive_enabled,
+    queue_directive_flag_key, QueueArgWire, QueueCollectResultWire,
+    QueueFieldsWire, QueueOccurrenceWire, QueueParseErrorWire,
+    QUEUE_DIRECTIVE_FLAG,
 };
 pub use referenced_by::{
     parse_referenced_by_block, remove_referenced_by_block,

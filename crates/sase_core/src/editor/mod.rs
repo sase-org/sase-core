@@ -44,13 +44,15 @@ pub use completion::{
 };
 pub use definition::{definition_at_position, DefinitionTarget};
 pub use diagnostics::{
-    analyze_artifact_refs, analyze_document, typed_launch_directive_diagnostics,
+    analyze_artifact_refs, analyze_document, queue_directive_diagnostics,
+    typed_launch_directive_diagnostics,
 };
 pub use directive::{
     build_bead_completion_candidates, build_directive_completion_candidates,
     build_directive_completion_candidates_with_flags,
     build_directive_keyword_candidates,
-    build_directive_static_value_candidates, canonical_directive_name,
+    build_directive_static_value_candidates,
+    build_filtered_directive_keyword_candidates, canonical_directive_name,
     detect_directive_context_at_position, directive_allows_keywords,
     directive_argument_candidates, directive_contract,
     directive_is_hidden_from_name_completion,
