@@ -25,6 +25,7 @@ pub mod agent_stats;
 pub mod artifact_consumption;
 pub mod artifact_file;
 pub mod artifact_link;
+pub mod artifact_link_eligibility;
 pub mod artifact_object_store;
 pub mod artifact_ref;
 pub mod axe_chop;
@@ -381,6 +382,14 @@ pub use artifact_link::{
     LINKS_BLOCK_HEADING, LINKS_BLOCK_START_MARKER,
     LINKS_BLOCK_WIRE_SCHEMA_VERSION, MAX_RENDERED_MANAGED_TABLE_ROWS,
     RESERVED_ARTIFACT_RELATION_SLUGS,
+};
+pub use artifact_link_eligibility::{
+    artifact_link_release_evidence, decide_artifact_link_eligibility,
+    validate_artifact_link_release_evidence, ArtifactLinkChangeRoleWire,
+    ArtifactLinkChangedPathWire, ArtifactLinkEligibilityDecisionWire,
+    ArtifactLinkEligibilityError, ArtifactLinkEligibilityRequestWire,
+    ArtifactLinkReleaseEvidenceWire, ArtifactLinkRepoEvidenceWire,
+    ARTIFACT_LINK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
 };
 pub use artifact_object_store::{
     artifact_object_prompt_link, artifact_object_relpath,

@@ -461,6 +461,10 @@
 //! - `artifact_link_canonicalize(value: str) -> str`
 //! - `artifact_link_validate_row(row: dict) -> dict`
 //! - `artifact_link_upsert_row(rows: list[dict], row: dict) -> dict`
+//! - `artifact_link_eligibility_wire_schema_version() -> int`
+//! - `decide_artifact_link_eligibility(request: dict) -> dict`
+//! - `artifact_link_release_evidence(decision: dict, recorded_at: str) -> dict`
+//! - `validate_artifact_link_release_evidence(evidence: dict, expected_run_id: str, expected_agent_id: str) -> None`
 //! - `artifact_relations_builtins() -> list[dict]`
 //! - `artifact_relation_lookup(slug: str) -> dict`
 //! - `artifact_relation_label(slug: str, this_is_source: bool) -> str`
@@ -726,6 +730,14 @@ use sase_core::artifact_link::{
     ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
     ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
+};
+use sase_core::artifact_link_eligibility::{
+    artifact_link_release_evidence as core_artifact_link_release_evidence,
+    decide_artifact_link_eligibility as core_decide_artifact_link_eligibility,
+    validate_artifact_link_release_evidence as core_validate_artifact_link_release_evidence,
+    ArtifactLinkEligibilityDecisionWire, ArtifactLinkEligibilityError,
+    ArtifactLinkEligibilityRequestWire, ArtifactLinkReleaseEvidenceWire,
+    ARTIFACT_LINK_ELIGIBILITY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_object_store::{
     artifact_object_prompt_link as core_artifact_object_prompt_link,
@@ -6050,6 +6062,100 @@ fn py_artifact_link_upsert_row(
         "rows": parsed,
     });
     json_value_to_py(py, &value)
+}
+
+fn artifact_link_eligibility_error_to_pyerr(
+    error: ArtifactLinkEligibilityError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn artifact_link_eligibility_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkEligibilityRequestWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactLinkEligibilityRequestWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_eligibility_decision_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkEligibilityDecisionWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "decision is not a valid ArtifactLinkEligibilityDecisionWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_release_evidence_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkReleaseEvidenceWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "evidence is not a valid ArtifactLinkReleaseEvidenceWire dict: {error}"
+        ))
+    })
+}
+
+/// Return the artifact-link eligibility wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_eligibility_wire_schema_version")]
+fn py_artifact_link_eligibility_wire_schema_version() -> u64 {
+    ARTIFACT_LINK_ELIGIBILITY_WIRE_SCHEMA_VERSION
+}
+
+/// Decide whether a run's host-collected change evidence qualifies it to
+/// publish its pending automatic artifact links.
+#[pyfunction]
+#[pyo3(name = "decide_artifact_link_eligibility")]
+fn py_decide_artifact_link_eligibility(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = artifact_link_eligibility_request_from_pydict(request)?;
+    let decision = core_decide_artifact_link_eligibility(&request)
+        .map_err(artifact_link_eligibility_error_to_pyerr)?;
+    let value = serde_json::to_value(decision).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Build the durable release-evidence record for an eligible decision.
+#[pyfunction]
+#[pyo3(name = "artifact_link_release_evidence")]
+fn py_artifact_link_release_evidence(
+    py: Python<'_>,
+    decision: &Bound<'_, PyDict>,
+    recorded_at: &str,
+) -> PyResult<PyObject> {
+    let decision = artifact_link_eligibility_decision_from_pydict(decision)?;
+    let evidence = core_artifact_link_release_evidence(&decision, recorded_at)
+        .map_err(artifact_link_eligibility_error_to_pyerr)?;
+    let value = serde_json::to_value(evidence).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Confirm release evidence is still bound to the run trying to use it.
+#[pyfunction]
+#[pyo3(name = "validate_artifact_link_release_evidence")]
+fn py_validate_artifact_link_release_evidence(
+    evidence: &Bound<'_, PyDict>,
+    expected_run_id: &str,
+    expected_agent_id: &str,
+) -> PyResult<()> {
+    let evidence = artifact_link_release_evidence_from_pydict(evidence)?;
+    core_validate_artifact_link_release_evidence(
+        &evidence,
+        expected_run_id,
+        expected_agent_id,
+    )
+    .map_err(artifact_link_eligibility_error_to_pyerr)
 }
 
 /// Return the compiled-in v1 relation registry.
@@ -14831,6 +14937,16 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_link_canonicalize, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_validate_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_upsert_row, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_eligibility_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_decide_artifact_link_eligibility, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_release_evidence, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_artifact_link_release_evidence,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_relations_builtins, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_relation_lookup, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_relation_label, m)?)?;
@@ -20229,6 +20345,119 @@ MENTORS:
             .unwrap();
             let aggregate = py_to_json_value(aggregate.bind(py)).unwrap();
             assert_eq!(aggregate["status"], json!("success"));
+        });
+    }
+
+    #[test]
+    fn artifact_link_eligibility_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "artifact_link_eligibility_wire_schema_version",
+                "decide_artifact_link_eligibility",
+                "artifact_link_release_evidence",
+                "validate_artifact_link_release_evidence",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+
+            assert_eq!(py_artifact_link_eligibility_wire_schema_version(), 1);
+
+            let ineligible_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "run_id": "run-1",
+                    "agent_id": "agent-1",
+                    "repos": [
+                        {
+                            "repo_id": "sdd:plan",
+                            "kind": "sdd",
+                            "changed_paths": [
+                                {"path": "links/plan/foo.md.json", "role": "bookkeeping"}
+                            ],
+                        }
+                    ],
+                }),
+            )
+            .unwrap();
+            let ineligible_decision_obj = py_decide_artifact_link_eligibility(
+                py,
+                ineligible_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let ineligible_decision_dict = ineligible_decision_obj
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap();
+            let ineligible_decision_value =
+                py_to_json_value(ineligible_decision_obj.bind(py)).unwrap();
+            assert_eq!(ineligible_decision_value["eligible"], json!(false));
+            assert_eq!(
+                ineligible_decision_value["qualifying_repo_ids"],
+                json!([])
+            );
+
+            let eligible_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "run_id": "run-1",
+                    "agent_id": "agent-1",
+                    "repos": [
+                        {
+                            "repo_id": "main",
+                            "kind": "main",
+                            "changed_paths": [
+                                {"path": "src/lib.rs", "role": "real"}
+                            ],
+                        }
+                    ],
+                }),
+            )
+            .unwrap();
+            let decision = py_decide_artifact_link_eligibility(
+                py,
+                eligible_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let decision_dict = decision.bind(py).downcast::<PyDict>().unwrap();
+            let decision_value = py_to_json_value(decision.bind(py)).unwrap();
+            assert_eq!(decision_value["eligible"], json!(true));
+            assert_eq!(decision_value["qualifying_repo_ids"], json!(["main"]));
+
+            let evidence = py_artifact_link_release_evidence(
+                py,
+                decision_dict,
+                "2026-09-08T00:00:00Z",
+            )
+            .unwrap();
+            let evidence_dict = evidence.bind(py).downcast::<PyDict>().unwrap();
+            let evidence_value = py_to_json_value(evidence.bind(py)).unwrap();
+            assert_eq!(evidence_value["run_id"], json!("run-1"));
+            assert_eq!(evidence_value["agent_id"], json!("agent-1"));
+
+            py_validate_artifact_link_release_evidence(
+                evidence_dict,
+                "run-1",
+                "agent-1",
+            )
+            .unwrap();
+            assert!(py_validate_artifact_link_release_evidence(
+                evidence_dict,
+                "run-2",
+                "agent-1",
+            )
+            .is_err());
+
+            assert!(py_artifact_link_release_evidence(
+                py,
+                ineligible_decision_dict,
+                "2026-09-08T00:00:00Z",
+            )
+            .is_err());
         });
     }
 
