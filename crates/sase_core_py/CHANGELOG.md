@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.43](https://github.com/sase-org/sase-core/compare/v0.32.42...v0.32.43) - 2026-09-08
+
+### Added
+
+- Persist observations and fence stale writers (sase-y5.2)
+
 ## [0.32.42](https://github.com/sase-org/sase-core/compare/v0.32.41...v0.32.42) - 2026-09-08
 
 ### Fixed
