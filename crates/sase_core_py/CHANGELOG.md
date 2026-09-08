@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.46](https://github.com/sase-org/sase-core/compare/v0.32.45...v0.32.46) - 2026-09-08
+
+### Added
+
+- *(gateway)* expose fleet setup surface
+
 ## [0.32.45](https://github.com/sase-org/sase-core/compare/v0.32.44...v0.32.45) - 2026-09-08
 
 ### Added
