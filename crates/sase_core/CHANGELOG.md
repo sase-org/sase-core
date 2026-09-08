@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.44](https://github.com/sase-org/sase-core/compare/v0.32.43...v0.32.44) - 2026-09-08
+
+### Added
+
+- *(provider-usage)* add refresh admission, due, and backoff
+
 ## [0.32.43](https://github.com/sase-org/sase-core/compare/v0.32.42...v0.32.43) - 2026-09-08
 
 ### Added
