@@ -50,6 +50,7 @@ pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
+pub mod managed_origin;
 pub mod markdown_link_refs;
 pub mod migration;
 pub mod model_completion;
@@ -840,6 +841,13 @@ pub use host_bridge::{
 pub use machine_hood::{
     machine_hood_of, qualify_machine_agent_name, strip_machine_agent_name,
     validate_machine_name, MachineNameError,
+};
+pub use managed_origin::{
+    decide_managed_origin_reconciliation, ManagedOriginPushUrlRewriteWire,
+    ManagedOriginReconciliationDecisionWire,
+    ManagedOriginReconciliationRequestWire, MANAGED_ORIGIN_ACTION_FAIL,
+    MANAGED_ORIGIN_ACTION_NONE, MANAGED_ORIGIN_ACTION_REWRITE,
+    MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION,
 };
 pub use markdown_link_refs::{
     allocate_markdown_reference_label, append_markdown_reference_definitions,

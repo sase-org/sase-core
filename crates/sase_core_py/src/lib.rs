@@ -992,6 +992,11 @@ use sase_core::machine_hood::{
     strip_machine_agent_name as core_strip_machine_agent_name,
     validate_machine_name as core_validate_machine_name,
 };
+use sase_core::managed_origin::{
+    decide_managed_origin_reconciliation as core_decide_managed_origin_reconciliation,
+    ManagedOriginReconciliationRequestWire,
+    MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION,
+};
 use sase_core::markdown_link_refs::{
     allocate_markdown_reference_label as core_allocate_markdown_reference_label,
     append_markdown_reference_definitions as core_append_markdown_reference_definitions,
@@ -1514,6 +1519,27 @@ fn py_machine_hood_of(
     known_machines: Vec<String>,
 ) -> Option<String> {
     core_machine_hood_of(name, &known_machines)
+}
+
+#[pyfunction]
+#[pyo3(name = "managed_origin_reconciliation_wire_schema_version")]
+fn py_managed_origin_reconciliation_wire_schema_version() -> u32 {
+    MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "decide_managed_origin_reconciliation")]
+fn py_decide_managed_origin_reconciliation<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ManagedOriginReconciliationRequestWire =
+        provider_priority_dict_from_py(
+            request.as_any(),
+            "managed origin request",
+        )?;
+    let decision = core_decide_managed_origin_reconciliation(&request);
+    serialize_to_py(py, &decision)
 }
 
 // The machine-hood bindings above are migration shims. New code should use
@@ -14404,6 +14430,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
     m.add_function(wrap_pyfunction!(py_commit_shas_equivalent, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_managed_origin_reconciliation_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_managed_origin_reconciliation,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
@@ -16482,6 +16516,57 @@ mod tests {
                 Some("zeus".to_string())
             );
             assert_eq!(py_machine_hood_of("foo", known), None);
+        });
+    }
+
+    #[test]
+    fn managed_origin_decision_binding_returns_wire_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let version: u32 = module
+                .getattr("managed_origin_reconciliation_wire_schema_version")
+                .unwrap()
+                .call0()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(
+                version,
+                MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION
+            );
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "managed": true,
+                    "identity_verified": true,
+                    "checkout_dir": "/work/repo_2",
+                    "primary_checkout_dir": "/work/repo",
+                    "canonical_remote_url": "git@github.com:org/repo.git",
+                    "origin_url": "/work/repo",
+                    "origin_points_at_primary": true,
+                    "origin_matches_canonical": false,
+                    "effective_push_urls": ["/work/repo"],
+                    "effective_push_urls_pointing_at_primary": ["/work/repo"]
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let decision = module
+                .getattr("decide_managed_origin_reconciliation")
+                .unwrap()
+                .call1((request,))
+                .unwrap();
+            let decision = py_to_json_value(&decision).unwrap();
+
+            assert_eq!(decision["action"], json!("rewrite"));
+            assert_eq!(
+                decision["rewrite_origin_url"],
+                json!("git@github.com:org/repo.git")
+            );
+            assert_eq!(decision["rewrite_push_urls"], json!([]));
         });
     }
 
