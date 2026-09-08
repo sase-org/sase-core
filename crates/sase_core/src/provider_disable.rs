@@ -21,7 +21,9 @@ pub const PROVIDER_DISABLE_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const PROVIDER_DISABLE_STATE_FILENAME: &str = "llm_provider_disables.json";
 const PROVIDER_DISABLE_WIRE_SCHEMA_V1: u32 = 1;
 const PROVIDER_DISABLE_LOCK_FILENAME: &str = "llm_provider_disables.lock";
-const LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+// Launch and usage-limit paths can fan in through multiple short-lived processes,
+// so the lock wait needs scheduler headroom while staying bounded.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1161,7 +1163,7 @@ mod tests {
         let started = Instant::now();
         let result = get_provider_disables(temp.path(), NOW);
         assert!(matches!(result, Err(ProviderDisableError::LockTimeout)));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(3));
         FileExt::unlock(&holder).unwrap();
     }
 
@@ -1351,7 +1353,7 @@ mod tests {
             HARD,
         );
         assert!(matches!(result, Err(ProviderDisableError::LockTimeout)));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(3));
         FileExt::unlock(&holder).unwrap();
     }
 }
