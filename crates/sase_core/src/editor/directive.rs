@@ -2264,7 +2264,7 @@ mod tests {
                 documentation: "Remote workstation".to_string(),
             }],
             excluded_bead_ids: Vec::new(),
-            enabled_feature_flags: vec!["remote_dispatch".to_string()],
+            enabled_feature_flags: Vec::new(),
         };
 
         let insertions = |text: &str, character: u32| -> Vec<String> {

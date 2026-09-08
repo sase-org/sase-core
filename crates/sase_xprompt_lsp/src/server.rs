@@ -94,7 +94,6 @@ const MACHINE_CATALOG_ENV: &str = "SASE_XPROMPT_MACHINE_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
-const REMOTE_DISPATCH_ENV: &str = "SASE_REMOTE_DISPATCH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -124,8 +123,6 @@ struct ServerConfig {
     glossary_catalog: Option<PathBuf>,
     /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
     typed_launch_units: bool,
-    /// Startup-resolved `remote_dispatch` flag. Never re-read on keystrokes.
-    remote_dispatch: bool,
 }
 
 impl Default for ServerConfig {
@@ -142,7 +139,6 @@ impl Default for ServerConfig {
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
-            remote_dispatch: remote_dispatch_from_env(),
         }
     }
 }
@@ -450,10 +446,7 @@ impl XpromptLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.remote_dispatch,
-                    ),
+                    &enabled_feature_flags(config.typed_launch_units),
                     config.snippet_support,
                 ));
             }
@@ -677,7 +670,6 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
-                config.remote_dispatch,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -717,7 +709,6 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
-                config.remote_dispatch,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -1340,10 +1331,7 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates_with_flags(
                     token,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.remote_dispatch,
-                    ),
+                    &enabled_feature_flags(config.typed_launch_units),
                 )
             }
             CompletionContextKind::DirectiveArgument
@@ -1791,8 +1779,6 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         glossary_catalog: glossary_catalog_path(),
         typed_launch_units: typed_launch_units_from_initialize(params)
             .unwrap_or_else(typed_launch_units_from_env),
-        remote_dispatch: remote_dispatch_from_initialize(params)
-            .unwrap_or_else(remote_dispatch_from_env),
     }
 }
 
@@ -1814,22 +1800,6 @@ fn typed_launch_units_from_env() -> bool {
         .unwrap_or(false)
 }
 
-fn remote_dispatch_from_initialize(params: &InitializeParams) -> Option<bool> {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("remote_dispatch"))
-        .and_then(serde_json::Value::as_bool)
-}
-
-fn remote_dispatch_from_env() -> bool {
-    std::env::var(REMOTE_DISPATCH_ENV)
-        .ok()
-        .as_deref()
-        .map(env_flag_enabled)
-        .unwrap_or(false)
-}
-
 fn env_flag_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -1837,16 +1807,10 @@ fn env_flag_enabled(value: &str) -> bool {
     )
 }
 
-fn enabled_feature_flags(
-    typed_launch_units: bool,
-    remote_dispatch: bool,
-) -> Vec<String> {
+fn enabled_feature_flags(typed_launch_units: bool) -> Vec<String> {
     let mut flags = Vec::new();
     if typed_launch_units {
         flags.push("typed_launch_units".to_string());
-    }
-    if remote_dispatch {
-        flags.push("remote_dispatch".to_string());
     }
     flags
 }

@@ -595,7 +595,6 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
         "if" | "proc" => Some("typed_launch_units"),
-        "dispatch" => Some("remote_dispatch"),
         _ => None,
     }
 }
