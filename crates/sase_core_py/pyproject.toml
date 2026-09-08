@@ -35,6 +35,7 @@ Repository = "https://github.com/sase-org/sase-core"
 Issues = "https://github.com/sase-org/sase-core/issues"
 
 [project.scripts]
+sase_gateway = "sase_core_rs.gateway:main"
 sase_federation_worker = "sase_core_rs.federation_worker:main"
 
 # Distribution name (`sase-core-rs`) differs from the import module name

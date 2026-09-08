@@ -67,20 +67,20 @@ use crate::storage::{
     AuditLogEntryWire, DeviceTokenStore, StoreError,
 };
 use crate::wire::{
-    ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
-    EventRecordWire, FleetCatalogQueryWire, FleetContentReadRequestWire,
-    FleetContentReadResponseWire, FleetCredentialRecordWire,
-    FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
-    FleetDetailRequestWire, FleetDetailResponseWire,
-    FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
-    FleetEventStreamItemWire, FleetHelloResponseWire, FleetLaunchRequestWire,
-    FleetLaunchResponseWire, FleetLogicalBatchRequestWire,
-    FleetLogicalBatchResponseWire, FleetMutationRequestWire,
-    FleetMutationResponseWire, FleetProjectEligibilityRequestWire,
-    FleetProjectEligibilityResponseWire, FleetResyncReasonWire,
-    FleetSummaryResponseWire, FleetTokenRotateRequestWire,
-    FleetTokenRotateResponseWire, GatewayBindWire, GatewayBuildWire,
-    HealthResponseWire, MobileAgentForkRequestWire,
+    default_fleet_protocol_versions, ApiErrorCodeWire, ApiErrorWire,
+    DeviceRecordWire, EventPayloadWire, EventRecordWire, FleetCatalogQueryWire,
+    FleetContentReadRequestWire, FleetContentReadResponseWire,
+    FleetCredentialRecordWire, FleetCredentialRevokeRequestWire,
+    FleetCredentialRevokeResponseWire, FleetDetailRequestWire,
+    FleetDetailResponseWire, FleetEnrollmentRequestWire,
+    FleetEnrollmentResponseWire, FleetEventStreamItemWire, FleetHealthWire,
+    FleetHelloResponseWire, FleetLaunchRequestWire, FleetLaunchResponseWire,
+    FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
+    FleetMutationRequestWire, FleetMutationResponseWire,
+    FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
+    FleetResyncReasonWire, FleetSummaryResponseWire,
+    FleetTokenRotateRequestWire, FleetTokenRotateResponseWire, GatewayBindWire,
+    GatewayBuildWire, HealthResponseWire, MobileAgentForkRequestWire,
     MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
     MobileAgentKillResultWire, MobileAgentLaunchResultWire,
     MobileAgentListRequestWire, MobileAgentListResponseWire,
@@ -786,6 +786,9 @@ async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
         build: state.build,
         bind: state.bind,
         push: state.push_dispatcher.status(),
+        fleet: FleetHealthWire {
+            supported_protocol_versions: default_fleet_protocol_versions(),
+        },
     })
 }
 
@@ -7031,6 +7034,9 @@ exit 4
                     "last_success_at": null,
                     "last_failure_at": null,
                     "last_failure": null
+                },
+                "fleet": {
+                    "supported_protocol_versions": [crate::wire::FLEET_PROTOCOL_VERSION]
                 }
             })
         );

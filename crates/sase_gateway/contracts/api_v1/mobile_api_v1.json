@@ -110,6 +110,9 @@
       "payload": "EventPayloadWire",
       "schema_version": "u32"
     },
+    "FleetHealthWire": {
+      "supported_protocol_versions": "u32[]; canonical non-secret fleet protocol versions supported by this gateway"
+    },
     "GateActionRequestWire": {
       "defined_by": "sase_core::notifications::mobile",
       "feedback": "string|null",
@@ -148,6 +151,7 @@
     "HealthResponseWire": {
       "bind": "GatewayBindWire",
       "build": "GatewayBuildWire",
+      "fleet": "FleetHealthWire",
       "push": "PushGatewayStatusWire",
       "schema_version": "u32",
       "service": "sase_gateway",

@@ -208,6 +208,8 @@
 //! - `fleet_evaluate_attention_precondition(intent: dict, capabilities: dict, observed: dict | None = None) -> dict`
 //! - `fleet_decide_attention_notices(current: list[dict], ledger: list[dict], retention_window_seconds: float, now_unix: float) -> dict`
 //! - `fleet_validate_connection_plan(plan: dict) -> dict`
+//! - `fleet_issue_bootstrap(sase_home: str, request: dict) -> dict`
+//! - `gateway_main(args: list[str]) -> None`
 //! - `federation_worker_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
 //! - `fleet_classify_cache_freshness(request: dict) -> dict`
@@ -11853,6 +11855,30 @@ fn fleet_contract_error_to_pyerr(err: FleetContractDomainError) -> PyErr {
     }
 }
 
+fn fleet_store_error_to_pyerr(err: sase_gateway::FleetStoreError) -> PyErr {
+    let message = err.to_string();
+    match &err {
+        sase_gateway::FleetStoreError::Validation(_)
+        | sase_gateway::FleetStoreError::IncompatibleProtocol
+        | sase_gateway::FleetStoreError::BootstrapExpired
+        | sase_gateway::FleetStoreError::BootstrapConsumed
+        | sase_gateway::FleetStoreError::BootstrapRejected
+        | sase_gateway::FleetStoreError::CredentialExpired
+        | sase_gateway::FleetStoreError::CredentialMissing
+        | sase_gateway::FleetStoreError::CredentialRevoked
+        | sase_gateway::FleetStoreError::ScopeDenied(_)
+        | sase_gateway::FleetStoreError::FleetContract(
+            FleetContractDomainError::Validation(_),
+        ) => PyValueError::new_err(message),
+        sase_gateway::FleetStoreError::LockPoisoned
+        | sase_gateway::FleetStoreError::Io { .. }
+        | sase_gateway::FleetStoreError::Json { .. }
+        | sase_gateway::FleetStoreError::FleetContract(_) => {
+            PyRuntimeError::new_err(message)
+        }
+    }
+}
+
 fn fleet_wire_from_pydict<T: DeserializeOwned>(
     dict: &Bound<'_, PyDict>,
     label: &str,
@@ -12391,6 +12417,32 @@ fn py_fleet_decide_attention_notices<'py>(
         })
         .map_err(fleet_contract_error_to_pyerr)?;
     fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_issue_bootstrap")]
+fn py_fleet_issue_bootstrap<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: sase_gateway::FleetBootstrapIssueRequestWire =
+        fleet_wire_from_pydict(request, "fleet bootstrap issue request")?;
+    let home = PathBuf::from(sase_home);
+    let result = py
+        .allow_threads(|| {
+            let store = sase_gateway::FleetCredentialStore::new(home);
+            store.issue_bootstrap(request, sase_gateway::current_unix_time())
+        })
+        .map_err(fleet_store_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "gateway_main")]
+fn py_gateway_main(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
+    py.allow_threads(|| sase_gateway::run_gateway_cli(args))
+        .map_err(PyRuntimeError::new_err)
 }
 
 #[pyfunction]
@@ -13760,6 +13812,116 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
     });
 }
 
+#[test]
+fn gateway_and_bootstrap_bindings_are_registered() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+
+        assert!(module.getattr("gateway_main").unwrap().is_callable());
+        assert!(module
+            .getattr("fleet_issue_bootstrap")
+            .unwrap()
+            .is_callable());
+    });
+}
+
+#[test]
+fn fleet_issue_bootstrap_binding_delegates_to_store_without_persisting_secret()
+{
+    use serde_json::json;
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let home = tempfile::tempdir().unwrap();
+        let request = json!({
+            "schema_version": 1,
+            "requested_scopes": [
+                " fleet.summary.read ",
+                "fleet.hello",
+                "fleet.hello"
+            ],
+            "supported_protocol_versions": [99, 1],
+            "expires_at_unix": null,
+            "installation_pin": null
+        });
+        let request_obj =
+            json_value_to_py(py, &request).unwrap().into_bound(py);
+        let request_dict = request_obj.downcast::<PyDict>().unwrap();
+
+        let before = sase_gateway::current_unix_time();
+        let response = py_fleet_issue_bootstrap(
+            py,
+            home.path().to_str().unwrap(),
+            request_dict,
+        )
+        .unwrap();
+        let after = sase_gateway::current_unix_time();
+        let response = py_to_json_value(response.bind(py)).unwrap();
+
+        assert_eq!(
+            response["schema_version"],
+            json!(sase_gateway::FLEET_API_WIRE_SCHEMA_VERSION)
+        );
+        assert!(response["bootstrap_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("boot_"));
+        let secret = response["bootstrap_secret"].as_str().unwrap();
+        assert!(secret.starts_with("sase_bootstrap_"));
+        assert_eq!(
+            response["allowed_scopes"],
+            json!(["fleet.hello", "fleet.summary.read"])
+        );
+        assert_eq!(
+            response["protocol_versions"],
+            json!([sase_gateway::FLEET_PROTOCOL_VERSION, 99])
+        );
+        assert!(!response["pinned_installation_id"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        let expires_at = response["expires_at_unix"].as_f64().unwrap();
+        assert!(
+            expires_at >= before + sase_gateway::FLEET_BOOTSTRAP_TTL_SECONDS
+        );
+        assert!(
+            expires_at
+                <= after + sase_gateway::FLEET_BOOTSTRAP_TTL_SECONDS + 1.0
+        );
+
+        let auth_path = home
+            .path()
+            .join(sase_gateway::FLEET_AUTH_DIR)
+            .join(sase_gateway::FLEET_AUTH_FILE);
+        let stored = std::fs::read_to_string(auth_path).unwrap();
+        assert!(!stored.contains(secret));
+        assert!(stored.contains("secret_hash"));
+
+        let pinned_request = json!({
+            "schema_version": 1,
+            "requested_scopes": [],
+            "supported_protocol_versions": [1],
+            "expires_at_unix": null,
+            "installation_pin": "not-the-current-installation"
+        });
+        let pinned_obj = json_value_to_py(py, &pinned_request)
+            .unwrap()
+            .into_bound(py);
+        let pinned_dict = pinned_obj.downcast::<PyDict>().unwrap();
+        let err = py_fleet_issue_bootstrap(
+            py,
+            home.path().to_str().unwrap(),
+            pinned_dict,
+        )
+        .unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        assert!(err.to_string().contains("installation_pin does not match"));
+        assert!(!err.to_string().contains(secret));
+    });
+}
+
 #[cfg(windows)]
 fn configure_detached_process(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -14882,6 +15044,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_decide_attention_notices, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_issue_bootstrap, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gateway_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;

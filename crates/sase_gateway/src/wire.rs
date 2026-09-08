@@ -60,6 +60,11 @@ pub struct GatewayBindWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetHealthWire {
+    pub supported_protocol_versions: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponseWire {
     pub schema_version: u32,
     pub status: String,
@@ -68,6 +73,7 @@ pub struct HealthResponseWire {
     pub build: GatewayBuildWire,
     pub bind: GatewayBindWire,
     pub push: PushGatewayStatusWire,
+    pub fleet: FleetHealthWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -801,6 +807,9 @@ mod tests {
                 last_failure_at: None,
                 last_failure: None,
             },
+            fleet: FleetHealthWire {
+                supported_protocol_versions: default_fleet_protocol_versions(),
+            },
         };
 
         assert_eq!(
@@ -828,6 +837,9 @@ mod tests {
                     "last_success_at": null,
                     "last_failure_at": null,
                     "last_failure": null
+                },
+                "fleet": {
+                    "supported_protocol_versions": [FLEET_PROTOCOL_VERSION]
                 }
             })
         );

@@ -189,6 +189,7 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains(r#""service":"sase_gateway""#));
+        assert!(response.contains(r#""supported_protocol_versions":[1]"#));
         handle.abort();
     }
 
@@ -220,6 +221,10 @@ mod tests {
         assert_eq!(health["service"], "sase_gateway");
         assert_eq!(health["push"]["provider"], "test");
         assert_eq!(health["push"]["enabled"], true);
+        assert_eq!(
+            health["fleet"]["supported_protocol_versions"],
+            serde_json::json!([crate::wire::FLEET_PROTOCOL_VERSION])
+        );
 
         let (start_status, start) = request_json(
             addr,

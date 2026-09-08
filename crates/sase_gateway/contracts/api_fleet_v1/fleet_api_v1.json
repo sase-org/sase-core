@@ -184,7 +184,7 @@
       "local_only": true,
       "requested_scopes": "string[]; empty means default fleet scopes",
       "schema_version": "u32",
-      "supported_protocol_versions": "u32[]; empty means [1]"
+      "supported_protocol_versions": "u32[]; empty means the current fleet protocol version"
     },
     "FleetBootstrapIssueResponseWire": {
       "allowed_scopes": "string[]",
@@ -293,7 +293,7 @@
       "pinned_installation_id": "string",
       "requested_scopes": "string[]; empty means bootstrap-allowed defaults",
       "schema_version": "u32",
-      "supported_protocol_versions": "u32[]; empty means [1]"
+      "supported_protocol_versions": "u32[]; empty means the current fleet protocol version"
     },
     "FleetEnrollmentResponseWire": {
       "capabilities": "CapabilitySetWire",
@@ -517,7 +517,7 @@
     },
     "FleetTokenRotateRequestWire": {
       "schema_version": "u32",
-      "supported_protocol_versions": "u32[]; empty means [1]"
+      "supported_protocol_versions": "u32[]; empty means the current fleet protocol version"
     },
     "FleetTokenRotateResponseWire": {
       "credential": "FleetCredentialRecordWire",

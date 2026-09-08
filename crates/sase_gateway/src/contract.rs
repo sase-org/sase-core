@@ -13,7 +13,10 @@ use crate::fleet_auth::{
     FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE, FLEET_SCOPE_PROJECTS_READ,
     FLEET_SCOPE_REVOKE, FLEET_SCOPE_ROTATE, FLEET_SCOPE_SUMMARY_READ,
 };
-use crate::wire::{FLEET_API_WIRE_SCHEMA_VERSION, GATEWAY_WIRE_SCHEMA_VERSION};
+use crate::wire::{
+    FLEET_API_WIRE_SCHEMA_VERSION, FLEET_PROTOCOL_VERSION,
+    GATEWAY_WIRE_SCHEMA_VERSION,
+};
 use sase_core::{
     FLEET_READ_DEFAULT_CONTENT_BYTES, FLEET_READ_DEFAULT_PAGE_ROWS,
     FLEET_READ_DEFAULT_REPLAY_EVENTS, FLEET_READ_MAX_BATCH_IDS,
@@ -370,7 +373,11 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "version": "string",
                 "build": "GatewayBuildWire",
                 "bind": "GatewayBindWire",
-                "push": "PushGatewayStatusWire"
+                "push": "PushGatewayStatusWire",
+                "fleet": "FleetHealthWire"
+            },
+            "FleetHealthWire": {
+                "supported_protocol_versions": "u32[]; canonical non-secret fleet protocol versions supported by this gateway"
             },
             "PushGatewayStatusWire": {
                 "provider": "disabled|test|fcm",
@@ -947,7 +954,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             }
         },
         "protocol_negotiation": {
-            "supported_versions": [1],
+            "supported_versions": [FLEET_PROTOCOL_VERSION],
             "selection": "highest mutually supported version",
             "hello_header": "X-SASE-Fleet-Protocol-Versions",
             "incompatible_error": "incompatible_protocol"
@@ -1142,7 +1149,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "local_only": true,
                 "schema_version": "u32",
                 "requested_scopes": "string[]; empty means default fleet scopes",
-                "supported_protocol_versions": "u32[]; empty means [1]",
+                "supported_protocol_versions": "u32[]; empty means the current fleet protocol version",
                 "expires_at_unix": "f64|null; default now + 600s",
                 "installation_pin": "string|null; optional current-installation precondition"
             },
@@ -1574,7 +1581,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "bootstrap_secret": "string",
                 "controller": "FleetControllerMetadataWire",
                 "requested_scopes": "string[]; empty means bootstrap-allowed defaults",
-                "supported_protocol_versions": "u32[]; empty means [1]",
+                "supported_protocol_versions": "u32[]; empty means the current fleet protocol version",
                 "pinned_installation_id": "string"
             },
             "FleetEnrollmentResponseWire": {
@@ -1609,7 +1616,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             },
             "FleetTokenRotateRequestWire": {
                 "schema_version": "u32",
-                "supported_protocol_versions": "u32[]; empty means [1]"
+                "supported_protocol_versions": "u32[]; empty means the current fleet protocol version"
             },
             "FleetTokenRotateResponseWire": {
                 "schema_version": "u32",

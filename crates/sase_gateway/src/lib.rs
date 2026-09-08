@@ -2,6 +2,7 @@
 
 //! Local host gateway skeleton for SASE mobile clients.
 
+pub mod cli;
 pub mod contract;
 pub mod daemon;
 pub mod federation_worker;
@@ -17,6 +18,7 @@ pub mod server;
 pub mod storage;
 pub mod wire;
 
+pub use cli::run_gateway_cli;
 pub use contract::{
     api_v1_contract_snapshot, fleet_api_v1_contract_snapshot,
     write_api_v1_contract_snapshot, write_fleet_api_v1_contract_snapshot,
@@ -92,7 +94,7 @@ pub use wire::{
     FleetCredentialRevokeRequestWire, FleetCredentialRevokeResponseWire,
     FleetDetailRequestWire, FleetDetailResponseWire,
     FleetEnrollmentRequestWire, FleetEnrollmentResponseWire,
-    FleetEventStreamItemWire, FleetHelloResponseWire,
+    FleetEventStreamItemWire, FleetHealthWire, FleetHelloResponseWire,
     FleetInvalidationEventWire, FleetInvalidationKindWire,
     FleetLaunchReceiptWire, FleetLaunchRequestWire, FleetLaunchResponseWire,
     FleetLogicalAgentCountsWire, FleetLogicalBatchEntryWire,
