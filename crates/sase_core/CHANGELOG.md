@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.47](https://github.com/sase-org/sase-core/compare/v0.32.46...v0.32.47) - 2026-09-08
+
+### Added
+
+- *(artifact-link)* add publication retry policy
+
 ## [0.32.46](https://github.com/sase-org/sase-core/compare/v0.32.45...v0.32.46) - 2026-09-08
 
 ### Added
