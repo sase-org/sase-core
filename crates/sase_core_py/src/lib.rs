@@ -155,6 +155,8 @@
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
+//! - `model_alias_shortcut_context(text: str, position: dict) -> dict | None`
+//! - `model_alias_shortcut_edit(text: str, position: dict, entries: list[dict], selected_alias: str) -> dict | None`
 //! - `fenced_block_ranges(text: str) -> list[tuple[int, int]]`
 //! - `fenced_block_details(text: str) -> list[dict]`
 //! - `scan_directive_owned_fences(text: str) -> dict`
@@ -1223,9 +1225,11 @@ use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
+    editor_detect_model_alias_shortcut_context as core_detect_model_alias_shortcut_context,
+    editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
-    validate_snippet_trigger as core_validate_snippet_trigger,
+    validate_snippet_trigger as core_validate_snippet_trigger, EditorPosition,
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
     XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
@@ -1922,6 +1926,40 @@ fn py_filter_model_completion_entries(
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_alias_shortcut_context")]
+fn py_model_alias_shortcut_context(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    core_detect_model_alias_shortcut_context(text, position)
+        .map(|context| serialize_to_py(py, &context))
+        .transpose()
+}
+
+#[pyfunction]
+#[pyo3(name = "model_alias_shortcut_edit")]
+fn py_model_alias_shortcut_edit(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+    entries: &Bound<'_, PyList>,
+    selected_alias: &str,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    let entries = model_completion_entries_from_py_list(entries)?;
+    core_plan_model_alias_shortcut_edit(
+        text,
+        position,
+        &entries,
+        selected_alias,
+    )
+    .map(|edit| serialize_to_py(py, &edit))
+    .transpose()
 }
 
 /// The nested snippet session engine's single entry point: apply one wire
@@ -9073,6 +9111,16 @@ fn model_completion_entries_from_py_list(
     Ok(values)
 }
 
+fn editor_position_from_py(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<EditorPosition> {
+    serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "position is not a valid EditorPosition dict with UTF-16 line/character units: {error}"
+        ))
+    })
+}
+
 fn hooks_from_py(list: &Bound<'_, PyList>) -> PyResult<Vec<HookWire>> {
     let mut values = Vec::with_capacity(list.len());
     for (idx, item) in list.iter().enumerate() {
@@ -14084,6 +14132,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_model_alias_shortcut_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_model_alias_shortcut_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_snippet_session_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
@@ -16736,6 +16786,131 @@ mod tests {
                 .to_string();
             assert!(
                 error.contains("missing field"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn model_alias_shortcut_bindings_return_plain_dict_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_model_alias_shortcut_context, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_model_alias_shortcut_edit, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            let position =
+                json_value_to_py(py, &json!({"line": 0, "character": 6}))
+                    .unwrap();
+            let entries = json_value_to_py(
+                py,
+                &json!([
+                    model_completion_entry_json(
+                        "@large",
+                        "user_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "@small",
+                        "implicit_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "large-model",
+                        "model",
+                        "openai",
+                        [],
+                        0,
+                    ),
+                ]),
+            )
+            .unwrap();
+
+            let context = module
+                .getattr("model_alias_shortcut_context")
+                .unwrap()
+                .call1(("🙂 *la", position.clone_ref(py)))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&context).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "query": "la",
+                    "token": "*la",
+                    "caret": {"line": 0, "character": 6},
+                    "token_range": {
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 6}
+                    },
+                    "replacement_range": {
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 6}
+                    }
+                })
+            );
+
+            let edit = module
+                .getattr("model_alias_shortcut_edit")
+                .unwrap()
+                .call1((
+                    "🙂 *la",
+                    position.clone_ref(py),
+                    entries.clone_ref(py),
+                    "@large",
+                ))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&edit).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "alias": "@large",
+                    "replacement": "%m:@large ",
+                    "edit": {
+                        "range": {
+                            "start": {"line": 0, "character": 3},
+                            "end": {"line": 0, "character": 6}
+                        },
+                        "new_text": "%m:@large "
+                    },
+                    "caret": {"line": 0, "character": 13}
+                })
+            );
+
+            let stale = module
+                .getattr("model_alias_shortcut_edit")
+                .unwrap()
+                .call1(("🙂 *la", position, entries, "@small"))
+                .unwrap();
+            assert!(stale.is_none());
+        });
+    }
+
+    #[test]
+    fn model_alias_shortcut_binding_rejects_malformed_position() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let error = py_model_alias_shortcut_context(
+                py,
+                "*",
+                PyDict::new_bound(py).as_any(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("UTF-16 line/character"),
                 "unexpected error: {error}"
             );
         });

@@ -7,6 +7,7 @@ pub mod file;
 mod frontmatter;
 pub mod fuzzy;
 pub mod hover;
+pub mod model_alias_shortcut;
 pub mod placeholder;
 pub mod token;
 pub mod wire;
@@ -69,6 +70,11 @@ pub use frontmatter::{
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::hover_at_position;
+pub use model_alias_shortcut::{
+    detect_model_alias_shortcut_context, plan_model_alias_shortcut_edit,
+    ModelAliasShortcutContextWire, ModelAliasShortcutEditWire,
+    MODEL_ALIAS_SHORTCUT_WIRE_SCHEMA_VERSION,
+};
 pub use placeholder::{
     build_placeholder_completion_candidates,
     detect_placeholder_context_at_position, extract_placeholder_spans,
