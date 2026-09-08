@@ -4,6 +4,7 @@
 mod inlet;
 mod managed_table;
 mod path;
+mod publication_retry;
 mod relation;
 mod row_resolution;
 mod wire;
@@ -31,6 +32,19 @@ pub use path::{
     ArtifactCompanionPathWire, ArtifactMdPathKindWire,
     ArtifactMdPathRequestWire, ArtifactMdPathWire,
     ARTIFACT_MD_PATH_WIRE_SCHEMA_VERSION,
+};
+pub use publication_retry::{
+    artifact_link_publication_due, artifact_link_publication_mark_attempt,
+    artifact_link_publication_record_key,
+    artifact_link_publication_register_pending,
+    retry_backoff_seconds_after_attempt,
+    ArtifactLinkPublicationAttemptStatusWire,
+    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationDueWire,
+    ArtifactLinkPublicationObservationWire, ArtifactLinkPublicationRecordWire,
+    ARTIFACT_LINK_PUBLICATION_AGING_WARNING_SECONDS,
+    ARTIFACT_LINK_PUBLICATION_INITIAL_RETRY_SECONDS,
+    ARTIFACT_LINK_PUBLICATION_MAX_BACKOFF_SECONDS,
+    ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
 };
 pub use relation::{
     builtin_artifact_relations, lookup_artifact_relation,

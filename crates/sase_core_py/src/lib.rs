@@ -696,6 +696,10 @@ use sase_core::artifact_file::{
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_link::{
+    artifact_link_publication_due as core_artifact_link_publication_due,
+    artifact_link_publication_mark_attempt as core_artifact_link_publication_mark_attempt,
+    artifact_link_publication_record_key as core_artifact_link_publication_record_key,
+    artifact_link_publication_register_pending as core_artifact_link_publication_register_pending,
     artifact_md_path as core_artifact_md_path,
     artifact_row_index_keys as core_artifact_row_index_keys,
     artifact_row_ref_lookup_keys as core_artifact_row_ref_lookup_keys,
@@ -714,9 +718,12 @@ use sase_core::artifact_link::{
     upsert_artifact_link_row as core_upsert_artifact_link_row,
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
-    ArtifactLinkError, ArtifactLinkOriginWire, ArtifactLinkRowWire,
+    ArtifactLinkError, ArtifactLinkOriginWire,
+    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationObservationWire,
+    ArtifactLinkPublicationRecordWire, ArtifactLinkRowWire,
     ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
     ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
+    ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
     ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
@@ -5744,6 +5751,36 @@ fn artifact_row_ref_query_from_pydict(
     })
 }
 
+fn artifact_link_publication_observation_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkPublicationObservationWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "observation is not a valid ArtifactLinkPublicationObservationWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_publication_record_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkPublicationRecordWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "record is not a valid ArtifactLinkPublicationRecordWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_publication_attempt_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkPublicationAttemptWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "attempt is not a valid ArtifactLinkPublicationAttemptWire dict: {error}"
+        ))
+    })
+}
+
 /// Return the v2 artifact-link row schema version.
 #[pyfunction]
 #[pyo3(name = "artifact_link_row_schema_version")]
@@ -5756,6 +5793,99 @@ fn py_artifact_link_row_schema_version() -> u64 {
 #[pyo3(name = "artifact_row_resolution_wire_schema_version")]
 fn py_artifact_row_resolution_wire_schema_version() -> u64 {
     ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION
+}
+
+/// Return the artifact-link publication retry state schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_state_wire_schema_version")]
+fn py_artifact_link_publication_state_wire_schema_version() -> u64 {
+    u64::from(ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION)
+}
+
+/// Return the stable state key for one artifact-link publication root.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_record_key")]
+fn py_artifact_link_publication_record_key(
+    project_key: &str,
+    role: &str,
+    repo_root: &str,
+    remote_url: &str,
+    upstream: &str,
+) -> PyResult<String> {
+    core_artifact_link_publication_record_key(
+        project_key,
+        role,
+        repo_root,
+        remote_url,
+        upstream,
+    )
+    .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Register or refresh one pending artifact-link publication observation.
+#[pyfunction]
+#[pyo3(
+    name = "artifact_link_publication_register_pending",
+    signature = (observation, now, current=None)
+)]
+fn py_artifact_link_publication_register_pending<'py>(
+    py: Python<'py>,
+    observation: &Bound<'py, PyDict>,
+    now: f64,
+    current: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let current_record = current
+        .map(artifact_link_publication_record_from_pydict)
+        .transpose()?;
+    let observation =
+        artifact_link_publication_observation_from_pydict(observation)?;
+    let record = core_artifact_link_publication_register_pending(
+        current_record.as_ref(),
+        observation,
+        now,
+    )
+    .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(record).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Classify whether a pending artifact-link publication is due and aging.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_due")]
+fn py_artifact_link_publication_due<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let record = artifact_link_publication_record_from_pydict(record)?;
+    let due = core_artifact_link_publication_due(record, now)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(due).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Update retry state after a bounded publication worker attempt.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_mark_attempt")]
+fn py_artifact_link_publication_mark_attempt<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+    attempt: &Bound<'py, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let record = artifact_link_publication_record_from_pydict(record)?;
+    let attempt = artifact_link_publication_attempt_from_pydict(attempt)?;
+    let record =
+        core_artifact_link_publication_mark_attempt(record, attempt, now)
+            .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(record).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Split an artifact-link ref string into canonical kind and payload.
@@ -14643,6 +14773,23 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_row_resolution_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_publication_state_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_publication_record_key,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_publication_register_pending,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_publication_due, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_publication_mark_attempt,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_ref_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_index_keys, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_ref_lookup_keys, m)?)?;
@@ -19652,6 +19799,11 @@ MENTORS:
             for name in [
                 "artifact_link_row_schema_version",
                 "artifact_row_resolution_wire_schema_version",
+                "artifact_link_publication_state_wire_schema_version",
+                "artifact_link_publication_record_key",
+                "artifact_link_publication_register_pending",
+                "artifact_link_publication_due",
+                "artifact_link_publication_mark_attempt",
                 "artifact_link_ref_parts",
                 "artifact_row_index_keys",
                 "artifact_row_ref_lookup_keys",
@@ -19675,6 +19827,70 @@ MENTORS:
             }
             assert_eq!(py_artifact_link_row_schema_version(), 2);
             assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
+            assert_eq!(
+                py_artifact_link_publication_state_wire_schema_version(),
+                1
+            );
+            let publication_key = py_artifact_link_publication_record_key(
+                "gh_acme__widget",
+                "plans",
+                "/tmp/plans",
+                "git@example.com:acme/widget--plans.git",
+                "origin/main",
+            )
+            .unwrap();
+            assert!(
+                publication_key.starts_with("artifact-link-publication:v1:")
+            );
+            let observation_value = json!({
+                "version": 1,
+                "project_key": "gh_acme__widget",
+                "role": "plans",
+                "repo_root": "/tmp/plans",
+                "remote_url": "git@example.com:acme/widget--plans.git",
+                "upstream": "origin/main",
+                "head_revision": "abc123",
+                "oldest_unpublished_at": 1_000.0
+            });
+            let observation_object =
+                json_value_to_py(py, &observation_value).unwrap();
+            let observation =
+                observation_object.bind(py).downcast::<PyDict>().unwrap();
+            let record = py_artifact_link_publication_register_pending(
+                py,
+                observation,
+                1_200.0,
+                None,
+            )
+            .unwrap();
+            let record_value = py_to_json_value(record.bind(py)).unwrap();
+            assert_eq!(record_value["key"], json!(publication_key));
+            assert_eq!(record_value["first_pending_at"], json!(1_000.0));
+            assert_eq!(record_value["next_due_at"], json!(3_600.0));
+            let record_dict = record.bind(py).downcast::<PyDict>().unwrap();
+            let due =
+                py_artifact_link_publication_due(py, record_dict, 3_600.0)
+                    .unwrap();
+            let due_value = py_to_json_value(due.bind(py)).unwrap();
+            assert_eq!(due_value["due"], json!(true));
+            let attempt_value = json!({
+                "status": "failed",
+                "error": "network",
+                "log_path": "/tmp/sase-sync.log"
+            });
+            let attempt_object = json_value_to_py(py, &attempt_value).unwrap();
+            let attempt = attempt_object.bind(py).downcast::<PyDict>().unwrap();
+            let failed_record = py_artifact_link_publication_mark_attempt(
+                py,
+                record_dict,
+                attempt,
+                3_600.0,
+            )
+            .unwrap();
+            let failed_value =
+                py_to_json_value(failed_record.bind(py)).unwrap();
+            assert_eq!(failed_value["attempt_count"], json!(1));
+            assert_eq!(failed_value["next_due_at"], json!(7_200.0));
             let ref_parts =
                 py_artifact_link_ref_parts(py, "@plans:202609/a.md#section")
                     .unwrap()
