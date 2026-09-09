@@ -42,6 +42,13 @@ impl ArtifactLinkError {
             message: message.into(),
         }
     }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            kind: "conflict".to_string(),
+            message: message.into(),
+        }
+    }
 }
 
 impl From<ArtifactRefError> for ArtifactLinkError {

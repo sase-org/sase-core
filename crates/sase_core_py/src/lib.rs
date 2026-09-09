@@ -473,6 +473,7 @@
 //! - `artifact_link_canonicalize(value: str) -> str`
 //! - `artifact_link_validate_row(row: dict) -> dict`
 //! - `artifact_link_upsert_row(rows: list[dict], row: dict) -> dict`
+//! - `artifact_link_merge_indexes(base: dict, ours: dict, theirs: dict) -> dict`
 //! - `artifact_link_eligibility_wire_schema_version() -> int`
 //! - `decide_artifact_link_eligibility(request: dict) -> dict`
 //! - `artifact_link_release_evidence(decision: dict, recorded_at: str) -> dict`
@@ -730,6 +731,7 @@ use sase_core::artifact_link::{
     canonicalize_artifact_link_ref as core_canonicalize_artifact_link_ref,
     companion_md_path as core_companion_md_path,
     lookup_artifact_relation as core_lookup_artifact_relation,
+    merge_artifact_link_indexes as core_merge_artifact_link_indexes,
     parse_artifact_link_frontmatter_inlet as core_parse_artifact_link_frontmatter_inlet,
     parse_artifact_link_ref_parts as core_parse_artifact_link_ref_parts,
     parse_links_block as core_parse_links_block,
@@ -744,9 +746,10 @@ use sase_core::artifact_link::{
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
     ArtifactLinkAliasWire, ArtifactLinkError, ArtifactLinkEventWire,
-    ArtifactLinkOriginWire, ArtifactLinkPublicationAttemptWire,
-    ArtifactLinkPublicationObservationWire, ArtifactLinkPublicationRecordWire,
-    ArtifactLinkRowWire, ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
+    ArtifactLinkIndexWire, ArtifactLinkOriginWire,
+    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationObservationWire,
+    ArtifactLinkPublicationRecordWire, ArtifactLinkRowWire,
+    ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
     ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
@@ -6426,6 +6429,37 @@ fn py_artifact_link_upsert_row(
         "row": outcome.row,
         "rows": parsed,
     });
+    json_value_to_py(py, &value)
+}
+
+fn artifact_link_index_from_pydict(
+    label: &str,
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkIndexWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "{label} is not a valid ArtifactLinkIndexWire dict: {error}"
+        ))
+    })
+}
+
+/// Merge three per-artifact link indexes with conflict-aware semantics.
+#[pyfunction]
+#[pyo3(name = "artifact_link_merge_indexes")]
+fn py_artifact_link_merge_indexes(
+    py: Python<'_>,
+    base: &Bound<'_, PyDict>,
+    ours: &Bound<'_, PyDict>,
+    theirs: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let base = artifact_link_index_from_pydict("base", base)?;
+    let ours = artifact_link_index_from_pydict("ours", ours)?;
+    let theirs = artifact_link_index_from_pydict("theirs", theirs)?;
+    let merged = core_merge_artifact_link_indexes(&base, &ours, &theirs)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(merged).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
     json_value_to_py(py, &value)
 }
 
@@ -15412,6 +15446,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_artifact_link_canonicalize, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_validate_row, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_upsert_row, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_merge_indexes, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_link_eligibility_wire_schema_version,
         m
@@ -21156,6 +21191,7 @@ MENTORS:
                 "artifact_link_canonicalize",
                 "artifact_link_validate_row",
                 "artifact_link_upsert_row",
+                "artifact_link_merge_indexes",
                 "artifact_relations_builtins",
                 "artifact_relation_lookup",
                 "artifact_relation_label",
@@ -21395,6 +21431,60 @@ MENTORS:
                 py_artifact_link_canonicalize("plans:202608/report.md")
                     .unwrap(),
                 "plan:202608/report.md"
+            );
+            let base_index_value = json!({
+                "schema_version": 2,
+                "artifact_ref": "plan:202609/a.md",
+                "rows": []
+            });
+            let local_index_value = json!({
+                "schema_version": 2,
+                "artifact_ref": "plans:202609/a.md",
+                "rows": [{
+                    "schema_version": 2,
+                    "source_ref": "agent:local",
+                    "relation": "cites",
+                    "target_ref": "plan:202609/a.md",
+                    "description": "local citation",
+                    "origin": "manual",
+                    "created_by": "agent:local",
+                    "created_at": "2026-09-03T00:00:00Z",
+                    "uses": 1
+                }]
+            });
+            let upstream_index_value = json!({
+                "schema_version": 2,
+                "artifact_ref": "plan:202609/a.md",
+                "rows": [{
+                    "schema_version": 2,
+                    "source_ref": "agent:upstream",
+                    "relation": "cites",
+                    "target_ref": "plan:202609/a.md",
+                    "description": "upstream citation",
+                    "origin": "manual",
+                    "created_by": "agent:upstream",
+                    "created_at": "2026-09-02T00:00:00Z",
+                    "uses": 1
+                }]
+            });
+            let base_object = json_value_to_py(py, &base_index_value).unwrap();
+            let local_object =
+                json_value_to_py(py, &local_index_value).unwrap();
+            let upstream_object =
+                json_value_to_py(py, &upstream_index_value).unwrap();
+            let merged = py_artifact_link_merge_indexes(
+                py,
+                base_object.bind(py).downcast::<PyDict>().unwrap(),
+                local_object.bind(py).downcast::<PyDict>().unwrap(),
+                upstream_object.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let merged = py_to_json_value(merged.bind(py)).unwrap();
+            assert_eq!(merged["artifact_ref"], json!("plan:202609/a.md"));
+            assert_eq!(merged["rows"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                merged["rows"][0]["source_ref"],
+                json!("agent:upstream")
             );
             let relations = py_artifact_relations_builtins(py).unwrap();
             let relations = py_to_json_value(relations.bind(py)).unwrap();

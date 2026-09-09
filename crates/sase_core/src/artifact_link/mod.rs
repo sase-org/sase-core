@@ -4,6 +4,7 @@
 mod events;
 mod inlet;
 mod managed_table;
+mod merge;
 mod path;
 mod publication_retry;
 mod relation;
@@ -43,6 +44,7 @@ pub use managed_table::{
     REFERENCED_BY_BLOCK_HEADING, REFERENCED_BY_BLOCK_START_MARKER,
     REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION,
 };
+pub use merge::merge_artifact_link_indexes;
 pub use path::{
     artifact_md_path, bead_lineage_root, bead_page_relpath, companion_md_path,
     ArtifactCompanionPathWire, ArtifactMdPathKindWire,
