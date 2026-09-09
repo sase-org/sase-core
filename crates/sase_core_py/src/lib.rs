@@ -712,6 +712,11 @@ use sase_core::artifact_file::{
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_link::{
+    artifact_link_event_canonical_json as core_artifact_link_event_canonical_json,
+    artifact_link_event_digest as core_artifact_link_event_digest,
+    artifact_link_event_path_for_digest as core_artifact_link_event_path_for_digest,
+    artifact_link_event_validate_bytes as core_artifact_link_event_validate_bytes,
+    artifact_link_event_validate_path as core_artifact_link_event_validate_path,
     artifact_link_publication_due as core_artifact_link_publication_due,
     artifact_link_publication_mark_attempt as core_artifact_link_publication_mark_attempt,
     artifact_link_publication_record_key as core_artifact_link_publication_record_key,
@@ -720,25 +725,30 @@ use sase_core::artifact_link::{
     artifact_row_index_keys as core_artifact_row_index_keys,
     artifact_row_ref_lookup_keys as core_artifact_row_ref_lookup_keys,
     builtin_artifact_relations as core_builtin_artifact_relations,
+    canonicalize_artifact_link_alias as core_canonicalize_artifact_link_alias,
+    canonicalize_artifact_link_event_json_value as core_canonicalize_artifact_link_event_json_value,
     canonicalize_artifact_link_ref as core_canonicalize_artifact_link_ref,
     companion_md_path as core_companion_md_path,
     lookup_artifact_relation as core_lookup_artifact_relation,
     parse_artifact_link_frontmatter_inlet as core_parse_artifact_link_frontmatter_inlet,
     parse_artifact_link_ref_parts as core_parse_artifact_link_ref_parts,
     parse_links_block as core_parse_links_block,
+    reduce_link_events as core_reduce_link_events,
     relation_label_from_perspective as core_relation_label_from_perspective,
     remove_links_block as core_remove_links_block,
     render_links_block as core_render_links_block,
+    resolve_artifact_link_event_aliases as core_resolve_artifact_link_event_aliases,
     resolve_artifact_row_identity as core_resolve_artifact_row_identity,
     strip_links_block as core_strip_links_block,
     upsert_artifact_link_row as core_upsert_artifact_link_row,
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
-    ArtifactLinkError, ArtifactLinkOriginWire,
-    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationObservationWire,
-    ArtifactLinkPublicationRecordWire, ArtifactLinkRowWire,
-    ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
+    ArtifactLinkAliasWire, ArtifactLinkError, ArtifactLinkEventWire,
+    ArtifactLinkOriginWire, ArtifactLinkPublicationAttemptWire,
+    ArtifactLinkPublicationObservationWire, ArtifactLinkPublicationRecordWire,
+    ArtifactLinkRowWire, ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
     ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
+    ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
     ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -6000,11 +6010,66 @@ fn artifact_link_publication_attempt_from_pydict(
     })
 }
 
+fn artifact_link_event_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkEventWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    core_canonicalize_artifact_link_event_json_value(&value)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+fn artifact_link_events_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ArtifactLinkEventWire>> {
+    let mut events = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let dict = item.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err(format!("events[{index}] must be a dict"))
+        })?;
+        events.push(artifact_link_event_from_pydict(dict)?);
+    }
+    Ok(events)
+}
+
+fn artifact_link_alias_from_py(
+    value: &Bound<'_, PyAny>,
+    label: &str,
+) -> PyResult<ArtifactLinkAliasWire> {
+    let alias: ArtifactLinkAliasWire =
+        serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+            PyValueError::new_err(format!(
+                "{label} is not a valid ArtifactLinkAliasWire dict: {error}"
+            ))
+        })?;
+    core_canonicalize_artifact_link_alias(&alias)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+fn artifact_link_aliases_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ArtifactLinkAliasWire>> {
+    let mut aliases = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        aliases.push(artifact_link_alias_from_py(
+            &item,
+            &format!("aliases[{index}]"),
+        )?);
+    }
+    Ok(aliases)
+}
+
 /// Return the v2 artifact-link row schema version.
 #[pyfunction]
 #[pyo3(name = "artifact_link_row_schema_version")]
 fn py_artifact_link_row_schema_version() -> u64 {
     ARTIFACT_LINK_ROW_SCHEMA_VERSION
+}
+
+/// Return the immutable artifact-link event wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_schema_version")]
+fn py_artifact_link_event_schema_version() -> u64 {
+    ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION
 }
 
 /// Return the artifact-row ref-resolution wire schema version.
@@ -6102,6 +6167,125 @@ fn py_artifact_link_publication_mark_attempt<'py>(
         core_artifact_link_publication_mark_attempt(record, attempt, now)
             .map_err(artifact_link_error_to_pyerr)?;
     let value = serde_json::to_value(record).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Validate and canonicalize one immutable artifact-link event dict.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_canonicalize")]
+fn py_artifact_link_event_canonicalize(
+    py: Python<'_>,
+    event: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let event = artifact_link_event_from_pydict(event)?;
+    let value = serde_json::to_value(event).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return sorted compact JSON plus one trailing newline for one link event.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_canonical_json")]
+fn py_artifact_link_event_canonical_json(
+    event: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let event = artifact_link_event_from_pydict(event)?;
+    core_artifact_link_event_canonical_json(&event)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Return the lowercase SHA-256 over canonical event bytes.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_digest")]
+fn py_artifact_link_event_digest(
+    event: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let event = artifact_link_event_from_pydict(event)?;
+    core_artifact_link_event_digest(&event)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Return the immutable event path for a canonical event digest.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_path_for_digest")]
+fn py_artifact_link_event_path_for_digest(digest: &str) -> PyResult<String> {
+    core_artifact_link_event_path_for_digest(digest)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Validate an immutable event path against a canonical digest.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_validate_path")]
+fn py_artifact_link_event_validate_path(
+    path: &str,
+    digest: &str,
+) -> PyResult<String> {
+    core_artifact_link_event_validate_path(path, digest)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Validate exact canonical event bytes and their optional immutable path.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_validate_bytes", signature = (payload, path=None))]
+fn py_artifact_link_event_validate_bytes(
+    py: Python<'_>,
+    payload: &Bound<'_, PyAny>,
+    path: Option<&str>,
+) -> PyResult<PyObject> {
+    let bytes: Vec<u8> = if let Ok(bytes) = payload.extract::<Vec<u8>>() {
+        bytes
+    } else if let Ok(text) = payload.extract::<String>() {
+        text.into_bytes()
+    } else {
+        return Err(PyValueError::new_err(
+            "payload must be bytes, bytearray, or str",
+        ));
+    };
+    let validation = core_artifact_link_event_validate_bytes(&bytes, path)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(validation).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Resolve artifact refs through an alias graph used by link-event reduction.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_resolve_aliases")]
+fn py_artifact_link_event_resolve_aliases(
+    py: Python<'_>,
+    aliases: &Bound<'_, PyList>,
+    refs: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let aliases = artifact_link_aliases_from_py_list(aliases)?;
+    let refs = strings_from_py_list(refs, "refs")?;
+    let resolved = core_resolve_artifact_link_event_aliases(&aliases, &refs)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(resolved).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Reduce link events to legacy rows plus deterministic version metadata.
+#[pyfunction]
+#[pyo3(name = "artifact_link_events_reduce", signature = (events, aliases=None))]
+fn py_artifact_link_events_reduce(
+    py: Python<'_>,
+    events: &Bound<'_, PyList>,
+    aliases: Option<&Bound<'_, PyList>>,
+) -> PyResult<PyObject> {
+    let events = artifact_link_events_from_py_list(events)?;
+    let aliases = aliases
+        .map(artifact_link_aliases_from_py_list)
+        .transpose()?
+        .unwrap_or_default();
+    let reduction = core_reduce_link_events(&events, &aliases)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(reduction).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
@@ -15177,6 +15361,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_referenced_by_block_strip, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_row_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         py_artifact_row_resolution_wire_schema_version,
         m
     )?)?;
@@ -15197,6 +15385,26 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_link_publication_mark_attempt,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_event_canonicalize, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_canonical_json,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_event_digest, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_path_for_digest,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_event_validate_path, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_validate_bytes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_resolve_aliases,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_events_reduce, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_ref_parts, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_index_keys, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_row_ref_lookup_keys, m)?)?;
@@ -20886,6 +21094,15 @@ MENTORS:
 
             for name in [
                 "artifact_link_row_schema_version",
+                "artifact_link_event_schema_version",
+                "artifact_link_event_canonicalize",
+                "artifact_link_event_canonical_json",
+                "artifact_link_event_digest",
+                "artifact_link_event_path_for_digest",
+                "artifact_link_event_validate_path",
+                "artifact_link_event_validate_bytes",
+                "artifact_link_event_resolve_aliases",
+                "artifact_link_events_reduce",
                 "artifact_row_resolution_wire_schema_version",
                 "artifact_link_publication_state_wire_schema_version",
                 "artifact_link_publication_record_key",
@@ -20914,6 +21131,7 @@ MENTORS:
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
             assert_eq!(py_artifact_link_row_schema_version(), 2);
+            assert_eq!(py_artifact_link_event_schema_version(), 1);
             assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
             assert_eq!(
                 py_artifact_link_publication_state_wire_schema_version(),
@@ -20979,6 +21197,111 @@ MENTORS:
                 py_to_json_value(failed_record.bind(py)).unwrap();
             assert_eq!(failed_value["attempt_count"], json!(1));
             assert_eq!(failed_value["next_due_at"], json!(7_200.0));
+
+            let event_value = json!({
+                "schema_version": 1,
+                "project_key": "gh_acme__widget",
+                "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "created_by": "agent:reader",
+                "origin": "read",
+                "created_at": "2026-09-09T12:00:00Z",
+                "kind": {
+                    "type": "observation",
+                    "edge": {
+                        "kind": "directed",
+                        "source_ref": "agent:reader",
+                        "relation": "read",
+                        "target_ref": "plan:202609/old.md"
+                    },
+                    "description": "read the artifact",
+                    "occurrences": 2
+                }
+            });
+            let event_object = json_value_to_py(py, &event_value).unwrap();
+            let event = event_object.bind(py).downcast::<PyDict>().unwrap();
+            let canonical_event =
+                py_artifact_link_event_canonicalize(py, event).unwrap();
+            let canonical_event_value =
+                py_to_json_value(canonical_event.bind(py)).unwrap();
+            assert_eq!(
+                canonical_event_value["kind"]["edge"]["target_ref"],
+                json!("plan:202609/old.md")
+            );
+            let canonical_json =
+                py_artifact_link_event_canonical_json(event).unwrap();
+            assert!(canonical_json.ends_with('\n'));
+            let digest = py_artifact_link_event_digest(event).unwrap();
+            assert_eq!(digest.len(), 64);
+            let path = py_artifact_link_event_path_for_digest(&digest).unwrap();
+            assert_eq!(
+                py_artifact_link_event_validate_path(&path, &digest).unwrap(),
+                path
+            );
+            let bytes = PyBytes::new_bound(py, canonical_json.as_bytes());
+            let canonical_from_bytes = py_artifact_link_event_validate_bytes(
+                py,
+                bytes.as_any(),
+                Some(&path),
+            )
+            .unwrap();
+            let canonical_from_bytes =
+                py_to_json_value(canonical_from_bytes.bind(py)).unwrap();
+            assert_eq!(canonical_from_bytes["digest"], json!(digest));
+
+            let put_value = json!({
+                "schema_version": 1,
+                "project_key": "gh_acme__widget",
+                "operation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "created_by": "agent:writer",
+                "origin": "manual",
+                "created_at": "2026-09-09T12:01:00Z",
+                "kind": {
+                    "type": "edge-put",
+                    "edge": {
+                        "kind": "directed",
+                        "source_ref": "agent:reader",
+                        "relation": "read",
+                        "target_ref": "plan:202609/old.md"
+                    },
+                    "description": "updated description",
+                    "observed_operation_ids": [
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ]
+                }
+            });
+            let alias_value = json!([{
+                "old_ref": "plan:202609/old.md",
+                "new_ref": "plan:202609/new.md"
+            }]);
+            let events_object =
+                json_value_to_py(py, &json!([event_value, put_value])).unwrap();
+            let events = events_object.bind(py).downcast::<PyList>().unwrap();
+            let aliases_object = json_value_to_py(py, &alias_value).unwrap();
+            let aliases = aliases_object.bind(py).downcast::<PyList>().unwrap();
+            let refs_object =
+                json_value_to_py(py, &json!(["plan:202609/old.md"])).unwrap();
+            let refs = refs_object.bind(py).downcast::<PyList>().unwrap();
+            let resolved =
+                py_artifact_link_event_resolve_aliases(py, aliases, refs)
+                    .unwrap();
+            let resolved = py_to_json_value(resolved.bind(py)).unwrap();
+            assert_eq!(
+                resolved["resolved_refs"]["plan:202609/old.md"],
+                json!("plan:202609/new.md")
+            );
+            let reduction =
+                py_artifact_link_events_reduce(py, events, Some(aliases))
+                    .unwrap();
+            let reduction = py_to_json_value(reduction.bind(py)).unwrap();
+            assert_eq!(
+                reduction["rows"][0]["target_ref"],
+                json!("plan:202609/new.md")
+            );
+            assert_eq!(
+                reduction["rows"][0]["description"],
+                json!("updated description")
+            );
+            assert_eq!(reduction["rows"][0]["uses"], json!(2));
             let ref_parts =
                 py_artifact_link_ref_parts(py, "@plans:202609/a.md#section")
                     .unwrap()

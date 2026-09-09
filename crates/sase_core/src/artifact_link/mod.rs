@@ -1,6 +1,7 @@
 //! First-class artifact link graph: row schema, relation registry, managed
 //! tables, companion paths, and frontmatter inlet.
 
+mod events;
 mod inlet;
 mod managed_table;
 mod path;
@@ -9,6 +10,21 @@ mod relation;
 mod row_resolution;
 mod wire;
 
+pub use events::{
+    artifact_link_event_canonical_json, artifact_link_event_digest,
+    artifact_link_event_path_for_digest, artifact_link_event_validate_bytes,
+    artifact_link_event_validate_path, canonicalize_artifact_link_alias,
+    canonicalize_artifact_link_event,
+    canonicalize_artifact_link_event_json_value, reduce_link_events,
+    resolve_artifact_link_event_aliases, ArtifactLinkAliasResolutionWire,
+    ArtifactLinkAliasWire, ArtifactLinkEventCanonicalWire,
+    ArtifactLinkEventEdgeWire, ArtifactLinkEventKindWire,
+    ArtifactLinkEventReductionWire, ArtifactLinkEventWire,
+    ArtifactLinkReducedEdgeWire, ArtifactLinkReducedTombstoneWire,
+    ArtifactLinkReducedVersionWire,
+    ARTIFACT_LINK_EVENT_REDUCTION_WIRE_SCHEMA_VERSION,
+    ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
+};
 pub use inlet::{
     parse_artifact_link_frontmatter_inlet,
     ArtifactLinkFrontmatterInletKindWire, ArtifactLinkFrontmatterInletWire,
