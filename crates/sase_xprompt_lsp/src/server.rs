@@ -46,7 +46,6 @@ use sase_core::{
     editor_directive_contract,
     editor_directive_is_hidden_from_name_completion_with_flags,
     editor_extract_token_at_position, editor_hover_at_position,
-    editor_queue_directive_diagnostics,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
     AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
@@ -95,7 +94,6 @@ const MACHINE_CATALOG_ENV: &str = "SASE_XPROMPT_MACHINE_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
-const QUEUE_DIRECTIVE_ENV: &str = "SASE_QUEUE_DIRECTIVE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -125,8 +123,6 @@ struct ServerConfig {
     glossary_catalog: Option<PathBuf>,
     /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
     typed_launch_units: bool,
-    /// Startup-resolved `queue_directive` flag. Never re-read on keystrokes.
-    queue_directive: bool,
 }
 
 impl Default for ServerConfig {
@@ -143,7 +139,6 @@ impl Default for ServerConfig {
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
-            queue_directive: queue_directive_from_env(),
         }
     }
 }
@@ -451,10 +446,7 @@ impl XpromptLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.queue_directive,
-                    ),
+                    &enabled_feature_flags(config.typed_launch_units),
                     config.snippet_support,
                 ));
             }
@@ -678,7 +670,6 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
-                config.queue_directive,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -718,7 +709,6 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
-                config.queue_directive,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -906,10 +896,6 @@ impl XpromptLspServer {
         diagnostics.extend(editor_typed_launch_directive_diagnostics(
             &document,
             config.typed_launch_units,
-        ));
-        diagnostics.extend(editor_queue_directive_diagnostics(
-            &document,
-            config.queue_directive,
         ));
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
@@ -1345,10 +1331,7 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates_with_flags(
                     token,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.queue_directive,
-                    ),
+                    &enabled_feature_flags(config.typed_launch_units),
                 )
             }
             CompletionContextKind::DirectiveArgument
@@ -1796,8 +1779,6 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         glossary_catalog: glossary_catalog_path(),
         typed_launch_units: typed_launch_units_from_initialize(params)
             .unwrap_or_else(typed_launch_units_from_env),
-        queue_directive: queue_directive_from_initialize(params)
-            .unwrap_or_else(queue_directive_from_env),
     }
 }
 
@@ -1819,22 +1800,6 @@ fn typed_launch_units_from_env() -> bool {
         .unwrap_or(false)
 }
 
-fn queue_directive_from_initialize(params: &InitializeParams) -> Option<bool> {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("queue_directive"))
-        .and_then(serde_json::Value::as_bool)
-}
-
-fn queue_directive_from_env() -> bool {
-    std::env::var(QUEUE_DIRECTIVE_ENV)
-        .ok()
-        .as_deref()
-        .map(env_flag_enabled)
-        .unwrap_or(false)
-}
-
 fn env_flag_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -1842,16 +1807,10 @@ fn env_flag_enabled(value: &str) -> bool {
     )
 }
 
-fn enabled_feature_flags(
-    typed_launch_units: bool,
-    queue_directive: bool,
-) -> Vec<String> {
+fn enabled_feature_flags(typed_launch_units: bool) -> Vec<String> {
     let mut flags = Vec::new();
     if typed_launch_units {
         flags.push("typed_launch_units".to_string());
-    }
-    if queue_directive {
-        flags.push("queue_directive".to_string());
     }
     flags
 }
@@ -4025,33 +3984,25 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "time=",
-                "unit=",
-                "@ops",
-                "builders",
-                "review"
+                "agent=", "bead=", "proc=", "time=", "unit=", "@ops",
+                "builders", "review"
             ]
         );
         assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-        assert_eq!(items[7].kind, Some(CompletionItemKind::ENUM_MEMBER));
-        assert_eq!(items[8].kind, Some(CompletionItemKind::MODULE));
-        assert_eq!(items[9].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[7].sort_text.as_deref(), Some("1:0007"));
+        assert_eq!(items[5].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[6].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[7].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[5].sort_text.as_deref(), Some("1:0005"));
         assert_eq!(
-            items[8]
+            items[6]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("clan · 3 members")
         );
-        assert!(items[8].documentation.is_none());
+        assert!(items[6].documentation.is_none());
         let Some(Documentation::MarkupContent(review_doc)) =
-            items[9].documentation.as_ref()
+            items[7].documentation.as_ref()
         else {
             panic!("expected markdown documentation for review family entry");
         };
@@ -4324,15 +4275,7 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "time=",
-                "unit="
-            ]
+            vec!["agent=", "bead=", "proc=", "time=", "unit="]
         );
 
         let mut mixed = bridge_with_catalog_entries(Vec::new());
@@ -4389,8 +4332,10 @@ mod tests {
         let bead = labels_at(server, "%id(worker, bead=").await;
         assert_eq!(bead, vec!["sase-a"]);
         assert_eq!(labels_at(server, "%wait(time=").await, vec!["5m", "1430"]);
-        assert_eq!(labels_at(server, "%wait(runners=").await, vec!["0", "1"]);
-        assert_eq!(labels_at(server, "%wait(priority=").await, vec!["10", "1"]);
+        assert!(labels_at(server, "%wait(runners=").await.is_empty());
+        assert!(labels_at(server, "%wait(priority=").await.is_empty());
+        assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
         assert_eq!(labels_at(server, "%repeat:").await, vec!["2", "3"]);
         assert_eq!(
             labels_at(server, "%xprompts_enabled:").await,
@@ -4401,12 +4346,23 @@ mod tests {
             .await
             .iter()
             .all(|value| !value.ends_with('=')));
-        assert!(labels_at(server, "%q").await.is_empty());
-        assert!(labels_at(server, "%queue(").await.is_empty());
+        assert_eq!(
+            labels_at(server, "%q").await,
+            vec![
+                "%queue",
+                "%queue:...",
+                "%q:...",
+                "%queue(runners=..., priority=...)"
+            ]
+        );
+        assert_eq!(
+            labels_at(server, "%queue(").await,
+            vec!["p=", "priority=", "runners=", "0", "1"]
+        );
     }
 
     #[tokio::test]
-    async fn queue_completion_follows_flag_and_avoids_agent_targets() {
+    async fn queue_completion_avoids_agent_targets() {
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let mut inner = bridge_with_catalog_entries(Vec::new());
         inner.agent_catalog_response =
@@ -4424,7 +4380,6 @@ mod tests {
             XpromptLspServer::with_bridge(client, Arc::new(bridge))
         });
         let server = service.inner();
-        server.config.write().unwrap().queue_directive = true;
 
         assert_eq!(
             labels_at(server, "%q(").await,

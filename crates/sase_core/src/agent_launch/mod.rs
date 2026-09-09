@@ -42,9 +42,7 @@ use crate::fenced_code::{
 };
 use crate::prompt_literals::inline_code_ranges;
 use crate::queue_directive::{
-    collect_queue_fields, queue_directive_disabled_message,
-    queue_directive_enabled, QueueArgWire, QueueFieldsWire,
-    QueueOccurrenceWire,
+    collect_queue_fields, QueueArgWire, QueueFieldsWire, QueueOccurrenceWire,
 };
 use crate::xprompt_text_block::find_text_block_close_for_args;
 use chrono::{Duration, NaiveDateTime};
@@ -826,7 +824,7 @@ pub fn plan_typed_launch_units_with_flags(
     prompt: &str,
     launch_kind: Option<&str>,
     selected_project: Option<&str>,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> Result<LaunchPlanWire, AgentLaunchFanoutPlanError> {
     let fanout = plan_agent_launch_fanout(prompt, launch_kind)?;
     let plan_project = selected_project
@@ -834,13 +832,11 @@ pub fn plan_typed_launch_units_with_flags(
         .or_else(|| project_context_from_prompt(prompt));
     let mut diagnostics = Vec::new();
     let mut raw_units = Vec::with_capacity(fanout.slots.len());
-    let queue_enabled = queue_directive_enabled(enabled_feature_flags);
 
     for slot in &fanout.slots {
         raw_units.push(classify_typed_launch_unit(
             slot,
             plan_project.as_deref(),
-            queue_enabled,
             &mut diagnostics,
         ));
     }
@@ -909,7 +905,6 @@ struct ParsedProcDirective {
 fn classify_typed_launch_unit(
     slot: &LaunchFanoutSlotWire,
     selected_project: Option<&str>,
-    queue_enabled: bool,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) -> RawLaunchUnit {
     let prompt = slot.prompt.as_str();
@@ -1061,9 +1056,7 @@ fn classify_typed_launch_unit(
                     prompt,
                     &directive,
                     &logical_id,
-                    queue_enabled,
                     &mut raw_waits,
-                    &mut wait_queue,
                     diagnostics,
                 );
             }
@@ -1178,16 +1171,7 @@ fn classify_typed_launch_unit(
     }
 
     if !queue_occurrences.is_empty() {
-        if !queue_enabled {
-            for occurrence in &queue_occurrences {
-                diagnostics.push(typed_unit_diagnostic(
-                    "queue-directive-disabled",
-                    &queue_directive_disabled_message(),
-                    &logical_id,
-                    Some(occurrence.source_span),
-                ));
-            }
-        } else if proc_code.is_some() {
+        if proc_code.is_some() {
             proc_forbidden_directives.push("%queue".to_string());
         } else {
             let collected = collect_queue_fields(&queue_occurrences);
@@ -1485,9 +1469,7 @@ fn parse_wait_directive(
     prompt: &str,
     directive: &DirectiveOccurrence,
     logical_id: &str,
-    queue_enabled: bool,
     raw_waits: &mut Vec<RawWaitTarget>,
-    wait_queue: &mut QueueFieldsWire,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
     let span = [directive.start, directive.end];
@@ -1522,53 +1504,29 @@ fn parse_wait_directive(
             Some("proc") => raw_waits.push(raw_wait("proc", value, span, source.clone())),
             Some("bead") => raw_waits.push(raw_wait("bead", value, span, source.clone())),
             Some("time") => raw_waits.push(raw_wait("time", value, span, source.clone())),
-            Some("runners") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+            Some("runners") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-runners-moved",
                 "%wait(runners=...) has moved to %queue. Use %queue(runners=N) or %q:N, and keep dependencies on %wait.",
                 logical_id,
                 Some(span),
             )),
-            Some("priority") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+            Some("priority") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-priority-moved",
                 "%wait(priority=...) has moved to %queue. Use %queue(priority=N) or %q(p=N), and keep dependencies on %wait.",
                 logical_id,
                 Some(span),
             )),
-            Some("p") if queue_enabled => diagnostics.push(typed_unit_diagnostic(
+            Some("p") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-p-unsupported",
                 "%wait(p=...) is unsupported. Use %queue(priority=...) or %q(p=...).",
                 logical_id,
                 Some(span),
             )),
-            Some("runners") => match value.parse::<u32>() {
-                Ok(parsed) => wait_queue.runners = Some(parsed),
-                Err(_) => diagnostics.push(typed_unit_diagnostic(
-                    "invalid-wait-runners",
-                    "%wait(runners=...) requires a non-negative integer.",
-                    logical_id,
-                    Some(span),
-                )),
-            },
-            Some("priority") => match value.parse::<i32>() {
-                Ok(parsed) => wait_queue.priority = Some(parsed),
-                Err(_) => diagnostics.push(typed_unit_diagnostic(
-                    "invalid-wait-priority",
-                    "%wait(priority=...) requires an integer.",
-                    logical_id,
-                    Some(span),
-                )),
-            },
             Some(key) => diagnostics.push(typed_unit_diagnostic(
                 "unknown-wait-target",
-                &if queue_enabled {
-                    format!(
-                        "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, or time=. Queue controls belong on %queue."
-                    )
-                } else {
-                    format!(
-                        "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, time=, runners=, or priority=."
-                    )
-                },
+                &format!(
+                    "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, or time=. Queue controls belong on %queue."
+                ),
                 logical_id,
                 Some(span),
             )),
@@ -6682,16 +6640,12 @@ Keep this comma, and the rest of the prose in the summary.";
         assert!(decision.reason.contains("disagree"));
     }
 
-    fn queue_flags() -> Vec<String> {
-        vec!["queue_directive".to_string()]
-    }
-
     fn plan_queue(prompt: &str) -> LaunchPlanWire {
         plan_typed_launch_units_with_flags(
             prompt,
             Some("auto"),
             Some("sase"),
-            &queue_flags(),
+            &[],
         )
         .unwrap()
     }
@@ -6701,7 +6655,7 @@ Keep this comma, and the rest of the prose in the summary.";
             prompt,
             Some("auto"),
             Some("sase"),
-            &queue_flags(),
+            &[],
         )
         .unwrap_err()
     }
@@ -6720,29 +6674,7 @@ Keep this comma, and the rest of the prose in the summary.";
     }
 
     #[test]
-    fn typed_launch_flag_off_keeps_wait_queue_fields_and_rejects_queue() {
-        let plan = plan_typed_launch_units(
-            "%wait(runners=2, priority=1)\nDo work",
-            Some("auto"),
-            Some("sase"),
-        )
-        .unwrap();
-        let (runners, priority, prompt) = agent_fields(&plan);
-        assert_eq!(runners, Some(2));
-        assert_eq!(priority, Some(1));
-        assert_eq!(prompt, "Do work");
-
-        let err = plan_typed_launch_units(
-            "%q:5\nDo work",
-            Some("auto"),
-            Some("sase"),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("queue_directive"));
-    }
-
-    #[test]
-    fn typed_launch_flag_on_parses_queue_spellings_and_round_trips() {
+    fn typed_launch_parses_queue_spellings_and_round_trips() {
         for prompt in [
             "%q:5\nDo work",
             "%queue:5\nDo work",
@@ -6771,7 +6703,7 @@ Keep this comma, and the rest of the prose in the summary.";
                 LaunchUnitPayloadWire::Agent(agent) => agent,
                 other => panic!("expected agent payload, got {other:?}"),
             },
-            &queue_flags(),
+            &[],
         );
         assert!(rebuilt.contains("%queue(runners=1, priority=20)"));
         assert!(!rebuilt.contains("%wait(runners="));
@@ -6779,7 +6711,7 @@ Keep this comma, and the rest of the prose in the summary.";
     }
 
     #[test]
-    fn typed_launch_flag_on_rejects_wait_queue_keywords_and_proc_queue() {
+    fn typed_launch_rejects_wait_queue_keywords_and_proc_queue() {
         let runners = plan_queue_err("%wait(runners=5)\nDo work");
         assert!(runners.to_string().contains("%queue"));
         let priority = plan_queue_err("%wait(priority=10)\nDo work");
@@ -6792,19 +6724,19 @@ Keep this comma, and the rest of the prose in the summary.";
             "%queue(runners=1)\n%proc(\"just check\")",
             Some("auto"),
             Some("sase"),
-            &queue_flags(),
+            &[],
         )
         .unwrap_err();
         assert!(proc.to_string().contains("not valid on %proc"));
     }
 
     #[test]
-    fn typed_launch_flag_on_composes_disjoint_queue_and_fanout() {
+    fn typed_launch_composes_disjoint_queue_and_fanout() {
         let plan = plan_typed_launch_units_with_flags(
             "%q:0 %queue(priority=10)\nFirst\n---\n%q(p=1)\nSecond",
             Some("multi_prompt"),
             Some("sase"),
-            &queue_flags(),
+            &[],
         )
         .unwrap();
         match &plan.units[0].payload {

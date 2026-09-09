@@ -2,25 +2,24 @@
 //!
 //! This module owns queue-field normalization, validation, collection across
 //! occurrences, and canonical formatting. Callers reuse existing directive
-//! occurrence scanning and pass the resolved `queue_directive` flag into
-//! launch and editor entry points; this module never reads global
-//! configuration.
+//! occurrence scanning. This module never reads global configuration.
 
 use serde::{Deserialize, Serialize};
 
-/// Feature-flag key that gates the `%queue` / `%q` split from `%wait`.
+/// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub const QUEUE_DIRECTIVE_FLAG: &str = "queue_directive";
 
-/// Feature-flag key that gates `%queue` / `%q`.
+/// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub fn queue_directive_flag_key() -> &'static str {
     QUEUE_DIRECTIVE_FLAG
 }
 
-/// Return whether `enabled_feature_flags` contains [`QUEUE_DIRECTIVE_FLAG`].
-pub fn queue_directive_enabled(enabled_feature_flags: &[String]) -> bool {
-    enabled_feature_flags
-        .iter()
-        .any(|flag| flag == QUEUE_DIRECTIVE_FLAG)
+/// Return whether `%queue` / `%q` is enabled.
+///
+/// The argument is kept for source compatibility with callers from the temporary
+/// migration window.
+pub fn queue_directive_enabled(_enabled_feature_flags: &[String]) -> bool {
+    true
 }
 
 /// One already-split queue argument. `name` is absent for positionals.
@@ -129,11 +128,9 @@ pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
     }
 }
 
-/// Message used when `%queue` / `%q` is written while the flag is off.
+/// Legacy diagnostic message from the temporary migration window.
 pub fn queue_directive_disabled_message() -> String {
-    format!(
-        "%queue requires the {QUEUE_DIRECTIVE_FLAG} feature flag. Enable it with `sase flag enable {QUEUE_DIRECTIVE_FLAG}`."
-    )
+    "%queue is enabled by default.".to_string()
 }
 
 fn parse_queue_occurrence(
@@ -532,9 +529,9 @@ mod tests {
     }
 
     #[test]
-    fn flag_helpers_are_explicit() {
+    fn legacy_flag_helpers_always_enable_queue() {
         assert_eq!(queue_directive_flag_key(), "queue_directive");
-        assert!(!queue_directive_enabled(&[]));
+        assert!(queue_directive_enabled(&[]));
         assert!(queue_directive_enabled(&[
             "typed_launch_units".to_string(),
             "queue_directive".to_string(),

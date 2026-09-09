@@ -5793,17 +5793,8 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "time=",
-                "unit=",
-                "@ops",
-                "builders",
-                "review",
-                "worker"
+                "agent=", "bead=", "proc=", "time=", "unit=", "@ops",
+                "builders", "review", "worker"
             ]
         );
 
@@ -5817,15 +5808,7 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "unit=",
-                "@ops",
-                "review",
-                "worker"
+                "agent=", "bead=", "proc=", "unit=", "@ops", "review", "worker"
             ]
         );
 

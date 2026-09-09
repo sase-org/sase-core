@@ -24493,7 +24493,7 @@ MENTORS:
                 .find(|entry| entry["name"] == "queue")
                 .unwrap();
             assert_eq!(queue["alias"], json!("q"));
-            assert_eq!(queue["feature_flag"], json!("queue_directive"));
+            assert_eq!(queue.get("feature_flag"), None);
             assert_eq!(py_queue_directive_flag_key(), "queue_directive");
             let occurrences = json_value_to_py(
                 py,
@@ -24534,10 +24534,7 @@ MENTORS:
                     .iter()
                     .map(|keyword| keyword["name"].as_str().unwrap())
                     .collect::<Vec<_>>(),
-                [
-                    "agent", "bead", "priority", "proc", "runners", "time",
-                    "unit"
-                ]
+                ["agent", "bead", "proc", "time", "unit"]
             );
 
             let context =
@@ -24602,16 +24599,7 @@ MENTORS:
                 .collect();
             assert_eq!(
                 insertions,
-                [
-                    "agent=",
-                    "bead=",
-                    "priority=",
-                    "proc=",
-                    "runners=",
-                    "time=",
-                    "unit=",
-                    "worker"
-                ]
+                ["agent=", "bead=", "proc=", "time=", "unit=", "worker"]
             );
 
             let colon =

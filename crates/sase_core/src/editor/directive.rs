@@ -334,28 +334,12 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
-        name: "priority",
-        description: "Lower values start first; the default is 10",
-        value_role: DirectiveValueRole::NonNegativeInt,
-        repeatable: false,
-        conflicts_with: &[],
-        suggested_values: WAIT_PRIORITY_SUGGESTIONS,
-    },
-    DirectiveKeywordSpec {
         name: "proc",
         description: "Wait for a proc ID or shell name",
         value_role: DirectiveValueRole::FreeText,
         repeatable: false,
         conflicts_with: &[],
         suggested_values: &[],
-    },
-    DirectiveKeywordSpec {
-        name: "runners",
-        description: "Start when at most this many agents are already running",
-        value_role: DirectiveValueRole::NonNegativeInt,
-        repeatable: false,
-        conflicts_with: &[],
-        suggested_values: WAIT_RUNNERS_SUGGESTIONS,
     },
     DirectiveKeywordSpec {
         name: "time",
@@ -975,10 +959,9 @@ pub(super) fn mixes_positional_and_keyword_clauses(
 
 pub(super) fn wait_queue_keyword_retired(
     keyword: &str,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> bool {
-    crate::queue_directive::queue_directive_enabled(enabled_feature_flags)
-        && matches!(keyword, "runners" | "priority")
+    matches!(keyword, "runners" | "priority")
 }
 
 fn selected_keyword_set(selected: &[String]) -> Vec<String> {
@@ -1550,7 +1533,7 @@ mod tests {
                 .iter()
                 .map(|keyword| keyword.name.as_str())
                 .collect::<Vec<_>>(),
-            ["agent", "bead", "priority", "proc", "runners", "time", "unit"]
+            ["agent", "bead", "proc", "time", "unit"]
         );
         assert!(wait
             .syntax_forms
@@ -1563,7 +1546,7 @@ mod tests {
             .find(|entry| entry.name == "queue")
             .expect("queue contract");
         assert_eq!(queue.alias.as_deref(), Some("q"));
-        assert_eq!(queue.feature_flag.as_deref(), Some("queue_directive"));
+        assert_eq!(queue.feature_flag.as_deref(), None);
         assert_eq!(
             queue.positional_role,
             Some(DirectiveValueRole::NonNegativeInt)
@@ -1584,10 +1567,10 @@ mod tests {
                 .map(|keyword| keyword.conflicts_with.clone()),
             Some(vec!["priority".to_string()])
         );
-        assert!(directive_is_hidden_from_name_completion("queue"));
+        assert!(!directive_is_hidden_from_name_completion("queue"));
         assert!(!directive_is_hidden_from_name_completion_with_flags(
             "queue",
-            &["queue_directive".to_string()]
+            &[]
         ));
         assert_eq!(
             wait.keywords
@@ -1989,16 +1972,10 @@ mod tests {
             candidates.iter().map(|c| c.insertion.as_str()).collect();
         assert_eq!(values, ["p=", "priority=", "runners="]);
         assert_eq!(canonical_directive_name("q"), Some("queue"));
-        assert!(build_directive_completion_candidates("%q")
-            .candidates
-            .is_empty());
-        let enabled = build_directive_completion_candidates_with_flags(
-            "%q",
-            &["queue_directive".to_string()],
-        );
-        assert_eq!(enabled.candidates.len(), 1);
-        assert_eq!(enabled.candidates[0].insertion, "%queue");
-        assert_eq!(enabled.candidates[0].detail.as_deref(), Some("alias %q"));
+        let list = build_directive_completion_candidates("%q");
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].insertion, "%queue");
+        assert_eq!(list.candidates[0].detail.as_deref(), Some("alias %q"));
     }
 
     #[test]
@@ -2006,18 +1983,7 @@ mod tests {
         let candidates = directive_argument_candidates("wait").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(
-            values,
-            [
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "time=",
-                "unit="
-            ]
-        );
+        assert_eq!(values, ["agent=", "bead=", "proc=", "time=", "unit="]);
         assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 
@@ -2410,14 +2376,7 @@ mod tests {
         assert_eq!(
             at_end("%wait("),
             [
-                "agent=",
-                "bead=",
-                "priority=",
-                "proc=",
-                "runners=",
-                "time=",
-                "unit=",
-                "builders",
+                "agent=", "bead=", "proc=", "time=", "unit=", "builders",
                 "planner"
             ]
         );
@@ -2425,14 +2384,10 @@ mod tests {
         assert!(at_end("%wait:t").iter().all(|value| !value.ends_with('=')));
         assert_eq!(at_end("%wait(bead="), ["sase-a"]);
         assert_eq!(at_end("%wait(time="), ["5m", "1430"]);
-        let queue_enabled = DirectiveCompletionInventories {
-            enabled_feature_flags: vec!["queue_directive".to_string()],
-            ..inventories.clone()
-        };
         let queue_insertions = |text: &str| -> Vec<String> {
             let list = build_directive_clause_candidates(
                 &classify(text, text.len() as u32),
-                &queue_enabled,
+                &inventories,
             );
             list.candidates
                 .into_iter()

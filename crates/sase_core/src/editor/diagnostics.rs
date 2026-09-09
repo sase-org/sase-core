@@ -115,34 +115,10 @@ pub fn analyze_artifact_refs(
 
 pub fn queue_directive_diagnostics(
     document: &DocumentSnapshot,
-    queue_directive_enabled: bool,
+    _queue_directive_enabled: bool,
 ) -> Vec<EditorDiagnostic> {
-    if queue_directive_enabled {
-        return Vec::new();
-    }
-    let mut literal_ranges = fenced_block_ranges(document.text());
-    literal_ranges.extend(inline_code_ranges(document.text(), &literal_ranges));
-    queue_directive_re()
-        .captures_iter(document.text())
-        .filter_map(|captures| {
-            let marker = captures.get(0)?;
-            let span = (marker.start(), marker.end());
-            if literal_ranges
-                .iter()
-                .any(|literal| ranges_intersect(span, *literal))
-            {
-                return None;
-            }
-            document.byte_range_to_range(span.0, span.1).map(|range| {
-                EditorDiagnostic {
-                    range,
-                    severity: DiagnosticSeverity::Error,
-                    code: "queue_directive_disabled".to_string(),
-                    message: crate::queue_directive::queue_directive_disabled_message(),
-                }
-            })
-        })
-        .collect()
+    let _ = document;
+    Vec::new()
 }
 
 pub fn typed_launch_directive_diagnostics(
@@ -771,13 +747,6 @@ fn directive_re() -> &'static Regex {
     })
 }
 
-fn queue_directive_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"(?m)(?:^|[\s\(\[\{"'])(?:%(?P<name>queue|q)\b)"#).unwrap()
-    })
-}
-
 fn typed_launch_directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1193,12 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn queue_directive_diagnostics_follow_flag() {
+    fn queue_directive_diagnostics_are_retired() {
         let document = DocumentSnapshot::new("%q:5 Review");
-        let disabled = queue_directive_diagnostics(&document, false);
-        assert_eq!(diagnostic_count(&disabled, "queue_directive_disabled"), 1);
-        let enabled = queue_directive_diagnostics(&document, true);
-        assert!(enabled.is_empty(), "{enabled:?}");
+        let diagnostics = queue_directive_diagnostics(&document, false);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
             diagnostic_count(
                 &analyze_document(&document, &catalog()),
