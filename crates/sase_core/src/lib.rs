@@ -51,6 +51,7 @@ pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
 pub mod machine_hood;
+pub mod machine_setup;
 pub mod managed_origin;
 pub mod markdown_link_refs;
 pub mod migration;
@@ -796,11 +797,12 @@ pub use fleet_contract::{
     FLEET_INITIAL_CURSOR_GENERATION, FLEET_INSTALLATION_IDENTITY_FILENAME,
     FLEET_INSTALLATION_IDENTITY_MAX_BYTES,
     FLEET_INSTALLATION_IDENTITY_SCHEMA_VERSION, FLEET_INSTALLATION_ID_PREFIX,
-    FLEET_READ_DEFAULT_CONTENT_BYTES, FLEET_READ_DEFAULT_PAGE_ROWS,
-    FLEET_READ_DEFAULT_REPLAY_EVENTS, FLEET_READ_MAX_BATCH_IDS,
-    FLEET_READ_MAX_CONTENT_BYTES, FLEET_READ_MAX_FILTER_BYTES,
-    FLEET_READ_MAX_PAGE_ROWS, FLEET_READ_MAX_PROJECT_IDS,
-    FLEET_READ_MAX_QUERY_BYTES, FLEET_READ_MAX_REPLAY_EVENTS,
+    FLEET_PROTOCOL_VERSION, FLEET_READ_DEFAULT_CONTENT_BYTES,
+    FLEET_READ_DEFAULT_PAGE_ROWS, FLEET_READ_DEFAULT_REPLAY_EVENTS,
+    FLEET_READ_MAX_BATCH_IDS, FLEET_READ_MAX_CONTENT_BYTES,
+    FLEET_READ_MAX_FILTER_BYTES, FLEET_READ_MAX_PAGE_ROWS,
+    FLEET_READ_MAX_PROJECT_IDS, FLEET_READ_MAX_QUERY_BYTES,
+    FLEET_READ_MAX_REPLAY_EVENTS,
 };
 pub use fleet_mutation::{
     decide_fleet_mutation_replay, evaluate_mutation_precondition,
@@ -853,6 +855,19 @@ pub use host_bridge::{
 pub use machine_hood::{
     machine_hood_of, qualify_machine_agent_name, strip_machine_agent_name,
     validate_machine_name, MachineNameError,
+};
+pub use machine_setup::{
+    classify_tailnet_discovery, classify_tailnet_health,
+    reconcile_machine_enrollments, DiscoveryCandidateWire, EnrolledMachineWire,
+    MachineReconcileRequestWire, MachineReconcileResultWire,
+    MachineSetupDiagnosticWire, MachineSetupError, ReconciledCandidateWire,
+    TailnetDiscoveryRequestWire, TailnetDiscoveryResultWire,
+    TailnetHealthObservationWire, TailnetHealthRequestWire,
+    TailnetHealthResultWire, TailnetPeerWire, COMPATIBILITY_COMPATIBLE,
+    COMPATIBILITY_INCOMPATIBLE, COMPATIBILITY_UNKNOWN, ENDPOINT_SOURCE_DNS,
+    ENDPOINT_SOURCE_OVERRIDE, MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+    RECONCILE_STATUS_ENROLLED, RECONCILE_STATUS_NEW, RECONCILE_STATUS_REPAIR,
+    SASE_GATEWAY_HEALTH_SERVICE, TAILNET_PROVIDER_REF,
 };
 pub use managed_origin::{
     decide_managed_origin_reconciliation, ManagedOriginPushUrlRewriteWire,

@@ -126,6 +126,10 @@
 //! - `qualify_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `strip_machine_agent_name(name: str, machine_name: str) -> str`
 //! - `machine_hood_of(name: str, known_machines: list[str]) -> str | None`
+//! - `machine_setup_wire_schema_version() -> int`
+//! - `classify_tailnet_health(request: dict) -> dict`
+//! - `classify_tailnet_discovery(request: dict) -> dict`
+//! - `reconcile_machine_enrollments(request: dict) -> dict`
 //! - `validate_agent_name(name: str) -> None`
 //! - `validate_agent_username(username: str) -> None`
 //! - `validate_owner_root(root: str) -> None`
@@ -1007,6 +1011,14 @@ use sase_core::machine_hood::{
     strip_machine_agent_name as core_strip_machine_agent_name,
     validate_machine_name as core_validate_machine_name,
 };
+use sase_core::machine_setup::{
+    classify_tailnet_discovery as core_classify_tailnet_discovery,
+    classify_tailnet_health as core_classify_tailnet_health,
+    reconcile_machine_enrollments as core_reconcile_machine_enrollments,
+    MachineReconcileRequestWire, MachineSetupError,
+    TailnetDiscoveryRequestWire, TailnetHealthRequestWire,
+    MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+};
 use sase_core::managed_origin::{
     decide_managed_origin_reconciliation as core_decide_managed_origin_reconciliation,
     ManagedOriginReconciliationRequestWire,
@@ -1561,6 +1573,61 @@ fn py_decide_managed_origin_reconciliation<'py>(
         )?;
     let decision = core_decide_managed_origin_reconciliation(&request);
     serialize_to_py(py, &decision)
+}
+
+fn machine_setup_error_to_pyerr(error: MachineSetupError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "machine_setup_wire_schema_version")]
+fn py_machine_setup_wire_schema_version() -> u32 {
+    MACHINE_SETUP_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_tailnet_health")]
+fn py_classify_tailnet_health<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: TailnetHealthRequestWire = provider_priority_dict_from_py(
+        request.as_any(),
+        "tailnet health request",
+    )?;
+    let result = core_classify_tailnet_health(&request)
+        .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_tailnet_discovery")]
+fn py_classify_tailnet_discovery<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: TailnetDiscoveryRequestWire = provider_priority_dict_from_py(
+        request.as_any(),
+        "tailnet discovery request",
+    )?;
+    let result = core_classify_tailnet_discovery(&request)
+        .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "reconcile_machine_enrollments")]
+fn py_reconcile_machine_enrollments<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: MachineReconcileRequestWire = provider_priority_dict_from_py(
+        request.as_any(),
+        "machine enrollment reconcile request",
+    )?;
+    let result = core_reconcile_machine_enrollments(&request)
+        .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
 }
 
 // The machine-hood bindings above are migration shims. New code should use
@@ -14601,6 +14668,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_decide_managed_origin_reconciliation,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_machine_setup_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
@@ -16743,6 +16814,198 @@ mod tests {
                 json!("git@github.com:org/repo.git")
             );
             assert_eq!(decision["rewrite_push_urls"], json!([]));
+        });
+    }
+
+    #[test]
+    fn machine_setup_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "machine_setup_wire_schema_version",
+                "classify_tailnet_health",
+                "classify_tailnet_discovery",
+                "reconcile_machine_enrollments",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            let version: u32 = module
+                .getattr("machine_setup_wire_schema_version")
+                .unwrap()
+                .call0()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(version, MACHINE_SETUP_WIRE_SCHEMA_VERSION);
+
+            let unrelated = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "alias": "web",
+                    "payload": {"status": "ok", "service": "unrelated"}
+                }),
+            )
+            .unwrap();
+            let unrelated = module
+                .getattr("classify_tailnet_health")
+                .unwrap()
+                .call1((unrelated.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let unrelated = py_to_json_value(&unrelated).unwrap();
+            assert_eq!(unrelated["compatibility"], json!("incompatible"));
+            assert_eq!(
+                unrelated["diagnostic"]["code"],
+                json!("tailnet_probe_unrelated_service")
+            );
+
+            let legacy = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "alias": "old-gateway",
+                    "payload": {"status": "ok"}
+                }),
+            )
+            .unwrap();
+            let legacy = module
+                .getattr("classify_tailnet_health")
+                .unwrap()
+                .call1((legacy.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let legacy = py_to_json_value(&legacy).unwrap();
+            assert_eq!(legacy["compatibility"], json!("unknown"));
+            assert_eq!(
+                legacy["diagnostic"]["code"],
+                json!("tailnet_probe_fleet_unknown")
+            );
+
+            let malformed_versions = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "alias": "bad",
+                    "payload": {
+                        "status": "ok",
+                        "fleet": {"supported_protocol_versions": [1, "x"]}
+                    }
+                }),
+            )
+            .unwrap();
+            let malformed_versions = module
+                .getattr("classify_tailnet_health")
+                .unwrap()
+                .call1((malformed_versions
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),))
+                .unwrap();
+            let malformed_versions =
+                py_to_json_value(&malformed_versions).unwrap();
+            assert_eq!(
+                malformed_versions["diagnostic"]["code"],
+                json!("tailnet_probe_fleet_malformed")
+            );
+
+            let discovery = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "status": {
+                        "Self": {
+                            "ID": "self-node",
+                            "DNSName": "athena.tail297af1.ts.net."
+                        },
+                        "Peer": {
+                            "peer-apollo": {
+                                "ID": "peer-apollo",
+                                "DNSName": "apollo.tail297af1.ts.net.",
+                                "HostName": "apollo",
+                                "Online": true,
+                                "OS": "linux"
+                            }
+                        }
+                    },
+                    "health_observations": [{
+                        "endpoint": "https://apollo.tail297af1.ts.net",
+                        "payload": {
+                            "status": "ok",
+                            "fleet": {"supported_protocol_versions": [1]}
+                        }
+                    }]
+                }),
+            )
+            .unwrap();
+            let discovery = module
+                .getattr("classify_tailnet_discovery")
+                .unwrap()
+                .call1((discovery.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let discovery = py_to_json_value(&discovery).unwrap();
+            assert_eq!(
+                discovery["candidates"][0]["endpoint"],
+                json!("https://apollo.tail297af1.ts.net")
+            );
+            assert_eq!(
+                discovery["candidates"][0]["installation_pin"],
+                json!("")
+            );
+            assert_eq!(
+                discovery["candidates"][0]["machine_selector"],
+                json!("")
+            );
+
+            let reconcile = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "enrolled": [{
+                        "alias": "apollo",
+                        "provider_ref": "builtin@https",
+                        "endpoint": "https://apollo.example.test",
+                        "pinned_installation_id": format!(
+                            "sase_inst_v1_{}",
+                            "a".repeat(64)
+                        )
+                    }],
+                    "candidates": [{
+                        "provider_ref": "builtin@https",
+                        "endpoint": "https://apollo.example.test",
+                        "installation_pin": format!(
+                            "sase_inst_v1_{}",
+                            "b".repeat(64)
+                        )
+                    }]
+                }),
+            )
+            .unwrap();
+            let reconcile = module
+                .getattr("reconcile_machine_enrollments")
+                .unwrap()
+                .call1((reconcile.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let reconcile = py_to_json_value(&reconcile).unwrap();
+            assert_eq!(reconcile["items"][0]["status"], json!("repair"));
+
+            let bad_schema = json_value_to_py(
+                py,
+                &json!({"schema_version": 9, "payload": {"status": "ok"}}),
+            )
+            .unwrap();
+            let err = module
+                .getattr("classify_tailnet_health")
+                .unwrap()
+                .call1((bad_schema.bind(py).downcast::<PyDict>().unwrap(),));
+            assert!(err.is_err());
+
+            let not_object = json_value_to_py(py, &json!([1, 2, 3])).unwrap();
+            let err = module
+                .getattr("classify_tailnet_discovery")
+                .unwrap()
+                .call1((not_object.bind(py),));
+            assert!(err.is_err());
         });
     }
 

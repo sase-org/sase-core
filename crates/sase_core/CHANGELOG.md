@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(core)* add machine-setup Tailnet discovery and enrollment reconciliation policy
+
 ## [0.32.50](https://github.com/sase-org/sase-core/compare/v0.32.49...v0.32.50) - 2026-09-09
 
 ### Added

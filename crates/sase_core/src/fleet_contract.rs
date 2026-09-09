@@ -36,6 +36,9 @@ use crate::store_lock::{
 
 /// Schema version shared by the fleet contract surface.
 pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 1;
+/// Current fleet protocol version advertised by gateways and required by
+/// viewers. Discovery compatibility is derived from this constant.
+pub const FLEET_PROTOCOL_VERSION: u32 = 1;
 /// Current persisted installation-identity file schema.
 pub const FLEET_INSTALLATION_IDENTITY_SCHEMA_VERSION: u32 = 1;
 /// File under SASE home that stores this user's opaque installation identity.
