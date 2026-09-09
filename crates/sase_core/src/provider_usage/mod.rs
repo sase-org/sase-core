@@ -45,6 +45,7 @@ pub const DEFAULT_USAGE_CADENCE_SECONDS: f64 = 300.0;
 pub const MIN_USAGE_CADENCE_SECONDS: f64 = 60.0;
 pub const DEFAULT_USAGE_WARN_PERCENT: f64 = 75.0;
 pub const DEFAULT_USAGE_CRITICAL_PERCENT: f64 = 90.0;
+pub const USAGE_COLLECTOR_FAILING_THRESHOLD: u32 = 3;
 
 const MAX_FUTURE_SKEW_SECONDS: f64 = 60.0;
 const MAX_OBSERVATIONS: usize = 64;
@@ -109,6 +110,7 @@ pub enum UsageReasonCode {
     MalformedPayload,
     DeadlineExceeded,
     ProbeFailed,
+    VendorDrift,
 }
 
 /// Whether the observation is a full inventory or a named-window update.
@@ -159,6 +161,25 @@ pub enum UsageCollectionHealth {
     Error,
 }
 
+/// Collector health derived from probe/refresh failure streaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCollectorHealthState {
+    Ok,
+    Degraded,
+    Failing,
+}
+
+/// Public per-provider collector health block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageCollectorHealthWire {
+    pub state: UsageCollectorHealthState,
+    pub consecutive_failures: u32,
+    pub last_success_at: Option<f64>,
+    pub failing_since: Option<f64>,
+}
+
 /// Attention kind for a provider or limiting window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,8 +196,8 @@ impl UsageAttentionKind {
         match self {
             Self::Rejected => 4,
             Self::VeryLow => 3,
-            Self::Low => 2,
-            Self::CollectionProblem => 1,
+            Self::CollectionProblem => 2,
+            Self::Low => 1,
             Self::None => 0,
         }
     }
@@ -337,6 +358,8 @@ pub struct UsagePublicProviderWire {
     pub account_generation: u64,
     pub collection_status: UsageCollectionOutcome,
     pub collection_reason: Option<UsageReasonCode>,
+    #[serde(default)]
+    pub collector_health: Option<UsageCollectorHealthWire>,
     pub completeness: UsageCompleteness,
     pub last_attempt_at: f64,
     pub last_full_observation_at: Option<f64>,
@@ -693,6 +716,7 @@ fn project_provider(
     let attention = provider_attention(
         &observation.provider,
         observation.outcome,
+        None,
         &windows,
         &summary,
         warn_percent,
@@ -704,6 +728,7 @@ fn project_provider(
         account_generation: observation.account_generation,
         collection_status: observation.outcome,
         collection_reason: observation.reason_code,
+        collector_health: None,
         completeness: observation.completeness,
         last_attempt_at: observation.received_at,
         last_full_observation_at,
@@ -872,19 +897,26 @@ fn window_attention(
 fn provider_attention(
     provider: &str,
     outcome: UsageCollectionOutcome,
+    collector_health: Option<&UsageCollectorHealthWire>,
     windows: &[UsagePublicWindowWire],
     summary: &Option<UsageScopedSummaryWire>,
     warn_percent: f64,
     critical_percent: f64,
 ) -> UsageAttentionWire {
     let mut best = UsageAttentionWire {
-        kind: UsageAttentionKind::None,
+        kind: if collection_problem_is_attentive(
+            outcome,
+            collector_health,
+            windows,
+            summary,
+        ) {
+            UsageAttentionKind::CollectionProblem
+        } else {
+            UsageAttentionKind::None
+        },
         provider: provider.to_string(),
         window_key: None,
     };
-    if outcome.is_problem() {
-        best.kind = UsageAttentionKind::CollectionProblem;
-    }
     for window in windows {
         if usage_window_applies(&window.applicability, None)
             == UsageApplicabilityMatch::DoesNotApply
@@ -904,17 +936,53 @@ fn provider_attention(
             best.window_key = Some(window.key.clone());
         }
     }
-    if best.kind == UsageAttentionKind::None
+    best
+}
+
+fn collector_health_from_schedule(
+    schedule: Option<&ProviderUsageRefreshScheduleWire>,
+) -> Option<UsageCollectorHealthWire> {
+    let schedule = schedule?;
+    let consecutive_failures = schedule.consecutive_failures;
+    let state = if consecutive_failures >= USAGE_COLLECTOR_FAILING_THRESHOLD {
+        UsageCollectorHealthState::Failing
+    } else if consecutive_failures > 0 {
+        UsageCollectorHealthState::Degraded
+    } else {
+        UsageCollectorHealthState::Ok
+    };
+    Some(UsageCollectorHealthWire {
+        state,
+        consecutive_failures,
+        last_success_at: schedule.last_success_at,
+        failing_since: if consecutive_failures > 0 {
+            schedule.first_failure_at
+        } else {
+            None
+        },
+    })
+}
+
+fn collection_problem_is_attentive(
+    outcome: UsageCollectionOutcome,
+    collector_health: Option<&UsageCollectorHealthWire>,
+    windows: &[UsagePublicWindowWire],
+    summary: &Option<UsageScopedSummaryWire>,
+) -> bool {
+    if collector_health.is_some_and(|health| {
+        health.state == UsageCollectorHealthState::Failing
+    }) {
+        return true;
+    }
+    if outcome.is_problem() && windows.is_empty() {
+        return true;
+    }
+    outcome == UsageCollectionOutcome::Ok
         && summary.is_none()
-        && outcome == UsageCollectionOutcome::Ok
-        && windows.iter().any(|window| {
+        && !windows.is_empty()
+        && windows.iter().all(|window| {
             window.freshness == UsageFreshness::Unknown && !window.reset_passed
         })
-    {
-        best.kind = UsageAttentionKind::CollectionProblem;
-        best.window_key = None;
-    }
-    best
 }
 
 fn window_key_is_less(candidate: &str, current: Option<&str>) -> bool {

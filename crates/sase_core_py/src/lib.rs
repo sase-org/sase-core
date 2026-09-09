@@ -249,6 +249,7 @@
 //! - `provider_usage_observation_schema_version() -> int`
 //! - `provider_usage_public_schema_version() -> int`
 //! - `provider_usage_store_schema_version() -> int`
+//! - `provider_usage_collector_failing_threshold() -> int`
 //! - `provider_usage_state_path(sase_home: str) -> str`
 //! - `provider_usage_load(sase_home: str, now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
 //! - `provider_usage_record_observation(sase_home: str, observation: dict, now: float) -> dict`
@@ -1213,6 +1214,7 @@ use sase_core::provider_usage::{
     DEFAULT_USAGE_CADENCE_SECONDS, DEFAULT_USAGE_CRITICAL_PERCENT,
     DEFAULT_USAGE_WARN_PERCENT, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
     PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION, PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+    USAGE_COLLECTOR_FAILING_THRESHOLD,
 };
 use sase_core::query::types::{QueryErrorWire, QueryExprWire};
 use sase_core::query::{
@@ -12139,6 +12141,12 @@ fn py_provider_usage_store_schema_version() -> u32 {
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_collector_failing_threshold")]
+fn py_provider_usage_collector_failing_threshold() -> u32 {
+    USAGE_COLLECTOR_FAILING_THRESHOLD
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_state_path")]
 fn py_provider_usage_state_path(sase_home: &str) -> String {
     core_provider_usage_state_path(&PathBuf::from(sase_home))
@@ -15746,6 +15754,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_store_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_collector_failing_threshold,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_state_path, m)?)?;
@@ -25513,6 +25525,7 @@ MENTORS:
             let now = 1_800_000_000.0;
             assert_eq!(py_provider_usage_observation_schema_version(), 1);
             assert_eq!(py_provider_usage_public_schema_version(), 1);
+            assert_eq!(py_provider_usage_collector_failing_threshold(), 3);
             assert_eq!(
                 py_provider_usage_remaining_percent(12.5).unwrap(),
                 87.5
@@ -25636,6 +25649,7 @@ MENTORS:
             let temp = tempdir().unwrap();
             let home = temp.path().to_string_lossy().to_string();
             assert_eq!(py_provider_usage_store_schema_version(), 1);
+            assert_eq!(py_provider_usage_collector_failing_threshold(), 3);
             assert!(py_provider_usage_state_path(&home)
                 .ends_with("llm_provider_usage.json"));
 

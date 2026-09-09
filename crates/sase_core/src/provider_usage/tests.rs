@@ -382,6 +382,43 @@ fn rejects_duplicate_keys_empty_ok_and_impossible_periods() {
 }
 
 #[test]
+fn vendor_drift_reason_code_is_accepted_and_unknown_codes_still_reject() {
+    let mut observation = valid_observation();
+    observation.outcome = UsageCollectionOutcome::Error;
+    observation.reason_code = Some(UsageReasonCode::VendorDrift);
+    observation.completeness = UsageCompleteness::Partial;
+    observation.windows.clear();
+    assert_eq!(
+        validate_usage_observation(observation, NOW)
+            .unwrap()
+            .reason_code,
+        Some(UsageReasonCode::VendorDrift)
+    );
+
+    let value = json!({
+        "schema_version": 1,
+        "provider": "alpha",
+        "context_id": "ctx",
+        "account_generation": 1,
+        "ordering_token": NOW - 1.0,
+        "received_at": NOW - 1.0,
+        "source": "probe",
+        "outcome": "error",
+        "reason_code": "vendor_changed",
+        "diagnostic": null,
+        "completeness": "partial",
+        "account_mode": null,
+        "plan": null,
+        "windows": []
+    });
+    let parsed: std::result::Result<
+        ProviderUsageObservationWire,
+        serde_json::Error,
+    > = serde_json::from_value(value);
+    assert!(parsed.unwrap_err().to_string().contains("unknown variant"));
+}
+
+#[test]
 fn usage_store_merges_partial_updates_and_fences_tombstones() {
     let temp = tempdir().unwrap();
     let full = usage_observation(
@@ -653,6 +690,91 @@ fn usage_store_reports_bad_provider_records_without_repairing_on_read() {
 }
 
 #[test]
+fn usage_store_decodes_old_schedules_and_isolates_future_schedule_fields() {
+    let temp = tempdir().unwrap();
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            "alpha",
+            "ctx-alpha",
+            1,
+            NOW - 20.0,
+            UsageCompleteness::Complete,
+            vec![named_window("week", 10.0, NOW - 20.0)],
+        ),
+        NOW,
+    )
+    .unwrap();
+    record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx-alpha",
+        1,
+        "error",
+        NOW + 1.0,
+    );
+
+    let path = provider_usage_state_path(temp.path());
+    let mut raw: Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let schedule = raw["schedules"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    schedule.remove("first_failure_at");
+    fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+    let read = load_provider_usage_store(
+        temp.path(),
+        NOW + 2.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap();
+    assert!(read.diagnostics.is_empty());
+    let health = read.snapshot.providers[0]
+        .collector_health
+        .as_ref()
+        .unwrap();
+    assert_eq!(health.state, UsageCollectorHealthState::Degraded);
+    assert_eq!(health.consecutive_failures, 1);
+    assert_eq!(health.failing_since, None);
+
+    let mut raw: Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let schedule = raw["schedules"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .next()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    schedule.insert("future_schedule_field".to_string(), json!(true));
+    fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+    let read = load_provider_usage_store(
+        temp.path(),
+        NOW + 3.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap();
+    assert_eq!(read.snapshot.providers.len(), 1);
+    assert!(read.snapshot.providers[0].collector_health.is_none());
+    assert_eq!(read.diagnostics.len(), 1);
+    assert!(read.diagnostics[0]
+        .message
+        .contains("provider usage schedule is not valid v1 JSON"));
+}
+
+#[test]
 fn usage_refresh_reservations_join_release_and_expire() {
     let temp = tempdir().unwrap();
     let request = ProviderUsageRefreshReservationRequestWire {
@@ -709,6 +831,350 @@ fn usage_refresh_backoff_grows_and_caps() {
     assert_eq!(refresh_backoff_seconds(3, 300.0), 1_200.0);
     assert_eq!(refresh_backoff_seconds(4, 300.0), 1_800.0);
     assert_eq!(refresh_backoff_seconds(8, 300.0), 1_800.0);
+}
+
+fn record_refresh_attempt_at(
+    home: &std::path::Path,
+    provider: &str,
+    context_id: &str,
+    account_generation: u64,
+    outcome: &str,
+    now: f64,
+) -> ProviderUsageRefreshScheduleWire {
+    record_provider_usage_refresh_attempt(
+        home,
+        ProviderUsageRefreshAttemptWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation,
+            outcome: outcome.to_string(),
+            retry_after_seconds: None,
+            cadence_seconds: 300.0,
+        },
+        now,
+    )
+    .unwrap()
+}
+
+#[test]
+fn usage_refresh_failure_streak_tracks_first_failure_and_clears_on_success() {
+    let temp = tempdir().unwrap();
+    let first =
+        record_refresh_attempt_at(temp.path(), "alpha", "ctx", 1, "error", NOW);
+    assert_eq!(first.consecutive_failures, 1);
+    assert_eq!(first.first_failure_at, Some(NOW));
+
+    let second = record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "error",
+        NOW + 1.0,
+    );
+    assert_eq!(second.consecutive_failures, 2);
+    assert_eq!(second.first_failure_at, Some(NOW));
+
+    let success = record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "ok",
+        NOW + 2.0,
+    );
+    assert_eq!(success.consecutive_failures, 0);
+    assert_eq!(success.first_failure_at, None);
+    assert_eq!(success.last_success_at, Some(NOW + 2.0));
+
+    let next_streak = record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "error",
+        NOW + 3.0,
+    );
+    assert_eq!(next_streak.consecutive_failures, 1);
+    assert_eq!(next_streak.first_failure_at, Some(NOW + 3.0));
+}
+
+#[test]
+fn collector_health_classifies_failure_boundaries_and_saturation() {
+    let mut schedule = empty_refresh_schedule("alpha", "ctx", 1);
+    schedule.last_success_at = Some(NOW - 10.0);
+    schedule.first_failure_at = Some(NOW);
+    for (failures, expected_state, expected_since) in [
+        (0, UsageCollectorHealthState::Ok, None),
+        (1, UsageCollectorHealthState::Degraded, Some(NOW)),
+        (2, UsageCollectorHealthState::Degraded, Some(NOW)),
+        (3, UsageCollectorHealthState::Failing, Some(NOW)),
+        (u32::MAX, UsageCollectorHealthState::Failing, Some(NOW)),
+    ] {
+        schedule.consecutive_failures = failures;
+        let health = collector_health_from_schedule(Some(&schedule)).unwrap();
+        assert_eq!(health.state, expected_state);
+        assert_eq!(health.consecutive_failures, failures);
+        assert_eq!(health.last_success_at, Some(NOW - 10.0));
+        assert_eq!(health.failing_since, expected_since);
+    }
+    assert!(collector_health_from_schedule(None).is_none());
+}
+
+#[test]
+fn usage_store_projects_current_generation_collector_health_only() {
+    let temp = tempdir().unwrap();
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            "alpha",
+            "ctx-1",
+            1,
+            NOW - 20.0,
+            UsageCompleteness::Complete,
+            vec![named_window("week", 10.0, NOW - 20.0)],
+        ),
+        NOW,
+    )
+    .unwrap();
+    record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx-1",
+        1,
+        "error",
+        NOW + 1.0,
+    );
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 2.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    let health = snapshot.providers[0].collector_health.as_ref().unwrap();
+    assert_eq!(health.state, UsageCollectorHealthState::Degraded);
+    assert_eq!(health.consecutive_failures, 1);
+    assert_eq!(health.failing_since, Some(NOW + 1.0));
+
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            "alpha",
+            "ctx-2",
+            2,
+            NOW + 3.0,
+            UsageCompleteness::Complete,
+            vec![named_window("week", 12.0, NOW + 3.0)],
+        ),
+        NOW + 4.0,
+    )
+    .unwrap();
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 5.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(snapshot.providers[0].context_ref, "ctx-2");
+    assert_eq!(snapshot.providers[0].account_generation, 2);
+    assert!(snapshot.providers[0].collector_health.is_none());
+
+    let success = record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx-2",
+        2,
+        "ok",
+        NOW + 6.0,
+    );
+    assert_eq!(success.first_failure_at, None);
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 7.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    let health = snapshot.providers[0].collector_health.as_ref().unwrap();
+    assert_eq!(health.state, UsageCollectorHealthState::Ok);
+    assert_eq!(health.consecutive_failures, 0);
+    assert_eq!(health.last_success_at, Some(NOW + 6.0));
+    assert_eq!(health.failing_since, None);
+}
+
+#[test]
+fn collection_problem_attention_requires_consistent_failure_with_cached_data() {
+    let temp = tempdir().unwrap();
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            "alpha",
+            "ctx",
+            1,
+            NOW - 30.0,
+            UsageCompleteness::Complete,
+            vec![named_window("week", 10.0, NOW - 30.0)],
+        ),
+        NOW,
+    )
+    .unwrap();
+    let mut failed = usage_observation(
+        "alpha",
+        "ctx",
+        1,
+        NOW - 10.0,
+        UsageCompleteness::Partial,
+        vec![],
+    );
+    failed.outcome = UsageCollectionOutcome::Error;
+    failed.reason_code = Some(UsageReasonCode::Timeout);
+    record_provider_usage_observation(temp.path(), failed, NOW + 1.0).unwrap();
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 2.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(
+        snapshot.providers[0].attention.kind,
+        UsageAttentionKind::None
+    );
+
+    record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "error",
+        NOW + 3.0,
+    );
+    record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "error",
+        NOW + 4.0,
+    );
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 5.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(
+        snapshot.providers[0]
+            .collector_health
+            .as_ref()
+            .unwrap()
+            .state,
+        UsageCollectorHealthState::Degraded
+    );
+    assert_eq!(
+        snapshot.providers[0].attention.kind,
+        UsageAttentionKind::None
+    );
+
+    record_refresh_attempt_at(
+        temp.path(),
+        "alpha",
+        "ctx",
+        1,
+        "error",
+        NOW + 6.0,
+    );
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW + 7.0,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(
+        snapshot.providers[0]
+            .collector_health
+            .as_ref()
+            .unwrap()
+            .state,
+        UsageCollectorHealthState::Failing
+    );
+    assert_eq!(
+        snapshot.providers[0].attention.kind,
+        UsageAttentionKind::CollectionProblem
+    );
+    assert_eq!(snapshot.providers[0].attention.window_key, None);
+}
+
+#[test]
+fn collection_problem_attention_keeps_empty_problem_and_silent_unknown_arms() {
+    let mut empty_problem = valid_observation();
+    empty_problem.outcome = UsageCollectionOutcome::Error;
+    empty_problem.reason_code = Some(UsageReasonCode::ProbeFailed);
+    empty_problem.completeness = UsageCompleteness::Partial;
+    empty_problem.windows.clear();
+    let snapshot = project_usage_snapshot(
+        &[empty_problem],
+        NOW,
+        CADENCE,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot.providers[0].attention.kind,
+        UsageAttentionKind::CollectionProblem
+    );
+
+    let mut silent_unknown = valid_observation();
+    silent_unknown.windows[0].used_percent = 10.0;
+    silent_unknown.windows[0].observed_at = NOW - 1_500.0;
+    let snapshot = project_usage_snapshot(
+        &[silent_unknown],
+        NOW,
+        CADENCE,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap();
+    assert!(snapshot.providers[0].summary.is_none());
+    assert_eq!(
+        snapshot.providers[0].attention.kind,
+        UsageAttentionKind::CollectionProblem
+    );
+}
+
+#[test]
+fn usage_attention_rank_order_places_collection_problem_above_low() {
+    assert!(
+        UsageAttentionKind::Rejected.rank()
+            > UsageAttentionKind::VeryLow.rank()
+    );
+    assert!(
+        UsageAttentionKind::VeryLow.rank()
+            > UsageAttentionKind::CollectionProblem.rank()
+    );
+    assert!(
+        UsageAttentionKind::CollectionProblem.rank()
+            > UsageAttentionKind::Low.rank()
+    );
+    assert!(UsageAttentionKind::Low.rank() > UsageAttentionKind::None.rank());
 }
 
 #[test]
@@ -1129,6 +1595,7 @@ fn missing_quantities_are_null_not_zero() {
     let value = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(value["providers"][0]["plan"], Value::Null);
     assert_eq!(value["providers"][0]["collection_reason"], Value::Null);
+    assert_eq!(value["providers"][0]["collector_health"], Value::Null);
     assert_eq!(
         value["providers"][0]["windows"][0]["exceeded_by_percent"],
         Value::Null

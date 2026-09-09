@@ -1089,7 +1089,8 @@ pub use provider_usage::{
     ProviderUsageStoreWriteOutcomeWire, ProviderUsageStoreWriteStatus,
     RefreshDueDecision, UsageApplicabilityMatch, UsageApplicabilityWire,
     UsageAttentionKind, UsageAttentionWire, UsageCollectionHealth,
-    UsageCollectionOutcome, UsageCompleteness, UsageFreshness,
+    UsageCollectionOutcome, UsageCollectorHealthState,
+    UsageCollectorHealthWire, UsageCompleteness, UsageFreshness,
     UsageKnownConstraintWire, UsagePublicProviderWire, UsagePublicSnapshotWire,
     UsagePublicWindowWire, UsageReasonCode, UsageScopedSummaryWire,
     UsageSource, UsageVendorState, UsageWindowObservationWire,
@@ -1097,7 +1098,7 @@ pub use provider_usage::{
     DEFAULT_USAGE_WARN_PERCENT, MAX_USAGE_REFRESH_BACKOFF_SECONDS,
     MIN_USAGE_CADENCE_SECONDS, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
     PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION, PROVIDER_USAGE_STATE_FILENAME,
-    PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+    PROVIDER_USAGE_STORE_SCHEMA_VERSION, USAGE_COLLECTOR_FAILING_THRESHOLD,
     USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
 };
 pub use query::{

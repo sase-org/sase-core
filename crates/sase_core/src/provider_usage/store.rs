@@ -16,6 +16,7 @@ use super::refresh::{
     USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
 };
 use super::{
+    collection_problem_is_attentive, collector_health_from_schedule,
     project_window, sanitize_diagnostic, summarize_filtered_windows,
     usage_window_applies, validate_ident, validate_now, validate_usage_cadence,
     validate_usage_observation, validate_usage_thresholds, window_attention,
@@ -615,10 +616,14 @@ pub fn record_provider_usage_refresh_attempt(
             schedule.last_finished_at = Some(now);
             if refresh_attempt_succeeded(&request.outcome) {
                 schedule.last_success_at = Some(now);
+                schedule.first_failure_at = None;
                 schedule.consecutive_failures = 0;
                 schedule.backoff_until = None;
                 schedule.retry_after_until = None;
             } else {
+                if schedule.consecutive_failures == 0 {
+                    schedule.first_failure_at = Some(now);
+                }
                 schedule.consecutive_failures =
                     schedule.consecutive_failures.saturating_add(1);
                 let backoff = refresh_backoff_seconds(
@@ -663,12 +668,20 @@ fn read_wire_from_state(
     warn_percent: f64,
     critical_percent: f64,
 ) -> ProviderUsageStoreReadWire {
+    let schedules = decoded.schedules;
     let providers = decoded
         .providers
         .into_values()
         .map(|record| {
+            let key = reservation_key(
+                &record.provider,
+                &record.context_id,
+                record.account_generation,
+            );
+            let schedule = schedules.get(&key);
             public_provider_from_record(
                 record,
+                schedule,
                 now,
                 cadence_seconds,
                 warn_percent,
@@ -694,6 +707,7 @@ fn read_wire_from_state(
 
 fn public_provider_from_record(
     record: ProviderUsageStoredProviderWire,
+    schedule: Option<&ProviderUsageRefreshScheduleWire>,
     now: f64,
     cadence_seconds: f64,
     warn_percent: f64,
@@ -712,9 +726,11 @@ fn public_provider_from_record(
     };
     let known_constraints =
         store_constraint_list(&windows, warn_percent, critical_percent);
+    let collector_health = collector_health_from_schedule(schedule);
     let attention = store_provider_attention(
         &record.provider,
         record.last_attempt.outcome,
+        collector_health.as_ref(),
         &windows,
         &summary,
         warn_percent,
@@ -726,6 +742,7 @@ fn public_provider_from_record(
         account_generation: record.account_generation,
         collection_status: record.last_attempt.outcome,
         collection_reason: record.last_attempt.reason_code,
+        collector_health,
         completeness: if record.last_attempt.outcome
             == UsageCollectionOutcome::Ok
         {
@@ -791,13 +808,19 @@ fn store_constraint_list(
 fn store_provider_attention(
     provider: &str,
     outcome: UsageCollectionOutcome,
+    collector_health: Option<&super::UsageCollectorHealthWire>,
     windows: &[UsagePublicWindowWire],
     summary: &Option<super::UsageScopedSummaryWire>,
     warn_percent: f64,
     critical_percent: f64,
 ) -> UsageAttentionWire {
     let mut best = UsageAttentionWire {
-        kind: if outcome.is_problem() {
+        kind: if collection_problem_is_attentive(
+            outcome,
+            collector_health,
+            windows,
+            summary,
+        ) {
             UsageAttentionKind::CollectionProblem
         } else {
             UsageAttentionKind::None
@@ -818,13 +841,6 @@ fn store_provider_attention(
             best.kind = kind;
             best.window_key = Some(window.key.clone());
         }
-    }
-    if best.kind == UsageAttentionKind::None
-        && summary.is_none()
-        && outcome == UsageCollectionOutcome::Ok
-        && !windows.is_empty()
-    {
-        best.kind = UsageAttentionKind::CollectionProblem;
     }
     best
 }

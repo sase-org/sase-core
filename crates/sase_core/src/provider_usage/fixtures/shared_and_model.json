@@ -83,6 +83,7 @@
         "account_generation": 2,
         "collection_status": "ok",
         "collection_reason": null,
+        "collector_health": null,
         "completeness": "complete",
         "last_attempt_at": 1799999988.0,
         "last_full_observation_at": 1799999980.0,

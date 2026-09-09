@@ -27,6 +27,8 @@ pub struct ProviderUsageRefreshScheduleWire {
     pub last_started_at: Option<f64>,
     pub last_finished_at: Option<f64>,
     pub last_success_at: Option<f64>,
+    #[serde(default)]
+    pub first_failure_at: Option<f64>,
     pub consecutive_failures: u32,
     pub backoff_until: Option<f64>,
     pub retry_after_until: Option<f64>,
@@ -188,6 +190,7 @@ pub fn empty_refresh_schedule(
         last_started_at: None,
         last_finished_at: None,
         last_success_at: None,
+        first_failure_at: None,
         consecutive_failures: 0,
         backoff_until: None,
         retry_after_until: None,
