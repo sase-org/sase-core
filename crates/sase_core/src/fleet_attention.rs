@@ -16,12 +16,14 @@ use serde_json::{json, Value as JsonValue};
 use crate::fleet_contract::{
     duration_ms, operation_payload_fingerprint, reject_path_like,
     reject_secretish, timestamp_ms, validate_content_handle,
-    validate_installation_id, validate_label, validate_non_negative_seconds,
-    validate_schema, validate_timestamp, CapabilitySetWire, ContentHandleWire,
-    FleetContractError, LogicalAgentLocatorWire, OperationDecisionKindWire,
-    OperationDecisionReasonWire, OperationReceiptStateWire,
-    PayloadFingerprintRequestWire, PayloadFingerprintWire,
-    ScopedOperationKeyWire, FLEET_CONTRACT_SCHEMA_VERSION, MAX_LABEL_BYTES,
+    validate_fleet_snapshot_freshness, validate_installation_id,
+    validate_label, validate_non_negative_seconds, validate_schema,
+    validate_timestamp, CapabilitySetWire, ContentHandleWire,
+    FleetContractError, FleetSnapshotFreshnessWire, LogicalAgentLocatorWire,
+    OperationDecisionKindWire, OperationDecisionReasonWire,
+    OperationReceiptStateWire, PayloadFingerprintRequestWire,
+    PayloadFingerprintWire, ScopedOperationKeyWire,
+    FLEET_CONTRACT_SCHEMA_VERSION, MAX_LABEL_BYTES,
 };
 use crate::notifications::mobile::{
     mobile_action_detail_from_notification, pending_action_identity,
@@ -48,6 +50,10 @@ const MAX_ATTENTION_IDENTITIES: usize = 200;
 const MAX_ATTENTION_OPTIONS: usize = 32;
 const MAX_TITLE_BYTES: usize = 200;
 const MAX_SUMMARY_BYTES: usize = 2048;
+/// Default page size for fleet-wide pending-attention inventory reads.
+pub const FLEET_ATTENTION_DEFAULT_PAGE_ROWS: u32 = 50;
+/// Hard cap for one pending-attention inventory page.
+pub const FLEET_ATTENTION_MAX_PAGE_ROWS: u32 = 100;
 
 /// Closed attention kinds the fleet attention journal accepts.
 #[derive(
@@ -254,6 +260,40 @@ pub struct FleetAttentionSnapshotWire {
     pub observed_at_unix: f64,
 }
 
+/// Bounded owner-side pending-attention inventory request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetAttentionInventoryRequestWire {
+    pub schema_version: u32,
+    /// Opaque offset cursor returned by a previous inventory page.
+    pub cursor: Option<String>,
+    /// Requested row limit. `None` means
+    /// [`FLEET_ATTENTION_DEFAULT_PAGE_ROWS`].
+    pub limit: Option<u32>,
+}
+
+/// One bounded page of pending owner-side attention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetAttentionInventoryPageWire {
+    pub schema_version: u32,
+    pub entries: Vec<FleetAttentionEntryWire>,
+    pub limit: u32,
+    pub total_matching_entries: u64,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// Owner-side pending-attention inventory response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetAttentionInventoryResponseWire {
+    pub schema_version: u32,
+    pub page: FleetAttentionInventoryPageWire,
+    pub observed_at_unix: f64,
+    pub freshness: FleetSnapshotFreshnessWire,
+}
+
 /// One notification row plus its already-resolved mobile action state, as
 /// read through the existing notification bridge (`list_notifications` plus
 /// `action_state` per row).
@@ -421,6 +461,174 @@ pub fn project_fleet_attention(
         entries,
         observed_at_unix,
     })
+}
+
+/// Project and page every currently pending owner-side attention entry.
+///
+/// Unlike [`project_fleet_attention`]'s existing row-scoped callers, this is
+/// the discovery contract: the input notification rows are not pre-filtered by
+/// followed logical keys, so uncorrelated questions and gates remain visible to
+/// fleet controllers through their stable request identity.
+pub fn project_fleet_attention_inventory(
+    origin_installation_id: &str,
+    rows: &[FleetAttentionNotificationRowWire],
+    resolved: &[FleetAttentionLogicalIdentityWire],
+    request: &FleetAttentionInventoryRequestWire,
+    observed_at_unix: f64,
+    freshness: FleetSnapshotFreshnessWire,
+) -> Result<FleetAttentionInventoryResponseWire, FleetContractError> {
+    let request = validate_fleet_attention_inventory_request(request)?;
+    validate_timestamp("observed_at_unix", observed_at_unix)?;
+    let freshness = validate_fleet_snapshot_freshness(&freshness)?;
+    let limit = normalize_attention_inventory_limit(request.limit)?;
+    let start = request
+        .cursor
+        .as_deref()
+        .map(parse_attention_inventory_cursor)
+        .transpose()?
+        .unwrap_or(0);
+    let projected = project_fleet_attention(
+        origin_installation_id,
+        rows,
+        resolved,
+        observed_at_unix,
+    )?;
+    let pending = projected
+        .entries
+        .into_iter()
+        .filter(|entry| entry.state == FleetAttentionStateWire::Pending)
+        .collect::<Vec<_>>();
+    let total_matching_entries = pending.len() as u64;
+    let start = start.min(pending.len());
+    let end = start.saturating_add(limit as usize).min(pending.len());
+    let has_more = end < pending.len();
+    let next_cursor = has_more.then(|| format_attention_inventory_cursor(end));
+    let response = FleetAttentionInventoryResponseWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        page: FleetAttentionInventoryPageWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            entries: pending[start..end].to_vec(),
+            limit,
+            total_matching_entries,
+            next_cursor,
+            has_more,
+        },
+        observed_at_unix,
+        freshness,
+    };
+    validate_fleet_attention_inventory_response(&response)
+}
+
+pub fn validate_fleet_attention_inventory_request(
+    request: &FleetAttentionInventoryRequestWire,
+) -> Result<FleetAttentionInventoryRequestWire, FleetContractError> {
+    validate_schema(
+        "fleet attention inventory request",
+        request.schema_version,
+    )?;
+    if let Some(cursor) = &request.cursor {
+        parse_attention_inventory_cursor(cursor)?;
+    }
+    normalize_attention_inventory_limit(request.limit)?;
+    Ok(request.clone())
+}
+
+pub fn validate_fleet_attention_inventory_response(
+    response: &FleetAttentionInventoryResponseWire,
+) -> Result<FleetAttentionInventoryResponseWire, FleetContractError> {
+    validate_schema(
+        "fleet attention inventory response",
+        response.schema_version,
+    )?;
+    validate_schema(
+        "fleet attention inventory page",
+        response.page.schema_version,
+    )?;
+    normalize_attention_inventory_limit(Some(response.page.limit))?;
+    validate_timestamp("observed_at_unix", response.observed_at_unix)?;
+    validate_fleet_snapshot_freshness(&response.freshness)?;
+    if let Some(cursor) = &response.page.next_cursor {
+        parse_attention_inventory_cursor(cursor)?;
+    }
+    if response.page.entries.len() > response.page.limit as usize {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory page entries exceeds limit".to_string(),
+        ));
+    }
+    if response.page.has_more != response.page.next_cursor.is_some() {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory has_more and next_cursor must match"
+                .to_string(),
+        ));
+    }
+    if response.page.entries.len() as u64 > response.page.total_matching_entries
+    {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory page exceeds total_matching_entries"
+                .to_string(),
+        ));
+    }
+    for entry in &response.page.entries {
+        entry.validate()?;
+        if entry.state != FleetAttentionStateWire::Pending {
+            return Err(FleetContractError::Validation(
+                "fleet attention inventory entries must be pending".to_string(),
+            ));
+        }
+    }
+    Ok(response.clone())
+}
+
+fn normalize_attention_inventory_limit(
+    limit: Option<u32>,
+) -> Result<u32, FleetContractError> {
+    let limit = limit.unwrap_or(FLEET_ATTENTION_DEFAULT_PAGE_ROWS);
+    if limit == 0 {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory limit must be positive".to_string(),
+        ));
+    }
+    if limit > FLEET_ATTENTION_MAX_PAGE_ROWS {
+        return Err(FleetContractError::Validation(format!(
+            "fleet attention inventory limit exceeds {FLEET_ATTENTION_MAX_PAGE_ROWS}"
+        )));
+    }
+    Ok(limit)
+}
+
+fn parse_attention_inventory_cursor(
+    cursor: &str,
+) -> Result<usize, FleetContractError> {
+    validate_label(
+        "fleet attention inventory cursor",
+        cursor,
+        MAX_LABEL_BYTES,
+    )?;
+    reject_path_like("fleet attention inventory cursor", cursor)?;
+    reject_secretish("fleet attention inventory cursor", cursor)?;
+    let Some(offset) = cursor.strip_prefix("off:") else {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory cursor is not recognized".to_string(),
+        ));
+    };
+    if offset.is_empty()
+        || !offset.bytes().all(|byte| byte.is_ascii_digit())
+        || (offset.len() > 1 && offset.starts_with('0'))
+    {
+        return Err(FleetContractError::Validation(
+            "fleet attention inventory cursor offset is malformed".to_string(),
+        ));
+    }
+    offset.parse::<usize>().map_err(|_| {
+        FleetContractError::Validation(
+            "fleet attention inventory cursor offset is out of range"
+                .to_string(),
+        )
+    })
+}
+
+fn format_attention_inventory_cursor(offset: usize) -> String {
+    format!("off:{offset}")
 }
 
 fn fleet_attention_kind_for(
@@ -1269,7 +1477,7 @@ pub fn decide_attention_notices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet_contract::ProjectLocatorWire;
+    use crate::fleet_contract::{ObservationFreshnessWire, ProjectLocatorWire};
 
     fn installation(hex: char) -> String {
         format!(
@@ -1346,6 +1554,27 @@ mod tests {
         }
     }
 
+    fn inventory_request(
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> FleetAttentionInventoryRequestWire {
+        FleetAttentionInventoryRequestWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            cursor: cursor.map(str::to_string),
+            limit,
+        }
+    }
+
+    fn fresh_snapshot() -> FleetSnapshotFreshnessWire {
+        FleetSnapshotFreshnessWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            freshness: ObservationFreshnessWire::Fresh,
+            partial: false,
+            refreshed_at_unix: Some(100.0),
+            error: None,
+        }
+    }
+
     #[test]
     fn projection_correlates_gate_by_origin_agent() {
         let rows = vec![gate_row("notif-1", Some("athena.worker"))];
@@ -1410,6 +1639,121 @@ mod tests {
         )
         .unwrap();
         assert!(snapshot.entries.is_empty());
+    }
+
+    #[test]
+    fn inventory_returns_pending_uncorrelated_requests_without_catalog_rows() {
+        let rows =
+            vec![gate_row("notif-inventory", Some("never-loaded-agent"))];
+        let response = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[],
+            &inventory_request(Some(10), None),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+
+        assert_eq!(response.page.total_matching_entries, 1);
+        assert_eq!(response.page.entries.len(), 1);
+        let entry = &response.page.entries[0];
+        assert_eq!(entry.request_key.request_id, "notif-inventory");
+        assert_eq!(entry.state, FleetAttentionStateWire::Pending);
+        assert!(entry.logical_key.is_none());
+        assert!(entry.logical_locator.is_none());
+    }
+
+    #[test]
+    fn inventory_pages_pending_entries_and_filters_settled_entries() {
+        let mut settled = gate_row("notif-b", Some("athena.worker"));
+        settled.state = MobileActionStateWire::AlreadyHandled;
+        let rows = vec![
+            question_row("notif-c", "athena.worker"),
+            settled,
+            gate_row("notif-a", Some("athena.worker")),
+        ];
+
+        let first = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(Some(1), None),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+        assert_eq!(first.page.total_matching_entries, 2);
+        assert_eq!(first.page.entries.len(), 1);
+        assert_eq!(first.page.entries[0].request_key.request_id, "notif-a");
+        assert_eq!(first.page.next_cursor.as_deref(), Some("off:1"));
+        assert!(first.page.has_more);
+
+        let second = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(Some(1), first.page.next_cursor.as_deref()),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+        assert_eq!(second.page.entries.len(), 1);
+        assert_eq!(second.page.entries[0].request_key.request_id, "notif-c");
+        assert_eq!(second.page.next_cursor, None);
+        assert!(!second.page.has_more);
+    }
+
+    #[test]
+    fn inventory_revision_is_stable_across_reconnect() {
+        let rows = vec![question_row("question-stable", "athena.worker")];
+        let first = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(None, None),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+        let second = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(None, None),
+            200.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.page.entries[0].request_key,
+            second.page.entries[0].request_key
+        );
+        assert_eq!(
+            first.page.entries[0].revision,
+            second.page.entries[0].revision
+        );
+    }
+
+    #[test]
+    fn inventory_validation_rejects_unbounded_limits_and_bad_cursor() {
+        let too_many = validate_fleet_attention_inventory_request(
+            &inventory_request(Some(FLEET_ATTENTION_MAX_PAGE_ROWS + 1), None),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(too_many.contains("limit exceeds"), "{too_many}");
+
+        let bad_cursor = validate_fleet_attention_inventory_request(
+            &inventory_request(Some(1), Some("off:01")),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            bad_cursor.contains("cursor offset is malformed"),
+            "{bad_cursor}"
+        );
     }
 
     #[test]

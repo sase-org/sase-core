@@ -739,10 +739,15 @@ pub use finalizer::{
 pub use fleet_attention::{
     decide_attention_notices, decide_fleet_attention_replay,
     evaluate_attention_precondition, fleet_attention_payload_fingerprint,
-    project_fleet_attention, validate_fleet_attention_intent,
+    project_fleet_attention, project_fleet_attention_inventory,
+    validate_fleet_attention_intent,
+    validate_fleet_attention_inventory_request,
+    validate_fleet_attention_inventory_response,
     validate_fleet_attention_request, DurableFleetAttentionRecordWire,
     FleetAttentionDecisionRequestWire, FleetAttentionDecisionWire,
-    FleetAttentionEntryWire, FleetAttentionIntentWire, FleetAttentionKindWire,
+    FleetAttentionEntryWire, FleetAttentionIntentWire,
+    FleetAttentionInventoryPageWire, FleetAttentionInventoryRequestWire,
+    FleetAttentionInventoryResponseWire, FleetAttentionKindWire,
     FleetAttentionLogicalIdentityWire, FleetAttentionNoticeDecisionWire,
     FleetAttentionNoticeLedgerEntryWire, FleetAttentionNotificationRowWire,
     FleetAttentionOptionWire, FleetAttentionOutcomeWire,
@@ -752,7 +757,8 @@ pub use fleet_attention::{
     FleetAttentionRequestWire, FleetAttentionResponseWire,
     FleetAttentionSnapshotWire, FleetAttentionStateWire,
     FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
-    FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
+    FLEET_ATTENTION_CAPABILITY_APPROVE_GATE, FLEET_ATTENTION_DEFAULT_PAGE_ROWS,
+    FLEET_ATTENTION_MAX_PAGE_ROWS,
 };
 pub use fleet_contract::{
     classify_cursor_replay, count_focus_and_fleet,

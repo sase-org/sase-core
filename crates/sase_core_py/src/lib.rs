@@ -218,8 +218,11 @@
 //! - `fleet_evaluate_mutation_precondition(intent: dict, observed: dict | None) -> dict`
 //! - `fleet_partition_bulk_targets(targets: list[dict]) -> dict`
 //! - `fleet_project_attention(origin_installation_id: str, rows: list[dict], resolved: list[dict], observed_at_unix: float) -> dict`
+//! - `fleet_project_attention_inventory(origin_installation_id: str, rows: list[dict], resolved: list[dict], request: dict, observed_at_unix: float, freshness: dict) -> dict`
 //! - `fleet_attention_payload_fingerprint(intent: dict) -> dict`
 //! - `fleet_validate_attention_request(request: dict) -> dict`
+//! - `fleet_validate_attention_inventory_request(request: dict) -> dict`
+//! - `fleet_validate_attention_inventory_response(response: dict) -> dict`
 //! - `fleet_evaluate_attention_precondition(intent: dict, capabilities: dict, observed: dict | None = None) -> dict`
 //! - `fleet_decide_attention_notices(current: list[dict], ledger: list[dict], retention_window_seconds: float, now_unix: float) -> dict`
 //! - `fleet_validate_connection_plan(plan: dict) -> dict`
@@ -995,7 +998,8 @@ use sase_core::finalizer::{
 };
 use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,
-    FleetAttentionIntentWire, FleetAttentionLogicalIdentityWire,
+    FleetAttentionIntentWire, FleetAttentionInventoryRequestWire,
+    FleetAttentionInventoryResponseWire, FleetAttentionLogicalIdentityWire,
     FleetAttentionNoticeLedgerEntryWire, FleetAttentionNotificationRowWire,
     FleetAttentionRequestWire,
 };
@@ -8208,6 +8212,7 @@ fn py_bead_add_link<'py>(
 #[pyfunction]
 #[pyo3(name = "bead_remove_link")]
 #[pyo3(signature = (beads_dir, issue_id, target_ref, relation=None, direction="out", now=None, operation_id=None))]
+#[allow(clippy::too_many_arguments)]
 fn py_bead_remove_link<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -13113,6 +13118,44 @@ fn py_fleet_project_attention<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_project_attention_inventory")]
+fn py_fleet_project_attention_inventory<'py>(
+    py: Python<'py>,
+    origin_installation_id: &str,
+    rows: &Bound<'py, PyList>,
+    resolved: &Bound<'py, PyList>,
+    request: &Bound<'py, PyDict>,
+    observed_at_unix: f64,
+    freshness: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let origin_installation_id = origin_installation_id.to_string();
+    let rows: Vec<FleetAttentionNotificationRowWire> =
+        fleet_wire_list_from_pylist(rows, "fleet attention notification row")?;
+    let resolved: Vec<FleetAttentionLogicalIdentityWire> =
+        fleet_wire_list_from_pylist(
+            resolved,
+            "fleet attention logical identity",
+        )?;
+    let request: FleetAttentionInventoryRequestWire =
+        fleet_wire_from_pydict(request, "fleet attention inventory request")?;
+    let freshness: FleetSnapshotFreshnessWire =
+        fleet_wire_from_pydict(freshness, "fleet snapshot freshness")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::project_fleet_attention_inventory(
+                &origin_installation_id,
+                &rows,
+                &resolved,
+                &request,
+                observed_at_unix,
+                freshness,
+            )
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_attention_payload_fingerprint")]
 fn py_fleet_attention_payload_fingerprint<'py>(
     py: Python<'py>,
@@ -13139,6 +13182,42 @@ fn py_fleet_validate_attention_request<'py>(
     let result = py
         .allow_threads(|| {
             core_fleet_attention::validate_fleet_attention_request(&request)
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_attention_inventory_request")]
+fn py_fleet_validate_attention_inventory_request<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetAttentionInventoryRequestWire =
+        fleet_wire_from_pydict(request, "fleet attention inventory request")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::validate_fleet_attention_inventory_request(
+                &request,
+            )
+        })
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_attention_inventory_response")]
+fn py_fleet_validate_attention_inventory_response<'py>(
+    py: Python<'py>,
+    response: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let response: FleetAttentionInventoryResponseWire =
+        fleet_wire_from_pydict(response, "fleet attention inventory response")?;
+    let result = py
+        .allow_threads(|| {
+            core_fleet_attention::validate_fleet_attention_inventory_response(
+                &response,
+            )
         })
         .map_err(fleet_contract_error_to_pyerr)?;
     fleet_wire_to_py(py, &result)
@@ -14817,6 +14896,107 @@ fn gateway_and_bootstrap_bindings_are_registered() {
             .getattr("fleet_count_focus_and_fleet_from_federation")
             .unwrap()
             .is_callable());
+        assert!(module
+            .getattr("fleet_project_attention_inventory")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_validate_attention_inventory_request")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_validate_attention_inventory_response")
+            .unwrap()
+            .is_callable());
+    });
+}
+
+#[test]
+fn fleet_attention_inventory_bindings_validate_envelopes() {
+    use serde_json::json;
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let origin_installation_id = format!(
+            "{}{}",
+            sase_core::FLEET_INSTALLATION_ID_PREFIX,
+            "a".repeat(64)
+        );
+        let rows = json!([
+            {
+                "schema_version": 1,
+                "notification": {
+                    "id": "question-00000001",
+                    "timestamp": "2026-09-07T00:00:00Z",
+                    "sender": "uncataloged-agent",
+                    "notes": ["Need a decision"],
+                    "action": "UserQuestion",
+                    "action_data": {
+                        "question_count": "1"
+                    }
+                },
+                "state": "available"
+            }
+        ]);
+        let resolved = json!([]);
+        let request = json!({
+            "schema_version": 1,
+            "limit": 10
+        });
+        let freshness = json!({
+            "schema_version": 1,
+            "freshness": "fresh",
+            "partial": false,
+            "refreshed_at_unix": 100.0,
+            "error": null
+        });
+
+        let rows = json_value_to_py(py, &rows).unwrap().into_bound(py);
+        let rows = rows.downcast::<PyList>().unwrap();
+        let resolved = json_value_to_py(py, &resolved).unwrap().into_bound(py);
+        let resolved = resolved.downcast::<PyList>().unwrap();
+        let request = json_value_to_py(py, &request).unwrap().into_bound(py);
+        let request = request.downcast::<PyDict>().unwrap();
+        let freshness =
+            json_value_to_py(py, &freshness).unwrap().into_bound(py);
+        let freshness = freshness.downcast::<PyDict>().unwrap();
+
+        let validated_request =
+            py_fleet_validate_attention_inventory_request(py, request).unwrap();
+        assert_eq!(
+            py_to_json_value(validated_request.bind(py)).unwrap()["limit"],
+            json!(10)
+        );
+
+        let projected = py_fleet_project_attention_inventory(
+            py,
+            &origin_installation_id,
+            rows,
+            resolved,
+            request,
+            100.0,
+            freshness,
+        )
+        .unwrap();
+        let projected_value = py_to_json_value(projected.bind(py)).unwrap();
+        assert_eq!(projected_value["page"]["total_matching_entries"], json!(1));
+        assert_eq!(
+            projected_value["page"]["entries"][0]["logical_key"],
+            json!(null)
+        );
+        assert_eq!(
+            projected_value["page"]["entries"][0]["state"],
+            json!("pending")
+        );
+
+        let projected_dict = projected.bind(py).downcast::<PyDict>().unwrap();
+        let validated =
+            py_fleet_validate_attention_inventory_response(py, projected_dict)
+                .unwrap();
+        assert_eq!(
+            py_to_json_value(validated.bind(py)).unwrap(),
+            projected_value
+        );
     });
 }
 
@@ -16132,11 +16312,20 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_partition_bulk_targets, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_project_attention, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_project_attention_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_attention_payload_fingerprint,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_attention_request, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_validate_attention_inventory_request,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_validate_attention_inventory_response,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_evaluate_attention_precondition,
         m

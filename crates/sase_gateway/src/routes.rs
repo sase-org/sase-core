@@ -771,6 +771,7 @@ fn fleet_v1_routes() -> Router<GatewayState> {
         .route("/launch", post(fleet_launch))
         .route("/mutate", post(fleet_mutate))
         .route("/attention", post(fleet_attention_read))
+        .route("/attention/inventory", post(fleet_attention_inventory))
         .route("/attention/resolve", post(fleet_attention_resolve))
         .route("/credential/rotate", post(fleet_token_rotate))
         .route("/credential/revoke", post(fleet_credential_revoke))
@@ -1437,6 +1438,69 @@ async fn fleet_attention_read(
         ApiError::invalid_request("attention", error.to_string())
     })?;
     Ok(Json(snapshot))
+}
+
+async fn fleet_attention_inventory(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    payload: Result<
+        Json<sase_core::FleetAttentionInventoryRequestWire>,
+        JsonRejection,
+    >,
+) -> Result<Json<sase_core::FleetAttentionInventoryResponseWire>, ApiError> {
+    fleet_protocol_version_from_headers(&headers)?;
+    fleet_authenticate(
+        &state,
+        &headers,
+        "/api/fleet/v1/attention/inventory",
+        FLEET_SCOPE_ATTENTION_READ,
+    )
+    .await?;
+    let Json(payload) = payload.map_err(ApiError::from_fleet_json_rejection)?;
+    let installation = state
+        .fleet_store
+        .ensure_installation_identity()
+        .map_err(ApiError::from_fleet_store)?;
+    let notifications = state
+        .notification_bridge
+        .list_notifications(false)
+        .map_err(ApiError::from_host_bridge)?;
+    let rows =
+        attention_notification_rows(&state, notifications.notifications.iter());
+    let observed_at_unix = current_unix_time();
+    let response = sase_core::project_fleet_attention_inventory(
+        &installation.installation_id,
+        &rows,
+        &[],
+        &payload,
+        observed_at_unix,
+        sase_core::FleetSnapshotFreshnessWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            freshness: sase_core::ObservationFreshnessWire::Fresh,
+            partial: false,
+            refreshed_at_unix: Some(observed_at_unix),
+            error: None,
+        },
+    )
+    .map_err(|error| {
+        ApiError::invalid_request("attention_inventory", error.to_string())
+    })?;
+    Ok(Json(response))
+}
+
+fn attention_notification_rows<'a>(
+    state: &GatewayState,
+    notifications: impl Iterator<Item = &'a NotificationWire>,
+) -> Vec<sase_core::FleetAttentionNotificationRowWire> {
+    notifications
+        .map(
+            |notification| sase_core::FleetAttentionNotificationRowWire {
+                schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                state: state.notification_bridge.action_state(notification),
+                notification: notification.clone(),
+            },
+        )
+        .collect()
 }
 
 /// The agent-label signal used to correlate a notification to a followed
@@ -6220,6 +6284,24 @@ exit 4
         json_response_with_state(state, request).await
     }
 
+    async fn post_attention_inventory(
+        state: GatewayState,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/attention/inventory",
+            Some(token),
+            Some(body),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        json_response_with_state(state, request).await
+    }
+
     fn attention_request_key(
         origin_installation_id: &str,
         request_id: &str,
@@ -6284,6 +6366,18 @@ exit 4
         assert_eq!(body["code"], "scope_denied");
         assert_eq!(body["target"], FLEET_SCOPE_ATTENTION_READ);
 
+        let (status, body) = post_attention_inventory(
+            state.clone(),
+            &token,
+            json!({
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "scope_denied");
+        assert_eq!(body["target"], FLEET_SCOPE_ATTENTION_READ);
+
         let intent = sase_core::FleetAttentionIntentWire {
             schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
             kind: sase_core::FleetAttentionKindWire::Gate,
@@ -6332,6 +6426,111 @@ exit 4
         assert_eq!(status, StatusCode::OK);
         assert_eq!(snapshot["entries"], json!([]));
         assert_eq!(*bridge.list_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_inventory_returns_uncataloged_pending_requests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let envelope_path = tmp.path().join("gate_request.json");
+        write_gate_envelope(&envelope_path);
+        let bridge =
+            Arc::new(FakeAttentionNotificationBridge::with_notifications(
+                vec![attention_gate_notification(
+                    "gate-00000001",
+                    "never-loaded-agent",
+                    envelope_path.to_str().unwrap(),
+                )],
+            ));
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;
+
+        let (status, response) = post_attention_inventory(
+            state,
+            &token,
+            json!({
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "limit": 10,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["page"]["total_matching_entries"], json!(1));
+        let entries = response["page"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let entry = &entries[0];
+        assert_eq!(
+            entry["request_key"]["origin_installation_id"],
+            json!(installation_id)
+        );
+        assert_eq!(entry["request_key"]["request_id"], json!("gate-00000001"));
+        assert!(entry["logical_key"].is_null());
+        assert!(entry["logical_locator"].is_null());
+        assert_eq!(entry["state"], json!("pending"));
+        assert_eq!(*bridge.list_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_inventory_pages_pending_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let bridge = Arc::new(
+            FakeAttentionNotificationBridge::with_notifications(vec![
+                attention_question_notification("question-00000003", "agent-c"),
+                attention_question_notification("question-00000002", "agent-b"),
+                attention_question_notification("question-00000001", "agent-a"),
+            ]),
+        );
+        bridge
+            .handled
+            .lock()
+            .unwrap()
+            .insert("question-00000002".to_string());
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, _installation_id) =
+            enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;
+
+        let (status, first) = post_attention_inventory(
+            state.clone(),
+            &token,
+            json!({
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "limit": 1,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["page"]["total_matching_entries"], json!(2));
+        assert_eq!(first["page"]["has_more"], json!(true));
+        assert_eq!(first["page"]["next_cursor"], json!("off:1"));
+        assert_eq!(
+            first["page"]["entries"][0]["request_key"]["request_id"],
+            json!("question-00000001")
+        );
+
+        let (status, second) = post_attention_inventory(
+            state,
+            &token,
+            json!({
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "limit": 1,
+                "cursor": first["page"]["next_cursor"].clone(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        assert_eq!(second["page"]["total_matching_entries"], json!(2));
+        assert_eq!(second["page"]["has_more"], json!(false));
+        assert!(second["page"]["next_cursor"].is_null());
+        assert_eq!(
+            second["page"]["entries"][0]["request_key"]["request_id"],
+            json!("question-00000003")
+        );
+        assert_eq!(*bridge.list_calls.lock().unwrap(), 2);
     }
 
     #[tokio::test]

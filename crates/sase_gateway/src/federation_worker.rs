@@ -8,7 +8,9 @@ use std::{
 };
 
 use fs2::FileExt;
-use sase_core::fleet_attention::FleetAttentionRequestWire;
+use sase_core::fleet_attention::{
+    FleetAttentionInventoryRequestWire, FleetAttentionRequestWire,
+};
 use sase_core::fleet_contract::{
     validate_connection_plan, ConnectionPlanWire, FleetCatalogQueryWire,
     FleetContentReadRequestWire, FleetDetailRequestWire,
@@ -284,6 +286,11 @@ pub enum FederationIpcRequestWire {
     },
     Attention {
         request: FleetLogicalBatchRequestWire,
+        #[serde(default)]
+        cache_only: bool,
+    },
+    AttentionInventory {
+        request: FleetAttentionInventoryRequestWire,
         #[serde(default)]
         cache_only: bool,
     },
@@ -848,6 +855,18 @@ mod imp {
                 state
                     .read_all(
                         ReadOperation::Attention(request),
+                        cache_only,
+                        deadline,
+                    )
+                    .await
+            }
+            FederationIpcRequestWire::AttentionInventory {
+                request,
+                cache_only,
+            } => {
+                state
+                    .read_all(
+                        ReadOperation::AttentionInventory(request),
                         cache_only,
                         deadline,
                     )
@@ -1477,6 +1496,15 @@ mod imp {
                     )
                     .await
                 }
+                ReadOperation::AttentionInventory(request) => {
+                    self.http_json(
+                        Method::POST,
+                        "/attention/inventory",
+                        Some(to_json(request)?),
+                        deadline,
+                    )
+                    .await
+                }
             }
         }
 
@@ -1581,6 +1609,7 @@ mod imp {
         ContentRange(FleetContentReadRequestWire),
         ProjectEligibility(FleetProjectEligibilityRequestWire),
         Attention(FleetLogicalBatchRequestWire),
+        AttentionInventory(FleetAttentionInventoryRequestWire),
     }
 
     impl ReadOperation {
@@ -1593,6 +1622,7 @@ mod imp {
                 Self::ContentRange(_) => "content_range",
                 Self::ProjectEligibility(_) => "project_eligibility",
                 Self::Attention(_) => "attention",
+                Self::AttentionInventory(_) => "attention_inventory",
             }
         }
 
@@ -1605,6 +1635,7 @@ mod imp {
                 Self::ContentRange(request) => to_json(request)?,
                 Self::ProjectEligibility(request) => to_json(request)?,
                 Self::Attention(request) => to_json(request)?,
+                Self::AttentionInventory(request) => to_json(request)?,
             };
             Ok(format!("{}:{payload}", self.name()))
         }
@@ -2351,6 +2382,31 @@ mod imp {
             assert_eq!(result["hosts"], json!([]));
         }
 
+        #[tokio::test]
+        async fn attention_inventory_read_returns_empty_hosts_when_unconfigured(
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = Arc::new(FederationWorkerState::new(
+                FederationWorkerConfig::new(tmp.path()),
+            ));
+            let result = state
+                .read_all(
+                    ReadOperation::AttentionInventory(
+                        FleetAttentionInventoryRequestWire {
+                            schema_version: 1,
+                            cursor: None,
+                            limit: None,
+                        },
+                    ),
+                    false,
+                    RequestDeadline { unix_ms: None },
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["operation"], "attention_inventory");
+            assert_eq!(result["hosts"], json!([]));
+        }
+
         #[test]
         fn attention_read_operation_cache_key_is_namespaced_and_stable() {
             let request = FleetLogicalBatchRequestWire {
@@ -2364,6 +2420,26 @@ mod imp {
             assert_eq!(
                 key,
                 ReadOperation::Attention(request).cache_key().unwrap()
+            );
+        }
+
+        #[test]
+        fn attention_inventory_read_operation_cache_key_is_namespaced_and_stable(
+        ) {
+            let request = FleetAttentionInventoryRequestWire {
+                schema_version: 1,
+                cursor: Some("off:50".to_string()),
+                limit: Some(50),
+            };
+            let operation = ReadOperation::AttentionInventory(request.clone());
+            assert_eq!(operation.name(), "attention_inventory");
+            let key = operation.cache_key().unwrap();
+            assert!(key.starts_with("attention_inventory:"));
+            assert_eq!(
+                key,
+                ReadOperation::AttentionInventory(request)
+                    .cache_key()
+                    .unwrap()
             );
         }
 
@@ -2681,6 +2757,48 @@ mod imp {
                 json!("deadline"),
             );
 
+            let inventory_deadline_unix_ms = unix_now_ms() + deadline_budget_ms;
+            let inventory_started = std::time::Instant::now();
+            let inventory_response = request_worker_with_deadline(
+                &socket_path,
+                "attention-inventory-1",
+                json!({
+                    "op": "attention_inventory",
+                    "request": {
+                        "schema_version": 1,
+                        "limit": 1,
+                    },
+                    "cache_only": false,
+                }),
+                inventory_deadline_unix_ms,
+            )
+            .await;
+            let inventory_elapsed = inventory_started.elapsed();
+            assert!(
+                inventory_elapsed
+                    < Duration::from_millis(deadline_budget_ms + 1500),
+                "inventory deadline was not bounded: waited {inventory_elapsed:?}",
+            );
+            assert_eq!(
+                inventory_response["ok"],
+                json!(true),
+                "a hung inventory host must not discard the whole response: {inventory_response}",
+            );
+            assert_eq!(
+                inventory_response["result"]["operation"],
+                json!("attention_inventory"),
+            );
+            assert_eq!(
+                host_result(&inventory_response, "zeus")["status"],
+                json!("deadline"),
+                "{inventory_response}",
+            );
+            assert_ne!(
+                host_result(&inventory_response, "apollo")["status"],
+                json!("deadline"),
+                "{inventory_response}",
+            );
+
             let shutdown = request_worker(
                 &socket_path,
                 "shutdown-1",
@@ -2718,6 +2836,7 @@ fn federation_capabilities() -> Vec<String> {
         "fleet.launch".to_string(),
         "fleet.mutate".to_string(),
         "fleet.attention".to_string(),
+        "fleet.attention_inventory".to_string(),
         "fleet.resolve_attention".to_string(),
         "cache.read".to_string(),
         "cache.persist".to_string(),
