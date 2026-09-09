@@ -1091,6 +1091,38 @@ async fn fleet_launch(
         }));
     }
 
+    let project_id = payload.intent.project.project_id.clone();
+    if admission.decision
+        == sase_core::OperationDecisionKindWire::ReturnOriginalReceipt
+    {
+        let agent_id = payload
+            .intent
+            .name
+            .clone()
+            .unwrap_or_else(|| payload.key.operation_id.clone());
+        if let Some(receipt) = recover_fleet_launch_settlement(
+            &state,
+            &admission.receipt,
+            &project_id,
+            &agent_id,
+        )
+        .await?
+        {
+            state.audit(
+                credential.controller_id,
+                "/api/fleet/v1/launch",
+                Some(agent_id),
+                "recovered",
+            );
+            return Ok(Json(FleetLaunchResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                decision: admission.decision,
+                reason: admission.reason,
+                receipt,
+            }));
+        }
+    }
+
     let launch_request = MobileAgentTextLaunchRequestWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         prompt: payload.intent.prompt.clone(),
@@ -1105,46 +1137,175 @@ async fn fleet_launch(
         dry_run: payload.intent.dry_run,
     };
 
-    match state.agent_bridge.launch_text(&launch_request) {
-        Ok(result) => {
+    spawn_fleet_launch_settlement(
+        state.clone(),
+        credential.controller_id.clone(),
+        admission.receipt.clone(),
+        project_id,
+        launch_request,
+    );
+    state.audit(
+        credential.controller_id,
+        "/api/fleet/v1/launch",
+        None,
+        "accepted",
+    );
+    Ok(Json(FleetLaunchResponseWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        decision: admission.decision,
+        reason: admission.reason,
+        receipt: admission.receipt,
+    }))
+}
+
+async fn recover_fleet_launch_settlement(
+    state: &GatewayState,
+    receipt: &sase_core::FleetLaunchReceiptWire,
+    project_id: &str,
+    agent_id: &str,
+) -> Result<Option<sase_core::FleetLaunchReceiptWire>, ApiError> {
+    let _ = state.fleet_reads.reconcile().await;
+    let snapshot = state
+        .fleet_reads
+        .authoritative_snapshot()
+        .await
+        .map_err(ApiError::from_fleet_read)?;
+    let Some(summary) = snapshot.summaries.iter().find(|summary| {
+        summary.logical_locator.project.origin.installation_id
+            == receipt.target_installation_id
+            && summary.logical_locator.project.project_id == project_id
+            && summary.logical_locator.agent_id == agent_id
+    }) else {
+        return Ok(None);
+    };
+    let message = summary
+        .labels
+        .agent_label
+        .clone()
+        .or_else(|| Some(agent_id.to_string()));
+    let recovered = state
+        .fleet_launches
+        .settle_recovered(
+            receipt,
+            Some(summary.logical_locator.clone()),
+            summary.exact_locator.clone(),
+            message,
+        )
+        .map_err(ApiError::from_fleet_launch_store)?;
+    Ok(Some(recovered))
+}
+
+fn spawn_fleet_launch_settlement(
+    state: GatewayState,
+    controller_id: Option<String>,
+    receipt: sase_core::FleetLaunchReceiptWire,
+    project_id: String,
+    launch_request: MobileAgentTextLaunchRequestWire,
+) {
+    tokio::spawn(async move {
+        finish_fleet_launch_settlement(
+            state,
+            controller_id,
+            receipt,
+            project_id,
+            launch_request,
+        )
+        .await;
+    });
+}
+
+async fn finish_fleet_launch_settlement(
+    state: GatewayState,
+    controller_id: Option<String>,
+    receipt: sase_core::FleetLaunchReceiptWire,
+    project_id: String,
+    launch_request: MobileAgentTextLaunchRequestWire,
+) {
+    let bridge = state.agent_bridge.clone();
+    let launched = tokio::task::spawn_blocking(move || {
+        bridge.launch_text(&launch_request)
+    })
+    .await;
+    match launched {
+        Ok(Ok(result)) => {
             let primary_name = launch_primary_name(&result);
             let message = result
                 .primary
                 .as_ref()
                 .and_then(|slot| slot.message.clone())
                 .or_else(|| primary_name.clone());
-            let receipt = state
-                .fleet_launches
-                .settle(
-                    &admission.receipt,
+            let agent_id = primary_name
+                .clone()
+                .unwrap_or_else(|| receipt.key.operation_id.clone());
+            let recovered = recover_fleet_launch_settlement(
+                &state,
+                &receipt,
+                &project_id,
+                &agent_id,
+            )
+            .await;
+            let settled = match recovered {
+                Ok(Some(receipt)) => Ok(receipt),
+                Ok(None) | Err(_) => state.fleet_launches.settle(
+                    &receipt,
                     &result,
-                    &payload.intent.project.project_id,
+                    &project_id,
                     message,
-                )
-                .map_err(ApiError::from_fleet_launch_store)?;
-            state.audit(
-                credential.controller_id.clone(),
-                "/api/fleet/v1/launch",
-                primary_name.clone(),
-                "success",
-            );
-            publish_agents_changed(&state, "fleet_launch", primary_name)?;
-            Ok(Json(FleetLaunchResponseWire {
-                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
-                decision: admission.decision,
-                reason: admission.reason,
-                receipt,
-            }))
+                ),
+            };
+            match settled {
+                Ok(_) => {
+                    let _ = state.fleet_reads.reconcile().await;
+                    state.audit(
+                        controller_id,
+                        "/api/fleet/v1/launch",
+                        primary_name.clone(),
+                        "success",
+                    );
+                    let _ = publish_agents_changed(
+                        &state,
+                        "fleet_launch",
+                        primary_name,
+                    );
+                }
+                Err(error) => {
+                    let api_error = ApiError::from_fleet_launch_store(error);
+                    state.audit(
+                        controller_id,
+                        "/api/fleet/v1/launch",
+                        None,
+                        api_error.wire.code.outcome_label(),
+                    );
+                }
+            }
         }
-        Err(error) => {
+        Ok(Err(error)) => {
             let api_error = ApiError::from_host_bridge(error);
+            let target =
+                api_error.wire.target.as_deref().unwrap_or("agent_bridge");
+            let message =
+                format!("{}: {}", api_error.wire.code.outcome_label(), target);
+            let _ = state
+                .fleet_launches
+                .fail(&receipt, Some(message.chars().take(160).collect()));
             state.audit(
-                credential.controller_id,
+                controller_id,
                 "/api/fleet/v1/launch",
                 None,
                 api_error.wire.code.outcome_label(),
             );
-            Err(api_error)
+        }
+        Err(_) => {
+            let _ = state.fleet_launches.fail(
+                &receipt,
+                Some("internal: launch worker task failed".to_string()),
+            );
+            state.audit(
+                controller_id,
+                "/api/fleet/v1/launch",
+                None,
+                "internal",
+            );
         }
     }
 }
@@ -4352,6 +4513,10 @@ mod tests {
     };
     use chrono::Duration;
     use serde_json::{json, Value};
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -4759,8 +4924,52 @@ mod tests {
         }
     }
 
-    fn state_for_agent_bridge(tmp: &TempDir) -> GatewayState {
-        let launch = sample_launch_result("mobile-demo");
+    fn sample_fleet_launch_body(
+        installation_id: &str,
+        operation_id: &str,
+    ) -> Value {
+        let intent: sase_core::FleetLaunchIntentWire =
+            serde_json::from_value(json!({
+                "schema_version": 1,
+                "prompt": "Do remote work",
+                "request_id": operation_id,
+                "display_name": "Dispatch demo",
+                "name": "mobile-demo",
+                "model": "gpt-5",
+                "provider": "codex",
+                "runtime": "codex",
+                "project": {
+                    "schema_version": 1,
+                    "provider_ref": "builtin:https",
+                    "project_id": "sase",
+                    "revision": null,
+                    "patch_ref": "patch-123"
+                },
+                "dry_run": false,
+                "follow": true,
+                "references": []
+            }))
+            .unwrap();
+        let fingerprint =
+            sase_core::fleet_launch_payload_fingerprint(&intent).unwrap();
+        json!({
+            "schema_version": 1,
+            "key": {
+                "schema_version": 1,
+                "controller_id": "controller-a",
+                "operation_id": operation_id
+            },
+            "target_installation_id": installation_id,
+            "intent": intent,
+            "payload_fingerprint": fingerprint,
+            "acceptance_window_seconds": 30.0
+        })
+    }
+
+    fn state_for_custom_agent_bridge(
+        tmp: &TempDir,
+        agent_bridge: Arc<dyn AgentHostBridge>,
+    ) -> GatewayState {
         GatewayState::new_with_agent_bridge(
             GatewayStateOptions {
                 bind_addr: "127.0.0.1:0".to_string(),
@@ -4773,6 +4982,14 @@ mod tests {
                 max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
                 push_config: PushConfig::default(),
             },
+            agent_bridge,
+        )
+    }
+
+    fn state_for_agent_bridge(tmp: &TempDir) -> GatewayState {
+        let launch = sample_launch_result("mobile-demo");
+        state_for_custom_agent_bridge(
+            tmp,
             Arc::new(crate::host_bridge::StaticAgentHostBridge {
                 list_response: MobileAgentListResponseWire {
                     schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
@@ -4813,6 +5030,57 @@ mod tests {
                 },
             }),
         )
+    }
+
+    #[derive(Debug)]
+    struct DelayedLaunchBridge {
+        home: PathBuf,
+        launch_count: Arc<AtomicUsize>,
+        delay: StdDuration,
+    }
+
+    impl AgentHostBridge for DelayedLaunchBridge {
+        fn launch_text(
+            &self,
+            _request: &MobileAgentTextLaunchRequestWire,
+        ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+            self.launch_count.fetch_add(1, AtomicOrdering::SeqCst);
+            std::thread::sleep(self.delay);
+            seed_fleet_agent(&self.home, "mobile-demo", true, false);
+            Ok(sample_launch_result("mobile-demo"))
+        }
+
+        fn kill_agent(
+            &self,
+            name: &str,
+            _request: &MobileAgentKillRequestWire,
+        ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+            Ok(MobileAgentKillResultWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                name: name.to_string(),
+                status: "killed".to_string(),
+                pid: Some(4242),
+                changed: true,
+                message: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingLaunchBridge {
+        launch_count: Arc<AtomicUsize>,
+    }
+
+    impl AgentHostBridge for FailingLaunchBridge {
+        fn launch_text(
+            &self,
+            _request: &MobileAgentTextLaunchRequestWire,
+        ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+            self.launch_count.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(HostBridgeError::LaunchFailed(
+                "agent_bridge:launch-text:invalid-request".to_string(),
+            ))
+        }
     }
 
     fn helper_result() -> crate::wire::MobileHelperResultWire {
@@ -5638,69 +5906,33 @@ exit 4
         assert_eq!(enroll_status, StatusCode::OK);
         let token = enrolled["token"].as_str().unwrap();
 
-        let intent: sase_core::FleetLaunchIntentWire =
-            serde_json::from_value(json!({
-                "schema_version": 1,
-                "prompt": "Do remote work",
-                "request_id": "dispatch-request-1",
-                "display_name": "Dispatch demo",
-                "name": "mobile-demo",
-                "model": "gpt-5",
-                "provider": "codex",
-                "runtime": "codex",
-                "project": {
-                    "schema_version": 1,
-                    "provider_ref": "builtin:https",
-                    "project_id": "sase",
-                    "revision": null,
-                    "patch_ref": "patch-123"
-                },
-                "dry_run": false,
-                "follow": true,
-                "references": []
-            }))
-            .unwrap();
-        let fingerprint =
-            sase_core::fleet_launch_payload_fingerprint(&intent).unwrap();
-        let body = json!({
-            "schema_version": 1,
-            "key": {
-                "schema_version": 1,
-                "controller_id": "controller-a",
-                "operation_id": "dispatch-request-1"
-            },
-            "target_installation_id": bootstrap.pinned_installation_id,
-            "intent": intent,
-            "payload_fingerprint": fingerprint,
-            "acceptance_window_seconds": 30.0
-        });
-        let mut request = fleet_json_request(
-            "POST",
-            "/api/fleet/v1/launch",
-            Some(token),
-            Some(body),
-        );
-        request.headers_mut().insert(
-            FLEET_PROTOCOL_VERSIONS_HEADER,
-            HeaderValue::from_static("1"),
+        let body = sample_fleet_launch_body(
+            &bootstrap.pinned_installation_id,
+            "dispatch-request-1",
         );
         let (status, launch) =
-            json_response_with_state(state.clone(), request).await;
+            post_fleet_launch(state.clone(), token, body.clone()).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(launch["decision"], "accept_new");
         assert_eq!(launch["reason"], "unseen_in_window");
-        assert_eq!(launch["receipt"]["state"], "settled");
-        assert_eq!(launch["receipt"]["message"], "mobile-demo");
+        assert_eq!(launch["receipt"]["state"], "pending");
         assert_eq!(
             launch["receipt"]["target_installation_id"],
             bootstrap.pinned_installation_id
         );
+
+        let settled =
+            wait_for_launch_receipt_state(&state, token, &body, "settled")
+                .await;
+        assert_eq!(settled["decision"], "return_original_receipt");
+        assert_eq!(settled["receipt"]["message"], "mobile-demo");
         assert_eq!(
-            launch["receipt"]["logical_locator"]["agent_id"],
+            settled["receipt"]["logical_locator"]["agent_id"],
             "mobile-demo"
         );
 
+        wait_for_agents_changed(&state, "fleet_launch", "mobile-demo").await;
         let events = state
             .event_hub
             .replay_after("0000000000000000")
@@ -5716,6 +5948,221 @@ exit 4
         )));
     }
 
+    #[tokio::test]
+    async fn fleet_launch_replays_delayed_launch_and_reconciles_visible_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch_count = Arc::new(AtomicUsize::new(0));
+        let state = state_for_custom_agent_bridge(
+            &tmp,
+            Arc::new(DelayedLaunchBridge {
+                home: tmp.path().to_path_buf(),
+                launch_count: launch_count.clone(),
+                delay: StdDuration::from_millis(80),
+            }),
+        );
+        let bootstrap = fleet_bootstrap(
+            &state,
+            &[FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE],
+            None,
+        );
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+
+        let empty = state
+            .fleet_reads
+            .catalog(sase_core::FleetCatalogQueryWire {
+                schema_version: 1,
+                cursor: None,
+                limit: Some(10),
+                project_ids: Vec::new(),
+                query: None,
+                status_buckets: Vec::new(),
+                include_terminal: true,
+            })
+            .await
+            .unwrap();
+        assert!(empty.page.rows.is_empty());
+
+        let body = sample_fleet_launch_body(
+            &bootstrap.pinned_installation_id,
+            "dispatch-request-delayed",
+        );
+        let (first_status, first) =
+            post_fleet_launch(state.clone(), token, body.clone()).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first["decision"], "accept_new");
+        assert_eq!(first["receipt"]["state"], "pending");
+
+        let (replay_status, replay) =
+            post_fleet_launch(state.clone(), token, body.clone()).await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(replay["decision"], "return_original_receipt");
+        assert_eq!(replay["receipt"]["state"], "pending");
+
+        let settled =
+            wait_for_launch_receipt_state(&state, token, &body, "settled")
+                .await;
+        assert_eq!(
+            settled["receipt"]["logical_locator"]["agent_id"],
+            "mobile-demo"
+        );
+        assert!(settled["receipt"]["instance_locator"].is_object());
+        assert_eq!(launch_count.load(AtomicOrdering::SeqCst), 1);
+
+        let page = state
+            .fleet_reads
+            .catalog(sase_core::FleetCatalogQueryWire {
+                schema_version: 1,
+                cursor: None,
+                limit: Some(10),
+                project_ids: Vec::new(),
+                query: None,
+                status_buckets: Vec::new(),
+                include_terminal: true,
+            })
+            .await
+            .unwrap();
+        assert!(page
+            .page
+            .rows
+            .iter()
+            .any(|row| row.logical_locator.agent_id == "mobile-demo"));
+
+        let summary = first_summary(&state).await;
+        let (stop_status, stop) = post_mutate(
+            state,
+            token,
+            mutation_body(
+                &summary,
+                &bootstrap.pinned_installation_id,
+                "stop",
+                "op-stop-launched",
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(stop_status, StatusCode::OK);
+        assert_eq!(stop["receipt"]["state"], "settled");
+        assert_eq!(
+            stop["receipt"]["target"]["logical"]["agent_id"],
+            "mobile-demo"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleet_launch_failure_settles_failed_without_raw_bridge_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launch_count = Arc::new(AtomicUsize::new(0));
+        let state = state_for_custom_agent_bridge(
+            &tmp,
+            Arc::new(FailingLaunchBridge {
+                launch_count: launch_count.clone(),
+            }),
+        );
+        let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_LAUNCH], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_LAUNCH],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+        let body = sample_fleet_launch_body(
+            &bootstrap.pinned_installation_id,
+            "dispatch-request-failed",
+        );
+
+        let (first_status, first) =
+            post_fleet_launch(state.clone(), token, body.clone()).await;
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first["receipt"]["state"], "pending");
+
+        let failed =
+            wait_for_launch_receipt_state(&state, token, &body, "failed").await;
+        assert_eq!(failed["decision"], "return_original_receipt");
+        assert_eq!(
+            failed["receipt"]["message"],
+            "launch_failed: agent_bridge:launch-text:invalid-request"
+        );
+        assert_eq!(launch_count.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fleet_launch_recovers_pending_reservation_after_gateway_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first_state = state_for_agent_bridge(&tmp);
+        let bootstrap =
+            fleet_bootstrap(&first_state, &[FLEET_SCOPE_LAUNCH], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            first_state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_LAUNCH],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+        let body = sample_fleet_launch_body(
+            &bootstrap.pinned_installation_id,
+            "dispatch-request-restart",
+        );
+        let request: sase_core::FleetLaunchRequestWire =
+            serde_json::from_value(body.clone()).unwrap();
+        let admission = first_state
+            .fleet_launches
+            .reserve(
+                &request,
+                &bootstrap.pinned_installation_id,
+                current_unix_time(),
+            )
+            .unwrap();
+        assert_eq!(
+            admission.decision,
+            sase_core::OperationDecisionKindWire::AcceptNew
+        );
+        assert_eq!(
+            admission.receipt.state,
+            sase_core::OperationReceiptStateWire::Pending
+        );
+        assert!(admission.should_launch);
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+
+        let launch_count = Arc::new(AtomicUsize::new(0));
+        let restarted_state = state_for_custom_agent_bridge(
+            &tmp,
+            Arc::new(FailingLaunchBridge {
+                launch_count: launch_count.clone(),
+            }),
+        );
+
+        let (status, recovered) =
+            post_fleet_launch(restarted_state, token, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recovered["decision"], "return_original_receipt");
+        assert_eq!(recovered["receipt"]["state"], "settled");
+        assert_eq!(
+            recovered["receipt"]["logical_locator"]["agent_id"],
+            "mobile-demo"
+        );
+        assert!(recovered["receipt"]["instance_locator"].is_object());
+        assert_eq!(launch_count.load(AtomicOrdering::SeqCst), 0);
+    }
+
     fn seed_fleet_agent(
         home: &std::path::Path,
         name: &str,
@@ -5724,12 +6171,12 @@ exit 4
     ) {
         use sase_core::agent_scan::AgentArtifactScanOptionsWire;
         let projects = home.join("projects");
-        let project = projects.join("proj");
+        let project = projects.join("sase");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
-            project.join("proj.sase"),
+            project.join("sase.sase"),
             format!(
-                "NAME: proj\nWORKSPACE_DIR: {}\nPROJECT_STATE: enabled\n",
+                "NAME: sase\nWORKSPACE_DIR: {}\nPROJECT_STATE: enabled\n",
                 project.display()
             ),
         )
@@ -5878,6 +6325,70 @@ exit 4
             HeaderValue::from_static("1"),
         );
         json_response_with_state(state, request).await
+    }
+
+    async fn post_fleet_launch(
+        state: GatewayState,
+        token: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let mut request = fleet_json_request(
+            "POST",
+            "/api/fleet/v1/launch",
+            Some(token),
+            Some(body),
+        );
+        request.headers_mut().insert(
+            FLEET_PROTOCOL_VERSIONS_HEADER,
+            HeaderValue::from_static("1"),
+        );
+        json_response_with_state(state, request).await
+    }
+
+    async fn wait_for_launch_receipt_state(
+        state: &GatewayState,
+        token: &str,
+        body: &Value,
+        expected: &str,
+    ) -> Value {
+        for _ in 0..50 {
+            let (status, value) =
+                post_fleet_launch(state.clone(), token, body.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            if value["receipt"]["state"] == expected {
+                return value;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("fleet launch receipt never reached state {expected}");
+    }
+
+    async fn wait_for_agents_changed(
+        state: &GatewayState,
+        reason: &str,
+        agent_name: &str,
+    ) {
+        for _ in 0..50 {
+            let events = state
+                .event_hub
+                .replay_after("0000000000000000")
+                .unwrap()
+                .unwrap();
+            if events.iter().any(|event| {
+                matches!(
+                    &event.payload,
+                    EventPayloadWire::AgentsChanged {
+                        reason: event_reason,
+                        agent_name: Some(name),
+                        timestamp: Some(_),
+                    } if event_reason == reason && name == agent_name
+                )
+            }) {
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        panic!("agents_changed event {reason}/{agent_name} was not published");
     }
 
     #[tokio::test]

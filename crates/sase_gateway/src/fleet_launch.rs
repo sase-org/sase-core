@@ -1,17 +1,18 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use fs2::FileExt;
 use sase_core::fleet_contract::{
     decide_fleet_launch_replay, validate_fleet_launch_request,
-    DurableFleetLaunchRecordWire, FleetContractError,
+    AgentInstanceLocatorWire, DurableFleetLaunchRecordWire, FleetContractError,
     FleetLaunchDecisionRequestWire, FleetLaunchReceiptWire,
-    FleetLaunchRequestWire, OperationDecisionKindWire,
+    FleetLaunchRequestWire, LogicalAgentLocatorWire, OperationDecisionKindWire,
     OperationDecisionReasonWire, OperationReceiptStateWire,
     FLEET_CONTRACT_SCHEMA_VERSION,
 };
@@ -29,6 +30,7 @@ pub struct FleetLaunchStore {
     state_dir: Arc<PathBuf>,
     path: Arc<PathBuf>,
     lock_path: Arc<PathBuf>,
+    in_flight: Arc<Mutex<BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +76,7 @@ impl FleetLaunchStore {
             path: Arc::new(state_dir.join(FLEET_LAUNCH_FILE)),
             lock_path: Arc::new(state_dir.join(FLEET_LAUNCH_LOCK_FILE)),
             state_dir: Arc::new(state_dir),
+            in_flight: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -111,7 +114,7 @@ impl FleetLaunchStore {
             })
             .map_err(contract_error_to_launch_store)?;
 
-        let Some(receipt) = decision.receipt.clone() else {
+        let Some(mut receipt) = decision.receipt.clone() else {
             return Err(match decision.decision {
                 OperationDecisionKindWire::Expired => {
                     FleetLaunchStoreError::Expired(format!(
@@ -125,15 +128,39 @@ impl FleetLaunchStore {
                 )),
             });
         };
-        let should_launch =
+        let mut should_launch =
             decision.decision == OperationDecisionKindWire::AcceptNew;
         if should_launch {
+            receipt.state = OperationReceiptStateWire::Pending;
             file.records.push(DurableFleetLaunchRecordWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 receipt: receipt.clone(),
                 tombstoned_at_unix_ms: None,
             });
             self.write_unlocked(&file)?;
+            should_launch = self.reserve_in_flight(&key)?;
+        } else if decision.decision
+            == OperationDecisionKindWire::ReturnOriginalReceipt
+            && matches!(
+                receipt.state,
+                OperationReceiptStateWire::Accepted
+                    | OperationReceiptStateWire::Pending
+            )
+        {
+            should_launch = self.reserve_in_flight(&key)?;
+            if should_launch
+                && receipt.state != OperationReceiptStateWire::Pending
+            {
+                if let Some(record) = file
+                    .records
+                    .iter_mut()
+                    .find(|record| operation_key(&record.receipt.key) == key)
+                {
+                    record.receipt.state = OperationReceiptStateWire::Pending;
+                    receipt = record.receipt.clone();
+                    self.write_unlocked(&file)?;
+                }
+            }
         }
         Ok(FleetLaunchAdmission {
             decision: decision.decision,
@@ -150,6 +177,18 @@ impl FleetLaunchStore {
         project_id: &str,
         message: Option<String>,
     ) -> Result<FleetLaunchReceiptWire, FleetLaunchStoreError> {
+        let logical_locator =
+            launch_primary_logical_locator(launch, receipt, project_id);
+        self.settle_recovered(receipt, logical_locator, None, message)
+    }
+
+    pub fn settle_recovered(
+        &self,
+        receipt: &FleetLaunchReceiptWire,
+        logical_locator: Option<LogicalAgentLocatorWire>,
+        instance_locator: Option<AgentInstanceLocatorWire>,
+        message: Option<String>,
+    ) -> Result<FleetLaunchReceiptWire, FleetLaunchStoreError> {
         let _lock = self.lock_file()?;
         let mut file = self.read_unlocked()?;
         let key = operation_key(&receipt.key);
@@ -163,16 +202,62 @@ impl FleetLaunchStore {
             ));
         };
         record.receipt.state = OperationReceiptStateWire::Settled;
-        record.receipt.logical_locator =
-            launch_primary_logical_locator(launch, receipt, project_id);
-        record.receipt.message = message.filter(|value| {
-            !value.trim().is_empty()
-                && !value.contains('/')
-                && !value.to_ascii_lowercase().contains("bearer ")
-        });
+        record.receipt.logical_locator = logical_locator;
+        record.receipt.instance_locator = instance_locator;
+        record.receipt.message = message.and_then(safe_receipt_message);
         let settled = record.receipt.clone();
         self.write_unlocked(&file)?;
+        self.release_in_flight(&key);
         Ok(settled)
+    }
+
+    pub fn fail(
+        &self,
+        receipt: &FleetLaunchReceiptWire,
+        message: Option<String>,
+    ) -> Result<FleetLaunchReceiptWire, FleetLaunchStoreError> {
+        let _lock = self.lock_file()?;
+        let mut file = self.read_unlocked()?;
+        let key = operation_key(&receipt.key);
+        let Some(record) = file
+            .records
+            .iter_mut()
+            .find(|record| operation_key(&record.receipt.key) == key)
+        else {
+            return Err(FleetLaunchStoreError::Validation(
+                "fleet launch reservation record is missing".to_string(),
+            ));
+        };
+        if record.receipt.state == OperationReceiptStateWire::Settled {
+            self.release_in_flight(&key);
+            return Ok(record.receipt.clone());
+        }
+        record.receipt.state = OperationReceiptStateWire::Failed;
+        record.receipt.logical_locator = None;
+        record.receipt.instance_locator = None;
+        record.receipt.message = message.and_then(safe_receipt_message);
+        let failed = record.receipt.clone();
+        self.write_unlocked(&file)?;
+        self.release_in_flight(&key);
+        Ok(failed)
+    }
+
+    fn reserve_in_flight(
+        &self,
+        key: &str,
+    ) -> Result<bool, FleetLaunchStoreError> {
+        let mut in_flight = self.in_flight.lock().map_err(|_| {
+            FleetLaunchStoreError::Validation(
+                "fleet launch in-flight lock is poisoned".to_string(),
+            )
+        })?;
+        Ok(in_flight.insert(key.to_string()))
+    }
+
+    fn release_in_flight(&self, key: &str) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(key);
+        }
     }
 
     fn lock_file(&self) -> Result<File, FleetLaunchStoreError> {
@@ -332,6 +417,19 @@ fn is_locator_component(value: &str) -> bool {
             byte.is_ascii_alphanumeric()
                 || matches!(byte, b'_' | b'-' | b'.' | b':')
         })
+}
+
+fn safe_receipt_message(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.to_ascii_lowercase().contains("bearer ")
+        || trimmed.to_ascii_lowercase().contains("sase_fleet_")
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn contract_error_to_launch_store(

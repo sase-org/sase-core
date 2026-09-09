@@ -1118,6 +1118,7 @@ pub enum OperationReceiptStateWire {
     Accepted,
     Pending,
     Settled,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

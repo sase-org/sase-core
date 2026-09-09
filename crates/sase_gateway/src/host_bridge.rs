@@ -269,7 +269,8 @@ impl CommandAgentHostBridge {
             }
             if operation.starts_with("launch-") {
                 return Err(HostBridgeError::LaunchFailed(format!(
-                    "agent_bridge:{operation}"
+                    "agent_bridge:{operation}{}",
+                    safe_launch_error_suffix(&output.stderr)
                 )));
             }
             return Err(HostBridgeError::BridgeUnavailable(format!(
@@ -281,6 +282,75 @@ impl CommandAgentHostBridge {
                 "agent_bridge:{operation}:invalid_json"
             ))
         })
+    }
+}
+
+fn safe_launch_error_suffix(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let Some(detail) = text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("mobile agent bridge error:")
+            .map(str::trim)
+    }) else {
+        return String::new();
+    };
+    let lowered = detail.to_ascii_lowercase();
+    if detail.contains('/')
+        || detail.contains('\\')
+        || lowered.contains("bearer ")
+        || lowered.contains("sase_fleet_")
+    {
+        return String::new();
+    }
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for ch in detail.chars().take(160) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if matches!(ch, ' ' | '-' | '_' | ':' | '.')
+            && !last_was_separator
+        {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        String::new()
+    } else {
+        format!(":{slug}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_error_suffix_keeps_bounded_safe_bridge_detail() {
+        assert_eq!(
+            safe_launch_error_suffix(
+                b"mobile agent bridge error: prompt must be a non-empty string\n"
+            ),
+            ":prompt-must-be-a-non-empty-string"
+        );
+    }
+
+    #[test]
+    fn launch_error_suffix_drops_secret_or_path_like_detail() {
+        assert_eq!(
+            safe_launch_error_suffix(
+                b"mobile agent bridge error: failed at /tmp/source\n"
+            ),
+            ""
+        );
+        assert_eq!(
+            safe_launch_error_suffix(
+                b"mobile agent bridge error: bearer abc123 rejected\n"
+            ),
+            ""
+        );
     }
 }
 
