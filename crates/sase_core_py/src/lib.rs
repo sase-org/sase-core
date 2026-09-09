@@ -1077,6 +1077,11 @@ use sase_core::notifications::{
     NotificationUpsertRequestWire, NotificationWire,
     PendingActionTransportRequestWire, PendingActionWire,
 };
+use sase_core::pending_commit_checkpoint::{
+    decide_pending_commit_checkpoint_recovery as core_decide_pending_commit_checkpoint_recovery,
+    PendingCommitCheckpointRequestWire,
+    PENDING_COMMIT_CHECKPOINT_WIRE_SCHEMA_VERSION,
+};
 use sase_core::perf_logs::{
     perf_logs_query as core_perf_logs_query, PerfLogsQueryWire,
 };
@@ -1633,6 +1638,27 @@ fn py_reconcile_machine_enrollments<'py>(
     let result = core_reconcile_machine_enrollments(&request)
         .map_err(machine_setup_error_to_pyerr)?;
     serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "pending_commit_checkpoint_wire_schema_version")]
+fn py_pending_commit_checkpoint_wire_schema_version() -> u32 {
+    PENDING_COMMIT_CHECKPOINT_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "decide_pending_commit_checkpoint_recovery")]
+fn py_decide_pending_commit_checkpoint_recovery<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PendingCommitCheckpointRequestWire =
+        provider_priority_dict_from_py(
+            request.as_any(),
+            "pending commit checkpoint request",
+        )?;
+    let decision = core_decide_pending_commit_checkpoint_recovery(&request);
+    serialize_to_py(py, &decision)
 }
 
 // The machine-hood bindings above are migration shims. New code should use
@@ -14693,6 +14719,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_pending_commit_checkpoint_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_pending_commit_checkpoint_recovery,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_normalize_agent_archive_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_normalize_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_globalize_agent_name, m)?)?;
@@ -17142,6 +17176,49 @@ mod tests {
                 .unwrap()
                 .call1((not_object.bind(py),));
             assert!(err.is_err());
+        });
+    }
+
+    #[test]
+    fn pending_commit_checkpoint_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert_eq!(
+                module
+                    .getattr("pending_commit_checkpoint_wire_schema_version")
+                    .unwrap()
+                    .call0()
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                1
+            );
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "checkpoint_present": true,
+                    "repository_matches": true,
+                    "subject_matches": true,
+                    "payload_matches": true,
+                    "has_operation_id": true,
+                    "independent_ownership_evidence": true,
+                    "dispatch_completed": true,
+                    "pending_after_hook": true,
+                    "commit_sha_present": true
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let decision = module
+                .getattr("decide_pending_commit_checkpoint_recovery")
+                .unwrap()
+                .call1((request,))
+                .unwrap();
+            let decision = py_to_json_value(&decision).unwrap();
+            assert_eq!(decision["action"], json!("resume"));
+            assert_eq!(decision["schema_version"], json!(1));
         });
     }
 

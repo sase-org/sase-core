@@ -60,6 +60,7 @@ pub mod model_completion;
 pub mod model_route;
 pub mod notifications;
 pub mod parser;
+pub mod pending_commit_checkpoint;
 pub mod perf_logs;
 pub mod plan;
 pub mod procs;
@@ -952,6 +953,14 @@ pub use notifications::{
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
 };
 pub use parser::{parse_patch_project_bytes, parse_project_bytes};
+pub use pending_commit_checkpoint::{
+    decide_pending_commit_checkpoint_recovery,
+    PendingCommitCheckpointDecisionWire, PendingCommitCheckpointRequestWire,
+    PENDING_COMMIT_CHECKPOINT_ACTION_FAIL,
+    PENDING_COMMIT_CHECKPOINT_ACTION_NONE,
+    PENDING_COMMIT_CHECKPOINT_ACTION_RESUME,
+    PENDING_COMMIT_CHECKPOINT_WIRE_SCHEMA_VERSION,
+};
 pub use perf_logs::{
     perf_logs_query, PerfAgentLoadStageWire, PerfAgentLoadsSnapshotWire,
     PerfCountWire, PerfExternalToolWaitsSnapshotWire, PerfGitOpsSnapshotWire,
