@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.56](https://github.com/sase-org/sase-core/compare/v0.32.55...v0.32.56) - 2026-09-09
+
+### Added
+
+- add artifact link event contract
+
 ## [0.32.55](https://github.com/sase-org/sase-core/compare/v0.32.54...v0.32.55) - 2026-09-09
 
 ### Added
