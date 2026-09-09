@@ -205,6 +205,11 @@
 //! - `fleet_reconcile_follow_records(request: dict) -> dict`
 //! - `fleet_followed_batch_family_promotions(request: dict) -> dict`
 //! - `fleet_count_focus_and_fleet(request: dict) -> dict`
+//! - `fleet_validate_catalog_query(request: dict) -> dict`
+//! - `fleet_validate_catalog_cursor(cursor: str) -> str`
+//! - `fleet_validate_snapshot_freshness(freshness: dict) -> dict`
+//! - `fleet_normalize_federation_response(request: dict) -> dict`
+//! - `fleet_count_focus_and_fleet_from_federation(request: dict) -> dict`
 //! - `fleet_classify_cursor_replay(request: dict) -> dict`
 //! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
 //! - `fleet_decide_operation_replay(request: dict) -> dict`
@@ -997,11 +1002,14 @@ use sase_core::fleet_attention::{
 use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
     CacheFreshnessRequestWire, CapabilitySetWire, ConnectionPlanWire,
-    CursorReplayRequestWire, FleetContractError as FleetContractDomainError,
-    FleetLaunchDecisionRequestWire, FleetLaunchIntentWire,
-    FleetLaunchRequestWire, FleetLogicalAgentCountsRequestWire,
-    FocusFleetCountsRequestWire, FollowReconciliationRequestWire,
-    FollowRecordWire, InstallationIdentityMigrateRequestWire,
+    CursorReplayRequestWire, FleetCatalogQueryWire,
+    FleetContractError as FleetContractDomainError,
+    FleetFederationNormalizeRequestWire, FleetLaunchDecisionRequestWire,
+    FleetLaunchIntentWire, FleetLaunchRequestWire,
+    FleetLogicalAgentCountsRequestWire, FleetSnapshotFreshnessWire,
+    FocusFleetCountsRequestWire, FocusFleetFederationCountsRequestWire,
+    FollowReconciliationRequestWire, FollowRecordWire,
+    InstallationIdentityMigrateRequestWire,
     InstallationIdentityRotateRequestWire, LogicalAgentLocatorWire,
     OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
     PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
@@ -12818,6 +12826,71 @@ fn py_fleet_count_focus_and_fleet<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_validate_catalog_query")]
+fn py_fleet_validate_catalog_query<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetCatalogQueryWire =
+        fleet_wire_from_pydict(request, "fleet catalog query")?;
+    let result = core_fleet_contract::validate_fleet_catalog_query(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_catalog_cursor")]
+fn py_fleet_validate_catalog_cursor(cursor: &str) -> PyResult<String> {
+    core_fleet_contract::validate_fleet_catalog_cursor(cursor)
+        .map_err(fleet_contract_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_validate_snapshot_freshness")]
+fn py_fleet_validate_snapshot_freshness<'py>(
+    py: Python<'py>,
+    freshness: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let freshness: FleetSnapshotFreshnessWire =
+        fleet_wire_from_pydict(freshness, "fleet snapshot freshness")?;
+    let result =
+        core_fleet_contract::validate_fleet_snapshot_freshness(&freshness)
+            .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_normalize_federation_response")]
+fn py_fleet_normalize_federation_response<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetFederationNormalizeRequestWire =
+        fleet_wire_from_pydict(request, "fleet federation normalize request")?;
+    let result =
+        core_fleet_contract::normalize_fleet_federation_response(&request)
+            .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_count_focus_and_fleet_from_federation")]
+fn py_fleet_count_focus_and_fleet_from_federation<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FocusFleetFederationCountsRequestWire =
+        fleet_wire_from_pydict(
+            request,
+            "focus/fleet federation counts request",
+        )?;
+    let result =
+        core_fleet_contract::count_focus_and_fleet_from_federation(&request)
+            .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_classify_cursor_replay")]
 fn py_fleet_classify_cursor_replay<'py>(
     py: Python<'py>,
@@ -14460,6 +14533,143 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
             json!(1)
         );
 
+        let catalog_query = json!({
+            "schema_version": 1,
+            "cursor": null,
+            "limit": 50,
+            "project_ids": [],
+            "query": null,
+            "status_buckets": [],
+            "include_terminal": true
+        });
+        let catalog_query =
+            json_value_to_py(py, &catalog_query).unwrap().into_bound(py);
+        let catalog_query = catalog_query.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            py_to_json_value(
+                py_fleet_validate_catalog_query(py, catalog_query)
+                    .unwrap()
+                    .bind(py)
+            )
+            .unwrap()["limit"],
+            json!(50)
+        );
+        assert_eq!(
+            py_fleet_validate_catalog_cursor("off:50").unwrap(),
+            "off:50"
+        );
+
+        let freshness = json!({
+            "schema_version": 1,
+            "freshness": "fresh",
+            "partial": false,
+            "refreshed_at_unix": 11.0,
+            "error": null
+        });
+        let freshness_obj =
+            json_value_to_py(py, &freshness).unwrap().into_bound(py);
+        let freshness_dict = freshness_obj.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            py_to_json_value(
+                py_fleet_validate_snapshot_freshness(py, freshness_dict)
+                    .unwrap()
+                    .bind(py)
+            )
+            .unwrap()["refreshed_at_unix"],
+            json!(11.0)
+        );
+
+        let authoritative_counts = json!({
+            "schema_version": 1,
+            "basis": {
+                "schema_version": 1,
+                "input_rows": 3,
+                "selected_rows": 3,
+                "max_revision": 3,
+                "observed_at_unix_max": 12.0
+            },
+            "logical_agent_total": 3,
+            "running": 3,
+            "waiting": 0,
+            "attention": 0,
+            "occupied_runner_slots": 3
+        });
+        let federation_response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 1,
+            "hosts": [{
+                "schema_version": 1,
+                "alias": "apollo",
+                "provider_ref": "apollo-provider",
+                "installation_id": installation_id,
+                "endpoint": "https://apollo.example.test",
+                "status": "ok",
+                "cached": false,
+                "age_seconds": null,
+                "payload": {
+                    "schema_version": 1,
+                    "cursor": {
+                        "schema_version": 1,
+                        "store_generation": "gen-apollo",
+                        "sequence": 12
+                    },
+                    "counts": authoritative_counts,
+                    "freshness": freshness,
+                    "page": {
+                        "schema_version": 1,
+                        "rows": [summary_value.clone()],
+                        "limit": 50,
+                        "total_matching_rows": 3,
+                        "next_cursor": "off:50",
+                        "has_more": true
+                    }
+                },
+                "error": null
+            }]
+        });
+        let normalize_req = json!({
+            "schema_version": 1,
+            "response": federation_response.clone()
+        });
+        let normalize_req =
+            json_value_to_py(py, &normalize_req).unwrap().into_bound(py);
+        let normalize_req = normalize_req.downcast::<PyDict>().unwrap();
+        let normalized =
+            py_fleet_normalize_federation_response(py, normalize_req).unwrap();
+        let normalized = py_to_json_value(normalized.bind(py)).unwrap();
+        assert_eq!(normalized["hosts"][0]["alias"], json!("apollo"));
+        assert_eq!(
+            normalized["hosts"][0]["catalog"]["next_cursor"],
+            json!("off:50")
+        );
+        assert_eq!(
+            normalized["hosts"][0]["authoritative_counts"]["running"],
+            json!(3)
+        );
+
+        let federation_count_req = json!({
+            "schema_version": 1,
+            "local_summaries": [],
+            "followed_response": null,
+            "fleet_response": federation_response
+        });
+        let federation_count_req = json_value_to_py(py, &federation_count_req)
+            .unwrap()
+            .into_bound(py);
+        let federation_count_req =
+            federation_count_req.downcast::<PyDict>().unwrap();
+        let counted = py_fleet_count_focus_and_fleet_from_federation(
+            py,
+            federation_count_req,
+        )
+        .unwrap();
+        assert_eq!(
+            py_to_json_value(counted.bind(py)).unwrap()["fleet"]["counts"]
+                ["running"],
+            json!(3)
+        );
+
         let cursor_req = json!({
             "schema_version": 1,
             "cursor": {
@@ -14585,6 +14795,26 @@ fn gateway_and_bootstrap_bindings_are_registered() {
         assert!(module.getattr("gateway_main").unwrap().is_callable());
         assert!(module
             .getattr("fleet_issue_bootstrap")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_validate_catalog_query")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_validate_catalog_cursor")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_validate_snapshot_freshness")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_normalize_federation_response")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_count_focus_and_fleet_from_federation")
             .unwrap()
             .is_callable());
     });
@@ -15869,6 +16099,17 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_count_focus_and_fleet, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_catalog_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_catalog_cursor, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_validate_snapshot_freshness, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_normalize_federation_response,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_count_focus_and_fleet_from_federation,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cursor_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_operation_payload_fingerprint,

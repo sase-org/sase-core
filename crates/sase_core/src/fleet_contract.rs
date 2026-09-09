@@ -21,8 +21,8 @@ use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::{rngs::OsRng, RngCore};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -607,6 +607,101 @@ pub struct FleetLogicalBatchResponseWire {
     pub entries: Vec<FleetLogicalBatchEntryWire>,
 }
 
+/// Request to normalize a federation worker read result.
+///
+/// The payload is transport-independent JSON from the federation worker result
+/// object or from a successful IPC response envelope. Host envelopes are
+/// normalized independently so a malformed host degrades to diagnostics
+/// without discarding other healthy hosts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetFederationNormalizeRequestWire {
+    pub schema_version: u32,
+    pub response: Value,
+}
+
+/// Count request for the current Focus/Fleet bridge over real federation
+/// envelopes.
+///
+/// `followed_response` must be a followed-batch federation response and is
+/// counted only from resolved requested summaries. `fleet_response` may carry
+/// catalog or summary responses and may use authoritative host counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FocusFleetFederationCountsRequestWire {
+    pub schema_version: u32,
+    pub local_summaries: Vec<ResolvedAgentSummaryWire>,
+    pub followed_response: Option<Value>,
+    pub fleet_response: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetEnvelopeDiagnosticWire {
+    pub schema_version: u32,
+    pub alias: Option<String>,
+    pub operation: Option<String>,
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCatalogContinuationStateWire {
+    Ready,
+    Finished,
+    ResyncRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetCatalogContinuationWire {
+    pub schema_version: u32,
+    pub snapshot_cursor: Option<StoreCursorWire>,
+    pub limit: u32,
+    pub total_matching_rows: u64,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub state: FleetCatalogContinuationStateWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNormalizedHostWire {
+    pub schema_version: u32,
+    pub alias: Option<String>,
+    pub origin: Option<OriginLocatorWire>,
+    pub status: String,
+    pub cached: bool,
+    pub age_seconds: Option<f64>,
+    pub partial: bool,
+    pub freshness: FleetSnapshotFreshnessWire,
+    pub observed_at_unix: Option<f64>,
+    pub summaries: Vec<ResolvedAgentSummaryWire>,
+    pub authoritative_counts: Option<FleetLogicalAgentCountsWire>,
+    pub count_revision: Option<u64>,
+    pub catalog: Option<FleetCatalogContinuationWire>,
+    pub unresolved_logical_keys: Vec<String>,
+    pub diagnostics: Vec<FleetEnvelopeDiagnosticWire>,
+    pub count_input: Option<FleetHostCountInputWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetNormalizedReadResponseWire {
+    pub schema_version: u32,
+    pub operation: Option<String>,
+    pub configured_host_count: u64,
+    pub partial: bool,
+    pub summaries: Vec<ResolvedAgentSummaryWire>,
+    pub diagnostics: Vec<FleetEnvelopeDiagnosticWire>,
+    pub hosts: Vec<FleetNormalizedHostWire>,
+    pub count_hosts: Vec<FleetHostCountInputWire>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FleetDetailRequestWire {
@@ -837,6 +932,10 @@ pub struct FleetHostCountInputWire {
     pub summaries: Vec<ResolvedAgentSummaryWire>,
     pub observed_at_unix: Option<f64>,
     pub freshness: ObservationFreshnessWire,
+    #[serde(default)]
+    pub authoritative_counts: Option<FleetLogicalAgentCountsWire>,
+    #[serde(default)]
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1726,12 +1825,28 @@ pub fn validate_fleet_snapshot_freshness(
     Ok(freshness.clone())
 }
 
+pub fn validate_fleet_logical_agent_counts(
+    counts: &FleetLogicalAgentCountsWire,
+    label: &str,
+) -> Result<FleetLogicalAgentCountsWire, FleetContractError> {
+    validate_schema(label, counts.schema_version)?;
+    validate_schema(&format!("{label} basis"), counts.basis.schema_version)?;
+    if let Some(observed) = counts.basis.observed_at_unix_max {
+        validate_timestamp(&format!("{label} observed_at_unix_max"), observed)?;
+    }
+    Ok(counts.clone())
+}
+
 pub fn validate_fleet_authoritative_snapshot(
     snapshot: &FleetAuthoritativeSnapshotWire,
 ) -> Result<FleetAuthoritativeSnapshotWire, FleetContractError> {
     validate_schema("fleet authoritative snapshot", snapshot.schema_version)?;
     snapshot.cursor.validate()?;
     validate_fleet_snapshot_freshness(&snapshot.freshness)?;
+    validate_fleet_logical_agent_counts(
+        &snapshot.counts,
+        "fleet authoritative snapshot counts",
+    )?;
     for summary in &snapshot.summaries {
         validate_resolved_agent_summary(summary)?;
     }
@@ -1793,6 +1908,13 @@ pub fn validate_fleet_catalog_query(
         prior = Some(*bucket);
     }
     Ok(query.clone())
+}
+
+pub fn validate_fleet_catalog_cursor(
+    cursor: &str,
+) -> Result<String, FleetContractError> {
+    parse_catalog_cursor(cursor)?;
+    Ok(cursor.to_string())
 }
 
 pub fn select_fleet_catalog_page(
@@ -2246,12 +2368,53 @@ pub fn count_focus_and_fleet(
         &request.local_summaries,
         &request.followed_remote_hosts,
         "followed_remote_hosts",
+        false,
     )?;
-    let fleet = count_scope(&[], &request.fleet_hosts, "fleet_hosts")?;
+    let fleet = count_scope(&[], &request.fleet_hosts, "fleet_hosts", true)?;
     Ok(FocusFleetCountsWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         focus,
         fleet,
+    })
+}
+
+pub fn normalize_fleet_federation_response(
+    request: &FleetFederationNormalizeRequestWire,
+) -> Result<FleetNormalizedReadResponseWire, FleetContractError> {
+    validate_schema(
+        "fleet federation normalize request",
+        request.schema_version,
+    )?;
+    normalize_fleet_federation_response_value(&request.response)
+}
+
+pub fn count_focus_and_fleet_from_federation(
+    request: &FocusFleetFederationCountsRequestWire,
+) -> Result<FocusFleetCountsWire, FleetContractError> {
+    validate_schema(
+        "focus/fleet federation counts request",
+        request.schema_version,
+    )?;
+    for summary in &request.local_summaries {
+        validate_resolved_agent_summary(summary)?;
+    }
+    let followed = match &request.followed_response {
+        Some(response) if !response.is_null() => {
+            normalize_fleet_federation_response_value(response)?
+        }
+        _ => empty_normalized_federation_response(None),
+    };
+    let fleet = match &request.fleet_response {
+        Some(response) if !response.is_null() => {
+            normalize_fleet_federation_response_value(response)?
+        }
+        _ => empty_normalized_federation_response(None),
+    };
+    count_focus_and_fleet(&FocusFleetCountsRequestWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        local_summaries: request.local_summaries.clone(),
+        followed_remote_hosts: followed.count_hosts,
+        fleet_hosts: fleet.count_hosts,
     })
 }
 
@@ -3665,24 +3828,1213 @@ fn follow_diagnostic(
     })
 }
 
+fn normalize_fleet_federation_response_value(
+    response: &Value,
+) -> Result<FleetNormalizedReadResponseWire, FleetContractError> {
+    let response = nested_federation_result(response);
+    let object = response.as_object().ok_or_else(|| {
+        FleetContractError::Validation(
+            "fleet federation response must be a JSON object".to_string(),
+        )
+    })?;
+    validate_allowed_fields(
+        object,
+        "fleet federation response",
+        &[
+            "schema_version",
+            "operation",
+            "configured_hosts",
+            "configured_host_count",
+            "partial",
+            "disabled",
+            "diagnostics",
+            "hosts",
+        ],
+    )?;
+    validate_optional_schema(object, "fleet federation response")?;
+    let operation = optional_string_field(
+        object,
+        "operation",
+        "fleet federation operation",
+        MAX_IDENTIFIER_BYTES,
+    )?;
+    if let Some(operation) = &operation {
+        validate_reference_id("fleet federation operation", operation)?;
+    }
+    let disabled = optional_bool_field(object, "disabled")?.unwrap_or(false);
+    let host_values = array_field(object, "hosts")?;
+    let configured_hosts = optional_u64_field(object, "configured_hosts")?;
+    let configured_host_count =
+        optional_u64_field(object, "configured_host_count")?;
+    if let (Some(left), Some(right)) = (configured_hosts, configured_host_count)
+    {
+        if left != right {
+            return Err(FleetContractError::Validation(
+                "configured_hosts and configured_host_count disagree"
+                    .to_string(),
+            ));
+        }
+    }
+    let configured_host_count = configured_hosts
+        .or(configured_host_count)
+        .unwrap_or(host_values.len() as u64);
+    if configured_host_count < host_values.len() as u64 {
+        return Err(FleetContractError::Validation(
+            "configured_host_count is smaller than returned hosts".to_string(),
+        ));
+    }
+    let response_partial =
+        optional_bool_field(object, "partial")?.unwrap_or(false);
+    let mut diagnostics = diagnostics_array(
+        object.get("diagnostics"),
+        None,
+        operation.as_deref(),
+    )?;
+    let mut hosts = Vec::new();
+    let mut summaries = Vec::new();
+    let mut count_hosts = Vec::new();
+    for (index, value) in host_values.iter().enumerate() {
+        let host = match normalize_federation_host_strict(
+            value,
+            operation.as_deref(),
+            disabled,
+            index,
+        ) {
+            Ok(host) => host,
+            Err(error) => invalid_federation_host(
+                value,
+                operation.as_deref(),
+                index,
+                &error.to_string(),
+            )?,
+        };
+        diagnostics.extend(host.diagnostics.clone());
+        summaries.extend(host.summaries.clone());
+        if let Some(input) = &host.count_input {
+            count_hosts.push(input.clone());
+        }
+        hosts.push(host);
+    }
+    Ok(FleetNormalizedReadResponseWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        operation,
+        configured_host_count,
+        partial: response_partial
+            || configured_host_count > hosts.len() as u64
+            || hosts.iter().any(|host| host.partial),
+        summaries,
+        diagnostics,
+        hosts,
+        count_hosts,
+    })
+}
+
+fn empty_normalized_federation_response(
+    operation: Option<String>,
+) -> FleetNormalizedReadResponseWire {
+    FleetNormalizedReadResponseWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        operation,
+        configured_host_count: 0,
+        partial: false,
+        summaries: Vec::new(),
+        diagnostics: Vec::new(),
+        hosts: Vec::new(),
+        count_hosts: Vec::new(),
+    }
+}
+
+fn normalize_federation_host_strict(
+    value: &Value,
+    operation: Option<&str>,
+    disabled: bool,
+    index: usize,
+) -> Result<FleetNormalizedHostWire, FleetContractError> {
+    let object = value.as_object().ok_or_else(|| {
+        FleetContractError::Validation(format!(
+            "fleet federation hosts[{index}] must be a JSON object"
+        ))
+    })?;
+    validate_allowed_fields(
+        object,
+        &format!("fleet federation hosts[{index}]"),
+        &[
+            "schema_version",
+            "alias",
+            "origin",
+            "provider_ref",
+            "installation_id",
+            "endpoint",
+            "status",
+            "cached",
+            "age_seconds",
+            "payload",
+            "error",
+            "freshness",
+            "observed_at",
+            "observed_at_unix",
+            "diagnostics",
+        ],
+    )?;
+    validate_optional_schema(
+        object,
+        &format!("fleet federation hosts[{index}]"),
+    )?;
+    let alias = optional_string_field(
+        object,
+        "alias",
+        "fleet federation host alias",
+        MAX_LABEL_BYTES,
+    )?;
+    let origin = origin_from_host(object)?;
+    let status = optional_string_field(
+        object,
+        "status",
+        "fleet federation host status",
+        MAX_IDENTIFIER_BYTES,
+    )?
+    .unwrap_or_else(|| {
+        if disabled {
+            "disabled".to_string()
+        } else {
+            "unknown".to_string()
+        }
+    });
+    validate_reference_id("fleet federation host status", &status)?;
+    let cached = optional_bool_field(object, "cached")?.unwrap_or(false);
+    let age_seconds =
+        optional_non_negative_seconds_field(object, "age_seconds")?;
+    let mut diagnostics = diagnostics_array(
+        object.get("diagnostics"),
+        alias.as_deref(),
+        operation,
+    )?;
+    if let Some(error) = diagnostic_from_error_value(
+        object.get("error"),
+        alias.as_deref(),
+        operation,
+        "fleet_host_error",
+    )? {
+        diagnostics.push(error);
+    }
+
+    let payload = object
+        .get("payload")
+        .filter(|payload| !payload.is_null())
+        .map(|payload| {
+            payload.as_object().ok_or_else(|| {
+                FleetContractError::Validation(
+                    "fleet federation host payload must be a JSON object"
+                        .to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    let payload_normalization =
+        normalize_host_payload(payload, operation, alias.as_deref())?;
+    diagnostics.extend(payload_normalization.diagnostics);
+    if payload.is_none() && host_status_healthy(&status) {
+        diagnostics.push(fleet_envelope_diagnostic(
+            alias.as_deref(),
+            operation,
+            "fleet_payload_missing",
+            "error",
+            "healthy host did not include a fleet payload",
+        )?);
+    }
+    if !disabled && !host_status_healthy(&status) && diagnostics.is_empty() {
+        diagnostics.push(fleet_envelope_diagnostic(
+            alias.as_deref(),
+            operation,
+            "fleet_host_error",
+            "warning",
+            &format!("host status {status}"),
+        )?);
+    }
+    let freshness = match payload_normalization.freshness {
+        Some(freshness) => freshness,
+        None => {
+            normalized_host_freshness(object, &status, diagnostics.first())?
+        }
+    };
+    if let Some(reason) = &freshness.error {
+        if !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == *reason)
+        {
+            diagnostics.push(fleet_envelope_diagnostic(
+                alias.as_deref(),
+                operation,
+                if freshness.freshness == ObservationFreshnessWire::Stale {
+                    "fleet_host_stale"
+                } else {
+                    "fleet_host_partial"
+                },
+                "warning",
+                reason,
+            )?);
+        }
+    }
+    let observed_at_unix = normalized_host_observed_at(
+        object,
+        &freshness,
+        payload_normalization.authoritative_counts.as_ref(),
+        &payload_normalization.summaries,
+    )?;
+    let partial = payload_normalization.partial
+        || freshness.partial
+        || !host_status_healthy(&status)
+        || (payload.is_none() && host_status_healthy(&status));
+    let count_input = origin.clone().map(|origin| FleetHostCountInputWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        origin,
+        summaries: payload_normalization.summaries.clone(),
+        observed_at_unix,
+        freshness: freshness.freshness,
+        authoritative_counts: payload_normalization
+            .authoritative_counts
+            .clone(),
+        partial,
+    });
+    Ok(FleetNormalizedHostWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        alias,
+        origin,
+        status,
+        cached,
+        age_seconds,
+        partial,
+        freshness,
+        observed_at_unix,
+        summaries: payload_normalization.summaries,
+        authoritative_counts: payload_normalization.authoritative_counts,
+        count_revision: payload_normalization.count_revision,
+        catalog: payload_normalization.catalog,
+        unresolved_logical_keys: payload_normalization.unresolved_logical_keys,
+        diagnostics,
+        count_input,
+    })
+}
+
+fn invalid_federation_host(
+    value: &Value,
+    operation: Option<&str>,
+    index: usize,
+    reason: &str,
+) -> Result<FleetNormalizedHostWire, FleetContractError> {
+    let object = value.as_object();
+    let alias = object.and_then(safe_alias_from_host);
+    let origin = object
+        .and_then(|object| origin_from_host(object).ok())
+        .flatten();
+    let cached = object
+        .and_then(|object| optional_bool_field(object, "cached").ok())
+        .flatten()
+        .unwrap_or(false);
+    let age_seconds = object
+        .and_then(|object| {
+            optional_non_negative_seconds_field(object, "age_seconds").ok()
+        })
+        .flatten();
+    let diagnostics = vec![fleet_envelope_diagnostic(
+        alias.as_deref(),
+        operation,
+        "fleet_envelope_invalid",
+        "error",
+        &format!("hosts[{index}] could not be normalized: {reason}"),
+    )?];
+    let freshness = FleetSnapshotFreshnessWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        freshness: ObservationFreshnessWire::Unknown,
+        partial: true,
+        refreshed_at_unix: None,
+        error: Some("invalid_envelope".to_string()),
+    };
+    let count_input = origin.clone().map(|origin| FleetHostCountInputWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        origin,
+        summaries: Vec::new(),
+        observed_at_unix: None,
+        freshness: ObservationFreshnessWire::Unknown,
+        authoritative_counts: None,
+        partial: true,
+    });
+    Ok(FleetNormalizedHostWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        alias,
+        origin,
+        status: "invalid".to_string(),
+        cached,
+        age_seconds,
+        partial: true,
+        freshness,
+        observed_at_unix: None,
+        summaries: Vec::new(),
+        authoritative_counts: None,
+        count_revision: None,
+        catalog: None,
+        unresolved_logical_keys: Vec::new(),
+        diagnostics,
+        count_input,
+    })
+}
+
+struct PayloadNormalization {
+    summaries: Vec<ResolvedAgentSummaryWire>,
+    authoritative_counts: Option<FleetLogicalAgentCountsWire>,
+    count_revision: Option<u64>,
+    freshness: Option<FleetSnapshotFreshnessWire>,
+    catalog: Option<FleetCatalogContinuationWire>,
+    unresolved_logical_keys: Vec<String>,
+    diagnostics: Vec<FleetEnvelopeDiagnosticWire>,
+    partial: bool,
+}
+
+fn normalize_host_payload(
+    payload: Option<&Map<String, Value>>,
+    operation: Option<&str>,
+    alias: Option<&str>,
+) -> Result<PayloadNormalization, FleetContractError> {
+    let Some(payload) = payload else {
+        return Ok(PayloadNormalization {
+            summaries: Vec::new(),
+            authoritative_counts: None,
+            count_revision: None,
+            freshness: None,
+            catalog: None,
+            unresolved_logical_keys: Vec::new(),
+            diagnostics: Vec::new(),
+            partial: false,
+        });
+    };
+    validate_allowed_fields(
+        payload,
+        "fleet federation host payload",
+        &[
+            "schema_version",
+            "cursor",
+            "counts",
+            "count_revision",
+            "freshness",
+            "page",
+            "entries",
+        ],
+    )?;
+    validate_optional_schema(payload, "fleet federation host payload")?;
+    let mut diagnostics = Vec::new();
+    let (snapshot_cursor, cursor_partial) = optional_store_cursor_value(
+        payload.get("cursor"),
+        "fleet federation payload cursor",
+        alias,
+        operation,
+        &mut diagnostics,
+    )?;
+    let freshness = payload
+        .get("freshness")
+        .map(|value| {
+            freshness_from_json_value(value, "fleet host payload freshness")
+        })
+        .transpose()?;
+    let has_page = payload.get("page").is_some_and(|value| !value.is_null());
+    let has_entries =
+        payload.get("entries").is_some_and(|value| !value.is_null());
+    if has_page && has_entries {
+        return Err(FleetContractError::Validation(
+            "fleet payload cannot contain both page and entries".to_string(),
+        ));
+    }
+    let authoritative_counts = if has_entries {
+        None
+    } else {
+        authoritative_counts_from_payload(payload, operation)?
+    };
+    let count_revision = optional_u64_field(payload, "count_revision")?
+        .or_else(|| {
+            authoritative_counts.as_ref().and_then(fleet_count_revision)
+        });
+    let mut summaries = Vec::new();
+    let mut unresolved_logical_keys = Vec::new();
+    let mut catalog = None;
+    let mut partial = cursor_partial;
+    if let Some(page) = payload.get("page").filter(|value| !value.is_null()) {
+        let parsed = normalized_catalog_page(
+            page,
+            snapshot_cursor,
+            alias,
+            operation,
+            &mut diagnostics,
+        )?;
+        summaries = parsed.0;
+        catalog = Some(parsed.1);
+        partial |= catalog.as_ref().is_some_and(|catalog| {
+            catalog.state == FleetCatalogContinuationStateWire::ResyncRequired
+        });
+    } else if let Some(entries) =
+        payload.get("entries").filter(|value| !value.is_null())
+    {
+        let parsed = normalized_followed_entries(entries)?;
+        summaries = parsed.0;
+        unresolved_logical_keys = parsed.1;
+    }
+    Ok(PayloadNormalization {
+        summaries,
+        authoritative_counts,
+        count_revision,
+        freshness,
+        catalog,
+        unresolved_logical_keys,
+        diagnostics,
+        partial,
+    })
+}
+
+fn normalized_catalog_page(
+    value: &Value,
+    snapshot_cursor: Option<StoreCursorWire>,
+    alias: Option<&str>,
+    operation: Option<&str>,
+    diagnostics: &mut Vec<FleetEnvelopeDiagnosticWire>,
+) -> Result<
+    (Vec<ResolvedAgentSummaryWire>, FleetCatalogContinuationWire),
+    FleetContractError,
+> {
+    let page = value.as_object().ok_or_else(|| {
+        FleetContractError::Validation(
+            "fleet catalog payload.page must be a JSON object".to_string(),
+        )
+    })?;
+    validate_allowed_fields(
+        page,
+        "fleet catalog payload.page",
+        &[
+            "schema_version",
+            "rows",
+            "limit",
+            "total_matching_rows",
+            "next_cursor",
+            "has_more",
+        ],
+    )?;
+    validate_optional_schema(page, "fleet catalog payload.page")?;
+    let rows = resolved_summaries_array(
+        page.get("rows"),
+        "fleet catalog payload.page.rows",
+    )?;
+    let limit_u64 = required_u64_field(page, "limit")?;
+    let limit = u32::try_from(limit_u64).map_err(|_| {
+        FleetContractError::Validation(
+            "fleet catalog payload.page.limit is out of range".to_string(),
+        )
+    })?;
+    normalize_catalog_limit(Some(limit))?;
+    let total_matching_rows = required_u64_field(page, "total_matching_rows")?;
+    let raw_next_cursor = optional_string_field(
+        page,
+        "next_cursor",
+        "fleet catalog next_cursor",
+        MAX_IDENTIFIER_BYTES,
+    )?;
+    let has_more = required_bool_field(page, "has_more")?;
+    let mut state = if has_more {
+        FleetCatalogContinuationStateWire::Ready
+    } else {
+        FleetCatalogContinuationStateWire::Finished
+    };
+    let mut next_cursor = None;
+    match (has_more, raw_next_cursor) {
+        (true, Some(cursor)) => match parse_catalog_cursor(&cursor) {
+            Ok(_) => next_cursor = Some(cursor),
+            Err(error) => {
+                state = FleetCatalogContinuationStateWire::ResyncRequired;
+                diagnostics.push(fleet_envelope_diagnostic(
+                    alias,
+                    operation,
+                    "fleet_cursor_invalid",
+                    "warning",
+                    &error.to_string(),
+                )?);
+            }
+        },
+        (true, None) => {
+            state = FleetCatalogContinuationStateWire::ResyncRequired;
+            diagnostics.push(fleet_envelope_diagnostic(
+                alias,
+                operation,
+                "fleet_cursor_missing",
+                "warning",
+                "fleet catalog page has more rows but no next_cursor",
+            )?);
+        }
+        (false, Some(_)) => {
+            state = FleetCatalogContinuationStateWire::ResyncRequired;
+            diagnostics.push(fleet_envelope_diagnostic(
+                alias,
+                operation,
+                "fleet_cursor_inconsistent",
+                "warning",
+                "fleet catalog page returned next_cursor without has_more",
+            )?);
+        }
+        (false, None) => {}
+    }
+    Ok((
+        rows,
+        FleetCatalogContinuationWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            snapshot_cursor,
+            limit,
+            total_matching_rows,
+            next_cursor,
+            has_more,
+            state,
+        },
+    ))
+}
+
+fn normalized_followed_entries(
+    value: &Value,
+) -> Result<(Vec<ResolvedAgentSummaryWire>, Vec<String>), FleetContractError> {
+    let entries = value.as_array().ok_or_else(|| {
+        FleetContractError::Validation(
+            "fleet followed payload.entries must be a JSON array".to_string(),
+        )
+    })?;
+    let mut summaries = Vec::new();
+    let mut unresolved = Vec::new();
+    for (index, value) in entries.iter().enumerate() {
+        let entry: FleetLogicalBatchEntryWire = wire_from_json_value(
+            value,
+            &format!("fleet followed payload.entries[{index}]"),
+        )?;
+        validate_schema("fleet followed payload entry", entry.schema_version)?;
+        validate_key(
+            "fleet followed payload requested_logical_key",
+            &entry.requested_logical_key,
+        )?;
+        match entry.summary {
+            Some(summary) => {
+                summaries.push(validate_resolved_agent_summary(&summary)?);
+            }
+            None => unresolved.push(entry.requested_logical_key),
+        }
+    }
+    Ok((summaries, unresolved))
+}
+
+fn authoritative_counts_from_payload(
+    payload: &Map<String, Value>,
+    operation: Option<&str>,
+) -> Result<Option<FleetLogicalAgentCountsWire>, FleetContractError> {
+    if operation == Some("followed_batch") || operation == Some("attention") {
+        return Ok(None);
+    }
+    let Some(value) = payload.get("counts") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let counts: FleetLogicalAgentCountsWire =
+        wire_from_json_value(value, "fleet host authoritative counts")?;
+    validate_fleet_logical_agent_counts(
+        &counts,
+        "fleet host authoritative counts",
+    )
+    .map(Some)
+}
+
+fn normalized_host_freshness(
+    host: &Map<String, Value>,
+    status: &str,
+    diagnostic: Option<&FleetEnvelopeDiagnosticWire>,
+) -> Result<FleetSnapshotFreshnessWire, FleetContractError> {
+    if let Some(value) = host.get("freshness") {
+        return freshness_from_json_value(value, "fleet host freshness");
+    }
+    let error = if host_status_healthy(status) {
+        None
+    } else {
+        Some(
+            diagnostic
+                .map(|diagnostic| diagnostic.code.clone())
+                .unwrap_or_else(|| status.to_string()),
+        )
+    };
+    Ok(FleetSnapshotFreshnessWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        freshness: if status == "stale" {
+            ObservationFreshnessWire::Stale
+        } else if host_status_healthy(status) {
+            ObservationFreshnessWire::Fresh
+        } else {
+            ObservationFreshnessWire::Unknown
+        },
+        partial: !host_status_healthy(status),
+        refreshed_at_unix: None,
+        error,
+    })
+}
+
+fn freshness_from_json_value(
+    value: &Value,
+    label: &str,
+) -> Result<FleetSnapshotFreshnessWire, FleetContractError> {
+    if value.is_null() {
+        return Ok(FleetSnapshotFreshnessWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            freshness: ObservationFreshnessWire::Unknown,
+            partial: true,
+            refreshed_at_unix: None,
+            error: Some("missing_freshness".to_string()),
+        });
+    }
+    if value.is_string() {
+        let freshness: ObservationFreshnessWire =
+            wire_from_json_value(value, label)?;
+        return Ok(FleetSnapshotFreshnessWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            freshness,
+            partial: freshness == ObservationFreshnessWire::Unknown,
+            refreshed_at_unix: None,
+            error: None,
+        });
+    }
+    let freshness: FleetSnapshotFreshnessWire =
+        wire_from_json_value(value, label)?;
+    validate_fleet_snapshot_freshness(&freshness)
+}
+
+fn normalized_host_observed_at(
+    host: &Map<String, Value>,
+    freshness: &FleetSnapshotFreshnessWire,
+    authoritative_counts: Option<&FleetLogicalAgentCountsWire>,
+    summaries: &[ResolvedAgentSummaryWire],
+) -> Result<Option<f64>, FleetContractError> {
+    let host_observed = optional_f64_value(
+        host.get("observed_at_unix")
+            .or_else(|| host.get("observed_at")),
+        "fleet host observed_at_unix",
+    )?;
+    let summary_observed =
+        summaries.iter().try_fold(None, |observed, summary| {
+            validate_resolved_agent_summary(summary)?;
+            Ok::<_, FleetContractError>(max_optional_f64(
+                observed,
+                Some(summary.observed_at_unix),
+            ))
+        })?;
+    Ok([
+        host_observed,
+        freshness.refreshed_at_unix,
+        authoritative_counts
+            .and_then(|counts| counts.basis.observed_at_unix_max),
+        summary_observed,
+    ]
+    .into_iter()
+    .fold(None, max_optional_f64))
+}
+
+fn optional_store_cursor_value(
+    value: Option<&Value>,
+    label: &str,
+    alias: Option<&str>,
+    operation: Option<&str>,
+    diagnostics: &mut Vec<FleetEnvelopeDiagnosticWire>,
+) -> Result<(Option<StoreCursorWire>, bool), FleetContractError> {
+    let Some(value) = value else {
+        return Ok((None, false));
+    };
+    if value.is_null() {
+        return Ok((None, false));
+    }
+    let cursor: StoreCursorWire = match wire_from_json_value(value, label) {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            diagnostics.push(fleet_envelope_diagnostic(
+                alias,
+                operation,
+                "fleet_snapshot_cursor_invalid",
+                "warning",
+                &error.to_string(),
+            )?);
+            return Ok((None, true));
+        }
+    };
+    match cursor.validate() {
+        Ok(()) => Ok((Some(cursor), false)),
+        Err(error) => {
+            diagnostics.push(fleet_envelope_diagnostic(
+                alias,
+                operation,
+                "fleet_snapshot_cursor_invalid",
+                "warning",
+                &error.to_string(),
+            )?);
+            Ok((None, true))
+        }
+    }
+}
+
+fn nested_federation_result(response: &Value) -> &Value {
+    let Some(object) = response.as_object() else {
+        return response;
+    };
+    let Some(result) = object.get("result") else {
+        return response;
+    };
+    if result.as_object().is_some_and(|result| {
+        result.contains_key("hosts") || result.contains_key("operation")
+    }) {
+        result
+    } else {
+        response
+    }
+}
+
+fn origin_from_host(
+    object: &Map<String, Value>,
+) -> Result<Option<OriginLocatorWire>, FleetContractError> {
+    let origin = object
+        .get("origin")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            let origin: OriginLocatorWire =
+                wire_from_json_value(value, "fleet federation host origin")?;
+            origin.validate()?;
+            Ok::<_, FleetContractError>(origin)
+        })
+        .transpose()?;
+    let installation_id = optional_string_field(
+        object,
+        "installation_id",
+        "fleet federation host installation_id",
+        MAX_IDENTIFIER_BYTES,
+    )?;
+    let installation_origin = installation_id
+        .map(|installation_id| {
+            validate_installation_id(&installation_id)?;
+            Ok::<_, FleetContractError>(OriginLocatorWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                installation_id,
+            })
+        })
+        .transpose()?;
+    if let (Some(origin), Some(installation_origin)) =
+        (&origin, &installation_origin)
+    {
+        if origin != installation_origin {
+            return Err(FleetContractError::Validation(
+                "fleet federation host origin does not match installation_id"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(origin.or(installation_origin))
+}
+
+fn safe_alias_from_host(object: &Map<String, Value>) -> Option<String> {
+    optional_string_field(
+        object,
+        "alias",
+        "fleet federation host alias",
+        MAX_LABEL_BYTES,
+    )
+    .ok()
+    .flatten()
+}
+
+fn diagnostic_from_error_value(
+    value: Option<&Value>,
+    alias: Option<&str>,
+    operation: Option<&str>,
+    default_code: &str,
+) -> Result<Option<FleetEnvelopeDiagnosticWire>, FleetContractError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_str() {
+        return fleet_envelope_diagnostic(
+            alias,
+            operation,
+            default_code,
+            "error",
+            text,
+        )
+        .map(Some);
+    }
+    let object = value.as_object().ok_or_else(|| {
+        FleetContractError::Validation(
+            "fleet federation error must be a JSON object or string"
+                .to_string(),
+        )
+    })?;
+    validate_allowed_fields(
+        object,
+        "fleet federation error",
+        &["schema_version", "code", "message", "target", "details"],
+    )?;
+    validate_optional_schema(object, "fleet federation error")?;
+    let code = optional_string_field(
+        object,
+        "code",
+        "fleet federation error code",
+        MAX_IDENTIFIER_BYTES,
+    )?
+    .unwrap_or_else(|| default_code.to_string());
+    validate_reference_id("fleet federation error code", &code)?;
+    let message = optional_string_field(
+        object,
+        "message",
+        "fleet federation error message",
+        MAX_LABEL_BYTES,
+    )?
+    .unwrap_or_else(|| code.clone());
+    fleet_envelope_diagnostic(alias, operation, &code, "error", &message)
+        .map(Some)
+}
+
+fn diagnostics_array(
+    value: Option<&Value>,
+    alias: Option<&str>,
+    operation: Option<&str>,
+) -> Result<Vec<FleetEnvelopeDiagnosticWire>, FleetContractError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let values = value.as_array().ok_or_else(|| {
+        FleetContractError::Validation(
+            "fleet federation diagnostics must be a JSON array".to_string(),
+        )
+    })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let mut diagnostic: FleetEnvelopeDiagnosticWire =
+                wire_from_json_value(
+                    value,
+                    &format!("fleet federation diagnostics[{index}]"),
+                )?;
+            if diagnostic.alias.is_none() {
+                diagnostic.alias = alias.map(str::to_string);
+            }
+            if diagnostic.operation.is_none() {
+                diagnostic.operation = operation.map(str::to_string);
+            }
+            validate_fleet_envelope_diagnostic(&diagnostic)
+        })
+        .collect()
+}
+
+fn validate_fleet_envelope_diagnostic(
+    diagnostic: &FleetEnvelopeDiagnosticWire,
+) -> Result<FleetEnvelopeDiagnosticWire, FleetContractError> {
+    validate_schema("fleet envelope diagnostic", diagnostic.schema_version)?;
+    if let Some(alias) = &diagnostic.alias {
+        validate_label(
+            "fleet envelope diagnostic alias",
+            alias,
+            MAX_LABEL_BYTES,
+        )?;
+        reject_secretish("fleet envelope diagnostic alias", alias)?;
+    }
+    if let Some(operation) = &diagnostic.operation {
+        validate_reference_id(
+            "fleet envelope diagnostic operation",
+            operation,
+        )?;
+    }
+    validate_reference_id("fleet envelope diagnostic code", &diagnostic.code)?;
+    validate_reference_id(
+        "fleet envelope diagnostic severity",
+        &diagnostic.severity,
+    )?;
+    if !matches!(diagnostic.severity.as_str(), "info" | "warning" | "error") {
+        return Err(FleetContractError::Validation(
+            "fleet envelope diagnostic severity must be info, warning, or error"
+                .to_string(),
+        ));
+    }
+    validate_label(
+        "fleet envelope diagnostic message",
+        &diagnostic.message,
+        MAX_LABEL_BYTES,
+    )?;
+    reject_secretish("fleet envelope diagnostic message", &diagnostic.message)?;
+    Ok(diagnostic.clone())
+}
+
+fn fleet_envelope_diagnostic(
+    alias: Option<&str>,
+    operation: Option<&str>,
+    code: &str,
+    severity: &str,
+    message: &str,
+) -> Result<FleetEnvelopeDiagnosticWire, FleetContractError> {
+    let message = sanitize_diagnostic_message(message);
+    let diagnostic = FleetEnvelopeDiagnosticWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        alias: alias.map(str::to_string),
+        operation: operation.map(str::to_string),
+        code: code.to_string(),
+        severity: severity.to_string(),
+        message,
+    };
+    validate_fleet_envelope_diagnostic(&diagnostic)
+}
+
+fn sanitize_diagnostic_message(message: &str) -> String {
+    let normalized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let trimmed = normalized.trim();
+    let redacted = if trimmed.contains("://")
+        || trimmed.contains("Authorization:")
+        || trimmed.to_ascii_lowercase().contains("bearer ")
+        || reject_secretish("fleet envelope diagnostic message", trimmed)
+            .is_err()
+    {
+        "federation diagnostic redacted"
+    } else if trimmed.is_empty() {
+        "federation diagnostic omitted"
+    } else {
+        trimmed
+    };
+    trim_to_limit(redacted, MAX_LABEL_BYTES)
+}
+
+fn host_status_healthy(status: &str) -> bool {
+    status == "ok"
+}
+
+fn resolved_summaries_array(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<Vec<ResolvedAgentSummaryWire>, FleetContractError> {
+    let value = value.ok_or_else(|| {
+        FleetContractError::Validation(format!("{label} is required"))
+    })?;
+    let values = value.as_array().ok_or_else(|| {
+        FleetContractError::Validation(format!("{label} must be a JSON array"))
+    })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let summary: ResolvedAgentSummaryWire =
+                wire_from_json_value(value, &format!("{label}[{index}]"))?;
+            validate_resolved_agent_summary(&summary)
+        })
+        .collect()
+}
+
+fn validate_allowed_fields(
+    object: &Map<String, Value>,
+    label: &str,
+    allowed: &[&str],
+) -> Result<(), FleetContractError> {
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(FleetContractError::Validation(format!(
+                "{label} contains unknown field {key}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_schema(
+    object: &Map<String, Value>,
+    label: &str,
+) -> Result<(), FleetContractError> {
+    let Some(value) = object.get("schema_version") else {
+        return Ok(());
+    };
+    let Some(version) = value.as_u64() else {
+        return Err(FleetContractError::Validation(format!(
+            "{label} schema_version must be an unsigned integer"
+        )));
+    };
+    let version = u32::try_from(version).map_err(|_| {
+        FleetContractError::Validation(format!(
+            "{label} schema_version is out of range"
+        ))
+    })?;
+    validate_schema(label, version)
+}
+
+fn optional_string_field(
+    object: &Map<String, Value>,
+    field: &str,
+    label: &str,
+    max_bytes: usize,
+) -> Result<Option<String>, FleetContractError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(text) = value.as_str() else {
+        return Err(FleetContractError::Validation(format!(
+            "{label} must be a string"
+        )));
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    validate_label(label, text, max_bytes)?;
+    reject_secretish(label, text)?;
+    Ok(Some(text.to_string()))
+}
+
+fn optional_bool_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<bool>, FleetContractError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_bool()
+        .ok_or_else(|| {
+            FleetContractError::Validation(format!("{field} must be a boolean"))
+        })
+        .map(Some)
+}
+
+fn required_bool_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<bool, FleetContractError> {
+    optional_bool_field(object, field)?.ok_or_else(|| {
+        FleetContractError::Validation(format!("{field} is required"))
+    })
+}
+
+fn optional_u64_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, FleetContractError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .ok_or_else(|| {
+            FleetContractError::Validation(format!(
+                "{field} must be an unsigned integer"
+            ))
+        })
+        .map(Some)
+}
+
+fn required_u64_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<u64, FleetContractError> {
+    optional_u64_field(object, field)?.ok_or_else(|| {
+        FleetContractError::Validation(format!("{field} is required"))
+    })
+}
+
+fn optional_non_negative_seconds_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<f64>, FleetContractError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(number) = value.as_f64() else {
+        return Err(FleetContractError::Validation(format!(
+            "{field} must be a finite number"
+        )));
+    };
+    validate_non_negative_seconds(field, number)?;
+    Ok(Some(number))
+}
+
+fn optional_f64_value(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<Option<f64>, FleetContractError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(number) = value.as_f64() else {
+        return Err(FleetContractError::Validation(format!(
+            "{label} must be a finite number"
+        )));
+    };
+    validate_timestamp(label, number)?;
+    Ok(Some(number))
+}
+
+fn array_field<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a Vec<Value>, FleetContractError> {
+    let value = object.get(field).ok_or_else(|| {
+        FleetContractError::Validation(format!("{field} is required"))
+    })?;
+    value.as_array().ok_or_else(|| {
+        FleetContractError::Validation(format!("{field} must be a JSON array"))
+    })
+}
+
+fn wire_from_json_value<T: DeserializeOwned>(
+    value: &Value,
+    label: &str,
+) -> Result<T, FleetContractError> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        FleetContractError::Validation(format!(
+            "{label} is not a valid fleet wire value: {error}"
+        ))
+    })
+}
+
 fn count_scope(
     local_summaries: &[ResolvedAgentSummaryWire],
     hosts: &[FleetHostCountInputWire],
     label: &str,
+    allow_authoritative_counts: bool,
 ) -> Result<FleetScopeCountsWire, FleetContractError> {
     let mut host_origins = BTreeSet::new();
-    let mut summaries = Vec::new();
-    summaries.extend_from_slice(local_summaries);
     let mut unknown_origins = Vec::new();
     let mut host_counts = Vec::new();
-    let mut observed_at_unix_max = None;
-    for summary in local_summaries {
-        let summary = validate_resolved_agent_summary(summary)?;
-        observed_at_unix_max = max_optional_f64(
-            observed_at_unix_max,
-            Some(summary.observed_at_unix),
-        );
-    }
+    let local_counts =
+        count_logical_agents(&FleetLogicalAgentCountsRequestWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            summaries: local_summaries.to_vec(),
+        })?;
+    let mut counts = empty_logical_counts();
+    add_logical_counts(&mut counts, &local_counts);
     for host in hosts {
         host.validate(label)?;
         let origin_key = host.origin.installation_id.clone();
@@ -3691,39 +5043,53 @@ fn count_scope(
                 "{label} contains duplicate origin {origin_key}"
             )));
         }
-        summaries.extend_from_slice(&host.summaries);
-        let counts =
+        let counts_for_host = if allow_authoritative_counts {
+            match &host.authoritative_counts {
+                Some(counts) => validate_fleet_logical_agent_counts(
+                    counts,
+                    "fleet host authoritative counts",
+                )?,
+                None => {
+                    count_logical_agents(&FleetLogicalAgentCountsRequestWire {
+                        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                        summaries: host.summaries.clone(),
+                    })?
+                }
+            }
+        } else {
             count_logical_agents(&FleetLogicalAgentCountsRequestWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 summaries: host.summaries.clone(),
-            })?;
-        let partial = host.freshness == ObservationFreshnessWire::Unknown;
+            })?
+        };
+        let partial = host.partial
+            || matches!(
+                host.freshness,
+                ObservationFreshnessWire::Stale
+                    | ObservationFreshnessWire::Unknown
+            );
         if partial {
             unknown_origins.push(origin_key);
         }
         let host_observed_at = max_optional_f64(
             host.observed_at_unix,
-            counts.basis.observed_at_unix_max,
+            counts_for_host.basis.observed_at_unix_max,
         );
-        observed_at_unix_max =
-            max_optional_f64(observed_at_unix_max, host_observed_at);
         host_counts.push(FleetHostCountWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             origin: host.origin.clone(),
-            counts,
+            counts: counts_for_host.clone(),
             partial,
             observed_at_unix: host_observed_at,
         });
+        add_logical_counts(&mut counts, &counts_for_host);
+        counts.basis.observed_at_unix_max = max_optional_f64(
+            counts.basis.observed_at_unix_max,
+            host_observed_at,
+        );
     }
-    let counts = count_logical_agents(&FleetLogicalAgentCountsRequestWire {
-        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
-        summaries,
-    })?;
-    observed_at_unix_max = max_optional_f64(
-        observed_at_unix_max,
-        counts.basis.observed_at_unix_max,
-    );
     unknown_origins.sort();
+    let observed_at_unix_max = counts.basis.observed_at_unix_max;
     Ok(FleetScopeCountsWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         counts,
@@ -3732,6 +5098,61 @@ fn count_scope(
         unknown_origins,
         host_counts,
     })
+}
+
+fn empty_logical_counts() -> FleetLogicalAgentCountsWire {
+    FleetLogicalAgentCountsWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        basis: FleetCountBasisWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            input_rows: 0,
+            selected_rows: 0,
+            max_revision: None,
+            observed_at_unix_max: None,
+        },
+        logical_agent_total: 0,
+        running: 0,
+        waiting: 0,
+        attention: 0,
+        occupied_runner_slots: 0,
+    }
+}
+
+fn add_logical_counts(
+    total: &mut FleetLogicalAgentCountsWire,
+    counts: &FleetLogicalAgentCountsWire,
+) {
+    total.basis.input_rows = total
+        .basis
+        .input_rows
+        .saturating_add(counts.basis.input_rows);
+    total.basis.selected_rows = total
+        .basis
+        .selected_rows
+        .saturating_add(counts.basis.selected_rows);
+    total.basis.max_revision =
+        max_optional_u64(total.basis.max_revision, counts.basis.max_revision);
+    total.basis.observed_at_unix_max = max_optional_f64(
+        total.basis.observed_at_unix_max,
+        counts.basis.observed_at_unix_max,
+    );
+    total.logical_agent_total = total
+        .logical_agent_total
+        .saturating_add(counts.logical_agent_total);
+    total.running = total.running.saturating_add(counts.running);
+    total.waiting = total.waiting.saturating_add(counts.waiting);
+    total.attention = total.attention.saturating_add(counts.attention);
+    total.occupied_runner_slots = total
+        .occupied_runner_slots
+        .saturating_add(counts.occupied_runner_slots);
+}
+
+fn max_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
 }
 
 fn max_optional_f64(left: Option<f64>, right: Option<f64>) -> Option<f64> {
@@ -4799,6 +6220,28 @@ mod tests {
         }
     }
 
+    fn authoritative_counts(
+        running: u64,
+        total: u64,
+        observed_at_unix_max: Option<f64>,
+    ) -> FleetLogicalAgentCountsWire {
+        FleetLogicalAgentCountsWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            basis: FleetCountBasisWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                input_rows: total,
+                selected_rows: total,
+                max_revision: Some(total),
+                observed_at_unix_max,
+            },
+            logical_agent_total: total,
+            running,
+            waiting: 0,
+            attention: 0,
+            occupied_runner_slots: running,
+        }
+    }
+
     fn record_running() -> AgentArtifactRecordWire {
         AgentArtifactRecordWire {
             project_name: "SASE".to_string(),
@@ -4832,6 +6275,34 @@ mod tests {
             has_done_marker: false,
             record_shape: AgentArtifactRecordShapeWire::Full,
         }
+    }
+
+    fn summary_done(
+        hex: char,
+        agent: &str,
+        revision_num: u64,
+        observed_at_unix: f64,
+    ) -> ResolvedAgentSummaryWire {
+        let locator = logical(hex, agent);
+        let mut record = record_running();
+        record.running = None;
+        record.done = Some(DoneMarkerWire {
+            outcome: Some("completed".to_string()),
+            status_label: Some("DONE".to_string()),
+            ..DoneMarkerWire::default()
+        });
+        record.has_done_marker = true;
+        let mut request = projection_request(
+            locator,
+            Some(exact(hex, agent, "run-1")),
+            revision_num,
+            record,
+        );
+        request.owner_facts.liveness = OwnerLivenessWire::Dead;
+        request.owner_facts.occupied_runner_slot = false;
+        request.owner_facts.capabilities = caps(&[]);
+        request.owner_facts.observed_at_unix = observed_at_unix;
+        project_resolved_agent_summary(&request).unwrap()
     }
 
     fn projection_request(
@@ -5448,6 +6919,8 @@ mod tests {
                 summaries: vec![remote_followed.clone()],
                 observed_at_unix: Some(2000.0),
                 freshness: ObservationFreshnessWire::Fresh,
+                authoritative_counts: None,
+                partial: false,
             }],
             fleet_hosts: vec![
                 FleetHostCountInputWire {
@@ -5456,6 +6929,8 @@ mod tests {
                     summaries: vec![remote_followed],
                     observed_at_unix: Some(2000.0),
                     freshness: ObservationFreshnessWire::Fresh,
+                    authoritative_counts: None,
+                    partial: false,
                 },
                 FleetHostCountInputWire {
                     schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -5463,6 +6938,8 @@ mod tests {
                     summaries: vec![remote_unfollowed],
                     observed_at_unix: Some(1500.0),
                     freshness: ObservationFreshnessWire::Aging,
+                    authoritative_counts: None,
+                    partial: false,
                 },
                 FleetHostCountInputWire {
                     schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -5470,6 +6947,8 @@ mod tests {
                     summaries: Vec::new(),
                     observed_at_unix: None,
                     freshness: ObservationFreshnessWire::Unknown,
+                    authoritative_counts: None,
+                    partial: false,
                 },
             ],
         })
@@ -5482,6 +6961,432 @@ mod tests {
         assert_eq!(counted.fleet.unknown_origins, vec![id('d')]);
         assert_eq!(counted.fleet.host_counts.len(), 3);
         assert_eq!(counted.fleet.observed_at_unix_max, Some(2000.0));
+    }
+
+    #[test]
+    fn federation_catalog_normalization_preserves_authoritative_counts_freshness_and_cursors(
+    ) {
+        let apollo_done =
+            summary_done('b', "followed-done", 7, 1_700_000_000.0);
+        let mac_running = project_resolved_agent_summary(&projection_request(
+            logical('c', "running"),
+            Some(exact('c', "running", "run-1")),
+            8,
+            record_running(),
+        ))
+        .unwrap();
+        let apollo_counts = authoritative_counts(9, 9, Some(1_800_000_000.0));
+        let mac_counts = authoritative_counts(2, 2, Some(1_700_000_001.0));
+        let response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 2,
+            "hosts": [
+                {
+                    "schema_version": 1,
+                    "alias": "apollo",
+                    "provider_ref": "apollo-provider",
+                    "installation_id": id('b'),
+                    "endpoint": "https://apollo.example.test",
+                    "status": "ok",
+                    "cached": false,
+                    "age_seconds": null,
+                    "payload": {
+                        "schema_version": 1,
+                        "cursor": {
+                            "schema_version": 1,
+                            "store_generation": "gen-apollo",
+                            "sequence": 12
+                        },
+                        "counts": apollo_counts,
+                        "count_revision": 99,
+                        "freshness": {
+                            "schema_version": 1,
+                            "freshness": "fresh",
+                            "partial": true,
+                            "refreshed_at_unix": 1_800_000_000.0,
+                            "error": "catalog_partial"
+                        },
+                        "page": {
+                            "schema_version": 1,
+                            "rows": [apollo_done],
+                            "limit": 50,
+                            "total_matching_rows": 42,
+                            "next_cursor": "off:50",
+                            "has_more": true
+                        }
+                    },
+                    "error": null
+                },
+                {
+                    "schema_version": 1,
+                    "alias": "mac",
+                    "provider_ref": "mac-provider",
+                    "installation_id": id('c'),
+                    "endpoint": "https://mac.example.test",
+                    "status": "ok",
+                    "cached": true,
+                    "age_seconds": 2.0,
+                    "payload": {
+                        "schema_version": 1,
+                        "cursor": {
+                            "schema_version": 1,
+                            "store_generation": "gen-mac",
+                            "sequence": 3
+                        },
+                        "counts": mac_counts,
+                        "freshness": "fresh",
+                        "page": {
+                            "schema_version": 1,
+                            "rows": [mac_running],
+                            "limit": 20,
+                            "total_matching_rows": 25,
+                            "next_cursor": "off:20",
+                            "has_more": true
+                        }
+                    },
+                    "error": null
+                }
+            ]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response: response.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(normalized.operation.as_deref(), Some("catalog"));
+        assert!(normalized.partial);
+        assert_eq!(normalized.summaries.len(), 2);
+        assert_eq!(
+            normalized.hosts[0]
+                .catalog
+                .as_ref()
+                .unwrap()
+                .next_cursor
+                .as_deref(),
+            Some("off:50")
+        );
+        assert_eq!(
+            normalized.hosts[1]
+                .catalog
+                .as_ref()
+                .unwrap()
+                .next_cursor
+                .as_deref(),
+            Some("off:20")
+        );
+        assert_eq!(
+            normalized.hosts[0]
+                .catalog
+                .as_ref()
+                .unwrap()
+                .snapshot_cursor
+                .as_ref()
+                .unwrap()
+                .store_generation,
+            "gen-apollo"
+        );
+        assert_eq!(normalized.hosts[0].observed_at_unix, Some(1_800_000_000.0));
+        assert_eq!(
+            normalized.hosts[0]
+                .authoritative_counts
+                .as_ref()
+                .unwrap()
+                .running,
+            9
+        );
+        assert!(normalized.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "fleet_host_partial"
+                && diagnostic.alias.as_deref() == Some("apollo")
+        }));
+
+        let counted = count_focus_and_fleet_from_federation(
+            &FocusFleetFederationCountsRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                local_summaries: Vec::new(),
+                followed_response: None,
+                fleet_response: Some(response),
+            },
+        )
+        .unwrap();
+        assert_eq!(counted.fleet.counts.running, 11);
+        assert_eq!(counted.fleet.counts.occupied_runner_slots, 11);
+        assert!(counted.fleet.partial);
+        assert_eq!(counted.fleet.unknown_origins, vec![id('b')]);
+    }
+
+    #[test]
+    fn federation_followed_batch_counts_only_resolved_requested_entries() {
+        let local = project_resolved_agent_summary(&projection_request(
+            logical('a', "local"),
+            Some(exact('a', "local", "run-1")),
+            1,
+            record_running(),
+        ))
+        .unwrap();
+        let followed_done = summary_done('b', "followed-done", 7, 2_000.0);
+        let response = json!({
+            "schema_version": 1,
+            "operation": "followed_batch",
+            "configured_hosts": 1,
+            "hosts": [{
+                "schema_version": 1,
+                "alias": "apollo",
+                "provider_ref": "apollo-provider",
+                "installation_id": id('b'),
+                "endpoint": "https://apollo.example.test",
+                "status": "ok",
+                "cached": false,
+                "age_seconds": null,
+                "payload": {
+                    "schema_version": 1,
+                    "cursor": {
+                        "schema_version": 1,
+                        "store_generation": "gen-apollo",
+                        "sequence": 12
+                    },
+                    "counts": authoritative_counts(9, 9, Some(2_000.0)),
+                    "freshness": {
+                        "schema_version": 1,
+                        "freshness": "fresh",
+                        "partial": false,
+                        "refreshed_at_unix": 2_000.0,
+                        "error": null
+                    },
+                    "entries": [
+                        {
+                            "schema_version": 1,
+                            "requested_logical_key": followed_done.logical_key,
+                            "summary": followed_done
+                        },
+                        {
+                            "schema_version": 1,
+                            "requested_logical_key": "missing-logical-key",
+                            "summary": null
+                        }
+                    ]
+                },
+                "error": null
+            }]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response: response.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            normalized.hosts[0].unresolved_logical_keys,
+            vec!["missing-logical-key".to_string()]
+        );
+        assert!(normalized.hosts[0].authoritative_counts.is_none());
+
+        let counted = count_focus_and_fleet_from_federation(
+            &FocusFleetFederationCountsRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                local_summaries: vec![local],
+                followed_response: Some(response),
+                fleet_response: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(counted.focus.counts.running, 1);
+        assert_eq!(counted.focus.host_counts[0].counts.running, 0);
+        assert!(!counted.focus.partial);
+    }
+
+    #[test]
+    fn federation_malformed_host_degrades_without_losing_healthy_hosts() {
+        let healthy = project_resolved_agent_summary(&projection_request(
+            logical('b', "healthy"),
+            Some(exact('b', "healthy", "run-1")),
+            2,
+            record_running(),
+        ))
+        .unwrap();
+        let response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 3,
+            "hosts": [
+                {
+                    "schema_version": 1,
+                    "alias": "apollo",
+                    "provider_ref": "apollo-provider",
+                    "installation_id": id('b'),
+                    "endpoint": "https://apollo.example.test",
+                    "status": "ok",
+                    "cached": false,
+                    "age_seconds": null,
+                    "payload": {
+                        "schema_version": 1,
+                        "cursor": {
+                            "schema_version": 1,
+                            "store_generation": "gen-apollo",
+                            "sequence": 12
+                        },
+                        "counts": authoritative_counts(1, 1, Some(2_000.0)),
+                        "freshness": "fresh",
+                        "page": {
+                            "schema_version": 1,
+                            "rows": [healthy],
+                            "limit": 50,
+                            "total_matching_rows": 1,
+                            "next_cursor": null,
+                            "has_more": false
+                        }
+                    },
+                    "error": null
+                },
+                {
+                    "schema_version": 1,
+                    "alias": "bad",
+                    "provider_ref": "bad-provider",
+                    "installation_id": id('c'),
+                    "endpoint": "https://bad.example.test",
+                    "status": "ok",
+                    "cached": false,
+                    "age_seconds": null,
+                    "payload": {
+                        "schema_version": 1,
+                        "freshness": "fresh",
+                        "page": {
+                            "schema_version": 1,
+                            "rows": [{"schema_version": 1, "logical_key": "bad"}],
+                            "limit": 50,
+                            "total_matching_rows": 1,
+                            "next_cursor": null,
+                            "has_more": false
+                        }
+                    },
+                    "error": null
+                },
+                {
+                    "schema_version": 1,
+                    "alias": "offline",
+                    "provider_ref": "offline-provider",
+                    "installation_id": id('d'),
+                    "endpoint": "https://offline.example.test",
+                    "status": "timeout",
+                    "cached": false,
+                    "age_seconds": null,
+                    "payload": null,
+                    "error": {
+                        "schema_version": 1,
+                        "code": "timeout",
+                        "message": "host did not reply before deadline",
+                        "target": "offline",
+                        "details": null
+                    }
+                }
+            ]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response: response.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(normalized.partial);
+        assert_eq!(normalized.summaries.len(), 1);
+        assert_eq!(normalized.hosts[1].status, "invalid");
+        assert!(normalized.hosts[1].partial);
+        assert!(normalized.hosts[2].partial);
+        assert!(normalized.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "fleet_envelope_invalid"
+                && diagnostic.alias.as_deref() == Some("bad")
+        }));
+        assert!(normalized.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "timeout"
+                && diagnostic.alias.as_deref() == Some("offline")
+        }));
+
+        let counted = count_focus_and_fleet_from_federation(
+            &FocusFleetFederationCountsRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                local_summaries: Vec::new(),
+                followed_response: None,
+                fleet_response: Some(response),
+            },
+        )
+        .unwrap();
+        assert_eq!(counted.fleet.counts.running, 1);
+        assert!(counted.fleet.partial);
+        assert_eq!(counted.fleet.unknown_origins, vec![id('c'), id('d')]);
+    }
+
+    #[test]
+    fn federation_invalid_host_cursor_requests_host_resync_but_keeps_rows() {
+        let row = project_resolved_agent_summary(&projection_request(
+            logical('b', "cursor"),
+            Some(exact('b', "cursor", "run-1")),
+            2,
+            record_running(),
+        ))
+        .unwrap();
+        let response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 1,
+            "hosts": [{
+                "schema_version": 1,
+                "alias": "apollo",
+                "provider_ref": "apollo-provider",
+                "installation_id": id('b'),
+                "endpoint": "https://apollo.example.test",
+                "status": "ok",
+                "cached": false,
+                "age_seconds": null,
+                "payload": {
+                    "schema_version": 1,
+                    "cursor": {
+                        "schema_version": 1,
+                        "store_generation": "gen-apollo",
+                        "sequence": 12
+                    },
+                    "counts": authoritative_counts(1, 1, Some(2_000.0)),
+                    "freshness": "fresh",
+                    "page": {
+                        "schema_version": 1,
+                        "rows": [row],
+                        "limit": 50,
+                        "total_matching_rows": 2,
+                        "next_cursor": "../other-host",
+                        "has_more": true
+                    }
+                },
+                "error": null
+            }]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response,
+            },
+        )
+        .unwrap();
+        let catalog = normalized.hosts[0].catalog.as_ref().unwrap();
+        assert_eq!(
+            catalog.state,
+            FleetCatalogContinuationStateWire::ResyncRequired
+        );
+        assert!(catalog.next_cursor.is_none());
+        assert_eq!(normalized.summaries.len(), 1);
+        assert!(normalized.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "fleet_cursor_invalid"
+                && diagnostic.alias.as_deref() == Some("apollo")
+        }));
     }
 
     #[test]
