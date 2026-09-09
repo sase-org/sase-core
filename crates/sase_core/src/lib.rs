@@ -698,11 +698,12 @@ pub use external_pr::{
     EXTERNAL_PR_WIRE_SCHEMA_VERSION,
 };
 pub use feature_flag_state::{
-    feature_flag_state_get, feature_flag_state_path, feature_flag_state_set,
+    feature_flag_state_get, feature_flag_state_path,
+    feature_flag_state_reconcile, feature_flag_state_set,
     FeatureFlagStateDiagnosticWire, FeatureFlagStateError,
-    FeatureFlagStateSetOutcomeWire, FeatureFlagStateSnapshotWire,
-    FEATURE_FLAG_STATE_FILENAME, FEATURE_FLAG_STATE_MAX_BYTES,
-    FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
+    FeatureFlagStateReconcileOutcomeWire, FeatureFlagStateSetOutcomeWire,
+    FeatureFlagStateSnapshotWire, FEATURE_FLAG_STATE_FILENAME,
+    FEATURE_FLAG_STATE_MAX_BYTES, FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
 };
 pub use fenced_code::{
     fenced_block_details, fenced_block_details_wire, fenced_block_ranges,

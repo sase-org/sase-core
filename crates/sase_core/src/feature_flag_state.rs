@@ -2,10 +2,12 @@
 //!
 //! Persistent enable/disable choices live under SASE home as
 //! `feature_flags.json`. This module owns wire shape, snake_case keys, a
-//! bounded exclusive lock, and crash-safe atomic writes. It does not own the
-//! Python feature-flag registry: unknown but valid keys are preserved.
+//! bounded exclusive lock, and crash-safe atomic writes. The neutral get/set
+//! APIs do not own the Python feature-flag registry: unknown but valid keys
+//! are preserved. Registry-driven reconciliation is a separate installation
+//! boundary operation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -51,6 +53,18 @@ pub struct FeatureFlagStateSetOutcomeWire {
     pub enabled: bool,
     pub previous: Option<bool>,
     pub changed: bool,
+    pub flags: BTreeMap<String, bool>,
+    pub path: String,
+    pub diagnostics: Vec<FeatureFlagStateDiagnosticWire>,
+}
+
+/// Outcome of one registry-driven saved-state reconciliation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureFlagStateReconcileOutcomeWire {
+    pub version: u32,
+    pub status: String,
+    pub removed: Vec<String>,
     pub flags: BTreeMap<String, bool>,
     pub path: String,
     pub diagnostics: Vec<FeatureFlagStateDiagnosticWire>,
@@ -143,6 +157,68 @@ pub fn feature_flag_state_set(
     result
 }
 
+/// Remove saved entries absent from the supplied authoritative registry.
+///
+/// This operation is intentionally separate from registry-neutral get/set
+/// calls. It validates the caller-supplied registry before touching state,
+/// rereads the latest file under the same bounded exclusive lock, preserves
+/// registered entries byte-for-byte at the value level, and atomically rewrites
+/// only when one or more valid unregistered entries are removed.
+pub fn feature_flag_state_reconcile(
+    sase_home: &Path,
+    registered_keys: &[String],
+) -> Result<FeatureFlagStateReconcileOutcomeWire, FeatureFlagStateError> {
+    reconcile_with_timeout(
+        sase_home,
+        registered_keys,
+        timeout_from_env(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT),
+    )
+}
+
+fn reconcile_with_timeout(
+    sase_home: &Path,
+    registered_keys: &[String],
+    timeout: Duration,
+) -> Result<FeatureFlagStateReconcileOutcomeWire, FeatureFlagStateError> {
+    let path = feature_flag_state_path(sase_home);
+    let registered = validate_registered_keys(&path, registered_keys)?;
+    let lock = match lock_store_with_timeout(
+        sase_home,
+        "feature_flag_state_reconcile",
+        timeout,
+    ) {
+        Ok(lock) => lock,
+        Err(error) => {
+            return Ok(reconcile_failure_from_error(
+                &path,
+                "lock_failed",
+                error,
+            ));
+        }
+    };
+
+    let mut outcome = reconcile_unlocked(&path, &registered);
+    if let Err(error) = lock.release() {
+        let diagnostic = diagnostic(
+            "unlock_failed",
+            &format!("failed to release lock: {error}"),
+            &path,
+        );
+        if outcome.status == "cleaned" {
+            outcome.diagnostics.push(diagnostic);
+        } else {
+            outcome = reconcile_outcome(
+                &path,
+                "failed",
+                Vec::new(),
+                BTreeMap::new(),
+                vec![diagnostic],
+            );
+        }
+    }
+    Ok(outcome)
+}
+
 fn set_unlocked(
     path: &Path,
     flag: &str,
@@ -171,6 +247,124 @@ fn set_unlocked(
         path: path.display().to_string(),
         diagnostics: Vec::new(),
     })
+}
+
+fn reconcile_unlocked(
+    path: &Path,
+    registered: &BTreeSet<String>,
+) -> FeatureFlagStateReconcileOutcomeWire {
+    let flags = match load_unlocked(path) {
+        Ok(LoadedState::Missing) => {
+            return reconcile_outcome(
+                path,
+                "unchanged",
+                Vec::new(),
+                BTreeMap::new(),
+                Vec::new(),
+            );
+        }
+        Ok(LoadedState::Valid(flags)) => flags,
+        Ok(LoadedState::Unusable { code, message }) => {
+            return reconcile_outcome(
+                path,
+                "unusable",
+                Vec::new(),
+                BTreeMap::new(),
+                vec![diagnostic(code, &message, path)],
+            );
+        }
+        Err(error) => {
+            return reconcile_failure_from_error(path, "read_failed", error);
+        }
+    };
+
+    let mut kept = BTreeMap::new();
+    let mut removed = Vec::new();
+    for (key, enabled) in flags {
+        if registered.contains(&key) {
+            kept.insert(key, enabled);
+        } else {
+            removed.push(key);
+        }
+    }
+    if removed.is_empty() {
+        return reconcile_outcome(
+            path,
+            "unchanged",
+            Vec::new(),
+            kept,
+            Vec::new(),
+        );
+    }
+    if let Err(error) = write_snapshot_atomic(path, &kept) {
+        return reconcile_failure_from_error(path, "write_failed", error);
+    }
+    reconcile_outcome(path, "cleaned", removed, kept, Vec::new())
+}
+
+fn reconcile_outcome(
+    path: &Path,
+    status: &str,
+    removed: Vec<String>,
+    flags: BTreeMap<String, bool>,
+    diagnostics: Vec<FeatureFlagStateDiagnosticWire>,
+) -> FeatureFlagStateReconcileOutcomeWire {
+    FeatureFlagStateReconcileOutcomeWire {
+        version: FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
+        status: status.to_string(),
+        removed,
+        flags,
+        path: path.display().to_string(),
+        diagnostics,
+    }
+}
+
+fn reconcile_failure_from_error(
+    path: &Path,
+    default_code: &'static str,
+    error: FeatureFlagStateError,
+) -> FeatureFlagStateReconcileOutcomeWire {
+    let message = error.to_string();
+    let (code, diagnostic_path) = match &error {
+        FeatureFlagStateError::LockTimeout { path, .. } => {
+            ("lock_timeout", path)
+        }
+        FeatureFlagStateError::Invalid { path, .. } => (default_code, path),
+        FeatureFlagStateError::Io { path, .. } => (default_code, path),
+    };
+    reconcile_outcome(
+        path,
+        "failed",
+        Vec::new(),
+        BTreeMap::new(),
+        vec![diagnostic(code, &message, diagnostic_path)],
+    )
+}
+
+fn validate_registered_keys(
+    path: &Path,
+    registered_keys: &[String],
+) -> Result<BTreeSet<String>, FeatureFlagStateError> {
+    let mut registered = BTreeSet::new();
+    for key in registered_keys {
+        if !is_feature_flag_key(key) {
+            return Err(FeatureFlagStateError::Invalid {
+                path: path.to_path_buf(),
+                message: format!(
+                    "registered feature flag key must be snake_case: {key:?}"
+                ),
+            });
+        }
+        if !registered.insert(key.clone()) {
+            return Err(FeatureFlagStateError::Invalid {
+                path: path.to_path_buf(),
+                message: format!(
+                    "registered feature flag keys must be unique: {key:?}"
+                ),
+            });
+        }
+    }
+    Ok(registered)
 }
 
 fn snapshot_from_loaded(
@@ -540,6 +734,25 @@ mod tests {
         fs::read(feature_flag_state_path(home)).unwrap()
     }
 
+    fn write_state(home: &Path, flags: &[(&str, bool)]) {
+        let path = feature_flag_state_path(home);
+        fs::create_dir_all(home).unwrap();
+        let flags: BTreeMap<String, bool> = flags
+            .iter()
+            .map(|(key, enabled)| ((*key).to_string(), *enabled))
+            .collect();
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&FeatureFlagStateFileWire {
+                version: FEATURE_FLAG_STATE_WIRE_SCHEMA_VERSION,
+                flags,
+            })
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    }
+
     fn tmp_names(dir: &Path) -> Vec<String> {
         fs::read_dir(dir)
             .unwrap()
@@ -748,6 +961,257 @@ mod tests {
         assert_eq!(outcome.flags.get("epic_resume_gate"), Some(&false));
         let snapshot = feature_flag_state_get(temp.path()).unwrap();
         assert_eq!(snapshot.flags, outcome.flags);
+    }
+
+    #[test]
+    fn reconcile_removes_unknown_valid_keys_only() {
+        let temp = tempdir().unwrap();
+        write_state(
+            temp.path(),
+            &[
+                ("alpha_flag", true),
+                ("future_release_flag", false),
+                ("zeta_removed", true),
+            ],
+        );
+
+        let outcome = feature_flag_state_reconcile(
+            temp.path(),
+            &["alpha_flag".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(outcome.status, "cleaned");
+        assert_eq!(
+            outcome.removed,
+            vec![
+                "future_release_flag".to_string(),
+                "zeta_removed".to_string()
+            ]
+        );
+        assert_eq!(outcome.flags.get("alpha_flag"), Some(&true));
+        assert_eq!(
+            feature_flag_state_get(temp.path()).unwrap().flags,
+            outcome.flags
+        );
+        assert!(outcome.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reconcile_empty_registry_removes_every_valid_entry() {
+        let temp = tempdir().unwrap();
+        write_state(temp.path(), &[("alpha_flag", true), ("beta_flag", false)]);
+
+        let outcome = feature_flag_state_reconcile(temp.path(), &[]).unwrap();
+
+        assert_eq!(outcome.status, "cleaned");
+        assert_eq!(
+            outcome.removed,
+            vec!["alpha_flag".to_string(), "beta_flag".to_string()]
+        );
+        assert!(outcome.flags.is_empty());
+        assert_eq!(
+            String::from_utf8(state_bytes(temp.path())).unwrap(),
+            "{\n  \"version\": 1,\n  \"flags\": {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn reconcile_missing_and_clean_state_are_idempotent() {
+        let temp = tempdir().unwrap();
+        let missing = feature_flag_state_reconcile(
+            temp.path(),
+            &["alpha_flag".to_string()],
+        )
+        .unwrap();
+        assert_eq!(missing.status, "unchanged");
+        assert!(!feature_flag_state_path(temp.path()).exists());
+
+        write_state(temp.path(), &[("alpha_flag", true)]);
+        let before = state_bytes(temp.path());
+        let metadata =
+            fs::metadata(feature_flag_state_path(temp.path())).unwrap();
+        let clean = feature_flag_state_reconcile(
+            temp.path(),
+            &["alpha_flag".to_string()],
+        )
+        .unwrap();
+        assert_eq!(clean.status, "unchanged");
+        assert_eq!(clean.removed, Vec::<String>::new());
+        assert_eq!(state_bytes(temp.path()), before);
+        assert_eq!(
+            fs::metadata(feature_flag_state_path(temp.path()))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            metadata.modified().unwrap()
+        );
+    }
+
+    #[test]
+    fn reconcile_unusable_files_are_non_destructive() {
+        let temp = tempdir().unwrap();
+        let path = feature_flag_state_path(temp.path());
+        fs::create_dir_all(temp.path()).unwrap();
+        for (body, code) in [
+            ("not json", "malformed_json"),
+            (r#"{"version":2,"flags":{}}"#, "unsupported_version"),
+            (r#"{"version":1,"flags":[]}"#, "invalid_schema"),
+            (
+                r#"{"version":1,"flags":{"epic_resume_gate":"yes"}}"#,
+                "invalid_schema",
+            ),
+            (r#"{"version":1,"flags":{"NotSnake":true}}"#, "invalid_key"),
+        ] {
+            fs::write(&path, body).unwrap();
+            let outcome = feature_flag_state_reconcile(
+                temp.path(),
+                &["epic_resume_gate".to_string()],
+            )
+            .unwrap();
+            assert_eq!(outcome.status, "unusable", "{code}");
+            assert_eq!(outcome.diagnostics[0].code, code);
+            assert_eq!(fs::read_to_string(&path).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn reconcile_rejects_invalid_registered_keys_before_touching_state() {
+        let temp = tempdir().unwrap();
+        write_state(temp.path(), &[("future_release_flag", true)]);
+        let before = state_bytes(temp.path());
+
+        for keys in [
+            vec!["NotSnake".to_string()],
+            vec!["alpha_flag".to_string(), "alpha_flag".to_string()],
+        ] {
+            let error = feature_flag_state_reconcile(temp.path(), &keys)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("registered feature flag"),
+                "{keys:?} -> {error}"
+            );
+            assert_eq!(state_bytes(temp.path()), before);
+        }
+    }
+
+    #[test]
+    fn competing_reconciliations_remove_a_stale_key_once() {
+        let temp = tempdir().unwrap();
+        write_state(
+            temp.path(),
+            &[("alpha_flag", true), ("future_release_flag", false)],
+        );
+        let home = Arc::new(temp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let home = Arc::clone(&home);
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                feature_flag_state_reconcile(&home, &["alpha_flag".to_string()])
+                    .unwrap()
+            }));
+        }
+        barrier.wait();
+        let outcomes: Vec<FeatureFlagStateReconcileOutcomeWire> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let cleaned = outcomes
+            .iter()
+            .filter(|outcome| outcome.status == "cleaned")
+            .count();
+        let unchanged = outcomes
+            .iter()
+            .filter(|outcome| outcome.status == "unchanged")
+            .count();
+        assert_eq!(cleaned, 1);
+        assert_eq!(unchanged, 1);
+        assert_eq!(
+            feature_flag_state_get(temp.path()).unwrap().flags,
+            BTreeMap::from([("alpha_flag".to_string(), true)])
+        );
+    }
+
+    #[test]
+    fn concurrent_reconcile_and_registered_set_do_not_lose_updates() {
+        let temp = tempdir().unwrap();
+        write_state(temp.path(), &[("future_release_flag", true)]);
+        let home = Arc::new(temp.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+
+        let cleanup_home = Arc::clone(&home);
+        let cleanup_barrier = Arc::clone(&barrier);
+        let cleanup = thread::spawn(move || {
+            cleanup_barrier.wait();
+            feature_flag_state_reconcile(
+                &cleanup_home,
+                &["alpha_flag".to_string()],
+            )
+            .unwrap()
+        });
+
+        let set_home = Arc::clone(&home);
+        let set_barrier = Arc::clone(&barrier);
+        let setter = thread::spawn(move || {
+            set_barrier.wait();
+            feature_flag_state_set(&set_home, "alpha_flag", false).unwrap()
+        });
+
+        barrier.wait();
+        cleanup.join().unwrap();
+        setter.join().unwrap();
+        assert_eq!(
+            feature_flag_state_get(temp.path()).unwrap().flags,
+            BTreeMap::from([("alpha_flag".to_string(), false)])
+        );
+    }
+
+    #[test]
+    fn reconcile_lock_timeout_and_write_failure_report_failed_outcomes() {
+        let temp = tempdir().unwrap();
+        write_state(
+            temp.path(),
+            &[("alpha_flag", true), ("future_release_flag", false)],
+        );
+        let path = feature_flag_state_path(temp.path());
+        let lock_path = lock_path_for(&path);
+        let holder = acquire_store_lock(
+            &lock_path,
+            &holder_path_for(&lock_path),
+            LockMode::Exclusive,
+            Duration::from_secs(1),
+            "holding-operation",
+        )
+        .unwrap();
+
+        let locked = reconcile_with_timeout(
+            temp.path(),
+            &["alpha_flag".to_string()],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert_eq!(locked.status, "failed");
+        assert_eq!(locked.diagnostics[0].code, "lock_timeout");
+        holder.release().unwrap();
+
+        let before = state_bytes(temp.path());
+        let original = fs::metadata(temp.path()).unwrap().permissions();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let failed = feature_flag_state_reconcile(
+            temp.path(),
+            &["alpha_flag".to_string()],
+        )
+        .unwrap();
+        fs::set_permissions(temp.path(), original).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.diagnostics[0].code, "write_failed");
+        assert_eq!(state_bytes(temp.path()), before);
+        assert!(tmp_names(temp.path()).is_empty());
     }
 
     #[test]

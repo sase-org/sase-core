@@ -188,6 +188,7 @@
 //! - `feature_flag_state_wire_schema_version() -> int`
 //! - `feature_flag_state_get(sase_home: str) -> dict`
 //! - `feature_flag_state_set(sase_home: str, flag: str, enabled: bool) -> dict`
+//! - `feature_flag_state_reconcile(sase_home: str, registered_keys: list[str]) -> dict`
 //! - `fleet_contract_schema_version() -> int`
 //! - `fleet_installation_identity_load(sase_home: str) -> dict`
 //! - `fleet_installation_identity_ensure(sase_home: str) -> dict`
@@ -962,6 +963,7 @@ use sase_core::external_pr::{
 };
 use sase_core::feature_flag_state::{
     feature_flag_state_get as core_feature_flag_state_get,
+    feature_flag_state_reconcile as core_feature_flag_state_reconcile,
     feature_flag_state_set as core_feature_flag_state_set,
     FeatureFlagStateError as FeatureFlagStateDomainError,
 };
@@ -12489,7 +12491,9 @@ fn py_feature_flag_state_get<'py>(
     py: Python<'py>,
     sase_home: &str,
 ) -> PyResult<PyObject> {
-    let snapshot = core_feature_flag_state_get(&PathBuf::from(sase_home))
+    let home = PathBuf::from(sase_home);
+    let snapshot = py
+        .allow_threads(|| core_feature_flag_state_get(&home))
         .map_err(feature_flag_state_error_to_pyerr)?;
     feature_flag_state_wire_to_py(py, &snapshot)
 }
@@ -12502,9 +12506,26 @@ fn py_feature_flag_state_set<'py>(
     flag: &str,
     enabled: bool,
 ) -> PyResult<PyObject> {
-    let outcome =
-        core_feature_flag_state_set(&PathBuf::from(sase_home), flag, enabled)
-            .map_err(feature_flag_state_error_to_pyerr)?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| core_feature_flag_state_set(&home, flag, enabled))
+        .map_err(feature_flag_state_error_to_pyerr)?;
+    feature_flag_state_wire_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "feature_flag_state_reconcile")]
+fn py_feature_flag_state_reconcile<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    registered_keys: Vec<String>,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| {
+            core_feature_flag_state_reconcile(&home, &registered_keys)
+        })
+        .map_err(feature_flag_state_error_to_pyerr)?;
     feature_flag_state_wire_to_py(py, &outcome)
 }
 
@@ -15798,6 +15819,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_feature_flag_state_get, m)?)?;
     m.add_function(wrap_pyfunction!(py_feature_flag_state_set, m)?)?;
+    m.add_function(wrap_pyfunction!(py_feature_flag_state_reconcile, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_contract_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_installation_identity_load, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -19720,6 +19742,7 @@ mod tests {
                 "feature_flag_state_wire_schema_version",
                 "feature_flag_state_get",
                 "feature_flag_state_set",
+                "feature_flag_state_reconcile",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -19765,6 +19788,24 @@ mod tests {
             let again_value = py_to_json_value(again.bind(py)).unwrap();
             assert_eq!(again_value["previous"], json!(true));
             assert_eq!(again_value["changed"], json!(false));
+
+            let reconciled = py_feature_flag_state_reconcile(
+                py,
+                &home,
+                vec!["epic_resume_gate".to_string()],
+            )
+            .unwrap();
+            let reconciled_value =
+                py_to_json_value(reconciled.bind(py)).unwrap();
+            assert_eq!(reconciled_value["status"], json!("cleaned"));
+            assert_eq!(
+                reconciled_value["removed"],
+                json!(["prettier_enabled"])
+            );
+            assert_eq!(
+                reconciled_value["flags"],
+                json!({"epic_resume_gate": true})
+            );
         });
     }
 
