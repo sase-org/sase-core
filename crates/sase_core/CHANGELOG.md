@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.59](https://github.com/sase-org/sase-core/compare/v0.32.58...v0.32.59) - 2026-09-09
+
+### Added
+
+- *(provider-usage)* expose collector health
+
 ## [0.32.58](https://github.com/sase-org/sase-core/compare/v0.32.57...v0.32.58) - 2026-09-09
 
 ### Added
