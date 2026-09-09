@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.51](https://github.com/sase-org/sase-core/compare/v0.32.50...v0.32.51) - 2026-09-09
+
+### Added
+
+- *(core)* derive followed-batch singleton-to-family follow promotions
+- *(core)* add Tailnet discovery and enrollment reconciliation policy
+
 ### Added
 
 - *(core)* add machine-setup Tailnet discovery and enrollment reconciliation policy
