@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.53](https://github.com/sase-org/sase-core/compare/v0.32.52...v0.32.53) - 2026-09-09
+
+### Added
+
+- *(core)* decide pending commit checkpoint recovery
+
 ## [0.32.52](https://github.com/sase-org/sase-core/compare/v0.32.51...v0.32.52) - 2026-09-09
 
 ### Other
