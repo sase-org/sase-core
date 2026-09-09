@@ -9,7 +9,8 @@ use sase_core::{
     AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
     DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
     EditorTextEdit, HoverPayload, ModelAliasShortcutContextWire,
-    ModelAliasShortcutEditWire, VcsRepoEntry,
+    ModelAliasShortcutEditWire, ModelShortcutContextWire,
+    ModelShortcutEditWire, ModelShortcutKind, VcsRepoEntry,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -365,6 +366,73 @@ fn model_alias_shortcut_completion_item(
     // never falls back to this `replacement_range` argument.
     let mut item = completion_item(candidate, range);
     item.kind = Some(CompletionItemKind::ENUM_MEMBER);
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" → {expansion}")),
+        description: Some(model_completion_kind_label(&kind, &alias_kind)),
+    });
+    item.filter_text = Some(filter_text.to_string());
+    item.sort_text = Some(format!("{index:04}"));
+    item.preselect = (index == 0).then_some(true);
+    item
+}
+
+/// Render `**model` shortcut rows as an incomplete list owned by the detected
+/// double-star context.
+pub fn model_shortcut_completion_response(
+    candidates: Vec<(CompletionCandidate, ModelShortcutEditWire)>,
+    context: &ModelShortcutContextWire,
+) -> CompletionResponse {
+    let filter_text = match context.kind {
+        ModelShortcutKind::Alias => format!("*{}", context.query),
+        ModelShortcutKind::Model => format!("**{}", context.query),
+    };
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (candidate, edit))| {
+                model_shortcut_completion_item(
+                    candidate,
+                    edit,
+                    &filter_text,
+                    index,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn model_shortcut_completion_item(
+    mut candidate: CompletionCandidate,
+    edit: ModelShortcutEditWire,
+    filter_text: &str,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let alias_kind = candidate.status.clone();
+    let expansion = edit.replacement.trim_end().to_string();
+    let range = edit.edit.range;
+    if edit.kind == ModelShortcutKind::Model {
+        candidate.detail = Some(match candidate.detail.take() {
+            Some(detail) if !detail.is_empty() => {
+                format!("{expansion} · {detail}")
+            }
+            _ => expansion.clone(),
+        });
+        candidate.documentation = Some(match candidate.documentation.take() {
+            Some(documentation) if !documentation.is_empty() => {
+                format!("**Expansion:** `{expansion}`\n\n{documentation}")
+            }
+            _ => format!("**Expansion:** `{expansion}`"),
+        });
+    }
+    candidate.replacement = Some(edit.edit);
+    let mut item = completion_item(candidate, range);
+    item.kind = Some(match edit.kind {
+        ModelShortcutKind::Alias => CompletionItemKind::ENUM_MEMBER,
+        ModelShortcutKind::Model => CompletionItemKind::VALUE,
+    });
     item.label_details = Some(CompletionItemLabelDetails {
         detail: Some(format!(" → {expansion}")),
         description: Some(model_completion_kind_label(&kind, &alias_kind)),

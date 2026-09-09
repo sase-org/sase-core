@@ -73,9 +73,14 @@ pub use frontmatter::{
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::hover_at_position;
 pub use model_alias_shortcut::{
-    detect_model_alias_shortcut_context, filter_model_alias_shortcut_entries,
-    plan_model_alias_shortcut_edit, ModelAliasShortcutContextWire,
-    ModelAliasShortcutEditWire, MODEL_ALIAS_SHORTCUT_WIRE_SCHEMA_VERSION,
+    detect_model_alias_shortcut_context,
+    filter_explicit_model_shortcut_entries,
+    filter_model_alias_shortcut_entries, model_shortcut_context,
+    model_shortcut_edit, plan_model_alias_shortcut_edit,
+    ModelAliasShortcutContextWire, ModelAliasShortcutEditWire,
+    ModelShortcutContextWire, ModelShortcutEditWire, ModelShortcutKind,
+    MODEL_ALIAS_SHORTCUT_WIRE_SCHEMA_VERSION,
+    MODEL_SHORTCUT_WIRE_SCHEMA_VERSION,
 };
 pub use placeholder::{
     build_placeholder_completion_candidates,

@@ -159,6 +159,9 @@
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
+//! - `model_shortcut_context(text: str, position: dict) -> dict | None`
+//! - `model_shortcut_edit(text: str, position: dict, entries: list[dict], selected_value: str) -> dict | None`
+//! - `filter_explicit_model_shortcut_entries(entries: list[dict], query: str) -> list[dict]`
 //! - `model_alias_shortcut_context(text: str, position: dict) -> dict | None`
 //! - `model_alias_shortcut_edit(text: str, position: dict, entries: list[dict], selected_alias: str) -> dict | None`
 //! - `filter_model_alias_shortcut_entries(entries: list[dict], query: str) -> list[dict]`
@@ -1284,7 +1287,10 @@ use sase_core::{
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
     editor_detect_model_alias_shortcut_context as core_detect_model_alias_shortcut_context,
+    editor_filter_explicit_model_shortcut_entries as core_filter_explicit_model_shortcut_entries,
     editor_filter_model_alias_shortcut_entries as core_filter_model_alias_shortcut_entries,
+    editor_model_shortcut_context as core_model_shortcut_context,
+    editor_model_shortcut_edit as core_model_shortcut_edit,
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
@@ -2078,6 +2084,52 @@ fn py_filter_model_completion_entries(
 ) -> PyResult<PyObject> {
     let entries = model_completion_entries_from_py_list(entries)?;
     let filtered = core_filter_model_completion_entries(&entries, partial);
+    let value = serde_json::to_value(filtered).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "model_shortcut_context")]
+fn py_model_shortcut_context(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    core_model_shortcut_context(text, position)
+        .map(|context| serialize_to_py(py, &context))
+        .transpose()
+}
+
+#[pyfunction]
+#[pyo3(name = "model_shortcut_edit")]
+fn py_model_shortcut_edit(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+    entries: &Bound<'_, PyList>,
+    selected_value: &str,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    let entries = model_completion_entries_from_py_list(entries)?;
+    core_model_shortcut_edit(text, position, &entries, selected_value)
+        .map(|edit| serialize_to_py(py, &edit))
+        .transpose()
+}
+
+/// Filter a `%model:`-shaped catalog down to concrete model rows a
+/// `**query` shortcut may expand to, in canonical catalog order.
+#[pyfunction]
+#[pyo3(name = "filter_explicit_model_shortcut_entries")]
+fn py_filter_explicit_model_shortcut_entries(
+    py: Python<'_>,
+    entries: &Bound<'_, PyList>,
+    query: &str,
+) -> PyResult<PyObject> {
+    let entries = model_completion_entries_from_py_list(entries)?;
+    let filtered = core_filter_explicit_model_shortcut_entries(&entries, query);
     let value = serde_json::to_value(filtered).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
@@ -14769,6 +14821,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_model_shortcut_context, m)?)?;
+    m.add_function(wrap_pyfunction!(py_model_shortcut_edit, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_filter_explicit_model_shortcut_entries,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_model_alias_shortcut_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_alias_shortcut_edit, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -17868,6 +17926,178 @@ mod tests {
             assert!(
                 error.contains("missing field"),
                 "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn model_shortcut_bindings_return_plain_dict_list_and_none_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_model_shortcut_context, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_model_shortcut_edit, &module).unwrap(),
+                )
+                .unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_filter_explicit_model_shortcut_entries,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let entries = json_value_to_py(
+                py,
+                &json!([
+                    model_completion_entry_json(
+                        "gpt-5.6-sol",
+                        "model",
+                        "codex",
+                        ["gpt56sol"],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "@large",
+                        "user_alias",
+                        "",
+                        ["large"],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "codex/",
+                        "provider",
+                        "codex",
+                        [],
+                        1,
+                    ),
+                ]),
+            )
+            .unwrap();
+            let position =
+                json_value_to_py(py, &json!({"line": 0, "character": 7}))
+                    .unwrap();
+
+            let context = module
+                .getattr("model_shortcut_context")
+                .unwrap()
+                .call1(("🙂 **gp", position.clone_ref(py)))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&context).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "kind": "model",
+                    "query": "gp",
+                    "token": "**gp",
+                    "caret": {"line": 0, "character": 7},
+                    "token_range": {
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 7}
+                    },
+                    "replacement_range": {
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 7}
+                    }
+                })
+            );
+
+            let filtered = module
+                .getattr("filter_explicit_model_shortcut_entries")
+                .unwrap()
+                .call1((entries.clone_ref(py), "codex/gp"))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&filtered).unwrap(),
+                json!([model_completion_entry_json(
+                    "codex/gpt-5.6-sol",
+                    "model",
+                    "codex",
+                    ["gpt56sol"],
+                    0,
+                )])
+            );
+
+            let scoped_position =
+                json_value_to_py(py, &json!({"line": 0, "character": 13}))
+                    .unwrap();
+            let edit = module
+                .getattr("model_shortcut_edit")
+                .unwrap()
+                .call1((
+                    "🙂 **codex/gp",
+                    scoped_position.clone_ref(py),
+                    entries.clone_ref(py),
+                    "codex/gpt-5.6-sol",
+                ))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&edit).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "kind": "model",
+                    "value": "codex/gpt-5.6-sol",
+                    "replacement": "%m:codex/gpt-5.6-sol ",
+                    "edit": {
+                        "range": {
+                            "start": {"line": 0, "character": 3},
+                            "end": {"line": 0, "character": 13}
+                        },
+                        "new_text": "%m:codex/gpt-5.6-sol "
+                    },
+                    "caret": {"line": 0, "character": 24}
+                })
+            );
+
+            let stale = module
+                .getattr("model_shortcut_edit")
+                .unwrap()
+                .call1((
+                    "🙂 **codex/gp",
+                    scoped_position,
+                    entries,
+                    "gpt-5.6-sol",
+                ))
+                .unwrap();
+            assert!(stale.is_none());
+        });
+    }
+
+    #[test]
+    fn model_shortcut_binding_rejects_malformed_inputs() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let position_error = py_model_shortcut_context(
+                py,
+                "**",
+                PyDict::new_bound(py).as_any(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                position_error.contains("UTF-16 line/character"),
+                "unexpected error: {position_error}"
+            );
+
+            let rows = json_value_to_py(py, &json!([{"value": "gpt-5"}]))
+                .unwrap()
+                .into_bound(py);
+            let rows = rows.downcast::<PyList>().unwrap();
+            let catalog_error =
+                py_filter_explicit_model_shortcut_entries(py, rows, "")
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                catalog_error.contains("missing field"),
+                "unexpected error: {catalog_error}"
             );
         });
     }

@@ -46,7 +46,9 @@ use sase_core::{
     editor_detect_model_alias_shortcut_context, editor_directive_contract,
     editor_directive_is_hidden_from_name_completion_with_flags,
     editor_extract_token_at_position,
+    editor_filter_explicit_model_shortcut_entries,
     editor_filter_model_alias_shortcut_entries, editor_hover_at_position,
+    editor_model_shortcut_context, editor_model_shortcut_edit,
     editor_plan_model_alias_shortcut_edit,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
@@ -59,8 +61,9 @@ use sase_core::{
     DocumentSnapshot, EditorPosition, EditorRange, EditorSnippetEntryWire,
     GlossaryCatalogWire, GlossaryEntryWire, GlossarySpanWire, HelperHostBridge,
     HoverPayload, ModelAliasShortcutContextWire, ModelCompletionEntryWire,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
-    XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
+    ModelShortcutContextWire, ModelShortcutKind, VcsNamespaceEntry,
+    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -73,9 +76,10 @@ use crate::lsp_convert::{
     at_reference_completion_response, completion_response,
     diagnostic as lsp_diagnostic, finalizer_completion_response,
     hover as lsp_hover, model_alias_shortcut_completion_response,
-    model_completion_response, placeholder_completion_response,
-    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
-    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
+    model_completion_response, model_shortcut_completion_response,
+    placeholder_completion_response, sase_snippet_completion_item,
+    snippet_completion_item, to_editor_position, to_lsp_range,
+    vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
 use crate::semantic_tokens::{document_semantic_tokens, legend};
@@ -339,6 +343,17 @@ impl XpromptLspServer {
             editor_position,
         ) {
             return Some(model_alias_shortcut_completion(
+                document.text(),
+                editor_position,
+                &context,
+                config.model_catalog.as_deref(),
+            ));
+        }
+        if let Some(context) =
+            editor_model_shortcut_context(document.text(), editor_position)
+                .filter(|context| context.kind == ModelShortcutKind::Model)
+        {
+            return Some(model_shortcut_completion(
                 document.text(),
                 editor_position,
                 &context,
@@ -2233,6 +2248,34 @@ fn model_alias_shortcut_completion(
             })
             .collect();
     model_alias_shortcut_completion_response(candidates, context)
+}
+
+/// Build the `**model` shortcut completion response for a detected double-star
+/// context. The complete catalog is filtered through the shared model shortcut
+/// filter so provider-scoped queries can use provider rows even though only
+/// concrete model rows are displayed.
+fn model_shortcut_completion(
+    text: &str,
+    position: EditorPosition,
+    context: &ModelShortcutContextWire,
+    path: Option<&Path>,
+) -> CompletionResponse {
+    let entries = load_model_catalog(path);
+    let candidates =
+        editor_filter_explicit_model_shortcut_entries(&entries, &context.query)
+            .into_iter()
+            .filter_map(|entry| {
+                let edit = editor_model_shortcut_edit(
+                    text,
+                    position,
+                    &entries,
+                    &entry.value,
+                )?;
+                let filter_text = entry.value.clone();
+                Some((model_completion_candidate(entry, filter_text), edit))
+            })
+            .collect();
+    model_shortcut_completion_response(candidates, context)
 }
 
 fn model_completion_candidate(
@@ -7273,6 +7316,164 @@ mod tests {
         assert!(
             matches!(response, CompletionResponse::Array(_)),
             "expected the ordinary %model: completion array, not a shortcut list"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_offers_model_rows_only_in_catalog_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "**", 0, 2).await;
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opus", "gpt-5.6-sol"]
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.kind == Some(CompletionItemKind::VALUE)));
+        assert_eq!(items[0].filter_text.as_deref(), Some("**"));
+        assert_eq!(items[0].preselect, Some(true));
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_filters_and_replaces_provider_scoped_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog_with_providers(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "Use **claude/fa", 0, 15).await;
+
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.label, "claude/claude-fable-5");
+        assert_eq!(item.filter_text.as_deref(), Some("**claude/fa"));
+        let details = item.label_details.as_ref().expect("label details");
+        assert_eq!(
+            details.detail.as_deref(),
+            Some(" → %m:claude/claude-fable-5")
+        );
+        assert_eq!(details.description.as_deref(), Some("model"));
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("%m:claude/claude-fable-5 · claude")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected model documentation");
+        };
+        assert!(
+            documentation
+                .value
+                .contains("**Expansion:** `%m:claude/claude-fable-5`"),
+            "{}",
+            documentation.value
+        );
+        assert!(documentation.value.contains("Claude (fable)"));
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 4));
+        assert_eq!(edit.range.end, Position::new(0, 15));
+        assert_eq!(edit.new_text, "%m:claude/claude-fable-5 ");
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_matches_short_hint_but_inserts_canonical_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "Use **fa", 0, 8).await;
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "claude-fable-5");
+        assert_eq!(items[0].filter_text.as_deref(), Some("**fa"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 4));
+        assert_eq!(edit.range.end, Position::new(0, 8));
+        assert_eq!(edit.new_text, "%m:claude-fable-5 ");
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_backspace_transitions_between_star_kinds() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let filtered = shortcut_items_at(server, "**gpt", 0, 5).await;
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.6-sol"]
+        );
+
+        let bare_model = shortcut_items_at(server, "**", 0, 2).await;
+        assert_eq!(
+            bare_model
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opus", "gpt-5.6-sol"]
+        );
+
+        let alias = shortcut_items_at(server, "*", 0, 1).await;
+        assert_eq!(
+            alias
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@default", "@claude_coder", "@scout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_empty_and_protected_contexts_do_not_fall_through() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let no_match = shortcut_items_at(server, "**zzz", 0, 5).await;
+        assert!(no_match.is_empty());
+
+        let missing_catalog_service = model_alias_shortcut_service(None);
+        let missing =
+            shortcut_items_at(missing_catalog_service.inner(), "**", 0, 2)
+                .await;
+        assert!(missing.is_empty());
+
+        let response = server
+            .completion_for_text(
+                "%model:**gpt".to_string(),
+                Position::new(0, 12),
+            )
+            .await
+            .expect("expected ordinary directive completion");
+        assert!(
+            matches!(response, CompletionResponse::Array(_)),
+            "expected protected directive context to avoid shortcut list"
         );
     }
 
