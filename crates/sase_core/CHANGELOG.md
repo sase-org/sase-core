@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.61](https://github.com/sase-org/sase-core/compare/v0.32.60...v0.32.61) - 2026-09-09
+
+### Added
+
+- *(fleet)* add pending attention inventory contract
+- *(fleet)* normalize federation read envelopes
+- *(core)* add model completion support
+- *(beads)* support link operation ids
+
 ## [0.32.60](https://github.com/sase-org/sase-core/compare/v0.32.59...v0.32.60) - 2026-09-09
 
 ### Added
