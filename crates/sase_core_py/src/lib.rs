@@ -18709,6 +18709,7 @@ mod tests {
             "description": "",
             "kind": kind,
             "provider": provider,
+            "provider_display": "",
             "aliases": aliases.to_vec(),
             "alias_kind": "",
             "target_provider": "",

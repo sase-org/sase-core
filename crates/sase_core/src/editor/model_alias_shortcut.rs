@@ -513,6 +513,7 @@ mod tests {
             description: String::new(),
             kind: kind.to_string(),
             provider: String::new(),
+            provider_display: String::new(),
             aliases: Vec::new(),
             alias_kind: String::new(),
             target_provider: String::new(),
