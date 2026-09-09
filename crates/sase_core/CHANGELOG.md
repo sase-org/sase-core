@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.57](https://github.com/sase-org/sase-core/compare/v0.32.56...v0.32.57) - 2026-09-09
+
+### Fixed
+
+- *(editor)* reject unsafe model shortcut values
+
 ## [0.32.56](https://github.com/sase-org/sase-core/compare/v0.32.55...v0.32.56) - 2026-09-09
 
 ### Added
