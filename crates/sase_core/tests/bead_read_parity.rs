@@ -665,6 +665,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-22T14:10:00Z".to_string()),
+        None,
     )
     .unwrap();
     add_bead_link(
@@ -677,6 +678,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-22T14:11:00Z".to_string()),
+        None,
     )
     .unwrap();
     add_bead_link(
@@ -689,6 +691,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-20T09:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     add_bead_link(
@@ -701,6 +704,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-22T15:00:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -790,6 +794,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-24T12:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     let rewritten =
@@ -813,6 +818,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         Some("related"),
         BeadLinkDirectionWire::Out,
         Some("2026-08-24T13:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     let after_remove =
@@ -833,6 +839,7 @@ fn issue_detail_link_neighborhood_preserves_event_provenance() {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-08-24T14:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     let after_readd =

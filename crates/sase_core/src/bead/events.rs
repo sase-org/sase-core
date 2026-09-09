@@ -221,12 +221,16 @@ pub enum BeadEventPayloadWire {
         direction: crate::artifact_link::BeadLinkDirectionWire,
         #[serde(default = "default_bead_link_uses")]
         uses: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
     },
     LinkRemoved {
         target_ref: String,
         relation: String,
         #[serde(default)]
         direction: crate::artifact_link::BeadLinkDirectionWire,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
     },
     ReadyMarked,
     ReadyUnmarked,
@@ -724,6 +728,7 @@ fn apply_link_provenance(
             origin,
             direction,
             uses,
+            ..
         } => {
             let target_ref = canonicalize_artifact_link_ref(target_ref)
                 .map_err(link_error)?;
@@ -752,6 +757,7 @@ fn apply_link_provenance(
             target_ref,
             relation,
             direction,
+            ..
         } => {
             if let Ok(target_ref) = canonicalize_artifact_link_ref(target_ref) {
                 provenance.remove(&StoredLinkIdentity {
@@ -1667,6 +1673,7 @@ pub(super) fn apply_event(
             origin,
             direction,
             uses,
+            ..
         } => {
             apply_link_added(
                 issues,
@@ -1683,6 +1690,7 @@ pub(super) fn apply_event(
             target_ref,
             relation,
             direction,
+            ..
         } => {
             if let Some(issue) = issues.get_mut(&event.issue_id) {
                 let canonical = canonicalize_artifact_link_ref(target_ref)
@@ -2042,6 +2050,7 @@ impl PendingEvent {
                 origin: link.origin,
                 direction: link.direction,
                 uses: link.uses,
+                operation_id: None,
             },
         }
     }
@@ -2653,6 +2662,7 @@ mod tests {
                     origin: ArtifactLinkOriginWire::Manual,
                     direction: BeadLinkDirectionWire::Out,
                     uses: 1,
+                    operation_id: None,
                 }
             }
             BeadEventOperationWire::LinkRemoved => {
@@ -2660,6 +2670,7 @@ mod tests {
                     target_ref: target_ref.to_string(),
                     relation: relation.to_string(),
                     direction: BeadLinkDirectionWire::Out,
+                    operation_id: None,
                 }
             }
             _ => panic!("link_event requires a link operation"),
@@ -2841,6 +2852,7 @@ mod tests {
                 origin: ArtifactLinkOriginWire::Manual,
                 direction: BeadLinkDirectionWire::In,
                 uses: 1,
+                operation_id: None,
             },
         };
         inbound.event_id = mint_bead_event_id(

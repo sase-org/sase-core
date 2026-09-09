@@ -2219,7 +2219,10 @@ pub fn add_bead_link(
     direction: BeadLinkDirectionWire,
     uses: u64,
     now: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let operation_id =
+        validate_artifact_link_operation_id_option(operation_id)?;
     with_bead_mutation_lock(beads_dir, "add_link", || {
         let mut store = MutableStore::load(beads_dir)?;
         let source_id = resolve_issue_id_in_issues(&store.issues, issue_id)?;
@@ -2250,6 +2253,17 @@ pub fn add_bead_link(
         } else {
             BeadLinkDirectionWire::Out
         };
+        if let Some(operation_id) = operation_id.as_deref() {
+            if store
+                .artifact_link_operation_seen_on(&holder_id, operation_id)?
+            {
+                let mut result =
+                    outcome("link_add", false, vec![source_id.clone()]);
+                result.issue =
+                    Some(store.issues[store.issue_index(&source_id)?].clone());
+                return Ok(result);
+            }
+        }
         let existing =
             store.issues[holder_index].links.iter().position(|link| {
                 link_matches(
@@ -2263,7 +2277,10 @@ pub fn add_bead_link(
         let stored_uses;
         if let Some(index) = existing {
             let current = &store.issues[holder_index].links[index];
-            if current.description == description && current.origin == origin {
+            if operation_id.is_none()
+                && current.description == description
+                && current.origin == origin
+            {
                 let mut result =
                     outcome("link_add", false, vec![source_id.clone()]);
                 result.issue =
@@ -2271,7 +2288,9 @@ pub fn add_bead_link(
                 return Ok(result);
             }
             stored_uses = if origin.increments_uses() {
-                current.uses.saturating_add(1)
+                current
+                    .uses
+                    .saturating_add(if uses == 0 { 1 } else { uses })
             } else {
                 current.uses
             };
@@ -2312,6 +2331,7 @@ pub fn add_bead_link(
                 origin,
                 direction: stored_direction,
                 uses: stored_uses,
+                operation_id: operation_id.clone(),
             },
             &added_at,
             &actor,
@@ -2340,7 +2360,10 @@ pub fn remove_bead_link(
     relation: Option<&str>,
     direction: BeadLinkDirectionWire,
     now: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
+    let operation_id =
+        validate_artifact_link_operation_id_option(operation_id)?;
     if let Some(relation) = relation {
         lookup_artifact_relation(relation).map_err(link_mutation_error)?;
     }
@@ -2373,6 +2396,13 @@ pub fn remove_bead_link(
         for (holder_id, stored_target, stored_relation, stored_direction) in
             &removed
         {
+            if let Some(operation_id) = operation_id.as_deref() {
+                if store
+                    .artifact_link_operation_seen_on(holder_id, operation_id)?
+                {
+                    continue;
+                }
+            }
             let index = store.issue_index(holder_id)?;
             store.issues[index].links.retain(|link| {
                 !(link.target_ref == *stored_target
@@ -2386,6 +2416,7 @@ pub fn remove_bead_link(
                     target_ref: stored_target.clone(),
                     relation: stored_relation.clone(),
                     direction: *stored_direction,
+                    operation_id: operation_id.clone(),
                 },
                 &removed_at,
                 &actor,
@@ -2467,6 +2498,27 @@ fn link_matches(
         return false;
     }
     link.target_ref == target_ref || link.target_ref == source_ref
+}
+
+fn validate_artifact_link_operation_id_option(
+    operation_id: Option<String>,
+) -> Result<Option<String>, BeadError> {
+    let Some(raw) = operation_id else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    if value.len() != 32 || !is_lowercase_hex(value) {
+        return Err(BeadError::validation(
+            "artifact link operation_id must be 32 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn is_lowercase_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2943,6 +2995,33 @@ impl MutableStore {
             .iter()
             .find(|issue| issue.id == issue_id)
             .ok_or_else(|| not_found(issue_id))
+    }
+
+    fn artifact_link_operation_seen_on(
+        &self,
+        issue_id: &str,
+        operation_id: &str,
+    ) -> Result<bool, BeadError> {
+        let stream_id = self.stream_id_for_issue(issue_id)?;
+        let Some(stream) = self
+            .streams
+            .all()
+            .iter()
+            .find(|stream| stream.stream_id == stream_id)
+        else {
+            return Ok(false);
+        };
+        Ok(stream.events.iter().any(|event| match &event.payload {
+            BeadEventPayloadWire::LinkAdded {
+                operation_id: Some(existing),
+                ..
+            }
+            | BeadEventPayloadWire::LinkRemoved {
+                operation_id: Some(existing),
+                ..
+            } => existing == operation_id,
+            _ => false,
+        }))
     }
 
     fn append_issue_event(
@@ -4484,6 +4563,7 @@ mod tests {
             BeadLinkDirectionWire::Out,
             1,
             Some("2026-01-01T00:01:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(added.changed);
@@ -4504,6 +4584,7 @@ mod tests {
             BeadLinkDirectionWire::Out,
             1,
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(!reverse.changed);
@@ -4525,6 +4606,7 @@ mod tests {
             BeadLinkDirectionWire::Out,
             1,
             Some("2026-01-01T00:03:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(rewritten.changed);
@@ -4543,6 +4625,7 @@ mod tests {
             BeadLinkDirectionWire::Out,
             1,
             None,
+            None,
         )
         .unwrap_err();
         assert_eq!(reserved.kind, "reserved");
@@ -4555,6 +4638,7 @@ mod tests {
             Some("related"),
             BeadLinkDirectionWire::Out,
             Some("2026-01-01T00:04:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(removed.changed);
@@ -4602,6 +4686,7 @@ mod tests {
             BeadLinkDirectionWire::In,
             1,
             Some("2026-01-01T00:01:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(added.changed);
@@ -4621,6 +4706,7 @@ mod tests {
             BeadLinkDirectionWire::In,
             1,
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(!unchanged.changed);
@@ -4632,6 +4718,7 @@ mod tests {
             Some("implements"),
             BeadLinkDirectionWire::In,
             Some("2026-01-01T00:03:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(removed.changed);
@@ -4681,6 +4768,7 @@ mod tests {
             BeadLinkDirectionWire::Out,
             1,
             Some("2026-01-01T00:01:00Z".to_string()),
+            None,
         )
         .unwrap();
         // right implements left: left is the target of that separate edge,
@@ -4696,6 +4784,7 @@ mod tests {
             BeadLinkDirectionWire::In,
             1,
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
         )
         .unwrap();
 
@@ -4721,6 +4810,7 @@ mod tests {
             Some("implements"),
             BeadLinkDirectionWire::In,
             Some("2026-01-01T00:03:00Z".to_string()),
+            None,
         )
         .unwrap();
         let issues = read_store_issues(&beads_dir).unwrap();
@@ -4728,6 +4818,94 @@ mod tests {
             issues.iter().find(|issue| issue.id == left.id).unwrap();
         assert_eq!(left_issue.links.len(), 1);
         assert_eq!(left_issue.links[0].direction, BeadLinkDirectionWire::Out);
+    }
+
+    #[test]
+    fn link_operation_ids_make_replay_idempotent_but_keep_distinct_reads() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let first_operation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let second_operation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+
+        let added = add_bead_link(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/a.md",
+            "related",
+            "read once",
+            ArtifactLinkOriginWire::Read,
+            BeadLinkDirectionWire::Out,
+            1,
+            Some("2026-01-01T00:01:00Z".to_string()),
+            Some(first_operation.clone()),
+        )
+        .unwrap();
+        assert!(added.changed);
+
+        let replayed = add_bead_link(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/a.md",
+            "related",
+            "read once",
+            ArtifactLinkOriginWire::Read,
+            BeadLinkDirectionWire::Out,
+            1,
+            Some("2026-01-01T00:02:00Z".to_string()),
+            Some(first_operation.clone()),
+        )
+        .unwrap();
+        assert!(!replayed.changed);
+
+        let distinct = add_bead_link(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/a.md",
+            "related",
+            "read again",
+            ArtifactLinkOriginWire::Read,
+            BeadLinkDirectionWire::Out,
+            1,
+            Some("2026-01-01T00:03:00Z".to_string()),
+            Some(second_operation.clone()),
+        )
+        .unwrap();
+        assert!(distinct.changed);
+
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let issue = issues.iter().find(|item| item.id == issue.id).unwrap();
+        assert_eq!(issue.links.len(), 1);
+        assert_eq!(issue.links[0].uses, 2);
+        assert_eq!(issue.links[0].description, "read again");
+
+        let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+        let link_added_operation_ids: Vec<_> = streams
+            .iter()
+            .flat_map(|stream| stream.events.iter())
+            .filter_map(|event| match &event.payload {
+                BeadEventPayloadWire::LinkAdded {
+                    operation_id: Some(operation_id),
+                    ..
+                } => Some(operation_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            link_added_operation_ids,
+            vec![first_operation, second_operation]
+        );
     }
 
     #[test]

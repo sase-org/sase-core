@@ -375,8 +375,8 @@
 //! - `code_value_wire_schema_version() -> int`
 //! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
-//! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", direction: str = "out", uses: int = 1, now: str | None = None) -> dict`
-//! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, direction: str = "out", now: str | None = None) -> dict`
+//! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", direction: str = "out", uses: int = 1, now: str | None = None, operation_id: str | None = None) -> dict`
+//! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, direction: str = "out", now: str | None = None, operation_id: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict` (`issue["notes"]` is a list of note records)
 //! - `bead_note_edit(beads_dir: str, issue_id: str, note_id: str, text: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_note_remove(beads_dir: str, issue_id: str, note_id: str, author: str | None = None, now: str | None = None) -> dict`
@@ -8150,7 +8150,7 @@ fn py_bead_remove_many<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_add_link")]
-#[pyo3(signature = (beads_dir, issue_id, target_ref, relation, description, origin="manual", direction="out", uses=1, now=None))]
+#[pyo3(signature = (beads_dir, issue_id, target_ref, relation, description, origin="manual", direction="out", uses=1, now=None, operation_id=None))]
 #[allow(clippy::too_many_arguments)]
 fn py_bead_add_link<'py>(
     py: Python<'py>,
@@ -8163,6 +8163,7 @@ fn py_bead_add_link<'py>(
     direction: &str,
     uses: u64,
     now: Option<String>,
+    operation_id: Option<String>,
 ) -> PyResult<PyObject> {
     let origin =
         ArtifactLinkOriginWire::from_name(origin).ok_or_else(|| {
@@ -8190,6 +8191,7 @@ fn py_bead_add_link<'py>(
                 direction,
                 uses,
                 now,
+                operation_id,
             )
         }),
     )
@@ -8197,7 +8199,7 @@ fn py_bead_add_link<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_remove_link")]
-#[pyo3(signature = (beads_dir, issue_id, target_ref, relation=None, direction="out", now=None))]
+#[pyo3(signature = (beads_dir, issue_id, target_ref, relation=None, direction="out", now=None, operation_id=None))]
 fn py_bead_remove_link<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -8206,6 +8208,7 @@ fn py_bead_remove_link<'py>(
     relation: Option<&str>,
     direction: &str,
     now: Option<String>,
+    operation_id: Option<String>,
 ) -> PyResult<PyObject> {
     let direction =
         BeadLinkDirectionWire::from_name(direction).ok_or_else(|| {
@@ -8218,7 +8221,13 @@ fn py_bead_remove_link<'py>(
         py,
         py.allow_threads(|| {
             core_bead_remove_link(
-                &beads_dir, issue_id, target_ref, relation, direction, now,
+                &beads_dir,
+                issue_id,
+                target_ref,
+                relation,
+                direction,
+                now,
+                operation_id,
             )
         }),
     )
