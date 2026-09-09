@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.50](https://github.com/sase-org/sase-core/compare/v0.32.49...v0.32.50) - 2026-09-09
+
+### Added
+
+- *(core)* add shared %queue/%q contract behind queue_directive flag
+
 ## [0.32.48](https://github.com/sase-org/sase-core/compare/v0.32.47...v0.32.48) - 2026-09-08
 
 ### Added
