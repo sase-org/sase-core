@@ -31,7 +31,14 @@ pub struct ModelAliasShortcutContextWire {
 /// One validated edit that expands a `*alias` shortcut to `%m:@alias`.
 ///
 /// The `edit.range` uses the original document's UTF-16 editor positions.
-/// `caret` uses the post-edit document's UTF-16 editor position.
+/// It usually equals the detected context's `replacement_range`, but when
+/// the star token is immediately followed by one ASCII space, the range
+/// deliberately extends one character beyond it to consume that space (a
+/// space is then reinserted at the end of `edit.new_text`). This keeps the
+/// edit self-contained: applying `edit` alone reproduces the same final
+/// document a naive whitespace-preserving expansion would, and `caret`
+/// (the post-edit document's UTF-16 editor position) is always exactly the
+/// position at the end of the applied `edit`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelAliasShortcutEditWire {
     pub schema_version: u32,
@@ -57,6 +64,26 @@ pub fn detect_model_alias_shortcut_context(
         .map(|detected| detected.wire)
 }
 
+/// Filter a model catalog down to the effective alias rows a `*query`
+/// shortcut may expand to, in canonical catalog order.
+///
+/// Reuses [`filter_model_completion_entries`] with a synthesized `@query`
+/// partial so alias prefix matching (including matching on a row's
+/// `aliases`) stays identical to `%model:@` completion, then restricts the
+/// result to `implicit_alias`/`user_alias` rows. [`plan_model_alias_shortcut_edit`]
+/// uses this same helper to validate a selected alias against the current
+/// catalog.
+pub fn filter_model_alias_shortcut_entries(
+    entries: &[ModelCompletionEntryWire],
+    query: &str,
+) -> Vec<ModelCompletionEntryWire> {
+    let partial = format!("@{query}");
+    filter_model_completion_entries(entries, &partial)
+        .into_iter()
+        .filter(|entry| is_model_alias_kind(&entry.kind))
+        .collect()
+}
+
 pub fn plan_model_alias_shortcut_edit(
     text: &str,
     position: EditorPosition,
@@ -72,21 +99,23 @@ pub fn plan_model_alias_shortcut_edit(
         selected_alias,
     )?;
     let replacement = model_alias_replacement(&alias);
-    let (new_text, edit_text, caret_byte) = apply_replacement_preview(
-        text,
-        detected.start,
-        detected.end,
-        &replacement,
-    )?;
+    let (new_text, edit_text, edit_end, caret_byte) =
+        apply_replacement_preview(
+            text,
+            detected.start,
+            detected.end,
+            &replacement,
+        )?;
     let caret =
         DocumentSnapshot::new(new_text).byte_offset_to_position(caret_byte)?;
+    let edit_range = document.byte_range_to_range(detected.start, edit_end)?;
 
     Some(ModelAliasShortcutEditWire {
         schema_version: MODEL_ALIAS_SHORTCUT_WIRE_SCHEMA_VERSION,
         alias,
         replacement: edit_text.clone(),
         edit: EditorTextEdit {
-            range: detected.wire.replacement_range,
+            range: edit_range,
             new_text: edit_text,
         },
         caret,
@@ -137,12 +166,9 @@ fn selected_canonical_alias(
     query: &str,
     selected_alias: &str,
 ) -> Option<String> {
-    let partial = format!("@{query}");
-    filter_model_completion_entries(entries, &partial)
+    filter_model_alias_shortcut_entries(entries, query)
         .into_iter()
-        .find(|entry| {
-            entry.value == selected_alias && is_model_alias_kind(&entry.kind)
-        })
+        .find(|entry| entry.value == selected_alias)
         .and_then(|entry| canonical_alias_value(&entry.value))
 }
 
@@ -156,16 +182,29 @@ fn model_alias_replacement(alias: &str) -> String {
     format!("%m:{alias}")
 }
 
+/// Build the expansion preview, the edit's `new_text`, the edit range's end
+/// byte offset, and the post-edit caret byte offset.
+///
+/// `edit_end` normally equals `end` (the edit touches only the star token),
+/// except when the token is immediately followed by one ASCII space: that
+/// space is consumed into the edit range and one space is reinserted at the
+/// end of `new_text`, so the edit stays self-contained and the caret is
+/// always exactly the end of the applied edit.
 fn apply_replacement_preview(
     text: &str,
     start: usize,
     end: usize,
     replacement: &str,
-) -> Option<(String, String, usize)> {
+) -> Option<(String, String, usize, usize)> {
     let mut edit_text = replacement.to_string();
+    let mut edit_end = end;
     let caret_after_edit =
         match text.get(end..).and_then(|tail| tail.chars().next()) {
-            Some(' ') => start + replacement.len() + 1,
+            Some(' ') => {
+                edit_text.push(' ');
+                edit_end = end + 1;
+                start + edit_text.len()
+            }
             Some('\t') => start + replacement.len(),
             Some('\n') | Some('\r') | None => {
                 edit_text.push(' ');
@@ -174,12 +213,13 @@ fn apply_replacement_preview(
             Some(_) => start + replacement.len(),
         };
 
-    let mut preview =
-        String::with_capacity(text.len() - (end - start) + edit_text.len());
+    let mut preview = String::with_capacity(
+        text.len() - (edit_end - start) + edit_text.len(),
+    );
     preview.push_str(text.get(..start)?);
     preview.push_str(&edit_text);
-    preview.push_str(text.get(end..)?);
-    Some((preview, edit_text, caret_after_edit))
+    preview.push_str(text.get(edit_end..)?);
+    Some((preview, edit_text, edit_end, caret_after_edit))
 }
 
 fn whitespace_token_bounds(
@@ -404,7 +444,7 @@ mod tests {
     #[test]
     fn plans_full_token_replacement_from_mid_token_caret() {
         let planned = plan("Explain *laX later", 0, 11, "@large");
-        assert_eq!(planned.edit.new_text, "%m:@large");
+        assert_eq!(planned.edit.new_text, "%m:@large ");
         assert_eq!(
             apply("Explain *laX later", &planned.edit),
             "Explain %m:@large later"
@@ -419,8 +459,16 @@ mod tests {
         assert_eq!(apply("Use *la", &at_end.edit), "Use %m:@large ");
         assert_eq!(at_end.caret, pos(0, 14));
 
+        let before_one_space = plan("Use *la now", 0, 7, "@large");
+        assert_eq!(before_one_space.edit.new_text, "%m:@large ");
+        assert_eq!(
+            apply("Use *la now", &before_one_space.edit),
+            "Use %m:@large now"
+        );
+        assert_eq!(before_one_space.caret, pos(0, 14));
+
         let before_space = plan("Use *la   now", 0, 7, "@large");
-        assert_eq!(before_space.edit.new_text, "%m:@large");
+        assert_eq!(before_space.edit.new_text, "%m:@large ");
         assert_eq!(
             apply("Use *la   now", &before_space.edit),
             "Use %m:@large   now"
@@ -518,5 +566,76 @@ mod tests {
         let planned = plan(text, 0, 6, "@large");
         assert_eq!(apply(text, &planned.edit), "🙂 %m:@large \r\nnext");
         assert_eq!(planned.caret, pos(0, 13));
+    }
+
+    #[test]
+    fn filter_model_alias_shortcut_entries_restricts_to_alias_kinds_in_catalog_order(
+    ) {
+        let entries = vec![
+            entry("@large", "user_alias"),
+            entry("@launch", "implicit_alias"),
+            entry("large-model", "model"),
+            entry("@scout", "user_alias"),
+        ];
+        assert_eq!(
+            filter_model_alias_shortcut_entries(&entries, ""),
+            vec![
+                entry("@large", "user_alias"),
+                entry("@launch", "implicit_alias"),
+                entry("@scout", "user_alias"),
+            ]
+        );
+        assert_eq!(
+            filter_model_alias_shortcut_entries(&entries, "la"),
+            vec![
+                entry("@large", "user_alias"),
+                entry("@launch", "implicit_alias"),
+            ]
+        );
+        assert_eq!(
+            filter_model_alias_shortcut_entries(&entries, "LA"),
+            vec![
+                entry("@large", "user_alias"),
+                entry("@launch", "implicit_alias"),
+            ]
+        );
+        assert_eq!(
+            filter_model_alias_shortcut_entries(&entries, "nope"),
+            Vec::new()
+        );
+    }
+
+    /// The [`ModelAliasShortcutEditWire`] doc invariant: `caret` is always
+    /// exactly the UTF-16 position at the end of the applied `edit`, for
+    /// every trailing-whitespace and Unicode case the planner handles.
+    #[test]
+    fn planned_caret_always_equals_end_of_applied_edit() {
+        for (text, character) in [
+            ("Use *la", 7),
+            ("Use *la now", 7),
+            ("Use *la   now", 7),
+            ("Use *la\tnow", 7),
+            ("Use *la\nnow", 7),
+            ("Explain *laX later", 11),
+            ("🙂 *la\r\nnext", 6),
+        ] {
+            let planned = plan(text, 0, character, "@large");
+            assert_eq!(
+                planned.caret,
+                end_of_edit(&planned.edit),
+                "text={text:?}"
+            );
+        }
+    }
+
+    /// `new_text` never contains a newline, so the end of an applied edit is
+    /// always on the same line as its start, offset by the UTF-16 length of
+    /// `new_text`.
+    fn end_of_edit(edit: &EditorTextEdit) -> EditorPosition {
+        let utf16_len = edit.new_text.encode_utf16().count() as u32;
+        pos(
+            edit.range.start.line,
+            edit.range.start.character + utf16_len,
+        )
     }
 }

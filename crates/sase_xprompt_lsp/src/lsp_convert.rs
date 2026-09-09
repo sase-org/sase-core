@@ -8,7 +8,8 @@ use sase_core::{
     AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
     AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
     DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
-    EditorTextEdit, HoverPayload, VcsRepoEntry,
+    EditorTextEdit, HoverPayload, ModelAliasShortcutContextWire,
+    ModelAliasShortcutEditWire, VcsRepoEntry,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -307,6 +308,71 @@ fn model_completion_sort_group(kind: &str) -> u8 {
     } else {
         0
     }
+}
+
+/// Render `*alias` shortcut rows as an *incomplete* list whose `filterText`
+/// is the star prefix actually typed (`*` plus the detected context's
+/// `query`), and whose first row is preselected.
+///
+/// Each `(candidate, edit)` pair reuses [`model_completion_candidate`]'s
+/// label/detail/documentation/kind projection — the same one `%model:`
+/// completion uses — so the two surfaces never format a catalog row
+/// differently; only the `textEdit` (the shared Rust edit planner's
+/// [`ModelAliasShortcutEditWire::edit`]), the expansion shown in the label
+/// detail, `filterText`, and `sortText` are shortcut-specific. Mirrors
+/// [`at_reference_completion_response`]'s incomplete-list/filterText idiom:
+/// a client that prefix-filters the inserted `%m:@large` text against the
+/// typed `*la` would drop the row without `filterText`/`isIncomplete`
+/// telling it to re-request instead.
+///
+/// Callers pass an empty `candidates` list as-is (no matching alias, or no
+/// catalog) rather than falling back to unrelated completion; an empty
+/// *shortcut* response is still owned by this star context.
+pub fn model_alias_shortcut_completion_response(
+    candidates: Vec<(CompletionCandidate, ModelAliasShortcutEditWire)>,
+    context: &ModelAliasShortcutContextWire,
+) -> CompletionResponse {
+    let filter_text = format!("*{}", context.query);
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (candidate, edit))| {
+                model_alias_shortcut_completion_item(
+                    candidate,
+                    edit,
+                    &filter_text,
+                    index,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn model_alias_shortcut_completion_item(
+    mut candidate: CompletionCandidate,
+    edit: ModelAliasShortcutEditWire,
+    filter_text: &str,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let alias_kind = candidate.status.clone();
+    let expansion = edit.replacement.trim_end().to_string();
+    let range = edit.edit.range;
+    candidate.replacement = Some(edit.edit);
+    // `candidate.replacement` is always `Some` here, so `completion_item`
+    // never falls back to this `replacement_range` argument.
+    let mut item = completion_item(candidate, range);
+    item.kind = Some(CompletionItemKind::ENUM_MEMBER);
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" → {expansion}")),
+        description: Some(model_completion_kind_label(&kind, &alias_kind)),
+    });
+    item.filter_text = Some(filter_text.to_string());
+    item.sort_text = Some(format!("{index:04}"));
+    item.preselect = (index == 0).then_some(true);
+    item
 }
 
 /// Render kind-aware wait/fork targets without losing the core candidate order.

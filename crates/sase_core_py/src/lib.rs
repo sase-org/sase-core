@@ -161,6 +161,7 @@
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
 //! - `model_alias_shortcut_context(text: str, position: dict) -> dict | None`
 //! - `model_alias_shortcut_edit(text: str, position: dict, entries: list[dict], selected_alias: str) -> dict | None`
+//! - `filter_model_alias_shortcut_entries(entries: list[dict], query: str) -> list[dict]`
 //! - `fenced_block_ranges(text: str) -> list[tuple[int, int]]`
 //! - `fenced_block_details(text: str) -> list[dict]`
 //! - `scan_directive_owned_fences(text: str) -> dict`
@@ -1283,6 +1284,7 @@ use sase_core::{
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
     editor_detect_model_alias_shortcut_context as core_detect_model_alias_shortcut_context,
+    editor_filter_model_alias_shortcut_entries as core_filter_model_alias_shortcut_entries,
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
@@ -2114,6 +2116,26 @@ fn py_model_alias_shortcut_edit(
     )
     .map(|edit| serialize_to_py(py, &edit))
     .transpose()
+}
+
+/// Filter a `%model:`-shaped catalog down to the effective alias rows a
+/// `*query` shortcut may expand to, in canonical catalog order. ACE's star
+/// shortcut menu and `sase-xprompt-lsp`'s `*` completion both build their
+/// candidate rows from this one binding so alias filtering never drifts
+/// between the two frontends.
+#[pyfunction]
+#[pyo3(name = "filter_model_alias_shortcut_entries")]
+fn py_filter_model_alias_shortcut_entries(
+    py: Python<'_>,
+    entries: &Bound<'_, PyList>,
+    query: &str,
+) -> PyResult<PyObject> {
+    let entries = model_completion_entries_from_py_list(entries)?;
+    let filtered = core_filter_model_alias_shortcut_entries(&entries, query);
+    let value = serde_json::to_value(filtered).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// The nested snippet session engine's single entry point: apply one wire
@@ -14749,6 +14771,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_alias_shortcut_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_alias_shortcut_edit, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_filter_model_alias_shortcut_entries,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_apply_snippet_session_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_project_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_patch_project_bytes, m)?)?;
@@ -17959,6 +17985,94 @@ mod tests {
             .to_string();
             assert!(
                 error.contains("UTF-16 line/character"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn filter_model_alias_shortcut_entries_binding_restricts_to_alias_kinds() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_filter_model_alias_shortcut_entries,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let entries = json_value_to_py(
+                py,
+                &json!([
+                    model_completion_entry_json(
+                        "@large",
+                        "user_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "@launch",
+                        "implicit_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "large-model",
+                        "model",
+                        "openai",
+                        [],
+                        0,
+                    ),
+                ]),
+            )
+            .unwrap();
+
+            let filtered = module
+                .getattr("filter_model_alias_shortcut_entries")
+                .unwrap()
+                .call1((entries, "la"))
+                .unwrap();
+
+            assert_eq!(
+                py_to_json_value(&filtered).unwrap(),
+                json!([
+                    model_completion_entry_json(
+                        "@large",
+                        "user_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "@launch",
+                        "implicit_alias",
+                        "",
+                        [],
+                        0,
+                    ),
+                ])
+            );
+        });
+    }
+
+    #[test]
+    fn filter_model_alias_shortcut_entries_binding_rejects_malformed_rows() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let rows = json_value_to_py(py, &json!([{"value": "@large"}]))
+                .unwrap()
+                .into_bound(py);
+            let rows = rows.downcast::<PyList>().unwrap();
+            let error = py_filter_model_alias_shortcut_entries(py, rows, "")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("missing field"),
                 "unexpected error: {error}"
             );
         });

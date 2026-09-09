@@ -43,9 +43,11 @@ use sase_core::{
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
-    editor_directive_contract,
+    editor_detect_model_alias_shortcut_context, editor_directive_contract,
     editor_directive_is_hidden_from_name_completion_with_flags,
-    editor_extract_token_at_position, editor_hover_at_position,
+    editor_extract_token_at_position,
+    editor_filter_model_alias_shortcut_entries, editor_hover_at_position,
+    editor_plan_model_alias_shortcut_edit,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
     AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
@@ -54,11 +56,11 @@ use sase_core::{
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories, DirectiveMachineEntry,
     DirectiveModelAliasKey, DirectiveSyntaxForm, DirectiveValueRole,
-    DocumentSnapshot, EditorRange, EditorSnippetEntryWire, GlossaryCatalogWire,
-    GlossaryEntryWire, GlossarySpanWire, HelperHostBridge, HoverPayload,
-    ModelCompletionEntryWire, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
-    MEMORY_NAMESPACE_SEGMENT,
+    DocumentSnapshot, EditorPosition, EditorRange, EditorSnippetEntryWire,
+    GlossaryCatalogWire, GlossaryEntryWire, GlossarySpanWire, HelperHostBridge,
+    HoverPayload, ModelAliasShortcutContextWire, ModelCompletionEntryWire,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
+    XpromptAssistEntry, MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;
 use tower_lsp_server::jsonrpc::Result;
@@ -70,10 +72,10 @@ use crate::lsp_convert::{
     agent_completion_response, apply_replacement,
     at_reference_completion_response, completion_response,
     diagnostic as lsp_diagnostic, finalizer_completion_response,
-    hover as lsp_hover, model_completion_response,
-    placeholder_completion_response, sase_snippet_completion_item,
-    snippet_completion_item, to_editor_position, to_lsp_range,
-    vcs_project_completion_response, vcs_ref_completion_response,
+    hover as lsp_hover, model_alias_shortcut_completion_response,
+    model_completion_response, placeholder_completion_response,
+    sase_snippet_completion_item, snippet_completion_item, to_editor_position,
+    to_lsp_range, vcs_project_completion_response, vcs_ref_completion_response,
     vcs_repo_completion_response,
 };
 use crate::semantic_tokens::{document_semantic_tokens, legend};
@@ -323,6 +325,24 @@ impl XpromptLspServer {
                 list,
                 context.replacement_range,
                 prefix,
+            ));
+        }
+
+        // The `*alias` shortcut is also document-local (the shared detector
+        // already excludes placeholder/directive/literal zones), and its
+        // model catalog is a synchronous file read, so classify it before
+        // any catalog refresh too. A valid star context owns the response
+        // even when no alias matches, so this never falls through to the
+        // generic classifier below.
+        if let Some(context) = editor_detect_model_alias_shortcut_context(
+            document.text(),
+            editor_position,
+        ) {
+            return Some(model_alias_shortcut_completion(
+                document.text(),
+                editor_position,
+                &context,
+                config.model_catalog.as_deref(),
             ));
         }
 
@@ -1509,6 +1529,7 @@ impl LanguageServer for XpromptLspServer {
                         ",".to_string(),
                         "+".to_string(),
                         "<".to_string(),
+                        "*".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -2181,6 +2202,37 @@ fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
         candidates,
         shared_extension: String::new(),
     }
+}
+
+/// Build the `*alias` shortcut completion response for a detected star
+/// context: filter the model catalog to effective alias rows through the
+/// shared Rust filter, validate and plan each candidate's edit through the
+/// shared edit planner, and hand both to [`model_alias_shortcut_completion_response`]
+/// for LSP rendering. Returns the (possibly empty) shortcut response
+/// unconditionally; the caller never falls through to unrelated completion
+/// once a star context is detected.
+fn model_alias_shortcut_completion(
+    text: &str,
+    position: EditorPosition,
+    context: &ModelAliasShortcutContextWire,
+    path: Option<&Path>,
+) -> CompletionResponse {
+    let entries = load_model_catalog(path);
+    let candidates =
+        editor_filter_model_alias_shortcut_entries(&entries, &context.query)
+            .into_iter()
+            .filter_map(|entry| {
+                let edit = editor_plan_model_alias_shortcut_edit(
+                    text,
+                    position,
+                    &entries,
+                    &entry.value,
+                )?;
+                let filter_text = entry.value.clone();
+                Some((model_completion_candidate(entry, filter_text), edit))
+            })
+            .collect();
+    model_alias_shortcut_completion_response(candidates, context)
 }
 
 fn model_completion_candidate(
@@ -6921,6 +6973,307 @@ mod tests {
 
         assert!(triggers.contains(&":".to_string()), "{triggers:?}");
         assert!(triggers.contains(&"(".to_string()), "{triggers:?}");
+    }
+
+    #[tokio::test]
+    async fn advertises_model_alias_shortcut_trigger_character() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog(None)),
+            )
+        });
+        let server = service.inner();
+
+        let result = server
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        let triggers = result
+            .capabilities
+            .completion_provider
+            .and_then(|completion| completion.trigger_characters)
+            .unwrap_or_default();
+
+        assert!(triggers.contains(&"*".to_string()), "{triggers:?}");
+    }
+
+    // --- `*alias` shortcut completion ---------------------------------------
+
+    fn model_alias_shortcut_service(
+        catalog_path: Option<&Path>,
+    ) -> LspService<XpromptLspServer> {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        if let Some(path) = catalog_path {
+            let mut config = service.inner().config.write().unwrap();
+            config.model_catalog = Some(path.to_path_buf());
+        }
+        service
+    }
+
+    async fn shortcut_items_at(
+        server: &XpromptLspServer,
+        text: &str,
+        line: u32,
+        character: u32,
+    ) -> Vec<CompletionItem> {
+        let response = server
+            .completion_for_text(
+                text.to_string(),
+                Position::new(line, character),
+            )
+            .await
+            .unwrap_or_else(|| panic!("expected a response for {text:?}"));
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete shortcut list for {text:?}");
+        };
+        assert!(list.is_incomplete, "expected isIncomplete for {text:?}");
+        list.items
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_offers_alias_rows_only_in_catalog_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*", 0, 1).await;
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@default", "@claude_coder", "@scout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_filters_by_partial_case_insensitive_query() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let lower = shortcut_items_at(server, "*sc", 0, 3).await;
+        assert_eq!(
+            lower
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@scout"]
+        );
+
+        let upper = shortcut_items_at(server, "*SC", 0, 3).await;
+        assert_eq!(
+            upper
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@scout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_detects_later_line_and_after_leading_space() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items =
+            shortcut_items_at(server, "Explain the plan.\n  *sc", 1, 5).await;
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@scout"]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_sets_filter_text_sort_text_and_preselect() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*", 0, 1).await;
+
+        assert_eq!(items.len(), 3);
+        for item in &items {
+            assert_eq!(item.filter_text.as_deref(), Some("*"));
+        }
+        assert_eq!(items[0].sort_text.as_deref(), Some("0000"));
+        assert_eq!(items[1].sort_text.as_deref(), Some("0001"));
+        assert_eq!(items[2].sort_text.as_deref(), Some("0002"));
+        assert_eq!(items[0].preselect, Some(true));
+        assert_eq!(items[1].preselect, None);
+        assert_eq!(items[2].preselect, None);
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_shows_expansion_detail_and_metadata_documentation(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*sc", 0, 3).await;
+        let item = &items[0];
+
+        assert_eq!(item.label, "@scout");
+        assert_eq!(item.kind, Some(CompletionItemKind::ENUM_MEMBER));
+        let details = item.label_details.as_ref().expect("label details");
+        assert_eq!(details.detail.as_deref(), Some(" → %m:@scout"));
+        assert_eq!(details.description.as_deref(), Some("custom"));
+        assert_eq!(item.detail.as_deref(), Some("CODEX(gpt-5.6-sol) @ low"));
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected alias documentation");
+        };
+        assert!(
+            documentation.value.contains("Fast scouting pool."),
+            "{}",
+            documentation.value
+        );
+        assert!(
+            documentation.value.contains(
+                "**Config:** `llm_provider.model_aliases.custom.scout`"
+            ),
+            "{}",
+            documentation.value
+        );
+        assert!(
+            documentation.value.contains("**Pool:** 2/3 available"),
+            "{}",
+            documentation.value
+        );
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_replaces_whole_token_from_mid_token_caret() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        // Caret sits between "sc" and the trailing "X" garbage; the whole
+        // "*scX" token is replaced, "X" included, not just the typed prefix.
+        let items = shortcut_items_at(server, "Use *scX later", 0, 7).await;
+        assert_eq!(items.len(), 1);
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected a text edit");
+        };
+        assert_eq!(edit.range.start, Position::new(0, 4));
+        assert_eq!(edit.range.end, Position::new(0, 9));
+        assert_eq!(edit.new_text, "%m:@scout ");
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_text_edit_covers_every_trailing_whitespace_case()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        for (text, character, expected_end, expected_new_text) in [
+            ("Use *sc", 7, 7, "%m:@scout "),
+            ("Use *sc\tnow", 7, 7, "%m:@scout"),
+            ("Use *sc\nnow", 7, 7, "%m:@scout "),
+        ] {
+            let items = shortcut_items_at(server, text, 0, character).await;
+            assert_eq!(items.len(), 1, "text={text:?}");
+            let Some(CompletionTextEdit::Edit(edit)) =
+                items[0].text_edit.as_ref()
+            else {
+                panic!("expected a text edit for {text:?}");
+            };
+            assert_eq!(edit.range.start, Position::new(0, 4), "text={text:?}");
+            assert_eq!(
+                edit.range.end,
+                Position::new(0, expected_end),
+                "text={text:?}"
+            );
+            assert_eq!(edit.new_text, expected_new_text, "text={text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_no_match_returns_empty_list_not_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*zzz", 0, 4).await;
+
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_missing_catalog_returns_empty_list() {
+        let service = model_alias_shortcut_service(None);
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*", 0, 1).await;
+
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_malformed_catalog_returns_empty_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        fs::write(&catalog_path, "not json").unwrap();
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "*", 0, 1).await;
+
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn model_alias_shortcut_leaves_protected_star_to_ordinary_completion()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        // A star inside an active `%model:` value is excluded by the shared
+        // detector, so ordinary `%model:` value completion still answers —
+        // it is never hijacked into (or dropped by) the shortcut path.
+        let response = server
+            .completion_for_text("%model:*la".to_string(), Position::new(0, 10))
+            .await
+            .expect("expected ordinary directive completion");
+        assert!(
+            matches!(response, CompletionResponse::Array(_)),
+            "expected the ordinary %model: completion array, not a shortcut list"
+        );
     }
 
     #[tokio::test]

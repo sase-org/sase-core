@@ -613,6 +613,7 @@ pub use editor::{
     directive_snippet_recipes as editor_directive_snippet_recipes,
     extract_placeholder_spans as editor_extract_placeholder_spans,
     extract_token_at_position as editor_extract_token_at_position,
+    filter_model_alias_shortcut_entries as editor_filter_model_alias_shortcut_entries,
     frontmatter_field_schema as editor_frontmatter_field_schema,
     frontmatter_input_type_schema as editor_frontmatter_input_type_schema,
     fuzzy_match as editor_fuzzy_match,
