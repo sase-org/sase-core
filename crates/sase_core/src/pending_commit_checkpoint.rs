@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PENDING_COMMIT_CHECKPOINT_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PENDING_COMMIT_CHECKPOINT_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const PENDING_COMMIT_CHECKPOINT_ACTION_NONE: &str = "none";
 pub const PENDING_COMMIT_CHECKPOINT_ACTION_RESUME: &str = "resume";
@@ -26,6 +26,22 @@ pub struct PendingCommitCheckpointRequestWire {
     pub subject_matches: bool,
     #[serde(default)]
     pub payload_matches: bool,
+    #[serde(default)]
+    pub checkpoint_method: Option<String>,
+    #[serde(default)]
+    pub accepted_action: Option<String>,
+    #[serde(default)]
+    pub checkpoint_payload_identity: Option<String>,
+    #[serde(default)]
+    pub accepted_payload_identity: Option<String>,
+    #[serde(default)]
+    pub checkpoint_run_id: Option<String>,
+    #[serde(default)]
+    pub current_run_id: Option<String>,
+    #[serde(default)]
+    pub checkpoint_agent_id: Option<String>,
+    #[serde(default)]
+    pub current_agent_id: Option<String>,
     #[serde(default)]
     pub has_operation_id: bool,
     #[serde(default)]
@@ -70,6 +86,7 @@ pub fn decide_pending_commit_checkpoint_recovery(
     }
 
     let pending = pending_work(request);
+    let identity = identity_matches(request);
     if !request.repository_matches {
         if pending {
             return fail(
@@ -82,13 +99,37 @@ pub fn decide_pending_commit_checkpoint_recovery(
             vec![],
         );
     }
-    if !request.subject_matches || !request.payload_matches {
+    if pending && !identity.current_present {
+        return fail(
+            "current run and agent identity are required for automatic checkpoint recovery",
+            vec!["missing_current_identity".to_string()],
+        );
+    }
+    if pending && identity.foreign_run {
+        return fail(
+            "pending commit checkpoint belongs to a different run; automatic recovery refused",
+            vec!["checkpoint_run_mismatch".to_string()],
+        );
+    }
+    if pending && identity.foreign_agent {
+        return fail(
+            "pending commit checkpoint belongs to a different agent; automatic recovery refused",
+            vec!["checkpoint_agent_mismatch".to_string()],
+        );
+    }
+    if !operation_matches(request) {
+        return fail(
+            "commit checkpoint operation does not match the accepted finalizer action",
+            vec!["checkpoint_operation_mismatch".to_string()],
+        );
+    }
+    if !payload_matches(request) {
         return fail(
             "commit checkpoint does not match the accepted work; automatic recovery refused",
             vec!["checkpoint_payload_mismatch".to_string()],
         );
     }
-    if !request.has_operation_id && !request.independent_ownership_evidence {
+    if !identity.ownership_proven {
         return fail(
             "legacy commit checkpoint lacks independently verified ownership evidence",
             vec!["legacy_checkpoint_unproven".to_string()],
@@ -116,6 +157,69 @@ pub fn decide_pending_commit_checkpoint_recovery(
         );
     }
     none("commit checkpoint is already complete", vec![])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CheckpointIdentityDecision {
+    current_present: bool,
+    foreign_run: bool,
+    foreign_agent: bool,
+    ownership_proven: bool,
+}
+
+fn identity_matches(
+    request: &PendingCommitCheckpointRequestWire,
+) -> CheckpointIdentityDecision {
+    let checkpoint_run_id =
+        clean_optional(request.checkpoint_run_id.as_deref());
+    let current_run_id = clean_optional(request.current_run_id.as_deref());
+    let checkpoint_agent_id =
+        clean_optional(request.checkpoint_agent_id.as_deref());
+    let current_agent_id = clean_optional(request.current_agent_id.as_deref());
+    let current_present =
+        current_run_id.is_some() && current_agent_id.is_some();
+    let run_matches = checkpoint_run_id
+        .zip(current_run_id)
+        .map(|(checkpoint, current)| checkpoint == current);
+    let agent_matches = checkpoint_agent_id
+        .zip(current_agent_id)
+        .map(|(checkpoint, current)| checkpoint == current);
+    let run_owned = request.has_operation_id
+        && run_matches == Some(true)
+        && agent_matches == Some(true);
+    CheckpointIdentityDecision {
+        current_present,
+        foreign_run: run_matches == Some(false),
+        foreign_agent: agent_matches == Some(false),
+        ownership_proven: run_owned || request.independent_ownership_evidence,
+    }
+}
+
+fn operation_matches(request: &PendingCommitCheckpointRequestWire) -> bool {
+    let checkpoint_method =
+        clean_optional(request.checkpoint_method.as_deref());
+    let accepted_action = clean_optional(request.accepted_action.as_deref());
+    match (checkpoint_method, accepted_action) {
+        (Some("create_commit"), Some("commit")) => true,
+        (None, None) => request.payload_matches,
+        _ => false,
+    }
+}
+
+fn payload_matches(request: &PendingCommitCheckpointRequestWire) -> bool {
+    let checkpoint_payload =
+        clean_optional(request.checkpoint_payload_identity.as_deref());
+    let accepted_payload =
+        clean_optional(request.accepted_payload_identity.as_deref());
+    match (checkpoint_payload, accepted_payload) {
+        (Some(checkpoint), Some(accepted)) => checkpoint == accepted,
+        (None, None) => request.subject_matches && request.payload_matches,
+        _ => false,
+    }
+}
+
+fn clean_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
 }
 
 fn pending_work(request: &PendingCommitCheckpointRequestWire) -> bool {
@@ -188,8 +292,19 @@ mod tests {
             repository_matches: true,
             subject_matches: true,
             payload_matches: true,
+            checkpoint_method: Some("create_commit".to_string()),
+            accepted_action: Some("commit".to_string()),
+            checkpoint_payload_identity: Some(
+                "fix(final): reconcile commit declaration\n\nbody".to_string(),
+            ),
+            accepted_payload_identity: Some(
+                "fix(final): reconcile commit declaration\n\nbody".to_string(),
+            ),
+            checkpoint_run_id: Some("run-1".to_string()),
+            current_run_id: Some("run-1".to_string()),
+            checkpoint_agent_id: Some("agent-1".to_string()),
+            current_agent_id: Some("agent-1".to_string()),
             has_operation_id: true,
-            independent_ownership_evidence: true,
             dispatch_completed: true,
             pending_after_hook: true,
             commit_sha_present: true,
@@ -230,8 +345,57 @@ mod tests {
     fn subject_mismatch_fails() {
         let mut req = owned_pending();
         req.subject_matches = false;
+        req.checkpoint_payload_identity = Some("fix(final): old".to_string());
         let decision = decide_pending_commit_checkpoint_recovery(&req);
         assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
+    }
+
+    #[test]
+    fn same_subject_different_body_fails() {
+        let mut req = owned_pending();
+        req.checkpoint_payload_identity =
+            Some("fix(final): reconcile commit declaration\n\nold".to_string());
+        req.accepted_payload_identity =
+            Some("fix(final): reconcile commit declaration\n\nnew".to_string());
+        req.subject_matches = true;
+        let decision = decide_pending_commit_checkpoint_recovery(&req);
+        assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
+        assert!(decision
+            .diagnostics
+            .contains(&"checkpoint_payload_mismatch".to_string()));
+    }
+
+    #[test]
+    fn foreign_run_fails() {
+        let mut req = owned_pending();
+        req.checkpoint_run_id = Some("run-2".to_string());
+        let decision = decide_pending_commit_checkpoint_recovery(&req);
+        assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
+        assert!(decision
+            .diagnostics
+            .contains(&"checkpoint_run_mismatch".to_string()));
+    }
+
+    #[test]
+    fn foreign_agent_fails() {
+        let mut req = owned_pending();
+        req.checkpoint_agent_id = Some("agent-2".to_string());
+        let decision = decide_pending_commit_checkpoint_recovery(&req);
+        assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
+        assert!(decision
+            .diagnostics
+            .contains(&"checkpoint_agent_mismatch".to_string()));
+    }
+
+    #[test]
+    fn missing_current_identity_fails() {
+        let mut req = owned_pending();
+        req.current_run_id = None;
+        let decision = decide_pending_commit_checkpoint_recovery(&req);
+        assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
+        assert!(decision
+            .diagnostics
+            .contains(&"missing_current_identity".to_string()));
     }
 
     #[test]
@@ -259,6 +423,17 @@ mod tests {
         let decision = decide_pending_commit_checkpoint_recovery(&req);
         assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_FAIL);
         assert!(decision.reason.contains("legacy"));
+    }
+
+    #[test]
+    fn legacy_with_independent_proof_resumes() {
+        let mut req = owned_pending();
+        req.has_operation_id = false;
+        req.checkpoint_run_id = None;
+        req.checkpoint_agent_id = None;
+        req.independent_ownership_evidence = true;
+        let decision = decide_pending_commit_checkpoint_recovery(&req);
+        assert_eq!(decision.action, PENDING_COMMIT_CHECKPOINT_ACTION_RESUME);
     }
 
     #[test]

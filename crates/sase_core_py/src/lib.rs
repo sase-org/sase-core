@@ -17219,7 +17219,7 @@ mod tests {
                     .unwrap()
                     .extract::<u32>()
                     .unwrap(),
-                1
+                2
             );
             let request = json_value_to_py(
                 py,
@@ -17228,8 +17228,15 @@ mod tests {
                     "repository_matches": true,
                     "subject_matches": true,
                     "payload_matches": true,
+                    "checkpoint_method": "create_commit",
+                    "accepted_action": "commit",
+                    "checkpoint_payload_identity": "fix(final): reconcile commit declaration\n\nbody",
+                    "accepted_payload_identity": "fix(final): reconcile commit declaration\n\nbody",
+                    "checkpoint_run_id": "run-1",
+                    "current_run_id": "run-1",
+                    "checkpoint_agent_id": "agent-1",
+                    "current_agent_id": "agent-1",
                     "has_operation_id": true,
-                    "independent_ownership_evidence": true,
                     "dispatch_completed": true,
                     "pending_after_hook": true,
                     "commit_sha_present": true
@@ -17244,7 +17251,7 @@ mod tests {
                 .unwrap();
             let decision = py_to_json_value(&decision).unwrap();
             assert_eq!(decision["action"], json!("resume"));
-            assert_eq!(decision["schema_version"], json!(1));
+            assert_eq!(decision["schema_version"], json!(2));
         });
     }
 
