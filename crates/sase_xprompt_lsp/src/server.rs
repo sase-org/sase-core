@@ -7188,8 +7188,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_alias_shortcut_text_edit_covers_every_trailing_whitespace_case()
-    {
+    async fn model_alias_shortcut_text_edit_covers_every_trailing_whitespace_case(
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("model_catalog.json");
         write_enriched_model_catalog(&catalog_path);
