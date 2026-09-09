@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::bead::validate_model_value;
 use crate::model_completion::{
     filter_model_completion_entries, ModelCompletionEntryWire,
 };
@@ -308,8 +309,7 @@ fn selected_canonical_alias(
 
 fn canonical_alias_value(value: &str) -> Option<String> {
     let alias = value.strip_prefix('@')?;
-    (!alias.is_empty() && !alias.chars().any(char::is_whitespace))
-        .then(|| format!("@{alias}"))
+    safe_inline_model_directive_value(alias).then(|| format!("@{alias}"))
 }
 
 fn selected_canonical_model(
@@ -324,10 +324,14 @@ fn selected_canonical_model(
 }
 
 fn canonical_model_value(value: &str) -> Option<String> {
-    (!value.is_empty()
-        && !value.starts_with('@')
-        && !value.chars().any(char::is_whitespace))
-    .then(|| value.to_string())
+    (safe_inline_model_directive_value(value) && !value.starts_with('@'))
+        .then(|| value.to_string())
+}
+
+fn safe_inline_model_directive_value(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(char::is_whitespace)
+        && validate_model_value(value).is_ok()
 }
 
 fn model_directive_replacement(value: &str) -> String {
@@ -883,15 +887,93 @@ mod tests {
             ),
             None
         );
-        let unsafe_entries = vec![model_entry("gpt bad", "codex", &[])];
+    }
+
+    #[test]
+    fn rejects_unsafe_shortcut_values_before_emitting_model_directive() {
+        for unsafe_value in [
+            "gpt bad",
+            "gpt\tbad",
+            "gpt\nbad",
+            "gpt\0bad",
+            "gpt\u{001f}bad",
+            "gpt\u{007f}bad",
+        ] {
+            let unsafe_entries = vec![model_entry(unsafe_value, "codex", &[])];
+            assert_eq!(
+                values(filter_explicit_model_shortcut_entries(
+                    &unsafe_entries,
+                    "gpt"
+                )),
+                vec![unsafe_value],
+                "the candidate may match filtering before edit validation"
+            );
+            assert_eq!(
+                model_shortcut_edit(
+                    "Use **gpt",
+                    pos(0, 9),
+                    &unsafe_entries,
+                    unsafe_value
+                ),
+                None,
+                "unsafe selected model value {unsafe_value:?}"
+            );
+        }
+
+        let alias_entries = vec![entry("@large", "user_alias")];
+        let planned = plan_model_alias_shortcut_edit(
+            "Use *la",
+            pos(0, 7),
+            &alias_entries,
+            "@large",
+        )
+        .unwrap();
+        assert_eq!(planned.edit.new_text, "%m:@large ");
+
+        let unsafe_alias_entries = vec![entry("@bad\0alias", "user_alias")];
         assert_eq!(
-            model_shortcut_edit(
-                "Use **gpt",
-                pos(0, 9),
-                &unsafe_entries,
-                "gpt bad"
+            plan_model_alias_shortcut_edit(
+                "Use *bad",
+                pos(0, 8),
+                &unsafe_alias_entries,
+                "@bad\0alias",
             ),
             None
+        );
+    }
+
+    #[test]
+    fn accepts_safe_model_punctuation_and_nested_provider_values() {
+        let entries = vec![
+            model_entry("gpt-5.6_sol.alpha+preview", "codex", &["gpt56"]),
+            model_entry("anthropic/claude-sonnet-4-5", "opencode", &[]),
+            provider_entry("opencode/", "opencode"),
+        ];
+
+        let punctuation = model_shortcut_edit(
+            "Use **gptX later",
+            pos(0, 9),
+            &entries,
+            "gpt-5.6_sol.alpha+preview",
+        )
+        .unwrap();
+        assert_eq!(punctuation.value, "gpt-5.6_sol.alpha+preview");
+        assert_eq!(
+            apply("Use **gptX later", &punctuation.edit),
+            "Use %m:gpt-5.6_sol.alpha+preview later"
+        );
+
+        let nested = model_shortcut_edit(
+            "Use **opencode/anthropic/",
+            pos(0, 25),
+            &entries,
+            "opencode/anthropic/claude-sonnet-4-5",
+        )
+        .unwrap();
+        assert_eq!(nested.value, "opencode/anthropic/claude-sonnet-4-5");
+        assert_eq!(
+            nested.edit.new_text,
+            "%m:opencode/anthropic/claude-sonnet-4-5 "
         );
     }
 

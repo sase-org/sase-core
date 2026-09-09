@@ -43,6 +43,22 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
                     "aliases": ["gpt56sol"]
                 },
                 {
+                    "value": "gpt\u{0000}bad",
+                    "display": "gpt null",
+                    "description": "NUL is unsafe inline",
+                    "kind": "model",
+                    "provider": "codex",
+                    "aliases": []
+                },
+                {
+                    "value": "unsafe\u{001f}bad",
+                    "display": "unsafe control",
+                    "description": "Control is unsafe inline",
+                    "kind": "model",
+                    "provider": "codex",
+                    "aliases": []
+                },
+                {
                     "value": "@large",
                     "display": "@large",
                     "description": "Large pool",
@@ -161,24 +177,36 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
         })
     );
 
-    did_change(&mut client_writer, uri, 4, "Use **").await;
-    let back_to_bare_model = request_completion(
+    did_change(&mut client_writer, uri, 4, "Use **unsafe").await;
+    let unsafe_only = request_completion(
         &mut client_writer,
         &mut client_reader,
         uri,
         5,
+        12,
+        json!({"triggerKind": 3}),
+    )
+    .await;
+    assert!(labels(&unsafe_only).is_empty());
+
+    did_change(&mut client_writer, uri, 5, "Use **").await;
+    let back_to_bare_model = request_completion(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        6,
         6,
         json!({"triggerKind": 3}),
     )
     .await;
     assert_eq!(labels(&back_to_bare_model), vec!["opus", "gpt-5.6-sol"]);
 
-    did_change(&mut client_writer, uri, 5, "Use *").await;
+    did_change(&mut client_writer, uri, 6, "Use *").await;
     let back_to_alias = request_completion(
         &mut client_writer,
         &mut client_reader,
         uri,
-        6,
+        7,
         5,
         json!({"triggerKind": 1}),
     )
@@ -187,10 +215,10 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
 
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 7, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": null}),
     )
     .await;
-    read_response(&mut client_reader, 7).await;
+    read_response(&mut client_reader, 8).await;
     write_message(
         &mut client_writer,
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),

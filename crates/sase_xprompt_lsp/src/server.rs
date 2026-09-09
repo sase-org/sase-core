@@ -5927,6 +5927,50 @@ mod tests {
         .unwrap();
     }
 
+    fn write_model_catalog_with_unsafe_shortcut_rows(path: &Path) {
+        fs::write(
+            path,
+            r#"{
+                "schema_version": 1,
+                "entries": [
+                    {
+                        "value": "gpt-safe",
+                        "display": "gpt-safe",
+                        "description": "Safe Codex",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": []
+                    },
+                    {
+                        "value": "gpt bad",
+                        "display": "gpt bad",
+                        "description": "Whitespace is unsafe inline",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": []
+                    },
+                    {
+                        "value": "gpt\u0000bad",
+                        "display": "gpt null",
+                        "description": "NUL is unsafe inline",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": []
+                    },
+                    {
+                        "value": "unsafe\u001fbad",
+                        "display": "unsafe control",
+                        "description": "Control is unsafe inline",
+                        "kind": "model",
+                        "provider": "codex",
+                        "aliases": []
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+    }
+
     fn write_enriched_model_catalog(path: &Path) {
         fs::write(
             path,
@@ -7409,6 +7453,35 @@ mod tests {
         assert_eq!(edit.range.start, Position::new(0, 4));
         assert_eq!(edit.range.end, Position::new(0, 8));
         assert_eq!(edit.new_text, "%m:claude-fable-5 ");
+    }
+
+    #[tokio::test]
+    async fn model_shortcut_skips_unsafe_model_values_and_keeps_owned_empty_lists(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_model_catalog_with_unsafe_shortcut_rows(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        let items = shortcut_items_at(server, "Use **gpt", 0, 9).await;
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-safe"]
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.new_text, "%m:gpt-safe ");
+
+        let unsafe_only =
+            shortcut_items_at(server, "Use **unsafe", 0, 12).await;
+        assert!(unsafe_only.is_empty());
     }
 
     #[tokio::test]

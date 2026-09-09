@@ -18276,6 +18276,46 @@ mod tests {
                 ))
                 .unwrap();
             assert!(stale.is_none());
+
+            let unsafe_entries = json_value_to_py(
+                py,
+                &json!([
+                    model_completion_entry_json(
+                        "gpt\u{0000}bad",
+                        "model",
+                        "codex",
+                        [],
+                        0,
+                    ),
+                    model_completion_entry_json(
+                        "gpt bad",
+                        "model",
+                        "codex",
+                        [],
+                        0,
+                    ),
+                ]),
+            )
+            .unwrap();
+            let unsafe_position =
+                json_value_to_py(py, &json!({"line": 0, "character": 9}))
+                    .unwrap();
+            for unsafe_value in ["gpt\u{0000}bad", "gpt bad"] {
+                let unsafe_edit = module
+                    .getattr("model_shortcut_edit")
+                    .unwrap()
+                    .call1((
+                        "Use **gpt",
+                        unsafe_position.clone_ref(py),
+                        unsafe_entries.clone_ref(py),
+                        unsafe_value,
+                    ))
+                    .unwrap();
+                assert!(
+                    unsafe_edit.is_none(),
+                    "unsafe selected value {unsafe_value:?}"
+                );
+            }
         });
     }
 
