@@ -35,6 +35,17 @@ const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 const DEFAULT_PER_HOST_IN_FLIGHT: usize = 4;
 const DEFAULT_CACHE_ENTRY_LIMIT: usize = 256;
 const DEFAULT_CACHE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+/// Slack added to the outer envelope-level deadline beyond the requested
+/// `deadline_unix_ms`. Read/mutate handlers already bound their own I/O to the
+/// exact requested deadline (each per-host fan-out task races the same instant
+/// via its own `with_deadline`), so the outer wrapper is a backstop against an
+/// operation that never respects the deadline internally, not the precise
+/// enforcement point. Without this grace period the outer timeout can fire a
+/// few milliseconds before a handler that resolved right at the deadline
+/// finishes sorting/serializing its already-complete per-host results,
+/// discarding a correctly bounded response (including hosts that answered
+/// successfully) in favor of a bare top-level deadline error.
+const OUTER_DEADLINE_GRACE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FederationWorkerConfig {
@@ -728,8 +739,13 @@ mod imp {
             return error_response(&request.request_id, error);
         }
         let request_id = request.request_id.clone();
+        let outer_deadline = RequestDeadline {
+            unix_ms: deadline
+                .unix_ms
+                .map(|ms| ms + OUTER_DEADLINE_GRACE.as_millis() as u64),
+        };
         match with_deadline(
-            deadline,
+            outer_deadline,
             handle_operation(state, request.operation, deadline),
         )
         .await
@@ -2445,6 +2461,234 @@ mod imp {
             assert_eq!(response["request_id"], json!(request_id));
             assert_eq!(response["ok"], json!(true));
             response["result"].clone()
+        }
+
+        async fn request_worker_with_deadline(
+            socket_path: &Path,
+            request_id: &str,
+            operation: serde_json::Value,
+            deadline_unix_ms: u64,
+        ) -> serde_json::Value {
+            let mut stream = UnixStream::connect(socket_path).await.unwrap();
+            let payload = json!({
+                "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
+                "request_id": request_id,
+                "deadline_unix_ms": deadline_unix_ms,
+                "operation": operation,
+            });
+            let bytes = serde_json::to_vec(&payload).unwrap();
+            stream
+                .write_all(&(bytes.len() as u32).to_be_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&bytes).await.unwrap();
+
+            let mut len_bytes = [0_u8; 4];
+            stream.read_exact(&mut len_bytes).await.unwrap();
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            let mut response_bytes = vec![0_u8; len];
+            stream.read_exact(&mut response_bytes).await.unwrap();
+            let response: serde_json::Value =
+                serde_json::from_slice(&response_bytes).unwrap();
+            assert_eq!(response["request_id"], json!(request_id));
+            response
+        }
+
+        fn host_result<'a>(
+            response: &'a serde_json::Value,
+            alias: &str,
+        ) -> &'a serde_json::Value {
+            response["result"]["hosts"]
+                .as_array()
+                .unwrap_or_else(|| {
+                    panic!("response had no hosts array: {response}")
+                })
+                .iter()
+                .find(|host| host["alias"] == json!(alias))
+                .unwrap_or_else(|| {
+                    panic!("no host result for alias {alias:?} in {response}")
+                })
+        }
+
+        /// Real worker + real per-host HTTPS fan-out deadline, using two genuinely
+        /// real loopback TCP fixtures instead of a scripted/mocked response: one
+        /// host accepts the connection (proving the worker actually reached it)
+        /// and then never answers, so it can only resolve via the worker's real
+        /// deadline timeout; the other has nothing listening, so it fails fast
+        /// with a real connection-refused error. This exercises the actual
+        /// `read_all`/`read_one_host`/`with_deadline` fan-out in production code,
+        /// proving the fast host's result is not discarded by the outer envelope
+        /// deadline racing the still-hanging host, and that the worker stays
+        /// usable for a subsequent request afterward.
+        #[tokio::test]
+        async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host(
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = FederationWorkerConfig::new(tmp.path());
+            config.run_root = tmp.path().join("run");
+            config.socket_path = config.run_root.join("worker.sock");
+            config.idle_timeout = Duration::from_secs(30);
+            let socket_path = config.socket_path.clone();
+
+            let hung_listener =
+                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let hung_port = hung_listener.local_addr().unwrap().port();
+            let hung_reached = std::sync::Arc::new(tokio::sync::Notify::new());
+            let hung_reached_writer = hung_reached.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _addr)) = hung_listener.accept().await
+                    else {
+                        return;
+                    };
+                    hung_reached_writer.notify_one();
+                    let _stream = stream;
+                    std::future::pending::<()>().await;
+                }
+            });
+
+            // Reserve a port, then drop the listener: nothing answers there, so
+            // connecting to it fails fast with a real connection-refused error.
+            let fast_port = {
+                let probe =
+                    tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                probe.local_addr().unwrap().port()
+            };
+
+            let worker = tokio::spawn(run(config));
+
+            let hung_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "a".repeat(64)
+            );
+            let fast_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "b".repeat(64)
+            );
+            let replace = request_worker(
+                &socket_path,
+                "replace-1",
+                json!({
+                    "op": "replace_config",
+                    "hosts": [
+                        {
+                            "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
+                            "alias": "zeus",
+                            "plan": {
+                                "schema_version": 1,
+                                "provider_ref": "builtin:https",
+                                "endpoint": format!("https://127.0.0.1:{hung_port}"),
+                                "credential_ref": "cred-zeus",
+                                "pinned_installation_id": hung_pin,
+                                "connection_kind": "gateway",
+                                "tls": {
+                                    "schema_version": 1,
+                                    "mode": "system_roots",
+                                    "ca_ref": null,
+                                    "server_name_ref": null,
+                                },
+                            },
+                            "bearer_token": "token-zeus",
+                        },
+                        {
+                            "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
+                            "alias": "apollo",
+                            "plan": {
+                                "schema_version": 1,
+                                "provider_ref": "builtin:https",
+                                "endpoint": format!("https://127.0.0.1:{fast_port}"),
+                                "credential_ref": "cred-apollo",
+                                "pinned_installation_id": fast_pin,
+                                "connection_kind": "gateway",
+                                "tls": {
+                                    "schema_version": 1,
+                                    "mode": "system_roots",
+                                    "ca_ref": null,
+                                    "server_name_ref": null,
+                                },
+                            },
+                            "bearer_token": "token-apollo",
+                        },
+                    ],
+                }),
+            )
+            .await;
+            assert_eq!(replace["configured_hosts"], json!(2), "{replace}");
+
+            let deadline_budget_ms = 400_u64;
+            let deadline_unix_ms = unix_now_ms() + deadline_budget_ms;
+            let started = std::time::Instant::now();
+            let response = request_worker_with_deadline(
+                &socket_path,
+                "summary-1",
+                json!({"op": "summary", "cache_only": false}),
+                deadline_unix_ms,
+            )
+            .await;
+            let elapsed = started.elapsed();
+
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    hung_reached.notified()
+                )
+                .await
+                .is_ok(),
+                "worker never connected to the hung host",
+            );
+            assert!(
+                elapsed < Duration::from_millis(deadline_budget_ms + 1500),
+                "deadline was not bounded: waited {elapsed:?}",
+            );
+            assert_eq!(
+                response["ok"],
+                json!(true),
+                "a hung host must not discard the whole response: {response}",
+            );
+
+            let zeus = host_result(&response, "zeus");
+            assert_eq!(zeus["status"], json!("deadline"), "{response}");
+
+            let apollo = host_result(&response, "apollo");
+            assert_ne!(apollo["status"], json!("deadline"), "{response}");
+            assert_ne!(
+                apollo["status"],
+                json!("ok"),
+                "nothing is listening on the fast host's port: {response}",
+            );
+
+            // The worker must remain usable for a subsequent request: the same
+            // still-hung host must not wedge later calls either.
+            let second_deadline_unix_ms = unix_now_ms() + deadline_budget_ms;
+            let second_started = std::time::Instant::now();
+            let second_response = request_worker_with_deadline(
+                &socket_path,
+                "summary-2",
+                json!({"op": "summary", "cache_only": false}),
+                second_deadline_unix_ms,
+            )
+            .await;
+            let second_elapsed = second_started.elapsed();
+            assert!(
+                second_elapsed < Duration::from_millis(deadline_budget_ms + 1500),
+                "worker was not usable on a subsequent request: waited {second_elapsed:?}",
+            );
+            assert_eq!(second_response["ok"], json!(true), "{second_response}");
+            assert_eq!(
+                host_result(&second_response, "zeus")["status"],
+                json!("deadline"),
+            );
+
+            let shutdown = request_worker(
+                &socket_path,
+                "shutdown-1",
+                json!({"op": "shutdown"}),
+            )
+            .await;
+            assert_eq!(shutdown["shutdown"], json!(true));
+            worker.await.unwrap().unwrap();
         }
     }
 }

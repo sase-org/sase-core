@@ -5914,6 +5914,15 @@ exit 4
     async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
         let tmp = tempfile::tempdir().unwrap();
         seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let running_path = tmp
+            .path()
+            .join("projects")
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260906120000")
+            .join("running.json");
+        let running_before = std::fs::read(&running_path).unwrap();
         let state = state_for_agent_bridge(&tmp);
         let (token, installation_id) =
             enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
@@ -5928,6 +5937,9 @@ exit 4
         let (status, body) = post_mutate(state.clone(), &token, stale).await;
         assert_eq!(status, StatusCode::GONE);
         assert_eq!(body["code"], "gone_stale");
+        // "other-run" reuses the seeded agent's logical name/PID but claims a
+        // different run_id, i.e. an exact locator for an instance that has
+        // since been replaced under the same logical key.
         let superseded = mutation_body(
             &summary,
             &installation_id,
@@ -5935,9 +5947,36 @@ exit 4
             "op-instance",
             json!({"run_id": "other-run", "reason": "old"}),
         );
-        let (status, body) = post_mutate(state, &token, superseded).await;
+        let (status, body) =
+            post_mutate(state.clone(), &token, superseded).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "conflict_already_handled");
+
+        // Zero lifecycle side effects on the replacement: the rejected old-
+        // instance mutations must not have touched the real (current) agent's
+        // on-disk state, and the real instance's own exact locator must still
+        // be mutable normally afterward, proving nothing about its mutation
+        // path was consumed, locked, or corrupted by the rejected attempts.
+        let running_after = std::fs::read(&running_path).unwrap();
+        assert_eq!(
+            running_before, running_after,
+            "a rejected mutation against a superseded instance must not \
+             modify the real replacement's on-disk lifecycle state",
+        );
+        let accepted = mutation_body(
+            &summary,
+            &installation_id,
+            "stop",
+            "op-real",
+            json!({"reason": "real"}),
+        );
+        let (status, body) = post_mutate(state, &token, accepted).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the real replacement instance must still accept a mutation \
+             against its own current exact locator: {body}",
+        );
     }
 
     #[tokio::test]
