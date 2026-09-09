@@ -46,6 +46,7 @@ pub mod fenced_code;
 pub mod finalizer;
 pub mod fleet_attention;
 pub mod fleet_contract;
+pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod git_query;
 pub mod glossary;
@@ -803,6 +804,10 @@ pub use fleet_contract::{
     FLEET_READ_MAX_FILTER_BYTES, FLEET_READ_MAX_PAGE_ROWS,
     FLEET_READ_MAX_PROJECT_IDS, FLEET_READ_MAX_QUERY_BYTES,
     FLEET_READ_MAX_REPLAY_EVENTS,
+};
+pub use fleet_follow_promotion::{
+    followed_batch_family_promotions, FollowedBatchFamilyPromotionRequestWire,
+    FollowedBatchFamilyPromotionResultWire,
 };
 pub use fleet_mutation::{
     decide_fleet_mutation_replay, evaluate_mutation_precondition,

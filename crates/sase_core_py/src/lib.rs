@@ -198,6 +198,7 @@
 //! - `fleet_count_logical_agents(request: dict) -> dict`
 //! - `fleet_follow_record_key(record: dict) -> str`
 //! - `fleet_reconcile_follow_records(request: dict) -> dict`
+//! - `fleet_followed_batch_family_promotions(request: dict) -> dict`
 //! - `fleet_count_focus_and_fleet(request: dict) -> dict`
 //! - `fleet_classify_cursor_replay(request: dict) -> dict`
 //! - `fleet_operation_payload_fingerprint(request: dict) -> dict`
@@ -985,6 +986,10 @@ use sase_core::fleet_contract::{
     OperationDecisionRequestWire, OwnerDisplayNameRequestWire,
     PayloadFingerprintRequestWire, ResolvedAgentProjectionRequestWire,
     ResolvedAgentSummaryWire, RuntimeDurationRequestWire,
+};
+use sase_core::fleet_follow_promotion::{
+    followed_batch_family_promotions as core_followed_batch_family_promotions,
+    FollowedBatchFamilyPromotionRequestWire,
 };
 use sase_core::fleet_mutation::{
     self as core_fleet_mutation, FleetMutationIntentWire,
@@ -12428,6 +12433,22 @@ fn py_fleet_reconcile_follow_records<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_followed_batch_family_promotions")]
+fn py_fleet_followed_batch_family_promotions<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FollowedBatchFamilyPromotionRequestWire =
+        fleet_wire_from_pydict(
+            request,
+            "followed-batch family promotion request",
+        )?;
+    let result = core_followed_batch_family_promotions(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_count_focus_and_fleet")]
 fn py_fleet_count_focus_and_fleet<'py>(
     py: Python<'py>,
@@ -15439,6 +15460,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_count_logical_agents, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_follow_record_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_reconcile_follow_records, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_followed_batch_family_promotions,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_count_focus_and_fleet, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cursor_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -17003,6 +17028,117 @@ mod tests {
             let not_object = json_value_to_py(py, &json!([1, 2, 3])).unwrap();
             let err = module
                 .getattr("classify_tailnet_discovery")
+                .unwrap()
+                .call1((not_object.bind(py),));
+            assert!(err.is_err());
+        });
+    }
+
+    #[test]
+    fn fleet_followed_batch_family_promotions_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module
+                .getattr("fleet_followed_batch_family_promotions")
+                .is_ok());
+
+            let installation_id = format!("sase_inst_v1_{}", "a".repeat(64));
+            let locator = |family_id: Option<&str>| {
+                json!({
+                    "schema_version": 1,
+                    "project": {
+                        "schema_version": 1,
+                        "origin": {
+                            "schema_version": 1,
+                            "installation_id": installation_id,
+                        },
+                        "project_id": "project-1",
+                    },
+                    "agent_id": "worker",
+                    "family_id": family_id,
+                })
+            };
+            let singleton = locator(None);
+            let family = locator(Some("family-1"));
+            let singleton_key: String = module
+                .getattr("fleet_logical_locator_key")
+                .unwrap()
+                .call1((json_value_to_py(py, &singleton)
+                    .unwrap()
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),))
+                .unwrap()
+                .extract()
+                .unwrap();
+            let record = json!({
+                "schema_version": 1,
+                "logical_locator": singleton,
+                "logical_key": singleton_key,
+                "created_by": "explicit",
+                "state": "active",
+                "created_at_unix": 10.0,
+                "updated_at_unix": 10.0,
+                "activated_at_unix": 10.0,
+                "operation_key": null,
+            });
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "records": [record],
+                    "observations": [family],
+                }),
+            )
+            .unwrap();
+            let result = module
+                .getattr("fleet_followed_batch_family_promotions")
+                .unwrap()
+                .call1((request.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let result = py_to_json_value(&result).unwrap();
+            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(result["promotions"][0]["from"], singleton);
+            assert_eq!(result["promotions"][0]["to"], family);
+
+            let other_family = locator(Some("family-2"));
+            let ambiguous = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "records": [record],
+                    "observations": [family, other_family],
+                }),
+            )
+            .unwrap();
+            let ambiguous = module
+                .getattr("fleet_followed_batch_family_promotions")
+                .unwrap()
+                .call1((ambiguous.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let ambiguous = py_to_json_value(&ambiguous).unwrap();
+            assert_eq!(ambiguous["promotions"], json!([]));
+
+            let bad_schema = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 9,
+                    "records": [],
+                    "observations": [],
+                }),
+            )
+            .unwrap();
+            let err = module
+                .getattr("fleet_followed_batch_family_promotions")
+                .unwrap()
+                .call1((bad_schema.bind(py).downcast::<PyDict>().unwrap(),));
+            assert!(err.is_err());
+
+            let not_object = json_value_to_py(py, &json!([1, 2, 3])).unwrap();
+            let err = module
+                .getattr("fleet_followed_batch_family_promotions")
                 .unwrap()
                 .call1((not_object.bind(py),));
             assert!(err.is_err());

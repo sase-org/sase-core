@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(core)* expose classify_tailnet_discovery, classify_tailnet_health, and reconcile_machine_enrollments
+- *(core)* expose fleet_followed_batch_family_promotions
 
 ## [0.32.50](https://github.com/sase-org/sase-core/compare/v0.32.49...v0.32.50) - 2026-09-09
 
