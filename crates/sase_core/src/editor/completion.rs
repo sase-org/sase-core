@@ -6542,6 +6542,25 @@ mod tests {
         }
     }
 
+    fn canonical_only_patch_entry(
+        name: &str,
+        project: &str,
+        status: &str,
+    ) -> VcsProjectEntry {
+        VcsProjectEntry {
+            name: name.to_string(),
+            vcs_prefix: "gh".to_string(),
+            display_tag: format!("#gh:{name}"),
+            provider_display: "GitHub".to_string(),
+            description: String::new(),
+            aliases: Vec::new(),
+            entry_kind: "patch".to_string(),
+            kind: String::new(),
+            project: project.to_string(),
+            status: status.to_string(),
+        }
+    }
+
     fn apply_test_edits(text: &str, edits: &VcsProjectByteEdits) -> String {
         let mut all: Vec<&VcsByteEdit> = std::iter::once(&edits.primary)
             .chain(edits.additional.iter())
@@ -6812,6 +6831,29 @@ mod tests {
 
         assert_eq!(list.candidates.len(), 1);
         assert_eq!(list.candidates[0].kind, "patch");
+    }
+
+    #[test]
+    fn vcs_project_candidates_accept_entry_kind_without_legacy_kind() {
+        let doc = DocumentSnapshot::new("Review +ship");
+        let cursor = pos(12);
+        let context = classify_completion_context(&doc, cursor, &[]).unwrap();
+        let token = context.token.as_ref().unwrap();
+        let list = build_vcs_project_completion_candidates(
+            token,
+            &doc,
+            cursor,
+            &[canonical_only_patch_entry(
+                "ship-completion",
+                "sase",
+                "Ready",
+            )],
+            &vcs_names(),
+        );
+
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].kind, "patch");
+        assert_eq!(list.candidates[0].name, "ship-completion");
     }
 
     #[test]

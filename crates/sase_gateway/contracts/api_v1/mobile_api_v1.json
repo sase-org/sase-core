@@ -452,6 +452,28 @@
       "schema_version": "u32",
       "total_count": "u64"
     },
+    "MobilePatchTagEntryWire": {
+      "patch": "string",
+      "project": "string|null",
+      "source_path_display": "string|null",
+      "status": "string",
+      "tag": "string",
+      "title": "string|null",
+      "workflow": "string|null"
+    },
+    "MobilePatchTagListRequestWire": {
+      "device_id": "string|null; host-injected before bridge dispatch",
+      "limit": "u32|null",
+      "project": "string|null",
+      "schema_version": "u32"
+    },
+    "MobilePatchTagListResponseWire": {
+      "context": "MobileHelperProjectContextWire",
+      "result": "MobileHelperResultWire",
+      "schema_version": "u32",
+      "tags": "MobilePatchTagEntryWire[]",
+      "total_count": "u64"
+    },
     "MobileUpdateJobWire": {
       "completion_path_display": "string|null",
       "finished_at": "rfc3339|null",
@@ -821,6 +843,16 @@
       "path": "/api/v1/changespec-tags",
       "query": "MobileChangeSpecTagListRequestWire fields as URL query parameters",
       "success": "MobileChangeSpecTagListResponseWire"
+    },
+    {
+      "auth": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
+      "path": "/api/v1/patch-tags",
+      "query": "MobilePatchTagListRequestWire fields as URL query parameters",
+      "success": "MobilePatchTagListResponseWire"
     },
     {
       "auth": true,

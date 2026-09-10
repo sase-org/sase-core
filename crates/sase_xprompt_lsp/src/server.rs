@@ -7678,7 +7678,8 @@ mod tests {
 
         assert_eq!(catalog.workflow_names, vec!["gh"]);
         assert_eq!(catalog.entries.len(), 1);
-        assert_eq!(catalog.entries[0].kind, "project");
+        assert!(catalog.entries[0].kind.is_empty());
+        assert!(catalog.entries[0].entry_kind.is_empty());
         assert_eq!(catalog.entries[0].project, "");
         assert_eq!(catalog.entries[0].status, "");
         assert!(catalog.namespaces.is_empty());
@@ -7758,6 +7759,40 @@ mod tests {
         assert_eq!(catalog.entries[0].kind, "changespec");
         assert_eq!(catalog.entries[0].project, "sase");
         assert_eq!(catalog.entries[0].status, "Ready");
+    }
+
+    #[test]
+    fn loads_v4_vcs_project_catalog_with_entry_kind_and_no_legacy_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("vcs_project_catalog.json");
+        fs::write(
+            &catalog_path,
+            r##"{
+                "schema_version": 4,
+                "workflow_names": ["gh"],
+                "entries": [
+                    {
+                        "name": "ship-completion",
+                        "vcs_prefix": "gh",
+                        "display_tag": "#gh:ship-completion",
+                        "provider_display": "GitHub",
+                        "description": "",
+                        "aliases": [],
+                        "entry_kind": "patch",
+                        "project": "sase",
+                        "status": "Ready"
+                    }
+                ]
+            }"##,
+        )
+        .unwrap();
+
+        let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+        assert_eq!(catalog.entries.len(), 1);
+        assert_eq!(catalog.entries[0].entry_kind, "patch");
+        assert!(catalog.entries[0].kind.is_empty());
+        assert_eq!(catalog.entries[0].name, "ship-completion");
     }
 
     #[test]

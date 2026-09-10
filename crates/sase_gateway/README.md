@@ -63,6 +63,7 @@ The HTTP status code carries transport status, while `code` is the stable client
 - `POST /api/v1/agents/{name}/retry` retries an agent from durable mobile launch/kill context or artifact prompt data
   and preserves an optional `request_id` on the new launch context.
 - `GET /api/v1/changespec-tags` lists active ChangeSpec workflow tags, optionally filtered by known project and limit.
+- `GET /api/v1/patch-tags` is the canonical counterpart of `/api/v1/changespec-tags`; it lists the same helper data with `patch` as the JSON field.
 - `GET /api/v1/xprompts/catalog` returns structured xprompt picker records, with optional best-effort PDF attachment
   metadata when `include_pdf=true`.
 - `GET /api/v1/beads` lists open/in-progress beads by default, with known-project, cross-project, status/type/tier,
@@ -224,6 +225,9 @@ Use workflow helper APIs for native mobile pickers and update status:
 
 ```bash
 curl -sS "$BASE_URL/api/v1/changespec-tags?project=sase&limit=25" \
+  -H "$AUTH_HEADER"
+
+curl -sS "$BASE_URL/api/v1/patch-tags?project=sase&limit=25" \
   -H "$AUTH_HEADER"
 
 # Legacy `changespec` tag filters remain accepted for compatibility.

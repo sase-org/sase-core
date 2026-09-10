@@ -33,18 +33,21 @@ use crate::sections::{
 use crate::wire::{
     default_pr_origin, ChangeSpecWire, CommentWire, CommitWire, DeltaWire,
     HookWire, MentorWire, ParseErrorWire, PatchWire, SourceSpanWire,
-    TimestampWire, CHANGESPEC_WIRE_SCHEMA_VERSION,
+    TimestampWire, PATCH_WIRE_SCHEMA_VERSION,
 };
 
-/// Parse all Patches from a project file's raw bytes.
+/// Parse all Patches from a project file's raw bytes into the canonical
+/// `PatchWire` contract.
 ///
-/// The Python equivalent is `parse_project_file_python`, which reads the
-/// file from disk via `f.readlines()`. This Rust entry point takes bytes
-/// directly so callers can avoid a temp-file round-trip.
-pub fn parse_project_bytes(
+/// This is the native parser: it accepts both `## Patch` / `STITCHES:` and
+/// the legacy `## ChangeSpec` / `COMMITS:` spellings and builds `PatchWire`
+/// records directly. The Python equivalent is `parse_project_file_python`,
+/// which reads the file from disk via `f.readlines()`. This Rust entry
+/// point takes bytes directly so callers can avoid a temp-file round-trip.
+pub fn parse_patch_project_bytes(
     path: &str,
     data: &[u8],
-) -> Result<Vec<ChangeSpecWire>, ParseErrorWire> {
+) -> Result<Vec<PatchWire>, ParseErrorWire> {
     let text = std::str::from_utf8(data).map_err(|e| ParseErrorWire {
         kind: "encoding".to_string(),
         message: format!("invalid UTF-8: {e}"),
@@ -55,31 +58,31 @@ pub fn parse_project_bytes(
 
     let lines: Vec<&str> = text.lines().collect();
     let project_display_name = project_display_name_from_content(text);
-    let mut specs: Vec<ChangeSpecWire> = Vec::new();
+    let mut patches: Vec<PatchWire> = Vec::new();
     let mut idx = 0usize;
 
     while idx < lines.len() {
         let line = lines[idx];
         if is_patch_header(line) {
-            let (spec, next_idx) = parse_one_patch(
+            let (patch, next_idx) = parse_one_patch(
                 &lines,
                 idx + 1,
                 path,
                 project_display_name.as_deref(),
             );
-            if let Some(s) = spec {
-                specs.push(s);
+            if let Some(patch) = patch {
+                patches.push(patch);
             }
             idx = next_idx;
         } else if line.starts_with("NAME: ") {
-            let (spec, next_idx) = parse_one_patch(
+            let (patch, next_idx) = parse_one_patch(
                 &lines,
                 idx,
                 path,
                 project_display_name.as_deref(),
             );
-            if let Some(s) = spec {
-                specs.push(s);
+            if let Some(patch) = patch {
+                patches.push(patch);
             }
             idx = next_idx;
         } else {
@@ -87,20 +90,21 @@ pub fn parse_project_bytes(
         }
     }
 
-    Ok(specs)
+    Ok(patches)
 }
 
-/// Parse all Patches from a project file's raw bytes.
+/// Parse all Patches from a project file's raw bytes into the legacy
+/// `ChangeSpecWire` projection.
 ///
-/// This canonical entry point accepts both `## Patch` / `STITCHES:` and the
-/// legacy `## ChangeSpec` / `COMMITS:` spellings. It emits `PatchWire`
-/// records with canonical `stitches` and `stitch_id` keys.
-pub fn parse_patch_project_bytes(
+/// Canonical output is produced by [`parse_patch_project_bytes`]; this
+/// entry point exists for the compatibility interval and must not be the
+/// native parse path.
+pub fn parse_project_bytes(
     path: &str,
     data: &[u8],
-) -> Result<Vec<PatchWire>, ParseErrorWire> {
-    parse_project_bytes(path, data)
-        .map(|specs| specs.into_iter().map(PatchWire::from).collect())
+) -> Result<Vec<ChangeSpecWire>, ParseErrorWire> {
+    parse_patch_project_bytes(path, data)
+        .map(|patches| patches.into_iter().map(ChangeSpecWire::from).collect())
 }
 
 /// Match canonical `## Patch` and legacy `## ChangeSpec` headers.
@@ -192,13 +196,13 @@ impl ParserState {
         project_display_name: Option<&str>,
         start_line: u32,
         end_line: u32,
-    ) -> Option<ChangeSpecWire> {
+    ) -> Option<PatchWire> {
         self.save_pending_entries();
         let name = self.name?;
         let status = self.status?;
         let description = trim_block(&self.description_lines);
-        Some(ChangeSpecWire {
-            schema_version: CHANGESPEC_WIRE_SCHEMA_VERSION,
+        Some(PatchWire {
+            schema_version: PATCH_WIRE_SCHEMA_VERSION,
             name,
             project_basename: project_spec_basename(file_path),
             project_display_name: project_display_name.map(str::to_string),
@@ -215,10 +219,10 @@ impl ParserState {
             bug: self.bug,
             description,
             refs: self.refs,
-            commits: self.commits,
-            hooks: self.hooks,
+            stitches: self.commits.into_iter().map(Into::into).collect(),
+            hooks: self.hooks.into_iter().map(Into::into).collect(),
             comments: self.comments,
-            mentors: self.mentors,
+            mentors: self.mentors.into_iter().map(Into::into).collect(),
             timestamps: self.timestamps,
             deltas: self.deltas,
         })
@@ -421,7 +425,7 @@ fn parse_one_patch(
     start_idx: usize,
     file_path: &str,
     project_display_name: Option<&str>,
-) -> (Option<ChangeSpecWire>, usize) {
+) -> (Option<PatchWire>, usize) {
     let mut state = ParserState::default();
     let mut idx = start_idx;
     let mut consecutive_blank = 0usize;
@@ -476,9 +480,9 @@ fn parse_one_patch(
 
     let start_line = (start_idx as u32) + 1;
     let end_line = (last_content_idx as u32) + 1;
-    let spec =
+    let patch =
         state.build(file_path, project_display_name, start_line, end_line);
-    (spec, idx)
+    (patch, idx)
 }
 
 #[cfg(test)]
@@ -896,6 +900,58 @@ MENTORS:
         assert_eq!(patch.stitches[0].proposal_letter.as_deref(), Some("a"));
         assert_eq!(patch.hooks[0].status_lines[0].stitch_id, "2a");
         assert_eq!(patch.mentors[0].stitch_id, "2a");
+    }
+
+    #[test]
+    fn both_parse_apis_keep_json_for_canonical_and_legacy_input() {
+        let inputs = [
+            "\
+## Patch
+NAME: alpha
+STATUS: WIP
+STITCHES:
+  (2a) Proposed stitch
+HOOKS:
+  just test
+      | (2a) [260101_120000] PASSED (3s)
+MENTORS:
+  (2a) profileA[1/1]
+",
+            "\
+## ChangeSpec
+NAME: alpha
+STATUS: WIP
+COMMITS:
+  (2a) Proposed stitch
+HOOKS:
+  just test
+      | (2a) [260101_120000] PASSED (3s)
+MENTORS:
+  (2a) profileA[1/1]
+",
+        ];
+        for src in inputs {
+            let bytes = src.as_bytes();
+            let patches =
+                parse_patch_project_bytes("myproj.sase", bytes).unwrap();
+            let specs = parse_project_bytes("myproj.sase", bytes).unwrap();
+            let patch_json = serde_json::to_value(&patches).unwrap();
+            let spec_json = serde_json::to_value(&specs).unwrap();
+            assert!(patch_json[0].get("stitches").is_some());
+            assert!(patch_json[0].get("commits").is_none());
+            assert!(spec_json[0].get("commits").is_some());
+            assert!(spec_json[0].get("stitches").is_none());
+            assert_eq!(
+                serde_json::to_value(ChangeSpecWire::from(patches[0].clone()))
+                    .unwrap(),
+                spec_json[0]
+            );
+            assert_eq!(
+                serde_json::to_value(PatchWire::from(specs[0].clone()))
+                    .unwrap(),
+                patch_json[0]
+            );
+        }
     }
 
     #[test]

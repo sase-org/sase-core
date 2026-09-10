@@ -13,8 +13,10 @@ use crate::store_lock::{
 };
 
 pub mod digest;
+pub mod gate_bundles;
 pub mod journal;
 pub mod manifest;
+pub mod patch_records;
 pub mod procs;
 pub mod residue;
 
@@ -23,6 +25,14 @@ pub use digest::{
     MigrationTreeDigestEntryWire, MigrationTreeDigestWire,
     MIGRATION_FINGERPRINT_ALGORITHM, MIGRATION_TREE_DIGEST_ALGORITHM,
 };
+pub use gate_bundles::{
+    apply as convert_gate_bundles_apply, plan as convert_gate_bundles_plan,
+    request_sha256 as gate_bundle_request_sha256,
+    verify as convert_gate_bundles_verify, GateBundleConvertApplyWire,
+    GateBundleConvertFactsWire, GateBundleConvertPlanWire,
+    GateBundleConvertVerifyWire, GATE_REQUEST_SCHEMA_VERSION,
+    LEGACY_GATE_REQUEST_SCHEMA_VERSION,
+};
 pub use journal::{
     plan_next_step, MigrationDigestMismatchWire, MigrationJournalRecord,
     MigrationJournalStateWire, MigrationRefusalWire, MigrationResumePlanWire,
@@ -30,6 +40,12 @@ pub use journal::{
 pub use manifest::{
     MigrationBackupRecord, MigrationConflictRecord, MigrationManifest,
     MigrationOperationEntry,
+};
+pub use patch_records::{
+    apply as convert_patch_records_apply, plan as convert_patch_records_plan,
+    verify as convert_patch_records_verify, PatchRecordsConversionCountsWire,
+    PatchRecordsConvertApplyWire, PatchRecordsConvertFactsWire,
+    PatchRecordsConvertPlanWire, PatchRecordsConvertVerifyWire,
 };
 pub use procs::{
     reconcile_plan, MigrationCanonicalProcRefWire, MigrationLegacyProcRowWire,

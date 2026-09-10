@@ -167,6 +167,14 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "GET",
+                "path": "/api/v1/patch-tags",
+                "auth": true,
+                "query": "MobilePatchTagListRequestWire fields as URL query parameters",
+                "success": "MobilePatchTagListResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
                 "path": "/api/v1/xprompts/catalog",
                 "auth": true,
                 "query": "MobileXpromptCatalogRequestWire fields as URL query parameters",
@@ -563,6 +571,28 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "tag": "string",
                 "project": "string|null",
                 "changespec": "string",
+                "title": "string|null",
+                "status": "string",
+                "workflow": "string|null",
+                "source_path_display": "string|null"
+            },
+            "MobilePatchTagListRequestWire": {
+                "schema_version": "u32",
+                "project": "string|null",
+                "limit": "u32|null",
+                "device_id": "string|null; host-injected before bridge dispatch"
+            },
+            "MobilePatchTagListResponseWire": {
+                "schema_version": "u32",
+                "result": "MobileHelperResultWire",
+                "context": "MobileHelperProjectContextWire",
+                "tags": "MobilePatchTagEntryWire[]",
+                "total_count": "u64"
+            },
+            "MobilePatchTagEntryWire": {
+                "tag": "string",
+                "project": "string|null",
+                "patch": "string",
                 "title": "string|null",
                 "status": "string",
                 "workflow": "string|null",
@@ -1737,11 +1767,13 @@ mod tests {
 
     #[test]
     fn committed_contract_snapshot_is_current() {
-        let committed = fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("contracts/api_v1/mobile_api_v1.json"),
-        )
-        .unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("contracts/api_v1/mobile_api_v1.json");
+        if std::env::var("UPDATE_MOBILE_CONTRACT").ok().as_deref() == Some("1")
+        {
+            write_api_v1_contract_snapshot(&path).unwrap();
+        }
+        let committed = fs::read_to_string(&path).unwrap();
         let mut expected =
             serde_json::to_string_pretty(&api_v1_contract_snapshot()).unwrap();
         expected.push('\n');

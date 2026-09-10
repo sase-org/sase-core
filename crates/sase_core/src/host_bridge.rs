@@ -39,6 +39,13 @@ impl DynHelperHostBridge {
         self.0.list_changespec_tags(request)
     }
 
+    pub fn list_patch_tags(
+        &self,
+        request: &MobilePatchTagListRequestWire,
+    ) -> Result<MobilePatchTagListResponseWire, HostBridgeError> {
+        self.0.list_patch_tags(request)
+    }
+
     pub fn xprompt_catalog(
         &self,
         request: &MobileXpromptCatalogRequestWire,
@@ -118,6 +125,16 @@ pub trait HelperHostBridge: Send + Sync {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
+    }
+
+    fn list_patch_tags(
+        &self,
+        request: &MobilePatchTagListRequestWire,
+    ) -> Result<MobilePatchTagListResponseWire, HostBridgeError> {
+        self.list_changespec_tags(&MobileChangeSpecTagListRequestWire::from(
+            request,
+        ))
+        .map(MobilePatchTagListResponseWire::from)
     }
 
     fn xprompt_catalog(
@@ -655,6 +672,76 @@ pub struct MobileChangeSpecTagEntryWire {
     pub status: String,
     pub workflow: Option<String>,
     pub source_path_display: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePatchTagListRequestWire {
+    pub schema_version: u32,
+    pub project: Option<String>,
+    pub limit: Option<u32>,
+    pub device_id: Option<String>,
+}
+
+impl From<&MobilePatchTagListRequestWire>
+    for MobileChangeSpecTagListRequestWire
+{
+    fn from(request: &MobilePatchTagListRequestWire) -> Self {
+        Self {
+            schema_version: request.schema_version,
+            project: request.project.clone(),
+            limit: request.limit,
+            device_id: request.device_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePatchTagListResponseWire {
+    pub schema_version: u32,
+    pub result: MobileHelperResultWire,
+    pub context: MobileHelperProjectContextWire,
+    pub tags: Vec<MobilePatchTagEntryWire>,
+    pub total_count: u64,
+}
+
+impl From<MobileChangeSpecTagListResponseWire>
+    for MobilePatchTagListResponseWire
+{
+    fn from(response: MobileChangeSpecTagListResponseWire) -> Self {
+        Self {
+            schema_version: response.schema_version,
+            result: response.result,
+            context: response.context,
+            tags: response.tags.into_iter().map(Into::into).collect(),
+            total_count: response.total_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobilePatchTagEntryWire {
+    pub tag: String,
+    pub project: Option<String>,
+    #[serde(rename = "patch", alias = "changespec")]
+    pub patch: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub workflow: Option<String>,
+    pub source_path_display: Option<String>,
+}
+
+impl From<MobileChangeSpecTagEntryWire> for MobilePatchTagEntryWire {
+    fn from(entry: MobileChangeSpecTagEntryWire) -> Self {
+        Self {
+            tag: entry.tag,
+            project: entry.project,
+            patch: entry.patch,
+            title: entry.title,
+            status: entry.status,
+            workflow: entry.workflow,
+            source_path_display: entry.source_path_display,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1577,5 +1664,33 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             new_entry.definition_range.map(|range| range.start.line),
             Some(8)
         );
+    }
+
+    #[test]
+    fn patch_tag_entry_serializes_canonical_patch_key() {
+        let entry = MobilePatchTagEntryWire {
+            tag: "#gh:feature".to_string(),
+            project: Some("sase".to_string()),
+            patch: "feature".to_string(),
+            title: Some("Feature".to_string()),
+            status: "WIP".to_string(),
+            workflow: Some("gh".to_string()),
+            source_path_display: None,
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["patch"], "feature");
+        assert!(value.get("changespec").is_none());
+        let from_legacy: MobilePatchTagEntryWire =
+            serde_json::from_value(json!({
+                "tag": "#gh:feature",
+                "project": "sase",
+                "changespec": "feature",
+                "title": "Feature",
+                "status": "WIP",
+                "workflow": "gh",
+                "source_path_display": null
+            }))
+            .unwrap();
+        assert_eq!(from_legacy.patch, "feature");
     }
 }

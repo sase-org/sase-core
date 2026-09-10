@@ -363,6 +363,12 @@
 //! - `migration_fingerprint(value: Any) -> str`
 //! - `migration_residue_classify(entry: dict, facts: dict) -> dict`
 //! - `migration_reconcile_procs(legacy_rows: list[dict], canonical_proc_ids: list[str | dict]) -> dict`
+//! - `migration_patch_records_plan(path: str, data: bytes, facts: dict) -> dict`
+//! - `migration_patch_records_apply(path: str, data: bytes, facts: dict) -> dict`
+//! - `migration_patch_records_verify(path: str, original: bytes, converted: bytes, facts: dict) -> dict`
+//! - `migration_gate_bundles_plan(envelope: dict, facts: dict) -> dict`
+//! - `migration_gate_bundles_apply(envelope: dict, facts: dict) -> dict`
+//! - `migration_gate_bundles_verify(original: dict, converted: dict, facts: dict) -> dict`
 //! - `migration_acquire_bounded_lock(lock_path: str, timeout_ms: int, operation: str) -> MigrationBoundedLockHandle`
 //! - `at_reference_context(text: str, line: int, character: int, known_kinds:
 //!   Sequence[str] | None = None) -> dict | None`
@@ -1075,14 +1081,20 @@ use sase_core::markdown_link_refs::{
 use sase_core::migration::{
     acquire_bounded_lock as core_migration_acquire_bounded_lock,
     classify as core_migration_residue_classify,
+    convert_gate_bundles_apply as core_migration_gate_bundles_apply,
+    convert_gate_bundles_plan as core_migration_gate_bundles_plan,
+    convert_gate_bundles_verify as core_migration_gate_bundles_verify,
+    convert_patch_records_apply as core_migration_patch_records_apply,
+    convert_patch_records_plan as core_migration_patch_records_plan,
+    convert_patch_records_verify as core_migration_patch_records_verify,
     fingerprint as core_migration_fingerprint,
     plan_next_step as core_migration_plan_next_step,
     reconcile_plan as core_migration_reconcile_procs,
-    tree_digest as core_migration_tree_digest, MigrationCanonicalProcRefWire,
-    MigrationDigestError, MigrationHeldLock, MigrationJournalRecord,
-    MigrationLegacyProcRowWire, MigrationLockError, MigrationManifest,
-    MigrationResidueEntryWire, MigrationResidueFactsWire,
-    MIGRATION_WIRE_SCHEMA_VERSION,
+    tree_digest as core_migration_tree_digest, GateBundleConvertFactsWire,
+    MigrationCanonicalProcRefWire, MigrationDigestError, MigrationHeldLock,
+    MigrationJournalRecord, MigrationLegacyProcRowWire, MigrationLockError,
+    MigrationManifest, MigrationResidueEntryWire, MigrationResidueFactsWire,
+    PatchRecordsConvertFactsWire, MIGRATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::model_route::{
     select_epic_land_model as core_select_epic_land_model,
@@ -7405,6 +7417,94 @@ fn py_migration_reconcile_procs<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "migration_patch_records_plan")]
+fn py_migration_patch_records_plan<'py>(
+    py: Python<'py>,
+    path: &str,
+    data: &Bound<'py, PyBytes>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let facts = patch_records_facts_from_pydict(facts)?;
+    let plan = core_migration_patch_records_plan(path, data.as_bytes(), &facts);
+    migration_value_to_py(py, &plan)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_patch_records_apply")]
+fn py_migration_patch_records_apply<'py>(
+    py: Python<'py>,
+    path: &str,
+    data: &Bound<'py, PyBytes>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let facts = patch_records_facts_from_pydict(facts)?;
+    let applied =
+        core_migration_patch_records_apply(path, data.as_bytes(), &facts);
+    migration_value_to_py(py, &applied)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_patch_records_verify")]
+fn py_migration_patch_records_verify<'py>(
+    py: Python<'py>,
+    path: &str,
+    original: &Bound<'py, PyBytes>,
+    converted: &Bound<'py, PyBytes>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let facts = patch_records_facts_from_pydict(facts)?;
+    let verified = core_migration_patch_records_verify(
+        path,
+        original.as_bytes(),
+        converted.as_bytes(),
+        &facts,
+    );
+    migration_value_to_py(py, &verified)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_gate_bundles_plan")]
+fn py_migration_gate_bundles_plan<'py>(
+    py: Python<'py>,
+    envelope: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let envelope = json_value_from_pydict(envelope)?;
+    let facts = gate_bundle_facts_from_pydict(facts)?;
+    let plan = core_migration_gate_bundles_plan(&envelope, &facts);
+    migration_value_to_py(py, &plan)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_gate_bundles_apply")]
+fn py_migration_gate_bundles_apply<'py>(
+    py: Python<'py>,
+    envelope: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let envelope = json_value_from_pydict(envelope)?;
+    let facts = gate_bundle_facts_from_pydict(facts)?;
+    let applied = core_migration_gate_bundles_apply(&envelope, &facts);
+    migration_value_to_py(py, &applied)
+}
+
+#[pyfunction]
+#[pyo3(name = "migration_gate_bundles_verify")]
+fn py_migration_gate_bundles_verify<'py>(
+    py: Python<'py>,
+    original: &Bound<'py, PyDict>,
+    converted: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let original = json_value_from_pydict(original)?;
+    let converted = json_value_from_pydict(converted)?;
+    let facts = gate_bundle_facts_from_pydict(facts)?;
+    let verified =
+        core_migration_gate_bundles_verify(&original, &converted, &facts);
+    migration_value_to_py(py, &verified)
+}
+
+#[pyfunction]
 #[pyo3(name = "migration_acquire_bounded_lock")]
 fn py_migration_acquire_bounded_lock(
     py: Python<'_>,
@@ -7492,6 +7592,32 @@ fn migration_residue_facts_from_pydict(
             "facts is not a valid MigrationResidueFactsWire dict: {error}"
         ))
     })
+}
+
+fn patch_records_facts_from_pydict(
+    facts: &Bound<'_, PyDict>,
+) -> PyResult<PatchRecordsConvertFactsWire> {
+    serde_json::from_value(py_to_json_value(facts.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid PatchRecordsConvertFactsWire dict: {error}"
+        ))
+    })
+}
+
+fn gate_bundle_facts_from_pydict(
+    facts: &Bound<'_, PyDict>,
+) -> PyResult<GateBundleConvertFactsWire> {
+    serde_json::from_value(py_to_json_value(facts.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "facts is not a valid GateBundleConvertFactsWire dict: {error}"
+        ))
+    })
+}
+
+fn json_value_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<serde_json::Value> {
+    py_to_json_value(dict.as_any())
 }
 
 fn migration_legacy_proc_rows_from_py_list(
@@ -16047,6 +16173,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_migration_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(py_migration_residue_classify, m)?)?;
     m.add_function(wrap_pyfunction!(py_migration_reconcile_procs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_patch_records_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_patch_records_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_patch_records_verify, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_gate_bundles_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_gate_bundles_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(py_migration_gate_bundles_verify, m)?)?;
     m.add_function(wrap_pyfunction!(py_migration_acquire_bounded_lock, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;
@@ -16710,6 +16842,55 @@ mod tests {
                 .unwrap();
             let reconcile = py_to_json_value(&reconcile).unwrap();
             assert_eq!(reconcile["matched"].as_array().unwrap().len(), 1);
+
+            let legacy = "\
+## ChangeSpec
+NAME: alpha
+STATUS: WIP
+CL: https://example.test/1
+COMMITS:
+  (1) first
+";
+            let facts = json_value_to_py(py, &json!({})).unwrap();
+            let facts = facts.bind(py).downcast::<PyDict>().unwrap();
+            let bytes = PyBytes::new_bound(py, legacy.as_bytes());
+            let patch_plan = module
+                .getattr("migration_patch_records_plan")
+                .unwrap()
+                .call1(("proj.sase", bytes, facts))
+                .unwrap();
+            let patch_plan = py_to_json_value(&patch_plan).unwrap();
+            assert_eq!(patch_plan["intended_action"], "convert");
+
+            let envelope = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 2,
+                    "kind": "plan",
+                    "request_id": "req-1",
+                    "branches": [["approve"], ["reject"]],
+                    "hashes": {"request": "dead", "resources": {}}
+                }),
+            )
+            .unwrap();
+            let envelope = envelope.bind(py).downcast::<PyDict>().unwrap();
+            let settled = json_value_to_py(
+                py,
+                &json!({
+                    "has_response": true,
+                    "has_cancellation": false,
+                    "deadline_passed": false
+                }),
+            )
+            .unwrap();
+            let settled = settled.bind(py).downcast::<PyDict>().unwrap();
+            let gate_plan = module
+                .getattr("migration_gate_bundles_plan")
+                .unwrap()
+                .call1((envelope, settled))
+                .unwrap();
+            let gate_plan = py_to_json_value(&gate_plan).unwrap();
+            assert_eq!(gate_plan["intended_action"], "convert");
         });
     }
 

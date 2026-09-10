@@ -173,8 +173,9 @@ pub struct VcsProjectEntry {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub entry_kind: String,
     /// Legacy entry discriminator. `project` for project rows, `changespec` for
-    /// patch rows in older catalogs.
-    #[serde(default = "default_vcs_project_entry_kind")]
+    /// patch rows in older catalogs. May be omitted entirely when `entry_kind`
+    /// is present.
+    #[serde(default)]
     pub kind: String,
     /// Owning project basename. For project rows, this equals `name` in v2
     /// catalogs and may be empty for v1 catalogs.
@@ -183,10 +184,6 @@ pub struct VcsProjectEntry {
     /// Base patch status for patch rows; empty for project rows.
     #[serde(default)]
     pub status: String,
-}
-
-fn default_vcs_project_entry_kind() -> String {
-    "project".to_string()
 }
 
 /// One org/group-style namespace completion candidate for a VCS workflow's ref

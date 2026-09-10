@@ -89,6 +89,7 @@ use crate::wire::{
     MobileBeadListRequestWire, MobileBeadListResponseWire,
     MobileBeadShowRequestWire, MobileBeadShowResponseWire,
     MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
+    MobilePatchTagListRequestWire, MobilePatchTagListResponseWire,
     MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
     MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
     MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
@@ -727,6 +728,7 @@ pub fn app_with_state(state: GatewayState) -> Router {
         .route("/api/v1/agents/:name/kill", post(agent_kill))
         .route("/api/v1/agents/:name/retry", post(agent_retry))
         .route("/api/v1/changespec-tags", get(list_changespec_tags))
+        .route("/api/v1/patch-tags", get(list_patch_tags))
         .route("/api/v1/xprompts/catalog", get(xprompt_catalog))
         .route("/api/v1/beads", get(list_beads))
         .route("/api/v1/beads/:id", get(show_bead))
@@ -2574,6 +2576,25 @@ async fn list_changespec_tags(
     state
         .helper_bridge
         .list_changespec_tags(&request)
+        .map(Json)
+        .map_err(ApiError::from_host_bridge)
+}
+
+async fn list_patch_tags(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<ChangeSpecTagsQuery>,
+) -> Result<Json<MobilePatchTagListResponseWire>, ApiError> {
+    let device = authenticate(&state, &headers, "/api/v1/patch-tags").await?;
+    let request = MobilePatchTagListRequestWire {
+        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+        project: query.project,
+        limit: query.limit,
+        device_id: Some(device.device_id),
+    };
+    state
+        .helper_bridge
+        .list_patch_tags(&request)
         .map(Json)
         .map_err(ApiError::from_host_bridge)
 }
@@ -8437,6 +8458,10 @@ exit 4
                 .body(Body::empty())
                 .unwrap(),
             Request::builder()
+                .uri("/api/v1/patch-tags")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
                 .uri("/api/v1/xprompts/catalog")
                 .body(Body::empty())
                 .unwrap(),
@@ -8542,6 +8567,23 @@ exit 4
         assert_eq!(tags_status, StatusCode::OK);
         assert_eq!(tags["result"]["status"], "success");
         assert_eq!(tags["tags"][0]["tag"], "#gh:feature");
+        assert_eq!(tags["tags"][0]["changespec"], "feature");
+        assert!(tags["tags"][0].get("patch").is_none());
+
+        let (patch_tags_status, patch_tags) = json_response_with_state(
+            state.clone(),
+            Request::builder()
+                .uri("/api/v1/patch-tags?project=sase&limit=10")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(patch_tags_status, StatusCode::OK);
+        assert_eq!(patch_tags["result"]["status"], "success");
+        assert_eq!(patch_tags["tags"][0]["tag"], "#gh:feature");
+        assert_eq!(patch_tags["tags"][0]["patch"], "feature");
+        assert!(patch_tags["tags"][0].get("changespec").is_none());
 
         let (catalog_status, catalog) = json_response_with_state(
             state.clone(),

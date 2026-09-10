@@ -36,13 +36,14 @@ pub use sase_core::host_bridge::{
     MobileChangeSpecTagEntryWire, MobileChangeSpecTagListRequestWire,
     MobileChangeSpecTagListResponseWire, MobileHelperProjectContextWire,
     MobileHelperProjectScopeWire, MobileHelperResultWire,
-    MobileHelperSkippedWire, MobileHelperStatusWire, MobileUpdateJobStatusWire,
-    MobileUpdateJobWire, MobileUpdateStartRequestWire,
-    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
-    MobileUpdateStatusResponseWire, MobileXpromptCatalogAttachmentWire,
-    MobileXpromptCatalogEntryWire, MobileXpromptCatalogRequestWire,
-    MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
-    MobileXpromptInputWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire, MobilePatchTagEntryWire,
+    MobilePatchTagListRequestWire, MobilePatchTagListResponseWire,
+    MobileUpdateJobStatusWire, MobileUpdateJobWire,
+    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
+    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
+    MobileXpromptCatalogAttachmentWire, MobileXpromptCatalogEntryWire,
+    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
+    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
 };
 
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
