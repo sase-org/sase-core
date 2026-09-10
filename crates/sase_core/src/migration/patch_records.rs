@@ -397,9 +397,14 @@ fn split_line_ending(chunk: &str) -> (&str, &str) {
     }
 }
 
+const LEGACY_PATCH_HEADING: &str = "ChangeSpec"; // legacy compatibility alias
+
 fn convert_structural_line(line: &str) -> (String, Option<&'static str>) {
-    if is_named_header(line, "ChangeSpec") {
-        return (line.replacen("ChangeSpec", "Patch", 1), Some("heading"));
+    if is_named_header(line, LEGACY_PATCH_HEADING) {
+        return (
+            line.replacen(LEGACY_PATCH_HEADING, "Patch", 1),
+            Some("heading"),
+        );
     }
     if let Some(rest) = line.strip_prefix("COMMITS:") {
         return (format!("STITCHES:{rest}"), Some("section"));
@@ -417,7 +422,7 @@ fn leftover_legacy_spellings(data: &[u8]) -> u64 {
     text.split_inclusive('\n')
         .filter(|chunk| {
             let (line, _) = split_line_ending(chunk);
-            is_named_header(line, "ChangeSpec")
+            is_named_header(line, LEGACY_PATCH_HEADING)
                 || line.starts_with("COMMITS:")
                 || line.starts_with("CL: ")
         })
@@ -433,7 +438,8 @@ fn mixed_record_conflicts(
     let mut idx = 0usize;
     while idx < lines.len() {
         let line = lines[idx];
-        if is_named_header(line, "Patch") || is_named_header(line, "ChangeSpec")
+        if is_named_header(line, "Patch")
+            || is_named_header(line, LEGACY_PATCH_HEADING)
         {
             let (scan, next) = scan_one_record(&lines, idx + 1);
             push_mixed_conflicts(path, &scan, conflicts);
@@ -469,7 +475,7 @@ fn scan_one_record(lines: &[&str], start_idx: usize) -> (RecordScan, usize) {
     while idx < lines.len() {
         let line = lines[idx];
         if (is_named_header(line, "Patch")
-            || is_named_header(line, "ChangeSpec"))
+            || is_named_header(line, LEGACY_PATCH_HEADING))
             && idx > start_idx
         {
             break;
