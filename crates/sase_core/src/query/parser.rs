@@ -273,7 +273,7 @@ pub fn canonicalize_query(expr: &QueryExprWire) -> String {
             }
         }
         QueryExprWire::PropertyMatch { key, value } => {
-            format!("{}:{}", key, value)
+            format!("{}:{}", key, property_value_to_canonical(value))
         }
         QueryExprWire::Not { operand } => {
             let inner = canonicalize_query(operand);
@@ -326,4 +326,22 @@ fn escape_string_value(value: &str) -> String {
         }
     }
     out
+}
+
+fn is_bare_property_value(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_alphanumeric() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+}
+
+fn property_value_to_canonical(value: &str) -> String {
+    if is_bare_property_value(value) {
+        return value.to_string();
+    }
+    format!("\"{}\"", escape_string_value(value))
 }

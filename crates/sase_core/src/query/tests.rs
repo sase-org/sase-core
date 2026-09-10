@@ -916,6 +916,17 @@ fn boolean_value_profile() -> CompiledQueryProfile {
             typed_field("until", FieldValueKind::Date, false),
             typed_field("min", FieldValueKind::Int, false),
             typed_field("attempt", FieldValueKind::Int, false),
+            QueryFieldSpec {
+                key: "status".into(),
+                value_kind: FieldValueKind::Enum,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: vec!["PLAN APPROVED".into(), "RUNNING".into()],
+                hint: String::new(),
+            },
         ],
         vec![QuerySigilSpec {
             sigil: "&".into(),
@@ -955,6 +966,7 @@ fn boolean_profile_accepts_widened_values_and_normalizes_typed_literals() {
         ("until:7d", "until:7d"),
         ("min:5m", "min:300"),
         ("attempt:002", "attempt:2"),
+        (r#"status:"plan approved""#, r#"status:"PLAN APPROVED""#),
         ("9lives", "\"9lives\""),
     ] {
         assert_eq!(
