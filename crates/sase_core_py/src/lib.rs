@@ -26398,6 +26398,18 @@ MENTORS:
                 capacity["candidate_decision"]["effective_weight"],
                 json!(2.0)
             );
+            assert_eq!(
+                capacity["candidate_decision"]["owner_key"],
+                json!("proj:fam")
+            );
+            assert_eq!(
+                capacity["candidate_decision"]["lineage_key"],
+                json!("fam")
+            );
+            assert_eq!(
+                capacity["candidate_decision"]["explicit_weight_compatibility"],
+                json!("inherited-active-claim")
+            );
 
             let wait = contract
                 .as_array()

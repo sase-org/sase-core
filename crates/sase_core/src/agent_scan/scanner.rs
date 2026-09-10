@@ -1131,6 +1131,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         ),
         queue_weight_invalid,
         queue_weight_error,
+        runner_claim_owner_key: coerce_str(data.get("runner_claim_owner_key"))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         wait_completed_at: coerce_str(data.get("wait_completed_at")),
         plan_submitted_at: coerce_str_list(data.get("plan_submitted_at")),
         epic_started_at: coerce_str(data.get("epic_started_at")),
@@ -1612,6 +1615,49 @@ mod tests {
     }
 
     #[test]
+    fn scanner_projects_runner_claim_owner_key_and_ignores_blank() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let present = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260910120101");
+        let blank = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260910120102");
+        write_json(
+            &present.join("agent_meta.json"),
+            json!({
+                "name": "owned",
+                "runner_claim_owner_key": "fam:parallel:20260910120000"
+            }),
+        );
+        write_json(
+            &blank.join("agent_meta.json"),
+            json!({
+                "name": "blank",
+                "runner_claim_owner_key": "   "
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 2);
+        let present_meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(
+            present_meta.runner_claim_owner_key.as_deref(),
+            Some("fam:parallel:20260910120000")
+        );
+        let blank_meta = snapshot.records[1].agent_meta.as_ref().unwrap();
+        assert_eq!(blank_meta.runner_claim_owner_key, None);
+    }
+
+    #[test]
     fn scanner_round_trips_gate_shell_metadata() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
@@ -1891,6 +1937,7 @@ mod tests {
                 "agent_family": "acme",
                 "agent_family_role": null,
                 "parent_timestamp": "20260427140000",
+                "runner_claim_owner_key": "acme:parallel:20260427140000",
             }),
         );
         write_json(
@@ -1954,6 +2001,10 @@ mod tests {
         assert_eq!(
             waiting_meta.parent_timestamp.as_deref(),
             Some("20260427140000")
+        );
+        assert_eq!(
+            waiting_meta.runner_claim_owner_key.as_deref(),
+            Some("acme:parallel:20260427140000")
         );
 
         let running_record = snapshot

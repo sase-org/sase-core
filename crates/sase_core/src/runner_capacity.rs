@@ -1879,6 +1879,109 @@ mod tests {
     }
 
     #[test]
+    fn nested_monitor_successor_reuses_starter_lineage() {
+        let mut starter = running("starter", Some(2.0));
+        starter.agent_family = Some("fam".to_string());
+        let mut monitor = running("monitor", Some(2.0));
+        monitor.agent_family = Some("fam".to_string());
+        monitor.agent_family_role = Some("monitor".to_string());
+        monitor.family_shell_kind = Some("monitor".to_string());
+        monitor.family_shell_id = Some("mon-1".to_string());
+        monitor.parent_timestamp = Some("starter".to_string());
+        monitor.pid = Some(99);
+        monitor.run_started_at = None;
+        let mut successor =
+            waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
+        successor.agent_family = Some("fam".to_string());
+        successor.parent_timestamp = Some("monitor".to_string());
+
+        let live = snapshot(
+            4.0,
+            vec![starter.clone(), monitor.clone(), successor.clone()],
+        );
+        assert_eq!(live.occupied_lanes, 1);
+        assert_eq!(live.occupied_capacity, 2.0);
+        assert!(live.waiters.is_empty());
+
+        let decision =
+            snapshot_with_candidate(4.0, vec![starter, monitor], successor)
+                .candidate_decision
+                .unwrap();
+        assert_eq!(decision.decision, "reuse_existing_claim");
+        assert_eq!(decision.owner_key, "proj:fam");
+        assert_eq!(decision.lineage_key, "fam");
+        assert_eq!(decision.effective_weight, 2.0);
+    }
+
+    #[test]
+    fn nested_gate_successor_reuses_starter_lineage() {
+        let mut starter = running("starter", Some(2.0));
+        starter.agent_family = Some("fam".to_string());
+        let mut gate = running("gate", Some(2.0));
+        gate.agent_family = Some("fam".to_string());
+        gate.agent_family_role = Some("gate".to_string());
+        gate.family_shell_kind = Some("gate".to_string());
+        gate.family_shell_id = Some("gate-1".to_string());
+        gate.family_shell_state = Some("approved".to_string());
+        gate.parent_timestamp = Some("starter".to_string());
+        let mut successor =
+            waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
+        successor.agent_family = Some("fam".to_string());
+        successor.parent_timestamp = Some("gate".to_string());
+
+        let decision =
+            snapshot_with_candidate(4.0, vec![starter, gate], successor)
+                .candidate_decision
+                .unwrap();
+        assert_eq!(decision.decision, "reuse_existing_claim");
+        assert_eq!(decision.lineage_key, "fam");
+        assert_eq!(decision.effective_weight, 2.0);
+    }
+
+    #[test]
+    fn candidate_serial_successor_of_live_parallel_member_reuses_parallel_lineage(
+    ) {
+        let mut parallel = running("parallel", Some(2.0));
+        parallel.agent_family = Some("fam".to_string());
+        parallel.agent_family_parallel = true;
+        let mut successor =
+            waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
+        successor.agent_family = Some("fam".to_string());
+        successor.parent_timestamp = Some("parallel".to_string());
+
+        let decision = snapshot_with_candidate(4.0, vec![parallel], successor)
+            .candidate_decision
+            .unwrap();
+        assert_eq!(decision.decision, "reuse_existing_claim");
+        assert_eq!(decision.claim_kind, "parallel_member");
+        assert_eq!(decision.owner_key, "proj:fam:parallel:parallel");
+        assert_eq!(decision.lineage_key, "fam:parallel:parallel");
+        assert_eq!(decision.effective_weight, 2.0);
+    }
+
+    #[test]
+    fn persisted_owner_keeps_released_parallel_successor_off_unrelated_family_claim(
+    ) {
+        let mut serial_branch = running("serial-branch", Some(2.0));
+        serial_branch.agent_family = Some("fam".to_string());
+        let mut successor =
+            waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
+        successor.agent_family = Some("fam".to_string());
+        successor.parent_timestamp = Some("parallel-parent".to_string());
+        successor.runner_claim_owner_key =
+            Some("fam:parallel:parallel-parent".to_string());
+
+        let result =
+            snapshot_with_candidate(4.0, vec![serial_branch], successor);
+        assert_eq!(result.occupied_capacity, 2.0);
+        let decision = result.candidate_decision.as_ref().unwrap();
+        assert_eq!(decision.decision, "acquire_capacity");
+        assert_eq!(decision.owner_key, "proj:fam:parallel:parallel-parent");
+        assert_eq!(decision.lineage_key, "fam:parallel:parallel-parent");
+        assert_ne!(decision.owner_key, result.claims[0].owner_key);
+    }
+
+    #[test]
     fn parked_waiters_sort_by_capacity_then_runner_shortfall_before_priority() {
         let held = running("held", Some(1.0));
         let mut heavy = waiting("heavy", "2026-09-10T00:00:00Z", Some(2.0));
