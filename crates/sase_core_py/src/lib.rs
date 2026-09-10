@@ -26213,7 +26213,7 @@ MENTORS:
                 formatted.as_deref(),
                 Some("%queue(runners=5, priority=20, weight=2)")
             );
-            assert_eq!(py_runner_capacity_policy_schema_version(), 1);
+            assert_eq!(py_runner_capacity_policy_schema_version(), 2);
             let capacity_request = json_value_to_py(
                 py,
                 &json!({
@@ -26241,10 +26241,50 @@ MENTORS:
                 py_runner_capacity_snapshot(py, capacity_request.bind(py))
                     .unwrap();
             let capacity = py_to_json_value(capacity.bind(py)).unwrap();
+            assert_eq!(capacity["schema_version"], json!(2));
             assert_eq!(capacity["occupied_capacity"], json!(0.75));
             assert_eq!(
                 capacity["first_eligible_artifact_dir"],
                 json!("/tmp/waiting")
+            );
+            let capacity_request_with_candidate = json_value_to_py(
+                py,
+                &json!({
+                    "effective_limit": 1.0,
+                    "records": [
+                        {
+                            "artifact_dir": "/tmp/root",
+                            "project_name": "proj",
+                            "timestamp": "root",
+                            "agent_family": "fam",
+                            "run_started_at": "2026-09-10T00:00:00Z",
+                            "queue_weight": 2.0
+                        }
+                    ],
+                    "candidate": {
+                        "artifact_dir": "/tmp/successor",
+                        "project_name": "proj",
+                        "timestamp": "successor",
+                        "parent_timestamp": "root",
+                        "agent_family": "fam",
+                        "slot_requested_at": "2026-09-10T00:00:01Z"
+                    }
+                }),
+            )
+            .unwrap();
+            let capacity = py_runner_capacity_snapshot(
+                py,
+                capacity_request_with_candidate.bind(py),
+            )
+            .unwrap();
+            let capacity = py_to_json_value(capacity.bind(py)).unwrap();
+            assert_eq!(
+                capacity["candidate_decision"]["decision"],
+                json!("reuse_existing_claim")
+            );
+            assert_eq!(
+                capacity["candidate_decision"]["effective_weight"],
+                json!(2.0)
             );
 
             let wait = contract
