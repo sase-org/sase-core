@@ -83,6 +83,9 @@ pub fn scan_agent_artifacts(
             stats.artifact_dirs_visited += 1;
             let has_done_marker =
                 candidate.artifact_dir.join("done.json").exists();
+            if has_done_marker && options.capacity_only {
+                continue;
+            }
             if has_done_marker
                 && options.not_before_timestamp.as_deref().is_some_and(
                     |not_before| candidate.timestamp.as_str() < not_before,
@@ -163,6 +166,9 @@ pub fn scan_agent_artifact_dirs(
         }
 
         let has_done_marker = candidate.artifact_dir.join("done.json").exists();
+        if has_done_marker && options.capacity_only {
+            continue;
+        }
         if has_done_marker
             && options.not_before_timestamp.as_deref().is_some_and(
                 |not_before| candidate.timestamp.as_str() < not_before,
@@ -560,12 +566,15 @@ fn scan_artifact_dir(
         None
     };
 
-    let plan_path =
+    let plan_path = if options.capacity_only {
+        None
+    } else {
         load_marker_object(&artifact_dir.join("plan_path.json"), stats)
-            .map(|m| plan_path_from_object(&m));
+            .map(|m| plan_path_from_object(&m))
+    };
 
     let mut prompt_steps: Vec<PromptStepMarkerWire> = Vec::new();
-    if options.include_prompt_step_markers {
+    if options.include_prompt_step_markers && !options.capacity_only {
         let mut step_files: Vec<PathBuf> =
             sorted_dir_entries(artifact_dir, stats)
                 .into_iter()
@@ -595,18 +604,22 @@ fn scan_artifact_dir(
         }
     }
 
-    let raw_prompt_snippet = if options.include_raw_prompt_snippets {
-        read_raw_prompt_snippet(
-            artifact_dir,
-            options.max_prompt_snippet_bytes as usize,
-            stats,
-        )
-    } else {
-        None
-    };
+    let raw_prompt_snippet =
+        if options.include_raw_prompt_snippets && !options.capacity_only {
+            read_raw_prompt_snippet(
+                artifact_dir,
+                options.max_prompt_snippet_bytes as usize,
+                stats,
+            )
+        } else {
+            None
+        };
 
-    let used_xprompts =
-        load_used_xprompts(&artifact_dir.join(USED_XPROMPTS_FILE), stats);
+    let used_xprompts = if options.capacity_only {
+        Vec::new()
+    } else {
+        load_used_xprompts(&artifact_dir.join(USED_XPROMPTS_FILE), stats)
+    };
 
     AgentArtifactRecordWire {
         project_name: project_name.to_string(),
@@ -1783,5 +1796,249 @@ mod tests {
         let step = &snapshot.records[0].prompt_steps[0];
         assert!(step.model_alias_trail.is_empty());
         assert_eq!(step.model_alias_origin, None);
+    }
+
+    fn write_done_dir(projects: &Path, timestamp: &str) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({"name": format!("done-{timestamp}")}),
+        );
+        write_json(
+            &artifact.join("done.json"),
+            json!({"outcome": "completed"}),
+        );
+        write_json(
+            &artifact.join("plan_path.json"),
+            json!({"plan_path": "plans/example.md"}),
+        );
+        write_json(
+            &artifact.join("xprompts.json"),
+            json!([{"name": "coder", "kind": "part"}]),
+        );
+    }
+
+    #[test]
+    fn capacity_only_skips_done_dirs_before_parsing_markers() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for i in 0..20 {
+            write_done_dir(&projects, &format!("2026042712{i:04}"));
+        }
+        let running = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427130000");
+        write_json(&running.join("agent_meta.json"), json!({"name": "runner"}));
+        write_json(&running.join("running.json"), json!({"pid": 4242}));
+        let waiting = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427140000");
+        write_json(&waiting.join("agent_meta.json"), json!({"name": "waiter"}));
+        write_json(
+            &waiting.join("waiting.json"),
+            json!({"slot_requested_at": "2026-04-27T14:00:00Z"}),
+        );
+
+        let full_scan = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(full_scan.records.len(), 22);
+
+        let capacity_scan = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        );
+        assert_eq!(capacity_scan.records.len(), 2);
+        assert!(capacity_scan
+            .records
+            .iter()
+            .all(|record| !record.has_done_marker));
+        // Every dir is still counted as visited (observability), but only
+        // the two non-done dirs get their marker files parsed.
+        assert_eq!(capacity_scan.stats.artifact_dirs_visited, 22);
+        assert!(
+            capacity_scan.stats.marker_files_parsed
+                < full_scan.stats.marker_files_parsed
+        );
+        assert_eq!(capacity_scan.stats.marker_files_parsed, 4);
+    }
+
+    #[test]
+    fn capacity_only_preserves_capacity_snapshot_fields() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let waiting = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427150000");
+        write_json(
+            &waiting.join("agent_meta.json"),
+            json!({
+                "name": "waiter",
+                "agent_family": "acme",
+                "agent_family_role": null,
+                "parent_timestamp": "20260427140000",
+            }),
+        );
+        write_json(
+            &waiting.join("waiting.json"),
+            json!({
+                "slot_requested_at": "2026-04-27T15:00:00Z",
+                "eligible_since": "2026-04-27T15:00:05Z",
+                "wait_priority": 3,
+                "wait_runners": 1,
+                "queue_weight": 2.5,
+                "queue_weight_explicit": true,
+            }),
+        );
+
+        let running = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427160000");
+        write_json(
+            &running.join("agent_meta.json"),
+            json!({"name": "runner", "pid": 5150, "run_started_at": "2026-04-27T16:00:00Z"}),
+        );
+        write_json(&running.join("running.json"), json!({"pid": 5150}));
+        write_json(
+            &running.join("workflow_state.json"),
+            json!({"workflow_name": "wf", "status": "running", "appears_as_agent": true}),
+        );
+        write_json(
+            &running.join("pending_question.json"),
+            json!({"session_id": "sess-1"}),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        );
+        assert_eq!(snapshot.records.len(), 2);
+
+        let waiting_record = snapshot
+            .records
+            .iter()
+            .find(|r| r.timestamp == "20260427150000")
+            .unwrap();
+        let waiting_marker = waiting_record.waiting.as_ref().unwrap();
+        assert_eq!(
+            waiting_marker.slot_requested_at.as_deref(),
+            Some("2026-04-27T15:00:00Z")
+        );
+        assert_eq!(
+            waiting_marker.eligible_since.as_deref(),
+            Some("2026-04-27T15:00:05Z")
+        );
+        assert_eq!(waiting_marker.wait_priority, Some(3));
+        assert_eq!(waiting_marker.queue_weight, Some(2.5));
+        assert!(waiting_marker.queue_weight_explicit);
+        let waiting_meta = waiting_record.agent_meta.as_ref().unwrap();
+        assert_eq!(
+            waiting_meta.parent_timestamp.as_deref(),
+            Some("20260427140000")
+        );
+
+        let running_record = snapshot
+            .records
+            .iter()
+            .find(|r| r.timestamp == "20260427160000")
+            .unwrap();
+        assert_eq!(running_record.running.as_ref().unwrap().pid, Some(5150));
+        assert_eq!(running_record.agent_meta.as_ref().unwrap().pid, Some(5150));
+        assert!(
+            running_record
+                .workflow_state
+                .as_ref()
+                .unwrap()
+                .appears_as_agent
+        );
+        assert!(running_record.pending_question.is_some());
+    }
+
+    #[test]
+    fn capacity_only_omits_plan_path_and_used_xprompts() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let running = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427170000");
+        write_json(&running.join("agent_meta.json"), json!({"name": "runner"}));
+        write_json(&running.join("running.json"), json!({"pid": 9000}));
+        write_json(
+            &running.join("plan_path.json"),
+            json!({"plan_path": "plans/example.md"}),
+        );
+        write_json(
+            &running.join("xprompts.json"),
+            json!([{"name": "coder", "kind": "part"}]),
+        );
+
+        let capacity_scan = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        );
+        assert_eq!(capacity_scan.records.len(), 1);
+        assert!(capacity_scan.records[0].plan_path.is_none());
+        assert!(capacity_scan.records[0].used_xprompts.is_empty());
+
+        let full_scan = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert!(full_scan.records[0].plan_path.is_some());
+        assert!(!full_scan.records[0].used_xprompts.is_empty());
+    }
+
+    #[test]
+    fn capacity_only_keeps_active_dir_without_running_or_waiting_marker() {
+        // A shell can occupy a runner slot via `agent_meta.run_started_at`
+        // alone (home-mode runs only write `running.json`); capacity_only
+        // must not drop such dirs just because neither marker file exists.
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let started = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260427180000");
+        write_json(
+            &started.join("agent_meta.json"),
+            json!({"name": "starting", "run_started_at": "2026-04-27T18:00:00Z"}),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire {
+                capacity_only: true,
+                ..AgentArtifactScanOptionsWire::default()
+            },
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(!snapshot.records[0].has_done_marker);
+        assert!(snapshot.records[0].running.is_none());
+        assert!(snapshot.records[0].waiting.is_none());
     }
 }
