@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use fs2::FileExt;
 
 use super::tabs::{tab_key_for, tabs_and_counts_for};
 use super::wire::{
-    NotificationAgentKeyWire, NotificationCountsWire,
+    notification_activity_at, NotificationAgentKeyWire, NotificationCountsWire,
     NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
     NotificationPlusOneRequestWire, NotificationPlusOneWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
@@ -22,6 +22,9 @@ use super::wire::{
 };
 
 const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const NOTIFICATION_COMPACTION_RETENTION_DAYS: i64 = 14;
+const NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD: usize = 1_000;
+const NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 
 pub fn read_notifications_snapshot(
     path: &Path,
@@ -67,10 +70,36 @@ pub fn read_notifications_snapshot_with_options(
 
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let lock = open_lock_file(path)?;
+    if notification_file_size(path)
+        >= NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
+    {
+        lock.lock_exclusive().map_err(|e| e.to_string())?;
+        let result = read_notifications_snapshot_rewriting_if_needed(
+            path,
+            include_dismissed,
+            DateTime::<Utc>::from(SystemTime::now()),
+            false,
+        );
+        unlock(lock)?;
+        return result;
+    }
+
     FileExt::lock_shared(&lock).map_err(|e| e.to_string())?;
     let result = read_rows(path, include_dismissed);
     unlock(lock)?;
     let (notifications, stats) = result?;
+    if should_recheck_for_notification_compaction(
+        path,
+        &notifications,
+        &stats,
+        include_dismissed,
+    ) {
+        return read_notifications_snapshot_with_exclusive_compaction(
+            path,
+            include_dismissed,
+            DateTime::<Utc>::from(SystemTime::now()),
+        );
+    }
     Ok(snapshot_from_rows(notifications, stats))
 }
 
@@ -82,21 +111,54 @@ fn read_notifications_snapshot_expiring_snoozes(
     let lock = open_lock_file(path)?;
     lock.lock_exclusive().map_err(|e| e.to_string())?;
 
-    let result = (|| {
-        let (mut rows, _) = read_rows_unlocked(path, true)?;
-        let expired_ids = expire_snoozes_in_rows(&mut rows, now);
-        if !expired_ids.is_empty() {
-            merge_and_rewrite_notifications_unlocked(path, &rows)?;
-        }
-        let (notifications, stats) =
-            read_rows_unlocked(path, include_dismissed)?;
-        let mut snapshot = snapshot_from_rows(notifications, stats);
-        snapshot.expired_ids = expired_ids;
-        Ok(snapshot)
-    })();
+    let result = read_notifications_snapshot_rewriting_if_needed(
+        path,
+        include_dismissed,
+        now,
+        true,
+    );
 
     unlock(lock)?;
     result
+}
+
+fn read_notifications_snapshot_with_exclusive_compaction(
+    path: &Path,
+    include_dismissed: bool,
+    now: DateTime<Utc>,
+) -> Result<NotificationStoreSnapshotWire, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+    let result = read_notifications_snapshot_rewriting_if_needed(
+        path,
+        include_dismissed,
+        now,
+        false,
+    );
+    unlock(lock)?;
+    result
+}
+
+fn read_notifications_snapshot_rewriting_if_needed(
+    path: &Path,
+    include_dismissed: bool,
+    now: DateTime<Utc>,
+    expire_due_snoozes: bool,
+) -> Result<NotificationStoreSnapshotWire, String> {
+    let (mut rows, _) = read_rows_unlocked(path, true)?;
+    let expired_ids = if expire_due_snoozes {
+        expire_snoozes_in_rows(&mut rows, now)
+    } else {
+        Vec::new()
+    };
+    let compaction = maybe_compact_notifications_unlocked(path, rows, now)?;
+    if !expired_ids.is_empty() || compaction.archived_count > 0 {
+        write_notifications_atomic(path, &compaction.rows)?;
+    }
+    let (notifications, stats) = read_rows_unlocked(path, include_dismissed)?;
+    let mut snapshot = snapshot_from_rows(notifications, stats);
+    snapshot.expired_ids = expired_ids;
+    Ok(snapshot)
 }
 
 pub fn append_notification(
@@ -857,6 +919,100 @@ fn read_rows_unlocked(
     Ok((rows, stats))
 }
 
+#[derive(Debug)]
+struct NotificationCompaction {
+    rows: Vec<NotificationWire>,
+    archived_count: u64,
+}
+
+fn should_recheck_for_notification_compaction(
+    path: &Path,
+    notifications: &[NotificationWire],
+    stats: &NotificationStoreStatsWire,
+    include_dismissed: bool,
+) -> bool {
+    if notification_file_size(path)
+        >= NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
+    {
+        return true;
+    }
+    let dismissed_count = if include_dismissed {
+        notification_compaction_candidate_count(notifications)
+    } else {
+        stats.dismissed_filtered as usize
+    };
+    dismissed_count >= NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD
+}
+
+fn notification_compaction_candidate_count(
+    notifications: &[NotificationWire],
+) -> usize {
+    notifications
+        .iter()
+        .filter(|notification| {
+            notification.dismissed && notification.snooze_until.is_none()
+        })
+        .count()
+}
+
+fn notification_file_size(path: &Path) -> u64 {
+    path.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+}
+
+fn maybe_compact_notifications_unlocked(
+    path: &Path,
+    rows: Vec<NotificationWire>,
+    now: DateTime<Utc>,
+) -> Result<NotificationCompaction, String> {
+    if notification_file_size(path)
+        < NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
+        && notification_compaction_candidate_count(&rows)
+            < NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD
+    {
+        return Ok(NotificationCompaction {
+            rows,
+            archived_count: 0,
+        });
+    }
+
+    let cutoff =
+        now - ChronoDuration::days(NOTIFICATION_COMPACTION_RETENTION_DAYS);
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut archived = Vec::new();
+    for row in rows {
+        if notification_should_archive(&row, cutoff) {
+            archived.push(row);
+        } else {
+            kept.push(row);
+        }
+    }
+
+    if archived.is_empty() {
+        return Ok(NotificationCompaction {
+            rows: kept,
+            archived_count: 0,
+        });
+    }
+
+    append_notifications_to_archive(path, &archived)?;
+    Ok(NotificationCompaction {
+        rows: kept,
+        archived_count: archived.len() as u64,
+    })
+}
+
+fn notification_should_archive(
+    notification: &NotificationWire,
+    cutoff: DateTime<Utc>,
+) -> bool {
+    if !notification.dismissed || notification.snooze_until.is_some() {
+        return false;
+    }
+    DateTime::parse_from_rfc3339(notification_activity_at(notification))
+        .map(|value| value.with_timezone(&Utc) < cutoff)
+        .unwrap_or(false)
+}
+
 // Rewrite is a _merge_: caller's rows win on id collision; rows present on
 // disk but absent from the input are preserved (they may be concurrent appends
 // from another thread). Callers cannot use this to delete rows by passing a
@@ -874,7 +1030,55 @@ fn merge_and_rewrite_notifications_unlocked(
             merged.push(row);
         }
     }
-    write_notifications_atomic(path, &merged)
+    let compaction = maybe_compact_notifications_unlocked(
+        path,
+        merged,
+        DateTime::<Utc>::from(SystemTime::now()),
+    )?;
+    write_notifications_atomic(path, &compaction.rows)
+}
+
+fn append_notifications_to_archive(
+    path: &Path,
+    notifications: &[NotificationWire],
+) -> Result<(), String> {
+    if notifications.is_empty() {
+        return Ok(());
+    }
+    let parent = ensure_parent(path)?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let archive_path = archive_path_for(path);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&archive_path)
+        .map_err(|e| e.to_string())?;
+    for notification in notifications {
+        serde_json::to_writer(&mut file, notification).map_err(|e| {
+            format!("failed to serialize archived notification: {e}")
+        })?;
+        file.write_all(b"\n").map_err(|e| e.to_string())?;
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+fn archive_path_for(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("notifications.jsonl");
+    let archive_name =
+        if let Some((stem, extension)) = filename.rsplit_once('.') {
+            format!("{stem}-archive.{extension}")
+        } else {
+            format!("{filename}-archive")
+        };
+    path.with_file_name(archive_name)
 }
 
 fn write_notifications_atomic(

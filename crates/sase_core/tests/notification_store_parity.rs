@@ -4,6 +4,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use sase_core::notifications::{
     append_notification, append_notification_counts,
     append_notification_plus_one, apply_notification_state_update,
@@ -27,6 +28,11 @@ fn store_path(root: &Path) -> PathBuf {
     root.join("notifications").join("notifications.jsonl")
 }
 
+fn archive_path(root: &Path) -> PathBuf {
+    root.join("notifications")
+        .join("notifications-archive.jsonl")
+}
+
 fn notification(id: &str) -> NotificationWire {
     NotificationWire {
         id: id.to_string(),
@@ -34,6 +40,21 @@ fn notification(id: &str) -> NotificationWire {
         sender: "test-sender".to_string(),
         ..NotificationWire::default()
     }
+}
+
+fn timestamp_days_from_now(days: i64) -> String {
+    (DateTime::<Utc>::from(SystemTime::now()) + ChronoDuration::days(days))
+        .to_rfc3339_opts(SecondsFormat::Secs, false)
+}
+
+fn write_jsonl(path: &Path, rows: &[NotificationWire]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut body = String::new();
+    for row in rows {
+        body.push_str(&serde_json::to_string(row).unwrap());
+        body.push('\n');
+    }
+    fs::write(path, body).unwrap();
 }
 
 #[test]
@@ -903,6 +924,110 @@ fn notification_current_read_recovers_legacy_state_and_preserves_cancellations()
 
     let second = read_current_notifications_snapshot(&path, true).unwrap();
     assert!(second.expired_ids.is_empty());
+}
+
+#[test]
+fn notification_snapshot_compacts_old_dismissed_rows_to_archive() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let archive = archive_path(temp.path());
+    let old_timestamp = timestamp_days_from_now(-30);
+    let recent_timestamp = timestamp_days_from_now(-3);
+    let future_snooze = timestamp_days_from_now(1);
+
+    let mut live = notification("live");
+    live.timestamp = old_timestamp.clone();
+    let mut recent_dismissed = notification("recent-dismissed");
+    recent_dismissed.timestamp = recent_timestamp;
+    recent_dismissed.dismissed = true;
+    let mut snoozed = notification("snoozed");
+    snoozed.timestamp = old_timestamp.clone();
+    snoozed.muted = true;
+    snoozed.snooze_until = Some(future_snooze.clone());
+    let mut dismissed_snoozed = notification("dismissed-snoozed");
+    dismissed_snoozed.timestamp = old_timestamp.clone();
+    dismissed_snoozed.dismissed = true;
+    dismissed_snoozed.muted = true;
+    dismissed_snoozed.snooze_until = Some(future_snooze);
+
+    let mut rows = vec![
+        live.clone(),
+        recent_dismissed.clone(),
+        snoozed.clone(),
+        dismissed_snoozed.clone(),
+    ];
+    for index in 0..1_001 {
+        let mut row = notification(&format!("old-dismissed-{index:04}"));
+        row.timestamp = old_timestamp.clone();
+        row.dismissed = true;
+        rows.push(row);
+    }
+    write_jsonl(&path, &rows);
+
+    let active = read_notifications_snapshot(&path, false).unwrap();
+    assert_eq!(
+        active
+            .notifications
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["live", "snoozed"]
+    );
+    assert_eq!(active.counts.rest, 1);
+    assert_eq!(active.counts.muted, 1);
+    assert_eq!(active.stats.total_lines, 4);
+    assert_eq!(active.stats.dismissed_filtered, 2);
+
+    let all = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(
+        all.notifications
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["live", "recent-dismissed", "snoozed", "dismissed-snoozed"]
+    );
+    assert_eq!(all.notifications[1], recent_dismissed);
+    assert_eq!(all.notifications[2], snoozed);
+    assert_eq!(all.notifications[3], dismissed_snoozed);
+
+    let archived_lines = fs::read_to_string(&archive).unwrap();
+    let archived: Vec<NotificationWire> = archived_lines
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(archived.len(), 1_001);
+    assert!(archived
+        .iter()
+        .all(|row| row.dismissed && row.snooze_until.is_none()));
+
+    let reread = read_notifications_snapshot(&path, false).unwrap();
+    assert_eq!(reread.counts, active.counts);
+    assert_eq!(reread.stats.total_lines, 4);
+}
+
+#[test]
+fn notification_rewrite_compacts_when_store_crosses_retention_threshold() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let archive = archive_path(temp.path());
+    let old_timestamp = timestamp_days_from_now(-30);
+
+    let mut rows = Vec::new();
+    for index in 0..1_000 {
+        let mut row = notification(&format!("old-dismissed-{index:04}"));
+        row.timestamp = old_timestamp.clone();
+        row.dismissed = true;
+        rows.push(row);
+    }
+    write_jsonl(&path, &rows);
+
+    let replacement = notification("replacement");
+    rewrite_notifications(&path, std::slice::from_ref(&replacement)).unwrap();
+
+    let all = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(all.notifications, vec![replacement]);
+    assert_eq!(all.stats.total_lines, 1);
+    assert_eq!(fs::read_to_string(&archive).unwrap().lines().count(), 1_000);
 }
 
 #[test]
