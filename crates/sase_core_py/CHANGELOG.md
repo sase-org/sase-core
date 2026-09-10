@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0](https://github.com/sase-org/sase-core/compare/v0.32.61...v0.33.0) - 2026-09-10
+
+### Added
+
+- add usage indicator policy projection
+- *(core)* land native PatchWire parser and shared-format conversion contracts
+- *(core)* add weighted queue capacity contracts
+- *(agent-launch)* add predecessor wait binding
+- *(editor)* [**breaking**] use equals model shortcuts
+
 ## [0.32.61](https://github.com/sase-org/sase-core/compare/v0.32.60...v0.32.61) - 2026-09-09
 
 ### Added
