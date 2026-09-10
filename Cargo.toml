@@ -8,14 +8,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.32.61"
+version = "0.33.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sase-org/sase-core"
 rust-version = "1.78"
 
 [workspace.dependencies]
-sase_core = { path = "crates/sase_core", version = "0.32.61" }
+sase_core = { path = "crates/sase_core", version = "0.33.0" }
 # This crate is internal-only; a version pin would block release-plz major bumps.
 sase_gateway = { path = "crates/sase_gateway" }
 serde = { version = "1", features = ["derive"] }
