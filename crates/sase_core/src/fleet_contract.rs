@@ -29,6 +29,7 @@ use thiserror::Error;
 use crate::agent_scan::{
     AgentArtifactRecordWire, AgentMetaWire, DoneMarkerWire, RunningMarkerWire,
 };
+use crate::queue_directive::queue_weight_is_valid;
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, HeldStoreLock,
     LockMode, StoreLockError,
@@ -494,6 +495,14 @@ pub struct ResolvedAgentSummaryWire {
     pub freshness: ObservationFreshnessWire,
     pub capabilities: CapabilitySetWire,
     pub content: ContentMetadataWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_weight: Option<f64>,
+    #[serde(default)]
+    pub queue_weight_explicit: bool,
+    #[serde(default)]
+    pub queue_weight_invalid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_weight_error: Option<String>,
     pub current_instance: bool,
     pub dismissable: bool,
     pub needs_attention: bool,
@@ -1722,6 +1731,12 @@ pub fn project_resolved_agent_summary(
     let meta = request.record.agent_meta.as_ref();
     let done = request.record.done.as_ref();
     let running = request.record.running.as_ref();
+    let (
+        queue_weight,
+        queue_weight_explicit,
+        queue_weight_invalid,
+        queue_weight_error,
+    ) = queue_weight_for_record(&request.record);
     let family = meta
         .and_then(|value| value.family_shell.as_ref())
         .or_else(|| done.and_then(|value| value.family_shell.as_ref()));
@@ -1770,6 +1785,10 @@ pub fn project_resolved_agent_summary(
         freshness: facts.freshness,
         capabilities: facts.capabilities.clone(),
         content: content_metadata(&facts.content_handles)?,
+        queue_weight,
+        queue_weight_explicit,
+        queue_weight_invalid,
+        queue_weight_error,
         current_instance: facts.current_instance,
         dismissable: facts.dismissable,
         needs_attention: facts.needs_attention
@@ -2173,6 +2192,30 @@ pub fn validate_resolved_agent_summary(
             validate_label(field, value, MAX_INTENT_BYTES)?;
             reject_secretish(field, value)?;
         }
+    }
+    if let Some(weight) = summary.queue_weight {
+        if !queue_weight_is_valid(weight) {
+            return Err(FleetContractError::Validation(
+                "summary queue_weight must be a positive finite capacity weight"
+                    .to_string(),
+            ));
+        }
+    }
+    if summary.queue_weight_invalid && summary.queue_weight.is_some() {
+        return Err(FleetContractError::Validation(
+            "summary queue_weight cannot be present when queue_weight_invalid is true"
+                .to_string(),
+        ));
+    }
+    if !summary.queue_weight_invalid && summary.queue_weight_error.is_some() {
+        return Err(FleetContractError::Validation(
+            "summary queue_weight_error requires queue_weight_invalid"
+                .to_string(),
+        ));
+    }
+    if let Some(error) = &summary.queue_weight_error {
+        validate_label("queue_weight_error", error, MAX_INTENT_BYTES)?;
+        reject_secretish("queue_weight_error", error)?;
     }
     let normalized = summary.capabilities.normalized()?;
     if normalized != summary.capabilities {
@@ -3577,6 +3620,49 @@ fn provider_for_record(
         done.and_then(|value| value.llm_provider.as_deref()),
     ])
     .map(|value| trim_to_limit(value, MAX_LABEL_BYTES))
+}
+
+fn queue_weight_for_record(
+    record: &AgentArtifactRecordWire,
+) -> (Option<f64>, bool, bool, Option<String>) {
+    if let Some(waiting) = &record.waiting {
+        if waiting.queue_weight_invalid {
+            return (
+                None,
+                waiting.queue_weight_explicit,
+                true,
+                waiting.queue_weight_error.clone(),
+            );
+        }
+        if let Some(weight) = waiting.queue_weight {
+            if queue_weight_is_valid(weight) {
+                return (
+                    Some(weight),
+                    waiting.queue_weight_explicit,
+                    false,
+                    None,
+                );
+            }
+            return (None, waiting.queue_weight_explicit, true, None);
+        }
+    }
+    if let Some(meta) = &record.agent_meta {
+        if meta.queue_weight_invalid {
+            return (
+                None,
+                meta.queue_weight_explicit,
+                true,
+                meta.queue_weight_error.clone(),
+            );
+        }
+        if let Some(weight) = meta.queue_weight {
+            if queue_weight_is_valid(weight) {
+                return (Some(weight), meta.queue_weight_explicit, false, None);
+            }
+            return (None, meta.queue_weight_explicit, true, None);
+        }
+    }
+    (None, false, false, None)
 }
 
 fn intent_for_record(record: &AgentArtifactRecordWire) -> Option<String> {
@@ -6601,11 +6687,16 @@ mod tests {
     fn projection_outputs_safe_summary_and_detail_without_local_fields() {
         let locator = logical('a', "worker");
         let exact_locator = exact('a', "worker", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.queue_weight = Some(0.25);
+            meta.queue_weight_explicit = true;
+        }
         let mut request = projection_request(
             locator.clone(),
             Some(exact_locator.clone()),
             1,
-            record_running(),
+            record,
         );
         request.owner_facts.capabilities =
             caps(&["stop", "content.read", "stop"]);
@@ -6619,6 +6710,9 @@ mod tests {
         assert_eq!(summary.freshness, ObservationFreshnessWire::Stale);
         assert_eq!(summary.capabilities.resource, vec!["content.read", "stop"]);
         assert_eq!(summary.content.handle_count, 1);
+        assert_eq!(summary.queue_weight, Some(0.25));
+        assert!(summary.queue_weight_explicit);
+        assert!(!summary.queue_weight_invalid);
         let value = serde_json::to_value(&summary).unwrap();
         assert_no_forbidden_local_fields(&value);
 
@@ -6626,6 +6720,30 @@ mod tests {
         assert_eq!(detail.content_handles.len(), 1);
         let detail_value = serde_json::to_value(&detail).unwrap();
         assert_no_forbidden_local_fields(&detail_value);
+    }
+
+    #[test]
+    fn projection_prefers_waiting_queue_weight_over_metadata() {
+        let locator = logical('a', "weighted");
+        let exact_locator = exact('a', "weighted", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.queue_weight = Some(2.0);
+            meta.queue_weight_explicit = false;
+        }
+        record.waiting = Some(crate::agent_scan::WaitingMarkerWire {
+            queue_weight: Some(0.5),
+            queue_weight_explicit: true,
+            ..crate::agent_scan::WaitingMarkerWire::default()
+        });
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.queue_weight, Some(0.5));
+        assert!(summary.queue_weight_explicit);
+        assert!(!summary.queue_weight_invalid);
     }
 
     #[test]
