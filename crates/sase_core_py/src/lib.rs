@@ -258,6 +258,7 @@
 //! - `provider_availability_classify_many(context: dict, facts: list[dict]) -> list[dict]`
 //! - `provider_usage_observation_schema_version() -> int`
 //! - `provider_usage_public_schema_version() -> int`
+//! - `provider_usage_indicator_schema_version() -> int`
 //! - `provider_usage_store_schema_version() -> int`
 //! - `provider_usage_collector_failing_threshold() -> int`
 //! - `provider_usage_state_path(sase_home: str) -> str`
@@ -272,6 +273,8 @@
 //! - `provider_usage_record_refresh_attempt(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
+//! - `provider_usage_validate_indicator_config(indicator: dict | None = None) -> dict`
+//! - `provider_usage_project_indicator(request: dict) -> dict`
 //! - `provider_usage_remaining_percent(used_percent: float) -> float`
 //! - `provider_usage_format_remaining_text(used_percent: float) -> str`
 //! - `provider_usage_classify_freshness(observed_at: float, now: float, cadence_seconds: float = 300) -> str`
@@ -1224,6 +1227,7 @@ use sase_core::provider_usage::{
     load_provider_usage_store as core_load_provider_usage_store,
     mark_provider_usage_refresh_due as core_mark_provider_usage_refresh_due,
     prepare_provider_usage_account_context as core_prepare_provider_usage_account_context,
+    project_usage_indicator as core_project_usage_indicator,
     project_usage_snapshot as core_project_usage_snapshot,
     provider_usage_state_path as core_provider_usage_state_path,
     record_provider_usage_observation as core_record_provider_usage_observation,
@@ -1233,6 +1237,7 @@ use sase_core::provider_usage::{
     reserve_provider_usage_refresh as core_reserve_provider_usage_refresh,
     summarize_usage_windows as core_summarize_usage_windows,
     usage_window_applies as core_usage_window_applies,
+    validate_usage_indicator_config as core_validate_usage_indicator_config,
     validate_usage_observation as core_validate_usage_observation,
     ProviderUsageError as ProviderUsageDomainError,
     ProviderUsageObservationWire, ProviderUsageRefreshAdmitRequestWire,
@@ -1240,9 +1245,11 @@ use sase_core::provider_usage::{
     ProviderUsageRefreshMarkDueRequestWire,
     ProviderUsageRefreshReservationRequestWire,
     ProviderUsageStoreError as ProviderUsageStoreDomainError,
-    UsageApplicabilityWire, UsagePublicWindowWire,
-    DEFAULT_USAGE_CADENCE_SECONDS, DEFAULT_USAGE_CRITICAL_PERCENT,
-    DEFAULT_USAGE_WARN_PERCENT, PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+    UsageApplicabilityWire, UsageIndicatorProjectionRequestWire,
+    UsagePublicWindowWire, DEFAULT_USAGE_CADENCE_SECONDS,
+    DEFAULT_USAGE_CRITICAL_PERCENT, DEFAULT_USAGE_WARN_PERCENT,
+    PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+    PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
     PROVIDER_USAGE_PUBLIC_SCHEMA_VERSION, PROVIDER_USAGE_STORE_SCHEMA_VERSION,
     USAGE_COLLECTOR_FAILING_THRESHOLD,
 };
@@ -12294,6 +12301,12 @@ fn py_provider_usage_public_schema_version() -> u32 {
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_indicator_schema_version")]
+fn py_provider_usage_indicator_schema_version() -> u32 {
+    PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_store_schema_version")]
 fn py_provider_usage_store_schema_version() -> u32 {
     PROVIDER_USAGE_STORE_SCHEMA_VERSION
@@ -12546,6 +12559,34 @@ fn py_provider_usage_project_snapshot<'py>(
     )
     .map_err(provider_usage_error_to_pyerr)?;
     serialize_to_py(py, &snapshot)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_validate_indicator_config")]
+#[pyo3(signature = (indicator = None))]
+fn py_provider_usage_validate_indicator_config<'py>(
+    py: Python<'py>,
+    indicator: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyObject> {
+    let raw = match indicator {
+        Some(value) if !value.is_none() => Some(py_to_json_value(value)?),
+        _ => None,
+    };
+    let validation = core_validate_usage_indicator_config(raw);
+    serialize_to_py(py, &validation)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_project_indicator")]
+fn py_provider_usage_project_indicator<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: UsageIndicatorProjectionRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let projection = core_project_usage_indicator(request)
+        .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &projection)
 }
 
 #[pyfunction]
@@ -16388,6 +16429,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        py_provider_usage_indicator_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         py_provider_usage_store_schema_version,
         m
     )?)?;
@@ -16416,6 +16461,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_project_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_validate_indicator_config,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_project_indicator, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_remaining_percent, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_format_remaining_text,
@@ -26308,6 +26358,7 @@ MENTORS:
             let now = 1_800_000_000.0;
             assert_eq!(py_provider_usage_observation_schema_version(), 1);
             assert_eq!(py_provider_usage_public_schema_version(), 1);
+            assert_eq!(py_provider_usage_indicator_schema_version(), 1);
             assert_eq!(py_provider_usage_collector_failing_threshold(), 3);
             assert_eq!(
                 py_provider_usage_remaining_percent(12.5).unwrap(),
@@ -26382,6 +26433,55 @@ MENTORS:
             );
             assert_eq!(
                 snapshot_value["providers"][0]["summary"]["remaining_percent"],
+                json!(6.0)
+            );
+            let invalid_indicator = json_value_to_py(
+                py,
+                &json!({
+                    "default": true,
+                    "weekly_all": "always",
+                }),
+            )
+            .unwrap();
+            let validation = py_provider_usage_validate_indicator_config(
+                py,
+                Some(invalid_indicator.bind(py)),
+            )
+            .unwrap();
+            let validation_value =
+                py_to_json_value(validation.bind(py)).unwrap();
+            assert_eq!(validation_value["schema_version"], json!(1));
+            assert_eq!(
+                validation_value["diagnostics"][0]["path"],
+                json!("indicator.default")
+            );
+
+            let request = json!({
+                "schema_version": 1,
+                "snapshot": snapshot_value,
+                "indicator": {
+                    "default": {"below_remaining_percent": 10},
+                    "weekly_all": "always"
+                },
+                "now": now,
+                "cadence_seconds": 300.0,
+                "warn_percent": 75.0,
+                "critical_percent": 90.0
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let indicator_projection =
+                py_provider_usage_project_indicator(py, request_dict).unwrap();
+            let indicator_value =
+                py_to_json_value(indicator_projection.bind(py)).unwrap();
+            assert_eq!(indicator_value["schema_version"], json!(1));
+            assert_eq!(
+                indicator_value["entries"][0]["window_key"],
+                json!("week")
+            );
+            assert_eq!(
+                indicator_value["entries"][0]["remaining_percent"],
                 json!(6.0)
             );
 

@@ -10,9 +10,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod indicator;
 mod refresh;
 mod store;
 
+pub use indicator::{
+    project_usage_indicator, validate_usage_indicator_config,
+    UsageIndicatorConfigValidationWire, UsageIndicatorConfigWire,
+    UsageIndicatorDiagnosticWire, UsageIndicatorPeriodKind,
+    UsageIndicatorPeriodWire, UsageIndicatorPolicyKind,
+    UsageIndicatorPolicySource, UsageIndicatorPolicyWire,
+    UsageIndicatorProjectionRequestWire, UsageIndicatorProjectionWire,
+    UsageIndicatorProviderConfigWire, UsageIndicatorProviderStatusWire,
+    UsageIndicatorResetState, UsageIndicatorScopeKind, UsageIndicatorScopeWire,
+    UsageIndicatorWindowEntryWire, PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+};
 pub use refresh::{
     empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
     refresh_backoff_seconds, ProviderUsageRefreshAdmissionStatus,
