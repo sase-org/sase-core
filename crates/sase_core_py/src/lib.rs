@@ -736,15 +736,20 @@ use sase_core::artifact_file::{
     ARTIFACT_FILE_QUERY_WIRE_SCHEMA_VERSION,
 };
 use sase_core::artifact_link::{
+    artifact_link_alias_producer_id as core_artifact_link_alias_producer_id,
+    artifact_link_derived_producer_id as core_artifact_link_derived_producer_id,
     artifact_link_event_canonical_json as core_artifact_link_event_canonical_json,
     artifact_link_event_digest as core_artifact_link_event_digest,
     artifact_link_event_path_for_digest as core_artifact_link_event_path_for_digest,
     artifact_link_event_validate_bytes as core_artifact_link_event_validate_bytes,
     artifact_link_event_validate_path as core_artifact_link_event_validate_path,
+    artifact_link_machine_run_id as core_artifact_link_machine_run_id,
     artifact_link_publication_due as core_artifact_link_publication_due,
     artifact_link_publication_mark_attempt as core_artifact_link_publication_mark_attempt,
     artifact_link_publication_record_key as core_artifact_link_publication_record_key,
     artifact_link_publication_register_pending as core_artifact_link_publication_register_pending,
+    artifact_link_stable_fact_created_at as core_artifact_link_stable_fact_created_at,
+    artifact_link_stable_operation_id as core_artifact_link_stable_operation_id,
     artifact_md_path as core_artifact_md_path,
     artifact_row_index_keys as core_artifact_row_index_keys,
     artifact_row_ref_lookup_keys as core_artifact_row_ref_lookup_keys,
@@ -6117,6 +6122,50 @@ fn py_artifact_link_row_schema_version() -> u64 {
 #[pyo3(name = "artifact_link_event_schema_version")]
 fn py_artifact_link_event_schema_version() -> u64 {
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION
+}
+
+/// Return the stable producer recorded on derived-fact link events.
+#[pyfunction]
+#[pyo3(name = "artifact_link_derived_producer_id")]
+fn py_artifact_link_derived_producer_id() -> &'static str {
+    core_artifact_link_derived_producer_id()
+}
+
+/// Return the stable producer recorded on artifact-rename alias events.
+#[pyfunction]
+#[pyo3(name = "artifact_link_alias_producer_id")]
+fn py_artifact_link_alias_producer_id() -> &'static str {
+    core_artifact_link_alias_producer_id()
+}
+
+/// Return the machine run marker used for stable background facts.
+#[pyfunction]
+#[pyo3(name = "artifact_link_machine_run_id")]
+fn py_artifact_link_machine_run_id() -> &'static str {
+    core_artifact_link_machine_run_id()
+}
+
+/// Return the timestamp sentinel for replay-stable derived facts.
+#[pyfunction]
+#[pyo3(name = "artifact_link_stable_fact_created_at")]
+fn py_artifact_link_stable_fact_created_at() -> &'static str {
+    core_artifact_link_stable_fact_created_at()
+}
+
+/// Return a deterministic 128-bit operation id for replayable producers.
+#[pyfunction]
+#[pyo3(name = "artifact_link_stable_operation_id")]
+fn py_artifact_link_stable_operation_id(
+    parts: &Bound<'_, PyAny>,
+) -> PyResult<String> {
+    let value = py_to_json_value(parts)?;
+    let JsonValue::Array(parts) = value else {
+        return Err(PyValueError::new_err(
+            "artifact_link_stable_operation_id expects a JSON-shaped list",
+        ));
+    };
+    core_artifact_link_stable_operation_id(&parts)
+        .map_err(artifact_link_error_to_pyerr)
 }
 
 /// Return the artifact-row ref-resolution wire schema version.
@@ -16071,6 +16120,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_link_event_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_derived_producer_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_alias_producer_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_machine_run_id, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_stable_fact_created_at,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_stable_operation_id, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_row_resolution_wire_schema_version,
         m
@@ -21972,6 +22029,11 @@ MENTORS:
             for name in [
                 "artifact_link_row_schema_version",
                 "artifact_link_event_schema_version",
+                "artifact_link_derived_producer_id",
+                "artifact_link_alias_producer_id",
+                "artifact_link_machine_run_id",
+                "artifact_link_stable_fact_created_at",
+                "artifact_link_stable_operation_id",
                 "artifact_link_event_canonicalize",
                 "artifact_link_event_canonical_json",
                 "artifact_link_event_digest",
@@ -22010,6 +22072,26 @@ MENTORS:
             }
             assert_eq!(py_artifact_link_row_schema_version(), 2);
             assert_eq!(py_artifact_link_event_schema_version(), 1);
+            assert_eq!(
+                py_artifact_link_derived_producer_id(),
+                "sase.artifact-link-derived"
+            );
+            assert_eq!(
+                py_artifact_link_alias_producer_id(),
+                "sase.artifact-link-renames"
+            );
+            assert_eq!(py_artifact_link_machine_run_id(), "machine");
+            assert_eq!(
+                py_artifact_link_stable_fact_created_at(),
+                "1970-01-01T00:00:00Z"
+            );
+            let stable_parts =
+                json_value_to_py(py, &json!(["derived", {"b": 2, "a": 1}]))
+                    .unwrap();
+            let stable_id =
+                py_artifact_link_stable_operation_id(stable_parts.bind(py))
+                    .unwrap();
+            assert_eq!(stable_id.len(), 32);
             assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
             assert_eq!(
                 py_artifact_link_publication_state_wire_schema_version(),

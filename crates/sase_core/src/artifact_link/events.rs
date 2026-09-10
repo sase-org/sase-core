@@ -21,6 +21,10 @@ pub const ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_LINK_EVENT_REDUCTION_WIRE_SCHEMA_VERSION: u64 = 1;
 
 const LINK_EVENT_PATH_PREFIX: &str = "link-events/v1";
+const ARTIFACT_LINK_STABLE_FACT_CREATED_AT: &str = "1970-01-01T00:00:00Z";
+const ARTIFACT_LINK_MACHINE_RUN_ID: &str = "machine";
+const ARTIFACT_LINK_DERIVED_PRODUCER_ID: &str = "sase.artifact-link-derived";
+const ARTIFACT_LINK_ALIAS_PRODUCER_ID: &str = "sase.artifact-link-renames";
 
 /// One immutable artifact-link operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +181,35 @@ struct EdgeAccum {
 struct AliasResolver {
     direct: BTreeMap<String, String>,
     terminal: BTreeMap<String, String>,
+}
+
+/// Return the stable producer recorded on derived-fact link events.
+pub fn artifact_link_derived_producer_id() -> &'static str {
+    ARTIFACT_LINK_DERIVED_PRODUCER_ID
+}
+
+/// Return the stable producer recorded on artifact-rename alias events.
+pub fn artifact_link_alias_producer_id() -> &'static str {
+    ARTIFACT_LINK_ALIAS_PRODUCER_ID
+}
+
+/// Return the machine run marker used for stable background facts.
+pub fn artifact_link_machine_run_id() -> &'static str {
+    ARTIFACT_LINK_MACHINE_RUN_ID
+}
+
+/// Return the timestamp sentinel for replay-stable derived facts.
+pub fn artifact_link_stable_fact_created_at() -> &'static str {
+    ARTIFACT_LINK_STABLE_FACT_CREATED_AT
+}
+
+/// Return a deterministic 128-bit operation id for replayable producers.
+pub fn artifact_link_stable_operation_id(
+    parts: &[JsonValue],
+) -> Result<String, ArtifactLinkError> {
+    let canonical =
+        canonical_json_for_value(&JsonValue::Array(parts.to_vec()))?;
+    Ok(sha256_hex(canonical.as_bytes())[..32].to_string())
 }
 
 /// Validate and canonicalize one immutable artifact-link event.
@@ -1337,6 +1370,39 @@ mod tests {
         .unwrap_err()
         .message
         .contains("not canonical"));
+    }
+
+    #[test]
+    fn stable_background_producer_contract_is_replay_stable() {
+        assert_eq!(
+            artifact_link_derived_producer_id(),
+            "sase.artifact-link-derived"
+        );
+        assert_eq!(
+            artifact_link_alias_producer_id(),
+            "sase.artifact-link-renames"
+        );
+        assert_eq!(artifact_link_machine_run_id(), "machine");
+        assert_eq!(
+            artifact_link_stable_fact_created_at(),
+            "1970-01-01T00:00:00Z"
+        );
+        let parts = vec![
+            JsonValue::String("derived".to_string()),
+            serde_json::json!({"b": 2, "a": 1}),
+        ];
+        assert_eq!(
+            artifact_link_stable_operation_id(&parts).unwrap(),
+            artifact_link_stable_operation_id(&parts).unwrap()
+        );
+        assert_ne!(
+            artifact_link_stable_operation_id(&parts).unwrap(),
+            artifact_link_stable_operation_id(&[
+                JsonValue::String("derived".to_string()),
+                serde_json::json!({"a": 2, "b": 1}),
+            ])
+            .unwrap()
+        );
     }
 
     #[test]

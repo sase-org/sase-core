@@ -12,10 +12,12 @@ mod row_resolution;
 mod wire;
 
 pub use events::{
+    artifact_link_alias_producer_id, artifact_link_derived_producer_id,
     artifact_link_event_canonical_json, artifact_link_event_digest,
     artifact_link_event_path_for_digest, artifact_link_event_validate_bytes,
-    artifact_link_event_validate_path, canonicalize_artifact_link_alias,
-    canonicalize_artifact_link_event,
+    artifact_link_event_validate_path, artifact_link_machine_run_id,
+    artifact_link_stable_fact_created_at, artifact_link_stable_operation_id,
+    canonicalize_artifact_link_alias, canonicalize_artifact_link_event,
     canonicalize_artifact_link_event_json_value, reduce_link_events,
     resolve_artifact_link_event_aliases, ArtifactLinkAliasResolutionWire,
     ArtifactLinkAliasWire, ArtifactLinkEventCanonicalWire,
