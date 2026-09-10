@@ -690,6 +690,7 @@ use sase_core::agent_scan::{
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
+    reconcile_agent_artifact_index_dismissed_family_members as core_reconcile_agent_artifact_index_dismissed_family_members,
     replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
     resolve_agent_artifact_path as core_resolve_agent_artifact_path,
     resolve_agent_artifact_timestamp_path as core_resolve_agent_artifact_timestamp_path,
@@ -3261,6 +3262,31 @@ fn py_replace_agent_artifact_index_dismissed_agents<'py>(
             core_replace_agent_artifact_index_dismissed_agents(
                 &index,
                 &wire_identities,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Back-fill dismissed identities for visible dead members of dismissed families.
+#[pyfunction]
+#[pyo3(
+    name = "reconcile_agent_artifact_index_dismissed_family_members",
+    signature = (index_path, dry_run = false)
+)]
+fn py_reconcile_agent_artifact_index_dismissed_family_members<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    dry_run: bool,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let update = py
+        .allow_threads(|| {
+            core_reconcile_agent_artifact_index_dismissed_family_members(
+                &index, dry_run,
             )
         })
         .map_err(PyRuntimeError::new_err)?;
@@ -15835,6 +15861,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_replace_agent_artifact_index_dismissed_agents,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_reconcile_agent_artifact_index_dismissed_family_members,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_read_agent_artifact_index_meta, m)?)?;
