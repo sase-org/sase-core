@@ -381,6 +381,8 @@
 //! - `collect_queue_fields(occurrences: list[dict]) -> dict`
 //! - `format_queue_directive(fields: dict) -> str | None`
 //! - `queue_directive_flag_key() -> str`
+//! - `runner_capacity_policy_schema_version() -> int`
+//! - `runner_capacity_snapshot(request: dict) -> dict`
 //! - `code_value_wire_schema_version() -> int`
 //! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
@@ -1328,6 +1330,11 @@ use sase_core::{
     validate_snippet_trigger as core_validate_snippet_trigger, EditorPosition,
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
     XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
+};
+use sase_core::{
+    runner_capacity_policy_schema_version as core_runner_capacity_policy_schema_version,
+    runner_capacity_snapshot as core_runner_capacity_snapshot,
+    RunnerCapacityRequestWire,
 };
 use serde::de::DeserializeOwned;
 use serde::ser::{
@@ -13930,6 +13937,31 @@ fn py_queue_directive_flag_key() -> &'static str {
 }
 
 #[pyfunction]
+#[pyo3(name = "runner_capacity_policy_schema_version")]
+fn py_runner_capacity_policy_schema_version() -> u32 {
+    core_runner_capacity_policy_schema_version()
+}
+
+#[pyfunction]
+#[pyo3(name = "runner_capacity_snapshot")]
+fn py_runner_capacity_snapshot<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let request: RunnerCapacityRequestWire =
+        serde_json::from_value(py_to_json_value(request)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid runner capacity request: {err}"
+            ))
+        })?;
+    let snapshot = core_runner_capacity_snapshot(&request);
+    let value = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(name = "wait_target_key")]
 fn py_wait_target_key(target: &Bound<'_, PyAny>) -> PyResult<String> {
     let target: WaitTargetWire =
@@ -16127,6 +16159,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_collect_queue_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_format_queue_directive, m)?)?;
     m.add_function(wrap_pyfunction!(py_queue_directive_flag_key, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_runner_capacity_policy_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_runner_capacity_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
@@ -25909,13 +25946,19 @@ MENTORS:
                 .unwrap();
             assert_eq!(queue["alias"], json!("q"));
             assert_eq!(queue.get("feature_flag"), None);
+            assert!(queue["keywords"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|keyword| keyword["name"] == "weight"
+                    && keyword["value_role"] == "positive_float"));
             assert_eq!(py_queue_directive_flag_key(), "queue_directive");
             let occurrences = json_value_to_py(
                 py,
                 &json!([{
-                    "source": "%q:5",
-                    "source_span": [0, 4],
-                    "args": [{"value": "5"}],
+                    "source": "%q(5, w=0.25)",
+                    "source_span": [0, 14],
+                    "args": [{"value": "5"}, {"name": "w", "value": "0.25"}],
                     "has_plus_suffix": false
                 }]),
             )
@@ -25924,16 +25967,53 @@ MENTORS:
                 py_collect_queue_fields(py, occurrences.bind(py)).unwrap();
             let collected = py_to_json_value(collected.bind(py)).unwrap();
             assert_eq!(collected["fields"]["runners"], json!(5));
+            assert_eq!(collected["fields"]["weight"], json!(0.25));
             assert!(collected["errors"].as_array().unwrap().is_empty());
             let formatted = py_format_queue_directive(
-                json_value_to_py(py, &json!({"runners": 5, "priority": 20}))
-                    .unwrap()
-                    .bind(py),
+                json_value_to_py(
+                    py,
+                    &json!({"runners": 5, "priority": 20, "weight": 2.0}),
+                )
+                .unwrap()
+                .bind(py),
             )
             .unwrap();
             assert_eq!(
                 formatted.as_deref(),
-                Some("%queue(runners=5, priority=20)")
+                Some("%queue(runners=5, priority=20, weight=2)")
+            );
+            assert_eq!(py_runner_capacity_policy_schema_version(), 1);
+            let capacity_request = json_value_to_py(
+                py,
+                &json!({
+                    "effective_limit": 1.0,
+                    "records": [
+                        {
+                            "artifact_dir": "/tmp/running",
+                            "project_name": "proj",
+                            "timestamp": "20260910000000",
+                            "run_started_at": "2026-09-10T00:00:00Z",
+                            "queue_weight": 0.75
+                        },
+                        {
+                            "artifact_dir": "/tmp/waiting",
+                            "project_name": "proj",
+                            "timestamp": "20260910000001",
+                            "slot_requested_at": "2026-09-10T00:00:01Z",
+                            "queue_weight": 0.25
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+            let capacity =
+                py_runner_capacity_snapshot(py, capacity_request.bind(py))
+                    .unwrap();
+            let capacity = py_to_json_value(capacity.bind(py)).unwrap();
+            assert_eq!(capacity["occupied_capacity"], json!(0.75));
+            assert_eq!(
+                capacity["first_eligible_artifact_dir"],
+                json!("/tmp/waiting")
             );
 
             let wait = contract

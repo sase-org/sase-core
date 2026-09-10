@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 7;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 8;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -557,6 +557,14 @@ pub struct AgentMetaWire {
     #[serde(default)]
     pub wait_priority: Option<i64>,
     #[serde(default)]
+    pub queue_weight: Option<f64>,
+    #[serde(default)]
+    pub queue_weight_explicit: bool,
+    #[serde(default)]
+    pub queue_weight_invalid: bool,
+    #[serde(default)]
+    pub queue_weight_error: Option<String>,
+    #[serde(default)]
     pub wait_completed_at: Option<String>,
     #[serde(default)]
     pub plan_submitted_at: Vec<String>,
@@ -728,11 +736,21 @@ pub struct WaitingMarkerWire {
     #[serde(default)]
     pub wait_priority: Option<i64>,
     #[serde(default)]
+    pub queue_weight: Option<f64>,
+    #[serde(default)]
+    pub queue_weight_explicit: bool,
+    #[serde(default)]
+    pub queue_weight_invalid: bool,
+    #[serde(default)]
+    pub queue_weight_error: Option<String>,
+    #[serde(default)]
     pub wait_priority_explicit: bool,
     #[serde(default)]
     pub wait_runners_explicit: bool,
     #[serde(default)]
     pub slot_requested_at: Option<String>,
+    #[serde(default)]
+    pub eligible_since: Option<String>,
 }
 
 /// Compact projection of `pending_question.json`.

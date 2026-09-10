@@ -117,6 +117,21 @@ const WAIT_PRIORITY_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     },
 ];
 
+const QUEUE_WEIGHT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "0.25",
+        documentation: "Quarter capacity unit",
+    },
+    DirectiveSuggestedValue {
+        value: "1.0",
+        documentation: "Default capacity unit",
+    },
+    DirectiveSuggestedValue {
+        value: "2.0",
+        documentation: "Two capacity units",
+    },
+];
+
 const BARE_PLUS: &[DirectiveSyntaxForm] =
     &[DirectiveSyntaxForm::Bare, DirectiveSyntaxForm::Plus];
 const COLON: &[DirectiveSyntaxForm] = &[DirectiveSyntaxForm::Colon];
@@ -314,6 +329,22 @@ const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
         conflicts_with: &[],
         suggested_values: WAIT_RUNNERS_SUGGESTIONS,
     },
+    DirectiveKeywordSpec {
+        name: "w",
+        description: "Alias for weight=; positive capacity units",
+        value_role: DirectiveValueRole::PositiveFloat,
+        repeatable: false,
+        conflicts_with: &["weight"],
+        suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "weight",
+        description: "Positive capacity units claimed by this launch",
+        value_role: DirectiveValueRole::PositiveFloat,
+        repeatable: false,
+        conflicts_with: &["w"],
+        suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
+    },
 ];
 
 const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
@@ -456,8 +487,8 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "queue",
         alias: Some("q"),
-        description: "Set runner-queue admission threshold and priority",
-        argument_hint: ":N or (N, runners=, priority=, p=)",
+        description: "Set runner-queue admission count, priority, and capacity weight",
+        argument_hint: ":N or (N, runners=, priority=, p=, weight=, w=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN,
@@ -961,7 +992,7 @@ pub(super) fn wait_queue_keyword_retired(
     keyword: &str,
     _enabled_feature_flags: &[String],
 ) -> bool {
-    matches!(keyword, "runners" | "priority")
+    matches!(keyword, "runners" | "priority" | "weight")
 }
 
 fn selected_keyword_set(selected: &[String]) -> Vec<String> {
@@ -1557,7 +1588,15 @@ mod tests {
                 .iter()
                 .map(|keyword| keyword.name.as_str())
                 .collect::<Vec<_>>(),
-            ["p", "priority", "runners"]
+            ["p", "priority", "runners", "w", "weight"]
+        );
+        assert_eq!(
+            queue
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == "w")
+                .map(|keyword| keyword.conflicts_with.clone()),
+            Some(vec!["weight".to_string()])
         );
         assert_eq!(
             queue
@@ -1970,7 +2009,7 @@ mod tests {
         let candidates = directive_argument_candidates("queue").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["p=", "priority=", "runners="]);
+        assert_eq!(values, ["p=", "priority=", "runners=", "w=", "weight="]);
         assert_eq!(canonical_directive_name("q"), Some("queue"));
         let list = build_directive_completion_candidates("%q");
         assert_eq!(list.candidates.len(), 1);
@@ -2396,12 +2435,26 @@ mod tests {
         };
         assert_eq!(
             queue_insertions("%q("),
-            ["p=", "priority=", "runners=", "0", "1"]
+            ["p=", "priority=", "runners=", "w=", "weight=", "0", "1"]
         );
         assert_eq!(queue_insertions("%q:"), ["0", "1"]);
-        assert_eq!(queue_insertions("%q(5, "), ["p=", "priority="]);
-        assert_eq!(queue_insertions("%q(runners=5, "), ["p=", "priority="]);
-        assert_eq!(queue_insertions("%q(p=20, "), ["runners=", "0", "1"]);
+        assert_eq!(
+            queue_insertions("%q(5, "),
+            ["p=", "priority=", "w=", "weight="]
+        );
+        assert_eq!(
+            queue_insertions("%q(runners=5, "),
+            ["p=", "priority=", "w=", "weight="]
+        );
+        assert_eq!(
+            queue_insertions("%q(p=20, "),
+            ["runners=", "w=", "weight=", "0", "1"]
+        );
+        assert_eq!(
+            queue_insertions("%q(w=0.25, "),
+            ["p=", "priority=", "runners=", "0", "1"]
+        );
+        assert_eq!(queue_insertions("%q(weight="), ["0.25", "1.0", "2.0"]);
         assert!(queue_insertions("%q(")
             .iter()
             .all(|value| value != "planner" && value != "builders"));

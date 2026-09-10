@@ -44,7 +44,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 25;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 26;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -2417,6 +2417,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "done_outcome", "TEXT")?;
         migrate_done_outcome_projection_v24(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 26) {
+        migrate_record_json_refresh_v26(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -2877,6 +2880,14 @@ fn migrate_done_outcome_projection_v24(
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// v26 refreshes `record_json` with `agent_meta.queue_weight` and
+/// `waiting.queue_weight` projections.
+fn migrate_record_json_refresh_v26(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
 }
 
 /// v21 adds a regenerable child projection for indexed output variables.

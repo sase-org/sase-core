@@ -380,6 +380,11 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
         runners: agent.wait_runners,
         priority: agent.wait_priority,
+        weight: if agent.queue_weight_explicit {
+            agent.queue_weight
+        } else {
+            None
+        },
     }) {
         lines.push(directive);
     }
@@ -837,6 +842,8 @@ mod tests {
             finalizers: vec!["commit".to_string()],
             wait_runners: Some(2),
             wait_priority: Some(1),
+            queue_weight: Some(2.0),
+            queue_weight_explicit: true,
             ..Default::default()
         });
         assert!(prompt.contains("%id(reviewer, bead=sase-1)"));
@@ -844,12 +851,23 @@ mod tests {
         assert!(prompt.contains("%auto"));
         assert!(prompt.contains("%final:commit"));
         assert!(prompt.contains("%hide"));
-        assert!(prompt.contains("%queue(runners=2, priority=1)"));
+        assert!(prompt.contains("%queue(runners=2, priority=1, weight=2)"));
         assert!(!prompt.contains("%wait(runners="));
         assert!(!prompt.contains("%wait(priority="));
         assert!(prompt.contains("Review the diff"));
         assert!(!prompt.contains("%wait:"));
         assert!(!prompt.contains("%if"));
+    }
+
+    #[test]
+    fn agent_dispatch_prompt_keeps_resolved_default_weight_implicit() {
+        let prompt = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review".to_string(),
+            queue_weight: Some(1.0),
+            queue_weight_explicit: false,
+            ..Default::default()
+        });
+        assert_eq!(prompt, "Review");
     }
 
     #[test]

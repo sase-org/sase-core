@@ -77,6 +77,7 @@ pub mod query;
 pub mod queue_directive;
 mod reference_path;
 pub mod referenced_by;
+pub mod runner_capacity;
 pub mod runner_limit_override;
 pub mod sections;
 mod serde_option;
@@ -1145,6 +1146,13 @@ pub use referenced_by::{
     upsert_referenced_by_block, ReferencedByColumnWire,
     ReferencedByDocumentWire, ReferencedByRowWire, ReferencedByTableWire,
     MAX_RENDERED_REFERENCED_BY_ROWS, REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION,
+};
+pub use runner_capacity::{
+    runner_capacity_policy_schema_version, runner_capacity_snapshot,
+    RunnerCapacityBlockerWire, RunnerCapacityClaimWire,
+    RunnerCapacityDiagnosticWire, RunnerCapacityRecordWire,
+    RunnerCapacityRequestWire, RunnerCapacitySnapshotWire,
+    RunnerCapacityWaiterWire, RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
 };
 pub use runner_limit_override::{
     clear_runner_limit_override, get_runner_limit_override,

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub const QUEUE_DIRECTIVE_FLAG: &str = "queue_directive";
+pub const DEFAULT_QUEUE_WEIGHT: f64 = 1.0;
 
 /// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub fn queue_directive_flag_key() -> &'static str {
@@ -44,15 +45,17 @@ pub struct QueueOccurrenceWire {
     pub has_plus_suffix: bool,
 }
 
-/// Canonical queue fields. `None` means omitted, distinct from explicit zero
-/// or explicit default priority 10.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Canonical queue fields. `None` means omitted, distinct from explicit zero,
+/// explicit default priority 10, or explicit default weight 1.0.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct QueueFieldsWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runners: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
 }
 
 /// Actionable queue parse failure with the source span of the occurrence.
@@ -66,7 +69,7 @@ pub struct QueueParseErrorWire {
 }
 
 /// Result of collecting queue fields across occurrences.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueCollectResultWire {
     #[serde(default)]
@@ -115,17 +118,34 @@ pub fn collect_queue_fields(
     }
 }
 
-/// Canonical generated form: `%queue(runners=N, priority=P)`, omitting
-/// absent fields. Returns `None` when both fields are omitted.
+/// Canonical generated form: `%queue(runners=N, priority=P, weight=W)`,
+/// omitting absent fields. Returns `None` when every field is omitted.
 pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
-    match (fields.runners, fields.priority) {
-        (None, None) => None,
-        (Some(runners), None) => Some(format!("%queue(runners={runners})")),
-        (None, Some(priority)) => Some(format!("%queue(priority={priority})")),
-        (Some(runners), Some(priority)) => {
-            Some(format!("%queue(runners={runners}, priority={priority})"))
+    let mut parts = Vec::new();
+    if let Some(runners) = fields.runners {
+        parts.push(format!("runners={runners}"));
+    }
+    if let Some(priority) = fields.priority {
+        parts.push(format!("priority={priority}"));
+    }
+    if let Some(weight) = fields.weight {
+        if queue_weight_is_valid(weight) {
+            parts.push(format!("weight={}", format_queue_weight(weight)));
         }
     }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("%queue({})", parts.join(", ")))
+    }
+}
+
+pub fn queue_weight_is_valid(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+pub fn format_queue_weight(value: f64) -> String {
+    value.to_string()
 }
 
 /// Legacy diagnostic message from the temporary migration window.
@@ -181,6 +201,7 @@ fn parse_colon_occurrence(
     Ok(QueueFieldsWire {
         runners: Some(parse_runners(&positionals[0].value, span)?),
         priority: None,
+        weight: None,
     })
 }
 
@@ -216,7 +237,7 @@ fn parse_parenthesized_occurrence(
                 if literal.is_empty() {
                     return Err(queue_error(
                         "unknown-queue-keyword",
-                        "Unsupported keyword on %queue: empty name. Use runners=, priority=, or p=.",
+                        "Unsupported keyword on %queue: empty name. Use runners=, priority=, p=, weight=, or w=.",
                         span,
                     ));
                 }
@@ -235,6 +256,9 @@ fn parse_parenthesized_occurrence(
                     "priority" => {
                         assign_priority(&mut fields, &arg.value, span)?;
                     }
+                    "weight" => {
+                        assign_weight(&mut fields, &arg.value, span)?;
+                    }
                     "agent" | "bead" | "proc" | "unit" | "time" => {
                         return Err(queue_error(
                             "queue-wait-keyword",
@@ -248,7 +272,7 @@ fn parse_parenthesized_occurrence(
                         return Err(queue_error(
                             "unknown-queue-keyword",
                             &format!(
-                                "Unsupported keyword on %queue: {literal}=. Use runners=, priority=, or p=."
+                                "Unsupported keyword on %queue: {literal}=. Use runners=, priority=, p=, weight=, or w=."
                             ),
                             span,
                         ));
@@ -257,7 +281,10 @@ fn parse_parenthesized_occurrence(
             }
         }
     }
-    if fields.runners.is_none() && fields.priority.is_none() {
+    if fields.runners.is_none()
+        && fields.priority.is_none()
+        && fields.weight.is_none()
+    {
         return Err(empty_queue_error(span));
     }
     Ok(fields)
@@ -287,6 +314,18 @@ fn assign_priority(
     Ok(())
 }
 
+fn assign_weight(
+    fields: &mut QueueFieldsWire,
+    raw: &str,
+    span: Option<[usize; 2]>,
+) -> Result<(), QueueParseErrorWire> {
+    if fields.weight.is_some() {
+        return Err(duplicate_field_error("weight", span));
+    }
+    fields.weight = Some(parse_weight(raw, span)?);
+    Ok(())
+}
+
 fn merge_queue_part(
     fields: &mut QueueFieldsWire,
     part: QueueFieldsWire,
@@ -303,6 +342,12 @@ fn merge_queue_part(
             return Err(duplicate_field_error("priority", Some(span)));
         }
         fields.priority = Some(priority);
+    }
+    if let Some(weight) = part.weight {
+        if fields.weight.is_some() {
+            return Err(duplicate_field_error("weight", Some(span)));
+        }
+        fields.weight = Some(weight);
     }
     Ok(())
 }
@@ -333,6 +378,22 @@ fn parse_priority(
         .map_err(|kind| integer_error("priority", kind, span))?;
     let parsed = digits.parse::<u64>().map_err(|_| overflow_priority(span))?;
     i32::try_from(parsed).map_err(|_| overflow_priority(span))
+}
+
+fn parse_weight(
+    raw: &str,
+    span: Option<[usize; 2]>,
+) -> Result<f64, QueueParseErrorWire> {
+    if raw.is_empty() {
+        return Err(weight_error(span));
+    }
+    let Ok(parsed) = raw.parse::<f64>() else {
+        return Err(weight_error(span));
+    };
+    if !queue_weight_is_valid(parsed) {
+        return Err(weight_error(span));
+    }
+    Ok(parsed)
 }
 
 enum InvalidInt {
@@ -384,7 +445,7 @@ fn overflow_priority(span: Option<[usize; 2]>) -> QueueParseErrorWire {
 fn empty_queue_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "empty-queue",
-        "%queue requires runners and/or priority; bare %q is not a previous-agent wait. Use %q:N, %queue(runners=N), and/or %queue(priority=P).",
+        "%queue requires runners, priority, and/or weight; bare %q is not a previous-agent wait. Use %q:N, %queue(runners=N), %queue(priority=P), and/or %queue(weight=W).",
         span,
     )
 }
@@ -410,9 +471,18 @@ fn duplicate_field_error(
     )
 }
 
+fn weight_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
+    queue_error(
+        "invalid-queue-weight",
+        "%queue(weight=...) requires a positive finite base-10 float; zero, negative, NaN, infinity, overflow, underflow-to-zero, boolean, empty, and nonnumeric values are rejected.",
+        span,
+    )
+}
+
 fn canonical_queue_key(literal: &str) -> String {
     match literal {
         "p" => "priority".to_string(),
+        "w" => "weight".to_string(),
         other => other.to_string(),
     }
 }
@@ -549,6 +619,7 @@ mod tests {
             QueueFieldsWire {
                 runners: Some(5),
                 priority: Some(20),
+                ..QueueFieldsWire::default()
             }
         );
         assert_eq!(
@@ -581,11 +652,16 @@ mod tests {
             Some("%queue(priority=20)")
         );
         let both = collect_ok(&[occ(
-            "%q(5, p=20)",
-            vec![positional("5"), named("p", "20")],
+            "%q(5, p=20, w=0.25)",
+            vec![positional("5"), named("p", "20"), named("w", "0.25")],
         )]);
         assert_eq!(both.runners, Some(5));
         assert_eq!(both.priority, Some(20));
+        assert_eq!(both.weight, Some(0.25));
+        assert_eq!(
+            format_queue_directive(&both).as_deref(),
+            Some("%queue(runners=5, priority=20, weight=0.25)")
+        );
     }
 
     #[test]
@@ -622,6 +698,14 @@ mod tests {
                 "%q(p=20, p=20)",
                 vec![named("p", "20"), named("p", "20")],
             )],
+            vec![occ(
+                "%q(w=1, weight=1)",
+                vec![named("w", "1"), named("weight", "1")],
+            )],
+            vec![
+                occ("%q(w=2)", vec![named("w", "2")]),
+                occ("%queue(weight=2)", vec![named("weight", "2")]),
+            ],
         ] {
             let errors = collect_err(&occurrences);
             assert!(
@@ -728,6 +812,54 @@ mod tests {
             collect_err(&[priority_overflow])[0].code,
             "queue-overflow-priority"
         );
+    }
+
+    #[test]
+    fn parses_weight_float_spellings_and_formats_canonically() {
+        for (value, expected) in [
+            ("2", 2.0),
+            ("2.0", 2.0),
+            (".25", 0.25),
+            ("2.", 2.0),
+            ("+2.5e-1", 0.25),
+            ("5e-324", f64::from_bits(1)),
+        ] {
+            let fields =
+                collect_ok(&[occ("%q(w=value)", vec![named("w", value)])]);
+            assert_eq!(fields.runners, None);
+            assert_eq!(fields.priority, None);
+            assert_eq!(fields.weight, Some(expected), "{value}");
+            assert_eq!(
+                format_queue_directive(&fields),
+                Some(format!(
+                    "%queue(weight={})",
+                    format_queue_weight(expected)
+                )),
+                "{value}"
+            );
+        }
+        let explicit_default =
+            collect_ok(&[occ("%q(weight=1.0)", vec![named("weight", "1.0")])]);
+        assert_eq!(explicit_default.weight, Some(DEFAULT_QUEUE_WEIGHT));
+        assert_eq!(
+            format_queue_directive(&explicit_default).as_deref(),
+            Some("%queue(weight=1)")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_weight_values() {
+        for value in [
+            "", "0", "-0", "-0.0", "-1", "true", "false", "many", "NaN", "inf",
+            "Infinity", "1e309", "1e-324",
+        ] {
+            let weight = occ("%q(w=x)", vec![named("w", value)]);
+            assert_eq!(
+                collect_err(&[weight])[0].code,
+                "invalid-queue-weight",
+                "{value}"
+            );
+        }
     }
 
     #[test]

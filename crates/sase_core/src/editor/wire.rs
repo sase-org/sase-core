@@ -413,6 +413,7 @@ pub enum DirectiveValueRole {
     Bool,
     NonNegativeInt,
     PositiveInt,
+    PositiveFloat,
     WaitTime,
     FinalizerInstance,
     FreeText,

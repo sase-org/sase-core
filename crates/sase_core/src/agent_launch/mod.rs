@@ -329,6 +329,10 @@ pub struct AgentUnitWire {
     pub wait_runners: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "skip_if_false")]
+    pub queue_weight_explicit: bool,
 }
 
 fn skip_if_false(value: &bool) -> bool {
@@ -1431,6 +1435,8 @@ fn classify_typed_launch_unit(
             finalizers,
             wait_runners: wait_queue.runners,
             wait_priority: wait_queue.priority,
+            queue_weight: wait_queue.weight,
+            queue_weight_explicit: wait_queue.weight.is_some(),
         })
     };
 
@@ -1650,6 +1656,18 @@ fn parse_wait_directive(
             Some("p") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-p-unsupported",
                 "%wait(p=...) is unsupported. Use %queue(priority=...) or %q(p=...).",
+                logical_id,
+                Some(span),
+            )),
+            Some("weight") => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-weight-moved",
+                "%wait(weight=...) has moved to %queue. Use %queue(weight=W) or %q(w=W), and keep dependencies on %wait.",
+                logical_id,
+                Some(span),
+            )),
+            Some("w") => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-w-unsupported",
+                "%wait(w=...) is unsupported. Use %queue(weight=W) or %q(w=W).",
                 logical_id,
                 Some(span),
             )),
@@ -6880,11 +6898,13 @@ Keep this comma, and the rest of the prose in the summary.";
 
     fn agent_fields(
         plan: &LaunchPlanWire,
-    ) -> (Option<u32>, Option<i32>, String) {
+    ) -> (Option<u32>, Option<i32>, Option<f64>, bool, String) {
         match &plan.units[0].payload {
             LaunchUnitPayloadWire::Agent(agent) => (
                 agent.wait_runners,
                 agent.wait_priority,
+                agent.queue_weight,
+                agent.queue_weight_explicit,
                 agent.prompt.clone(),
             ),
             other => panic!("expected agent payload, got {other:?}"),
@@ -6900,17 +6920,32 @@ Keep this comma, and the rest of the prose in the summary.";
             "%queue(runners=5)\nDo work",
         ] {
             let plan = plan_queue(prompt);
-            let (runners, priority, cleaned) = agent_fields(&plan);
+            let (runners, priority, weight, weight_explicit, cleaned) =
+                agent_fields(&plan);
             assert_eq!(runners, Some(5), "{prompt}");
             assert_eq!(priority, None, "{prompt}");
+            assert_eq!(weight, None, "{prompt}");
+            assert!(!weight_explicit, "{prompt}");
             assert_eq!(cleaned, "Do work", "{prompt}");
             assert!(!cleaned.contains("%q"), "{prompt}");
         }
-        let both = plan_queue("%w(builder, time=5m) %q(1, p=20)\nDo work");
+        let weight_only = plan_queue("%q(w=0.25)\nDo work");
+        let (runners, priority, weight, weight_explicit, cleaned) =
+            agent_fields(&weight_only);
+        assert_eq!(runners, None);
+        assert_eq!(priority, None);
+        assert_eq!(weight, Some(0.25));
+        assert!(weight_explicit);
+        assert_eq!(cleaned, "Do work");
+
+        let both =
+            plan_queue("%w(builder, time=5m) %q(1, p=20, weight=2)\nDo work");
         match &both.units[0].payload {
             LaunchUnitPayloadWire::Agent(agent) => {
                 assert_eq!(agent.wait_runners, Some(1));
                 assert_eq!(agent.wait_priority, Some(20));
+                assert_eq!(agent.queue_weight, Some(2.0));
+                assert!(agent.queue_weight_explicit);
                 assert_eq!(agent.prompt, "Do work");
             }
             other => panic!("expected agent payload, got {other:?}"),
@@ -6923,7 +6958,7 @@ Keep this comma, and the rest of the prose in the summary.";
             },
             &[],
         );
-        assert!(rebuilt.contains("%queue(runners=1, priority=20)"));
+        assert!(rebuilt.contains("%queue(runners=1, priority=20, weight=2)"));
         assert!(!rebuilt.contains("%wait(runners="));
         assert!(!rebuilt.contains("%wait(priority="));
     }
@@ -6951,7 +6986,7 @@ Keep this comma, and the rest of the prose in the summary.";
     #[test]
     fn typed_launch_composes_disjoint_queue_and_fanout() {
         let plan = plan_typed_launch_units_with_flags(
-            "%q:0 %queue(priority=10)\nFirst\n---\n%q(p=1)\nSecond",
+            "%q:0 %queue(priority=10)\nFirst\n---\n%q(p=1, w=.25)\nSecond",
             Some("multi_prompt"),
             Some("sase"),
             &[],
@@ -6969,6 +7004,8 @@ Keep this comma, and the rest of the prose in the summary.";
             LaunchUnitPayloadWire::Agent(agent) => {
                 assert_eq!(agent.wait_runners, None);
                 assert_eq!(agent.wait_priority, Some(1));
+                assert_eq!(agent.queue_weight, Some(0.25));
+                assert!(agent.queue_weight_explicit);
                 assert_eq!(agent.prompt, "Second");
             }
             other => panic!("expected agent payload, got {other:?}"),

@@ -40,6 +40,7 @@ use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
     read_project_lifecycle_from_content, ProjectLifecycleState,
 };
+use crate::queue_directive::queue_weight_is_valid;
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 const USED_XPROMPTS_FILE: &str = "xprompts.json";
@@ -817,6 +818,28 @@ fn coerce_float(value: Option<&Value>) -> Option<f64> {
     }
 }
 
+fn coerce_queue_weight(
+    data: &Map<String, Value>,
+) -> (Option<f64>, bool, Option<String>) {
+    if !data.contains_key("queue_weight") {
+        return (None, false, None);
+    }
+    let value = coerce_float(data.get("queue_weight"));
+    match value {
+        Some(weight) if queue_weight_is_valid(weight) => {
+            (Some(weight), false, None)
+        }
+        _ => (
+            None,
+            true,
+            Some(
+                "queue_weight must be a positive finite capacity weight"
+                    .to_string(),
+            ),
+        ),
+    }
+}
+
 fn coerce_str_list(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::String(s)) => vec![s.clone()],
@@ -1018,6 +1041,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
     } else {
         coerce_str(data.get("agent_family_role"))
     };
+    let (queue_weight, queue_weight_invalid, queue_weight_error) =
+        coerce_queue_weight(data);
 
     AgentMetaWire {
         name: coerce_str(data.get("name")),
@@ -1087,6 +1112,12 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         wait_priority: coerce_int(data.get("wait_priority")),
+        queue_weight,
+        queue_weight_explicit: coerce_bool_truthy(
+            data.get("queue_weight_explicit"),
+        ),
+        queue_weight_invalid,
+        queue_weight_error,
         wait_completed_at: coerce_str(data.get("wait_completed_at")),
         plan_submitted_at: coerce_str_list(data.get("plan_submitted_at")),
         epic_started_at: coerce_str(data.get("epic_started_at")),
@@ -1283,6 +1314,8 @@ fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {
 }
 
 fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
+    let (queue_weight, queue_weight_invalid, queue_weight_error) =
+        coerce_queue_weight(data);
     WaitingMarkerWire {
         waiting_for: coerce_str_list(data.get("waiting_for")),
         wait_for_beads: coerce_str_list(data.get("wait_for_beads")),
@@ -1290,6 +1323,12 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_until: coerce_str(data.get("wait_until")),
         wait_runners: coerce_int(data.get("wait_runners")),
         wait_priority: coerce_int(data.get("wait_priority")),
+        queue_weight,
+        queue_weight_explicit: coerce_bool_truthy(
+            data.get("queue_weight_explicit"),
+        ),
+        queue_weight_invalid,
+        queue_weight_error,
         wait_priority_explicit: coerce_bool_truthy(
             data.get("wait_priority_explicit"),
         ),
@@ -1297,6 +1336,7 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
             data.get("wait_runners_explicit"),
         ),
         slot_requested_at: coerce_str(data.get("slot_requested_at")),
+        eligible_since: coerce_str(data.get("eligible_since")),
     }
 }
 
@@ -1479,6 +1519,83 @@ mod tests {
         let shell = meta.family_shell.as_ref().unwrap();
         assert_eq!(shell.id.as_deref(), Some("oldmon"));
         assert_eq!(shell.next_model, None);
+    }
+
+    #[test]
+    fn scanner_distinguishes_absent_valid_and_invalid_queue_weight() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let absent = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120101");
+        let valid = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120102");
+        let invalid = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120103");
+
+        write_json(&absent.join("agent_meta.json"), json!({"name": "legacy"}));
+        write_json(
+            &valid.join("agent_meta.json"),
+            json!({
+                "name": "weighted",
+                "queue_weight": "0.25",
+                "queue_weight_explicit": true
+            }),
+        );
+        write_json(
+            &valid.join("waiting.json"),
+            json!({
+                "slot_requested_at": "2026-08-22T12:01:02Z",
+                "queue_weight": 0.25,
+                "queue_weight_explicit": true
+            }),
+        );
+        write_json(
+            &invalid.join("agent_meta.json"),
+            json!({"name": "bad", "queue_weight": "NaN"}),
+        );
+        write_json(
+            &invalid.join("waiting.json"),
+            json!({
+                "slot_requested_at": "2026-08-22T12:01:03Z",
+                "queue_weight": 0
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 3);
+        let absent_meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(absent_meta.queue_weight, None);
+        assert!(!absent_meta.queue_weight_invalid);
+
+        let valid_meta = snapshot.records[1].agent_meta.as_ref().unwrap();
+        assert_eq!(valid_meta.queue_weight, Some(0.25));
+        assert!(valid_meta.queue_weight_explicit);
+        assert!(!valid_meta.queue_weight_invalid);
+        let valid_waiting = snapshot.records[1].waiting.as_ref().unwrap();
+        assert_eq!(valid_waiting.queue_weight, Some(0.25));
+        assert!(valid_waiting.queue_weight_explicit);
+        assert!(!valid_waiting.queue_weight_invalid);
+
+        let invalid_meta = snapshot.records[2].agent_meta.as_ref().unwrap();
+        assert_eq!(invalid_meta.queue_weight, None);
+        assert!(invalid_meta.queue_weight_invalid);
+        assert!(invalid_meta.queue_weight_error.is_some());
+        let invalid_waiting = snapshot.records[2].waiting.as_ref().unwrap();
+        assert_eq!(invalid_waiting.queue_weight, None);
+        assert!(invalid_waiting.queue_weight_invalid);
+        assert!(invalid_waiting.queue_weight_error.is_some());
     }
 
     #[test]
