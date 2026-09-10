@@ -57,6 +57,7 @@ use std::sync::OnceLock;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION: u32 = 1;
 const EMPTY_ALT_SENTINEL: char = '\u{E000}';
 const EMPTY_ALT_SENTINEL_STR: &str = "\u{E000}";
 
@@ -221,6 +222,27 @@ pub struct LaunchFanoutPlanWire {
     pub requires_sequential_naming_wait: bool,
     #[serde(default)]
     pub fanout_sleep_seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchPredecessorContextWire {
+    pub schema_version: u32,
+    pub project_name: String,
+    pub timestamp: String,
+    pub artifact_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchPredecessorWaitBindingWire {
+    pub schema_version: u32,
+    pub prompt: String,
+    #[serde(default)]
+    pub wait_names: Vec<String>,
+    #[serde(default)]
+    pub wait_for_artifacts: Vec<BatchPredecessorContextWire>,
+    pub bound_wait_count: u32,
 }
 
 /// Pure, schema-versioned launch graph. It is produced before approval and
@@ -583,6 +605,7 @@ pub enum AgentLaunchFanoutPlanError {
         name: String,
         close: char,
     },
+    InvalidBatchPredecessorContext(String),
     TypedLaunchPlan {
         diagnostics: Vec<LaunchPlanDiagnosticWire>,
     },
@@ -600,6 +623,9 @@ impl fmt::Display for AgentLaunchFanoutPlanError {
                     f,
                     "unclosed {name} directive: missing closing '{close}'"
                 )
+            }
+            Self::InvalidBatchPredecessorContext(message) => {
+                write!(f, "invalid batch predecessor context: {message}")
             }
             Self::TypedLaunchPlan { diagnostics } => {
                 if let Some(first) = diagnostics.first() {
@@ -805,6 +831,111 @@ pub fn plan_agent_launch_fanout(
             other.to_string(),
         )),
     }
+}
+
+pub fn bind_batch_predecessor_waits(
+    prompt: &str,
+    predecessor: &BatchPredecessorContextWire,
+) -> Result<BatchPredecessorWaitBindingWire, AgentLaunchFanoutPlanError> {
+    validate_batch_predecessor_context(predecessor)?;
+
+    let ignored_ranges = launch_literal_zone_ranges(prompt);
+    let mut regions_to_remove = Vec::new();
+    if prompt.contains('%') {
+        for directive in directive_occurrences(prompt)? {
+            if position_in_ranges(directive.start, &ignored_ranges) {
+                continue;
+            }
+            if is_no_argument_wait_directive(&directive) {
+                regions_to_remove.push((directive.start, directive.end));
+            }
+        }
+    }
+
+    if regions_to_remove.is_empty() {
+        return Ok(BatchPredecessorWaitBindingWire {
+            schema_version: BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION,
+            prompt: prompt.to_string(),
+            wait_names: Vec::new(),
+            wait_for_artifacts: Vec::new(),
+            bound_wait_count: 0,
+        });
+    }
+
+    let mut wait_names = Vec::new();
+    if let Some(name) = predecessor.name.as_ref() {
+        wait_names.push(name.clone());
+    }
+
+    Ok(BatchPredecessorWaitBindingWire {
+        schema_version: BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION,
+        prompt: strip_prompt_regions(prompt, &regions_to_remove),
+        wait_names,
+        wait_for_artifacts: vec![predecessor.clone()],
+        bound_wait_count: regions_to_remove.len() as u32,
+    })
+}
+
+fn validate_batch_predecessor_context(
+    predecessor: &BatchPredecessorContextWire,
+) -> Result<(), AgentLaunchFanoutPlanError> {
+    if predecessor.schema_version != BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION {
+        return Err(
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                format!(
+                    "schema_version must be {}, got {}",
+                    BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION,
+                    predecessor.schema_version
+                ),
+            ),
+        );
+    }
+    if predecessor.project_name.trim().is_empty() {
+        return Err(
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                "project_name is required".to_string(),
+            ),
+        );
+    }
+    parse_launch_timestamp("timestamp", &predecessor.timestamp).map_err(
+        |error| {
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                error.to_string(),
+            )
+        },
+    )?;
+    if predecessor.artifact_dir.trim().is_empty() {
+        return Err(
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                "artifact_dir is required".to_string(),
+            ),
+        );
+    }
+    if !Path::new(&predecessor.artifact_dir).is_absolute() {
+        return Err(
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                "artifact_dir must be absolute".to_string(),
+            ),
+        );
+    }
+    if predecessor
+        .name
+        .as_ref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(
+            AgentLaunchFanoutPlanError::InvalidBatchPredecessorContext(
+                "name must be non-empty when supplied".to_string(),
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn is_no_argument_wait_directive(directive: &DirectiveOccurrence) -> bool {
+    directive.canonical_name == "wait"
+        && !directive.has_plus_suffix
+        && directive.args.iter().all(String::is_empty)
 }
 
 pub fn plan_typed_launch_units(
@@ -5568,6 +5699,93 @@ Keep this comma, and the rest of the prose in the summary.";
                 plan_agent_launch_fanout(prompt, Some("multi_prompt")).unwrap();
             assert!(plan.slots[0].wait_for_previous, "prompt was {prompt:?}");
         }
+    }
+
+    fn predecessor_context() -> BatchPredecessorContextWire {
+        BatchPredecessorContextWire {
+            schema_version: BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION,
+            project_name: "sase".to_string(),
+            timestamp: "260501_120000".to_string(),
+            artifact_dir:
+                "/tmp/sase/artifacts/ace-run/202605/01/20260501120000"
+                    .to_string(),
+            name: Some("builder".to_string()),
+        }
+    }
+
+    #[test]
+    fn batch_predecessor_binding_consumes_zero_argument_wait_forms() {
+        for source in [
+            "%wait\nReview",
+            "%w\nReview",
+            "%wait()\nReview",
+            "%w( \t )\nReview",
+        ] {
+            let binding =
+                bind_batch_predecessor_waits(source, &predecessor_context())
+                    .unwrap();
+
+            assert_eq!(binding.prompt, "Review");
+            assert_eq!(binding.wait_names, vec!["builder"]);
+            assert_eq!(binding.wait_for_artifacts, vec![predecessor_context()]);
+            assert_eq!(binding.bound_wait_count, 1);
+        }
+    }
+
+    #[test]
+    fn batch_predecessor_binding_preserves_explicit_and_non_wait_targets() {
+        let binding = bind_batch_predecessor_waits(
+            "%wait %wait:reviewer %wait(agent=ops) %queue:1\nReview",
+            &predecessor_context(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            binding.prompt,
+            " %wait:reviewer %wait(agent=ops) %queue:1\nReview"
+        );
+        assert_eq!(binding.wait_names, vec!["builder"]);
+        assert_eq!(binding.wait_for_artifacts, vec![predecessor_context()]);
+        assert_eq!(binding.bound_wait_count, 1);
+    }
+
+    #[test]
+    fn batch_predecessor_binding_ignores_literal_regions() {
+        let prompt = "```text\n%wait\n```\n`%w`\n%xprompts_enabled:false\n%wait\n%xprompts_enabled:true\nReview";
+
+        let binding =
+            bind_batch_predecessor_waits(prompt, &predecessor_context())
+                .unwrap();
+
+        assert_eq!(binding.prompt, prompt);
+        assert!(binding.wait_names.is_empty());
+        assert!(binding.wait_for_artifacts.is_empty());
+        assert_eq!(binding.bound_wait_count, 0);
+    }
+
+    #[test]
+    fn batch_predecessor_binding_without_name_keeps_identity_only_dependency() {
+        let mut context = predecessor_context();
+        context.name = None;
+
+        let binding =
+            bind_batch_predecessor_waits("%wait\nReview", &context).unwrap();
+
+        assert_eq!(binding.prompt, "Review");
+        assert!(binding.wait_names.is_empty());
+        assert_eq!(binding.wait_for_artifacts, vec![context]);
+        assert_eq!(binding.bound_wait_count, 1);
+    }
+
+    #[test]
+    fn batch_predecessor_binding_validates_context() {
+        let mut context = predecessor_context();
+        context.timestamp = "20260501120000".to_string();
+
+        let err = bind_batch_predecessor_waits("%wait\nReview", &context)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expected YYmmdd_HHMMSS"));
     }
 
     #[test]

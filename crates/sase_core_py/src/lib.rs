@@ -158,6 +158,7 @@
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
+//! - `bind_batch_predecessor_waits(prompt: str, predecessor: dict) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
 //! - `model_shortcut_context(text: str, position: dict) -> dict | None`
 //! - `model_shortcut_edit(text: str, position: dict, entries: list[dict], selected_value: str) -> dict | None`
@@ -605,6 +606,7 @@ use sase_core::agent_launch::{
     agent_unit_dispatch_prompt_with_flags as core_agent_unit_dispatch_prompt_with_flags,
     allocate_and_claim_workspace_from_content as core_allocate_and_claim_workspace_from_content,
     allocate_launch_timestamp_batch as core_allocate_launch_timestamp_batch,
+    bind_batch_predecessor_waits as core_bind_batch_predecessor_waits,
     build_condition_context as core_build_condition_context,
     classify_condition_status as core_classify_condition_status,
     cleanup_proc_private_inputs as core_cleanup_proc_private_inputs,
@@ -629,12 +631,12 @@ use sase_core::agent_launch::{
     validate_proc_workspace_intent as core_validate_proc_workspace_intent,
     validate_standalone_proc_shell_name as core_validate_standalone_proc_shell_name,
     wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
-    AgentLaunchRequestWire, AgentUnitWire, ConditionEvalRequestWire,
-    LaunchAdmissionJournalEntryWire, LaunchAdmissionUnitStateWire,
-    LaunchAdmissionWaitFactWire, LaunchPlanWire, LaunchUnitPayloadWire,
-    LaunchUnitWire, OccupancyCallerWire, OccupantRecordWire,
-    ProcDispatchRequestWire, WaitTargetWire, WaitedOutcomeWire,
-    WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    AgentLaunchRequestWire, AgentUnitWire, BatchPredecessorContextWire,
+    ConditionEvalRequestWire, LaunchAdmissionJournalEntryWire,
+    LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire, LaunchPlanWire,
+    LaunchUnitPayloadWire, LaunchUnitWire, OccupancyCallerWire,
+    OccupantRecordWire, ProcDispatchRequestWire, WaitTargetWire,
+    WaitedOutcomeWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
     CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
     CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
     CONDITION_OUTPUT_CAP_BYTES, LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
@@ -13706,6 +13708,30 @@ fn py_plan_agent_launch_fanout<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Bind no-argument batch waits to a supplied predecessor launch identity.
+#[pyfunction]
+#[pyo3(name = "bind_batch_predecessor_waits")]
+fn py_bind_batch_predecessor_waits<'py>(
+    py: Python<'py>,
+    prompt: &str,
+    predecessor: &Bound<'py, PyAny>,
+) -> PyResult<PyObject> {
+    let predecessor: BatchPredecessorContextWire = serde_json::from_value(
+        py_to_json_value(predecessor)?,
+    )
+    .map_err(|err| {
+        PyValueError::new_err(format!(
+            "invalid batch predecessor context: {err}"
+        ))
+    })?;
+    let binding = core_bind_batch_predecessor_waits(prompt, &predecessor)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let value = serde_json::to_value(&binding).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Plan a pure typed Agent/Proc launch graph without launching children.
 #[pyfunction]
 #[pyo3(name = "plan_typed_launch_units")]
@@ -16352,6 +16378,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bind_batch_predecessor_waits, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_launch_admission_journal_schema_version,
