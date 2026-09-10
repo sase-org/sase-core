@@ -396,6 +396,7 @@
 //! - `directive_completion_context(text: str, line: int, character: int) -> dict | None`
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
 //! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", direction: str = "out", uses: int = 1, now: str | None = None, operation_id: str | None = None) -> dict`
+//! - `bead_set_link_projection(beads_dir: str, issue_id: str, target_ref: str, relation: str, direction: str, present: bool, operation_id: str, description: str | None = None, origin: str | None = None, uses: int = 1, now: str | None = None) -> dict`
 //! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, direction: str = "out", now: str | None = None, operation_id: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict` (`issue["notes"]` is a list of note records)
 //! - `bead_note_edit(beads_dir: str, issue_id: str, note_id: str, text: str, author: str | None = None, now: str | None = None) -> dict`
@@ -931,6 +932,7 @@ use sase_core::bead::{
     resolution_migration_sql as core_bead_resolution_migration_sql,
     resolve_issue_id as core_bead_resolve_issue_id,
     search_issues as core_bead_search_issues,
+    set_bead_link_projection as core_bead_set_link_projection,
     show_issue as core_bead_show_issue,
     show_issue_detail_with_options as core_bead_show_issue_detail,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
@@ -8489,6 +8491,61 @@ fn py_bead_add_link<'py>(
                 description,
                 origin,
                 direction,
+                uses,
+                now,
+                operation_id,
+            )
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_set_link_projection")]
+#[pyo3(signature = (beads_dir, issue_id, target_ref, relation, direction, present, operation_id, description=None, origin=None, uses=1, now=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_bead_set_link_projection<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+    target_ref: &str,
+    relation: &str,
+    direction: &str,
+    present: bool,
+    operation_id: String,
+    description: Option<String>,
+    origin: Option<&str>,
+    uses: u64,
+    now: Option<String>,
+) -> PyResult<PyObject> {
+    let origin = match origin {
+        Some(origin) => Some(
+            ArtifactLinkOriginWire::from_name(origin).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown artifact link origin `{origin}`"
+                ))
+            })?,
+        ),
+        None => None,
+    };
+    let direction =
+        BeadLinkDirectionWire::from_name(direction).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown bead link direction `{direction}`"
+            ))
+        })?;
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_set_link_projection(
+                &beads_dir,
+                issue_id,
+                target_ref,
+                relation,
+                direction,
+                present,
+                description,
+                origin,
                 uses,
                 now,
                 operation_id,
@@ -16423,6 +16480,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_remove, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_add_link, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_set_link_projection, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_link, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_remove, m)?)?;

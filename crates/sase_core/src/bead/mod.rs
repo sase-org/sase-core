@@ -52,9 +52,9 @@ pub use mutation::{
     edit_issue_note, export_jsonl, init_store, mark_ready_to_work, open_issue,
     preclaim_epic_work_plan, release_agent_claim, remove_bead_link,
     remove_bead_references, remove_dependencies, remove_issue,
-    remove_issue_note, remove_issues, snooze_task, sync_is_clean,
-    unmark_ready_to_work, update_issue, update_issues, BeadCreateRequestWire,
-    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
+    remove_issue_note, remove_issues, set_bead_link_projection, snooze_task,
+    sync_is_clean, unmark_ready_to_work, update_issue, update_issues,
+    BeadCreateRequestWire, BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
     BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
