@@ -21,7 +21,9 @@ pub enum ModelShortcutKind {
     Model,
 }
 
-/// Detected `*alias` or `**model` shortcut context.
+const MODEL_SHORTCUT_MARKER: u8 = b'=';
+
+/// Detected `=alias` or `==model` shortcut context.
 ///
 /// `caret`, `token_range`, and `replacement_range` use [`EditorPosition`],
 /// whose `character` field is an LSP-compatible UTF-16 code-unit column.
@@ -38,7 +40,7 @@ pub struct ModelShortcutContextWire {
     pub replacement_range: EditorRange,
 }
 
-/// Detected `*alias` model shortcut context.
+/// Detected `=alias` model shortcut context.
 ///
 /// `caret`, `token_range`, and `replacement_range` use [`EditorPosition`],
 /// whose `character` field is an LSP-compatible UTF-16 code-unit column.
@@ -54,7 +56,7 @@ pub struct ModelAliasShortcutContextWire {
     pub replacement_range: EditorRange,
 }
 
-/// One validated edit that expands a star shortcut to an inline `%m:` directive.
+/// One validated edit that expands a model shortcut to an inline `%m:` directive.
 ///
 /// `value` is the selected canonical alias (`@alias`) or concrete model value.
 /// `replacement` matches `edit.new_text`, including any spacer. The
@@ -70,11 +72,11 @@ pub struct ModelShortcutEditWire {
     pub caret: EditorPosition,
 }
 
-/// One validated edit that expands a `*alias` shortcut to `%m:@alias`.
+/// One validated edit that expands a `=alias` shortcut to `%m:@alias`.
 ///
 /// The `edit.range` uses the original document's UTF-16 editor positions.
 /// It usually equals the detected context's `replacement_range`, but when
-/// the star token is immediately followed by one ASCII space, the range
+/// the shortcut token is immediately followed by one ASCII space, the range
 /// deliberately extends one character beyond it to consume that space (a
 /// space is then reinserted at the end of `edit.new_text`). This keeps the
 /// edit self-contained: applying `edit` alone reproduces the same final
@@ -113,7 +115,7 @@ pub fn detect_model_alias_shortcut_context(
     model_shortcut_context(text, position).and_then(alias_context_from_shortcut)
 }
 
-/// Filter a model catalog down to the effective alias rows a `*query`
+/// Filter a model catalog down to the effective alias rows a `=query`
 /// shortcut may expand to, in canonical catalog order.
 ///
 /// Reuses [`filter_model_completion_entries`] with a synthesized `@query`
@@ -133,12 +135,12 @@ pub fn filter_model_alias_shortcut_entries(
         .collect()
 }
 
-/// Filter a model catalog down to concrete model rows a `**query` shortcut may
+/// Filter a model catalog down to concrete model rows a `==query` shortcut may
 /// expand to, in canonical catalog order.
 ///
 /// The complete catalog is passed through [`filter_model_completion_entries`]
 /// before provider rows are removed, because provider-scoped queries such as
-/// `**codex/gpt` need provider rows to decide the scope.
+/// `==codex/gpt` need provider rows to decide the scope.
 pub fn filter_explicit_model_shortcut_entries(
     entries: &[ModelCompletionEntryWire],
     query: &str,
@@ -217,26 +219,27 @@ fn detect_model_shortcut_in_document(
         return None;
     }
     let (start, end) = whitespace_token_bounds(text, cursor)?;
-    if !text.get(start..)?.starts_with('*')
+    let token = text.get(start..end)?;
+    let leading_markers =
+        leading_ascii_marker_count(token, MODEL_SHORTCUT_MARKER);
+    if leading_markers == 0
         || !shortcut_left_boundary(text, start)
         || excluded_position(document, position, start)
     {
         return None;
     }
 
-    let token = text.get(start..end)?;
-    let leading_stars = leading_ascii_star_count(token);
-    let kind = match leading_stars {
+    let kind = match leading_markers {
         1 => ModelShortcutKind::Alias,
         2 => ModelShortcutKind::Model,
         _ => return None,
     };
-    let trigger_end = start + leading_stars;
+    let trigger_end = start + leading_markers;
     if cursor < trigger_end {
         return None;
     }
     let suffix = text.get(trigger_end..end)?;
-    if suffix.contains('*') {
+    if suffix.bytes().any(|byte| byte == MODEL_SHORTCUT_MARKER) {
         return None;
     }
     let query = text.get(trigger_end..cursor)?;
@@ -276,8 +279,8 @@ fn alias_context_from_shortcut(
     })
 }
 
-fn leading_ascii_star_count(token: &str) -> usize {
-    token.bytes().take_while(|byte| *byte == b'*').count()
+fn leading_ascii_marker_count(token: &str, marker: u8) -> usize {
+    token.bytes().take_while(|byte| *byte == marker).count()
 }
 
 fn selected_canonical_shortcut_value(
@@ -341,7 +344,7 @@ fn model_directive_replacement(value: &str) -> String {
 /// Build the expansion preview, the edit's `new_text`, the edit range's end
 /// byte offset, and the post-edit caret byte offset.
 ///
-/// `edit_end` normally equals `end` (the edit touches only the star token),
+/// `edit_end` normally equals `end` (the edit touches only the shortcut token),
 /// except when the token is immediately followed by one ASCII space: that
 /// space is consumed into the edit range and one space is reinserted at the
 /// end of `new_text`, so the edit stays self-contained and the caret is
@@ -609,45 +612,45 @@ mod tests {
 
     #[test]
     fn detects_start_space_and_logical_line_boundaries() {
-        assert_eq!(context("*", 0, 1).query, "");
-        assert_eq!(context("Explain *la", 0, 11).query, "la");
-        assert_eq!(context("one\n*sm", 1, 3).query, "sm");
-        assert_eq!(context("one\n  *sm", 1, 5).query, "sm");
+        assert_eq!(context("=", 0, 1).query, "");
+        assert_eq!(context("Explain =la", 0, 11).query, "la");
+        assert_eq!(context("one\n=sm", 1, 3).query, "sm");
+        assert_eq!(context("one\n  =sm", 1, 5).query, "sm");
     }
 
     #[test]
     fn detects_model_shortcut_context_without_alias_wrapper_fallback() {
-        let model = shortcut_context("Review **gpt", 0, 12);
+        let model = shortcut_context("Review ==gpt", 0, 12);
         assert_eq!(model.kind, ModelShortcutKind::Model);
         assert_eq!(model.query, "gpt");
-        assert_eq!(model.token, "**gpt");
+        assert_eq!(model.token, "==gpt");
         assert_eq!(model.caret, pos(0, 12));
         assert_eq!(model.replacement_range.start, pos(0, 7));
         assert_eq!(model.replacement_range.end, pos(0, 12));
         assert_eq!(
-            detect_model_alias_shortcut_context("Review **gpt", pos(0, 12)),
+            detect_model_alias_shortcut_context("Review ==gpt", pos(0, 12)),
             None
         );
 
-        let alias = shortcut_context("Review *la", 0, 10);
+        let alias = shortcut_context("Review =la", 0, 10);
         assert_eq!(alias.kind, ModelShortcutKind::Alias);
         assert_eq!(alias.query, "la");
 
-        let crlf = shortcut_context("one\r\n  **gpt", 1, 7);
+        let crlf = shortcut_context("one\r\n  ==gpt", 1, 7);
         assert_eq!(crlf.kind, ModelShortcutKind::Model);
         assert_eq!(crlf.query, "gpt");
     }
 
     #[test]
-    fn rejects_embedded_escaped_tabs_and_completed_emphasis() {
+    fn rejects_embedded_escaped_tabs_and_completed_equals_pairs() {
         for (text, position) in [
-            ("a*b", pos(0, 3)),
-            ("path/*", pos(0, 6)),
-            (r"\*", pos(0, 2)),
-            ("one\t*la", pos(0, 7)),
-            ("**bold", pos(0, 2)),
-            ("*emphasis*", pos(0, 5)),
-            ("*@large", pos(0, 7)),
+            ("a=b", pos(0, 3)),
+            ("path/=", pos(0, 6)),
+            (r"\=", pos(0, 2)),
+            ("one\t=la", pos(0, 7)),
+            ("==bold", pos(0, 2)),
+            ("=emphasis=", pos(0, 5)),
+            ("=@large", pos(0, 7)),
         ] {
             assert_eq!(
                 detect_model_alias_shortcut_context(text, position),
@@ -657,27 +660,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_literal_model_star_tokens() {
+    fn rejects_literal_model_equals_tokens() {
         for (text, position) in [
-            ("**", pos(0, 1)),
-            ("***", pos(0, 3)),
-            ("**bold**", pos(0, 4)),
-            ("**gpt**", pos(0, 5)),
-            ("a**b", pos(0, 4)),
-            ("path/**", pos(0, 7)),
-            (r"\**", pos(0, 3)),
-            ("one\t**gpt", pos(0, 9)),
+            ("==", pos(0, 1)),
+            ("===", pos(0, 3)),
+            ("==bold==", pos(0, 4)),
+            ("==gpt==", pos(0, 5)),
+            ("a==b", pos(0, 4)),
+            ("path/==", pos(0, 7)),
+            (r"\==", pos(0, 3)),
+            ("one\t==gpt", pos(0, 9)),
         ] {
             assert_eq!(model_shortcut_context(text, position), None);
         }
     }
 
     #[test]
+    fn ignores_legacy_star_shortcut_tokens() {
+        for (text, position) in [
+            ("*", pos(0, 1)),
+            ("*la", pos(0, 3)),
+            ("**", pos(0, 2)),
+            ("**gpt", pos(0, 5)),
+            ("Use *la", pos(0, 7)),
+            ("Use **gpt", pos(0, 9)),
+        ] {
+            assert_eq!(model_shortcut_context(text, position), None);
+            assert_eq!(
+                detect_model_alias_shortcut_context(text, position),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn plans_full_token_replacement_from_mid_token_caret() {
-        let planned = plan("Explain *laX later", 0, 11, "@large");
+        let planned = plan("Explain =laX later", 0, 11, "@large");
         assert_eq!(planned.edit.new_text, "%m:@large ");
         assert_eq!(
-            apply("Explain *laX later", &planned.edit),
+            apply("Explain =laX later", &planned.edit),
             "Explain %m:@large later"
         );
         assert_eq!(planned.caret, pos(0, 18));
@@ -685,39 +706,39 @@ mod tests {
 
     #[test]
     fn preserves_or_adds_whitespace_after_expansion() {
-        let at_end = plan("Use *la", 0, 7, "@large");
+        let at_end = plan("Use =la", 0, 7, "@large");
         assert_eq!(at_end.edit.new_text, "%m:@large ");
-        assert_eq!(apply("Use *la", &at_end.edit), "Use %m:@large ");
+        assert_eq!(apply("Use =la", &at_end.edit), "Use %m:@large ");
         assert_eq!(at_end.caret, pos(0, 14));
 
-        let before_one_space = plan("Use *la now", 0, 7, "@large");
+        let before_one_space = plan("Use =la now", 0, 7, "@large");
         assert_eq!(before_one_space.edit.new_text, "%m:@large ");
         assert_eq!(
-            apply("Use *la now", &before_one_space.edit),
+            apply("Use =la now", &before_one_space.edit),
             "Use %m:@large now"
         );
         assert_eq!(before_one_space.caret, pos(0, 14));
 
-        let before_space = plan("Use *la   now", 0, 7, "@large");
+        let before_space = plan("Use =la   now", 0, 7, "@large");
         assert_eq!(before_space.edit.new_text, "%m:@large ");
         assert_eq!(
-            apply("Use *la   now", &before_space.edit),
+            apply("Use =la   now", &before_space.edit),
             "Use %m:@large   now"
         );
         assert_eq!(before_space.caret, pos(0, 14));
 
-        let before_tab = plan("Use *la\tnow", 0, 7, "@large");
+        let before_tab = plan("Use =la\tnow", 0, 7, "@large");
         assert_eq!(before_tab.edit.new_text, "%m:@large");
         assert_eq!(
-            apply("Use *la\tnow", &before_tab.edit),
+            apply("Use =la\tnow", &before_tab.edit),
             "Use %m:@large\tnow"
         );
         assert_eq!(before_tab.caret, pos(0, 13));
 
-        let before_newline = plan("Use *la\nnow", 0, 7, "@large");
+        let before_newline = plan("Use =la\nnow", 0, 7, "@large");
         assert_eq!(before_newline.edit.new_text, "%m:@large ");
         assert_eq!(
-            apply("Use *la\nnow", &before_newline.edit),
+            apply("Use =la\nnow", &before_newline.edit),
             "Use %m:@large \nnow"
         );
         assert_eq!(before_newline.caret, pos(0, 14));
@@ -726,20 +747,20 @@ mod tests {
     #[test]
     fn rejects_literal_regions_and_frontmatter() {
         for (text, position) in [
-            ("`*la`", pos(0, 3)),
-            ("```text\n*la\n```", pos(1, 3)),
+            ("`=la`", pos(0, 3)),
+            ("```text\n=la\n```", pos(1, 3)),
             (
-                "%xprompts_enabled:false\n*la\n%xprompts_enabled:true\n",
+                "%xprompts_enabled:false\n=la\n%xprompts_enabled:true\n",
                 pos(1, 3),
             ),
-            ("---\nname: *la\n---\nbody", pos(1, 9)),
-            ("%model:*la", pos(0, 10)),
-            ("{{*la}}", pos(0, 5)),
-            ("{{ *la }}", pos(0, 6)),
-            ("{% if *la %}", pos(0, 9)),
-            ("{# *la #}", pos(0, 6)),
-            ("prefix {{\n  *la\n}} suffix", pos(1, 5)),
-            ("{{ *la", pos(0, 6)),
+            ("---\nname: =la\n---\nbody", pos(1, 9)),
+            ("%model:=la", pos(0, 10)),
+            ("{{=la}}", pos(0, 5)),
+            ("{{ =la }}", pos(0, 6)),
+            ("{% if =la %}", pos(0, 9)),
+            ("{# =la #}", pos(0, 6)),
+            ("prefix {{\n  =la\n}} suffix", pos(1, 5)),
+            ("{{ =la", pos(0, 6)),
         ] {
             assert_eq!(
                 detect_model_alias_shortcut_context(text, position),
@@ -758,7 +779,7 @@ mod tests {
         ];
         assert_eq!(
             plan_model_alias_shortcut_edit(
-                "Use *la",
+                "Use =la",
                 pos(0, 7),
                 &entries,
                 "@scout"
@@ -767,7 +788,7 @@ mod tests {
         );
         assert_eq!(
             plan_model_alias_shortcut_edit(
-                "Use *la",
+                "Use =la",
                 pos(0, 7),
                 &entries,
                 "large-model"
@@ -776,7 +797,7 @@ mod tests {
         );
         assert_eq!(
             plan_model_alias_shortcut_edit(
-                "Use *la",
+                "Use =la",
                 pos(0, 7),
                 &entries,
                 "@launch"
@@ -841,7 +862,7 @@ mod tests {
         ];
 
         let planned = model_shortcut_edit(
-            "Use **faX later",
+            "Use ==faX later",
             pos(0, 8),
             &entries,
             "claude-fable-5",
@@ -851,13 +872,13 @@ mod tests {
         assert_eq!(planned.value, "claude-fable-5");
         assert_eq!(planned.edit.new_text, "%m:claude-fable-5 ");
         assert_eq!(
-            apply("Use **faX later", &planned.edit),
+            apply("Use ==faX later", &planned.edit),
             "Use %m:claude-fable-5 later"
         );
         assert_eq!(planned.caret, pos(0, 22));
 
         let scoped = model_shortcut_edit(
-            "Use **claude/fa",
+            "Use ==claude/fa",
             pos(0, 15),
             &entries,
             "claude/claude-fable-5",
@@ -868,7 +889,7 @@ mod tests {
 
         assert_eq!(
             model_shortcut_edit(
-                "Use **claude/fa",
+                "Use ==claude/fa",
                 pos(0, 15),
                 &entries,
                 "claude-fable-5",
@@ -876,12 +897,12 @@ mod tests {
             None
         );
         assert_eq!(
-            model_shortcut_edit("Use **fa", pos(0, 8), &entries, "@large"),
+            model_shortcut_edit("Use ==fa", pos(0, 8), &entries, "@large"),
             None
         );
         assert_eq!(
             model_shortcut_edit(
-                "Use **claude",
+                "Use ==claude",
                 pos(0, 12),
                 &entries,
                 "claude/"
@@ -911,7 +932,7 @@ mod tests {
             );
             assert_eq!(
                 model_shortcut_edit(
-                    "Use **gpt",
+                    "Use ==gpt",
                     pos(0, 9),
                     &unsafe_entries,
                     unsafe_value
@@ -923,7 +944,7 @@ mod tests {
 
         let alias_entries = vec![entry("@large", "user_alias")];
         let planned = plan_model_alias_shortcut_edit(
-            "Use *la",
+            "Use =la",
             pos(0, 7),
             &alias_entries,
             "@large",
@@ -934,7 +955,7 @@ mod tests {
         let unsafe_alias_entries = vec![entry("@bad\0alias", "user_alias")];
         assert_eq!(
             plan_model_alias_shortcut_edit(
-                "Use *bad",
+                "Use =bad",
                 pos(0, 8),
                 &unsafe_alias_entries,
                 "@bad\0alias",
@@ -952,7 +973,7 @@ mod tests {
         ];
 
         let punctuation = model_shortcut_edit(
-            "Use **gptX later",
+            "Use ==gptX later",
             pos(0, 9),
             &entries,
             "gpt-5.6_sol.alpha+preview",
@@ -960,12 +981,12 @@ mod tests {
         .unwrap();
         assert_eq!(punctuation.value, "gpt-5.6_sol.alpha+preview");
         assert_eq!(
-            apply("Use **gptX later", &punctuation.edit),
+            apply("Use ==gptX later", &punctuation.edit),
             "Use %m:gpt-5.6_sol.alpha+preview later"
         );
 
         let nested = model_shortcut_edit(
-            "Use **opencode/anthropic/",
+            "Use ==opencode/anthropic/",
             pos(0, 25),
             &entries,
             "opencode/anthropic/claude-sonnet-4-5",
@@ -980,7 +1001,7 @@ mod tests {
 
     #[test]
     fn utf16_positions_survive_unicode_and_crlf() {
-        let text = "🙂 *la\r\nnext";
+        let text = "🙂 =la\r\nnext";
         let detected = context(text, 0, 6);
         assert_eq!(detected.replacement_range.start, pos(0, 3));
         assert_eq!(detected.replacement_range.end, pos(0, 6));
@@ -1033,13 +1054,13 @@ mod tests {
     #[test]
     fn planned_caret_always_equals_end_of_applied_edit() {
         for (text, character) in [
-            ("Use *la", 7),
-            ("Use *la now", 7),
-            ("Use *la   now", 7),
-            ("Use *la\tnow", 7),
-            ("Use *la\nnow", 7),
-            ("Explain *laX later", 11),
-            ("🙂 *la\r\nnext", 6),
+            ("Use =la", 7),
+            ("Use =la now", 7),
+            ("Use =la   now", 7),
+            ("Use =la\tnow", 7),
+            ("Use =la\nnow", 7),
+            ("Explain =laX later", 11),
+            ("🙂 =la\r\nnext", 6),
         ] {
             let planned = plan(text, 0, character, "@large");
             assert_eq!(

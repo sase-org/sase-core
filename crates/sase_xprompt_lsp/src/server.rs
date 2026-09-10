@@ -332,10 +332,10 @@ impl XpromptLspServer {
             ));
         }
 
-        // The `*alias` shortcut is also document-local (the shared detector
+        // The `=alias` shortcut is also document-local (the shared detector
         // already excludes placeholder/directive/literal zones), and its
         // model catalog is a synchronous file read, so classify it before
-        // any catalog refresh too. A valid star context owns the response
+        // any catalog refresh too. A valid equals context owns the response
         // even when no alias matches, so this never falls through to the
         // generic classifier below.
         if let Some(context) = editor_detect_model_alias_shortcut_context(
@@ -1544,7 +1544,7 @@ impl LanguageServer for XpromptLspServer {
                         ",".to_string(),
                         "+".to_string(),
                         "<".to_string(),
-                        "*".to_string(),
+                        "=".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -2219,13 +2219,13 @@ fn model_completion_list(partial: &str, path: Option<&Path>) -> CompletionList {
     }
 }
 
-/// Build the `*alias` shortcut completion response for a detected star
+/// Build the `=alias` shortcut completion response for a detected equals
 /// context: filter the model catalog to effective alias rows through the
 /// shared Rust filter, validate and plan each candidate's edit through the
 /// shared edit planner, and hand both to [`model_alias_shortcut_completion_response`]
 /// for LSP rendering. Returns the (possibly empty) shortcut response
 /// unconditionally; the caller never falls through to unrelated completion
-/// once a star context is detected.
+/// once an equals context is detected.
 fn model_alias_shortcut_completion(
     text: &str,
     position: EditorPosition,
@@ -2250,7 +2250,7 @@ fn model_alias_shortcut_completion(
     model_alias_shortcut_completion_response(candidates, context)
 }
 
-/// Build the `**model` shortcut completion response for a detected double-star
+/// Build the `==model` shortcut completion response for a detected double-marker
 /// context. The complete catalog is filtered through the shared model shortcut
 /// filter so provider-scoped queries can use provider rows even though only
 /// concrete model rows are displayed.
@@ -7063,7 +7063,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advertises_model_alias_shortcut_trigger_character() {
+    async fn advertises_model_shortcut_trigger_character() {
         let (service, _) = LspService::new(|client| {
             XpromptLspServer::with_bridge(
                 client,
@@ -7082,10 +7082,11 @@ mod tests {
             .and_then(|completion| completion.trigger_characters)
             .unwrap_or_default();
 
-        assert!(triggers.contains(&"*".to_string()), "{triggers:?}");
+        assert!(triggers.contains(&"=".to_string()), "{triggers:?}");
+        assert!(!triggers.contains(&"*".to_string()), "{triggers:?}");
     }
 
-    // --- `*alias` shortcut completion ---------------------------------------
+    // --- `=alias` shortcut completion ---------------------------------------
 
     fn model_alias_shortcut_service(
         catalog_path: Option<&Path>,
@@ -7131,7 +7132,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*", 0, 1).await;
+        let items = shortcut_items_at(server, "=", 0, 1).await;
 
         assert_eq!(
             items
@@ -7150,7 +7151,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let lower = shortcut_items_at(server, "*sc", 0, 3).await;
+        let lower = shortcut_items_at(server, "=sc", 0, 3).await;
         assert_eq!(
             lower
                 .iter()
@@ -7159,7 +7160,7 @@ mod tests {
             vec!["@scout"]
         );
 
-        let upper = shortcut_items_at(server, "*SC", 0, 3).await;
+        let upper = shortcut_items_at(server, "=SC", 0, 3).await;
         assert_eq!(
             upper
                 .iter()
@@ -7178,7 +7179,7 @@ mod tests {
         let server = service.inner();
 
         let items =
-            shortcut_items_at(server, "Explain the plan.\n  *sc", 1, 5).await;
+            shortcut_items_at(server, "Explain the plan.\n  =sc", 1, 5).await;
 
         assert_eq!(
             items
@@ -7197,11 +7198,11 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*", 0, 1).await;
+        let items = shortcut_items_at(server, "=", 0, 1).await;
 
         assert_eq!(items.len(), 3);
         for item in &items {
-            assert_eq!(item.filter_text.as_deref(), Some("*"));
+            assert_eq!(item.filter_text.as_deref(), Some("="));
         }
         assert_eq!(items[0].sort_text.as_deref(), Some("0000"));
         assert_eq!(items[1].sort_text.as_deref(), Some("0001"));
@@ -7220,7 +7221,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*sc", 0, 3).await;
+        let items = shortcut_items_at(server, "=sc", 0, 3).await;
         let item = &items[0];
 
         assert_eq!(item.label, "@scout");
@@ -7262,8 +7263,8 @@ mod tests {
         let server = service.inner();
 
         // Caret sits between "sc" and the trailing "X" garbage; the whole
-        // "*scX" token is replaced, "X" included, not just the typed prefix.
-        let items = shortcut_items_at(server, "Use *scX later", 0, 7).await;
+        // "=scX" token is replaced, "X" included, not just the typed prefix.
+        let items = shortcut_items_at(server, "Use =scX later", 0, 7).await;
         assert_eq!(items.len(), 1);
         let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
         else {
@@ -7284,9 +7285,9 @@ mod tests {
         let server = service.inner();
 
         for (text, character, expected_end, expected_new_text) in [
-            ("Use *sc", 7, 7, "%m:@scout "),
-            ("Use *sc\tnow", 7, 7, "%m:@scout"),
-            ("Use *sc\nnow", 7, 7, "%m:@scout "),
+            ("Use =sc", 7, 7, "%m:@scout "),
+            ("Use =sc\tnow", 7, 7, "%m:@scout"),
+            ("Use =sc\nnow", 7, 7, "%m:@scout "),
         ] {
             let items = shortcut_items_at(server, text, 0, character).await;
             assert_eq!(items.len(), 1, "text={text:?}");
@@ -7313,7 +7314,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*zzz", 0, 4).await;
+        let items = shortcut_items_at(server, "=zzz", 0, 4).await;
 
         assert!(items.is_empty());
     }
@@ -7323,7 +7324,7 @@ mod tests {
         let service = model_alias_shortcut_service(None);
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*", 0, 1).await;
+        let items = shortcut_items_at(server, "=", 0, 1).await;
 
         assert!(items.is_empty());
     }
@@ -7336,31 +7337,79 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "*", 0, 1).await;
+        let items = shortcut_items_at(server, "=", 0, 1).await;
 
         assert!(items.is_empty());
     }
 
     #[tokio::test]
-    async fn model_alias_shortcut_leaves_protected_star_to_ordinary_completion()
-    {
+    async fn model_alias_shortcut_leaves_protected_equals_to_ordinary_completion(
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("model_catalog.json");
         write_model_catalog(&catalog_path);
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        // A star inside an active `%model:` value is excluded by the shared
+        // An equals marker inside an active `%model:` value is excluded by the shared
         // detector, so ordinary `%model:` value completion still answers —
         // it is never hijacked into (or dropped by) the shortcut path.
         let response = server
-            .completion_for_text("%model:*la".to_string(), Position::new(0, 10))
+            .completion_for_text("%model:=la".to_string(), Position::new(0, 10))
             .await
             .expect("expected ordinary directive completion");
         assert!(
             matches!(response, CompletionResponse::Array(_)),
             "expected the ordinary %model: completion array, not a shortcut list"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_star_shortcuts_do_not_open_model_shortcut_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let catalog_path = temp.path().join("model_catalog.json");
+        write_enriched_model_catalog(&catalog_path);
+        let service = model_alias_shortcut_service(Some(&catalog_path));
+        let server = service.inner();
+
+        for (text, character) in [
+            ("*", 1),
+            ("*sc", 3),
+            ("**", 2),
+            ("**gpt", 5),
+            ("Use *sc", 7),
+            ("Use **gpt", 9),
+        ] {
+            let response = server
+                .completion_for_text(
+                    text.to_string(),
+                    Position::new(0, character),
+                )
+                .await;
+            assert!(
+                !completion_response_contains_model_shortcut_edit(response),
+                "legacy star text should not produce a model shortcut edit for {text:?}"
+            );
+        }
+    }
+
+    fn completion_response_contains_model_shortcut_edit(
+        response: Option<CompletionResponse>,
+    ) -> bool {
+        let Some(response) = response else {
+            return false;
+        };
+        let items = match response {
+            CompletionResponse::Array(items) => items,
+            CompletionResponse::List(list) => list.items,
+        };
+        items.into_iter().any(|item| {
+            matches!(
+                item.text_edit,
+                Some(CompletionTextEdit::Edit(edit))
+                    if edit.new_text.starts_with("%m:")
+            )
+        })
     }
 
     #[tokio::test]
@@ -7371,7 +7420,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "**", 0, 2).await;
+        let items = shortcut_items_at(server, "==", 0, 2).await;
 
         assert_eq!(
             items
@@ -7383,7 +7432,7 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| item.kind == Some(CompletionItemKind::VALUE)));
-        assert_eq!(items[0].filter_text.as_deref(), Some("**"));
+        assert_eq!(items[0].filter_text.as_deref(), Some("=="));
         assert_eq!(items[0].preselect, Some(true));
     }
 
@@ -7395,12 +7444,12 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "Use **claude/fa", 0, 15).await;
+        let items = shortcut_items_at(server, "Use ==claude/fa", 0, 15).await;
 
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.label, "claude/claude-fable-5");
-        assert_eq!(item.filter_text.as_deref(), Some("**claude/fa"));
+        assert_eq!(item.filter_text.as_deref(), Some("==claude/fa"));
         let details = item.label_details.as_ref().expect("label details");
         assert_eq!(
             details.detail.as_deref(),
@@ -7441,11 +7490,11 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "Use **fa", 0, 8).await;
+        let items = shortcut_items_at(server, "Use ==fa", 0, 8).await;
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "claude-fable-5");
-        assert_eq!(items[0].filter_text.as_deref(), Some("**fa"));
+        assert_eq!(items[0].filter_text.as_deref(), Some("==fa"));
         let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
         else {
             panic!("expected text edit");
@@ -7464,7 +7513,7 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let items = shortcut_items_at(server, "Use **gpt", 0, 9).await;
+        let items = shortcut_items_at(server, "Use ==gpt", 0, 9).await;
 
         assert_eq!(
             items
@@ -7480,19 +7529,19 @@ mod tests {
         assert_eq!(edit.new_text, "%m:gpt-safe ");
 
         let unsafe_only =
-            shortcut_items_at(server, "Use **unsafe", 0, 12).await;
+            shortcut_items_at(server, "Use ==unsafe", 0, 12).await;
         assert!(unsafe_only.is_empty());
     }
 
     #[tokio::test]
-    async fn model_shortcut_backspace_transitions_between_star_kinds() {
+    async fn model_shortcut_backspace_transitions_between_marker_kinds() {
         let temp = tempfile::tempdir().unwrap();
         let catalog_path = temp.path().join("model_catalog.json");
         write_enriched_model_catalog(&catalog_path);
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let filtered = shortcut_items_at(server, "**gpt", 0, 5).await;
+        let filtered = shortcut_items_at(server, "==gpt", 0, 5).await;
         assert_eq!(
             filtered
                 .iter()
@@ -7501,7 +7550,7 @@ mod tests {
             vec!["gpt-5.6-sol"]
         );
 
-        let bare_model = shortcut_items_at(server, "**", 0, 2).await;
+        let bare_model = shortcut_items_at(server, "==", 0, 2).await;
         assert_eq!(
             bare_model
                 .iter()
@@ -7510,7 +7559,7 @@ mod tests {
             vec!["opus", "gpt-5.6-sol"]
         );
 
-        let alias = shortcut_items_at(server, "*", 0, 1).await;
+        let alias = shortcut_items_at(server, "=", 0, 1).await;
         assert_eq!(
             alias
                 .iter()
@@ -7528,18 +7577,18 @@ mod tests {
         let service = model_alias_shortcut_service(Some(&catalog_path));
         let server = service.inner();
 
-        let no_match = shortcut_items_at(server, "**zzz", 0, 5).await;
+        let no_match = shortcut_items_at(server, "==zzz", 0, 5).await;
         assert!(no_match.is_empty());
 
         let missing_catalog_service = model_alias_shortcut_service(None);
         let missing =
-            shortcut_items_at(missing_catalog_service.inner(), "**", 0, 2)
+            shortcut_items_at(missing_catalog_service.inner(), "==", 0, 2)
                 .await;
         assert!(missing.is_empty());
 
         let response = server
             .completion_for_text(
-                "%model:**gpt".to_string(),
+                "%model:==gpt".to_string(),
                 Position::new(0, 12),
             )
             .await

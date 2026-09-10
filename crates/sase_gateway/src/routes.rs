@@ -6369,11 +6369,12 @@ exit 4
         agent_name: &str,
     ) {
         for _ in 0..50 {
-            let events = state
-                .event_hub
-                .replay_after("0000000000000000")
-                .unwrap()
-                .unwrap();
+            let Some(events) =
+                state.event_hub.replay_after("0000000000000000").unwrap()
+            else {
+                tokio::time::sleep(StdDuration::from_millis(20)).await;
+                continue;
+            };
             if events.iter().any(|event| {
                 matches!(
                     &event.payload,
@@ -6492,7 +6493,7 @@ exit 4
         let running_path = tmp
             .path()
             .join("projects")
-            .join("proj")
+            .join("sase")
             .join("artifacts")
             .join("ace-run")
             .join("20260906120000")

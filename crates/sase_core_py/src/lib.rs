@@ -2149,7 +2149,7 @@ fn py_model_shortcut_edit(
 }
 
 /// Filter a `%model:`-shaped catalog down to concrete model rows a
-/// `**query` shortcut may expand to, in canonical catalog order.
+/// `==query` shortcut may expand to, in canonical catalog order.
 #[pyfunction]
 #[pyo3(name = "filter_explicit_model_shortcut_entries")]
 fn py_filter_explicit_model_shortcut_entries(
@@ -2200,8 +2200,8 @@ fn py_model_alias_shortcut_edit(
 }
 
 /// Filter a `%model:`-shaped catalog down to the effective alias rows a
-/// `*query` shortcut may expand to, in canonical catalog order. ACE's star
-/// shortcut menu and `sase-xprompt-lsp`'s `*` completion both build their
+/// `=query` shortcut may expand to, in canonical catalog order. ACE's equals
+/// shortcut menu and `sase-xprompt-lsp`'s `=` completion both build their
 /// candidate rows from this one binding so alias filtering never drifts
 /// between the two frontends.
 #[pyfunction]
@@ -18705,7 +18705,7 @@ mod tests {
             let context = module
                 .getattr("model_shortcut_context")
                 .unwrap()
-                .call1(("🙂 **gp", position.clone_ref(py)))
+                .call1(("🙂 ==gp", position.clone_ref(py)))
                 .unwrap();
             assert_eq!(
                 py_to_json_value(&context).unwrap(),
@@ -18713,7 +18713,7 @@ mod tests {
                     "schema_version": 1,
                     "kind": "model",
                     "query": "gp",
-                    "token": "**gp",
+                    "token": "==gp",
                     "caret": {"line": 0, "character": 7},
                     "token_range": {
                         "start": {"line": 0, "character": 3},
@@ -18725,6 +18725,13 @@ mod tests {
                     }
                 })
             );
+
+            let legacy_star_context = module
+                .getattr("model_shortcut_context")
+                .unwrap()
+                .call1(("🙂 **gp", position.clone_ref(py)))
+                .unwrap();
+            assert!(legacy_star_context.is_none());
 
             let filtered = module
                 .getattr("filter_explicit_model_shortcut_entries")
@@ -18749,7 +18756,7 @@ mod tests {
                 .getattr("model_shortcut_edit")
                 .unwrap()
                 .call1((
-                    "🙂 **codex/gp",
+                    "🙂 ==codex/gp",
                     scoped_position.clone_ref(py),
                     entries.clone_ref(py),
                     "codex/gpt-5.6-sol",
@@ -18777,7 +18784,7 @@ mod tests {
                 .getattr("model_shortcut_edit")
                 .unwrap()
                 .call1((
-                    "🙂 **codex/gp",
+                    "🙂 ==codex/gp",
                     scoped_position,
                     entries,
                     "gpt-5.6-sol",
@@ -18813,7 +18820,7 @@ mod tests {
                     .getattr("model_shortcut_edit")
                     .unwrap()
                     .call1((
-                        "Use **gpt",
+                        "Use ==gpt",
                         unsafe_position.clone_ref(py),
                         unsafe_entries.clone_ref(py),
                         unsafe_value,
@@ -18833,7 +18840,7 @@ mod tests {
         Python::with_gil(|py| {
             let position_error = py_model_shortcut_context(
                 py,
-                "**",
+                "==",
                 PyDict::new_bound(py).as_any(),
             )
             .unwrap_err()
@@ -18909,14 +18916,14 @@ mod tests {
             let context = module
                 .getattr("model_alias_shortcut_context")
                 .unwrap()
-                .call1(("🙂 *la", position.clone_ref(py)))
+                .call1(("🙂 =la", position.clone_ref(py)))
                 .unwrap();
             assert_eq!(
                 py_to_json_value(&context).unwrap(),
                 json!({
                     "schema_version": 1,
                     "query": "la",
-                    "token": "*la",
+                    "token": "=la",
                     "caret": {"line": 0, "character": 6},
                     "token_range": {
                         "start": {"line": 0, "character": 3},
@@ -18929,11 +18936,18 @@ mod tests {
                 })
             );
 
+            let legacy_star_context = module
+                .getattr("model_alias_shortcut_context")
+                .unwrap()
+                .call1(("🙂 *la", position.clone_ref(py)))
+                .unwrap();
+            assert!(legacy_star_context.is_none());
+
             let edit = module
                 .getattr("model_alias_shortcut_edit")
                 .unwrap()
                 .call1((
-                    "🙂 *la",
+                    "🙂 =la",
                     position.clone_ref(py),
                     entries.clone_ref(py),
                     "@large",
@@ -18959,7 +18973,7 @@ mod tests {
             let stale = module
                 .getattr("model_alias_shortcut_edit")
                 .unwrap()
-                .call1(("🙂 *la", position, entries, "@small"))
+                .call1(("🙂 =la", position, entries, "@small"))
                 .unwrap();
             assert!(stale.is_none());
         });
@@ -18971,7 +18985,7 @@ mod tests {
         Python::with_gil(|py| {
             let error = py_model_alias_shortcut_context(
                 py,
-                "*",
+                "=",
                 PyDict::new_bound(py).as_any(),
             )
             .unwrap_err()

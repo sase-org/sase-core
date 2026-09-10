@@ -1,4 +1,4 @@
-//! JSON-RPC stdio coverage for the `*alias` shortcut completion trigger.
+//! JSON-RPC stdio coverage for the `=alias` shortcut completion trigger.
 //!
 //! This file deliberately holds exactly one test. The model catalog path is
 //! read from the process environment at `initialize` time (mirroring the real
@@ -16,7 +16,7 @@ use tower_lsp_server::{LspService, Server};
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
 
 /// Every [`HelperHostBridge`] method already defaults to
-/// `BridgeUnavailable`; the `*alias` shortcut never calls the helper bridge
+/// `BridgeUnavailable`; the `=alias` shortcut never calls the helper bridge
 /// (its catalog is the launcher-materialized file), so no override is needed.
 struct NoopBridge;
 
@@ -104,7 +104,7 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
                     "uri": uri,
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "Use *la"
+                    "text": "Use =la"
                 }
             }
         }),
@@ -148,7 +148,7 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
     assert_eq!(items.len(), 1);
     let item = &items[0];
     assert_eq!(item["label"], "@large");
-    assert_eq!(item["filterText"], "*la");
+    assert_eq!(item["filterText"], "=la");
     assert_eq!(item["preselect"], json!(true));
     assert_eq!(item["labelDetails"]["detail"], json!(" → %m:@large"));
     assert_eq!(
@@ -164,14 +164,53 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
 
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "Use *la"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 7}
+            }
+        }),
+    )
+    .await;
+    let mut legacy_result = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            legacy_result = Some(message["result"].clone());
+            break;
+        }
+    }
+    let legacy_result = legacy_result.expect("expected legacy star response");
+    assert!(
+        !json_result_contains_model_shortcut_edit(&legacy_result),
+        "legacy star text should not produce a model shortcut edit"
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(3)
+        != Some(4)
     {}
     write_message(
         &mut client_writer,
@@ -211,4 +250,18 @@ async fn read_message(reader: &mut tokio::io::DuplexStream) -> Value {
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+fn json_result_contains_model_shortcut_edit(result: &Value) -> bool {
+    let items = result
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array());
+    items.is_some_and(|items| {
+        items.iter().any(|item| {
+            item.pointer("/textEdit/newText")
+                .and_then(Value::as_str)
+                .is_some_and(|new_text| new_text.starts_with("%m:"))
+        })
+    })
 }

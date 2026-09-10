@@ -1,4 +1,4 @@
-//! JSON-RPC stdio coverage for the `**model` shortcut completion trigger.
+//! JSON-RPC stdio coverage for the `==model` shortcut completion trigger.
 //!
 //! The model catalog path is read from the process environment at
 //! `initialize` time, so this file keeps all transition coverage in one test.
@@ -119,7 +119,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
                     "uri": uri,
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "Use *"
+                    "text": "Use ="
                 }
             }
         }),
@@ -132,26 +132,26 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
         uri,
         2,
         5,
-        json!({"triggerKind": 2, "triggerCharacter": "*"}),
+        json!({"triggerKind": 2, "triggerCharacter": "="}),
     )
     .await;
     assert_eq!(labels(&alias), vec!["@large"]);
-    assert_eq!(alias["items"][0]["filterText"], json!("*"));
+    assert_eq!(alias["items"][0]["filterText"], json!("="));
 
-    did_change(&mut client_writer, uri, 2, "Use **").await;
+    did_change(&mut client_writer, uri, 2, "Use ==").await;
     let bare_model = request_completion(
         &mut client_writer,
         &mut client_reader,
         uri,
         3,
         6,
-        json!({"triggerKind": 2, "triggerCharacter": "*"}),
+        json!({"triggerKind": 2, "triggerCharacter": "="}),
     )
     .await;
     assert_eq!(labels(&bare_model), vec!["opus", "gpt-5.6-sol"]);
-    assert_eq!(bare_model["items"][0]["filterText"], json!("**"));
+    assert_eq!(bare_model["items"][0]["filterText"], json!("=="));
 
-    did_change(&mut client_writer, uri, 3, "Use **gp").await;
+    did_change(&mut client_writer, uri, 3, "Use ==gp").await;
     let filtered_model = request_completion(
         &mut client_writer,
         &mut client_reader,
@@ -163,7 +163,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
     .await;
     assert_eq!(labels(&filtered_model), vec!["gpt-5.6-sol"]);
     let item = &filtered_model["items"][0];
-    assert_eq!(item["filterText"], json!("**gp"));
+    assert_eq!(item["filterText"], json!("==gp"));
     assert_eq!(item["labelDetails"]["detail"], json!(" → %m:gpt-5.6-sol"));
     assert_eq!(item["detail"], json!("%m:gpt-5.6-sol · codex"));
     assert_eq!(
@@ -177,7 +177,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
         })
     );
 
-    did_change(&mut client_writer, uri, 4, "Use **unsafe").await;
+    did_change(&mut client_writer, uri, 4, "Use ==unsafe").await;
     let unsafe_only = request_completion(
         &mut client_writer,
         &mut client_reader,
@@ -189,7 +189,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
     .await;
     assert!(labels(&unsafe_only).is_empty());
 
-    did_change(&mut client_writer, uri, 5, "Use **").await;
+    did_change(&mut client_writer, uri, 5, "Use ==").await;
     let back_to_bare_model = request_completion(
         &mut client_writer,
         &mut client_reader,
@@ -201,7 +201,7 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
     .await;
     assert_eq!(labels(&back_to_bare_model), vec!["opus", "gpt-5.6-sol"]);
 
-    did_change(&mut client_writer, uri, 6, "Use *").await;
+    did_change(&mut client_writer, uri, 6, "Use =").await;
     let back_to_alias = request_completion(
         &mut client_writer,
         &mut client_reader,
@@ -213,12 +213,27 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
     .await;
     assert_eq!(labels(&back_to_alias), vec!["@large"]);
 
-    write_message(
+    did_change(&mut client_writer, uri, 7, "Use **gp").await;
+    let legacy_star = request_completion_result(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": null}),
+        &mut client_reader,
+        uri,
+        8,
+        8,
+        json!({"triggerKind": 3}),
     )
     .await;
-    read_response(&mut client_reader, 8).await;
+    assert!(
+        !json_result_contains_model_shortcut_edit(&legacy_star),
+        "legacy star text should not produce a model shortcut edit"
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response(&mut client_reader, 9).await;
     write_message(
         &mut client_writer,
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
@@ -257,6 +272,21 @@ async fn request_completion(
     character: u32,
     context: Value,
 ) -> Value {
+    let result =
+        request_completion_result(writer, reader, uri, id, character, context)
+            .await;
+    assert_eq!(result["isIncomplete"], json!(true));
+    result
+}
+
+async fn request_completion_result(
+    writer: &mut tokio::io::DuplexStream,
+    reader: &mut tokio::io::DuplexStream,
+    uri: &str,
+    id: i64,
+    character: u32,
+    context: Value,
+) -> Value {
     write_message(
         writer,
         json!({
@@ -271,9 +301,7 @@ async fn request_completion(
         }),
     )
     .await;
-    let result = read_response(reader, id).await;
-    assert_eq!(result["isIncomplete"], json!(true));
-    result
+    read_response(reader, id).await
 }
 
 fn labels(result: &Value) -> Vec<&str> {
@@ -283,6 +311,20 @@ fn labels(result: &Value) -> Vec<&str> {
         .iter()
         .map(|item| item["label"].as_str().expect("label"))
         .collect()
+}
+
+fn json_result_contains_model_shortcut_edit(result: &Value) -> bool {
+    let items = result
+        .get("items")
+        .and_then(Value::as_array)
+        .or_else(|| result.as_array());
+    items.is_some_and(|items| {
+        items.iter().any(|item| {
+            item.pointer("/textEdit/newText")
+                .and_then(Value::as_str)
+                .is_some_and(|new_text| new_text.starts_with("%m:"))
+        })
+    })
 }
 
 async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {

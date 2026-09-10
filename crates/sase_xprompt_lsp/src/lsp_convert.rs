@@ -311,8 +311,8 @@ fn model_completion_sort_group(kind: &str) -> u8 {
     }
 }
 
-/// Render `*alias` shortcut rows as an *incomplete* list whose `filterText`
-/// is the star prefix actually typed (`*` plus the detected context's
+/// Render `=alias` shortcut rows as an *incomplete* list whose `filterText`
+/// is the equals prefix actually typed (`=` plus the detected context's
 /// `query`), and whose first row is preselected.
 ///
 /// Each `(candidate, edit)` pair reuses [`model_completion_candidate`]'s
@@ -323,17 +323,17 @@ fn model_completion_sort_group(kind: &str) -> u8 {
 /// detail, `filterText`, and `sortText` are shortcut-specific. Mirrors
 /// [`at_reference_completion_response`]'s incomplete-list/filterText idiom:
 /// a client that prefix-filters the inserted `%m:@large` text against the
-/// typed `*la` would drop the row without `filterText`/`isIncomplete`
+/// typed `=la` would drop the row without `filterText`/`isIncomplete`
 /// telling it to re-request instead.
 ///
 /// Callers pass an empty `candidates` list as-is (no matching alias, or no
 /// catalog) rather than falling back to unrelated completion; an empty
-/// *shortcut* response is still owned by this star context.
+/// shortcut response is still owned by this equals context.
 pub fn model_alias_shortcut_completion_response(
     candidates: Vec<(CompletionCandidate, ModelAliasShortcutEditWire)>,
     context: &ModelAliasShortcutContextWire,
 ) -> CompletionResponse {
-    let filter_text = format!("*{}", context.query);
+    let filter_text = format!("={}", context.query);
     CompletionResponse::List(lsp_types::CompletionList {
         is_incomplete: true,
         items: candidates
@@ -376,15 +376,15 @@ fn model_alias_shortcut_completion_item(
     item
 }
 
-/// Render `**model` shortcut rows as an incomplete list owned by the detected
-/// double-star context.
+/// Render `==model` shortcut rows as an incomplete list owned by the detected
+/// double-marker context.
 pub fn model_shortcut_completion_response(
     candidates: Vec<(CompletionCandidate, ModelShortcutEditWire)>,
     context: &ModelShortcutContextWire,
 ) -> CompletionResponse {
     let filter_text = match context.kind {
-        ModelShortcutKind::Alias => format!("*{}", context.query),
-        ModelShortcutKind::Model => format!("**{}", context.query),
+        ModelShortcutKind::Alias => format!("={}", context.query),
+        ModelShortcutKind::Model => format!("=={}", context.query),
     };
     CompletionResponse::List(lsp_types::CompletionList {
         is_incomplete: true,
