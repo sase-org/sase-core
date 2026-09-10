@@ -739,6 +739,13 @@ use sase_core::artifact_file::{
 };
 use sase_core::artifact_link::{
     artifact_link_alias_producer_id as core_artifact_link_alias_producer_id,
+    artifact_link_cutover_attestation as core_artifact_link_cutover_attestation,
+    artifact_link_cutover_baseline_event as core_artifact_link_cutover_baseline_event,
+    artifact_link_cutover_import_identity as core_artifact_link_cutover_import_identity,
+    artifact_link_cutover_marker as core_artifact_link_cutover_marker,
+    artifact_link_cutover_marker_canonical_json as core_artifact_link_cutover_marker_canonical_json,
+    artifact_link_cutover_progress as core_artifact_link_cutover_progress,
+    artifact_link_cutover_read_state as core_artifact_link_cutover_read_state,
     artifact_link_derived_producer_id as core_artifact_link_derived_producer_id,
     artifact_link_event_canonical_json as core_artifact_link_event_canonical_json,
     artifact_link_event_digest as core_artifact_link_event_digest,
@@ -747,6 +754,8 @@ use sase_core::artifact_link::{
     artifact_link_event_validate_bytes as core_artifact_link_event_validate_bytes,
     artifact_link_event_validate_path as core_artifact_link_event_validate_path,
     artifact_link_machine_run_id as core_artifact_link_machine_run_id,
+    artifact_link_outbox_classify_line as core_artifact_link_outbox_classify_line,
+    artifact_link_outbox_legacy_conversion as core_artifact_link_outbox_legacy_conversion,
     artifact_link_publication_due as core_artifact_link_publication_due,
     artifact_link_publication_mark_attempt as core_artifact_link_publication_mark_attempt,
     artifact_link_publication_receipt as core_artifact_link_publication_receipt,
@@ -764,6 +773,7 @@ use sase_core::artifact_link::{
     companion_md_path as core_companion_md_path,
     lookup_artifact_relation as core_lookup_artifact_relation,
     merge_artifact_link_indexes as core_merge_artifact_link_indexes,
+    parse_artifact_link_cutover_marker as core_parse_artifact_link_cutover_marker,
     parse_artifact_link_frontmatter_inlet as core_parse_artifact_link_frontmatter_inlet,
     parse_artifact_link_ref_parts as core_parse_artifact_link_ref_parts,
     parse_links_block as core_parse_links_block,
@@ -777,13 +787,19 @@ use sase_core::artifact_link::{
     upsert_artifact_link_row as core_upsert_artifact_link_row,
     upsert_links_block as core_upsert_links_block,
     validate_artifact_link_row as core_validate_artifact_link_row,
-    ArtifactLinkAliasWire, ArtifactLinkError, ArtifactLinkEventWire,
-    ArtifactLinkIndexWire, ArtifactLinkOriginWire,
-    ArtifactLinkOwnerRequirementWire, ArtifactLinkPublicationAttemptWire,
-    ArtifactLinkPublicationEvidenceWire,
+    ArtifactLinkAliasWire, ArtifactLinkCutoverBaselineEventRequestWire,
+    ArtifactLinkCutoverBaselineEventWire, ArtifactLinkCutoverEventStoreWire,
+    ArtifactLinkCutoverImportIdentityWire,
+    ArtifactLinkCutoverImportRequestWire, ArtifactLinkCutoverMarkerWire,
+    ArtifactLinkCutoverProgressRequestWire, ArtifactLinkCutoverReadRootWire,
+    ArtifactLinkCutoverRoleWire, ArtifactLinkCutoverStateWire,
+    ArtifactLinkError, ArtifactLinkEventWire, ArtifactLinkIndexWire,
+    ArtifactLinkOriginWire, ArtifactLinkOwnerRequirementWire,
+    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationEvidenceWire,
     ArtifactLinkPublicationObservationWire, ArtifactLinkPublicationRecordWire,
     ArtifactLinkRowWire, ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
     ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
+    ARTIFACT_LINK_CUTOVER_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_PUBLICATION_OWNERSHIP_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
@@ -6162,6 +6178,123 @@ fn artifact_link_aliases_from_py_list(
     Ok(aliases)
 }
 
+fn artifact_link_cutover_marker_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverMarkerWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "marker is not a valid ArtifactLinkCutoverMarkerWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_import_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverImportRequestWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactLinkCutoverImportRequestWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_baseline_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverBaselineEventRequestWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactLinkCutoverBaselineEventRequestWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_event_store_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverEventStoreWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "event_store is not a valid ArtifactLinkCutoverEventStoreWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_import_identity_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverImportIdentityWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "import is not a valid ArtifactLinkCutoverImportIdentityWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_roles_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ArtifactLinkCutoverRoleWire>> {
+    let mut roles = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        let dict = item.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err(format!("roles[{index}] must be a dict"))
+        })?;
+        roles.push(serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "roles[{index}] is not a valid ArtifactLinkCutoverRoleWire dict: {error}"
+                ))
+            },
+        )?);
+    }
+    Ok(roles)
+}
+
+fn artifact_link_cutover_baseline_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverBaselineEventWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "baseline_event is not a valid ArtifactLinkCutoverBaselineEventWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_cutover_state_from_str(
+    value: &str,
+) -> PyResult<ArtifactLinkCutoverStateWire> {
+    match value.trim() {
+        "fenced" => Ok(ArtifactLinkCutoverStateWire::Fenced),
+        "imported" => Ok(ArtifactLinkCutoverStateWire::Imported),
+        _ => Err(PyValueError::new_err(
+            "artifact-link cutover state must be `fenced` or `imported`",
+        )),
+    }
+}
+
+fn artifact_link_cutover_read_roots_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<ArtifactLinkCutoverReadRootWire>> {
+    let mut roots = Vec::with_capacity(list.len());
+    for (index, item) in list.iter().enumerate() {
+        roots.push(serde_json::from_value(py_to_json_value(&item)?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "roots[{index}] is not a valid ArtifactLinkCutoverReadRootWire dict: {error}"
+                ))
+            },
+        )?);
+    }
+    Ok(roots)
+}
+
+fn artifact_link_cutover_progress_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkCutoverProgressRequestWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ArtifactLinkCutoverProgressRequestWire dict: {error}"
+        ))
+    })
+}
+
 /// Return the v2 artifact-link row schema version.
 #[pyfunction]
 #[pyo3(name = "artifact_link_row_schema_version")]
@@ -6174,6 +6307,199 @@ fn py_artifact_link_row_schema_version() -> u64 {
 #[pyo3(name = "artifact_link_event_schema_version")]
 fn py_artifact_link_event_schema_version() -> u64 {
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION
+}
+
+/// Return the artifact-link cutover marker wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_wire_schema_version")]
+fn py_artifact_link_cutover_wire_schema_version() -> u64 {
+    ARTIFACT_LINK_CUTOVER_WIRE_SCHEMA_VERSION
+}
+
+/// Strictly parse and validate one artifact-link cutover marker JSON string.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_marker_parse")]
+fn py_artifact_link_cutover_marker_parse(
+    py: Python<'_>,
+    payload: &str,
+) -> PyResult<PyObject> {
+    let marker = core_parse_artifact_link_cutover_marker(payload)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(marker).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return canonical marker JSON for one validated artifact-link cutover marker.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_marker_canonical_json")]
+fn py_artifact_link_cutover_marker_canonical_json(
+    marker: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let marker = artifact_link_cutover_marker_from_pydict(marker)?;
+    core_artifact_link_cutover_marker_canonical_json(&marker)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Build a validated artifact-link cutover marker.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_marker_build")]
+fn py_artifact_link_cutover_marker_build(
+    py: Python<'_>,
+    state: &str,
+    project_key: &str,
+    event_store: &Bound<'_, PyDict>,
+    import_identity: &Bound<'_, PyDict>,
+    roles: &Bound<'_, PyList>,
+    baseline_event: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let state = artifact_link_cutover_state_from_str(state)?;
+    let event_store =
+        artifact_link_cutover_event_store_from_pydict(event_store)?;
+    let import_identity =
+        artifact_link_cutover_import_identity_from_pydict(import_identity)?;
+    let roles = artifact_link_cutover_roles_from_py_list(roles)?;
+    let baseline_event =
+        artifact_link_cutover_baseline_from_pydict(baseline_event)?;
+    let marker = core_artifact_link_cutover_marker(
+        state,
+        project_key,
+        &event_store,
+        &import_identity,
+        &roles,
+        &baseline_event,
+    )
+    .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(marker).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the deterministic identity for one legacy-index import request.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_import_identity")]
+fn py_artifact_link_cutover_import_identity(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = artifact_link_cutover_import_request_from_pydict(request)?;
+    let identity = core_artifact_link_cutover_import_identity(&request)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(identity).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Build the deterministic baseline-import event for one cutover identity.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_baseline_event")]
+fn py_artifact_link_cutover_baseline_event(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = artifact_link_cutover_baseline_request_from_pydict(request)?;
+    let event = core_artifact_link_cutover_baseline_event(&request)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(event).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the operator attestation token for one cutover marker.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_attestation")]
+fn py_artifact_link_cutover_attestation(
+    marker: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let marker = artifact_link_cutover_marker_from_pydict(marker)?;
+    core_artifact_link_cutover_attestation(&marker)
+        .map_err(artifact_link_error_to_pyerr)
+}
+
+/// Return reader-facing cutover state for root marker observations.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_read_state")]
+fn py_artifact_link_cutover_read_state(
+    py: Python<'_>,
+    roots: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let roots = artifact_link_cutover_read_roots_from_py_list(roots)?;
+    let state = core_artifact_link_cutover_read_state(&roots)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(state).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return resumable cutover progress from expected marker and root observations.
+#[pyfunction]
+#[pyo3(name = "artifact_link_cutover_progress")]
+fn py_artifact_link_cutover_progress(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = artifact_link_cutover_progress_request_from_pydict(request)?;
+    let progress = core_artifact_link_cutover_progress(&request)
+        .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(progress).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Classify one physical artifact-link outbox JSONL line.
+#[pyfunction]
+#[pyo3(name = "artifact_link_outbox_classify_line")]
+fn py_artifact_link_outbox_classify_line(
+    py: Python<'_>,
+    line: &str,
+    project_key: &str,
+) -> PyResult<PyObject> {
+    let classification =
+        core_artifact_link_outbox_classify_line(line, project_key);
+    let value = serde_json::to_value(classification).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Convert or retire one legacy row-only outbox entry.
+#[pyfunction]
+#[pyo3(name = "artifact_link_outbox_legacy_conversion")]
+fn py_artifact_link_outbox_legacy_conversion(
+    py: Python<'_>,
+    entry: &Bound<'_, PyDict>,
+    project_key: &str,
+    baseline_rows: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let entry_value = py_to_json_value(entry.as_any())?;
+    let mut rows: Vec<ArtifactLinkRowWire> =
+        Vec::with_capacity(baseline_rows.len());
+    for (index, item) in baseline_rows.iter().enumerate() {
+        rows.push(
+            serde_json::from_value::<ArtifactLinkRowWire>(py_to_json_value(&item)?)
+                .map_err(|error| {
+                    PyValueError::new_err(format!(
+                        "baseline_rows[{index}] is not a valid ArtifactLinkRowWire dict: {error}"
+                    ))
+                })?,
+        );
+    }
+    let conversion = core_artifact_link_outbox_legacy_conversion(
+        &entry_value,
+        project_key,
+        &rows,
+    )
+    .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(conversion).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Return the stable producer recorded on derived-fact link events.
@@ -16278,6 +16604,41 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_link_event_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_marker_parse,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_marker_canonical_json,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_marker_build,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_import_identity,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_cutover_baseline_event,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_cutover_attestation, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_cutover_read_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_cutover_progress, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_outbox_classify_line,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_outbox_legacy_conversion,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_derived_producer_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_alias_producer_id, m)?)?;
     m.add_function(wrap_pyfunction!(py_artifact_link_machine_run_id, m)?)?;
@@ -22197,6 +22558,17 @@ MENTORS:
             for name in [
                 "artifact_link_row_schema_version",
                 "artifact_link_event_schema_version",
+                "artifact_link_cutover_wire_schema_version",
+                "artifact_link_cutover_marker_parse",
+                "artifact_link_cutover_marker_canonical_json",
+                "artifact_link_cutover_marker_build",
+                "artifact_link_cutover_import_identity",
+                "artifact_link_cutover_baseline_event",
+                "artifact_link_cutover_attestation",
+                "artifact_link_cutover_read_state",
+                "artifact_link_cutover_progress",
+                "artifact_link_outbox_classify_line",
+                "artifact_link_outbox_legacy_conversion",
                 "artifact_link_derived_producer_id",
                 "artifact_link_alias_producer_id",
                 "artifact_link_machine_run_id",
@@ -22243,6 +22615,7 @@ MENTORS:
             }
             assert_eq!(py_artifact_link_row_schema_version(), 2);
             assert_eq!(py_artifact_link_event_schema_version(), 1);
+            assert_eq!(py_artifact_link_cutover_wire_schema_version(), 1);
             assert_eq!(
                 py_artifact_link_derived_producer_id(),
                 "sase.artifact-link-derived"
@@ -22263,6 +22636,153 @@ MENTORS:
                 py_artifact_link_stable_operation_id(stable_parts.bind(py))
                     .unwrap();
             assert_eq!(stable_id.len(), 32);
+            let cutover_request_value = json!({
+                "project_key": "gh_acme__widget",
+                "roles": [{
+                    "role": "plans",
+                    "kind": "plan",
+                    "head": "abc123",
+                    "links_tree": "sha256:abc123",
+                    "remote_url": "<none>",
+                    "commit_time": "2026-09-10T00:00:00Z"
+                }],
+                "rows": [{
+                    "schema_version": 2,
+                    "source_ref": "agent:reader",
+                    "relation": "read",
+                    "target_ref": "plan:202609/old.md",
+                    "description": "read the artifact",
+                    "origin": "read",
+                    "created_by": "agent:reader",
+                    "created_at": "2026-09-09T12:00:00Z",
+                    "uses": 1
+                }]
+            });
+            let cutover_request_object =
+                json_value_to_py(py, &cutover_request_value).unwrap();
+            let cutover_request = cutover_request_object
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap();
+            let import_identity =
+                py_artifact_link_cutover_import_identity(py, cutover_request)
+                    .unwrap();
+            let import_identity_value =
+                py_to_json_value(import_identity.bind(py)).unwrap();
+            assert!(import_identity_value["import_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("legacy-v2-links-"));
+            let baseline_request_value = json!({
+                "project_key": "gh_acme__widget",
+                "import": import_identity_value,
+                "rows": cutover_request_value["rows"]
+            });
+            let baseline_request_object =
+                json_value_to_py(py, &baseline_request_value).unwrap();
+            let baseline_event = py_artifact_link_cutover_baseline_event(
+                py,
+                baseline_request_object
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let baseline_event_value =
+                py_to_json_value(baseline_event.bind(py)).unwrap();
+            let baseline_event_object =
+                json_value_to_py(py, &baseline_event_value).unwrap();
+            let baseline_digest = py_artifact_link_event_digest(
+                baseline_event_object.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let baseline_path =
+                py_artifact_link_event_path_for_digest(&baseline_digest)
+                    .unwrap();
+            let event_store_value = json!({
+                "schema_version": 1,
+                "minimum_event_schema_version": 1
+            });
+            let event_store_object =
+                json_value_to_py(py, &event_store_value).unwrap();
+            let marker_roles_value = json!([{
+                "role": "plans",
+                "kind": "plan",
+                "head": "abc123",
+                "links_tree": "sha256:abc123",
+                "remote_url": "<none>"
+            }]);
+            let marker_roles_object =
+                json_value_to_py(py, &marker_roles_value).unwrap();
+            let baseline_identity_value = json!({
+                "digest": baseline_digest,
+                "path": baseline_path
+            });
+            let baseline_identity_object =
+                json_value_to_py(py, &baseline_identity_value).unwrap();
+            let marker = py_artifact_link_cutover_marker_build(
+                py,
+                "fenced",
+                "gh_acme__widget",
+                event_store_object.bind(py).downcast::<PyDict>().unwrap(),
+                import_identity.bind(py).downcast::<PyDict>().unwrap(),
+                marker_roles_object.bind(py).downcast::<PyList>().unwrap(),
+                baseline_identity_object
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let marker_dict = marker.bind(py).downcast::<PyDict>().unwrap();
+            let marker_json =
+                py_artifact_link_cutover_marker_canonical_json(marker_dict)
+                    .unwrap();
+            let parsed =
+                py_artifact_link_cutover_marker_parse(py, &marker_json)
+                    .unwrap();
+            assert_eq!(
+                py_to_json_value(parsed.bind(py)).unwrap(),
+                py_to_json_value(marker.bind(py)).unwrap()
+            );
+            let attestation =
+                py_artifact_link_cutover_attestation(marker_dict).unwrap();
+            assert!(attestation.starts_with("fleet-capable-"));
+            let read_state_object = json_value_to_py(
+                py,
+                &json!([{"role": "plans", "marker": py_to_json_value(marker.bind(py)).unwrap()}]),
+            )
+            .unwrap();
+            let read_state = py_artifact_link_cutover_read_state(
+                py,
+                read_state_object.bind(py).downcast::<PyList>().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(read_state.bind(py)).unwrap()["state"],
+                json!("fenced")
+            );
+            let progress_object = json_value_to_py(
+                py,
+                &json!({
+                    "expected": py_to_json_value(marker.bind(py)).unwrap(),
+                    "roots": [{
+                        "role": "plans",
+                        "marker": py_to_json_value(marker.bind(py)).unwrap(),
+                        "marker_committed": true,
+                        "baseline_durable": false
+                    }]
+                }),
+            )
+            .unwrap();
+            let progress = py_artifact_link_cutover_progress(
+                py,
+                progress_object.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                py_to_json_value(progress.bind(py)).unwrap()["phase"],
+                json!("publish_baseline")
+            );
             assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
             assert_eq!(
                 py_artifact_link_publication_state_wire_schema_version(),

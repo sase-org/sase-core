@@ -1,6 +1,7 @@
 //! First-class artifact link graph: row schema, relation registry, managed
 //! tables, companion paths, and frontmatter inlet.
 
+mod cutover;
 mod events;
 mod inlet;
 mod managed_table;
@@ -12,6 +13,25 @@ mod relation;
 mod row_resolution;
 mod wire;
 
+pub use cutover::{
+    artifact_link_cutover_attestation, artifact_link_cutover_baseline_event,
+    artifact_link_cutover_import_identity, artifact_link_cutover_marker,
+    artifact_link_cutover_marker_canonical_json,
+    artifact_link_cutover_progress, artifact_link_cutover_read_state,
+    artifact_link_outbox_classify_line, artifact_link_outbox_legacy_conversion,
+    parse_artifact_link_cutover_marker,
+    ArtifactLinkCutoverBaselineEventRequestWire,
+    ArtifactLinkCutoverBaselineEventWire, ArtifactLinkCutoverEventStoreWire,
+    ArtifactLinkCutoverImportIdentityWire,
+    ArtifactLinkCutoverImportRequestWire, ArtifactLinkCutoverMarkerWire,
+    ArtifactLinkCutoverProgressRequestWire, ArtifactLinkCutoverProgressWire,
+    ArtifactLinkCutoverReadRootWire, ArtifactLinkCutoverReadStateWire,
+    ArtifactLinkCutoverRoleInputWire, ArtifactLinkCutoverRoleWire,
+    ArtifactLinkCutoverRootObservationWire, ArtifactLinkCutoverStateWire,
+    ArtifactLinkOutboxLegacyConversionWire,
+    ArtifactLinkOutboxLineClassificationWire,
+    ARTIFACT_LINK_CUTOVER_WIRE_SCHEMA_VERSION,
+};
 pub use events::{
     artifact_link_alias_producer_id, artifact_link_derived_producer_id,
     artifact_link_event_canonical_json, artifact_link_event_digest,
