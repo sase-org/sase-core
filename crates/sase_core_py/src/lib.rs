@@ -741,12 +741,14 @@ use sase_core::artifact_link::{
     artifact_link_derived_producer_id as core_artifact_link_derived_producer_id,
     artifact_link_event_canonical_json as core_artifact_link_event_canonical_json,
     artifact_link_event_digest as core_artifact_link_event_digest,
+    artifact_link_event_owner_requirements as core_artifact_link_event_owner_requirements,
     artifact_link_event_path_for_digest as core_artifact_link_event_path_for_digest,
     artifact_link_event_validate_bytes as core_artifact_link_event_validate_bytes,
     artifact_link_event_validate_path as core_artifact_link_event_validate_path,
     artifact_link_machine_run_id as core_artifact_link_machine_run_id,
     artifact_link_publication_due as core_artifact_link_publication_due,
     artifact_link_publication_mark_attempt as core_artifact_link_publication_mark_attempt,
+    artifact_link_publication_receipt as core_artifact_link_publication_receipt,
     artifact_link_publication_record_key as core_artifact_link_publication_record_key,
     artifact_link_publication_register_pending as core_artifact_link_publication_register_pending,
     artifact_link_stable_fact_created_at as core_artifact_link_stable_fact_created_at,
@@ -776,11 +778,13 @@ use sase_core::artifact_link::{
     validate_artifact_link_row as core_validate_artifact_link_row,
     ArtifactLinkAliasWire, ArtifactLinkError, ArtifactLinkEventWire,
     ArtifactLinkIndexWire, ArtifactLinkOriginWire,
-    ArtifactLinkPublicationAttemptWire, ArtifactLinkPublicationObservationWire,
-    ArtifactLinkPublicationRecordWire, ArtifactLinkRowWire,
-    ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
+    ArtifactLinkOwnerRequirementWire, ArtifactLinkPublicationAttemptWire,
+    ArtifactLinkPublicationEvidenceWire,
+    ArtifactLinkPublicationObservationWire, ArtifactLinkPublicationRecordWire,
+    ArtifactLinkRowWire, ArtifactMdPathRequestWire, ArtifactRowIdentityWire,
     ArtifactRowRefQueryWire, BeadLinkDirectionWire, ManagedTableTableWire,
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
+    ARTIFACT_LINK_PUBLICATION_OWNERSHIP_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_ROW_SCHEMA_VERSION,
     ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -6088,6 +6092,26 @@ fn artifact_link_publication_attempt_from_pydict(
     })
 }
 
+fn artifact_link_owner_requirements_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkOwnerRequirementWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "requirements is not a valid ArtifactLinkOwnerRequirementWire dict: {error}"
+        ))
+    })
+}
+
+fn artifact_link_publication_evidence_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<ArtifactLinkPublicationEvidenceWire> {
+    serde_json::from_value(py_to_json_value(dict.as_any())?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "evidence is not a valid ArtifactLinkPublicationEvidenceWire dict: {error}"
+        ))
+    })
+}
+
 fn artifact_link_event_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<ArtifactLinkEventWire> {
@@ -6206,6 +6230,53 @@ fn py_artifact_row_resolution_wire_schema_version() -> u64 {
 #[pyo3(name = "artifact_link_publication_state_wire_schema_version")]
 fn py_artifact_link_publication_state_wire_schema_version() -> u64 {
     u64::from(ARTIFACT_LINK_PUBLICATION_STATE_WIRE_SCHEMA_VERSION)
+}
+
+/// Return the artifact-link publication ownership wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_ownership_wire_schema_version")]
+fn py_artifact_link_publication_ownership_wire_schema_version() -> u64 {
+    ARTIFACT_LINK_PUBLICATION_OWNERSHIP_WIRE_SCHEMA_VERSION
+}
+
+/// Partition one link event's refs into publication owner requirements.
+#[pyfunction]
+#[pyo3(name = "artifact_link_event_owner_requirements")]
+fn py_artifact_link_event_owner_requirements<'py>(
+    py: Python<'py>,
+    event: &Bound<'py, PyDict>,
+    document_kinds: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let event = artifact_link_event_from_pydict(event)?;
+    let document_kinds =
+        strings_from_py_list(document_kinds, "document_kinds")?;
+    let requirements =
+        core_artifact_link_event_owner_requirements(&event, &document_kinds)
+            .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(requirements).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Decide whether one link event has a durable publication receipt.
+#[pyfunction]
+#[pyo3(name = "artifact_link_publication_receipt")]
+fn py_artifact_link_publication_receipt<'py>(
+    py: Python<'py>,
+    requirements: &Bound<'py, PyDict>,
+    evidence: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let requirements =
+        artifact_link_owner_requirements_from_pydict(requirements)?;
+    let evidence = artifact_link_publication_evidence_from_pydict(evidence)?;
+    let receipt =
+        core_artifact_link_publication_receipt(&requirements, &evidence)
+            .map_err(artifact_link_error_to_pyerr)?;
+    let value = serde_json::to_value(receipt).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 /// Return the stable state key for one artifact-link publication root.
@@ -16167,6 +16238,15 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        py_artifact_link_publication_ownership_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_link_event_owner_requirements,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_link_publication_receipt, m)?)?;
+    m.add_function(wrap_pyfunction!(
         py_artifact_link_publication_record_key,
         m
     )?)?;
@@ -22074,6 +22154,9 @@ MENTORS:
                 "artifact_link_events_reduce",
                 "artifact_row_resolution_wire_schema_version",
                 "artifact_link_publication_state_wire_schema_version",
+                "artifact_link_publication_ownership_wire_schema_version",
+                "artifact_link_event_owner_requirements",
+                "artifact_link_publication_receipt",
                 "artifact_link_publication_record_key",
                 "artifact_link_publication_register_pending",
                 "artifact_link_publication_due",
@@ -22125,6 +22208,10 @@ MENTORS:
             assert_eq!(py_artifact_row_resolution_wire_schema_version(), 1);
             assert_eq!(
                 py_artifact_link_publication_state_wire_schema_version(),
+                1
+            );
+            assert_eq!(
+                py_artifact_link_publication_ownership_wire_schema_version(),
                 1
             );
             let publication_key = py_artifact_link_publication_record_key(
@@ -22237,6 +22324,83 @@ MENTORS:
             let canonical_from_bytes =
                 py_to_json_value(canonical_from_bytes.bind(py)).unwrap();
             assert_eq!(canonical_from_bytes["digest"], json!(digest));
+            let document_kinds_object =
+                json_value_to_py(py, &json!(["plan"])).unwrap();
+            let document_kinds =
+                document_kinds_object.bind(py).downcast::<PyList>().unwrap();
+            let requirements = py_artifact_link_event_owner_requirements(
+                py,
+                event,
+                document_kinds,
+            )
+            .unwrap();
+            let requirements_bound = requirements.bind(py);
+            let requirements_value =
+                py_to_json_value(requirements_bound).unwrap();
+            assert_eq!(
+                requirements_value["document_refs"][0]["reference"],
+                json!("plan:202609/old.md")
+            );
+            let pending_evidence_object = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "resolved_roots": {},
+                    "forced_roots": [],
+                    "durable_roots": [],
+                    "bead_owner": false,
+                    "bead_receipt": false,
+                    "local_receipt": false
+                }),
+            )
+            .unwrap();
+            let pending_evidence = pending_evidence_object
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap();
+            let requirements_dict =
+                requirements_bound.downcast::<PyDict>().unwrap();
+            let pending_receipt = py_artifact_link_publication_receipt(
+                py,
+                requirements_dict,
+                pending_evidence,
+            )
+            .unwrap();
+            let pending_receipt =
+                py_to_json_value(pending_receipt.bind(py)).unwrap();
+            assert_eq!(pending_receipt["acknowledged"], json!(false));
+            assert!(pending_receipt["pending_reasons"][0]
+                .as_str()
+                .unwrap()
+                .contains("plan:202609/old.md"));
+            let acknowledged_evidence_object = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "resolved_roots": {"plan": "/tmp/plans"},
+                    "forced_roots": [],
+                    "durable_roots": ["/tmp/plans"],
+                    "bead_owner": false,
+                    "bead_receipt": false,
+                    "local_receipt": false
+                }),
+            )
+            .unwrap();
+            let acknowledged_evidence = acknowledged_evidence_object
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap();
+            let acknowledged_receipt = py_artifact_link_publication_receipt(
+                py,
+                requirements_dict,
+                acknowledged_evidence,
+            )
+            .unwrap();
+            let acknowledged_receipt =
+                py_to_json_value(acknowledged_receipt.bind(py)).unwrap();
+            assert_eq!(acknowledged_receipt["acknowledged"], json!(true));
 
             let put_value = json!({
                 "schema_version": 1,
