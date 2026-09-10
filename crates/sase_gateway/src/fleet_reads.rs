@@ -4,24 +4,24 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use sase_core::{
     agent_scan::{
         AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
         AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
         AgentArtifactScanOptionsWire, AgentMetaWire, DoneMarkerWire,
-        FamilyShellWire,
+        FamilyDismissalLineageCandidateWire, FamilyShellWire,
     },
     fleet_attention::{
         FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
         FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
     },
     fleet_contract::{
-        classify_cursor_replay, count_logical_agents,
+        classify_cache_freshness, classify_cursor_replay, count_logical_agents,
         cursor_replay_reason_to_resync_reason, ensure_installation_identity,
         fleet_content_read_limit, fleet_count_revision,
         fleet_project_eligibility_limit, instance_locator_key,
@@ -33,12 +33,13 @@ use sase_core::{
         validate_fleet_logical_batch_request,
         validate_fleet_project_eligibility_request,
         validate_fleet_replay_capacity, AgentInstanceLocatorWire,
-        CapabilitySetWire, ConnectionHealthWire, ContentHandleKindWire,
-        ContentHandleWire, CursorReplayClassificationWire,
-        CursorReplayRequestWire, FleetAuthoritativeSnapshotWire,
-        FleetCatalogPageWire, FleetCatalogQueryWire,
-        FleetContentReadRequestWire, FleetContentReadResponseWire,
-        FleetContractError, FleetDetailRequestWire, FleetDetailResponseWire,
+        CacheFreshnessRequestWire, CapabilitySetWire, ConnectionHealthWire,
+        ContentHandleKindWire, ContentHandleWire,
+        CursorReplayClassificationWire, CursorReplayRequestWire,
+        FleetAuthoritativeSnapshotWire, FleetCatalogPageWire,
+        FleetCatalogQueryWire, FleetContentReadRequestWire,
+        FleetContentReadResponseWire, FleetContractError,
+        FleetDetailRequestWire, FleetDetailResponseWire,
         FleetEventStreamItemWire, FleetInvalidationEventWire,
         FleetInvalidationKindWire, FleetLogicalAgentCountsRequestWire,
         FleetLogicalBatchRequestWire, FleetLogicalBatchResponseWire,
@@ -56,7 +57,12 @@ use sase_core::{
         FLEET_MUTATION_CAPABILITY_FORK, FLEET_MUTATION_CAPABILITY_RETRY,
         FLEET_MUTATION_CAPABILITY_STOP,
     },
+    fleet_presentation::{
+        decide_fleet_presentation, FleetPresentationCandidateWire,
+        FleetPresentationRequestWire,
+    },
     list_project_records, query_agent_artifact_index,
+    resolve_family_dismissal_lineage,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -64,6 +70,12 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex};
 
 const SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
 const FLEET_EVENT_BROADCAST_CAPACITY: usize = 256;
+/// Below this age a served snapshot reads as `Fresh`.
+const FLEET_SNAPSHOT_FRESH_SECONDS: f64 = 5.0;
+/// At or beyond this age a served snapshot reads as `Stale` and a read that
+/// is not already holding the refresh lock requires a rebuild attempt
+/// instead of serving the cached entry outright.
+const FLEET_SNAPSHOT_STALE_SECONDS: f64 = 60.0;
 
 #[derive(Clone)]
 pub struct FleetReadService {
@@ -128,7 +140,7 @@ impl FleetReadService {
     pub async fn summary(
         &self,
     ) -> Result<FleetSummaryResponseWire, FleetReadError> {
-        let snapshot = self.current_snapshot(false).await?;
+        let snapshot = self.stamped_snapshot(false).await?;
         Ok(FleetSummaryResponseWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             cursor: snapshot.wire.cursor,
@@ -142,7 +154,7 @@ impl FleetReadService {
         &self,
         query: FleetCatalogQueryWire,
     ) -> Result<FleetCatalogPageWire, FleetReadError> {
-        let snapshot = self.current_snapshot(false).await?;
+        let snapshot = self.stamped_snapshot(false).await?;
         let page = select_fleet_catalog_page(&query, &snapshot.wire.summaries)
             .map_err(FleetReadError::from)?;
         Ok(FleetCatalogPageWire {
@@ -161,7 +173,7 @@ impl FleetReadService {
     ) -> Result<FleetLogicalBatchResponseWire, FleetReadError> {
         validate_fleet_logical_batch_request(&request)
             .map_err(FleetReadError::from)?;
-        let snapshot = self.current_snapshot(false).await?;
+        let snapshot = self.stamped_snapshot(false).await?;
         let entries =
             select_fleet_logical_batch(&request, &snapshot.wire.summaries)
                 .map_err(FleetReadError::from)?;
@@ -181,7 +193,7 @@ impl FleetReadService {
     ) -> Result<FleetDetailResponseWire, FleetReadError> {
         let request = validate_fleet_detail_request(&request)
             .map_err(FleetReadError::from)?;
-        let snapshot = self.current_snapshot(false).await?;
+        let snapshot = self.stamped_snapshot(false).await?;
         let detail = snapshot
             .details_by_logical_key
             .get(&request.logical_key)
@@ -239,7 +251,7 @@ impl FleetReadService {
     pub async fn authoritative_snapshot(
         &self,
     ) -> Result<FleetAuthoritativeSnapshotWire, FleetReadError> {
-        Ok(self.current_snapshot(false).await?.wire)
+        Ok(self.stamped_snapshot(false).await?.wire)
     }
 
     pub async fn reconcile(
@@ -358,18 +370,53 @@ impl FleetReadService {
             .unwrap_or(0)
     }
 
+    /// Push the cached snapshot's build instant backward so it reads as
+    /// older than it really is, without a wall-clock sleep.
+    #[cfg(test)]
+    pub fn age_cache_for_test(&self, seconds: f64) {
+        if let Ok(mut cache) = self.inner.cache.lock() {
+            if let Some(snapshot) = cache.as_mut() {
+                snapshot.build_instant -= Duration::from_secs_f64(seconds);
+            }
+        }
+    }
+
+    /// Return the current snapshot with every row and the envelope stamped
+    /// with age-derived freshness. This is the accessor every read path that
+    /// serves rows to a caller should use.
+    async fn stamped_snapshot(
+        &self,
+        force: bool,
+    ) -> Result<CachedFleetSnapshot, FleetReadError> {
+        let mut snapshot = self.current_snapshot(force).await?;
+        let freshness = observation_freshness_for_age(
+            snapshot.build_instant.elapsed().as_secs_f64(),
+        )?;
+        snapshot.wire.freshness.freshness = freshness;
+        for summary in &mut snapshot.wire.summaries {
+            summary.freshness = freshness;
+        }
+        for summary in snapshot.summaries_by_logical_key.values_mut() {
+            summary.freshness = freshness;
+        }
+        for detail in snapshot.details_by_logical_key.values_mut() {
+            detail.summary.freshness = freshness;
+        }
+        Ok(snapshot)
+    }
+
     async fn current_snapshot(
         &self,
         force: bool,
     ) -> Result<CachedFleetSnapshot, FleetReadError> {
         if !force {
-            if let Some(snapshot) = self.cached_snapshot()? {
+            if let Some(snapshot) = self.unexpired_cached_snapshot()? {
                 return Ok(snapshot);
             }
         }
         let _guard = self.inner.refresh_lock.lock().await;
         if !force {
-            if let Some(snapshot) = self.cached_snapshot()? {
+            if let Some(snapshot) = self.unexpired_cached_snapshot()? {
                 return Ok(snapshot);
             }
         }
@@ -423,6 +470,24 @@ impl FleetReadService {
             .map(|snapshot| snapshot.clone())
     }
 
+    /// The cached snapshot, unless it has reached the stale threshold: an
+    /// aged-out entry is treated as a cache miss so the caller falls through
+    /// to a genuine rebuild attempt instead of serving a frozen snapshot
+    /// forever.
+    fn unexpired_cached_snapshot(
+        &self,
+    ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
+        let Some(snapshot) = self.cached_snapshot()? else {
+            return Ok(None);
+        };
+        if snapshot.build_instant.elapsed().as_secs_f64()
+            >= FLEET_SNAPSHOT_STALE_SECONDS
+        {
+            return Ok(None);
+        }
+        Ok(Some(snapshot))
+    }
+
     fn retain_previous_or_error(
         &self,
         previous: Option<CachedFleetSnapshot>,
@@ -449,6 +514,13 @@ struct CachedFleetSnapshot {
     details_by_logical_key: BTreeMap<String, ResolvedAgentDetailWire>,
     content_by_handle: BTreeMap<String, FleetContentSource>,
     refresh_count: u64,
+    /// Monotonic instant this snapshot was built (or last successfully
+    /// rebuilt). Every row's `observed_at_unix` and the envelope's
+    /// `refreshed_at_unix` are stamped from one build timestamp at the same
+    /// moment; this field is the seam that lets a later read derive honest
+    /// freshness from actual elapsed time instead of trusting a stored
+    /// label.
+    build_instant: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -529,10 +601,82 @@ fn build_snapshot_blocking(
     )
     .map_err(|_| FleetReadError::Backend("artifact_index".to_string()))?;
 
+    let build_instant = Instant::now();
+    let now_unix = current_unix_time();
+
+    // Obtain dismissal-lineage facts through the bounded core index API and
+    // resolve owner liveness once per candidate, so both are computed a
+    // single time per record instead of being re-derived per read path.
+    let lineage_candidates: Vec<FamilyDismissalLineageCandidateWire> = scan
+        .records
+        .iter()
+        .map(|record| FamilyDismissalLineageCandidateWire {
+            identity: record.artifact_dir.clone(),
+            project_name: record.project_name.clone(),
+            workflow_dir_name: record.workflow_dir_name.clone(),
+            timestamp: record.timestamp.clone(),
+        })
+        .collect();
+    let dismissed_by_identity: BTreeMap<String, bool> =
+        resolve_family_dismissal_lineage(
+            &request.index_path,
+            &lineage_candidates,
+        )
+        .map_err(|_| {
+            FleetReadError::Backend("family_dismissal_lineage".to_string())
+        })?
+        .into_iter()
+        .map(|result| (result.identity, result.family_root_dismissed))
+        .collect();
+
+    let mut liveness_by_identity = BTreeMap::new();
+    let mut presentation_candidates = Vec::with_capacity(scan.records.len());
+    for record in &scan.records {
+        let liveness = owner_liveness_for_record(record);
+        liveness_by_identity.insert(record.artifact_dir.clone(), liveness);
+        presentation_candidates.push(FleetPresentationCandidateWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            identity: record.artifact_dir.clone(),
+            liveness,
+            protected: record.waiting.is_some()
+                || record.pending_question.is_some(),
+            completion_time_unix: completion_time_for_record(record),
+            family_root_dismissed: dismissed_by_identity
+                .get(&record.artifact_dir)
+                .copied()
+                .unwrap_or(false),
+        });
+    }
+    let decision = decide_fleet_presentation(&FleetPresentationRequestWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        now_unix,
+        candidates: presentation_candidates,
+    })
+    .map_err(FleetReadError::from)?;
+    // Select the presentable set, then build details, content handles,
+    // summaries, and counts only from that set.
+    let presentable: BTreeSet<String> = decision
+        .current
+        .into_iter()
+        .chain(decision.recent_terminal)
+        .collect();
+
     let mut details = Vec::new();
     let mut content_by_handle = BTreeMap::new();
     for record in scan.records {
-        let resolved = resolve_record(&installation.installation_id, &record)?;
+        if !presentable.contains(&record.artifact_dir) {
+            continue;
+        }
+        let liveness = liveness_by_identity
+            .get(&record.artifact_dir)
+            .copied()
+            .unwrap_or(OwnerLivenessWire::Unknown);
+        let resolved = resolve_record(
+            &installation.installation_id,
+            &record,
+            liveness,
+            now_unix,
+        )?;
         for source in resolved.content_sources {
             content_by_handle.insert(source.handle.id.clone(), source);
         }
@@ -563,7 +707,7 @@ fn build_snapshot_blocking(
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             freshness: ObservationFreshnessWire::Fresh,
             partial: false,
-            refreshed_at_unix: Some(current_unix_time()),
+            refreshed_at_unix: Some(now_unix),
             error: None,
         },
     };
@@ -584,6 +728,7 @@ fn build_snapshot_blocking(
         details_by_logical_key,
         content_by_handle,
         refresh_count: request.prior_refresh_count.saturating_add(1),
+        build_instant,
     })
 }
 
@@ -595,6 +740,8 @@ struct ResolvedRecord {
 fn resolve_record(
     installation_id: &str,
     record: &AgentArtifactRecordWire,
+    liveness: OwnerLivenessWire,
+    build_unix: f64,
 ) -> Result<ResolvedRecord, FleetReadError> {
     let logical_locator = logical_locator_for_record(installation_id, record);
     let logical_key =
@@ -613,7 +760,6 @@ fn resolve_record(
         .map_err(FleetReadError::from)?;
     let (content_handles, content_sources) =
         content_handles_for_record(record, &logical_key, &row_revision)?;
-    let liveness = owner_liveness_for_record(record);
     let row_kind = row_kind_for_record(record);
     let is_terminal = record.done.is_some()
         || record.workflow_state.as_ref().is_some_and(|state| {
@@ -622,9 +768,21 @@ fn resolve_record(
                 "completed" | "failed" | "cancelled" | "noop"
             )
         });
+    // A Dead/NotProcess active-tier record (not yet marked done, not
+    // protected by a waiting/question marker) is terminal for presentation:
+    // it keeps its recorded lifecycle/status but loses current-instance and
+    // action capabilities, the same as a genuinely completed record.
+    let protected =
+        record.waiting.is_some() || record.pending_question.is_some();
+    let presentation_terminal = is_terminal
+        || (!protected
+            && matches!(
+                liveness,
+                OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+            ));
     let resource_caps = lifecycle_and_content_capabilities(
         row_kind,
-        is_terminal,
+        presentation_terminal,
         liveness,
         &content_handles,
         record.pending_question.is_some(),
@@ -648,11 +806,11 @@ fn resolve_record(
                     }
                 },
                 freshness: ObservationFreshnessWire::Fresh,
-                observed_at_unix: current_unix_time(),
+                observed_at_unix: build_unix,
                 row_kind,
-                current_instance: !is_terminal
+                current_instance: !presentation_terminal
                     && row_kind == FleetRowKindWire::AgentShell,
-                dismissable: is_terminal,
+                dismissable: presentation_terminal,
                 needs_attention: record.pending_question.is_some(),
                 occupied_runner_slot: row_kind == FleetRowKindWire::AgentShell
                     && liveness == OwnerLivenessWire::Alive,
@@ -1120,6 +1278,38 @@ fn current_unix_time() -> f64 {
         + f64::from(now.timestamp_subsec_micros()) / 1_000_000.0
 }
 
+fn observation_freshness_for_age(
+    age_seconds: f64,
+) -> Result<ObservationFreshnessWire, FleetReadError> {
+    let decision = classify_cache_freshness(&CacheFreshnessRequestWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        viewer_monotonic_elapsed_seconds: Some(age_seconds),
+        fresh_threshold_seconds: FLEET_SNAPSHOT_FRESH_SECONDS,
+        stale_threshold_seconds: FLEET_SNAPSHOT_STALE_SECONDS,
+    })
+    .map_err(FleetReadError::from)?;
+    Ok(decision.freshness)
+}
+
+/// Trustworthy completion time for presentation ranking/bounding:
+/// `done.finished_at` when present, else the record's own timestamp parsed
+/// to unix seconds. `record.timestamp` is always present and always in the
+/// compact `%Y%m%d%H%M%S` artifact-directory format, so it is a safe final
+/// fallback even when `done` is absent (a demoted dead-active record).
+fn completion_time_for_record(record: &AgentArtifactRecordWire) -> f64 {
+    if let Some(finished_at) =
+        record.done.as_ref().and_then(|done| done.finished_at)
+    {
+        return finished_at;
+    }
+    parse_record_timestamp(&record.timestamp).unwrap_or_else(current_unix_time)
+}
+
+fn parse_record_timestamp(value: &str) -> Option<f64> {
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
+    Some(parsed.and_utc().timestamp() as f64)
+}
+
 fn stable_revision(record: &AgentArtifactRecordWire) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(b"sase-fleet-row-revision-v1\0");
@@ -1363,6 +1553,7 @@ pub fn resync_item(
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use sase_core::fleet_contract::FleetStatusBucketWire;
     use serde_json::json;
     use tempfile::{tempdir, TempDir};
 
@@ -1376,8 +1567,19 @@ mod tests {
         let home = temp.path().to_path_buf();
         let projects = home.join("projects");
         seed_project(&projects, "proj");
-        seed_agent(&projects, "20260906120000", "alpha", "alpha output");
-        seed_agent(&projects, "20260906130000", "beta", "beta output");
+        // Recent-relative-to-now timestamps: the fleet presentation policy
+        // windows terminal presentation to the last seven days, so a fixed
+        // historical date would eventually fall outside that window and
+        // make these seeded rows silently vanish.
+        let now = Utc::now();
+        let alpha_ts = (now - chrono::Duration::minutes(2))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        let beta_ts = (now - chrono::Duration::minutes(1))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        seed_agent(&projects, &alpha_ts, "alpha", "alpha output");
+        seed_agent(&projects, &beta_ts, "beta", "beta output");
         sase_core::rebuild_agent_artifact_index(
             &home.join("agent_artifact_index.sqlite"),
             &projects,
@@ -1421,6 +1623,35 @@ mod tests {
                 "output_path": "output.txt"
             }),
         );
+        // Use this test process's own PID so `owner_liveness_for_record`
+        // resolves `Alive`: these fixtures represent ordinary current
+        // agents, and the presentation policy now treats a `NotProcess`
+        // active-tier record as terminal-for-presentation.
+        write_json(
+            &artifact.join("running.json"),
+            json!({"pid": std::process::id()}),
+        );
+    }
+
+    /// Seed an active-tier record whose PID (`0`) resolves deterministically
+    /// to `NotProcess` liveness, optionally as a tracked child of `parent`.
+    fn seed_dead_agent(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        parent: Option<&str>,
+    ) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        fs::create_dir_all(&artifact).unwrap();
+        let mut meta = json!({"name": name});
+        if let Some(parent) = parent {
+            meta["parent_timestamp"] = json!(parent);
+        }
+        write_json(&artifact.join("agent_meta.json"), meta);
         write_json(&artifact.join("running.json"), json!({"pid": 0}));
     }
 
@@ -1689,6 +1920,161 @@ mod tests {
         assert!(left.is_ok());
         assert!(right.is_ok());
         assert_eq!(service.refresh_count_for_test(), 1);
+    }
+
+    #[tokio::test]
+    async fn aged_cache_triggers_exactly_one_coalesced_rebuild() {
+        let (_temp, service) = seed_home();
+        service.summary().await.unwrap();
+        assert_eq!(service.refresh_count_for_test(), 1);
+
+        service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+        let (left, right) = tokio::join!(service.summary(), service.summary());
+        assert!(left.is_ok());
+        assert!(right.is_ok());
+        assert_eq!(
+            service.refresh_count_for_test(),
+            2,
+            "a stale cache should trigger exactly one rebuild, coalesced \
+             across concurrent readers"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_rebuild_retains_stale_partial_prior_snapshot() {
+        let (_temp, service) = seed_home();
+        let first = service.summary().await.unwrap();
+        assert_eq!(first.counts.logical_agent_total, 2);
+        assert_eq!(service.refresh_count_for_test(), 1);
+
+        service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+        // Replace the index file with a directory so the next rebuild
+        // attempt fails deterministically instead of relying on timing.
+        fs::remove_file(service.index_path()).unwrap();
+        fs::create_dir_all(service.index_path()).unwrap();
+
+        let second = service.summary().await.unwrap();
+        assert_eq!(
+            second.counts.logical_agent_total, 2,
+            "a failed rebuild must retain the previous snapshot's data"
+        );
+        assert_eq!(second.freshness.freshness, ObservationFreshnessWire::Stale);
+        assert!(second.freshness.partial);
+        assert!(second.freshness.error.is_some());
+        assert_eq!(
+            service.refresh_count_for_test(),
+            1,
+            "a failed rebuild must not be counted as a successful refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_active_leftovers_are_demoted_and_window_bounded() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let recent_ts = (now - chrono::Duration::minutes(5))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        let old_ts = (now - chrono::Duration::days(8))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        seed_dead_agent(&projects, &recent_ts, "recent-dead", None);
+        seed_dead_agent(&projects, &old_ts, "old-dead", None);
+        sase_core::rebuild_agent_artifact_index(
+            &home.join("agent_artifact_index.sqlite"),
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let service = FleetReadService::new(home);
+
+        let all = service
+            .catalog(FleetCatalogQueryWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                cursor: None,
+                limit: Some(10),
+                project_ids: Vec::new(),
+                query: None,
+                status_buckets: Vec::new(),
+                include_terminal: true,
+            })
+            .await
+            .unwrap();
+
+        let recent_row = all
+            .page
+            .rows
+            .iter()
+            .find(|row| {
+                row.labels.agent_label.as_deref() == Some("recent-dead")
+            })
+            .expect("recent dead-active leftover should still be served");
+        assert_eq!(recent_row.status_bucket, FleetStatusBucketWire::Stopped);
+        assert_eq!(recent_row.liveness, OwnerLivenessWire::NotProcess);
+        assert!(
+            !all.page.rows.iter().any(
+                |row| row.labels.agent_label.as_deref() == Some("old-dead")
+            ),
+            "a leftover outside the seven-day window must be excluded: {:?}",
+            all.page.rows
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_orphan_of_dismissed_family_is_excluded_from_catalog() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let root_ts = (now - chrono::Duration::minutes(10))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        let member_ts = (now - chrono::Duration::minutes(5))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        seed_dead_agent(&projects, &root_ts, "root", None);
+        seed_dead_agent(&projects, &member_ts, "member", Some(&root_ts));
+        let index = home.join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        sase_core::replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[sase_core::AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "unknown".to_string(),
+                raw_suffix: Some(root_ts.clone()),
+            }],
+        )
+        .unwrap();
+        let service = FleetReadService::new(home);
+
+        let all = service
+            .catalog(FleetCatalogQueryWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                cursor: None,
+                limit: Some(10),
+                project_ids: Vec::new(),
+                query: None,
+                status_buckets: Vec::new(),
+                include_terminal: true,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            all.page.rows.is_empty(),
+            "a dead root and its dead member must both be excluded once the \
+             family root is dismissed: {:?}",
+            all.page.rows
+        );
     }
 
     fn assert_no_paths_or_pids(value: &serde_json::Value) {

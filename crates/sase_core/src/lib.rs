@@ -48,6 +48,7 @@ pub mod fleet_attention;
 pub mod fleet_contract;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
+pub mod fleet_presentation;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -271,8 +272,8 @@ pub use agent_scan::{
     query_agent_output_variable_selectors, query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta, rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents, resolve_agent_artifact_path,
-    resolve_agent_artifact_timestamp_path, scan_agent_artifact_dir,
-    scan_agent_artifact_dirs, scan_agent_artifacts,
+    resolve_agent_artifact_timestamp_path, resolve_family_dismissal_lineage,
+    scan_agent_artifact_dir, scan_agent_artifact_dirs, scan_agent_artifacts,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, vacuum_agent_artifact_index,
     write_agent_artifact_index_meta, AgentAliasHistoryGroupWire,
@@ -289,8 +290,9 @@ pub use agent_scan::{
     AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
     AgentOutputVariableSelectorMatchWire, AgentOutputVariableSelectorQueryWire,
     AgentOutputVariableSelectorResultWire, AgentOutputVariableValueGroupWire,
-    DoneMarkerWire, FamilyShellGateWire, FamilyShellMonitorWire,
-    FamilyShellWire, OutputVariableSelectorError,
+    DoneMarkerWire, FamilyDismissalLineageCandidateWire,
+    FamilyDismissalLineageResultWire, FamilyShellGateWire,
+    FamilyShellMonitorWire, FamilyShellWire, OutputVariableSelectorError,
     OutputVariableSelectorPathWire, OutputVariableSelectorScopeWire,
     OutputVariableSelectorWire, OutputVariableValue, PlanPathMarkerWire,
     PromptStepMarkerWire, RunningMarkerWire, UsedXPromptWire,
@@ -860,6 +862,12 @@ pub use fleet_mutation::{
     FleetMutationReceiptWire, FleetMutationRequestWire,
     FleetMutationResponseWire, FLEET_MUTATION_CAPABILITY_FORK,
     FLEET_MUTATION_CAPABILITY_RETRY, FLEET_MUTATION_CAPABILITY_STOP,
+};
+pub use fleet_presentation::{
+    decide_fleet_presentation, FleetPresentationCandidateWire,
+    FleetPresentationDecisionWire, FleetPresentationRequestWire,
+    FLEET_PRESENTATION_RECENT_TERMINAL_MAX_ROWS,
+    FLEET_PRESENTATION_RECENT_TERMINAL_WINDOW_SECONDS,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

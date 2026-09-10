@@ -1597,7 +1597,8 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::fleet_contract",
                 "path_privacy": "never includes local paths, PIDs, process groups, bearer tokens, or auth headers",
                 "identity": "logical and optional exact locators plus logical/exact keys",
-                "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, capabilities, content metadata"
+                "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, capabilities, content metadata",
+                "family": "normalized family_role (root/member/monitor/gate/proc/historical_shell) plus optional parent_timestamp lineage, for viewer folding"
             },
             "ResolvedAgentDetailWire": {
                 "defined_by": "sase_core::fleet_contract",

@@ -27,6 +27,7 @@ pub use index::{
     query_related_agent_artifact_dirs, read_agent_artifact_index_meta,
     rebuild_agent_artifact_index,
     replace_agent_artifact_index_dismissed_agents,
+    resolve_family_dismissal_lineage,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, vacuum_agent_artifact_index,
     write_agent_artifact_index_meta, AgentAliasHistoryGroupWire,
@@ -35,6 +36,7 @@ pub use index::{
     AgentArtifactCandidateFilterWire, AgentArtifactIndexFreshnessWire,
     AgentArtifactIndexQueryWire, AgentArtifactIndexStatusWire,
     AgentArtifactIndexUpdateWire, AgentArtifactIndexVacuumWire,
+    FamilyDismissalLineageCandidateWire, FamilyDismissalLineageResultWire,
     AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
 };

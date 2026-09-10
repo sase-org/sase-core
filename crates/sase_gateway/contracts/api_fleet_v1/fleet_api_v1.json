@@ -550,6 +550,7 @@
     },
     "ResolvedAgentSummaryWire": {
       "defined_by": "sase_core::fleet_contract",
+      "family": "normalized family_role (root/member/monitor/gate/proc/historical_shell) plus optional parent_timestamp lineage, for viewer folding",
       "identity": "logical and optional exact locators plus logical/exact keys",
       "path_privacy": "never includes local paths, PIDs, process groups, bearer tokens, or auth headers",
       "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, capabilities, content metadata"

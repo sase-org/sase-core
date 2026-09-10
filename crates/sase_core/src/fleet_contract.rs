@@ -286,6 +286,27 @@ fn default_row_kind() -> FleetRowKindWire {
     FleetRowKindWire::AgentShell
 }
 
+/// Normalized family role for viewer folding.
+///
+/// Independent of `row_kind`: it distinguishes a family root from an
+/// ordinary member for `AgentShell` rows, carries `Monitor`/`Gate`/`Proc`
+/// straight through from their matching row kinds, and marks any row whose
+/// presentation is terminal (genuinely completed, or a demoted dead-active
+/// leftover) as `HistoricalShell` so a viewer can render "was running"
+/// uniformly once family topology stops mattering.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetFamilyRoleWire {
+    Root,
+    Member,
+    Monitor,
+    Gate,
+    Proc,
+    HistoricalShell,
+}
+
 /// Lifecycle status observed in the artifact record.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
@@ -480,6 +501,10 @@ pub struct ResolvedAgentSummaryWire {
     pub logical_key: String,
     pub exact_key: Option<String>,
     pub row_kind: FleetRowKindWire,
+    pub family_role: FleetFamilyRoleWire,
+    /// Parent's record identity, when this row is a tracked family member.
+    /// `None` for roots and rows with no tracked family lineage.
+    pub parent_timestamp: Option<String>,
     pub labels: HumanDisplayLabelsWire,
     pub project_name: String,
     pub model: Option<String>,
@@ -1740,6 +1765,19 @@ pub fn project_resolved_agent_summary(
     let family = meta
         .and_then(|value| value.family_shell.as_ref())
         .or_else(|| done.and_then(|value| value.family_shell.as_ref()));
+    let parent_timestamp = meta.and_then(|value| {
+        first_non_empty([
+            value.parent_timestamp.as_deref(),
+            value.parent_agent_timestamp.as_deref(),
+        ])
+        .map(str::to_string)
+    });
+    let family_role = family_role_for_projection(
+        facts.row_kind,
+        lifecycle,
+        facts.liveness,
+        parent_timestamp.is_some(),
+    );
     let labels = HumanDisplayLabelsWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         project_label: trim_to_limit(
@@ -1767,6 +1805,8 @@ pub fn project_resolved_agent_summary(
         logical_key,
         exact_key,
         row_kind: facts.row_kind,
+        family_role,
+        parent_timestamp,
         labels,
         project_name: trim_to_limit(
             &request.record.project_name,
@@ -1775,7 +1815,7 @@ pub fn project_resolved_agent_summary(
         model: model_for_record(meta, done, running),
         provider: provider_for_record(meta, done, running),
         status,
-        status_bucket: bucket_for_lifecycle(lifecycle),
+        status_bucket: bucket_for_lifecycle(lifecycle, facts.liveness),
         intent: intent_for_record(&request.record),
         observed_at_unix: facts.observed_at_unix,
         row_revision: facts.row_revision.clone(),
@@ -2242,6 +2282,30 @@ pub fn validate_resolved_agent_summary(
         return Err(FleetContractError::Validation(
             "actionable resource capability requires an exact instance locator"
                 .to_string(),
+        ));
+    }
+    let family_role_matches_row_kind = match summary.row_kind {
+        FleetRowKindWire::Proc => {
+            summary.family_role == FleetFamilyRoleWire::Proc
+        }
+        FleetRowKindWire::Monitor => {
+            summary.family_role == FleetFamilyRoleWire::Monitor
+        }
+        FleetRowKindWire::Gate => {
+            summary.family_role == FleetFamilyRoleWire::Gate
+        }
+        FleetRowKindWire::AgentShell
+        | FleetRowKindWire::ContainerHeader
+        | FleetRowKindWire::HistoricalShell => matches!(
+            summary.family_role,
+            FleetFamilyRoleWire::Root
+                | FleetFamilyRoleWire::Member
+                | FleetFamilyRoleWire::HistoricalShell
+        ),
+    };
+    if !family_role_matches_row_kind {
+        return Err(FleetContractError::Validation(
+            "summary family_role is inconsistent with row_kind".to_string(),
         ));
     }
     Ok(summary.clone())
@@ -3482,12 +3546,68 @@ fn reject_inconsistent_projection(
 }
 
 fn counts_as_running(summary: &ResolvedAgentSummaryWire) -> bool {
+    // Require compatible live owner facts rather than trusting the status
+    // bucket alone: a bucket that claims Running/Starting can never count
+    // toward authoritative running counts when the owner-resolved liveness
+    // is definitively Dead or NotProcess.
+    let live_compatible = matches!(
+        summary.liveness,
+        OwnerLivenessWire::Alive | OwnerLivenessWire::Unknown
+    );
+    if !live_compatible {
+        return false;
+    }
     match summary.status_bucket {
         FleetStatusBucketWire::Running => !summary.dismissable,
         FleetStatusBucketWire::Starting => {
             summary.container_projected_concrete_agent
         }
         _ => false,
+    }
+}
+
+/// Whether a row's presentation should be treated as terminal ("was
+/// running") for family-role and status-bucket purposes: genuinely terminal
+/// lifecycle, or definitively `Dead`/`NotProcess` liveness — unless a
+/// waiting/question marker protects it.
+fn presentation_is_historical(
+    lifecycle: FleetLifecycleWire,
+    liveness: OwnerLivenessWire,
+) -> bool {
+    if matches!(
+        lifecycle,
+        FleetLifecycleWire::Waiting | FleetLifecycleWire::Asking
+    ) {
+        return false;
+    }
+    terminal_lifecycle(lifecycle)
+        || matches!(
+            liveness,
+            OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+        )
+}
+
+fn family_role_for_projection(
+    row_kind: FleetRowKindWire,
+    lifecycle: FleetLifecycleWire,
+    liveness: OwnerLivenessWire,
+    has_parent: bool,
+) -> FleetFamilyRoleWire {
+    match row_kind {
+        FleetRowKindWire::Proc => FleetFamilyRoleWire::Proc,
+        FleetRowKindWire::Monitor => FleetFamilyRoleWire::Monitor,
+        FleetRowKindWire::Gate => FleetFamilyRoleWire::Gate,
+        FleetRowKindWire::AgentShell
+        | FleetRowKindWire::ContainerHeader
+        | FleetRowKindWire::HistoricalShell => {
+            if presentation_is_historical(lifecycle, liveness) {
+                FleetFamilyRoleWire::HistoricalShell
+            } else if has_parent {
+                FleetFamilyRoleWire::Member
+            } else {
+                FleetFamilyRoleWire::Root
+            }
+        }
     }
 }
 
@@ -3535,9 +3655,26 @@ fn terminal_lifecycle(lifecycle: FleetLifecycleWire) -> bool {
 
 fn bucket_for_lifecycle(
     lifecycle: FleetLifecycleWire,
+    liveness: OwnerLivenessWire,
 ) -> FleetStatusBucketWire {
+    // A record whose owner-resolved liveness is definitively Dead or
+    // NotProcess can never bucket as Running/Starting, no matter what its
+    // lifecycle label says: the four-fact model presents it as stopped
+    // instead of fabricating an active state.
+    let liveness_stops = matches!(
+        liveness,
+        OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+    );
     match lifecycle {
+        FleetLifecycleWire::Starting if liveness_stops => {
+            FleetStatusBucketWire::Stopped
+        }
         FleetLifecycleWire::Starting => FleetStatusBucketWire::Starting,
+        FleetLifecycleWire::Running | FleetLifecycleWire::Unknown
+            if liveness_stops =>
+        {
+            FleetStatusBucketWire::Stopped
+        }
         FleetLifecycleWire::Running | FleetLifecycleWire::Unknown => {
             FleetStatusBucketWire::Running
         }
@@ -6801,6 +6938,116 @@ mod tests {
     }
 
     #[test]
+    fn family_role_distinguishes_root_member_and_historical_shell() {
+        // A live root: no tracked parent.
+        let root_request = projection_request(
+            logical('a', "root"),
+            Some(exact('a', "root", "run-1")),
+            1,
+            record_running(),
+        );
+        let root = project_resolved_agent_summary(&root_request).unwrap();
+        assert_eq!(root.family_role, FleetFamilyRoleWire::Root);
+        assert_eq!(root.parent_timestamp, None);
+        assert_eq!(root.status_bucket, FleetStatusBucketWire::Running);
+
+        // A live member: tracked parent_timestamp.
+        let mut member_record = record_running();
+        member_record.agent_meta.as_mut().unwrap().parent_timestamp =
+            Some("20260906110000".to_string());
+        let member_request = projection_request(
+            logical('a', "member"),
+            Some(exact('a', "member", "run-1")),
+            1,
+            member_record,
+        );
+        let member = project_resolved_agent_summary(&member_request).unwrap();
+        assert_eq!(member.family_role, FleetFamilyRoleWire::Member);
+        assert_eq!(member.parent_timestamp, Some("20260906110000".to_string()));
+
+        // A genuinely completed record is a historical shell.
+        let done = summary_done('a', "done", 1, 1000.0);
+        assert_eq!(done.family_role, FleetFamilyRoleWire::HistoricalShell);
+
+        // A Dead active-tier record (not yet done, not protected) demotes
+        // into a historical shell and a stopped bucket, never running.
+        let mut demoted_request = projection_request(
+            logical('a', "demoted"),
+            Some(exact('a', "demoted", "run-1")),
+            1,
+            record_running(),
+        );
+        demoted_request.owner_facts.liveness = OwnerLivenessWire::Dead;
+        demoted_request.owner_facts.current_instance = false;
+        demoted_request.owner_facts.occupied_runner_slot = false;
+        demoted_request.owner_facts.capabilities = caps(&[]);
+        let demoted = project_resolved_agent_summary(&demoted_request).unwrap();
+        assert_eq!(demoted.family_role, FleetFamilyRoleWire::HistoricalShell);
+        assert_eq!(demoted.status_bucket, FleetStatusBucketWire::Stopped);
+        assert_eq!(demoted.lifecycle, FleetLifecycleWire::Running);
+
+        // A waiting record protected by a marker stays Root/Waiting even if
+        // its owner liveness is Dead: a waiting/question marker must never
+        // be demoted.
+        let mut protected_record = record_running();
+        protected_record.running = None;
+        protected_record.waiting =
+            Some(crate::agent_scan::WaitingMarkerWire::default());
+        let mut protected_request = projection_request(
+            logical('a', "protected"),
+            Some(exact('a', "protected", "run-1")),
+            1,
+            protected_record,
+        );
+        protected_request.owner_facts.liveness = OwnerLivenessWire::Dead;
+        protected_request.owner_facts.current_instance = false;
+        protected_request.owner_facts.occupied_runner_slot = false;
+        protected_request.owner_facts.capabilities = caps(&[]);
+        let protected =
+            project_resolved_agent_summary(&protected_request).unwrap();
+        assert_eq!(protected.family_role, FleetFamilyRoleWire::Root);
+        assert_eq!(protected.status_bucket, FleetStatusBucketWire::Waiting);
+    }
+
+    #[test]
+    fn dead_or_not_process_liveness_never_counts_as_running() {
+        let mut alive_request = projection_request(
+            logical('a', "alive"),
+            Some(exact('a', "alive", "run-1")),
+            1,
+            record_running(),
+        );
+        alive_request.owner_facts.occupied_runner_slot = false;
+        let alive = project_resolved_agent_summary(&alive_request).unwrap();
+
+        let mut dead_request = projection_request(
+            logical('a', "dead"),
+            Some(exact('a', "dead", "run-1")),
+            1,
+            record_running(),
+        );
+        dead_request.owner_facts.liveness = OwnerLivenessWire::Dead;
+        dead_request.owner_facts.occupied_runner_slot = false;
+        dead_request.owner_facts.capabilities = caps(&[]);
+        let dead = project_resolved_agent_summary(&dead_request).unwrap();
+        assert_eq!(dead.status_bucket, FleetStatusBucketWire::Stopped);
+        // Still counted as a logical agent (it is still a served row) even
+        // though liveness alone keeps it out of the running count below:
+        // this proves `counts_as_running` gates on liveness directly rather
+        // than trusting the status bucket or `current_instance` alone.
+        assert!(dead.current_instance);
+
+        let counts =
+            count_logical_agents(&FleetLogicalAgentCountsRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                summaries: vec![alive.clone(), dead],
+            })
+            .unwrap();
+        assert_eq!(counts.logical_agent_total, 2);
+        assert_eq!(counts.running, 1);
+    }
+
+    #[test]
     fn count_contract_is_order_independent_and_deduplicates_current_instances()
     {
         let locator = logical('a', "worker");
@@ -6853,6 +7100,7 @@ mod tests {
 
         let mut monitor = newer.clone();
         monitor.row_kind = FleetRowKindWire::Monitor;
+        monitor.family_role = FleetFamilyRoleWire::Monitor;
         let request = FleetLogicalAgentCountsRequestWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             summaries: vec![
