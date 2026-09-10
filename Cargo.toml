@@ -16,7 +16,8 @@ rust-version = "1.78"
 
 [workspace.dependencies]
 sase_core = { path = "crates/sase_core", version = "0.32.61" }
-sase_gateway = { path = "crates/sase_gateway", version = "0.32.60" }
+# This crate is internal-only; a version pin would block release-plz major bumps.
+sase_gateway = { path = "crates/sase_gateway" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
