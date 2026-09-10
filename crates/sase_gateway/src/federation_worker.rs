@@ -15,7 +15,7 @@ use sase_core::fleet_contract::{
     validate_connection_plan, ConnectionPlanWire, FleetCatalogQueryWire,
     FleetContentReadRequestWire, FleetDetailRequestWire,
     FleetLaunchRequestWire, FleetLogicalBatchRequestWire,
-    FleetProjectEligibilityRequestWire,
+    FleetProjectEligibilityRequestWire, TlsTrustModeWire,
 };
 use sase_core::fleet_mutation::FleetMutationRequestWire;
 use serde::{Deserialize, Serialize};
@@ -264,6 +264,11 @@ pub enum FederationIpcRequestWire {
         #[serde(default)]
         cache_only: bool,
     },
+    CatalogHosts {
+        queries: Vec<FederationHostCatalogQueryWire>,
+        #[serde(default)]
+        cache_only: bool,
+    },
     FollowedBatch {
         request: FleetLogicalBatchRequestWire,
         #[serde(default)]
@@ -315,6 +320,14 @@ pub struct FederationHostConfigWire {
     pub alias: Option<String>,
     pub plan: ConnectionPlanWire,
     pub bearer_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FederationHostCatalogQueryWire {
+    pub schema_version: u32,
+    pub installation_id: String,
+    pub query: FleetCatalogQueryWire,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -800,6 +813,14 @@ mod imp {
                     )
                     .await
             }
+            FederationIpcRequestWire::CatalogHosts {
+                queries,
+                cache_only,
+            } => {
+                state
+                    .read_catalog_hosts(queries, cache_only, deadline)
+                    .await
+            }
             FederationIpcRequestWire::FollowedBatch {
                 request,
                 cache_only,
@@ -995,10 +1016,33 @@ mod imp {
                             std::collections::btree_map::Entry::Vacant(
                                 entry,
                             ) => {
-                                let host = Arc::new(RemoteHost::new(validated));
-                                let response = host.empty_result("configured");
-                                entry.insert(host);
-                                response
+                                match RemoteHost::new(
+                                    validated.clone(),
+                                    &self.config.sase_home,
+                                ) {
+                                    Ok(host) => {
+                                        let host = Arc::new(host);
+                                        let response =
+                                            host.empty_result("configured");
+                                        entry.insert(host);
+                                        response
+                                    }
+                                    Err(error) => FederationHostResultWire {
+                                        schema_version:
+                                            FEDERATION_IPC_SCHEMA_VERSION,
+                                        alias: validated.alias,
+                                        provider_ref: validated
+                                            .plan
+                                            .provider_ref,
+                                        installation_id,
+                                        endpoint: validated.plan.endpoint,
+                                        status: status_from_error(&error),
+                                        cached: false,
+                                        age_seconds: None,
+                                        payload: None,
+                                        error: Some(error),
+                                    },
+                                }
                             }
                         }
                     }
@@ -1091,6 +1135,110 @@ mod imp {
             to_json(FederationReadResponseWire {
                 schema_version: FEDERATION_IPC_SCHEMA_VERSION,
                 operation: operation.name().to_string(),
+                hosts: results,
+            })
+        }
+
+        async fn read_catalog_hosts(
+            &self,
+            queries: Vec<FederationHostCatalogQueryWire>,
+            cache_only: bool,
+            deadline: RequestDeadline,
+        ) -> Result<JsonValue, FederationErrorWire> {
+            let mut tasks = JoinSet::new();
+            let mut results = Vec::new();
+            {
+                let hosts = self.hosts.read().await;
+                for host_query in queries {
+                    if host_query.schema_version
+                        != FEDERATION_IPC_SCHEMA_VERSION
+                    {
+                        results.push(FederationHostResultWire {
+                            schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                            alias: None,
+                            provider_ref: "".to_string(),
+                            installation_id: host_query.installation_id,
+                            endpoint: "".to_string(),
+                            status: "invalid".to_string(),
+                            cached: false,
+                            age_seconds: None,
+                            payload: None,
+                            error: Some(federation_error(
+                                "unsupported_version",
+                                "unsupported per-host catalog query schema version",
+                                Some("queries.schema_version"),
+                            )),
+                        });
+                        continue;
+                    }
+                    let installation_id =
+                        host_query.installation_id.trim().to_string();
+                    let Some(host) = hosts.get(&installation_id).cloned()
+                    else {
+                        results.push(FederationHostResultWire {
+                            schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                            alias: None,
+                            provider_ref: "".to_string(),
+                            installation_id,
+                            endpoint: "".to_string(),
+                            status: "not_found".to_string(),
+                            cached: false,
+                            age_seconds: None,
+                            payload: None,
+                            error: Some(federation_error(
+                                "not_found",
+                                "no configured dispatch host matches the per-host catalog query",
+                                Some("queries.installation_id"),
+                            )),
+                        });
+                        continue;
+                    };
+                    let cache = self.cache_path_limits_owned();
+                    let cache_ref = self.cache.clone();
+                    let global = self.in_flight.clone();
+                    tasks.spawn(async move {
+                        read_one_host(
+                            host,
+                            ReadOperation::Catalog(host_query.query),
+                            cache_only,
+                            deadline,
+                            cache_ref,
+                            cache,
+                            global,
+                        )
+                        .await
+                    });
+                }
+            }
+            while let Some(joined) = tasks.join_next().await {
+                match joined {
+                    Ok(result) => results.push(result),
+                    Err(_) => results.push(FederationHostResultWire {
+                        schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                        alias: None,
+                        provider_ref: "".to_string(),
+                        installation_id: "".to_string(),
+                        endpoint: "".to_string(),
+                        status: "unavailable".to_string(),
+                        cached: false,
+                        age_seconds: None,
+                        payload: None,
+                        error: Some(federation_error(
+                            "internal",
+                            "host worker task failed",
+                            Some("host"),
+                        )),
+                    }),
+                }
+            }
+            results.sort_by(|left, right| {
+                left.installation_id
+                    .cmp(&right.installation_id)
+                    .then_with(|| left.alias.cmp(&right.alias))
+            });
+            to_json(FederationReadResponseWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                operation: "catalog".to_string(),
                 hosts: results,
             })
         }
@@ -1360,12 +1508,12 @@ mod imp {
     }
 
     impl RemoteHost {
-        fn new(config: ValidatedHostConfig) -> Self {
-            let client = reqwest::Client::builder()
-                .pool_idle_timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-            Self {
+        fn new(
+            config: ValidatedHostConfig,
+            sase_home: &Path,
+        ) -> Result<Self, FederationErrorWire> {
+            let client = build_http_client(&config.plan, sase_home)?;
+            Ok(Self {
                 alias: config.alias,
                 plan: config.plan,
                 bearer_token: Arc::from(config.bearer_token),
@@ -1374,7 +1522,7 @@ mod imp {
                     AsyncMutex::new(RemoteHostRuntime::default()),
                 ),
                 permits: Arc::new(Semaphore::new(DEFAULT_PER_HOST_IN_FLIGHT)),
-            }
+            })
         }
 
         fn empty_result(&self, status: &str) -> FederationHostResultWire {
@@ -1598,6 +1746,129 @@ mod imp {
             }
             Ok(value)
         }
+    }
+
+    fn build_http_client(
+        plan: &ConnectionPlanWire,
+        sase_home: &Path,
+    ) -> Result<reqwest::Client, FederationErrorWire> {
+        let mut builder = reqwest::Client::builder()
+            .pool_idle_timeout(Duration::from_secs(30));
+        match plan.tls.mode {
+            TlsTrustModeWire::SystemRoots => {}
+            TlsTrustModeWire::PinnedCa => {
+                let ca_ref = plan.tls.ca_ref.as_deref().ok_or_else(|| {
+                    federation_error(
+                        "invalid_request",
+                        "pinned_ca trust mode requires ca_ref",
+                        Some("hosts.plan.tls.ca_ref"),
+                    )
+                })?;
+                let bytes = fs::read(managed_trust_ref_path(
+                    sase_home, "ca", ca_ref, "pem",
+                ))
+                .map_err(|error| {
+                    federation_error(
+                        "invalid_request",
+                        &format!(
+                            "managed TLS CA reference {ca_ref:?} could not be resolved: {error}"
+                        ),
+                        Some("hosts.plan.tls.ca_ref"),
+                    )
+                })?;
+                let certificate = reqwest::Certificate::from_pem(&bytes)
+                    .map_err(|error| {
+                        federation_error(
+                            "invalid_request",
+                            &format!(
+                                "managed TLS CA reference {ca_ref:?} is not a PEM certificate: {error}"
+                            ),
+                            Some("hosts.plan.tls.ca_ref"),
+                        )
+                    })?;
+                builder = builder.add_root_certificate(certificate);
+            }
+            TlsTrustModeWire::PinnedServerName => {
+                let server_name_ref =
+                    plan.tls.server_name_ref.as_deref().ok_or_else(|| {
+                        federation_error(
+                            "invalid_request",
+                            "pinned_server_name trust mode requires server_name_ref",
+                            Some("hosts.plan.tls.server_name_ref"),
+                        )
+                    })?;
+                let pinned_name = fs::read_to_string(managed_trust_ref_path(
+                    sase_home,
+                    "server_name",
+                    server_name_ref,
+                    "txt",
+                ))
+                .map_err(|error| {
+                    federation_error(
+                        "invalid_request",
+                        &format!(
+                            "managed TLS server-name reference {server_name_ref:?} could not be resolved: {error}"
+                        ),
+                        Some("hosts.plan.tls.server_name_ref"),
+                    )
+                })?;
+                let pinned_name = pinned_name.trim();
+                if pinned_name.is_empty()
+                    || pinned_name.chars().any(char::is_control)
+                {
+                    return Err(federation_error(
+                        "invalid_request",
+                        "managed TLS server-name reference resolved to an invalid name",
+                        Some("hosts.plan.tls.server_name_ref"),
+                    ));
+                }
+                let endpoint = reqwest::Url::parse(&plan.endpoint).map_err(
+                    |error| {
+                        federation_error(
+                            "invalid_request",
+                            &format!(
+                                "connection endpoint is not a valid URL: {error}"
+                            ),
+                            Some("hosts.plan.endpoint"),
+                        )
+                    },
+                )?;
+                let Some(endpoint_host) = endpoint.host_str() else {
+                    return Err(federation_error(
+                        "invalid_request",
+                        "connection endpoint has no host to compare with pinned server name",
+                        Some("hosts.plan.endpoint"),
+                    ));
+                };
+                if endpoint_host != pinned_name {
+                    return Err(federation_error(
+                        "invalid_request",
+                        "connection endpoint host does not match pinned server-name reference",
+                        Some("hosts.plan.tls.server_name_ref"),
+                    ));
+                }
+            }
+        }
+        builder.build().map_err(|error| {
+            federation_error(
+                "invalid_request",
+                &format!("failed to build federation HTTP client: {error}"),
+                Some("hosts.plan.tls"),
+            )
+        })
+    }
+
+    fn managed_trust_ref_path(
+        sase_home: &Path,
+        kind: &str,
+        reference: &str,
+        extension: &str,
+    ) -> PathBuf {
+        sase_home
+            .join("fleet")
+            .join("trust")
+            .join(kind)
+            .join(format!("{reference}.{extension}"))
     }
 
     #[derive(Clone)]
@@ -2045,7 +2316,10 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use std::{os::unix::fs::PermissionsExt, path::Path, time::Duration};
+        use std::{
+            os::unix::fs::PermissionsExt, path::Path, process::Command,
+            time::Duration,
+        };
 
         use serde_json::json;
         use tokio::{
@@ -2586,6 +2860,721 @@ mod imp {
                 })
         }
 
+        struct HttpsFixture {
+            port: u16,
+            requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        }
+
+        async fn start_https_fixture(
+            root: &Path,
+            ca_ref: &str,
+            installation_id: &str,
+        ) -> HttpsFixture {
+            let cert_dir = root.join("certs").join(ca_ref);
+            fs::create_dir_all(&cert_dir).unwrap();
+            let ca_path = cert_dir.join("ca.pem");
+            let cert_path = cert_dir.join("cert.pem");
+            let key_path = cert_dir.join("key.pem");
+            generate_loopback_certificate(&ca_path, &cert_path, &key_path);
+            let trust_dir = root.join("fleet").join("trust").join("ca");
+            fs::create_dir_all(&trust_dir).unwrap();
+            fs::copy(&ca_path, trust_dir.join(format!("{ca_ref}.pem")))
+                .unwrap();
+
+            let config = rustls_server_config(&cert_path, &key_path);
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+            let listener =
+                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = requests.clone();
+            let installation = installation_id.to_string();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _addr)) = listener.accept().await else {
+                        return;
+                    };
+                    let acceptor = acceptor.clone();
+                    let recorded = recorded.clone();
+                    let installation = installation.clone();
+                    tokio::spawn(async move {
+                        let Ok(mut stream) = acceptor.accept(stream).await
+                        else {
+                            return;
+                        };
+                        let Some((path, body)) =
+                            read_http_request(&mut stream).await
+                        else {
+                            return;
+                        };
+                        recorded
+                            .lock()
+                            .unwrap()
+                            .push(json!({"path": path, "body": body}));
+                        let payload = https_fixture_payload(
+                            &installation,
+                            &path,
+                            body.as_ref(),
+                        );
+                        write_http_json(&mut stream, payload).await;
+                    });
+                }
+            });
+            HttpsFixture { port, requests }
+        }
+
+        fn generate_loopback_certificate(
+            ca_path: &Path,
+            cert_path: &Path,
+            key_path: &Path,
+        ) {
+            let cert_dir = cert_path.parent().expect("cert parent");
+            let ca_key_path = cert_dir.join("ca-key.pem");
+            let csr_path = cert_dir.join("server.csr");
+            let ext_path = cert_dir.join("server-ext.cnf");
+            fs::write(
+                &ext_path,
+                "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n",
+            )
+            .unwrap();
+            run_openssl(
+                Command::new("openssl")
+                    .args([
+                        "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout",
+                    ])
+                    .arg(&ca_key_path)
+                    .args(["-out"])
+                    .arg(ca_path)
+                    .args([
+                        "-subj",
+                        "/CN=SASE Test CA",
+                        "-addext",
+                        "basicConstraints=critical,CA:TRUE",
+                        "-days",
+                        "1",
+                    ]),
+            );
+            run_openssl(
+                Command::new("openssl")
+                    .args(["req", "-newkey", "rsa:2048", "-nodes", "-keyout"])
+                    .arg(key_path)
+                    .args(["-out"])
+                    .arg(&csr_path)
+                    .args(["-subj", "/CN=localhost"]),
+            );
+            let _ = fs::remove_file(cert_dir.join("ca.srl"));
+            run_openssl(
+                Command::new("openssl")
+                    .args(["x509", "-req", "-in"])
+                    .arg(&csr_path)
+                    .args(["-CA"])
+                    .arg(ca_path)
+                    .args(["-CAkey"])
+                    .arg(&ca_key_path)
+                    .args(["-CAcreateserial", "-out"])
+                    .arg(cert_path)
+                    .args(["-days", "1", "-extfile"])
+                    .arg(&ext_path),
+            );
+        }
+
+        fn run_openssl(command: &mut Command) {
+            let output = command.output().unwrap_or_else(|error| {
+                panic!("failed to execute openssl: {error}")
+            });
+            assert!(
+                output.status.success(),
+                "openssl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn rustls_server_config(
+            cert_path: &Path,
+            key_path: &Path,
+        ) -> tokio_rustls::rustls::ServerConfig {
+            let cert_bytes = fs::read(cert_path).unwrap();
+            let mut cert_reader = std::io::BufReader::new(&cert_bytes[..]);
+            let certs = rustls_pemfile::certs(&mut cert_reader)
+                .unwrap()
+                .into_iter()
+                .map(tokio_rustls::rustls::Certificate)
+                .collect::<Vec<_>>();
+            let key_bytes = fs::read(key_path).unwrap();
+            let mut key_reader = std::io::BufReader::new(&key_bytes[..]);
+            let mut keys =
+                rustls_pemfile::pkcs8_private_keys(&mut key_reader).unwrap();
+            if keys.is_empty() {
+                let mut key_reader = std::io::BufReader::new(&key_bytes[..]);
+                keys =
+                    rustls_pemfile::rsa_private_keys(&mut key_reader).unwrap();
+            }
+            tokio_rustls::rustls::ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(
+                    certs,
+                    tokio_rustls::rustls::PrivateKey(
+                        keys.into_iter().next().expect("private key"),
+                    ),
+                )
+                .unwrap()
+        }
+
+        async fn read_http_request<T>(
+            stream: &mut T,
+        ) -> Option<(String, Option<serde_json::Value>)>
+        where
+            T: tokio::io::AsyncRead + Unpin,
+        {
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await.ok()?;
+                if read == 0 {
+                    return None;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = find_header_end(&bytes) else {
+                    continue;
+                };
+                let headers =
+                    String::from_utf8_lossy(&bytes[..header_end]).to_string();
+                let content_length = http_content_length(&headers);
+                let body_start = header_end + 4;
+                if bytes.len() < body_start + content_length {
+                    continue;
+                }
+                let path = headers
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                let body = if content_length == 0 {
+                    None
+                } else {
+                    serde_json::from_slice(
+                        &bytes[body_start..body_start + content_length],
+                    )
+                    .ok()
+                };
+                return Some((path, body));
+            }
+        }
+
+        fn find_header_end(bytes: &[u8]) -> Option<usize> {
+            bytes.windows(4).position(|window| window == b"\r\n\r\n")
+        }
+
+        fn http_content_length(headers: &str) -> usize {
+            headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if !name.eq_ignore_ascii_case("content-length") {
+                        return None;
+                    }
+                    value.trim().parse::<usize>().ok()
+                })
+                .unwrap_or(0)
+        }
+
+        async fn write_http_json<T>(stream: &mut T, payload: serde_json::Value)
+        where
+            T: tokio::io::AsyncWrite + Unpin,
+        {
+            let status = if payload.get("error").is_some() {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
+            let body = serde_json::to_vec(&payload).unwrap();
+            let header = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        }
+
+        fn https_fixture_payload(
+            installation_id: &str,
+            path: &str,
+            body: Option<&serde_json::Value>,
+        ) -> serde_json::Value {
+            match path {
+                "/api/fleet/v1/hello" => hello_payload(installation_id),
+                "/api/fleet/v1/summary" => json!({
+                    "schema_version": 1,
+                    "cursor": cursor_payload(),
+                    "counts": counts_payload(1, 1),
+                    "count_revision": 1,
+                    "freshness": freshness_payload(),
+                }),
+                "/api/fleet/v1/catalog" => {
+                    let cursor = body
+                        .and_then(|value| value.get("cursor"))
+                        .and_then(serde_json::Value::as_str);
+                    json!({
+                        "schema_version": 1,
+                        "cursor": cursor_payload(),
+                        "counts": counts_payload(1, 1),
+                        "count_revision": 1,
+                        "freshness": freshness_payload(),
+                        "page": {
+                            "schema_version": 1,
+                            "rows": [],
+                            "limit": 100,
+                            "total_matching_rows": 250,
+                            "next_cursor": if cursor.is_none() {
+                                json!("off:100")
+                            } else {
+                                serde_json::Value::Null
+                            },
+                            "has_more": cursor.is_none(),
+                        },
+                    })
+                }
+                _ => json!({"error": "not found"}),
+            }
+        }
+
+        fn hello_payload(installation_id: &str) -> serde_json::Value {
+            json!({
+                "schema_version": 1,
+                "protocol_version": FLEET_PROTOCOL_VERSION,
+                "installation": {
+                    "schema_version": 1,
+                    "installation_id": installation_id,
+                    "created_at_unix": 1_800_000_000.0,
+                    "generation": 1,
+                    "prior_installation_id": null,
+                    "rotated_at_unix": null,
+                    "adopted_at_unix": null,
+                    "reason": null,
+                },
+                "machine_selector": "loopback",
+                "capabilities": {
+                    "schema_version": 1,
+                    "resource": ["catalog.read", "summary.read"],
+                    "host": [],
+                    "protocol": ["fleet.v1"],
+                },
+                "credential": {
+                    "schema_version": 1,
+                    "credential_id": "cred-1",
+                    "controller_id": Some("controller-1"),
+                    "controller": {
+                        "schema_version": 1,
+                        "controller_id": Some("controller-1"),
+                        "display_name": "test-controller",
+                        "platform": null,
+                        "app_version": null,
+                    },
+                    "scopes": ["fleet.read"],
+                    "issued_at_unix": 1_800_000_000.0,
+                    "expires_at_unix": null,
+                    "rotated_at_unix": null,
+                    "revoked_at_unix": null,
+                    "revoked_reason": null,
+                },
+                "cursor": cursor_payload(),
+                "counts": counts_payload(1, 1),
+                "count_revision": 1,
+                "freshness": freshness_payload(),
+            })
+        }
+
+        fn cursor_payload() -> serde_json::Value {
+            json!({
+                "schema_version": 1,
+                "store_generation": "test-generation",
+                "sequence": 1,
+            })
+        }
+
+        fn counts_payload(total: u64, running: u64) -> serde_json::Value {
+            json!({
+                "schema_version": 1,
+                "basis": {
+                    "schema_version": 1,
+                    "input_rows": total,
+                    "selected_rows": total,
+                    "max_revision": 1,
+                    "observed_at_unix_max": 1_800_000_000.0,
+                },
+                "logical_agent_total": total,
+                "running": running,
+                "waiting": 0,
+                "attention": 0,
+                "occupied_runner_slots": 0,
+            })
+        }
+
+        fn freshness_payload() -> serde_json::Value {
+            json!({
+                "schema_version": 1,
+                "freshness": "fresh",
+                "partial": false,
+                "refreshed_at_unix": 1_800_000_000.0,
+                "error": null,
+            })
+        }
+
+        fn tls_host(
+            alias: &str,
+            pin: &str,
+            port: u16,
+            mode: &str,
+            ca_ref: Option<&str>,
+        ) -> serde_json::Value {
+            json!({
+                "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
+                "alias": alias,
+                "plan": {
+                    "schema_version": 1,
+                    "provider_ref": "builtin:https",
+                    "endpoint": format!("https://127.0.0.1:{port}"),
+                    "credential_ref": format!("cred-{alias}"),
+                    "pinned_installation_id": pin,
+                    "connection_kind": "gateway",
+                    "tls": {
+                        "schema_version": 1,
+                        "mode": mode,
+                        "ca_ref": ca_ref,
+                        "server_name_ref": null,
+                    },
+                },
+                "bearer_token": format!("token-{alias}"),
+            })
+        }
+
+        fn request_paths(
+            requests: &Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        ) -> Vec<String> {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|request| {
+                    request
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn replace_config_fails_closed_for_missing_managed_ca_ref() {
+            let tmp = tempfile::tempdir().unwrap();
+            let state = Arc::new(FederationWorkerState::new(
+                FederationWorkerConfig::new(tmp.path()),
+            ));
+            let pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "c".repeat(64)
+            );
+            let response = state
+                .replace_config(vec![FederationHostConfigWire {
+                    schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                    alias: Some("apollo".to_string()),
+                    plan: ConnectionPlanWire {
+                        schema_version: 1,
+                        provider_ref: "builtin:https".to_string(),
+                        endpoint: "https://127.0.0.1:443".to_string(),
+                        credential_ref: "cred-apollo".to_string(),
+                        pinned_installation_id: pin,
+                        connection_kind:
+                            sase_core::FleetConnectionKindWire::Gateway,
+                        tls: sase_core::TlsTrustSettingsWire {
+                            schema_version: 1,
+                            mode: sase_core::TlsTrustModeWire::PinnedCa,
+                            ca_ref: Some("missing".to_string()),
+                            server_name_ref: None,
+                        },
+                    },
+                    bearer_token: "token".to_string(),
+                }])
+                .await
+                .unwrap();
+
+            assert_eq!(response["configured_hosts"], json!(0), "{response}");
+            assert_eq!(response["hosts"][0]["status"], json!("invalid"));
+            assert_eq!(
+                response["hosts"][0]["error"]["target"],
+                json!("hosts.plan.tls.ca_ref")
+            );
+        }
+
+        #[tokio::test]
+        async fn worker_trusts_pinned_ca_and_preserves_healthy_host_beside_faults(
+        ) {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = FederationWorkerConfig::new(tmp.path());
+            config.run_root = tmp.path().join("run");
+            config.socket_path = config.run_root.join("worker.sock");
+            config.idle_timeout = Duration::from_secs(30);
+            let socket_path = config.socket_path.clone();
+
+            let healthy_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "d".repeat(64)
+            );
+            let untrusted_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "e".repeat(64)
+            );
+            let hung_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "f".repeat(64)
+            );
+            let fixture =
+                start_https_fixture(tmp.path(), "loopback", &healthy_pin).await;
+            let hung_listener =
+                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let hung_port = hung_listener.local_addr().unwrap().port();
+            let hung_reached = Arc::new(tokio::sync::Notify::new());
+            let hung_reached_writer = hung_reached.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _addr)) = hung_listener.accept().await
+                    else {
+                        return;
+                    };
+                    hung_reached_writer.notify_one();
+                    let _stream = stream;
+                    std::future::pending::<()>().await;
+                }
+            });
+
+            let worker = tokio::spawn(run(config));
+            let replace = request_worker(
+                &socket_path,
+                "replace-tls",
+                json!({
+                    "op": "replace_config",
+                    "hosts": [
+                        tls_host(
+                            "apollo",
+                            &healthy_pin,
+                            fixture.port,
+                            "pinned_ca",
+                            Some("loopback"),
+                        ),
+                        tls_host(
+                            "hera",
+                            &untrusted_pin,
+                            fixture.port,
+                            "system_roots",
+                            None,
+                        ),
+                        tls_host(
+                            "zeus",
+                            &hung_pin,
+                            hung_port,
+                            "system_roots",
+                            None,
+                        ),
+                    ],
+                }),
+            )
+            .await;
+            assert_eq!(replace["configured_hosts"], json!(3), "{replace}");
+
+            let deadline_budget_ms = 700_u64;
+            let started = std::time::Instant::now();
+            let response = request_worker_with_deadline(
+                &socket_path,
+                "summary-tls-1",
+                json!({"op": "summary", "cache_only": false}),
+                unix_now_ms() + deadline_budget_ms,
+            )
+            .await;
+            let elapsed = started.elapsed();
+
+            assert_eq!(response["ok"], json!(true), "{response}");
+            assert!(
+                elapsed < Duration::from_millis(deadline_budget_ms + 1500),
+                "deadline was not bounded: waited {elapsed:?}",
+            );
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    hung_reached.notified()
+                )
+                .await
+                .is_ok(),
+                "worker never connected to the hung host",
+            );
+            assert_eq!(
+                host_result(&response, "apollo")["status"],
+                json!("ok"),
+                "{response}"
+            );
+            assert_eq!(
+                host_result(&response, "apollo")["payload"]["counts"]
+                    ["running"],
+                json!(1)
+            );
+            assert_ne!(
+                host_result(&response, "hera")["status"],
+                json!("ok"),
+                "system roots must not silently trust the pinned CA fixture: {response}"
+            );
+            assert_eq!(
+                host_result(&response, "zeus")["status"],
+                json!("deadline"),
+                "{response}"
+            );
+
+            let second = request_worker_with_deadline(
+                &socket_path,
+                "summary-tls-2",
+                json!({"op": "summary", "cache_only": false}),
+                unix_now_ms() + deadline_budget_ms,
+            )
+            .await;
+            assert_eq!(second["ok"], json!(true), "{second}");
+            assert_eq!(
+                host_result(&second, "apollo")["status"],
+                json!("ok"),
+                "{second}"
+            );
+
+            let paths = request_paths(&fixture.requests);
+            assert!(
+                paths.iter().any(|path| path == "/api/fleet/v1/hello"),
+                "trusted fixture did not receive hello: {paths:?}",
+            );
+            assert!(
+                paths.iter().any(|path| path == "/api/fleet/v1/summary"),
+                "trusted fixture did not receive summary: {paths:?}",
+            );
+
+            let shutdown = request_worker(
+                &socket_path,
+                "shutdown-tls",
+                json!({"op": "shutdown"}),
+            )
+            .await;
+            assert_eq!(shutdown["shutdown"], json!(true));
+            worker.await.unwrap().unwrap();
+        }
+
+        #[tokio::test]
+        async fn worker_catalog_hosts_continues_only_requested_hosts() {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut config = FederationWorkerConfig::new(tmp.path());
+            config.run_root = tmp.path().join("run");
+            config.socket_path = config.run_root.join("worker.sock");
+            config.idle_timeout = Duration::from_secs(30);
+            let socket_path = config.socket_path.clone();
+
+            let apollo_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "1".repeat(64)
+            );
+            let zeus_pin = format!(
+                "{}{}",
+                sase_core::FLEET_INSTALLATION_ID_PREFIX,
+                "2".repeat(64)
+            );
+            let apollo =
+                start_https_fixture(tmp.path(), "apollo-ca", &apollo_pin).await;
+            let zeus =
+                start_https_fixture(tmp.path(), "zeus-ca", &zeus_pin).await;
+            let worker = tokio::spawn(run(config));
+            let replace = request_worker(
+                &socket_path,
+                "replace-catalog-hosts",
+                json!({
+                    "op": "replace_config",
+                    "hosts": [
+                        tls_host(
+                            "apollo",
+                            &apollo_pin,
+                            apollo.port,
+                            "pinned_ca",
+                            Some("apollo-ca"),
+                        ),
+                        tls_host(
+                            "zeus",
+                            &zeus_pin,
+                            zeus.port,
+                            "pinned_ca",
+                            Some("zeus-ca"),
+                        ),
+                    ],
+                }),
+            )
+            .await;
+            assert_eq!(replace["configured_hosts"], json!(2), "{replace}");
+
+            let response = request_worker(
+                &socket_path,
+                "catalog-hosts-1",
+                json!({
+                    "op": "catalog_hosts",
+                    "cache_only": false,
+                    "queries": [
+                        {
+                            "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
+                            "installation_id": zeus_pin,
+                            "query": {
+                                "schema_version": 1,
+                                "cursor": "zeus:100",
+                                "limit": 100,
+                                "project_ids": [],
+                                "query": null,
+                                "status_buckets": [],
+                                "include_terminal": true,
+                            },
+                        },
+                    ],
+                }),
+            )
+            .await;
+            assert_eq!(response["operation"], json!("catalog"));
+            assert_eq!(response["hosts"].as_array().unwrap().len(), 1);
+            assert_eq!(response["hosts"][0]["alias"], json!("zeus"));
+            assert_eq!(response["hosts"][0]["status"], json!("ok"));
+            assert!(request_paths(&apollo.requests).is_empty());
+            let zeus_requests = zeus.requests.lock().unwrap().clone();
+            assert_eq!(
+                zeus_requests
+                    .iter()
+                    .filter(|request| request["path"]
+                        == json!("/api/fleet/v1/catalog"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                zeus_requests
+                    .iter()
+                    .find(|request| request["path"]
+                        == json!("/api/fleet/v1/catalog"))
+                    .unwrap()["body"]["cursor"],
+                json!("zeus:100")
+            );
+
+            let shutdown = request_worker(
+                &socket_path,
+                "shutdown-catalog-hosts",
+                json!({"op": "shutdown"}),
+            )
+            .await;
+            assert_eq!(shutdown["shutdown"], json!(true));
+            worker.await.unwrap().unwrap();
+        }
+
         /// Real worker + real per-host HTTPS fan-out deadline, using two genuinely
         /// real loopback TCP fixtures instead of a scripted/mocked response: one
         /// host accepts the connection (proving the worker actually reached it)
@@ -2829,6 +3818,7 @@ fn federation_capabilities() -> Vec<String> {
         "config.replace".to_string(),
         "fleet.summary".to_string(),
         "fleet.catalog".to_string(),
+        "fleet.catalog_hosts".to_string(),
         "fleet.followed_batch".to_string(),
         "fleet.detail".to_string(),
         "fleet.content_range".to_string(),
