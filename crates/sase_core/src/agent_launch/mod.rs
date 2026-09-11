@@ -690,6 +690,7 @@ struct DirectiveOccurrence {
     start: usize,
     end: usize,
     args: Vec<String>,
+    is_bare: bool,
     has_plus_suffix: bool,
     // True when a single colon argument came from a backtick literal
     // (`` %model:`literal@id` ``). Such values bypass the `@effort` split so any
@@ -1135,11 +1136,17 @@ fn classify_typed_launch_unit(
         if position_in_ranges(directive.start, &ignored_ranges) {
             continue;
         }
-        // `%if::` is owned by the fence scanner. Re-parsing it as a bare
-        // `%if` would emit a false invalid-if-form diagnostic after the
-        // condition was already captured. `%proc(...)::` still needs this
-        // loop so parenthesized options survive.
+        // `%if::` and bare `%proc::` are owned by the fence scanner. Re-parsing
+        // them here would emit false diagnostics after the scanner already
+        // captured the code. `%proc(...)::` still needs this loop so
+        // parenthesized options survive.
         if directive.canonical_name == "if"
+            && position_in_ranges(directive.start, &owned_spans)
+        {
+            continue;
+        }
+        if directive.canonical_name == "proc"
+            && directive.is_bare
             && position_in_ranges(directive.start, &owned_spans)
         {
             continue;
@@ -1147,6 +1154,11 @@ fn classify_typed_launch_unit(
         let span = [directive.start, directive.end];
         match directive.canonical_name.as_str() {
             "proc" => {
+                if directive.is_bare
+                    && !prompt[directive.end..].starts_with("::")
+                {
+                    continue;
+                }
                 regions_to_remove.push((directive.start, directive.end));
                 match parse_proc_directive(
                     prompt,
@@ -1177,6 +1189,11 @@ fn classify_typed_launch_unit(
                 }
             }
             "if" => {
+                if directive.is_bare
+                    && !prompt[directive.end..].starts_with("::")
+                {
+                    continue;
+                }
                 regions_to_remove.push((directive.start, directive.end));
                 diagnostics.push(typed_unit_diagnostic(
                     "invalid-if-form",
@@ -3479,18 +3496,22 @@ fn directive_occurrences(
         let mut args = Vec::new();
         let mut has_plus_suffix = false;
         let mut from_backtick_literal = false;
+        let has_paren_form = caps.get(4).is_some();
+        let colon_arg = caps.get(5);
+        let has_plus_form = caps.get(6).is_some();
+        let is_bare = !has_paren_form && colon_arg.is_none() && !has_plus_form;
 
-        if caps.get(4).is_some() {
+        if has_paren_form {
             let paren_start = marker.end() - 1;
             if let Some(paren_end) = find_matching_paren(prompt, paren_start) {
                 args =
                     parse_directive_args(&prompt[paren_start + 1..paren_end]);
                 end = paren_end + 1;
             }
-        } else if let Some(colon_arg) = caps.get(5) {
+        } else if let Some(colon_arg) = colon_arg {
             from_backtick_literal = colon_arg.as_str().starts_with('`');
             args = vec![unquote_backticks(colon_arg.as_str())];
-        } else if caps.get(6).is_some() {
+        } else if has_plus_form {
             has_plus_suffix = true;
             args = vec!["true".to_string()];
         } else {
@@ -3502,6 +3523,7 @@ fn directive_occurrences(
             start: marker.start(),
             end,
             args,
+            is_bare,
             has_plus_suffix,
             from_backtick_literal,
         });
@@ -4952,7 +4974,25 @@ mod tests {
     }
 
     #[test]
-    fn typed_launch_plan_rejects_bare_if_without_owned_fence() {
+    fn typed_launch_plan_preserves_prose_if_proc_mentions() {
+        let prompt =
+            "stop un-admitted %if/%proc units\n%proc mentions stay prose";
+
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+
+        assert_eq!(plan.units.len(), 1);
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.prompt, prompt);
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_rejects_invalid_if_forms_without_owned_fence() {
         let err = plan_typed_launch_units(
             "%if:true\nReview",
             Some("auto"),
@@ -4961,6 +5001,21 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("%if requires %if::"));
+
+        let paren_err = plan_typed_launch_units(
+            "%if(true)\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        match paren_err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "invalid-if-form"));
+            }
+            other => panic!("expected typed launch diagnostic, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4976,6 +5031,23 @@ mod tests {
                 assert_eq!(proc_unit.cwd.as_deref(), Some("docs"));
                 assert!(proc_unit.workspace);
                 assert!(proc_unit.code.source.contains("just docs-check"));
+            }
+            other => panic!("expected proc payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_plan_captures_bare_fenced_proc() {
+        let prompt = "%proc::\n```bash\njust check\n```\n";
+
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Proc(proc_unit) => {
+                assert_eq!(proc_unit.code.source, "just check\n");
+                assert_eq!(proc_unit.code.language, "bash");
             }
             other => panic!("expected proc payload, got {other:?}"),
         }
