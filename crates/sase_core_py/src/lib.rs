@@ -65,6 +65,9 @@
 //! - `plan_status_transition(request: dict) -> dict`
 //! - `canonical_pull_request_url(url: str) -> dict | None`
 //! - `plan_external_pr_import(request: dict) -> dict`
+//! - `repository_resolution_wire_schema_version() -> int`
+//! - `canonical_repository_identity(value: str) -> dict | None`
+//! - `resolve_repository_reference(request: dict) -> dict`
 //! - `parse_git_name_status_z(stdout: str) -> list[dict]`
 //! - `parse_git_branch_name(stdout: str) -> str | None`
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
@@ -1333,6 +1336,12 @@ use sase_core::referenced_by::{
     strip_referenced_by_block as core_strip_referenced_by_block,
     upsert_referenced_by_block as core_upsert_referenced_by_block,
     ReferencedByTableWire, REFERENCED_BY_BLOCK_WIRE_SCHEMA_VERSION,
+};
+use sase_core::repository_resolution::{
+    canonical_repository_identity as core_canonical_repository_identity,
+    repository_resolution_wire_schema_version as core_repository_resolution_wire_schema_version,
+    resolve_repository_reference as core_resolve_repository_reference,
+    RepositoryResolutionRequestWire,
 };
 use sase_core::runner_limit_override::{
     clear_runner_limit_override as core_clear_runner_limit_override,
@@ -4337,6 +4346,44 @@ fn py_plan_external_pr_import<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Return the repository-resolution wire schema version.
+#[pyfunction]
+#[pyo3(name = "repository_resolution_wire_schema_version")]
+fn py_repository_resolution_wire_schema_version() -> u32 {
+    core_repository_resolution_wire_schema_version()
+}
+
+/// Canonicalize a supported repository identity, if one is present.
+#[pyfunction]
+#[pyo3(name = "canonical_repository_identity")]
+fn py_canonical_repository_identity<'py>(
+    py: Python<'py>,
+    value: &str,
+) -> PyResult<Option<PyObject>> {
+    let Some(identity) = core_canonical_repository_identity(value) else {
+        return Ok(None);
+    };
+    serialize_to_py(py, &identity).map(Some)
+}
+
+/// Resolve a requested repository reference against configured candidates.
+#[pyfunction]
+#[pyo3(name = "resolve_repository_reference")]
+fn py_resolve_repository_reference<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: RepositoryResolutionRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid RepositoryResolutionRequestWire dict: {e}"
+            ))
+        })?;
+    let decision = core_resolve_repository_reference(&req);
+    serialize_to_py(py, &decision)
 }
 
 // --- Phase 5C Git query parser bindings -----------------------------------
@@ -16823,6 +16870,12 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_status_transition, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_pull_request_url, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_external_pr_import, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_repository_resolution_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_canonical_repository_identity, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_repository_reference, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_name_status_z, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_branch_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
