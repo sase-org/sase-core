@@ -18,6 +18,7 @@ pub(crate) const MAX_STAGES: usize = 256;
 pub(crate) const MAX_RANGES: usize = 512;
 pub(crate) const MAX_COMMAND_PARTS: usize = 256;
 pub(crate) const MAX_ATTEMPTS: usize = 256;
+pub(crate) const MAX_CONTEXT_ENTRIES: usize = 128;
 
 /// Contract validation error surfaced through Rust and PyO3.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -249,6 +250,13 @@ pub enum ContinuationDeliveryDispositionWire {
     NeedsAttention,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchRequesterContinuationModeWire {
+    ResumeRequester,
+    TerminalHandoff,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationExecutionIdentityWire {
     pub project: String,
@@ -448,6 +456,21 @@ pub struct ContinuationDeliveryRecordWire {
     pub disposition: ContinuationDeliveryDispositionWire,
     #[serde(default)]
     pub disposition_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchRequesterContinuationWire {
+    pub schema_version: u32,
+    pub mode: LaunchRequesterContinuationModeWire,
+    #[serde(default)]
+    pub required: bool,
+    pub checkpoint: String,
+    #[serde(default)]
+    pub context: BTreeMap<String, String>,
+    #[serde(default)]
+    pub resume_branches: Vec<String>,
+    #[serde(default)]
+    pub terminal_branches: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,6 +756,68 @@ pub fn validate_continuation_delivery_record(
     Ok(record)
 }
 
+pub fn validate_launch_requester_continuation(
+    continuation: LaunchRequesterContinuationWire,
+) -> Result<LaunchRequesterContinuationWire, ContinuationError> {
+    validate_schema(
+        continuation.schema_version,
+        "LaunchRequesterContinuationWire",
+    )?;
+    validate_non_empty_text(
+        &continuation.checkpoint,
+        "checkpoint",
+        MAX_TEXT_BYTES,
+    )?;
+    if continuation.context.len() > MAX_CONTEXT_ENTRIES {
+        return Err(ContinuationError::validation(format!(
+            "context has {} entries; maximum is {MAX_CONTEXT_ENTRIES}",
+            continuation.context.len()
+        )));
+    }
+    for (key, value) in &continuation.context {
+        validate_identifier(key, "context key")?;
+        validate_text(value, &format!("context[{key}]"), MAX_TEXT_BYTES)?;
+    }
+    validate_branch_list(&continuation.resume_branches, "resume_branches")?;
+    validate_branch_list(&continuation.terminal_branches, "terminal_branches")?;
+    match continuation.mode {
+        LaunchRequesterContinuationModeWire::ResumeRequester => {
+            if !continuation.required {
+                return Err(ContinuationError::validation(
+                    "resume_requester continuations must be required",
+                ));
+            }
+            if continuation.resume_branches.is_empty() {
+                return Err(ContinuationError::validation(
+                    "resume_requester continuations must declare resume_branches",
+                ));
+            }
+            if continuation
+                .resume_branches
+                .iter()
+                .any(|branch| branch == "stopped")
+            {
+                return Err(ContinuationError::validation(
+                    "stopped must not be a requester-resume branch",
+                ));
+            }
+        }
+        LaunchRequesterContinuationModeWire::TerminalHandoff => {
+            if continuation.required {
+                return Err(ContinuationError::validation(
+                    "terminal_handoff continuations must not be required",
+                ));
+            }
+            if !continuation.resume_branches.is_empty() {
+                return Err(ContinuationError::validation(
+                    "terminal_handoff continuations must not declare resume_branches",
+                ));
+            }
+        }
+    }
+    Ok(continuation)
+}
+
 pub fn validate_continuation_graph(
     records: Vec<ContinuationNodeWire>,
 ) -> Result<ContinuationGraphValidationWire, ContinuationError> {
@@ -961,8 +1046,21 @@ fn validate_delivery_key(
     Ok(())
 }
 
+fn validate_branch_list(
+    branches: &[String],
+    field: &str,
+) -> Result<(), ContinuationError> {
+    for (index, branch) in branches.iter().enumerate() {
+        validate_identifier(branch, &format!("{field}[{index}]"))?;
+    }
+    validate_unique_ids(branches.iter().map(String::as_str), field)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::*;
@@ -1062,6 +1160,84 @@ mod tests {
 
         assert_eq!(err.kind, "validation");
         assert!(err.message.contains("injected parent content"));
+    }
+
+    #[test]
+    fn launch_requester_continuation_validates_resume_contract() {
+        let continuation = LaunchRequesterContinuationWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            mode: LaunchRequesterContinuationModeWire::ResumeRequester,
+            required: true,
+            checkpoint: "Continue the phase after approval.".to_string(),
+            context: BTreeMap::from([
+                ("SASE_AGENT_NAME".to_string(), "agent--0".to_string()),
+                ("SASE_BEAD_ID".to_string(), "sase-1.2".to_string()),
+            ]),
+            resume_branches: vec![
+                "approve".to_string(),
+                "reject".to_string(),
+                "timeout".to_string(),
+                "failed".to_string(),
+            ],
+            terminal_branches: vec!["stopped".to_string()],
+        };
+
+        let validated =
+            validate_launch_requester_continuation(continuation).unwrap();
+
+        assert_eq!(
+            validated.mode,
+            LaunchRequesterContinuationModeWire::ResumeRequester
+        );
+        assert_eq!(validated.resume_branches[0], "approve");
+    }
+
+    #[test]
+    fn launch_requester_continuation_keeps_stopped_terminal() {
+        let continuation = LaunchRequesterContinuationWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            mode: LaunchRequesterContinuationModeWire::ResumeRequester,
+            required: true,
+            checkpoint: "Continue the phase after approval.".to_string(),
+            context: BTreeMap::new(),
+            resume_branches: vec!["stopped".to_string()],
+            terminal_branches: vec![],
+        };
+
+        let err =
+            validate_launch_requester_continuation(continuation).unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert!(err.message.contains("stopped must not"));
+    }
+
+    #[test]
+    fn launch_requester_continuation_accepts_terminal_handoff() {
+        let continuation = LaunchRequesterContinuationWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            mode: LaunchRequesterContinuationModeWire::TerminalHandoff,
+            required: false,
+            checkpoint: "Operator selected terminal helper handoff."
+                .to_string(),
+            context: BTreeMap::new(),
+            resume_branches: vec![],
+            terminal_branches: vec![
+                "approve".to_string(),
+                "reject".to_string(),
+                "timeout".to_string(),
+                "stopped".to_string(),
+                "failed".to_string(),
+            ],
+        };
+
+        let validated =
+            validate_launch_requester_continuation(continuation).unwrap();
+
+        assert_eq!(
+            validated.mode,
+            LaunchRequesterContinuationModeWire::TerminalHandoff
+        );
+        assert!(validated.resume_branches.is_empty());
     }
 
     #[test]

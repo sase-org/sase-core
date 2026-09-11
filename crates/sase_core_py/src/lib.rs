@@ -1026,12 +1026,13 @@ use sase_core::continuation::{
     validate_continuation_intent as core_validate_continuation_intent,
     validate_continuation_node_value as core_validate_continuation_node_value,
     validate_diagnostic_manifest as core_validate_diagnostic_manifest,
+    validate_launch_requester_continuation as core_validate_launch_requester_continuation,
     validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
     ContinuationBudgetRequestWire, ContinuationDeliveryRecordWire,
     ContinuationError, ContinuationEvidenceSelectionRequestWire,
     ContinuationIntentWire, ContinuationNodeWire,
     ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
-    DiagnosticManifestWire, MonitorResultWire,
+    DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
@@ -14419,6 +14420,22 @@ fn py_continuation_validate_delivery_record<'py>(
     )
 }
 
+/// Validate one LaunchApproval requester-continuation contract.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_launch_requester_continuation")]
+fn py_continuation_validate_launch_requester_continuation<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: LaunchRequesterContinuationWire =
+        continuation_wire_from_pydict(record, "launch requester continuation")?;
+    continuation_result_to_py(
+        py,
+        core_validate_launch_requester_continuation(record),
+        "launch requester continuation validation",
+    )
+}
+
 /// Build a deterministic parent-first replay manifest.
 #[pyfunction]
 #[pyo3(name = "continuation_plan_replay")]
@@ -17662,6 +17679,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_continuation_validate_delivery_record,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_validate_launch_requester_continuation,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_continuation_plan_replay, m)?)?;
