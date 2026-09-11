@@ -1130,7 +1130,13 @@ async fn fleet_launch(
         prompt: payload.intent.prompt.clone(),
         request_id: payload.intent.request_id.clone(),
         display_name: payload.intent.display_name.clone(),
-        name: payload.intent.name.clone(),
+        name: if sase_core::prompt_has_identity_directive(
+            &payload.intent.prompt,
+        ) {
+            None
+        } else {
+            payload.intent.name.clone()
+        },
         model: payload.intent.model.clone(),
         provider: payload.intent.provider.clone(),
         runtime: payload.intent.runtime.clone(),
@@ -4536,7 +4542,10 @@ mod tests {
     use serde_json::{json, Value};
     use std::{
         path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        sync::{
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+            Arc, Mutex,
+        },
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -5058,6 +5067,49 @@ mod tests {
         home: PathBuf,
         launch_count: Arc<AtomicUsize>,
         delay: StdDuration,
+    }
+
+    #[derive(Debug)]
+    struct CapturingLaunchBridge {
+        home: PathBuf,
+        launches: Arc<Mutex<Vec<MobileAgentTextLaunchRequestWire>>>,
+    }
+
+    impl AgentHostBridge for CapturingLaunchBridge {
+        fn launch_text(
+            &self,
+            request: &MobileAgentTextLaunchRequestWire,
+        ) -> Result<MobileAgentLaunchResultWire, HostBridgeError> {
+            self.launches
+                .lock()
+                .expect("launch capture lock")
+                .push(request.clone());
+            let name = request
+                .name
+                .clone()
+                .or_else(|| {
+                    sase_core::prompt_has_identity_directive(&request.prompt)
+                        .then(|| "observer".to_string())
+                })
+                .unwrap_or_else(|| "mobile-demo".to_string());
+            seed_fleet_agent(&self.home, &name, true, false);
+            Ok(sample_launch_result(&name))
+        }
+
+        fn kill_agent(
+            &self,
+            name: &str,
+            _request: &MobileAgentKillRequestWire,
+        ) -> Result<MobileAgentKillResultWire, HostBridgeError> {
+            Ok(MobileAgentKillResultWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                name: name.to_string(),
+                status: "killed".to_string(),
+                pid: Some(4242),
+                changed: true,
+                message: None,
+            })
+        }
     }
 
     impl AgentHostBridge for DelayedLaunchBridge {
@@ -5967,6 +6019,60 @@ exit 4
                 timestamp: Some(_),
             } if reason == "fleet_launch" && name == "mobile-demo"
         )));
+    }
+
+    #[tokio::test]
+    async fn fleet_launch_omits_bridge_name_when_prompt_has_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let launches = Arc::new(Mutex::new(Vec::new()));
+        let state = state_for_custom_agent_bridge(
+            &tmp,
+            Arc::new(CapturingLaunchBridge {
+                home: tmp.path().to_path_buf(),
+                launches: launches.clone(),
+            }),
+        );
+        let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_LAUNCH], None);
+        let (enroll_status, enrolled) = json_response_with_state(
+            state.clone(),
+            fleet_enroll_request(fleet_enroll_body(
+                &bootstrap,
+                &[FLEET_SCOPE_LAUNCH],
+                vec![1],
+            )),
+        )
+        .await;
+        assert_eq!(enroll_status, StatusCode::OK);
+        let token = enrolled["token"].as_str().unwrap();
+
+        let mut body = sample_fleet_launch_body(
+            &bootstrap.pinned_installation_id,
+            "dispatch-named-1",
+        );
+        body["intent"]["prompt"] = json!("%id:observer\n#gh:sase Watch Apollo");
+        body["intent"]["name"] = json!("dispatch-named-1");
+        let intent: sase_core::FleetLaunchIntentWire =
+            serde_json::from_value(body["intent"].clone()).unwrap();
+        body["payload_fingerprint"] = serde_json::to_value(
+            sase_core::fleet_launch_payload_fingerprint(&intent).unwrap(),
+        )
+        .unwrap();
+
+        let (status, launch) =
+            post_fleet_launch(state.clone(), token, body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(launch["decision"], "accept_new");
+        let _settled =
+            wait_for_launch_receipt_state(&state, token, &body, "settled")
+                .await;
+        let captured = launches.lock().expect("launch capture lock");
+        assert_eq!(captured.len(), 1);
+        assert!(
+            captured[0].name.is_none(),
+            "gateway must not duplicate an identity already in the prompt: {:?}",
+            captured[0].name
+        );
+        assert!(captured[0].prompt.contains("%id:observer"));
     }
 
     #[tokio::test]

@@ -653,6 +653,7 @@ use sase_core::agent_launch::{
     prepare_agent_launch as core_prepare_agent_launch,
     prepare_proc_script as core_prepare_proc_script,
     proc_script_argv as core_proc_script_argv,
+    prompt_has_identity_directive as core_prompt_has_identity_directive,
     reconcile_admission_journal as core_reconcile_admission_journal,
     resolve_proc_execution_cwd as core_resolve_proc_execution_cwd,
     sanitize_safe_inputs as core_sanitize_safe_inputs,
@@ -15002,6 +15003,12 @@ fn py_agent_unit_dispatch_prompt(
 }
 
 #[pyfunction]
+#[pyo3(name = "prompt_has_identity_directive")]
+fn py_prompt_has_identity_directive(prompt: &str) -> bool {
+    core_prompt_has_identity_directive(prompt)
+}
+
+#[pyfunction]
 #[pyo3(name = "collect_queue_fields")]
 fn py_collect_queue_fields<'py>(
     py: Python<'py>,
@@ -17714,6 +17721,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_admission_unit_results, m)?)?;
     m.add_function(wrap_pyfunction!(py_dispatch_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_unit_dispatch_prompt, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_has_identity_directive, m)?)?;
     m.add_function(wrap_pyfunction!(py_wait_target_key, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_condition_eval_wire_schema_version,

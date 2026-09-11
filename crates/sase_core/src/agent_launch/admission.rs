@@ -15,9 +15,12 @@ use std::collections::BTreeMap;
 
 pub const LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchUnitPhaseWire {
+    #[default]
     Reserved,
     Waiting,
     Checking,
@@ -69,7 +72,7 @@ pub struct WaitedOutcomeWire {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LaunchAdmissionJournalEntryWire {
     pub schema_version: u32,
     pub seq: u64,
@@ -83,10 +86,22 @@ pub struct LaunchAdmissionJournalEntryWire {
     pub waited_outcomes: Option<Vec<WaitedOutcomeWire>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_key: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertain: Option<bool>,
     pub recorded_at_unix: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct LaunchAdmissionUnitStateWire {
     pub logical_id: String,
     pub phase: LaunchUnitPhaseWire,
@@ -98,6 +113,18 @@ pub struct LaunchAdmissionUnitStateWire {
     pub waited_outcomes: Vec<WaitedOutcomeWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_key: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertain: Option<bool>,
     pub last_seq: u64,
 }
 
@@ -194,11 +221,8 @@ pub fn reconcile_admission_journal(
                 LaunchAdmissionUnitStateWire {
                     logical_id: entry.logical_id.clone(),
                     phase: entry.phase,
-                    fingerprint: None,
-                    identity: None,
-                    waited_outcomes: Vec::new(),
-                    message: None,
                     last_seq: entry.seq,
+                    ..Default::default()
                 }
             });
         state.phase = entry.phase;
@@ -214,6 +238,24 @@ pub fn reconcile_admission_journal(
         }
         if let Some(message) = &entry.message {
             state.message = Some(message.clone());
+        }
+        if let Some(dispatch_target) = &entry.dispatch_target {
+            state.dispatch_target = Some(dispatch_target.clone());
+        }
+        if let Some(workspace_reference) = &entry.workspace_reference {
+            state.workspace_reference = Some(workspace_reference.clone());
+        }
+        if let Some(operation_key) = &entry.operation_key {
+            state.operation_key = Some(operation_key.clone());
+        }
+        if let Some(locator) = &entry.locator {
+            state.locator = Some(locator.clone());
+        }
+        if let Some(receipt_state) = &entry.receipt_state {
+            state.receipt_state = Some(receipt_state.clone());
+        }
+        if let Some(uncertain) = entry.uncertain {
+            state.uncertain = Some(uncertain);
         }
     }
     states
@@ -271,6 +313,10 @@ pub fn next_admission_actions(
                                 identity: identity.clone(),
                             },
                         );
+                    } else if unit_is_remote_agent(unit) {
+                        // Reconcile the same remote operation instead of
+                        // failing or spawning a local fallback.
+                        actions.push(dispatch_action(plan, unit));
                     } else {
                         actions.push(LaunchAdmissionActionWire::FailDispatch {
                             logical_id: unit.logical_id.clone(),
@@ -341,6 +387,27 @@ pub fn admission_unit_results(
                 logical_id: unit.logical_id.clone(),
                 outcome,
                 message: state.message.clone(),
+                identity: state.identity.clone(),
+                dispatch_target: state.dispatch_target.clone().or_else(|| {
+                    match &unit.payload {
+                        LaunchUnitPayloadWire::Agent(agent) => {
+                            agent.dispatch_target.clone()
+                        }
+                        LaunchUnitPayloadWire::Proc(_) => None,
+                    }
+                }),
+                workspace_reference: state.workspace_reference.clone().or_else(
+                    || match &unit.payload {
+                        LaunchUnitPayloadWire::Agent(agent) => {
+                            agent.workspace_reference.clone()
+                        }
+                        LaunchUnitPayloadWire::Proc(_) => None,
+                    },
+                ),
+                operation_key: state.operation_key.clone(),
+                locator: state.locator.clone(),
+                receipt_state: state.receipt_state.clone(),
+                uncertain: state.uncertain,
             })
         })
         .collect()
@@ -354,7 +421,13 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     agent: &AgentUnitWire,
     _enabled_feature_flags: &[String],
 ) -> String {
-    let mut lines = agent.identity_directive_lines();
+    let mut lines = Vec::new();
+    if let Some(target) = agent.dispatch_target.as_deref() {
+        if !target.is_empty() {
+            lines.push(format!("%dispatch:{target}"));
+        }
+    }
+    lines.extend(agent.identity_directive_lines());
     match (&agent.model, &agent.reasoning_effort) {
         (Some(model), Some(effort)) => {
             lines.push(format!("%model:{model}@{effort}"));
@@ -388,10 +461,22 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     }) {
         lines.push(directive);
     }
+    if let Some(workspace) = agent.workspace_reference.as_deref() {
+        if !workspace.is_empty() {
+            lines.push(workspace.to_string());
+        }
+    }
     if !agent.prompt.is_empty() {
         lines.push(agent.prompt.clone());
     }
     lines.join("\n")
+}
+
+fn unit_is_remote_agent(unit: &super::LaunchUnitWire) -> bool {
+    match &unit.payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent.dispatch_target.is_some(),
+        LaunchUnitPayloadWire::Proc(_) => false,
+    }
 }
 
 fn dispatch_action(
@@ -509,11 +594,8 @@ mod tests {
             seq,
             logical_id: logical_id.to_string(),
             phase,
-            fingerprint: None,
-            identity: None,
-            waited_outcomes: None,
-            message: None,
             recorded_at_unix: seq as f64,
+            ..Default::default()
         }
     }
 
@@ -563,11 +645,8 @@ mod tests {
             LaunchAdmissionUnitStateWire {
                 logical_id: "unit-1".to_string(),
                 phase: LaunchUnitPhaseWire::Reserved,
-                fingerprint: None,
-                identity: None,
-                waited_outcomes: Vec::new(),
-                message: None,
                 last_seq: 1,
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -618,11 +697,9 @@ mod tests {
             LaunchAdmissionUnitStateWire {
                 logical_id: "unit-1".to_string(),
                 phase: LaunchUnitPhaseWire::Skipped,
-                fingerprint: None,
-                identity: None,
-                waited_outcomes: Vec::new(),
                 message: Some("predicate exited 1".to_string()),
                 last_seq: 4,
+                ..Default::default()
             },
         );
         states.insert(
@@ -630,11 +707,8 @@ mod tests {
             LaunchAdmissionUnitStateWire {
                 logical_id: "unit-2".to_string(),
                 phase: LaunchUnitPhaseWire::Waiting,
-                fingerprint: None,
-                identity: None,
-                waited_outcomes: Vec::new(),
-                message: None,
                 last_seq: 3,
+                ..Default::default()
             },
         );
 
@@ -683,11 +757,8 @@ mod tests {
             LaunchAdmissionUnitStateWire {
                 logical_id: "unit-1".to_string(),
                 phase: LaunchUnitPhaseWire::Waiting,
-                fingerprint: None,
-                identity: None,
-                waited_outcomes: Vec::new(),
-                message: None,
                 last_seq: 2,
+                ..Default::default()
             },
         );
         match &next_admission_actions(&plan, &states, &[])[0] {
@@ -717,10 +788,8 @@ mod tests {
                 logical_id: "unit-1".to_string(),
                 phase: LaunchUnitPhaseWire::Dispatching,
                 fingerprint: Some("fp".to_string()),
-                identity: None,
-                waited_outcomes: Vec::new(),
-                message: None,
                 last_seq: 5,
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -742,6 +811,66 @@ mod tests {
     }
 
     #[test]
+    fn remote_dispatching_without_identity_retries_same_fingerprint() {
+        let mut unit = agent_unit("unit-1", 0);
+        match &mut unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                agent.dispatch_target = Some("apollo".to_string());
+                agent.workspace_reference = Some("#gh:sase".to_string());
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        let plan = plan_with(vec![unit.clone()]);
+        let mut states = BTreeMap::new();
+        states.insert(
+            "unit-1".to_string(),
+            LaunchAdmissionUnitStateWire {
+                logical_id: "unit-1".to_string(),
+                phase: LaunchUnitPhaseWire::Dispatching,
+                fingerprint: Some("fp".to_string()),
+                last_seq: 5,
+                ..Default::default()
+            },
+        );
+        match &next_admission_actions(&plan, &states, &[])[0] {
+            LaunchAdmissionActionWire::Dispatch {
+                logical_id,
+                fingerprint,
+                unit_kind,
+            } => {
+                assert_eq!(logical_id, "unit-1");
+                assert_eq!(unit_kind, "agent");
+                assert_eq!(
+                    fingerprint,
+                    &dispatch_fingerprint(
+                        &plan.content_digest,
+                        "unit-1",
+                        &unit.payload,
+                    )
+                );
+            }
+            other => panic!("expected dispatch retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_dispatch_prompt_restores_workspace_and_dispatch() {
+        let prompt = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Watch Apollo".to_string(),
+            identity: Some("observer".to_string()),
+            identity_explicit: true,
+            dispatch_target: Some("apollo".to_string()),
+            workspace_provider: Some("gh".to_string()),
+            workspace_reference: Some("#gh:sase".to_string()),
+            ..Default::default()
+        });
+        assert!(prompt.starts_with("%dispatch:apollo\n"));
+        assert!(prompt.contains("%id:observer"));
+        assert!(prompt.contains("#gh:sase"));
+        assert!(prompt.contains("Watch Apollo"));
+    }
+
+    #[test]
     fn external_wait_facts_gate_admission() {
         let mut unit = agent_unit("unit-1", 0);
         unit.waits = vec![WaitTargetWire::Agent {
@@ -754,11 +883,8 @@ mod tests {
             LaunchAdmissionUnitStateWire {
                 logical_id: "unit-1".to_string(),
                 phase: LaunchUnitPhaseWire::Waiting,
-                fingerprint: None,
-                identity: None,
-                waited_outcomes: Vec::new(),
-                message: None,
                 last_seq: 2,
+                ..Default::default()
             },
         );
         assert!(next_admission_actions(&plan, &states, &[]).is_empty());
@@ -804,11 +930,8 @@ mod tests {
                 LaunchAdmissionUnitStateWire {
                     logical_id: id.to_string(),
                     phase,
-                    fingerprint: None,
-                    identity: None,
-                    waited_outcomes: Vec::new(),
-                    message: None,
                     last_seq: 1,
+                    ..Default::default()
                 },
             );
         }

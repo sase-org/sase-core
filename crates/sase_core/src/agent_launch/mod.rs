@@ -333,6 +333,18 @@ pub struct AgentUnitWire {
     pub queue_weight: Option<f64>,
     #[serde(default, skip_serializing_if = "skip_if_false")]
     pub queue_weight_explicit: bool,
+    /// Workspace provider for this unit's VCS tag (`gh` or `git`).
+    /// Distinct from the plan-wide [`LaunchPlanWire::selected_project`]: a
+    /// plan-level project never replaces a per-unit `#gh:` / `#git:` ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_provider: Option<String>,
+    /// Exact per-unit workspace tag, for example `#gh:sase` or `#git:dotfiles`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_reference: Option<String>,
+    /// Remote machine alias from `%dispatch:<alias>`. Local units leave this
+    /// unset so admission never treats leftover prompt text as routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_target: Option<String>,
 }
 
 fn skip_if_false(value: &bool) -> bool {
@@ -522,12 +534,26 @@ pub enum LaunchOutcomeWire {
     LaunchError,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LaunchUnitResultWire {
     pub logical_id: String,
     pub outcome: LaunchOutcomeWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_key: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertain: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1045,7 +1071,17 @@ fn classify_typed_launch_unit(
 ) -> RawLaunchUnit {
     let prompt = slot.prompt.as_str();
     let logical_id = format!("unit-{}", slot.slot_index + 1);
-    let mut regions_to_remove = project_ref_ranges(prompt);
+    let project_refs = project_ref_captures(prompt);
+    let mut regions_to_remove: Vec<(usize, usize)> =
+        project_refs.iter().map(|capture| capture.span).collect();
+    let (workspace_provider, workspace_reference) = match project_refs.first() {
+        Some(capture) => (
+            Some(capture.provider.clone()),
+            Some(capture.reference.clone()),
+        ),
+        None => (None, None),
+    };
+    let mut dispatch_target: Option<String> = None;
     let mut condition: Option<LaunchConditionWire> = None;
     let mut proc_code: Option<CodeValueWire> = None;
     let mut proc_options: BTreeMap<String, String> = BTreeMap::new();
@@ -1157,6 +1193,16 @@ fn classify_typed_launch_unit(
                 if directive.is_bare
                     && !prompt[directive.end..].starts_with("::")
                 {
+                    if line_after_directive_is_blank(prompt, directive.end) {
+                        regions_to_remove
+                            .push((directive.start, directive.end));
+                        diagnostics.push(typed_unit_diagnostic(
+                            "invalid-proc-form",
+                            "%proc requires a body: %proc(\"cmd\"), %proc(bash=...|python=...), or %proc:: plus a fence.",
+                            &logical_id,
+                            Some(span),
+                        ));
+                    }
                     continue;
                 }
                 regions_to_remove.push((directive.start, directive.end));
@@ -1315,6 +1361,23 @@ fn classify_typed_launch_unit(
                 proc_forbidden_directives.push("%hide".to_string());
                 agent_hidden = true;
             }
+            "dispatch" => {
+                regions_to_remove.push((directive.start, directive.end));
+                if dispatch_target.is_some() {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-dispatch",
+                        "Only one %dispatch directive is allowed per launch unit.",
+                        &logical_id,
+                        Some(span),
+                    ));
+                } else {
+                    match parse_dispatch_target(&directive) {
+                        Ok(target) => dispatch_target = Some(target),
+                        Err(diagnostic) => diagnostics
+                            .push(with_logical_id(diagnostic, &logical_id)),
+                    }
+                }
+            }
             "repeat" => {
                 regions_to_remove.push((directive.start, directive.end));
             }
@@ -1359,6 +1422,18 @@ fn classify_typed_launch_unit(
         &mut agent_bead_id,
         diagnostics,
     );
+
+    if dispatch_target.is_some() {
+        validate_dispatch_combinations(
+            &logical_id,
+            proc_code.is_some(),
+            !raw_waits.is_empty(),
+            !queue_occurrences.is_empty(),
+            parsed_clan.is_some() || agent_clan.is_some(),
+            agent_family_parent.is_some(),
+            diagnostics,
+        );
+    }
 
     let cleaned_prompt = strip_prompt_regions(prompt, &regions_to_remove)
         .trim()
@@ -1454,6 +1529,9 @@ fn classify_typed_launch_unit(
             wait_priority: wait_queue.priority,
             queue_weight: wait_queue.weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
+            workspace_provider,
+            workspace_reference,
+            dispatch_target,
         })
     };
 
@@ -2655,7 +2733,20 @@ fn merge_ranges(regions: &[(usize, usize)]) -> Vec<(usize, usize)> {
     merged
 }
 
+struct ProjectRefCapture {
+    provider: String,
+    reference: String,
+    span: (usize, usize),
+}
+
 fn project_context_from_prompt(prompt: &str) -> Option<String> {
+    project_ref_captures(prompt)
+        .into_iter()
+        .next()
+        .map(|capture| capture.reference)
+}
+
+fn project_ref_captures(prompt: &str) -> Vec<ProjectRefCapture> {
     let ignored = typed_directive_ignored_ranges(prompt);
     project_ref_re()
         .captures_iter(prompt)
@@ -2664,21 +2755,133 @@ fn project_context_from_prompt(prompt: &str) -> Option<String> {
             if position_in_ranges(marker.start(), &ignored) {
                 return None;
             }
-            Some(marker.as_str().to_string())
-        })
-        .next()
-}
-
-fn project_ref_ranges(prompt: &str) -> Vec<(usize, usize)> {
-    let ignored = typed_directive_ignored_ranges(prompt);
-    project_ref_re()
-        .captures_iter(prompt)
-        .filter_map(|captures| {
-            let marker = captures.get(2)?;
-            (!position_in_ranges(marker.start(), &ignored))
-                .then_some((marker.start(), marker.end()))
+            let reference = marker.as_str();
+            let provider = reference
+                .strip_prefix("#")
+                .and_then(|rest| rest.split(':').next())
+                .unwrap_or_default()
+                .to_string();
+            if provider.is_empty() {
+                return None;
+            }
+            Some(ProjectRefCapture {
+                provider,
+                reference: reference.to_string(),
+                span: (marker.start(), marker.end()),
+            })
         })
         .collect()
+}
+
+fn parse_dispatch_target(
+    directive: &DirectiveOccurrence,
+) -> Result<String, LaunchPlanDiagnosticWire> {
+    let span = [directive.start, directive.end];
+    if directive.has_plus_suffix {
+        return Err(typed_plan_diagnostic(
+            "invalid-dispatch-form",
+            "%dispatch does not support '+'; use %dispatch:<machine>.",
+            Some(span),
+        ));
+    }
+    let raw = directive
+        .args
+        .iter()
+        .find(|arg| !arg.is_empty())
+        .cloned()
+        .unwrap_or_default();
+    let target = raw.trim();
+    if target.is_empty() {
+        return Err(typed_plan_diagnostic(
+            "invalid-dispatch-target",
+            "'%dispatch' requires a configured machine alias",
+            Some(span),
+        ));
+    }
+    if !dispatch_alias_re().is_match(target) {
+        return Err(typed_plan_diagnostic(
+            "invalid-dispatch-target",
+            "'%dispatch' requires a configured machine alias",
+            Some(span),
+        ));
+    }
+    if target.eq_ignore_ascii_case("local") {
+        return Err(typed_plan_diagnostic(
+            "dispatch-local-reserved",
+            "'%dispatch:local' is reserved; omit %dispatch for local launch",
+            Some(span),
+        ));
+    }
+    Ok(target.to_string())
+}
+
+fn validate_dispatch_combinations(
+    logical_id: &str,
+    is_proc: bool,
+    has_waits: bool,
+    has_queue: bool,
+    has_clan: bool,
+    has_family: bool,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let mut forbidden = Vec::new();
+    if is_proc {
+        forbidden.push("%proc");
+    }
+    if has_waits {
+        forbidden.push("%wait");
+    }
+    if has_queue {
+        forbidden.push("%queue");
+    }
+    if has_clan {
+        forbidden.push("%clan");
+    }
+    if has_family {
+        forbidden.push("%id(..., family=...)");
+    }
+    if forbidden.is_empty() {
+        return;
+    }
+    diagnostics.push(typed_unit_diagnostic(
+        "dispatch-unsupported-combination",
+        &format!(
+            "%dispatch cannot be combined with {} in V1 remote launch.",
+            forbidden.join(", ")
+        ),
+        logical_id,
+        None,
+    ));
+}
+
+fn line_after_directive_is_blank(prompt: &str, directive_end: usize) -> bool {
+    let rest = prompt.get(directive_end..).unwrap_or("");
+    let line = rest.split_once('\n').map(|(line, _)| line).unwrap_or(rest);
+    line.trim().is_empty()
+}
+
+fn dispatch_alias_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$").unwrap())
+}
+
+/// Return true when *prompt* already carries an active `%id` identity.
+///
+/// Fenced, disabled, and inline-literal occurrences stay inert. Remote
+/// admission uses this so gateway `name` and prompt identity never both
+/// own the same launch.
+pub fn prompt_has_identity_directive(prompt: &str) -> bool {
+    if !prompt.contains('%') {
+        return false;
+    }
+    let ignored = typed_directive_ignored_ranges(prompt);
+    directive_occurrences(prompt)
+        .unwrap_or_default()
+        .iter()
+        .any(|directive| {
+            directive.canonical_name == "id"
+                && !position_in_ranges(directive.start, &ignored)
+        })
 }
 
 fn project_ref_re() -> &'static Regex {
@@ -2724,13 +2927,15 @@ fn render_launch_approval_preview(
             .unwrap_or_default();
         match &unit.payload {
             LaunchUnitPayloadWire::Agent(agent) => lines.push(format!(
-                "{} agent identity={} model={} waits={}{} prompt={:?}",
+                "{} agent identity={} model={} workspace={} machine={} waits={}{} prompt={:?}",
                 unit.logical_id,
                 agent
                     .effective_identity()
                     .as_deref()
                     .unwrap_or("auto"),
                 agent.model.as_deref().unwrap_or("default"),
+                agent.workspace_reference.as_deref().unwrap_or("none"),
+                agent.dispatch_target.as_deref().unwrap_or("local"),
                 waits,
                 condition,
                 agent.prompt
@@ -4992,6 +5197,17 @@ mod tests {
     }
 
     #[test]
+    fn typed_launch_plan_rejects_bare_proc_without_body() {
+        let err = plan_typed_launch_units(
+            "%proc\nDo work",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("%proc requires a body"), "{err}");
+    }
+
+    #[test]
     fn typed_launch_plan_rejects_invalid_if_forms_without_owned_fence() {
         let err = plan_typed_launch_units(
             "%if:true\nReview",
@@ -5198,6 +5414,145 @@ mod tests {
             let back: AgentUnitWire = serde_json::from_value(value).unwrap();
             assert_eq!(back, agent);
         }
+    }
+
+    #[test]
+    fn typed_launch_preserves_per_unit_workspace_and_dispatch() {
+        let prompt = "%dispatch:apollo\n%id:observer\n#gh:sase\nWatch Apollo\n---\n%id:local-reviewer\n#git:dotfiles\nReview locally";
+        let plan = plan_typed_launch_units(
+            prompt,
+            Some("multi_prompt"),
+            Some("gh_sase-org__sase"),
+        )
+        .unwrap();
+
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.dispatch_target.as_deref(), Some("apollo"));
+                assert_eq!(agent.workspace_provider.as_deref(), Some("gh"));
+                assert_eq!(
+                    agent.workspace_reference.as_deref(),
+                    Some("#gh:sase")
+                );
+                assert_eq!(agent.identity.as_deref(), Some("observer"));
+                assert_eq!(agent.prompt, "Watch Apollo");
+                assert!(!agent.prompt.contains("#gh:sase"));
+                assert!(!agent.prompt.contains("%dispatch"));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        match &plan.units[1].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert!(agent.dispatch_target.is_none());
+                assert_eq!(agent.workspace_provider.as_deref(), Some("git"));
+                assert_eq!(
+                    agent.workspace_reference.as_deref(),
+                    Some("#git:dotfiles")
+                );
+                assert_eq!(agent.prompt, "Review locally");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert_eq!(plan.selected_project.as_deref(), Some("gh_sase-org__sase"));
+        let preview = plan.approval_preview.join("\n");
+        assert!(preview.contains("workspace=#gh:sase"));
+        assert!(preview.contains("machine=apollo"));
+        assert!(preview.contains("workspace=#git:dotfiles"));
+        assert!(preview.contains("machine=local"));
+
+        let remote =
+            crate::agent_unit_dispatch_prompt(match &plan.units[0].payload {
+                LaunchUnitPayloadWire::Agent(agent) => agent,
+                other => panic!("expected agent payload, got {other:?}"),
+            });
+        assert!(remote.contains("%dispatch:apollo"));
+        assert!(remote.contains("%id:observer"));
+        assert!(remote.contains("#gh:sase"));
+        assert!(remote.contains("Watch Apollo"));
+
+        let local =
+            crate::agent_unit_dispatch_prompt(match &plan.units[1].payload {
+                LaunchUnitPayloadWire::Agent(agent) => agent,
+                other => panic!("expected agent payload, got {other:?}"),
+            });
+        assert!(!local.contains("%dispatch"));
+        assert!(local.contains("#git:dotfiles"));
+        assert!(local.contains("%id:local-reviewer"));
+    }
+
+    #[test]
+    fn typed_launch_keeps_fenced_workspace_and_dispatch_inert() {
+        let prompt =
+            "```text\n%dispatch:apollo\n#gh:sase\n```\n%id:reviewer\nDo work";
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert!(agent.dispatch_target.is_none());
+                assert!(agent.workspace_reference.is_none());
+                assert!(agent.prompt.contains("%dispatch:apollo"));
+                assert!(agent.prompt.contains("#gh:sase"));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_does_not_replace_unit_workspace_with_plan_project() {
+        let plan = plan_typed_launch_units(
+            "%id:child\n#git:dotfiles\nReview",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(
+                    agent.workspace_reference.as_deref(),
+                    Some("#git:dotfiles")
+                );
+                assert_ne!(agent.workspace_reference.as_deref(), Some("sase"));
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+        assert_eq!(plan.selected_project.as_deref(), Some("sase"));
+    }
+
+    #[test]
+    fn typed_launch_rejects_dispatch_combined_with_wait_or_family() {
+        let wait = plan_typed_launch_units(
+            "%dispatch:apollo\n%wait:builder\nDo remote",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(wait.to_string().contains("%wait"), "{wait}");
+        let family = plan_typed_launch_units(
+            "%dispatch:apollo\n%id(reviewer, family=parent)\nDo remote",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(family.to_string().contains("family"), "{family}");
+        let local = plan_typed_launch_units(
+            "%dispatch:local\nDo remote",
+            Some("auto"),
+            Some("sase"),
+        )
+        .unwrap_err();
+        assert!(local.to_string().contains("reserved"), "{local}");
+    }
+
+    #[test]
+    fn prompt_has_identity_directive_ignores_fenced_id() {
+        assert!(prompt_has_identity_directive("%id:observer\nDo work"));
+        assert!(prompt_has_identity_directive(
+            "%id(reviewer, bead=sase-1)\nDo work"
+        ));
+        assert!(!prompt_has_identity_directive("Do work"));
+        assert!(!prompt_has_identity_directive(
+            "```text\n%id:observer\n```\nDo work"
+        ));
     }
 
     #[test]
