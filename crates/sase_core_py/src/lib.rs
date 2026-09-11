@@ -303,6 +303,18 @@
 //! - `axe_status_wire_schema_version() -> int`
 //! - `classify_axe_status(request: dict) -> dict`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
+//! - `continuation_wire_schema_version() -> int`
+//! - `continuation_validate_node(record: dict) -> dict`
+//! - `continuation_validate_graph(records: list[dict]) -> dict`
+//! - `continuation_validate_agent_delta(delta: dict) -> dict`
+//! - `continuation_validate_intent(intent: dict) -> dict`
+//! - `continuation_validate_monitor_result(result: dict) -> dict`
+//! - `continuation_validate_diagnostic_manifest(manifest: dict) -> dict`
+//! - `continuation_validate_delivery_record(record: dict) -> dict`
+//! - `continuation_plan_replay(request: dict) -> dict`
+//! - `continuation_select_evidence(request: dict) -> dict`
+//! - `continuation_resolve_policy(request: dict) -> dict`
+//! - `continuation_plan_budget(request: dict) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `skill_reference_name(skill_name: str, project: str | None = None) -> str`
 //! - `skill_placement_issue(source: str, in_skill_source: bool, declares_skill: bool, migrate_to: str | None = None) -> dict | None`
@@ -998,6 +1010,25 @@ use sase_core::content_layout::{
     skill_placement_issue as core_skill_placement_issue,
     skill_reference_name as core_skill_reference_name,
     LayoutCollisionPolicyWire,
+};
+use sase_core::continuation::{
+    plan_continuation_budget as core_plan_continuation_budget,
+    plan_continuation_replay as core_plan_continuation_replay,
+    resolve_continuation_policy as core_resolve_continuation_policy,
+    select_continuation_evidence as core_select_continuation_evidence,
+    validate_agent_delta as core_validate_agent_delta,
+    validate_continuation_delivery_record as core_validate_continuation_delivery_record,
+    validate_continuation_graph as core_validate_continuation_graph,
+    validate_continuation_intent as core_validate_continuation_intent,
+    validate_continuation_node_value as core_validate_continuation_node_value,
+    validate_diagnostic_manifest as core_validate_diagnostic_manifest,
+    validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
+    ContinuationBudgetRequestWire, ContinuationDeliveryRecordWire,
+    ContinuationError, ContinuationEvidenceSelectionRequestWire,
+    ContinuationIntentWire, ContinuationNodeWire,
+    ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
+    DiagnosticManifestWire, MonitorResultWire,
+    CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
 use sase_core::effort_override::{
@@ -14182,6 +14213,236 @@ fn py_select_epic_land_model<'py>(
     )
 }
 
+// --- Monitor continuation contracts --------------------------------------
+
+/// Return the continuation contract wire schema version.
+#[pyfunction]
+#[pyo3(name = "continuation_wire_schema_version")]
+fn py_continuation_wire_schema_version() -> u32 {
+    CONTINUATION_WIRE_SCHEMA_VERSION
+}
+
+/// Validate one continuation node and return its normalized wire shape.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_node")]
+fn py_continuation_validate_node<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(record.as_any())?;
+    continuation_result_to_py(
+        py,
+        core_validate_continuation_node_value(value),
+        "node validation",
+    )
+}
+
+/// Validate a continuation node collection and summarize its edges.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_graph")]
+fn py_continuation_validate_graph<'py>(
+    py: Python<'py>,
+    records: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let records: Vec<ContinuationNodeWire> =
+        continuation_wire_from_pyany(records.as_any(), "records")?;
+    continuation_result_to_py(
+        py,
+        core_validate_continuation_graph(records),
+        "graph validation",
+    )
+}
+
+/// Validate one agent-delta record.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_agent_delta")]
+fn py_continuation_validate_agent_delta<'py>(
+    py: Python<'py>,
+    delta: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let delta: AgentDeltaWire =
+        continuation_wire_from_pydict(delta, "agent delta")?;
+    continuation_result_to_py(
+        py,
+        core_validate_agent_delta(delta),
+        "agent-delta validation",
+    )
+}
+
+/// Validate one continuation intent record.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_intent")]
+fn py_continuation_validate_intent<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: ContinuationIntentWire =
+        continuation_wire_from_pydict(intent, "continuation intent")?;
+    continuation_result_to_py(
+        py,
+        core_validate_continuation_intent(intent),
+        "intent validation",
+    )
+}
+
+/// Validate one monitor-result record.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_monitor_result")]
+fn py_continuation_validate_monitor_result<'py>(
+    py: Python<'py>,
+    result: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let result: MonitorResultWire =
+        continuation_wire_from_pydict(result, "monitor result")?;
+    continuation_result_to_py(
+        py,
+        core_validate_monitor_result(result),
+        "monitor-result validation",
+    )
+}
+
+/// Validate one diagnostic-manifest record.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_diagnostic_manifest")]
+fn py_continuation_validate_diagnostic_manifest<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let manifest: DiagnosticManifestWire =
+        continuation_wire_from_pydict(manifest, "diagnostic manifest")?;
+    continuation_result_to_py(
+        py,
+        core_validate_diagnostic_manifest(manifest),
+        "diagnostic-manifest validation",
+    )
+}
+
+/// Validate one mutable delivery record.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_delivery_record")]
+fn py_continuation_validate_delivery_record<'py>(
+    py: Python<'py>,
+    record: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let record: ContinuationDeliveryRecordWire =
+        continuation_wire_from_pydict(record, "delivery record")?;
+    continuation_result_to_py(
+        py,
+        core_validate_continuation_delivery_record(record),
+        "delivery-record validation",
+    )
+}
+
+/// Build a deterministic parent-first replay manifest.
+#[pyfunction]
+#[pyo3(name = "continuation_plan_replay")]
+fn py_continuation_plan_replay<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationReplayPlanRequestWire =
+        continuation_wire_from_pydict(request, "replay request")?;
+    continuation_result_to_py(
+        py,
+        core_plan_continuation_replay(request),
+        "replay planning",
+    )
+}
+
+/// Select the monitor-result evidence projected into continuation context.
+#[pyfunction]
+#[pyo3(name = "continuation_select_evidence")]
+fn py_continuation_select_evidence<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationEvidenceSelectionRequestWire =
+        continuation_wire_from_pydict(request, "evidence request")?;
+    continuation_result_to_py(
+        py,
+        core_select_continuation_evidence(request),
+        "evidence selection",
+    )
+}
+
+/// Resolve the next-action branch for a terminal monitor outcome.
+#[pyfunction]
+#[pyo3(name = "continuation_resolve_policy")]
+fn py_continuation_resolve_policy<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationPolicyResolutionRequestWire =
+        continuation_wire_from_pydict(request, "policy request")?;
+    continuation_result_to_py(
+        py,
+        core_resolve_continuation_policy(request),
+        "policy resolution",
+    )
+}
+
+/// Decide whether an expanded continuation fits the provider budget.
+#[pyfunction]
+#[pyo3(name = "continuation_plan_budget")]
+fn py_continuation_plan_budget<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationBudgetRequestWire =
+        continuation_wire_from_pydict(request, "budget request")?;
+    continuation_result_to_py(
+        py,
+        core_plan_continuation_budget(request),
+        "budget planning",
+    )
+}
+
+fn continuation_error_to_pyerr(error: ContinuationError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn continuation_wire_from_pydict<T>(
+    dict: &Bound<'_, PyDict>,
+    what: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    continuation_wire_from_pyany(dict.as_any(), what)
+}
+
+fn continuation_wire_from_pyany<T>(
+    value: &Bound<'_, PyAny>,
+    what: &str,
+) -> PyResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(py_to_json_value(value)?).map_err(|error| {
+        PyValueError::new_err(format!(
+            "{what} is not a valid continuation wire value: {error}"
+        ))
+    })
+}
+
+fn continuation_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, ContinuationError>,
+    operation: &str,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value =
+        serde_json::to_value(result.map_err(continuation_error_to_pyerr)?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                "internal continuation {operation} serialize error: {error}"
+            ))
+            })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Canonical project/home content layout -------------------------------
 
 /// Return the shared canonical/legacy SASE content layout and xprompt order.
@@ -17290,6 +17551,27 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;
     m.add_function(wrap_pyfunction!(py_size_model_route, m)?)?;
     m.add_function(wrap_pyfunction!(py_select_epic_land_model, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_validate_node, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_validate_graph, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_validate_agent_delta, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_validate_intent, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_validate_monitor_result,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_validate_diagnostic_manifest,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_validate_delivery_record,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_plan_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_select_evidence, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_resolve_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_plan_budget, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;
@@ -20566,6 +20848,206 @@ COMMITS:
             assert!(zero_threshold
                 .to_string()
                 .contains("threshold must be a positive integer"));
+        });
+    }
+
+    #[test]
+    fn continuation_contract_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "continuation_wire_schema_version",
+                "continuation_validate_node",
+                "continuation_validate_graph",
+                "continuation_validate_agent_delta",
+                "continuation_validate_intent",
+                "continuation_validate_monitor_result",
+                "continuation_validate_diagnostic_manifest",
+                "continuation_validate_delivery_record",
+                "continuation_plan_replay",
+                "continuation_select_evidence",
+                "continuation_resolve_policy",
+                "continuation_plan_budget",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(py_continuation_wire_schema_version(), 1);
+
+            let fixture: JsonValue = serde_json::from_str(include_str!(
+                "../../sase_core/tests/fixtures/continuation/serial_replay.json"
+            ))
+            .unwrap();
+            let replay_request_obj =
+                json_value_to_py(py, &fixture["request"]).unwrap();
+            let replay_request =
+                replay_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let manifest =
+                py_continuation_plan_replay(py, replay_request).unwrap();
+            let manifest = py_to_json_value(manifest.bind(py)).unwrap();
+            assert_eq!(
+                manifest["ordered_node_ids"],
+                fixture["expected_order"].clone()
+            );
+            assert_eq!(
+                manifest["rendered_component_sizes"]["total_utf8_bytes"],
+                fixture["expected_rendered_bytes"].clone()
+            );
+
+            let records_obj =
+                json_value_to_py(py, &fixture["request"]["records"]).unwrap();
+            let records = records_obj.bind(py).downcast::<PyList>().unwrap();
+            let graph = py_continuation_validate_graph(py, records).unwrap();
+            let graph = py_to_json_value(graph.bind(py)).unwrap();
+            assert_eq!(graph["node_count"], json!(3));
+            assert_eq!(graph["edge_count"], json!(2));
+
+            let node_obj =
+                json_value_to_py(py, &fixture["request"]["records"][0])
+                    .unwrap();
+            let node = node_obj.bind(py).downcast::<PyDict>().unwrap();
+            let validated_node =
+                py_continuation_validate_node(py, node).unwrap();
+            let validated_node =
+                py_to_json_value(validated_node.bind(py)).unwrap();
+            assert_eq!(validated_node["node_id"], json!("previous-result-1"));
+
+            let bad_node_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "node_id": "bad-node",
+                    "kind": "not_real",
+                    "owner": {
+                        "project": "sase",
+                        "run_id": "run-1",
+                        "agent_name": "agent-1"
+                    },
+                    "content_ref": "file:explicit:bad-node",
+                    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }),
+            )
+            .unwrap();
+            let bad_node = bad_node_obj.bind(py).downcast::<PyDict>().unwrap();
+            let bad_node_error =
+                py_continuation_validate_node(py, bad_node).unwrap_err();
+            assert!(bad_node_error.is_instance_of::<PyValueError>(py));
+
+            let failed_result = json!({
+                "schema_version": 1,
+                "result_id": "result-1",
+                "monitor_id": "monitor-1",
+                "starter_execution_id": "run-1",
+                "outcome": "failed",
+                "exit_code": 1,
+                "command": ["just", "check"],
+                "cwd": "/repo",
+                "started_at": "2026-09-11T10:00:00Z",
+                "ended_at": "2026-09-11T10:01:00Z",
+                "elapsed_ms": 60000,
+                "workspace_identity": "workspace-19",
+                "diagnostic_manifest_ref": "file:explicit:manifest",
+                "retained_log": {
+                    "log_ref": "file:explicit:log",
+                    "local_locator": "monitor://monitor-1/log",
+                    "total_observed_bytes": 128,
+                    "retained_ranges": [{"start": 0, "end": 128}],
+                    "complete": true,
+                    "drain_confirmed": true
+                }
+            });
+            let diagnostic_manifest = json!({
+                "schema_version": 1,
+                "producer": "run-silent",
+                "stages": [{
+                    "stage_id": "mypy",
+                    "name": "Type checking",
+                    "status": "failed",
+                    "exit_code": 1,
+                    "diagnostic_refs": ["file:explicit:mypy"],
+                    "counts": {"errors": 2},
+                    "retained_ranges": [],
+                    "capture_errors": []
+                }],
+                "complete": true,
+                "manifest_ref": "file:explicit:manifest"
+            });
+            let evidence_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "result": failed_result,
+                    "policy": "auto",
+                    "historical_result": false,
+                    "diagnostic_manifest": diagnostic_manifest,
+                    "limits": {
+                        "selected_diagnostics_bytes": 8192,
+                        "fallback_tail_bytes": 4096,
+                        "total_raw_excerpt_bytes": 12288,
+                        "raw_tail_lines": 200
+                    }
+                }),
+            )
+            .unwrap();
+            let evidence_request =
+                evidence_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let evidence =
+                py_continuation_select_evidence(py, evidence_request).unwrap();
+            let evidence = py_to_json_value(evidence.bind(py)).unwrap();
+            assert_eq!(evidence["context_kind"], json!("failed_diagnostics"));
+            assert_eq!(evidence["include_raw_excerpt"], json!(false));
+            assert_eq!(evidence["diagnostic_stage_ids"], json!(["mypy"]));
+
+            let policy_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "outcome": "completed",
+                    "profile": "verify",
+                    "prepared_completion_ref": "file:explicit:completion"
+                }),
+            )
+            .unwrap();
+            let policy_request =
+                policy_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let policy =
+                py_continuation_resolve_policy(py, policy_request).unwrap();
+            let policy = py_to_json_value(policy.bind(py)).unwrap();
+            assert_eq!(policy["action"], json!("complete"));
+            assert_eq!(
+                policy["completion_ref"],
+                json!("file:explicit:completion")
+            );
+
+            let budget_request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "rendered_prompt_bytes": 12000,
+                    "essential_bytes": 6000,
+                    "provider_budget": {
+                        "context_limit_bytes": 10000,
+                        "transport_limit_bytes": 9000,
+                        "instruction_reserve_bytes": 1000
+                    },
+                    "reduction_candidates": [
+                        {"kind": "checkpoint", "bytes": 5000, "checkpoint_ref": "file:explicit:checkpoint"},
+                        {"kind": "identity_deduplication", "bytes": 2000}
+                    ]
+                }),
+            )
+            .unwrap();
+            let budget_request =
+                budget_request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let budget =
+                py_continuation_plan_budget(py, budget_request).unwrap();
+            let budget = py_to_json_value(budget.bind(py)).unwrap();
+            assert_eq!(budget["kind"], json!("compact"));
+            assert_eq!(
+                budget["reductions"][0]["kind"],
+                json!("identity_deduplication")
+            );
         });
     }
 

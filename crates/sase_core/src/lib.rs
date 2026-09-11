@@ -37,6 +37,7 @@ pub mod commit_sha;
 pub mod commit_subject;
 pub mod config;
 pub mod content_layout;
+pub mod continuation;
 pub mod editor;
 pub mod effort;
 pub mod effort_override;
@@ -584,6 +585,36 @@ pub use content_layout::{
     CONTENT_LAYOUT_SCHEMA_VERSION, MEMORY_NAMESPACE_SEGMENT,
     MEMORY_README_FILENAME, REF_DIRECTORY_SEGMENT, SKILL_DIRECTORY_SEGMENT,
     SKILL_NAMESPACE_SEGMENT,
+};
+pub use continuation::{
+    plan_continuation_budget, plan_continuation_replay,
+    resolve_continuation_policy, select_continuation_evidence,
+    validate_agent_delta, validate_continuation_delivery_record,
+    validate_continuation_graph, validate_continuation_intent,
+    validate_continuation_node, validate_continuation_node_value,
+    validate_diagnostic_manifest, validate_monitor_result,
+    AgentDeltaStatusWire, ContinuationActionWire, ContinuationAttributionWire,
+    ContinuationBranchAttributionWire, ContinuationBudgetDecisionKindWire,
+    ContinuationBudgetDecisionWire, ContinuationBudgetReductionCandidateWire,
+    ContinuationBudgetReductionKindWire, ContinuationBudgetRequestWire,
+    ContinuationBudgetReserveWire, ContinuationByteRangeWire,
+    ContinuationCheckpointCoverageWire, ContinuationDeliveryAttemptWire,
+    ContinuationDeliveryDispositionWire, ContinuationDeliveryKeyWire,
+    ContinuationDeliveryRecordWire, ContinuationError,
+    ContinuationEvidenceContextKindWire, ContinuationEvidenceLimitsWire,
+    ContinuationEvidencePolicyWire, ContinuationEvidenceSelectionRequestWire,
+    ContinuationEvidenceSelectionWire, ContinuationExecutionIdentityWire,
+    ContinuationGraphValidationWire, ContinuationIntentWire,
+    ContinuationModelRouteWire, ContinuationNodeKindWire, ContinuationNodeWire,
+    ContinuationOmissionWire, ContinuationOutcomePolicyWire,
+    ContinuationParentEdgeWire, ContinuationPolicyBranchWire,
+    ContinuationPolicyDecisionWire, ContinuationPolicyResolutionRequestWire,
+    ContinuationPromptSegmentProvenanceWire, ContinuationPromptSegmentWire,
+    ContinuationRenderedComponentSizesWire, ContinuationRenderedComponentWire,
+    ContinuationReplayManifestWire, ContinuationReplayPlanRequestWire,
+    DiagnosticManifestWire, DiagnosticStageStatusWire, DiagnosticStageWire,
+    MonitorOutcomeWire, MonitorResultWire, MonitorTimeoutKindWire,
+    RetainedLogMetadataWire, CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

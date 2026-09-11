@@ -1,0 +1,74 @@
+{
+  "request": {
+    "schema_version": 1,
+    "records": [
+      {
+        "schema_version": 1,
+        "node_id": "previous-result-1",
+        "kind": "monitor_result",
+        "parent_ids": [],
+        "owner": {
+          "project": "sase",
+          "run_id": "run-previous",
+          "agent_name": "worker.previous",
+          "machine_name": "athena",
+          "workspace_id": "workspace-19"
+        },
+        "content_ref": "file:explicit:previous-result",
+        "content_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "schema_version": 1,
+        "node_id": "starter-delta-1",
+        "kind": "agent_delta",
+        "parent_ids": ["previous-result-1"],
+        "owner": {
+          "project": "sase",
+          "run_id": "run-starter",
+          "agent_name": "worker.starter",
+          "machine_name": "athena",
+          "workspace_id": "workspace-19"
+        },
+        "content_ref": "file:explicit:starter-delta",
+        "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "checkpoint_ref": "file:explicit:checkpoint",
+        "intent_ref": "file:explicit:intent"
+      },
+      {
+        "schema_version": 1,
+        "node_id": "monitor-result-1",
+        "kind": "monitor_result",
+        "parent_ids": ["starter-delta-1"],
+        "owner": {
+          "project": "sase",
+          "run_id": "monitor-1",
+          "agent_name": "monitor.1",
+          "machine_name": "athena",
+          "workspace_id": "workspace-19"
+        },
+        "content_ref": "file:explicit:monitor-result",
+        "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ],
+    "root_ids": ["monitor-result-1"],
+    "selected_evidence_refs": ["file:explicit:diagnostics"],
+    "checkpoint_coverage": [
+      {
+        "checkpoint_ref": "file:explicit:checkpoint",
+        "covered_node_ids": ["previous-result-1"]
+      }
+    ],
+    "rendered_components": [
+      {"name": "local_delta", "utf8_bytes": 91},
+      {"name": "monitor_result", "utf8_bytes": 58}
+    ],
+    "budget": null,
+    "prefix_reset_reason": null
+  },
+  "expected_order": [
+    "previous-result-1",
+    "starter-delta-1",
+    "monitor-result-1"
+  ],
+  "expected_rendered_bytes": 149
+}
