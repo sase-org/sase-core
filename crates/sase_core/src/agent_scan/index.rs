@@ -2346,6 +2346,9 @@ fn family_root_dismissed_for_candidate(
     else {
         return Ok(false);
     };
+    if dismissed_parent_suffix_for_seed(conn, &seed)? {
+        return Ok(true);
+    }
     let mut timestamps: BTreeSet<String> = BTreeSet::new();
     insert_lineage_timestamp(&mut timestamps, &seed.timestamp);
     seed.add_related_timestamps(&mut timestamps);
@@ -2396,6 +2399,25 @@ fn family_root_dismissed_for_candidate(
     };
     let summary = RecordSummary::from_record(&record);
     record_is_dismissed(conn, &record, &summary)
+}
+
+fn dismissed_parent_suffix_for_seed(
+    conn: &Connection,
+    seed: &IndexedLineageRow,
+) -> Result<bool, String> {
+    for candidate in [
+        seed.parent_timestamp.as_deref(),
+        seed.retry_of_timestamp.as_deref(),
+        seed.retry_chain_root_timestamp.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if dismissed_raw_suffix_exists(conn, candidate)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn select_lineage_row_by_timestamp(
@@ -4388,23 +4410,78 @@ fn is_terminal_workflow_status(status: &str) -> bool {
 fn record_is_definitively_dead_for_dismissal_backfill(
     record: &AgentArtifactRecordWire,
 ) -> bool {
-    if record.has_done_marker || record.done.is_some() {
-        return true;
-    }
-    if record.running.is_some()
-        || record.waiting.is_some()
-        || record.pending_question.is_some()
-    {
+    if record.waiting.is_some() || record.pending_question.is_some() {
         return false;
     }
-    if record.agent_meta.as_ref().is_some_and(|meta| {
-        meta.pid.is_some_and(|pid| pid > 0) || meta.run_started_at.is_some()
-    }) {
-        return false;
+    match record_liveness_for_dismissal_backfill(record) {
+        DismissalBackfillLiveness::Alive
+        | DismissalBackfillLiveness::Unknown => return false,
+        DismissalBackfillLiveness::Dead
+        | DismissalBackfillLiveness::NotProcess => return true,
+        DismissalBackfillLiveness::NoCurrentProcessEvidence => {}
     }
     match record.workflow_state.as_ref() {
-        Some(workflow) => is_terminal_workflow_status(&workflow.status),
-        None => false,
+        Some(workflow) if is_terminal_workflow_status(&workflow.status) => true,
+        _ => record.has_done_marker || record.done.is_some(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DismissalBackfillLiveness {
+    Alive,
+    Dead,
+    NotProcess,
+    Unknown,
+    NoCurrentProcessEvidence,
+}
+
+fn record_liveness_for_dismissal_backfill(
+    record: &AgentArtifactRecordWire,
+) -> DismissalBackfillLiveness {
+    let pid = record
+        .running
+        .as_ref()
+        .and_then(|running| running.pid)
+        .or_else(|| record.agent_meta.as_ref().and_then(|meta| meta.pid))
+        .or_else(|| {
+            record
+                .workflow_state
+                .as_ref()
+                .and_then(|workflow| workflow.pid)
+        });
+    let Some(pid) = pid else {
+        if record.running.is_some()
+            || record.workflow_state.as_ref().is_some_and(|workflow| {
+                !is_terminal_workflow_status(&workflow.status)
+            })
+        {
+            return DismissalBackfillLiveness::Unknown;
+        }
+        return DismissalBackfillLiveness::NoCurrentProcessEvidence;
+    };
+    if pid <= 0 {
+        return DismissalBackfillLiveness::NotProcess;
+    }
+    if process_is_alive_for_dismissal_backfill(pid) {
+        DismissalBackfillLiveness::Alive
+    } else {
+        DismissalBackfillLiveness::Dead
+    }
+}
+
+fn process_is_alive_for_dismissal_backfill(pid: i64) -> bool {
+    #[cfg(unix)]
+    {
+        let pid = match libc::pid_t::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return false,
+        };
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
     }
 }
 
@@ -4507,6 +4584,23 @@ fn record_is_dismissed(
             summary.cl_name.as_deref(),
         ])
         .map_err(|e| e.to_string())?;
+    Ok(rows.next().map_err(|e| e.to_string())?.is_some())
+}
+
+fn dismissed_raw_suffix_exists(
+    conn: &Connection,
+    raw_suffix: &str,
+) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT 1 FROM dismissed_agents dismissed
+            WHERE dismissed.raw_suffix = ?1
+            LIMIT 1
+            "#,
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([raw_suffix]).map_err(|e| e.to_string())?;
     Ok(rows.next().map_err(|e| e.to_string())?.is_some())
 }
 
@@ -7510,8 +7604,12 @@ mod tests {
         let root = artifact(&projects, "20260515120000");
         let member = artifact(&projects, "20260515120500");
         let family_fallback_member = artifact(&projects, "20260515121000");
-        let live_member = artifact(&projects, "20260515121500");
-        let unknown_member = artifact(&projects, "20260515122000");
+        let dead_active_member = artifact(&projects, "20260515121500");
+        let live_member = artifact(&projects, "20260515122000");
+        let unknown_member = artifact(&projects, "20260515122500");
+        let running_unknown_member = artifact(&projects, "20260515123000");
+        let waiting_done_member = artifact(&projects, "20260515123500");
+        let question_dead_member = artifact(&projects, "20260515124000");
 
         write_json(
             &root.join("agent_meta.json"),
@@ -7554,7 +7652,7 @@ mod tests {
                 "cl_name": "fam--live",
                 "agent_family": "fam",
                 "parent_timestamp": "20260515120000",
-                "pid": 1,
+                "pid": std::process::id(),
                 "run_started_at": "2026-05-15T12:15:00Z"
             }),
         );
@@ -7566,6 +7664,59 @@ mod tests {
                 "agent_family": "fam",
                 "parent_timestamp": "20260515120000"
             }),
+        );
+        write_json(
+            &dead_active_member.join("agent_meta.json"),
+            json!({
+                "name": "fam--dead-active",
+                "cl_name": "fam--dead-active",
+                "agent_family": "fam",
+                "parent_timestamp": "20260515120000",
+                "pid": 99999999,
+                "run_started_at": "2026-05-15T12:30:00Z"
+            }),
+        );
+        write_json(
+            &running_unknown_member.join("agent_meta.json"),
+            json!({
+                "name": "fam--running-unknown",
+                "cl_name": "fam--running-unknown",
+                "agent_family": "fam",
+                "parent_timestamp": "20260515120000"
+            }),
+        );
+        write_json(&running_unknown_member.join("running.json"), json!({}));
+        write_json(
+            &waiting_done_member.join("agent_meta.json"),
+            json!({
+                "name": "fam--waiting",
+                "cl_name": "fam--waiting",
+                "agent_family": "fam",
+                "parent_timestamp": "20260515120000"
+            }),
+        );
+        write_json(
+            &waiting_done_member.join("done.json"),
+            json!({"outcome": "completed", "cl_name": "fam--waiting"}),
+        );
+        write_json(
+            &waiting_done_member.join("waiting.json"),
+            json!({"waiting_for": ["dependency"]}),
+        );
+        write_json(
+            &question_dead_member.join("agent_meta.json"),
+            json!({
+                "name": "fam--question",
+                "cl_name": "fam--question",
+                "agent_family": "fam",
+                "parent_timestamp": "20260515120000",
+                "pid": 99999999,
+                "run_started_at": "2026-05-15T12:40:00Z"
+            }),
+        );
+        write_json(
+            &question_dead_member.join("pending_question.json"),
+            json!({"session_id": "q1"}),
         );
 
         let index = tmp.path().join("agent_artifact_index.sqlite");
@@ -7589,8 +7740,8 @@ mod tests {
             &index, true,
         )
         .unwrap();
-        assert_eq!(dry_run.rows_backfilled, 2);
-        assert_eq!(dry_run.rows_skipped_live_or_unknown, 2);
+        assert_eq!(dry_run.rows_backfilled, 3);
+        assert_eq!(dry_run.rows_skipped_live_or_unknown, 5);
 
         let before = query_agent_artifact_index(
             &index,
@@ -7611,13 +7762,13 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
-        assert_eq!(before.records.len(), 4, "dry run must not hide rows");
+        assert_eq!(before.records.len(), 8, "dry run must not hide rows");
 
         let applied = reconcile_agent_artifact_index_dismissed_family_members(
             &index, false,
         )
         .unwrap();
-        assert_eq!(applied.rows_backfilled, 2);
+        assert_eq!(applied.rows_backfilled, 3);
 
         let after = query_agent_artifact_index(
             &index,
@@ -7645,8 +7796,90 @@ mod tests {
             .collect();
         assert_eq!(
             visible_timestamps.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from(["20260515121500", "20260515122000"]),
+            BTreeSet::from([
+                "20260515122000",
+                "20260515122500",
+                "20260515123000",
+                "20260515123500",
+                "20260515124000",
+            ]),
         );
+    }
+
+    #[test]
+    fn dismissal_reconcile_uses_dismissed_parent_suffix_when_root_row_deleted()
+    {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let root = artifact(&projects, "20260516120000");
+        let member = artifact(&projects, "20260516120500");
+
+        write_json(
+            &root.join("agent_meta.json"),
+            json!({"name": "fam", "cl_name": "fam", "agent_family": "fam"}),
+        );
+        write_json(
+            &root.join("done.json"),
+            json!({"outcome": "completed", "cl_name": "fam"}),
+        );
+        write_json(
+            &member.join("agent_meta.json"),
+            json!({
+                "name": "fam--code",
+                "cl_name": "fam--code",
+                "agent_family": "fam",
+                "parent_timestamp": "20260516120000"
+            }),
+        );
+        write_json(
+            &member.join("done.json"),
+            json!({"outcome": "completed", "cl_name": "fam--code"}),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        delete_agent_artifact_index_row(&index, &root).unwrap();
+        replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "fam".to_string(),
+                raw_suffix: Some("20260516120000".to_string()),
+            }],
+        )
+        .unwrap();
+
+        let applied = reconcile_agent_artifact_index_dismissed_family_members(
+            &index, false,
+        )
+        .unwrap();
+        assert_eq!(applied.rows_backfilled, 1);
+
+        let after = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(10),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(after.records.is_empty());
     }
 
     #[test]
