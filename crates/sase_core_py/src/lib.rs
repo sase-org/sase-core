@@ -323,6 +323,11 @@
 //! - `continuation_select_evidence(request: dict) -> dict`
 //! - `continuation_resolve_policy(request: dict) -> dict`
 //! - `continuation_plan_budget(request: dict) -> dict`
+//! - `continuation_validate_conditional_completion(intent: dict) -> dict`
+//! - `continuation_seal_conditional_completion(request: dict) -> dict`
+//! - `continuation_preview_conditional_completion(intent: dict) -> dict`
+//! - `continuation_bind_conditional_completion(request: dict) -> dict`
+//! - `continuation_rollback_conditional_completion_binding(request: dict) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `skill_reference_name(skill_name: str, project: str | None = None) -> str`
 //! - `skill_placement_issue(source: str, in_skill_source: bool, declares_skill: bool, migrate_to: str | None = None) -> dict | None`
@@ -1021,11 +1026,16 @@ use sase_core::content_layout::{
     LayoutCollisionPolicyWire,
 };
 use sase_core::continuation::{
+    bind_conditional_completion as core_bind_conditional_completion,
     plan_continuation_budget as core_plan_continuation_budget,
     plan_continuation_replay as core_plan_continuation_replay,
+    preview_conditional_completion as core_preview_conditional_completion,
     resolve_continuation_policy as core_resolve_continuation_policy,
+    rollback_conditional_completion_binding as core_rollback_conditional_completion_binding,
+    seal_conditional_completion as core_seal_conditional_completion,
     select_continuation_evidence as core_select_continuation_evidence,
     validate_agent_delta as core_validate_agent_delta,
+    validate_conditional_completion_intent as core_validate_conditional_completion_intent,
     validate_continuation_delivery_record as core_validate_continuation_delivery_record,
     validate_continuation_graph as core_validate_continuation_graph,
     validate_continuation_intent as core_validate_continuation_intent,
@@ -1033,11 +1043,14 @@ use sase_core::continuation::{
     validate_diagnostic_manifest as core_validate_diagnostic_manifest,
     validate_launch_requester_continuation as core_validate_launch_requester_continuation,
     validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
-    ContinuationBudgetRequestWire, ContinuationDeliveryRecordWire,
-    ContinuationError, ContinuationEvidenceSelectionRequestWire,
-    ContinuationIntentWire, ContinuationNodeWire,
-    ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
-    DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
+    ConditionalCompletionBindRequestWire, ConditionalCompletionIntentWire,
+    ConditionalCompletionPrepareRequestWire,
+    ConditionalCompletionRollbackRequestWire, ContinuationBudgetRequestWire,
+    ContinuationDeliveryRecordWire, ContinuationError,
+    ContinuationEvidenceSelectionRequestWire, ContinuationIntentWire,
+    ContinuationNodeWire, ContinuationPolicyResolutionRequestWire,
+    ContinuationReplayPlanRequestWire, DiagnosticManifestWire,
+    LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
@@ -14566,6 +14579,92 @@ fn py_continuation_plan_budget<'py>(
     )
 }
 
+/// Validate one host-sealed conditional completion intent.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_conditional_completion")]
+fn py_continuation_validate_conditional_completion<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: ConditionalCompletionIntentWire =
+        continuation_wire_from_pydict(intent, "conditional completion intent")?;
+    continuation_result_to_py(
+        py,
+        core_validate_conditional_completion_intent(intent),
+        "conditional completion validation",
+    )
+}
+
+/// Seal a conditional completion intent from host observations.
+#[pyfunction]
+#[pyo3(name = "continuation_seal_conditional_completion")]
+fn py_continuation_seal_conditional_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionPrepareRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion prepare",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_seal_conditional_completion(request),
+        "conditional completion seal",
+    )
+}
+
+/// Render a host-completion preview for a sealed intent.
+#[pyfunction]
+#[pyo3(name = "continuation_preview_conditional_completion")]
+fn py_continuation_preview_conditional_completion<'py>(
+    py: Python<'py>,
+    intent: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let intent: ConditionalCompletionIntentWire =
+        continuation_wire_from_pydict(intent, "conditional completion intent")?;
+    continuation_result_to_py(
+        py,
+        core_preview_conditional_completion(intent),
+        "conditional completion preview",
+    )
+}
+
+/// Bind a prepared intent to one monitor request (single-use).
+#[pyfunction]
+#[pyo3(name = "continuation_bind_conditional_completion")]
+fn py_continuation_bind_conditional_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionBindRequestWire =
+        continuation_wire_from_pydict(request, "conditional completion bind")?;
+    continuation_result_to_py(
+        py,
+        core_bind_conditional_completion(request),
+        "conditional completion bind",
+    )
+}
+
+/// Roll back a failed monitor-start binding so the intent is reusable.
+#[pyfunction]
+#[pyo3(name = "continuation_rollback_conditional_completion_binding")]
+fn py_continuation_rollback_conditional_completion_binding<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionRollbackRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion rollback",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_rollback_conditional_completion_binding(request),
+        "conditional completion rollback",
+    )
+}
+
 fn continuation_error_to_pyerr(error: ContinuationError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -17768,6 +17867,26 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_continuation_select_evidence, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_resolve_policy, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_plan_budget, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_validate_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_seal_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_preview_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_bind_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_rollback_conditional_completion_binding,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;
@@ -21067,6 +21186,11 @@ COMMITS:
                 "continuation_select_evidence",
                 "continuation_resolve_policy",
                 "continuation_plan_budget",
+                "continuation_validate_conditional_completion",
+                "continuation_seal_conditional_completion",
+                "continuation_preview_conditional_completion",
+                "continuation_bind_conditional_completion",
+                "continuation_rollback_conditional_completion_binding",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }

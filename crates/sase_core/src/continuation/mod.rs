@@ -5,6 +5,7 @@
 //! processes, or mutating monitor state.
 
 pub mod budget;
+pub mod completion;
 pub mod evidence;
 pub mod policy;
 pub mod replay;
@@ -15,6 +16,18 @@ pub use budget::{
     ContinuationBudgetDecisionWire, ContinuationBudgetReductionCandidateWire,
     ContinuationBudgetReductionKindWire, ContinuationBudgetRequestWire,
     ContinuationBudgetReserveWire,
+};
+pub use completion::{
+    bind_conditional_completion, preview_conditional_completion,
+    rollback_conditional_completion_binding, seal_conditional_completion,
+    validate_conditional_completion_intent,
+    ConditionalCompletionBindRequestWire, ConditionalCompletionBindingWire,
+    ConditionalCompletionContextWire, ConditionalCompletionIntentWire,
+    ConditionalCompletionPrepareRequestWire, ConditionalCompletionPreviewWire,
+    ConditionalCompletionRollbackRequestWire, ConditionalCompletionSealWire,
+    ConditionalCompletionStatusWire, ExecutorCapabilityWire,
+    ObservedPathKindWire, ObservedPathWire, RepositoryDecisionWire,
+    RepositoryObservationWire, VerificationContractWire, VerificationLevelWire,
 };
 pub use evidence::{
     select_continuation_evidence, ContinuationEvidenceContextKindWire,
