@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(provider-usage)* treat omitted Grok included-usage as zero after reset
+
 ## [0.34.9](https://github.com/sase-org/sase-core/compare/v0.34.8...v0.34.9) - 2026-09-11
 
 ### Added

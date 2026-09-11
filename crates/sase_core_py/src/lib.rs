@@ -278,6 +278,7 @@
 //! - `provider_usage_mark_refresh_due(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_record_refresh_attempt(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
+//! - `provider_usage_normalize_grok_billing(request: dict) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
 //! - `provider_usage_validate_indicator_config(indicator: dict | None = None) -> dict`
 //! - `provider_usage_project_indicator(request: dict) -> dict`
@@ -1303,6 +1304,7 @@ use sase_core::provider_usage::{
     format_remaining_text as core_format_remaining_text,
     load_provider_usage_store as core_load_provider_usage_store,
     mark_provider_usage_refresh_due as core_mark_provider_usage_refresh_due,
+    normalize_grok_billing as core_normalize_grok_billing,
     prepare_provider_usage_account_context as core_prepare_provider_usage_account_context,
     project_usage_indicator as core_project_usage_indicator,
     project_usage_snapshot as core_project_usage_snapshot,
@@ -1317,9 +1319,9 @@ use sase_core::provider_usage::{
     validate_usage_indicator_config as core_validate_usage_indicator_config,
     validate_usage_observation as core_validate_usage_observation,
     ProviderUsageError as ProviderUsageDomainError,
-    ProviderUsageObservationWire, ProviderUsageRefreshAdmitRequestWire,
-    ProviderUsageRefreshAttemptWire, ProviderUsageRefreshDueRequestWire,
-    ProviderUsageRefreshMarkDueRequestWire,
+    ProviderUsageNormalizeGrokBillingRequestWire, ProviderUsageObservationWire,
+    ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
+    ProviderUsageRefreshDueRequestWire, ProviderUsageRefreshMarkDueRequestWire,
     ProviderUsageRefreshReservationRequestWire,
     ProviderUsageStoreError as ProviderUsageStoreDomainError,
     UsageApplicabilityWire, UsageIndicatorProjectionRequestWire,
@@ -13217,6 +13219,19 @@ fn py_provider_usage_record_refresh_attempt<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_normalize_grok_billing")]
+fn py_provider_usage_normalize_grok_billing<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageNormalizeGrokBillingRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let observation = core_normalize_grok_billing(request)
+        .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &observation)
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_validate_observation")]
 fn py_provider_usage_validate_observation<'py>(
     py: Python<'py>,
@@ -17592,6 +17607,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_provider_usage_mark_refresh_due, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_record_refresh_attempt,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_normalize_grok_billing,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -28321,6 +28340,81 @@ MENTORS:
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn provider_usage_normalize_grok_billing_round_trips_and_rejects_nonfinite()
+    {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let now = 1_800_000_000.0;
+            let request = json!({
+                "schema_version": 1,
+                "payload": {
+                    "subscription_tier": "SuperGrok Heavy",
+                    "config": {
+                        "currentPeriod": {
+                            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                            "start": "2027-01-15T00:00:00Z",
+                            "end": "2027-01-22T00:00:00Z",
+                        },
+                        "isUnifiedBillingUser": true,
+                    }
+                },
+                "provider": "grok",
+                "context_id": "probe",
+                "account_generation": 1,
+                "request_started_at": now,
+                "now": now,
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let observation =
+                py_provider_usage_normalize_grok_billing(py, request_dict)
+                    .unwrap();
+            let value = py_to_json_value(observation.bind(py)).unwrap();
+            assert_eq!(value["outcome"], json!("ok"));
+            assert_eq!(value["plan"], json!("SuperGrok Heavy"));
+            assert_eq!(value["windows"][0]["used_percent"], json!(0.0));
+            assert_eq!(value["windows"][0]["key"], json!("included_weekly"));
+
+            for percent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let invalid = json!({
+                    "schema_version": 1,
+                    "payload": {
+                        "config": {
+                            "creditUsagePercent": 0.0,
+                            "isUnifiedBillingUser": true,
+                            "monthlyLimit": {"val": 1000},
+                            "used": {"val": 0},
+                        }
+                    },
+                    "provider": "grok",
+                    "context_id": "probe",
+                    "account_generation": 1,
+                    "request_started_at": now,
+                    "now": now,
+                });
+                let invalid_obj = json_value_to_py(py, &invalid).unwrap();
+                let invalid_dict =
+                    invalid_obj.bind(py).downcast::<PyDict>().unwrap();
+                let payload =
+                    invalid_dict.get_item("payload").unwrap().unwrap();
+                let payload_dict = payload.downcast::<PyDict>().unwrap();
+                let config = payload_dict.get_item("config").unwrap().unwrap();
+                let config_dict = config.downcast::<PyDict>().unwrap();
+                config_dict.set_item("creditUsagePercent", percent).unwrap();
+                let error =
+                    py_provider_usage_normalize_grok_billing(py, invalid_dict)
+                        .unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py));
+                assert!(error
+                    .to_string()
+                    .to_lowercase()
+                    .contains("non-finite"));
+            }
         });
     }
 

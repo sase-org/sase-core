@@ -10,9 +10,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod grok;
 mod indicator;
 mod refresh;
 mod store;
+
+pub use grok::{
+    normalize_grok_billing, ProviderUsageNormalizeGrokBillingRequestWire,
+};
 
 pub use indicator::{
     project_usage_indicator, validate_usage_indicator_config,
