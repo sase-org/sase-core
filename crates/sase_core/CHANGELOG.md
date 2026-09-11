@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.2](https://github.com/sase-org/sase-core/compare/v0.34.1...v0.34.2) - 2026-09-11
+
+### Fixed
+
+- *(artifact-links)* require durable bead history receipt
+
 ## [0.34.1](https://github.com/sase-org/sase-core/compare/v0.34.0...v0.34.1) - 2026-09-11
 
 ### Fixed
