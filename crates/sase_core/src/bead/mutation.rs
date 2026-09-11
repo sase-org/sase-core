@@ -2431,20 +2431,14 @@ pub fn set_bead_link_projection(
         } else {
             BeadEventOperationWire::LinkRemoved
         };
-        if store.artifact_link_projection_receipt_seen_on(
+        let receipt_seen = store.artifact_link_projection_receipt_seen_on(
             &holder_id,
             &operation_id,
             event_operation,
             &event_target,
             relation,
             stored_direction,
-        )? {
-            let mut result =
-                outcome("link_project", false, vec![source_id.clone()]);
-            result.issue =
-                Some(store.issues[store.issue_index(&source_id)?].clone());
-            return Ok(result);
-        }
+        )?;
 
         let holder_index = store.issue_index(&holder_id)?;
         let existing =
@@ -2453,6 +2447,21 @@ pub fn set_bead_link_projection(
                     && link.relation == relation
                     && link.direction == stored_direction
             });
+        if receipt_seen
+            && link_projection_matches_desired(
+                existing.map(|index| &store.issues[holder_index].links[index]),
+                relation,
+                &event_target,
+                stored_direction,
+                desired.as_ref(),
+            )
+        {
+            let mut result =
+                outcome("link_project", false, vec![source_id.clone()]);
+            result.issue =
+                Some(store.issues[store.issue_index(&source_id)?].clone());
+            return Ok(result);
+        }
         let timestamp = now.unwrap_or_else(now_utc);
         let actor = store.config.owner.clone();
         match desired {
@@ -2678,6 +2687,27 @@ fn link_matches(
         return false;
     }
     link.target_ref == target_ref || link.target_ref == source_ref
+}
+
+fn link_projection_matches_desired(
+    link: Option<&BeadLinkWire>,
+    relation: &str,
+    target_ref: &str,
+    direction: BeadLinkDirectionWire,
+    desired: Option<&(String, ArtifactLinkOriginWire, u64)>,
+) -> bool {
+    match (link, desired) {
+        (None, None) => true,
+        (Some(link), Some((description, origin, uses))) => {
+            link.target_ref == target_ref
+                && link.relation == relation
+                && link.direction == direction
+                && link.description == *description
+                && link.origin == *origin
+                && link.uses == *uses
+        }
+        _ => false,
+    }
 }
 
 fn validate_artifact_link_operation_id_option(
@@ -5191,6 +5221,97 @@ mod tests {
             targets,
             BTreeSet::from(["plan:202609/a.md", "plan:202609/b.md"])
         );
+    }
+
+    #[test]
+    fn link_projection_receipt_does_not_hide_changed_reduced_state() {
+        let temp = tempdir().unwrap();
+        init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+        let first_operation = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let second_operation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+
+        let first = set_bead_link_projection(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/hot.md",
+            "read",
+            BeadLinkDirectionWire::In,
+            true,
+            Some("partial read projection".to_string()),
+            Some(ArtifactLinkOriginWire::Read),
+            1,
+            Some("2026-01-01T00:01:00Z".to_string()),
+            first_operation.clone(),
+        )
+        .unwrap();
+        assert!(first.changed);
+
+        let second = set_bead_link_projection(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/hot.md",
+            "read",
+            BeadLinkDirectionWire::In,
+            true,
+            Some("partial read projection".to_string()),
+            Some(ArtifactLinkOriginWire::Read),
+            1,
+            Some("2026-01-01T00:02:00Z".to_string()),
+            second_operation,
+        )
+        .unwrap();
+        assert!(second.changed);
+
+        let repaired = set_bead_link_projection(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/hot.md",
+            "read",
+            BeadLinkDirectionWire::In,
+            true,
+            Some("complete read projection".to_string()),
+            Some(ArtifactLinkOriginWire::Read),
+            2,
+            Some("2026-01-01T00:03:00Z".to_string()),
+            first_operation.clone(),
+        )
+        .unwrap();
+        assert!(repaired.changed);
+
+        let stable = set_bead_link_projection(
+            &beads_dir,
+            &issue.id,
+            "plan:202609/hot.md",
+            "read",
+            BeadLinkDirectionWire::In,
+            true,
+            Some("complete read projection".to_string()),
+            Some(ArtifactLinkOriginWire::Read),
+            2,
+            Some("2026-01-01T00:04:00Z".to_string()),
+            first_operation,
+        )
+        .unwrap();
+        assert!(!stable.changed);
+
+        let issues = read_store_issues(&beads_dir).unwrap();
+        let issue = issues.iter().find(|item| item.id == issue.id).unwrap();
+        assert_eq!(issue.links.len(), 1);
+        assert_eq!(issue.links[0].target_ref, "plan:202609/hot.md");
+        assert_eq!(issue.links[0].description, "complete read projection");
+        assert_eq!(issue.links[0].uses, 2);
     }
 
     #[test]
