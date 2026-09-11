@@ -2321,6 +2321,9 @@ mod imp {
             time::Duration,
         };
 
+        use sase_core::fleet_contract::{
+            fleet_catalog_snapshot_id, FleetCatalogScopeWire,
+        };
         use serde_json::json;
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
@@ -3109,6 +3112,8 @@ mod imp {
                 "/api/fleet/v1/summary" => json!({
                     "schema_version": 1,
                     "cursor": cursor_payload(),
+                    "catalog_scope": "presentation",
+                    "catalog_snapshot_id": empty_presentation_snapshot_id(),
                     "counts": counts_payload(1, 1),
                     "count_revision": 1,
                     "freshness": freshness_payload(),
@@ -3117,6 +3122,8 @@ mod imp {
                     let cursor = body
                         .and_then(|value| value.get("cursor"))
                         .and_then(serde_json::Value::as_str);
+                    let snapshot_id = empty_presentation_snapshot_id();
+                    let next_cursor = format!("catcur_v1:p:{snapshot_id}:100");
                     json!({
                         "schema_version": 1,
                         "cursor": cursor_payload(),
@@ -3125,20 +3132,32 @@ mod imp {
                         "freshness": freshness_payload(),
                         "page": {
                             "schema_version": 1,
+                            "scope": "presentation",
+                            "snapshot_id": snapshot_id,
                             "rows": [],
                             "limit": 100,
                             "total_matching_rows": 250,
                             "next_cursor": if cursor.is_none() {
-                                json!("off:100")
+                                json!(next_cursor)
                             } else {
                                 serde_json::Value::Null
                             },
                             "has_more": cursor.is_none(),
+                            "state": if cursor.is_none() {
+                                json!("ready")
+                            } else {
+                                json!("finished")
+                            },
                         },
                     })
                 }
                 _ => json!({"error": "not found"}),
             }
+        }
+
+        fn empty_presentation_snapshot_id() -> String {
+            fleet_catalog_snapshot_id(FleetCatalogScopeWire::Presentation, &[])
+                .unwrap()
         }
 
         fn hello_payload(installation_id: &str) -> serde_json::Value {

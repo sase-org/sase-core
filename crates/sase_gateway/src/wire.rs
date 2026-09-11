@@ -13,7 +13,11 @@ pub use sase_core::fleet_attention::{
 };
 pub use sase_core::fleet_contract::{
     CapabilitySetWire, FleetAuthoritativeSnapshotWire,
+    FleetCatalogAccumulationActionWire, FleetCatalogAccumulationDecisionWire,
+    FleetCatalogAccumulationRequestWire, FleetCatalogAccumulationStateWire,
+    FleetCatalogContinuationStateWire, FleetCatalogContinuationWire,
     FleetCatalogPageSelectionWire, FleetCatalogPageWire, FleetCatalogQueryWire,
+    FleetCatalogResetReasonWire, FleetCatalogScopeWire,
     FleetContentReadRequestWire, FleetContentReadResponseWire,
     FleetDetailRequestWire, FleetDetailResponseWire, FleetEventStreamItemWire,
     FleetInvalidationEventWire, FleetInvalidationKindWire,

@@ -6002,6 +6002,8 @@ exit 4
             .fleet_reads
             .catalog(sase_core::FleetCatalogQueryWire {
                 schema_version: 1,
+                scope: sase_core::FleetCatalogScopeWire::Presentation,
+                snapshot_id: None,
                 cursor: None,
                 limit: Some(10),
                 project_ids: Vec::new(),
@@ -6043,6 +6045,8 @@ exit 4
             .fleet_reads
             .catalog(sase_core::FleetCatalogQueryWire {
                 schema_version: 1,
+                scope: sase_core::FleetCatalogScopeWire::Presentation,
+                snapshot_id: None,
                 cursor: None,
                 limit: Some(10),
                 project_ids: Vec::new(),
@@ -6276,6 +6280,8 @@ exit 4
             .fleet_reads
             .catalog(sase_core::FleetCatalogQueryWire {
                 schema_version: 1,
+                scope: sase_core::FleetCatalogScopeWire::Presentation,
+                snapshot_id: None,
                 cursor: None,
                 limit: Some(10),
                 project_ids: Vec::new(),

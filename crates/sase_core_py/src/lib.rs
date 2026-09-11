@@ -208,6 +208,8 @@
 //! - `fleet_count_focus_and_fleet(request: dict) -> dict`
 //! - `fleet_validate_catalog_query(request: dict) -> dict`
 //! - `fleet_validate_catalog_cursor(cursor: str) -> str`
+//! - `fleet_catalog_snapshot_id(scope: str, summaries: list[dict]) -> str`
+//! - `fleet_accumulate_catalog_page(request: dict) -> dict`
 //! - `fleet_validate_snapshot_freshness(freshness: dict) -> dict`
 //! - `fleet_normalize_federation_response(request: dict) -> dict`
 //! - `fleet_count_focus_and_fleet_from_federation(request: dict) -> dict`
@@ -1047,7 +1049,8 @@ use sase_core::fleet_attention::{
 use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
     CacheFreshnessRequestWire, CapabilitySetWire, ConnectionPlanWire,
-    CursorReplayRequestWire, FleetCatalogQueryWire,
+    CursorReplayRequestWire, FleetCatalogAccumulationRequestWire,
+    FleetCatalogQueryWire, FleetCatalogScopeWire,
     FleetContractError as FleetContractDomainError,
     FleetFederationNormalizeRequestWire, FleetLaunchDecisionRequestWire,
     FleetLaunchIntentWire, FleetLaunchRequestWire,
@@ -13556,6 +13559,45 @@ fn py_fleet_validate_catalog_cursor(cursor: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+#[pyo3(name = "fleet_catalog_snapshot_id")]
+fn py_fleet_catalog_snapshot_id<'py>(
+    scope: &str,
+    summaries: &Bound<'py, PyList>,
+) -> PyResult<String> {
+    let scope: FleetCatalogScopeWire = serde_json::from_value(
+        JsonValue::String(scope.to_string()),
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "fleet catalog scope is not valid: {error}"
+        ))
+    })?;
+    let summaries: Vec<ResolvedAgentSummaryWire> = serde_json::from_value(
+        py_to_json_value(summaries.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "fleet catalog summaries are not valid: {error}"
+        ))
+    })?;
+    core_fleet_contract::fleet_catalog_snapshot_id(scope, &summaries)
+        .map_err(fleet_contract_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_accumulate_catalog_page")]
+fn py_fleet_accumulate_catalog_page<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FleetCatalogAccumulationRequestWire =
+        fleet_wire_from_pydict(request, "fleet catalog accumulation request")?;
+    let result = core_fleet_contract::accumulate_fleet_catalog_page(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_validate_snapshot_freshness")]
 fn py_fleet_validate_snapshot_freshness<'py>(
     py: Python<'py>,
@@ -15368,6 +15410,8 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
 
         let catalog_query = json!({
             "schema_version": 1,
+            "scope": "presentation",
+            "snapshot_id": null,
             "cursor": null,
             "limit": 50,
             "project_ids": [],
@@ -15387,9 +15431,27 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
             .unwrap()["limit"],
             json!(50)
         );
+        let summary_for_snapshot: ResolvedAgentSummaryWire =
+            serde_json::from_value(summary_value.clone()).unwrap();
+        let snapshot_id = core_fleet_contract::fleet_catalog_snapshot_id(
+            FleetCatalogScopeWire::Presentation,
+            &[summary_for_snapshot],
+        )
+        .unwrap();
+        let summaries_list =
+            json_value_to_py(py, &json!([summary_value.clone()]))
+                .unwrap()
+                .into_bound(py);
+        let summaries_list = summaries_list.downcast::<PyList>().unwrap();
         assert_eq!(
-            py_fleet_validate_catalog_cursor("off:50").unwrap(),
-            "off:50"
+            py_fleet_catalog_snapshot_id("presentation", summaries_list)
+                .unwrap(),
+            snapshot_id
+        );
+        let catalog_cursor = format!("catcur_v1:p:{snapshot_id}:50");
+        assert_eq!(
+            py_fleet_validate_catalog_cursor(&catalog_cursor).unwrap(),
+            catalog_cursor
         );
 
         let freshness = json!({
@@ -15427,6 +15489,49 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
             "attention": 0,
             "occupied_runner_slots": 3
         });
+        let accumulation_req = json!({
+            "schema_version": 1,
+            "current": null,
+            "request_generation": 1,
+            "requested_scope": "presentation",
+            "requested_snapshot_id": null,
+            "requested_cursor": null,
+            "incoming": {
+                "schema_version": 1,
+                "cursor": {
+                    "schema_version": 1,
+                    "store_generation": "gen-apollo",
+                    "sequence": 12
+                },
+                "counts": authoritative_counts.clone(),
+                "count_revision": 3,
+                "freshness": freshness.clone(),
+                "page": {
+                    "schema_version": 1,
+                    "scope": "presentation",
+                    "snapshot_id": snapshot_id.clone(),
+                    "rows": [summary_value.clone()],
+                    "limit": 50,
+                    "total_matching_rows": 1,
+                    "next_cursor": null,
+                    "has_more": false,
+                    "state": "finished"
+                }
+            }
+        });
+        let accumulation_req = json_value_to_py(py, &accumulation_req)
+            .unwrap()
+            .into_bound(py);
+        let accumulation_req = accumulation_req.downcast::<PyDict>().unwrap();
+        let accumulation =
+            py_fleet_accumulate_catalog_page(py, accumulation_req).unwrap();
+        let accumulation = py_to_json_value(accumulation.bind(py)).unwrap();
+        assert_eq!(accumulation["action"], json!("replaced"));
+        assert_eq!(accumulation["state"]["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            accumulation["state"]["snapshot_id"],
+            json!(snapshot_id.clone())
+        );
         let federation_response = json!({
             "schema_version": 1,
             "operation": "catalog",
@@ -15447,15 +15552,20 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
                         "store_generation": "gen-apollo",
                         "sequence": 12
                     },
+                    "catalog_scope": "presentation",
+                    "catalog_snapshot_id": snapshot_id.clone(),
                     "counts": authoritative_counts,
                     "freshness": freshness,
                     "page": {
                         "schema_version": 1,
+                        "scope": "presentation",
+                        "snapshot_id": snapshot_id.clone(),
                         "rows": [summary_value.clone()],
                         "limit": 50,
                         "total_matching_rows": 3,
-                        "next_cursor": "off:50",
-                        "has_more": true
+                        "next_cursor": format!("catcur_v1:p:{snapshot_id}:50"),
+                        "has_more": true,
+                        "state": "ready"
                     }
                 },
                 "error": null
@@ -15474,7 +15584,7 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
         assert_eq!(normalized["hosts"][0]["alias"], json!("apollo"));
         assert_eq!(
             normalized["hosts"][0]["catalog"]["next_cursor"],
-            json!("off:50")
+            json!(format!("catcur_v1:p:{snapshot_id}:50"))
         );
         assert_eq!(
             normalized["hosts"][0]["authoritative_counts"]["running"],
@@ -15636,6 +15746,14 @@ fn gateway_and_bootstrap_bindings_are_registered() {
             .is_callable());
         assert!(module
             .getattr("fleet_validate_catalog_cursor")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_catalog_snapshot_id")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("fleet_accumulate_catalog_page")
             .unwrap()
             .is_callable());
         assert!(module
@@ -17112,6 +17230,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_count_focus_and_fleet, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_catalog_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_catalog_cursor, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_catalog_snapshot_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fleet_accumulate_catalog_page, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_snapshot_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_normalize_federation_response,

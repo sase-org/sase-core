@@ -1230,6 +1230,8 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::fleet_contract",
                 "schema_version": "u32",
                 "cursor": "StoreCursorWire",
+                "catalog_scope": "presentation|history; defaults to presentation",
+                "catalog_snapshot_id": "string; catsnap_v1_ + 64 lowercase hex",
                 "counts": "FleetLogicalAgentCountsWire",
                 "count_revision": "u64|null",
                 "summaries": "ResolvedAgentSummaryWire[]",
@@ -1239,14 +1241,30 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::fleet_contract",
                 "schema_version": "u32",
                 "cursor": "StoreCursorWire",
+                "catalog_scope": "presentation|history; defaults to presentation",
+                "catalog_snapshot_id": "string; catsnap_v1_ + 64 lowercase hex",
                 "counts": "FleetLogicalAgentCountsWire",
                 "count_revision": "u64|null",
                 "freshness": "FleetSnapshotFreshnessWire"
             },
+            "FleetCatalogScopeWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "values": ["presentation", "history"]
+            },
+            "FleetCatalogContinuationStateWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "values": ["ready", "finished", "resync_required"]
+            },
+            "FleetCatalogResetReasonWire": {
+                "defined_by": "sase_core::fleet_contract",
+                "values": ["scope_mismatch", "snapshot_mismatch", "restart_required"]
+            },
             "FleetCatalogQueryWire": {
                 "defined_by": "sase_core::fleet_contract",
                 "schema_version": "u32",
-                "cursor": "string|null; opaque catalog page cursor",
+                "scope": "FleetCatalogScopeWire; defaults to presentation",
+                "snapshot_id": "string|null; optional previous snapshot evidence",
+                "cursor": "string|null; catcur_v1 scope/snapshot/offset cursor",
                 "limit": "u32|null; default 50, max 100",
                 "project_ids": "string[]; bounded",
                 "query": "string|null; bounded, path/token rejected",
@@ -1256,11 +1274,15 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             "FleetCatalogPageSelectionWire": {
                 "defined_by": "sase_core::fleet_contract",
                 "schema_version": "u32",
+                "scope": "FleetCatalogScopeWire",
+                "snapshot_id": "string; catsnap_v1_ + 64 lowercase hex",
                 "rows": "ResolvedAgentSummaryWire[]",
                 "limit": "u32",
                 "total_matching_rows": "u64",
-                "next_cursor": "string|null",
-                "has_more": "bool"
+                "next_cursor": "string|null; catcur_v1 scope/snapshot/offset cursor",
+                "has_more": "bool",
+                "state": "FleetCatalogContinuationStateWire",
+                "reset_reason": "FleetCatalogResetReasonWire|null; present only for resync_required"
             },
             "FleetCatalogPageWire": {
                 "defined_by": "sase_core::fleet_contract",
