@@ -613,10 +613,11 @@ pub use continuation::{
     ContinuationPolicyDecisionWire, ContinuationPolicyResolutionRequestWire,
     ContinuationPromptSegmentProvenanceWire, ContinuationPromptSegmentWire,
     ContinuationRenderedComponentSizesWire, ContinuationRenderedComponentWire,
-    ContinuationReplayManifestWire, ContinuationReplayPlanRequestWire,
-    DiagnosticManifestWire, DiagnosticStageStatusWire, DiagnosticStageWire,
-    MonitorOutcomeWire, MonitorResultWire, MonitorTimeoutKindWire,
-    RetainedLogMetadataWire, CONTINUATION_WIRE_SCHEMA_VERSION,
+    ContinuationReplayBlockWire, ContinuationReplayManifestWire,
+    ContinuationReplayPlanRequestWire, DiagnosticManifestWire,
+    DiagnosticStageStatusWire, DiagnosticStageWire, MonitorOutcomeWire,
+    MonitorResultWire, MonitorTimeoutKindWire, RetainedLogMetadataWire,
+    CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

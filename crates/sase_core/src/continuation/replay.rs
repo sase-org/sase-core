@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::budget::ContinuationBudgetDecisionWire;
 use super::schema::{
@@ -58,6 +59,23 @@ pub struct ContinuationRenderedComponentSizesWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationReplayBlockWire {
+    pub block_id: String,
+    pub node_id: String,
+    pub kind: super::schema::ContinuationNodeKindWire,
+    #[serde(default)]
+    pub parent_ids: Vec<String>,
+    pub content_ref: String,
+    pub content_sha256: String,
+    #[serde(default)]
+    pub checkpoint_ref: Option<String>,
+    #[serde(default)]
+    pub intent_ref: Option<String>,
+    #[serde(default)]
+    pub workspace_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationReplayManifestWire {
     pub schema_version: u32,
     pub projection_version: u32,
@@ -73,6 +91,8 @@ pub struct ContinuationReplayManifestWire {
     pub checkpoint_coverage: Vec<ContinuationCheckpointCoverageWire>,
     #[serde(default)]
     pub omissions: Vec<ContinuationOmissionWire>,
+    #[serde(default)]
+    pub stable_blocks: Vec<ContinuationReplayBlockWire>,
     pub rendered_component_sizes: ContinuationRenderedComponentSizesWire,
     #[serde(default)]
     pub budget: Option<ContinuationBudgetDecisionWire>,
@@ -163,6 +183,7 @@ pub fn plan_continuation_replay(
         )?;
     }
 
+    let stable_blocks = replay_blocks(&ordered_node_ids, &records);
     let total_utf8_bytes = request
         .rendered_components
         .iter()
@@ -178,6 +199,7 @@ pub fn plan_continuation_replay(
         selected_evidence_refs: request.selected_evidence_refs,
         checkpoint_coverage: request.checkpoint_coverage,
         omissions,
+        stable_blocks,
         rendered_component_sizes: ContinuationRenderedComponentSizesWire {
             components: request.rendered_components,
             total_utf8_bytes,
@@ -185,6 +207,45 @@ pub fn plan_continuation_replay(
         budget: request.budget,
         prefix_reset_reason: request.prefix_reset_reason,
     })
+}
+
+fn replay_blocks(
+    ordered_node_ids: &[String],
+    records: &BTreeMap<String, ContinuationNodeWire>,
+) -> Vec<ContinuationReplayBlockWire> {
+    ordered_node_ids
+        .iter()
+        .filter_map(|node_id| records.get(node_id))
+        .map(|record| ContinuationReplayBlockWire {
+            block_id: replay_block_id(record),
+            node_id: record.node_id.clone(),
+            kind: record.kind,
+            parent_ids: record.parent_ids.clone(),
+            content_ref: record.content_ref.clone(),
+            content_sha256: record.content_sha256.clone(),
+            checkpoint_ref: record.checkpoint_ref.clone(),
+            intent_ref: record.intent_ref.clone(),
+            workspace_ref: record.workspace_ref.clone(),
+        })
+        .collect()
+}
+
+fn replay_block_id(record: &ContinuationNodeWire) -> String {
+    let payload = serde_json::json!({
+        "schema_version": CONTINUATION_WIRE_SCHEMA_VERSION,
+        "node_id": record.node_id,
+        "kind": record.kind,
+        "parent_ids": record.parent_ids,
+        "content_ref": record.content_ref,
+        "content_sha256": record.content_sha256,
+        "checkpoint_ref": record.checkpoint_ref,
+        "intent_ref": record.intent_ref,
+        "workspace_ref": record.workspace_ref,
+    });
+    let encoded = serde_json::to_vec(&payload)
+        .expect("continuation replay block payload serializes");
+    let digest = hex::encode(Sha256::digest(&encoded));
+    format!("block:v1:{}", &digest[..32])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,5 +455,69 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn stable_blocks_render_each_serial_node_once() {
+        let mut records = Vec::new();
+        for index in 0..100 {
+            let id = format!("node-{index:03}");
+            let parent_ids = if index == 0 {
+                vec![]
+            } else {
+                vec![format!("node-{:03}", index - 1)]
+            };
+            records.push(ContinuationNodeWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                node_id: id.clone(),
+                kind: ContinuationNodeKindWire::AgentDelta,
+                parent_ids,
+                owner: owner(),
+                content_ref: format!("file:explicit:{id}"),
+                content_sha256:
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                checkpoint_ref: None,
+                intent_ref: None,
+                workspace_ref: None,
+                attribution: None,
+            });
+        }
+        let request = ContinuationReplayPlanRequestWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            records,
+            root_ids: vec!["node-099".to_string()],
+            selected_evidence_refs: vec![],
+            checkpoint_coverage: vec![],
+            rendered_components: vec![],
+            budget: None,
+            prefix_reset_reason: None,
+            max_depth: None,
+        };
+
+        let manifest = plan_continuation_replay(request.clone()).unwrap();
+        let replayed = plan_continuation_replay(request).unwrap();
+
+        assert_eq!(manifest.ordered_node_ids.len(), 100);
+        assert_eq!(manifest.stable_blocks.len(), 100);
+        assert_eq!(manifest.ordered_node_ids[0], "node-000");
+        assert_eq!(manifest.ordered_node_ids[99], "node-099");
+        assert_eq!(manifest.stable_blocks, replayed.stable_blocks);
+        assert_eq!(
+            manifest
+                .stable_blocks
+                .iter()
+                .map(|block| block.node_id.as_str())
+                .collect::<Vec<_>>(),
+            manifest
+                .ordered_node_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(manifest
+            .stable_blocks
+            .iter()
+            .all(|block| block.block_id.starts_with("block:v1:")));
     }
 }

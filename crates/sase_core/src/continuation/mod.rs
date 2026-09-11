@@ -30,7 +30,8 @@ pub use policy::{
 pub use replay::{
     plan_continuation_replay, ContinuationBranchAttributionWire,
     ContinuationParentEdgeWire, ContinuationRenderedComponentSizesWire,
-    ContinuationReplayManifestWire, ContinuationReplayPlanRequestWire,
+    ContinuationReplayBlockWire, ContinuationReplayManifestWire,
+    ContinuationReplayPlanRequestWire,
 };
 pub use schema::{
     validate_agent_delta, validate_continuation_delivery_record,

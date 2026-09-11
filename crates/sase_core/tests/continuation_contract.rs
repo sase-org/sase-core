@@ -25,6 +25,18 @@ fn serial_replay_fixture_preserves_exact_parent_order() {
         fixture.expected_rendered_bytes
     );
     assert_eq!(
+        manifest
+            .stable_blocks
+            .iter()
+            .map(|block| block.node_id.as_str())
+            .collect::<Vec<_>>(),
+        fixture
+            .expected_order
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
         manifest.selected_evidence_refs,
         vec!["file:explicit:diagnostics"]
     );
