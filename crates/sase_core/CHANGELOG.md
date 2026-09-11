@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.8](https://github.com/sase-org/sase-core/compare/v0.34.7...v0.34.8) - 2026-09-11
+
+### Added
+
+- *(gate-followup)* classify settled coder-handoff recovery
+
 ### Added
 
 - *(gate-followup)* classify settled gate coder-handoff disposition and recovery
