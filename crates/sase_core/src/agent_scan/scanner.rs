@@ -1155,6 +1155,28 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         retry_terminal: coerce_bool_truthy(data.get("retry_terminal")),
         retry_error_category: coerce_str(data.get("retry_error_category")),
         family_shell: family_shell_from_object(data),
+        monitor_diagnostic_manifest_ref: coerce_str(
+            data.get("monitor_diagnostic_manifest_ref"),
+        ),
+        monitor_retained_log_ref: coerce_str(
+            data.get("monitor_retained_log_ref"),
+        ),
+        continuation_monitor_result_id: coerce_str(
+            data.get("continuation_monitor_result_id"),
+        ),
+        continuation_monitor_result_ref: coerce_str(
+            data.get("continuation_monitor_result_ref"),
+        ),
+        continuation_node_ref: coerce_str(data.get("continuation_node_ref")),
+        continuation_manifest_ref: coerce_str(
+            data.get("continuation_manifest_ref"),
+        ),
+        continuation_budget_decision_path: coerce_str(
+            data.get("continuation_budget_decision_path"),
+        ),
+        monitor_followup_budget_decision_path: coerce_str(
+            data.get("monitor_followup_budget_decision_path"),
+        ),
         shell_kind: coerce_str(data.get("shell_kind")),
         proc_id: coerce_str(data.get("proc_id")),
     }
@@ -1199,6 +1221,9 @@ fn family_shell_from_object(
             next_action: coerce_str(data.get("monitor_next_action")),
             next_output: coerce_str(data.get("monitor_next_output")),
             next_model: coerce_str(data.get("monitor_next_model")),
+            completion_ref: coerce_str(data.get("monitor_completion_ref")),
+            profile: coerce_str(data.get("monitor_profile")),
+            policy_digest: coerce_str(data.get("monitor_policy_digest")),
             followup_agent: coerce_str(data.get("monitor_followup_agent")),
             followup_outcome: coerce_str(data.get("monitor_followup_outcome")),
             followup_error: coerce_str(data.get("monitor_followup_error")),
@@ -1222,6 +1247,15 @@ fn family_shell_from_object(
             ),
             followup_error_type: coerce_str(
                 data.get("monitor_followup_error_type"),
+            ),
+            host_completion_status: coerce_str(
+                data.get("monitor_host_completion_status"),
+            ),
+            host_completion_message: coerce_str(
+                data.get("monitor_host_completion_message"),
+            ),
+            host_completion_reason: coerce_str(
+                data.get("monitor_host_completion_reason"),
             ),
             monitor: Some(FamilyShellMonitorWire {
                 command: coerce_str(data.get("monitor_command")),
@@ -1262,6 +1296,9 @@ fn family_shell_from_object(
             next_action: coerce_str(data.get("gate_next_action")),
             next_output: coerce_str(data.get("gate_next_output")),
             next_model: coerce_str(data.get("gate_next_model")),
+            completion_ref: None,
+            profile: None,
+            policy_digest: None,
             followup_agent: coerce_str(data.get("gate_followup_agent")),
             followup_outcome: coerce_str(data.get("gate_followup_outcome")),
             followup_error: coerce_str(data.get("gate_followup_error")),
@@ -1286,6 +1323,9 @@ fn family_shell_from_object(
             followup_error_type: coerce_str(
                 data.get("gate_followup_error_type"),
             ),
+            host_completion_status: None,
+            host_completion_message: None,
+            host_completion_reason: None,
             monitor: None,
             gate: Some(FamilyShellGateWire {
                 kind: coerce_str(data.get("gate_kind")),
@@ -1346,6 +1386,28 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         ),
         status_label: coerce_str(data.get("status_label")),
         family_shell: family_shell_from_object(data),
+        monitor_diagnostic_manifest_ref: coerce_str(
+            data.get("monitor_diagnostic_manifest_ref"),
+        ),
+        monitor_retained_log_ref: coerce_str(
+            data.get("monitor_retained_log_ref"),
+        ),
+        continuation_monitor_result_id: coerce_str(
+            data.get("continuation_monitor_result_id"),
+        ),
+        continuation_monitor_result_ref: coerce_str(
+            data.get("continuation_monitor_result_ref"),
+        ),
+        continuation_node_ref: coerce_str(data.get("continuation_node_ref")),
+        continuation_manifest_ref: coerce_str(
+            data.get("continuation_manifest_ref"),
+        ),
+        continuation_budget_decision_path: coerce_str(
+            data.get("continuation_budget_decision_path"),
+        ),
+        monitor_followup_budget_decision_path: coerce_str(
+            data.get("monitor_followup_budget_decision_path"),
+        ),
     }
 }
 
@@ -1523,7 +1585,25 @@ mod tests {
                 "agent_family_role": "monitor",
                 "monitor_id": "m4kq",
                 "monitor_next_action": "Reply to the user.",
-                "monitor_next_model": "@small"
+                "monitor_next_model": "@small",
+                "monitor_next_output": "auto",
+                "monitor_completion_ref": "cci:test",
+                "monitor_profile": "verify",
+                "monitor_policy_digest": "sha256:policy",
+                "monitor_followup_agent": "acme--next",
+                "monitor_followup_outcome": "launched-degraded",
+                "monitor_followup_degraded_reason": "workspace 0 fallback",
+                "monitor_followup_prompt_path": "followup.md",
+                "monitor_host_completion_status": "finalizing",
+                "monitor_host_completion_message": "running finalizers",
+                "monitor_host_completion_reason": "verification succeeded",
+                "monitor_diagnostic_manifest_ref": "artifact:diag",
+                "monitor_retained_log_ref": "artifact:log",
+                "continuation_monitor_result_id": "result-1",
+                "continuation_monitor_result_ref": "artifact:result",
+                "continuation_node_ref": "node:1",
+                "continuation_manifest_ref": "artifact:manifest",
+                "continuation_budget_decision_path": "/tmp/budget.json"
             }),
         );
 
@@ -1537,6 +1617,50 @@ mod tests {
         assert_eq!(shell.kind, "monitor");
         assert_eq!(shell.next_action.as_deref(), Some("Reply to the user."));
         assert_eq!(shell.next_model.as_deref(), Some("@small"));
+        assert_eq!(shell.next_output.as_deref(), Some("auto"));
+        assert_eq!(shell.completion_ref.as_deref(), Some("cci:test"));
+        assert_eq!(shell.profile.as_deref(), Some("verify"));
+        assert_eq!(shell.policy_digest.as_deref(), Some("sha256:policy"));
+        assert_eq!(shell.followup_agent.as_deref(), Some("acme--next"));
+        assert_eq!(
+            shell.followup_degraded_reason.as_deref(),
+            Some("workspace 0 fallback")
+        );
+        assert_eq!(shell.followup_prompt_path.as_deref(), Some("followup.md"));
+        assert_eq!(shell.host_completion_status.as_deref(), Some("finalizing"));
+        assert_eq!(
+            shell.host_completion_message.as_deref(),
+            Some("running finalizers")
+        );
+        assert_eq!(
+            shell.host_completion_reason.as_deref(),
+            Some("verification succeeded")
+        );
+        assert_eq!(
+            meta.monitor_diagnostic_manifest_ref.as_deref(),
+            Some("artifact:diag")
+        );
+        assert_eq!(
+            meta.monitor_retained_log_ref.as_deref(),
+            Some("artifact:log")
+        );
+        assert_eq!(
+            meta.continuation_monitor_result_id.as_deref(),
+            Some("result-1")
+        );
+        assert_eq!(
+            meta.continuation_monitor_result_ref.as_deref(),
+            Some("artifact:result")
+        );
+        assert_eq!(meta.continuation_node_ref.as_deref(), Some("node:1"));
+        assert_eq!(
+            meta.continuation_manifest_ref.as_deref(),
+            Some("artifact:manifest")
+        );
+        assert_eq!(
+            meta.continuation_budget_decision_path.as_deref(),
+            Some("/tmp/budget.json")
+        );
     }
 
     #[test]
