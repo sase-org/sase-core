@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.11](https://github.com/sase-org/sase-core/compare/v0.34.10...v0.34.11) - 2026-09-11
+
+### Added
+
+- *(continuation)* add conditional completion seal and bind contracts
+
 ## [0.34.10](https://github.com/sase-org/sase-core/compare/v0.34.9...v0.34.10) - 2026-09-11
 
 ### Fixed
