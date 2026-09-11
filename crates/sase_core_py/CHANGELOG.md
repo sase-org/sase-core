@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.3](https://github.com/sase-org/sase-core/compare/v0.34.2...v0.34.3) - 2026-09-11
+
+### Added
+
+- Define the Rust continuation and result contracts (sase-zl.2)
+
 ## [0.34.0](https://github.com/sase-org/sase-core/compare/v0.33.0...v0.34.0) - 2026-09-11
 
 ### Added
