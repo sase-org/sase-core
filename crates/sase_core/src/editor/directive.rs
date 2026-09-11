@@ -95,14 +95,15 @@ const WAIT_TIME_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     },
 ];
 
-const WAIT_RUNNERS_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+const WAIT_CAPACITY_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "0",
-        documentation: "Drain barrier: start after every running agent stops",
+        documentation:
+            "Drain barrier: start after occupied weighted load is zero",
     },
     DirectiveSuggestedValue {
         value: "1",
-        documentation: "Start when at most one agent is already running",
+        documentation: "Start when occupied weighted load is at most 1",
     },
 ];
 
@@ -306,6 +307,15 @@ const PROC_KEYWORDS: &[DirectiveKeywordSpec] = &[
 
 const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
+        name: "capacity",
+        description:
+            "Start when occupied weighted load is at most this threshold",
+        value_role: DirectiveValueRole::NonNegativeInt,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: WAIT_CAPACITY_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
         name: "p",
         description: "Alias for priority=; lower values start first",
         value_role: DirectiveValueRole::NonNegativeInt,
@@ -320,14 +330,6 @@ const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
         repeatable: false,
         conflicts_with: &["p"],
         suggested_values: WAIT_PRIORITY_SUGGESTIONS,
-    },
-    DirectiveKeywordSpec {
-        name: "runners",
-        description: "Start when at most this many agents are already running",
-        value_role: DirectiveValueRole::NonNegativeInt,
-        repeatable: false,
-        conflicts_with: &[],
-        suggested_values: WAIT_RUNNERS_SUGGESTIONS,
     },
     DirectiveKeywordSpec {
         name: "w",
@@ -475,7 +477,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         name: "wait",
         alias: Some("w"),
         description: "Wait for another agent/workflow and/or a time floor",
-        argument_hint: ":agent or (agent, bead=, time=, runners=, priority=)",
+        argument_hint: ":agent or (agent, bead=, time=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN_BARE,
@@ -487,13 +489,13 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "queue",
         alias: Some("q"),
-        description: "Set runner-queue admission count, priority, and capacity weight",
-        argument_hint: ":N or (N, runners=, priority=, p=, weight=, w=)",
+        description: "Set weighted-load capacity, priority, and capacity weight",
+        argument_hint: ":N or (N, capacity=, priority=, p=, weight=, w=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN,
         positional_role: Some(DirectiveValueRole::NonNegativeInt),
-        positional_suggestions: WAIT_RUNNERS_SUGGESTIONS,
+        positional_suggestions: WAIT_CAPACITY_SUGGESTIONS,
         keywords: QUEUE_KEYWORDS,
         dynamic_keyword_role: None,
     },
@@ -992,7 +994,7 @@ pub(super) fn wait_queue_keyword_retired(
     keyword: &str,
     _enabled_feature_flags: &[String],
 ) -> bool {
-    matches!(keyword, "runners" | "priority" | "weight")
+    matches!(keyword, "runners" | "capacity" | "priority" | "weight")
 }
 
 fn selected_keyword_set(selected: &[String]) -> Vec<String> {
@@ -1588,7 +1590,7 @@ mod tests {
                 .iter()
                 .map(|keyword| keyword.name.as_str())
                 .collect::<Vec<_>>(),
-            ["p", "priority", "runners", "w", "weight"]
+            ["capacity", "p", "priority", "w", "weight"]
         );
         assert_eq!(
             queue
@@ -2009,7 +2011,7 @@ mod tests {
         let candidates = directive_argument_candidates("queue").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["p=", "priority=", "runners=", "w=", "weight="]);
+        assert_eq!(values, ["capacity=", "p=", "priority=", "w=", "weight="]);
         assert_eq!(canonical_directive_name("q"), Some("queue"));
         let list = build_directive_completion_candidates("%q");
         assert_eq!(list.candidates.len(), 1);
@@ -2435,7 +2437,7 @@ mod tests {
         };
         assert_eq!(
             queue_insertions("%q("),
-            ["p=", "priority=", "runners=", "w=", "weight=", "0", "1"]
+            ["capacity=", "p=", "priority=", "w=", "weight=", "0", "1"]
         );
         assert_eq!(queue_insertions("%q:"), ["0", "1"]);
         assert_eq!(
@@ -2443,16 +2445,16 @@ mod tests {
             ["p=", "priority=", "w=", "weight="]
         );
         assert_eq!(
-            queue_insertions("%q(runners=5, "),
+            queue_insertions("%q(capacity=5, "),
             ["p=", "priority=", "w=", "weight="]
         );
         assert_eq!(
             queue_insertions("%q(p=20, "),
-            ["runners=", "w=", "weight=", "0", "1"]
+            ["capacity=", "w=", "weight=", "0", "1"]
         );
         assert_eq!(
             queue_insertions("%q(w=0.25, "),
-            ["p=", "priority=", "runners=", "0", "1"]
+            ["capacity=", "p=", "priority=", "0", "1"]
         );
         assert_eq!(queue_insertions("%q(weight="), ["0.25", "1.0", "2.0"]);
         assert!(queue_insertions("%q(")

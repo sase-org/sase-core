@@ -1525,7 +1525,7 @@ fn classify_typed_launch_unit(
             auto_enabled,
             auto_mode,
             finalizers,
-            wait_runners: wait_queue.runners,
+            wait_runners: wait_queue.capacity,
             wait_priority: wait_queue.priority,
             queue_weight: wait_queue.weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
@@ -1738,7 +1738,13 @@ fn parse_wait_directive(
             Some("time") => raw_waits.push(raw_wait("time", value, span, source.clone())),
             Some("runners") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-runners-moved",
-                "%wait(runners=...) has moved to %queue. Use %queue(runners=N) or %q:N, and keep dependencies on %wait.",
+                "%wait(runners=...) has moved to %queue. Use %queue(capacity=N) or %q:N, and keep dependencies on %wait.",
+                logical_id,
+                Some(span),
+            )),
+            Some("capacity") => diagnostics.push(typed_unit_diagnostic(
+                "wait-queue-capacity-moved",
+                "%wait(capacity=...) belongs on %queue. Use %queue(capacity=N) or %q:N, and keep dependencies on %wait.",
                 logical_id,
                 Some(span),
             )),
@@ -7344,7 +7350,7 @@ Keep this comma, and the rest of the prose in the summary.";
             "%q:5\nDo work",
             "%queue:5\nDo work",
             "%q(5)\nDo work",
-            "%queue(runners=5)\nDo work",
+            "%queue(capacity=5)\nDo work",
         ] {
             let plan = plan_queue(prompt);
             let (runners, priority, weight, weight_explicit, cleaned) =
@@ -7385,15 +7391,20 @@ Keep this comma, and the rest of the prose in the summary.";
             },
             &[],
         );
-        assert!(rebuilt.contains("%queue(runners=1, priority=20, weight=2)"));
+        assert!(rebuilt.contains("%queue(capacity=1, priority=20, weight=2)"));
         assert!(!rebuilt.contains("%wait(runners="));
+        assert!(!rebuilt.contains("%queue(runners="));
         assert!(!rebuilt.contains("%wait(priority="));
     }
 
     #[test]
     fn typed_launch_rejects_wait_queue_keywords_and_proc_queue() {
         let runners = plan_queue_err("%wait(runners=5)\nDo work");
-        assert!(runners.to_string().contains("%queue"));
+        assert!(runners.to_string().contains("%queue(capacity="));
+        let capacity = plan_queue_err("%wait(capacity=5)\nDo work");
+        assert!(capacity.to_string().contains("%queue(capacity="));
+        let obsolete = plan_queue_err("%queue(runners=5)\nDo work");
+        assert!(obsolete.to_string().contains("capacity="));
         let priority = plan_queue_err("%wait(priority=10)\nDo work");
         assert!(priority.to_string().contains("%queue"));
         let plus = plan_queue_err("%wait(p=20)\nDo work");
@@ -7401,7 +7412,7 @@ Keep this comma, and the rest of the prose in the summary.";
         let empty = plan_queue_err("%q\nDo work");
         assert!(empty.to_string().contains("bare %q"));
         let proc = plan_typed_launch_units_with_flags(
-            "%queue(runners=1)\n%proc(\"just check\")",
+            "%queue(capacity=1)\n%proc(\"just check\")",
             Some("auto"),
             Some("sase"),
             &[],

@@ -51,7 +51,7 @@ pub struct QueueOccurrenceWire {
 #[serde(deny_unknown_fields)]
 pub struct QueueFieldsWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runners: Option<u32>,
+    pub capacity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,12 +118,12 @@ pub fn collect_queue_fields(
     }
 }
 
-/// Canonical generated form: `%queue(runners=N, priority=P, weight=W)`,
+/// Canonical generated form: `%queue(capacity=N, priority=P, weight=W)`,
 /// omitting absent fields. Returns `None` when every field is omitted.
 pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(runners) = fields.runners {
-        parts.push(format!("runners={runners}"));
+    if let Some(capacity) = fields.capacity {
+        parts.push(format!("capacity={capacity}"));
     }
     if let Some(priority) = fields.priority {
         parts.push(format!("priority={priority}"));
@@ -146,6 +146,12 @@ pub fn queue_weight_is_valid(value: f64) -> bool {
 
 pub fn format_queue_weight(value: f64) -> String {
     value.to_string()
+}
+
+/// Validate a capacity threshold string through the same contract as
+/// `%queue(capacity=...)`.
+pub fn parse_queue_capacity(raw: &str) -> Result<u32, QueueParseErrorWire> {
+    parse_capacity(raw, None)
 }
 
 /// Legacy diagnostic message from the temporary migration window.
@@ -183,7 +189,7 @@ fn parse_colon_occurrence(
     if occurrence.args.iter().any(|arg| arg.name.is_some()) {
         return Err(queue_error(
             "queue-colon-keyword",
-            "%queue colon form supplies positional runners only; use parentheses for keywords.",
+            "%queue colon form supplies positional capacity only; use parentheses for keywords.",
             span,
         ));
     }
@@ -199,7 +205,7 @@ fn parse_colon_occurrence(
         return Err(extra_positional_error(span));
     }
     Ok(QueueFieldsWire {
-        runners: Some(parse_runners(&positionals[0].value, span)?),
+        capacity: Some(parse_capacity(&positionals[0].value, span)?),
         priority: None,
         weight: None,
     })
@@ -231,17 +237,20 @@ fn parse_parenthesized_occurrence(
                     return Err(extra_positional_error(span));
                 }
                 positional_seen = true;
-                assign_runners(&mut fields, &arg.value, span)?;
+                assign_capacity(&mut fields, &arg.value, span)?;
             }
             Some(literal) => {
                 if literal.is_empty() {
                     return Err(queue_error(
                         "unknown-queue-keyword",
-                        "Unsupported keyword on %queue: empty name. Use runners=, priority=, p=, weight=, or w=.",
+                        "Unsupported keyword on %queue: empty name. Use capacity=, priority=, p=, weight=, or w=.",
                         span,
                     ));
                 }
                 let key = literal.to_ascii_lowercase();
+                if key == "runners" {
+                    return Err(obsolete_runners_error(span));
+                }
                 if seen_literals.iter().any(|seen: &String| seen == &key) {
                     return Err(duplicate_field_error(
                         &canonical_queue_key(&key),
@@ -250,8 +259,8 @@ fn parse_parenthesized_occurrence(
                 }
                 seen_literals.push(key.clone());
                 match canonical_queue_key(&key).as_str() {
-                    "runners" => {
-                        assign_runners(&mut fields, &arg.value, span)?;
+                    "capacity" => {
+                        assign_capacity(&mut fields, &arg.value, span)?;
                     }
                     "priority" => {
                         assign_priority(&mut fields, &arg.value, span)?;
@@ -272,7 +281,7 @@ fn parse_parenthesized_occurrence(
                         return Err(queue_error(
                             "unknown-queue-keyword",
                             &format!(
-                                "Unsupported keyword on %queue: {literal}=. Use runners=, priority=, p=, weight=, or w=."
+                                "Unsupported keyword on %queue: {literal}=. Use capacity=, priority=, p=, weight=, or w=."
                             ),
                             span,
                         ));
@@ -281,7 +290,7 @@ fn parse_parenthesized_occurrence(
             }
         }
     }
-    if fields.runners.is_none()
+    if fields.capacity.is_none()
         && fields.priority.is_none()
         && fields.weight.is_none()
     {
@@ -290,15 +299,15 @@ fn parse_parenthesized_occurrence(
     Ok(fields)
 }
 
-fn assign_runners(
+fn assign_capacity(
     fields: &mut QueueFieldsWire,
     raw: &str,
     span: Option<[usize; 2]>,
 ) -> Result<(), QueueParseErrorWire> {
-    if fields.runners.is_some() {
-        return Err(duplicate_field_error("runners", span));
+    if fields.capacity.is_some() {
+        return Err(duplicate_field_error("capacity", span));
     }
-    fields.runners = Some(parse_runners(raw, span)?);
+    fields.capacity = Some(parse_capacity(raw, span)?);
     Ok(())
 }
 
@@ -331,11 +340,11 @@ fn merge_queue_part(
     part: QueueFieldsWire,
     span: [usize; 2],
 ) -> Result<(), QueueParseErrorWire> {
-    if let Some(runners) = part.runners {
-        if fields.runners.is_some() {
-            return Err(duplicate_field_error("runners", Some(span)));
+    if let Some(capacity) = part.capacity {
+        if fields.capacity.is_some() {
+            return Err(duplicate_field_error("capacity", Some(span)));
         }
-        fields.runners = Some(runners);
+        fields.capacity = Some(capacity);
     }
     if let Some(priority) = part.priority {
         if fields.priority.is_some() {
@@ -352,17 +361,17 @@ fn merge_queue_part(
     Ok(())
 }
 
-fn parse_runners(
+fn parse_capacity(
     raw: &str,
     span: Option<[usize; 2]>,
 ) -> Result<u32, QueueParseErrorWire> {
     let digits = parse_non_negative_decimal(raw)
-        .map_err(|kind| integer_error("runners", kind, span))?;
+        .map_err(|kind| integer_error("capacity", kind, span))?;
     digits.parse::<u32>().map_err(|_| {
         queue_error(
-            "queue-overflow-runners",
+            "queue-overflow-capacity",
             &format!(
-                "%queue(runners=...) exceeds the u32 maximum of {}.",
+                "%queue(capacity=...) exceeds the u32 maximum of {}.",
                 u32::MAX
             ),
             span,
@@ -418,7 +427,7 @@ fn integer_error(
 ) -> QueueParseErrorWire {
     let code = match field {
         "priority" => "invalid-queue-priority",
-        _ => "invalid-queue-runners",
+        _ => "invalid-queue-capacity",
     };
     let message = match kind {
         InvalidInt::Empty => format!(
@@ -445,7 +454,7 @@ fn overflow_priority(span: Option<[usize; 2]>) -> QueueParseErrorWire {
 fn empty_queue_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "empty-queue",
-        "%queue requires runners, priority, and/or weight; bare %q is not a previous-agent wait. Use %q:N, %queue(runners=N), %queue(priority=P), and/or %queue(weight=W).",
+        "%queue requires capacity, priority, and/or weight; bare %q is not a previous-agent wait. Use %q:N, %queue(capacity=N), %queue(priority=P), and/or %queue(weight=W).",
         span,
     )
 }
@@ -453,7 +462,7 @@ fn empty_queue_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
 fn extra_positional_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "extra-queue-positional",
-        "%queue accepts at most one positional argument, which is runners.",
+        "%queue accepts at most one positional argument, which is capacity.",
         span,
     )
 }
@@ -467,6 +476,14 @@ fn duplicate_field_error(
         &format!(
             "Duplicate %queue {field} assignment is not allowed, even when the values match."
         ),
+        span,
+    )
+}
+
+fn obsolete_runners_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
+    queue_error(
+        "obsolete-queue-runners",
+        "%queue(runners=...) has been renamed. Use %queue(capacity=N) or %q:N; capacity is a weighted-load threshold, not a count of running agents.",
         span,
     )
 }
@@ -617,14 +634,14 @@ mod tests {
         assert_eq!(
             fields,
             QueueFieldsWire {
-                runners: Some(5),
+                capacity: Some(5),
                 priority: Some(20),
                 ..QueueFieldsWire::default()
             }
         );
         assert_eq!(
             format_queue_directive(&fields).as_deref(),
-            Some("%queue(runners=5, priority=20)")
+            Some("%queue(capacity=5, priority=20)")
         );
     }
 
@@ -633,14 +650,14 @@ mod tests {
         for source_args in [
             occ("%q(5)", vec![positional("5")]),
             occ("%queue:5", vec![positional("5")]),
-            occ("%queue(runners=5)", vec![named("runners", "5")]),
+            occ("%queue(capacity=5)", vec![named("capacity", "5")]),
         ] {
             let fields = collect_ok(&[source_args]);
-            assert_eq!(fields.runners, Some(5));
+            assert_eq!(fields.capacity, Some(5));
             assert_eq!(fields.priority, None);
             assert_eq!(
                 format_queue_directive(&fields).as_deref(),
-                Some("%queue(runners=5)")
+                Some("%queue(capacity=5)")
             );
         }
         let priority = collect_ok(&[occ(
@@ -655,19 +672,19 @@ mod tests {
             "%q(5, p=20, w=0.25)",
             vec![positional("5"), named("p", "20"), named("w", "0.25")],
         )]);
-        assert_eq!(both.runners, Some(5));
+        assert_eq!(both.capacity, Some(5));
         assert_eq!(both.priority, Some(20));
         assert_eq!(both.weight, Some(0.25));
         assert_eq!(
             format_queue_directive(&both).as_deref(),
-            Some("%queue(runners=5, priority=20, weight=0.25)")
+            Some("%queue(capacity=5, priority=20, weight=0.25)")
         );
     }
 
     #[test]
     fn explicit_zero_is_distinct_from_omitted() {
         let zero = collect_ok(&[occ("%q:0", vec![positional("0")])]);
-        assert_eq!(zero.runners, Some(0));
+        assert_eq!(zero.capacity, Some(0));
         assert_eq!(zero.priority, None);
         let omitted = QueueFieldsWire::default();
         assert_ne!(zero, omitted);
@@ -683,8 +700,8 @@ mod tests {
     fn rejects_duplicates_even_when_values_match() {
         for occurrences in [
             vec![occ(
-                "%q(5, runners=5)",
-                vec![positional("5"), named("runners", "5")],
+                "%q(5, capacity=5)",
+                vec![positional("5"), named("capacity", "5")],
             )],
             vec![occ(
                 "%q(p=20, priority=20)",
@@ -692,7 +709,7 @@ mod tests {
             )],
             vec![
                 occ("%q:5", vec![positional("5")]),
-                occ("%queue(runners=5)", vec![named("runners", "5")]),
+                occ("%queue(capacity=5)", vec![named("capacity", "5")]),
             ],
             vec![occ(
                 "%q(p=20, p=20)",
@@ -760,19 +777,43 @@ mod tests {
         let unknown = occ("%q(foo=1)", vec![named("foo", "1")]);
         assert_eq!(collect_err(&[unknown])[0].code, "unknown-queue-keyword");
 
-        let colon_kw = occ("%q:runners=5", vec![named("runners", "5")]);
+        let colon_kw = occ("%q:capacity=5", vec![named("capacity", "5")]);
         assert_eq!(collect_err(&[colon_kw])[0].code, "queue-colon-keyword");
+    }
+
+    #[test]
+    fn rejects_obsolete_runners_keyword_with_capacity_migration() {
+        for occurrence in [
+            occ("%queue(runners=5)", vec![named("runners", "5")]),
+            occ(
+                "%q(3, runners=3)",
+                vec![positional("3"), named("runners", "3")],
+            ),
+            occ(
+                "%q(capacity=3, runners=3)",
+                vec![named("capacity", "3"), named("runners", "3")],
+            ),
+        ] {
+            let errors = collect_err(&[occurrence]);
+            assert_eq!(errors[0].code, "obsolete-queue-runners");
+            assert!(errors[0].message.contains("capacity="), "{errors:?}");
+            assert!(
+                !errors[0].message.to_ascii_lowercase().contains("alias"),
+                "{errors:?}"
+            );
+        }
     }
 
     #[test]
     fn rejects_invalid_and_overflow_integers() {
         for value in ["-1", "+1", "1.5", "true", "false", "many", ""] {
-            let runners = occ("%q(runners=x)", vec![named("runners", value)]);
-            let mut runners = runners;
-            runners.args[0].value = value.to_string();
+            let capacity =
+                occ("%q(capacity=x)", vec![named("capacity", value)]);
+            let mut capacity = capacity;
+            capacity.args[0].value = value.to_string();
             assert_eq!(
-                collect_err(&[runners])[0].code,
-                "invalid-queue-runners",
+                collect_err(&[capacity])[0].code,
+                "invalid-queue-capacity",
                 "{value}"
             );
             let priority = occ("%q(p=x)", vec![named("p", value)]);
@@ -785,18 +826,28 @@ mod tests {
             );
         }
 
-        let runners_max = collect_ok(&[occ(
-            "%queue(runners=4294967295)",
-            vec![named("runners", &u32::MAX.to_string())],
+        let capacity_max = collect_ok(&[occ(
+            "%queue(capacity=4294967295)",
+            vec![named("capacity", &u32::MAX.to_string())],
         )]);
-        assert_eq!(runners_max.runners, Some(u32::MAX));
-        let runners_overflow = occ(
-            "%queue(runners=4294967296)",
-            vec![named("runners", "4294967296")],
+        assert_eq!(capacity_max.capacity, Some(u32::MAX));
+        let capacity_overflow = occ(
+            "%queue(capacity=4294967296)",
+            vec![named("capacity", "4294967296")],
         );
         assert_eq!(
-            collect_err(&[runners_overflow])[0].code,
-            "queue-overflow-runners"
+            collect_err(&[capacity_overflow])[0].code,
+            "queue-overflow-capacity"
+        );
+        assert_eq!(parse_queue_capacity(&u32::MAX.to_string()), Ok(u32::MAX));
+        assert_eq!(parse_queue_capacity("0"), Ok(0));
+        assert_eq!(
+            parse_queue_capacity("4294967296").unwrap_err().code,
+            "queue-overflow-capacity"
+        );
+        assert_eq!(
+            parse_queue_capacity("true").unwrap_err().code,
+            "invalid-queue-capacity"
         );
 
         let priority_max = collect_ok(&[occ(
@@ -826,7 +877,7 @@ mod tests {
         ] {
             let fields =
                 collect_ok(&[occ("%q(w=value)", vec![named("w", value)])]);
-            assert_eq!(fields.runners, None);
+            assert_eq!(fields.capacity, None);
             assert_eq!(fields.priority, None);
             assert_eq!(fields.weight, Some(expected), "{value}");
             assert_eq!(
@@ -865,12 +916,12 @@ mod tests {
     #[test]
     fn preserves_source_spans_on_errors() {
         let occurrence = QueueOccurrenceWire {
-            source: "%q(5, runners=5)".to_string(),
-            source_span: [3, 19],
-            args: vec![positional("5"), named("runners", "5")],
+            source: "%q(5, capacity=5)".to_string(),
+            source_span: [3, 20],
+            args: vec![positional("5"), named("capacity", "5")],
             has_plus_suffix: false,
         };
         let errors = collect_err(&[occurrence]);
-        assert_eq!(errors[0].source_span, Some([3, 19]));
+        assert_eq!(errors[0].source_span, Some([3, 20]));
     }
 }

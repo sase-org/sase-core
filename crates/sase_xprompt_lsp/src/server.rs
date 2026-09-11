@@ -4447,12 +4447,12 @@ mod tests {
                 "%queue",
                 "%queue:...",
                 "%q:...",
-                "%queue(runners=..., priority=...)"
+                "%queue(capacity=..., priority=...)"
             ]
         );
         assert_eq!(
             labels_at(server, "%queue(").await,
-            vec!["p=", "priority=", "runners=", "w=", "weight=", "0", "1"]
+            vec!["capacity=", "p=", "priority=", "w=", "weight=", "0", "1"]
         );
     }
 
@@ -4478,7 +4478,7 @@ mod tests {
 
         assert_eq!(
             labels_at(server, "%q(").await,
-            vec!["p=", "priority=", "runners=", "w=", "weight=", "0", "1"]
+            vec!["capacity=", "p=", "priority=", "w=", "weight=", "0", "1"]
         );
         assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
         assert_eq!(
@@ -4486,7 +4486,7 @@ mod tests {
             vec!["p=", "priority=", "w=", "weight="]
         );
         assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
-        assert_eq!(labels_at(server, "%queue(runners=").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%queue(capacity=").await, vec!["0", "1"]);
         assert_eq!(
             labels_at(server, "%wait(").await,
             vec!["agent=", "bead=", "proc=", "time=", "unit=", "planner"]

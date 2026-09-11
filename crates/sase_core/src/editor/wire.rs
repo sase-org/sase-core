@@ -634,9 +634,9 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
         ],
         "queue" => &[
             "%q:5",
-            "%queue(runners=5)",
+            "%queue(capacity=5)",
             "%q(p=20)",
-            "%queue(runners=5, priority=20)",
+            "%queue(capacity=5, priority=20)",
         ],
         _ => &[],
     }
@@ -674,15 +674,15 @@ pub fn directive_snippet_recipes(
                 "%q:${1:5}$0",
                 "%q:$1$0",
                 "%q:5",
-                "Set a runner-queue admission threshold with the short alias.",
+                "Set a weighted-load capacity threshold with the short alias.",
             ),
             recipe(
-                "%queue(runners=..., priority=...)",
+                "%queue(capacity=..., priority=...)",
                 "directive snippet",
-                "%queue(runners=${1:5}, priority=${2:10})$0",
-                "%queue(runners=$1, priority=$2)$0",
-                "%queue(runners=5, priority=10)",
-                "Set both queue admission threshold and priority.",
+                "%queue(capacity=${1:5}, priority=${2:10})$0",
+                "%queue(capacity=$1, priority=$2)$0",
+                "%queue(capacity=5, priority=10)",
+                "Set both weighted-load capacity and priority.",
             ),
         ],
         "wait" => vec![

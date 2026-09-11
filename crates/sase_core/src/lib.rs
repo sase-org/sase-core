@@ -1217,7 +1217,7 @@ pub use query::{
     QueryRow, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
 };
 pub use queue_directive::{
-    collect_queue_fields, format_queue_directive,
+    collect_queue_fields, format_queue_directive, parse_queue_capacity,
     queue_directive_disabled_message, queue_directive_enabled,
     queue_directive_flag_key, QueueArgWire, QueueCollectResultWire,
     QueueFieldsWire, QueueOccurrenceWire, QueueParseErrorWire,

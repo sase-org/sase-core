@@ -1529,8 +1529,8 @@ fn build_queue_completion_candidates(
         .syntax_form()
         .unwrap_or(DirectiveSyntaxForm::Parenthesized);
     let mut selected_keywords = context.selected_keywords().to_vec();
-    if queue_has_positional_runners(&context.selected_values) {
-        selected_keywords.push("runners".to_string());
+    if queue_has_positional_capacity(&context.selected_values) {
+        selected_keywords.push("capacity".to_string());
     }
     let mut candidates = Vec::new();
     if !token.contains('=') && directive_allows_keywords(metadata, syntax_form)
@@ -1546,7 +1546,7 @@ fn build_queue_completion_candidates(
             .candidates,
         );
     }
-    if !queue_has_runners_assignment(
+    if !queue_has_capacity_assignment(
         &context.selected_values,
         &selected_keywords,
     ) {
@@ -1565,20 +1565,20 @@ fn build_queue_completion_candidates(
     }
 }
 
-fn queue_has_positional_runners(selected_values: &[String]) -> bool {
+fn queue_has_positional_capacity(selected_values: &[String]) -> bool {
     selected_values
         .iter()
         .any(|value| !value.contains('=') && !value.trim().is_empty())
 }
 
-fn queue_has_runners_assignment(
+fn queue_has_capacity_assignment(
     selected_values: &[String],
     selected_keywords: &[String],
 ) -> bool {
-    queue_has_positional_runners(selected_values)
+    queue_has_positional_capacity(selected_values)
         || selected_keywords
             .iter()
-            .any(|keyword| keyword.eq_ignore_ascii_case("runners"))
+            .any(|keyword| keyword.eq_ignore_ascii_case("capacity"))
 }
 
 pub fn build_directive_clause_candidates(

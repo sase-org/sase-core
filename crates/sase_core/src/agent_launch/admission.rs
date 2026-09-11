@@ -451,7 +451,7 @@ pub fn agent_unit_dispatch_prompt_with_flags(
         lines.push("%hide".to_string());
     }
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
-        runners: agent.wait_runners,
+        capacity: agent.wait_runners,
         priority: agent.wait_priority,
         weight: if agent.queue_weight_explicit {
             agent.queue_weight
@@ -974,8 +974,9 @@ mod tests {
         assert!(prompt.contains("%auto"));
         assert!(prompt.contains("%final:commit"));
         assert!(prompt.contains("%hide"));
-        assert!(prompt.contains("%queue(runners=2, priority=1, weight=2)"));
+        assert!(prompt.contains("%queue(capacity=2, priority=1, weight=2)"));
         assert!(!prompt.contains("%wait(runners="));
+        assert!(!prompt.contains("%queue(runners="));
         assert!(!prompt.contains("%wait(priority="));
         assert!(prompt.contains("Review the diff"));
         assert!(!prompt.contains("%wait:"));

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::queue_directive::{queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT};
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 2;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +80,7 @@ pub struct RunnerCapacityRecordWire {
     #[serde(default)]
     pub slot_requested_at: Option<String>,
     #[serde(default)]
+    /// Persisted spelling of the optional weighted-load capacity threshold.
     pub wait_runners: Option<i64>,
     #[serde(default)]
     pub wait_runners_explicit: bool,
@@ -125,9 +126,9 @@ pub struct RunnerCapacityBlockerWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub free_capacity: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub occupied_lanes: Option<u32>,
+    pub occupied_capacity: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_threshold: Option<u32>,
+    pub capacity_threshold: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,7 +148,7 @@ pub struct RunnerCapacityWaiterWire {
     #[serde(default)]
     pub capacity_shortfall: f64,
     #[serde(default)]
-    pub runner_count_shortfall: u32,
+    pub wait_capacity_shortfall: f64,
     #[serde(default)]
     pub blockers: Vec<RunnerCapacityBlockerWire>,
 }
@@ -195,7 +196,6 @@ struct WaiterEvaluation<'a> {
     request: &'a RunnerCapacityRequestWire,
     record: &'a RunnerCapacityRecordWire,
     claims: &'a [RunnerCapacityClaimWire],
-    occupied_lanes: u32,
     occupied_capacity: f64,
     requested_weight: f64,
     wait_runners: Option<u32>,
@@ -269,7 +269,6 @@ pub fn runner_capacity_snapshot(
     let active_claims = active_claim_keys(&claims);
     let waiters = build_waiters(
         &waiter_request,
-        occupied_lanes,
         occupied_capacity,
         &claims,
         &active_claims,
@@ -433,7 +432,6 @@ fn build_claims(
 
 fn build_waiters(
     request: &RunnerCapacityRequestWire,
-    occupied_lanes: u32,
     occupied_capacity: f64,
     claims: &[RunnerCapacityClaimWire],
     active_claims: &BTreeSet<String>,
@@ -458,7 +456,6 @@ fn build_waiters(
             request,
             record,
             claims,
-            occupied_lanes,
             occupied_capacity,
             requested_weight,
             wait_runners,
@@ -485,8 +482,10 @@ fn build_waiters(
             requested_weight,
             request.effective_limit,
         );
-        let runner_count_shortfall =
-            waiter_runner_count_shortfall(occupied_lanes, wait_runners);
+        let wait_capacity_shortfall = waiter_capacity_condition_shortfall(
+            occupied_capacity,
+            wait_runners,
+        );
         drafts.push(WaiterDraft {
             record,
             wire: RunnerCapacityWaiterWire {
@@ -503,7 +502,7 @@ fn build_waiters(
                 eligible: blockers.is_empty(),
                 parked,
                 capacity_shortfall,
-                runner_count_shortfall,
+                wait_capacity_shortfall,
                 blockers,
             },
         });
@@ -596,13 +595,21 @@ fn waiter_blockers(
         }
     }
     if let Some(threshold) = eval.wait_runners {
-        if eval.occupied_lanes > threshold {
+        if occupied_capacity_exceeds_threshold(
+            eval.occupied_capacity,
+            threshold,
+        ) {
+            let message = if threshold == 0 {
+                "Occupied weighted load must drain to zero before this capacity-0 waiter can start."
+            } else {
+                "Occupied weighted load exceeds this explicit capacity threshold."
+            };
             blockers.push(blocker(
-                "runner-count-condition",
-                "Too many occupied runner lanes for this explicit runners condition.",
+                "capacity-condition",
+                message,
                 None,
                 None,
-                Some(eval.occupied_lanes),
+                Some(eval.occupied_capacity),
                 Some(threshold),
             ));
         }
@@ -795,9 +802,10 @@ fn compare_waiter_drafts(
                     right.wire.capacity_shortfall,
                 )
                 .then_with(|| {
-                    left.wire
-                        .runner_count_shortfall
-                        .cmp(&right.wire.runner_count_shortfall)
+                    compare_f64(
+                        left.wire.wait_capacity_shortfall,
+                        right.wire.wait_capacity_shortfall,
+                    )
                 })
             } else {
                 Ordering::Equal
@@ -830,7 +838,7 @@ fn has_resource_blocker(blockers: &[RunnerCapacityBlockerWire]) -> bool {
                 | "weight-exceeds-limit"
                 | "insufficient-capacity"
                 | "capacity-overflow"
-                | "runner-count-condition"
+                | "capacity-condition"
         )
     })
 }
@@ -858,13 +866,35 @@ fn waiter_capacity_shortfall(
     }
 }
 
-fn waiter_runner_count_shortfall(
-    occupied_lanes: u32,
-    wait_runners: Option<u32>,
-) -> u32 {
-    wait_runners
-        .map(|threshold| occupied_lanes.saturating_sub(threshold))
-        .unwrap_or(0)
+fn waiter_capacity_condition_shortfall(
+    occupied_capacity: f64,
+    wait_capacity: Option<u32>,
+) -> f64 {
+    let Some(threshold) = wait_capacity else {
+        return 0.0;
+    };
+    if !occupied_capacity_exceeds_threshold(occupied_capacity, threshold) {
+        return 0.0;
+    }
+    if threshold == 0 {
+        occupied_capacity.max(0.0)
+    } else {
+        (occupied_capacity - f64::from(threshold)).max(0.0)
+    }
+}
+
+fn occupied_capacity_exceeds_threshold(
+    occupied_capacity: f64,
+    threshold: u32,
+) -> bool {
+    if !occupied_capacity.is_finite() {
+        return true;
+    }
+    if threshold == 0 {
+        occupied_capacity > 0.0
+    } else {
+        !capacity_fits(occupied_capacity, f64::from(threshold))
+    }
 }
 
 fn weights_equal(left: f64, right: f64) -> bool {
@@ -1333,16 +1363,16 @@ fn blocker(
     message: &str,
     needed_capacity: Option<f64>,
     free_capacity: Option<f64>,
-    occupied_lanes: Option<u32>,
-    runner_threshold: Option<u32>,
+    occupied_capacity: Option<f64>,
+    capacity_threshold: Option<u32>,
 ) -> RunnerCapacityBlockerWire {
     RunnerCapacityBlockerWire {
         code: code.to_string(),
         message: message.to_string(),
         needed_capacity,
         free_capacity,
-        occupied_lanes,
-        runner_threshold,
+        occupied_capacity,
+        capacity_threshold,
     }
 }
 
@@ -1523,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_runner_count_condition_cannot_bypass_capacity() {
+    fn explicit_capacity_cannot_bypass_global_budget() {
         let occupied = running("occupied", Some(1.0));
         let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
         waiter.wait_runners = Some(99);
@@ -1532,23 +1562,94 @@ mod tests {
         let result = snapshot(1.0, vec![occupied, waiter]);
         assert!(result.first_eligible_artifact_dir.is_none());
         assert_eq!(result.waiters[0].blockers[0].code, "insufficient-capacity");
+        assert_eq!(result.waiters[0].wait_capacity_shortfall, 0.0);
     }
 
     #[test]
-    fn count_condition_blocks_even_when_capacity_fits() {
-        let first = running("first", Some(0.25));
-        let second = running("second", Some(0.25));
+    fn four_light_claims_satisfy_capacity_one() {
+        let mut records: Vec<RunnerCapacityRecordWire> = (0..4)
+            .map(|index| running(&format!("light{index}"), Some(0.25)))
+            .collect();
+        let mut waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+        waiting_agent.wait_runners = Some(1);
+        waiting_agent.wait_runners_explicit = true;
+        records.push(waiting_agent);
+
+        let result = snapshot(8.0, records);
+        assert_eq!(result.occupied_capacity, 1.0);
+        assert_eq!(result.occupied_lanes, 4);
+        assert_eq!(
+            result.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(waiter(&result, "waiter").eligible);
+        assert_eq!(waiter(&result, "waiter").wait_capacity_shortfall, 0.0);
+    }
+
+    #[test]
+    fn one_heavy_claim_exceeds_capacity_one() {
+        let occupied = running("heavy", Some(2.0));
         let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
         waiter.wait_runners = Some(1);
         waiter.wait_runners_explicit = true;
 
-        let result = snapshot(1.0, vec![first, second, waiter]);
+        let result = snapshot(8.0, vec![occupied, waiter]);
         assert!(result.first_eligible_artifact_dir.is_none());
+        assert_eq!(result.waiters[0].blockers[0].code, "capacity-condition");
+        assert_eq!(result.waiters[0].blockers[0].occupied_capacity, Some(2.0));
+        assert_eq!(result.waiters[0].blockers[0].capacity_threshold, Some(1));
+        assert_eq!(result.waiters[0].wait_capacity_shortfall, 1.0);
+    }
+
+    #[test]
+    fn capacity_zero_is_true_drain_including_tiny_weight() {
+        let occupied = running("tiny", Some(f64::MIN_POSITIVE));
+        let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+        waiter.wait_runners = Some(0);
+        waiter.wait_runners_explicit = true;
+
+        let blocked = snapshot(8.0, vec![occupied, waiter.clone()]);
+        assert!(blocked.first_eligible_artifact_dir.is_none());
+        assert_eq!(blocked.waiters[0].blockers[0].code, "capacity-condition");
+        assert!(blocked.waiters[0].wait_capacity_shortfall > 0.0);
+
+        occupied_drain_admits(waiter);
+    }
+
+    fn occupied_drain_admits(mut waiter: RunnerCapacityRecordWire) {
+        waiter.wait_runners = Some(0);
+        waiter.wait_runners_explicit = true;
+        let drained = snapshot(8.0, vec![waiter]);
         assert_eq!(
-            result.waiters[0].blockers[0].code,
-            "runner-count-condition"
+            drained.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
         );
-        assert_eq!(result.waiters[0].blockers[0].occupied_lanes, Some(2));
+        assert!(drained.waiters[0].eligible);
+        assert_eq!(drained.waiters[0].wait_capacity_shortfall, 0.0);
+    }
+
+    #[test]
+    fn shared_family_claim_counts_once_for_capacity() {
+        let mut serial_root = running("serial-root", Some(2.0));
+        serial_root.agent_family = Some("fam".to_string());
+        let mut serial_child = running("serial-child", Some(1.0));
+        serial_child.agent_family = Some("fam".to_string());
+        serial_child.parent_timestamp = Some("serial-root".to_string());
+        let mut waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+        waiting_agent.wait_runners = Some(2);
+        waiting_agent.wait_runners_explicit = true;
+
+        let result =
+            snapshot(8.0, vec![serial_root, serial_child, waiting_agent]);
+        assert_eq!(result.occupied_lanes, 1);
+        assert_eq!(result.occupied_capacity, 2.0);
+        assert_eq!(
+            result.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(waiter(&result, "waiter").eligible);
     }
 
     #[test]
