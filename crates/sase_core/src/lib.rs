@@ -83,6 +83,7 @@ pub mod runner_capacity;
 pub mod runner_limit_override;
 pub mod sections;
 mod serde_option;
+pub mod sidecar_publication;
 pub mod snippet_catalog;
 pub mod snippet_session;
 pub mod source_language;
@@ -1221,6 +1222,17 @@ pub use runner_limit_override::{
     set_runner_limit_override_until, RunnerLimitOverrideError,
     RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
     RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
+};
+pub use sidecar_publication::{
+    decide_sidecar_publication_after_push, SidecarPublicationDecisionWire,
+    SIDECAR_PUBLICATION_ACTION_INTEGRATE_AND_RETRY,
+    SIDECAR_PUBLICATION_ACTION_STOP, SIDECAR_PUBLICATION_ACTION_SUCCESS,
+    SIDECAR_PUBLICATION_CLASS_FETCH_FIRST,
+    SIDECAR_PUBLICATION_CLASS_NON_FAST_FORWARD,
+    SIDECAR_PUBLICATION_CLASS_SUCCESS,
+    SIDECAR_PUBLICATION_CLASS_UNKNOWN_FAILURE,
+    SIDECAR_PUBLICATION_MAX_PUSH_ATTEMPTS,
+    SIDECAR_PUBLICATION_WIRE_SCHEMA_VERSION,
 };
 pub use snippet_catalog::{
     compose_snippet_catalog, is_valid_snippet_trigger,

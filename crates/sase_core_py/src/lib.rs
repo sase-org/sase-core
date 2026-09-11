@@ -70,6 +70,7 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `decide_sidecar_publication_after_push(returncode: int, stdout: str, stderr: str, attempt: int) -> dict`
 //! - `vcs_log_wire_schema_version() -> int`
 //! - `parse_git_log(stdout: str) -> list[dict]`
 //! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
@@ -1341,6 +1342,10 @@ use sase_core::runner_limit_override::{
     RunnerLimitOverrideError as RunnerLimitOverrideDomainError,
 };
 use sase_core::scan_directive_owned_fences as core_scan_directive_owned_fences;
+use sase_core::sidecar_publication::{
+    decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
+    SidecarPublicationDecisionWire,
+};
 use sase_core::snippet_session::{
     apply_session_event as core_apply_snippet_session_event,
     SnippetSessionEvent, SnippetSessionState,
@@ -4425,6 +4430,40 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
         Some(text) => text.into_py(py),
         None => py.None(),
     }
+}
+
+/// Decide the next launch-time sidecar publication action after one push.
+#[pyfunction]
+#[pyo3(name = "decide_sidecar_publication_after_push")]
+fn py_decide_sidecar_publication_after_push<'py>(
+    py: Python<'py>,
+    returncode: i32,
+    stdout: &str,
+    stderr: &str,
+    attempt: u32,
+) -> PyResult<Bound<'py, PyDict>> {
+    if attempt == 0 {
+        return Err(PyValueError::new_err("attempt must be at least 1"));
+    }
+    let decision = core_decide_sidecar_publication_after_push(
+        returncode, stdout, stderr, attempt,
+    );
+    sidecar_publication_decision_to_py(py, &decision)
+}
+
+fn sidecar_publication_decision_to_py<'py>(
+    py: Python<'py>,
+    decision: &SidecarPublicationDecisionWire,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("schema_version", decision.schema_version)?;
+    dict.set_item("action", &decision.action)?;
+    dict.set_item("classification", &decision.classification)?;
+    dict.set_item("reason", &decision.reason)?;
+    dict.set_item("attempt", decision.attempt)?;
+    dict.set_item("max_attempts", decision.max_attempts)?;
+    dict.set_item("retryable", decision.retryable)?;
+    Ok(dict)
 }
 
 // --- vcs_log parser + aggregator bindings --------------------------------
@@ -16789,6 +16828,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_sidecar_publication_after_push,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
@@ -25312,6 +25355,45 @@ MENTORS:
                     "text": "éévalue",
                     "omitted_lines": 1,
                     "omitted_chars": 6
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn sidecar_publication_binding_returns_plain_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_decide_sidecar_publication_after_push,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let value = module
+                .getattr("decide_sidecar_publication_after_push")
+                .unwrap()
+                .call1((
+                    1_i32,
+                    "",
+                    "! [rejected] main -> main (fetch first)",
+                    1_u32,
+                ))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "action": "integrate_and_retry",
+                    "classification": "rejected_fetch_first",
+                    "reason": "git push was rejected by remote divergence; integrate upstream and retry",
+                    "attempt": 1,
+                    "max_attempts": 3,
+                    "retryable": true
                 })
             );
         });
