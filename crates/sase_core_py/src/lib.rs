@@ -26,7 +26,7 @@
 //! - `delete_agent_artifact_index_row(index_path: str, artifact_dir: str) -> dict`
 //! - `delete_agent_artifact_index_row_bounded(index_path: str, artifact_dir: str, busy_timeout_ms: int) -> dict`
 //! - `terminalize_stale_active_agent_artifact_index_rows(index_path: str, projects_root: str, stale_after_seconds: int, max_rows: int | None = None, options: dict | None = None) -> dict`
-//! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict]) -> dict`
+//! - `replace_agent_artifact_index_dismissed_agents(index_path: str, identities: list[dict], force: bool = False) -> dict`
 //! - `read_agent_artifact_index_meta(index_path: str, key: str) -> str | None`
 //! - `write_agent_artifact_index_meta(index_path: str, key: str, value: str) -> None`
 //! - `agent_artifact_index_status(index_path: str) -> dict`
@@ -725,7 +725,7 @@ use sase_core::agent_scan::{
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
     reconcile_agent_artifact_index_dismissed_family_members as core_reconcile_agent_artifact_index_dismissed_family_members,
-    replace_agent_artifact_index_dismissed_agents as core_replace_agent_artifact_index_dismissed_agents,
+    replace_agent_artifact_index_dismissed_agents_with_force as core_replace_agent_artifact_index_dismissed_agents_with_force,
     resolve_agent_artifact_path as core_resolve_agent_artifact_path,
     resolve_agent_artifact_timestamp_path as core_resolve_agent_artifact_timestamp_path,
     scan_agent_artifact_dirs as core_scan_agent_artifact_dirs,
@@ -3347,11 +3347,15 @@ fn py_prune_hidden_terminal_agent_artifact_index_rows<'py>(
 
 /// Replace dismissed identities in the persistent artifact index.
 #[pyfunction]
-#[pyo3(name = "replace_agent_artifact_index_dismissed_agents")]
+#[pyo3(
+    name = "replace_agent_artifact_index_dismissed_agents",
+    signature = (index_path, identities, force = false)
+)]
 fn py_replace_agent_artifact_index_dismissed_agents<'py>(
     py: Python<'py>,
     index_path: &str,
     identities: &Bound<'_, PyList>,
+    force: bool,
 ) -> PyResult<PyObject> {
     let mut wire_identities: Vec<AgentCleanupIdentityWire> =
         Vec::with_capacity(identities.len());
@@ -3368,9 +3372,10 @@ fn py_replace_agent_artifact_index_dismissed_agents<'py>(
     let index = PathBuf::from(index_path);
     let update = py
         .allow_threads(|| {
-            core_replace_agent_artifact_index_dismissed_agents(
+            core_replace_agent_artifact_index_dismissed_agents_with_force(
                 &index,
                 &wire_identities,
+                force,
             )
         })
         .map_err(PyRuntimeError::new_err)?;

@@ -7,7 +7,7 @@
 //! historical timestamp directory.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -178,6 +178,24 @@ const MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS: usize = 128;
 const MAX_RELATED_ARTIFACT_QUERY_ITERATIONS: usize = 32;
 const ABANDONED_DONE_OUTCOME: &str = "abandoned";
 const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const DISMISSED_IDENTITY_SQL_BATCH: usize = 200;
+
+#[cfg(test)]
+thread_local! {
+    static LAST_INDEX_SQL_STATEMENTS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn record_index_sql_statements(count: u64) {
+    let _ = count;
+    #[cfg(test)]
+    LAST_INDEX_SQL_STATEMENTS.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn last_index_sql_statements() -> u64 {
+    LAST_INDEX_SQL_STATEMENTS.with(|cell| cell.get())
+}
 
 /// Freshness policy for persistent artifact index queries.
 #[derive(
@@ -830,38 +848,60 @@ pub(crate) fn cl_name_is_unknownish(cl_name: Option<&str>) -> bool {
 }
 
 /// Replace the dismissed identity table used by normal index visibility.
+///
+/// Default path is a diff: only identities missing from the current table
+/// are inserted, and only identities missing from `dismissed` are deleted.
+/// [`replace_agent_artifact_index_dismissed_agents_with_force`] keeps the
+/// unconditional full-table rewrite used by `force` callers.
 pub fn replace_agent_artifact_index_dismissed_agents(
     index_path: &Path,
     dismissed: &[AgentCleanupIdentityWire],
 ) -> Result<AgentArtifactIndexUpdateWire, String> {
+    replace_agent_artifact_index_dismissed_agents_with_force(
+        index_path, dismissed, false,
+    )
+}
+
+/// Replace dismissed identities, optionally rewriting the whole table.
+pub fn replace_agent_artifact_index_dismissed_agents_with_force(
+    index_path: &Path,
+    dismissed: &[AgentCleanupIdentityWire],
+    force: bool,
+) -> Result<AgentArtifactIndexUpdateWire, String> {
+    let mut sql_statements = 0u64;
     let mut conn = open_index(index_path)?;
+    let desired: BTreeSet<AgentCleanupIdentityWire> =
+        dismissed.iter().cloned().collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let deleted = tx
-        .execute("DELETE FROM dismissed_agents", [])
-        .map_err(|e| e.to_string())? as u64;
-    for identity in dismissed {
-        tx.execute(
-            r#"
-            INSERT OR REPLACE INTO dismissed_agents (
-                agent_type, cl_name, raw_suffix
-            ) VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                identity.agent_type,
-                identity.cl_name,
-                identity.raw_suffix,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    sql_statements += 1;
+
+    let (rows_indexed, rows_deleted) = if force {
+        let deleted = tx
+            .execute("DELETE FROM dismissed_agents", [])
+            .map_err(|e| e.to_string())? as u64;
+        sql_statements += 1;
+        sql_statements += insert_dismissed_identities(&tx, desired.iter())?;
+        (desired.len() as u64, deleted)
+    } else {
+        let current = load_dismissed_identity_set(&tx)?;
+        sql_statements += 1;
+        let removed: Vec<_> = current.difference(&desired).cloned().collect();
+        let added: Vec<_> = desired.difference(&current).cloned().collect();
+        sql_statements += delete_dismissed_identities(&tx, &removed)?;
+        sql_statements += insert_dismissed_identities(&tx, added.iter())?;
+        (desired.len() as u64, removed.len() as u64)
+    };
+
     tx.commit().map_err(|e| e.to_string())?;
+    sql_statements += 1;
+    record_index_sql_statements(sql_statements);
 
     Ok(AgentArtifactIndexUpdateWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
         index_path: index_path.to_string_lossy().into_owned(),
         projects_root: String::new(),
-        rows_indexed: dismissed.len() as u64,
-        rows_deleted: deleted,
+        rows_indexed,
+        rows_deleted,
         rows_skipped: 0,
         hidden_terminal_rows_retained: 0,
         hidden_terminal_rows_pruned: 0,
@@ -894,17 +934,26 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
     dry_run: bool,
 ) -> Result<AgentArtifactIndexDismissalReconcileWire, String> {
     let mut conn = open_index(index_path)?;
-    let candidates = select_dismissal_reconcile_candidates(&conn)?;
+    let mut sql_statements = 0u64;
+    let dismissed =
+        DismissedIndex::from_identities(load_dismissed_identity_set(&conn)?);
+    sql_statements += 1;
+    let snapshot = select_dismissal_reconcile_snapshot(&conn)?;
+    sql_statements += 1;
     let mut report = AgentArtifactIndexDismissalReconcileWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
         index_path: index_path.to_string_lossy().into_owned(),
         dry_run,
-        candidate_rows: candidates.len() as u64,
+        candidate_rows: snapshot.candidates.len() as u64,
         ..AgentArtifactIndexDismissalReconcileWire::default()
     };
     let mut additions = BTreeSet::new();
 
-    for candidate in candidates {
+    for candidate in snapshot.candidates {
+        let family_key = (
+            candidate.project_name.clone(),
+            candidate.workflow_dir_name.clone(),
+        );
         let Ok(record) = serde_json::from_str::<AgentArtifactRecordWire>(
             &candidate.record_json,
         ) else {
@@ -916,11 +965,20 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
             continue;
         }
         let summary = RecordSummary::from_record(&record);
-        if record_is_dismissed(&conn, &record, &summary)? {
+        if record_is_dismissed_in_memory(&record, &summary, &dismissed) {
             report.rows_already_dismissed += 1;
             continue;
         }
-        if !family_root_dismissed_for_candidate(&conn, &candidate.into())? {
+        let lineage_candidate = candidate.into();
+        let Some(rows) = snapshot.lineage_by_family.get(&family_key) else {
+            report.rows_skipped_no_dismissed_root += 1;
+            continue;
+        };
+        if !family_root_dismissed_from_snapshot(
+            &lineage_candidate,
+            rows,
+            &dismissed,
+        ) {
             report.rows_skipped_no_dismissed_root += 1;
             continue;
         }
@@ -929,26 +987,16 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
 
     report.rows_backfilled = additions.len() as u64;
     if dry_run || additions.is_empty() {
+        record_index_sql_statements(sql_statements);
         return Ok(report);
     }
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    for identity in additions {
-        tx.execute(
-            r#"
-            INSERT OR REPLACE INTO dismissed_agents (
-                agent_type, cl_name, raw_suffix
-            ) VALUES (?1, ?2, ?3)
-            "#,
-            params![
-                identity.agent_type,
-                identity.cl_name,
-                identity.raw_suffix,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    sql_statements += 1;
+    sql_statements += insert_dismissed_identities(&tx, additions.iter())?;
     tx.commit().map_err(|e| e.to_string())?;
+    sql_statements += 1;
+    record_index_sql_statements(sql_statements);
     Ok(report)
 }
 
@@ -2557,6 +2605,9 @@ fn open_index_with_busy_timeout(
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (agent_type, cl_name, raw_suffix)
         );
+        -- Covers dismissed-suffix lookups used by visibility filters and
+        -- the set-based family-dismissal reconcile (no schema bump: this
+        -- index already existed before the N+1 rewrite).
         CREATE INDEX IF NOT EXISTS idx_dismissed_agents_suffix
             ON dismissed_agents(raw_suffix, cl_name, agent_type);
         CREATE TABLE IF NOT EXISTS agent_artifact_aliases (
@@ -4504,6 +4555,7 @@ fn dismissed_identity_for_record(
     }
 }
 
+#[cfg(test)]
 fn select_dismissal_reconcile_candidates(
     conn: &Connection,
 ) -> Result<Vec<DismissalReconcileCandidate>, String> {
@@ -4534,6 +4586,488 @@ fn select_dismissal_reconcile_candidates(
         });
     }
     Ok(candidates)
+}
+
+#[derive(Debug, Clone)]
+struct DismissalLineageRow {
+    lineage: IndexedLineageRow,
+    agent_type: String,
+    cl_name: Option<String>,
+    has_done_marker: bool,
+    has_running_marker: bool,
+    has_waiting_marker: bool,
+    has_workflow_state: bool,
+    workflow_status: Option<String>,
+}
+
+struct DismissalReconcileSnapshot {
+    candidates: Vec<DismissalReconcileCandidate>,
+    lineage_by_family: HashMap<(String, String), Vec<DismissalLineageRow>>,
+}
+
+struct DismissedIndex {
+    by_suffix: HashMap<String, Vec<(String, String)>>,
+}
+
+impl DismissedIndex {
+    fn from_identities(identities: BTreeSet<AgentCleanupIdentityWire>) -> Self {
+        let mut by_suffix: HashMap<String, Vec<(String, String)>> =
+            HashMap::new();
+        for identity in identities {
+            let Some(suffix) = identity.raw_suffix else {
+                continue;
+            };
+            by_suffix
+                .entry(suffix)
+                .or_default()
+                .push((identity.agent_type, identity.cl_name));
+        }
+        Self { by_suffix }
+    }
+
+    fn suffix_exists(&self, suffix: &str) -> bool {
+        self.by_suffix.contains_key(suffix)
+    }
+
+    fn matches(
+        &self,
+        timestamp: &str,
+        terminal_or_inert: bool,
+        dismissed_agent_type: &str,
+        cl_name: Option<&str>,
+    ) -> bool {
+        let Some(entries) = self.by_suffix.get(timestamp) else {
+            return false;
+        };
+        entries.iter().any(|(agent_type, dismissed_cl)| {
+            terminal_or_inert
+                || (agent_type == dismissed_agent_type
+                    && (Some(dismissed_cl.as_str()) == cl_name
+                        || dismissed_cl == "unknown"
+                        || cl_name.is_none()))
+        })
+    }
+}
+
+fn load_dismissed_identity_set(
+    conn: &Connection,
+) -> Result<BTreeSet<AgentCleanupIdentityWire>, String> {
+    let mut stmt = conn
+        .prepare("SELECT agent_type, cl_name, raw_suffix FROM dismissed_agents")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut identities = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        identities.insert(AgentCleanupIdentityWire {
+            agent_type: row.get(0).map_err(|e| e.to_string())?,
+            cl_name: row.get(1).map_err(|e| e.to_string())?,
+            raw_suffix: row.get(2).map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(identities)
+}
+
+fn insert_dismissed_identities<'a>(
+    conn: &Connection,
+    identities: impl IntoIterator<Item = &'a AgentCleanupIdentityWire>,
+) -> Result<u64, String> {
+    let identities: Vec<&AgentCleanupIdentityWire> =
+        identities.into_iter().collect();
+    if identities.is_empty() {
+        return Ok(0);
+    }
+    let mut statements = 0u64;
+    for chunk in identities.chunks(DISMISSED_IDENTITY_SQL_BATCH) {
+        let mut sql = String::from(
+            "INSERT OR REPLACE INTO dismissed_agents \
+             (agent_type, cl_name, raw_suffix) VALUES ",
+        );
+        for index in 0..chunk.len() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            let base = index * 3;
+            sql.push_str(&format!(
+                "(?{}, ?{}, ?{})",
+                base + 1,
+                base + 2,
+                base + 3
+            ));
+        }
+        let mut params: Vec<rusqlite::types::Value> =
+            Vec::with_capacity(chunk.len() * 3);
+        for identity in chunk {
+            params.push(identity.agent_type.clone().into());
+            params.push(identity.cl_name.clone().into());
+            params.push(match &identity.raw_suffix {
+                Some(value) => value.clone().into(),
+                None => rusqlite::types::Value::Null,
+            });
+        }
+        conn.execute(&sql, params_from_iter(params.iter()))
+            .map_err(|e| e.to_string())?;
+        statements += 1;
+    }
+    Ok(statements)
+}
+
+fn delete_dismissed_identities(
+    conn: &Connection,
+    identities: &[AgentCleanupIdentityWire],
+) -> Result<u64, String> {
+    if identities.is_empty() {
+        return Ok(0);
+    }
+    let mut statements = 0u64;
+    let mut stmt = conn
+        .prepare(
+            "DELETE FROM dismissed_agents \
+             WHERE agent_type = ?1 AND cl_name = ?2 AND raw_suffix IS ?3",
+        )
+        .map_err(|e| e.to_string())?;
+    for chunk in identities.chunks(DISMISSED_IDENTITY_SQL_BATCH) {
+        for identity in chunk {
+            stmt.execute(params![
+                identity.agent_type,
+                identity.cl_name,
+                identity.raw_suffix,
+            ])
+            .map_err(|e| e.to_string())?;
+            statements += 1;
+        }
+    }
+    Ok(statements)
+}
+
+fn select_dismissal_reconcile_snapshot(
+    conn: &Connection,
+) -> Result<DismissalReconcileSnapshot, String> {
+    let sql = format!(
+        r#"
+        WITH candidates AS (
+            SELECT
+                artifact_dir,
+                project_name,
+                workflow_dir_name,
+                timestamp,
+                record_json,
+                agent_family,
+                parent_timestamp,
+                retry_of_timestamp,
+                retried_as_timestamp,
+                retry_chain_root_timestamp,
+                agent_type,
+                cl_name,
+                has_done_marker,
+                has_running_marker,
+                has_waiting_marker,
+                has_workflow_state,
+                workflow_status
+            FROM agent_artifacts
+            WHERE hidden = 0
+              AND (
+                  parent_timestamp IS NOT NULL
+                  OR agent_family IS NOT NULL
+                  OR retry_of_timestamp IS NOT NULL
+                  OR retry_chain_root_timestamp IS NOT NULL
+              )
+              AND {DISMISSED_NORMAL_VISIBILITY_FILTER}
+        )
+        SELECT
+            1 AS is_candidate,
+            project_name,
+            workflow_dir_name,
+            timestamp,
+            record_json,
+            artifact_dir,
+            agent_family,
+            parent_timestamp,
+            retry_of_timestamp,
+            retried_as_timestamp,
+            retry_chain_root_timestamp,
+            agent_type,
+            cl_name,
+            has_done_marker,
+            has_running_marker,
+            has_waiting_marker,
+            has_workflow_state,
+            workflow_status
+        FROM candidates
+        UNION ALL
+        SELECT
+            0 AS is_candidate,
+            a.project_name,
+            a.workflow_dir_name,
+            a.timestamp,
+            NULL,
+            a.artifact_dir,
+            a.agent_family,
+            a.parent_timestamp,
+            a.retry_of_timestamp,
+            a.retried_as_timestamp,
+            a.retry_chain_root_timestamp,
+            a.agent_type,
+            a.cl_name,
+            a.has_done_marker,
+            a.has_running_marker,
+            a.has_waiting_marker,
+            a.has_workflow_state,
+            a.workflow_status
+        FROM agent_artifacts a
+        WHERE EXISTS (
+            SELECT 1 FROM candidates c
+            WHERE c.project_name = a.project_name
+              AND c.workflow_dir_name = a.workflow_dir_name
+        )
+        ORDER BY is_candidate DESC, project_name ASC,
+                 workflow_dir_name ASC, timestamp ASC
+        "#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+    let mut lineage_by_family: HashMap<
+        (String, String),
+        Vec<DismissalLineageRow>,
+    > = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let is_candidate: i64 = row.get(0).map_err(|e| e.to_string())?;
+        if is_candidate == 1 {
+            candidates.push(DismissalReconcileCandidate {
+                project_name: row.get(1).map_err(|e| e.to_string())?,
+                workflow_dir_name: row.get(2).map_err(|e| e.to_string())?,
+                timestamp: row.get(3).map_err(|e| e.to_string())?,
+                record_json: row.get(4).map_err(|e| e.to_string())?,
+            });
+            continue;
+        }
+        let lineage_row =
+            dismissal_lineage_row_from_sql(row).map_err(|e| e.to_string())?;
+        let key = (
+            lineage_row.lineage.project_name.clone(),
+            lineage_row.lineage.workflow_dir_name.clone(),
+        );
+        lineage_by_family.entry(key).or_default().push(lineage_row);
+    }
+    Ok(DismissalReconcileSnapshot {
+        candidates,
+        lineage_by_family,
+    })
+}
+
+fn dismissal_lineage_row_from_sql(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DismissalLineageRow> {
+    Ok(DismissalLineageRow {
+        lineage: IndexedLineageRow {
+            artifact_dir: row.get(5)?,
+            project_name: row.get(1)?,
+            workflow_dir_name: row.get(2)?,
+            timestamp: row.get(3)?,
+            agent_family: row.get(6)?,
+            parent_timestamp: row.get(7)?,
+            retry_of_timestamp: row.get(8)?,
+            retried_as_timestamp: row.get(9)?,
+            retry_chain_root_timestamp: row.get(10)?,
+        },
+        agent_type: row.get(11)?,
+        cl_name: row.get(12)?,
+        has_done_marker: row.get::<_, i64>(13)? != 0,
+        has_running_marker: row.get::<_, i64>(14)? != 0,
+        has_waiting_marker: row.get::<_, i64>(15)? != 0,
+        has_workflow_state: row.get::<_, i64>(16)? != 0,
+        workflow_status: row.get(17)?,
+    })
+}
+
+fn record_is_dismissed_in_memory(
+    record: &AgentArtifactRecordWire,
+    summary: &RecordSummary,
+    dismissed: &DismissedIndex,
+) -> bool {
+    let workflow_terminal = record
+        .workflow_state
+        .as_ref()
+        .is_some_and(|workflow| is_terminal_workflow_status(&workflow.status));
+    let inert_without_markers = record.running.is_none()
+        && record.waiting.is_none()
+        && record.workflow_state.is_none()
+        && !record.has_done_marker;
+    let terminal_or_inert =
+        record.has_done_marker || workflow_terminal || inert_without_markers;
+    let dismissed_agent_type = if summary.agent_type == "workflow" {
+        "workflow"
+    } else {
+        "run"
+    };
+    dismissed.matches(
+        record.timestamp.as_str(),
+        terminal_or_inert,
+        dismissed_agent_type,
+        summary.cl_name.as_deref(),
+    )
+}
+
+fn lineage_row_is_dismissed(
+    row: &DismissalLineageRow,
+    dismissed: &DismissedIndex,
+) -> bool {
+    let workflow_terminal = row
+        .workflow_status
+        .as_deref()
+        .is_some_and(is_terminal_workflow_status);
+    let inert_without_markers = !row.has_running_marker
+        && !row.has_waiting_marker
+        && !row.has_workflow_state
+        && !row.has_done_marker;
+    let terminal_or_inert =
+        row.has_done_marker || workflow_terminal || inert_without_markers;
+    let dismissed_agent_type = if row.agent_type == "workflow" {
+        "workflow"
+    } else {
+        "run"
+    };
+    dismissed.matches(
+        row.lineage.timestamp.as_str(),
+        terminal_or_inert,
+        dismissed_agent_type,
+        row.cl_name.as_deref(),
+    )
+}
+
+fn dismissed_parent_suffix_from_index(
+    seed: &IndexedLineageRow,
+    dismissed: &DismissedIndex,
+) -> bool {
+    [
+        seed.parent_timestamp.as_deref(),
+        seed.retry_of_timestamp.as_deref(),
+        seed.retry_chain_root_timestamp.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| dismissed.suffix_exists(candidate))
+}
+
+fn snapshot_select_lineage_rows(
+    rows: &[DismissalLineageRow],
+    timestamps: &BTreeSet<String>,
+) -> Vec<IndexedLineageRow> {
+    if timestamps.is_empty() {
+        return Vec::new();
+    }
+    let mut matched: Vec<IndexedLineageRow> = rows
+        .iter()
+        .filter(|row| {
+            timestamps.contains(&row.lineage.timestamp)
+                || row
+                    .lineage
+                    .parent_timestamp
+                    .as_ref()
+                    .is_some_and(|value| timestamps.contains(value))
+                || row
+                    .lineage
+                    .retry_of_timestamp
+                    .as_ref()
+                    .is_some_and(|value| timestamps.contains(value))
+                || row
+                    .lineage
+                    .retried_as_timestamp
+                    .as_ref()
+                    .is_some_and(|value| timestamps.contains(value))
+                || row
+                    .lineage
+                    .retry_chain_root_timestamp
+                    .as_ref()
+                    .is_some_and(|value| timestamps.contains(value))
+        })
+        .map(|row| row.lineage.clone())
+        .collect();
+    matched.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.artifact_dir.cmp(&right.artifact_dir))
+    });
+    matched
+}
+
+fn family_root_row_from_snapshot<'a>(
+    rows: &'a [DismissalLineageRow],
+    agent_family: Option<&str>,
+) -> Option<&'a DismissalLineageRow> {
+    let family = agent_family.filter(|value| !value.is_empty())?;
+    rows.iter()
+        .filter(|row| {
+            row.lineage.agent_family.as_deref() == Some(family)
+                && row.lineage.parent_timestamp.is_none()
+        })
+        .min_by(|left, right| {
+            left.lineage
+                .timestamp
+                .cmp(&right.lineage.timestamp)
+                .then_with(|| {
+                    left.lineage.artifact_dir.cmp(&right.lineage.artifact_dir)
+                })
+        })
+}
+
+fn family_root_dismissed_from_snapshot(
+    candidate: &FamilyDismissalLineageCandidateWire,
+    rows: &[DismissalLineageRow],
+    dismissed: &DismissedIndex,
+) -> bool {
+    let Some(seed) = rows
+        .iter()
+        .find(|row| row.lineage.timestamp == candidate.timestamp)
+    else {
+        return false;
+    };
+    if dismissed_parent_suffix_from_index(&seed.lineage, dismissed) {
+        return true;
+    }
+    let mut timestamps: BTreeSet<String> = BTreeSet::new();
+    insert_lineage_timestamp(&mut timestamps, &seed.lineage.timestamp);
+    seed.lineage.add_related_timestamps(&mut timestamps);
+    let mut by_timestamp: BTreeMap<String, IndexedLineageRow> = BTreeMap::new();
+    by_timestamp.insert(seed.lineage.timestamp.clone(), seed.lineage.clone());
+
+    for _ in 0..MAX_RELATED_ARTIFACT_QUERY_ITERATIONS {
+        let matched = snapshot_select_lineage_rows(rows, &timestamps);
+        let mut changed = false;
+        for row in matched {
+            changed |= row.add_related_timestamps(&mut timestamps);
+            if !by_timestamp.contains_key(&row.timestamp) {
+                changed = true;
+            }
+            by_timestamp.insert(row.timestamp.clone(), row);
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let root = if let Some(root) = by_timestamp
+        .values()
+        .find(|row| row.parent_timestamp.is_none())
+        .cloned()
+    {
+        root
+    } else {
+        let Some(root) = family_root_row_from_snapshot(
+            rows,
+            seed.lineage.agent_family.as_deref(),
+        ) else {
+            return false;
+        };
+        root.lineage.clone()
+    };
+    let Some(root_row) = rows
+        .iter()
+        .find(|row| row.lineage.artifact_dir == root.artifact_dir)
+    else {
+        return false;
+    };
+    lineage_row_is_dismissed(root_row, dismissed)
 }
 
 fn record_is_dismissed(
@@ -7880,6 +8414,217 @@ mod tests {
         )
         .unwrap();
         assert!(after.records.is_empty());
+    }
+
+    fn reconcile_n_plus_one(
+        index_path: &Path,
+        dry_run: bool,
+    ) -> AgentArtifactIndexDismissalReconcileWire {
+        let conn = open_index(index_path).unwrap();
+        let candidates = select_dismissal_reconcile_candidates(&conn).unwrap();
+        let mut report = AgentArtifactIndexDismissalReconcileWire {
+            schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+            index_path: index_path.to_string_lossy().into_owned(),
+            dry_run,
+            candidate_rows: candidates.len() as u64,
+            ..AgentArtifactIndexDismissalReconcileWire::default()
+        };
+        let mut additions = BTreeSet::new();
+        for candidate in candidates {
+            let Ok(record) = serde_json::from_str::<AgentArtifactRecordWire>(
+                &candidate.record_json,
+            ) else {
+                report.rows_skipped_decode_errors += 1;
+                continue;
+            };
+            if !record_is_definitively_dead_for_dismissal_backfill(&record) {
+                report.rows_skipped_live_or_unknown += 1;
+                continue;
+            }
+            let summary = RecordSummary::from_record(&record);
+            if record_is_dismissed(&conn, &record, &summary).unwrap() {
+                report.rows_already_dismissed += 1;
+                continue;
+            }
+            if !family_root_dismissed_for_candidate(&conn, &candidate.into())
+                .unwrap()
+            {
+                report.rows_skipped_no_dismissed_root += 1;
+                continue;
+            }
+            additions.insert(dismissed_identity_for_record(&record, &summary));
+        }
+        report.rows_backfilled = additions.len() as u64;
+        report
+    }
+
+    fn fixture_dead_family_record(
+        timestamp: &str,
+        cl_name: &str,
+        parent_timestamp: Option<&str>,
+        agent_family: Option<&str>,
+    ) -> AgentArtifactRecordWire {
+        AgentArtifactRecordWire {
+            project_name: "proj".to_string(),
+            project_dir: "/proj".to_string(),
+            project_file: "/proj/sase.sase".to_string(),
+            workflow_dir_name: "ace-run".to_string(),
+            artifact_dir: format!("/proj/artifacts/ace-run/{timestamp}"),
+            timestamp: timestamp.to_string(),
+            agent_meta: Some(AgentMetaWire {
+                name: Some(cl_name.to_string()),
+                cl_name: Some(cl_name.to_string()),
+                agent_family: agent_family.map(str::to_string),
+                parent_timestamp: parent_timestamp.map(str::to_string),
+                ..AgentMetaWire::default()
+            }),
+            done: Some(DoneMarkerWire {
+                outcome: Some("completed".to_string()),
+                cl_name: Some(cl_name.to_string()),
+                ..DoneMarkerWire::default()
+            }),
+            running: None,
+            waiting: None,
+            pending_question: None,
+            workflow_state: None,
+            plan_path: None,
+            prompt_steps: Vec::new(),
+            raw_prompt_snippet: None,
+            used_xprompts: Vec::new(),
+            has_done_marker: true,
+            record_shape: AgentArtifactRecordShapeWire::Full,
+        }
+    }
+
+    #[test]
+    fn dismissed_replace_diffs_instead_of_rewriting_the_table() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        let mut identities: Vec<AgentCleanupIdentityWire> = (0..1_000)
+            .map(|i| AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "bulk".to_string(),
+                raw_suffix: Some(format!("20260516{i:06}")),
+            })
+            .collect();
+        let first =
+            replace_agent_artifact_index_dismissed_agents(&index, &identities)
+                .unwrap();
+        assert_eq!(first.rows_indexed, 1_000);
+        assert_eq!(first.rows_deleted, 0);
+
+        let unchanged =
+            replace_agent_artifact_index_dismissed_agents(&index, &identities)
+                .unwrap();
+        assert_eq!(unchanged.rows_indexed, 1_000);
+        assert_eq!(unchanged.rows_deleted, 0);
+        let unchanged_statements = last_index_sql_statements();
+        assert!(
+            unchanged_statements <= 4,
+            "identical projection must not rewrite the table, got {unchanged_statements} statements"
+        );
+
+        identities.push(AgentCleanupIdentityWire {
+            agent_type: "run".to_string(),
+            cl_name: "bulk".to_string(),
+            raw_suffix: Some("20260516999999".to_string()),
+        });
+        identities.remove(0);
+        let delta =
+            replace_agent_artifact_index_dismissed_agents(&index, &identities)
+                .unwrap();
+        assert_eq!(delta.rows_indexed, 1_000);
+        assert_eq!(delta.rows_deleted, 1);
+
+        let forced = replace_agent_artifact_index_dismissed_agents_with_force(
+            &index,
+            &identities,
+            true,
+        )
+        .unwrap();
+        assert_eq!(forced.rows_indexed, 1_000);
+        assert_eq!(forced.rows_deleted, 1_000);
+    }
+
+    #[test]
+    fn dismissal_reconcile_is_set_based_on_large_fixture() {
+        let tmp = tempdir().unwrap();
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        let mut conn = open_index(&index).unwrap();
+        let tx = conn.transaction().unwrap();
+        let root_ts = "20260515120000";
+        upsert_record(
+            &tx,
+            Path::new("/proj"),
+            &fixture_dead_family_record(root_ts, "fam", None, Some("fam")),
+        )
+        .unwrap();
+        let member_count = 10_000usize;
+        for i in 0..member_count {
+            let timestamp = format!("20260516{i:06}");
+            upsert_record(
+                &tx,
+                Path::new("/proj"),
+                &fixture_dead_family_record(
+                    &timestamp,
+                    &format!("fam--{i}"),
+                    Some(root_ts),
+                    Some("fam"),
+                ),
+            )
+            .unwrap();
+        }
+        let noise: Vec<AgentCleanupIdentityWire> = (0..40_000)
+            .map(|i| AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "noise".to_string(),
+                raw_suffix: Some(format!("20260401{i:06}")),
+            })
+            .collect();
+        insert_dismissed_identities(&tx, noise.iter()).unwrap();
+        insert_dismissed_identities(
+            &tx,
+            [AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "fam".to_string(),
+                raw_suffix: Some(root_ts.to_string()),
+            }]
+            .iter(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+
+        let expected = reconcile_n_plus_one(&index, true);
+        let applied = reconcile_agent_artifact_index_dismissed_family_members(
+            &index, true,
+        )
+        .unwrap();
+        assert_eq!(applied.candidate_rows, member_count as u64);
+        assert_eq!(applied.rows_backfilled, member_count as u64);
+        assert_eq!(applied.candidate_rows, expected.candidate_rows);
+        assert_eq!(applied.rows_backfilled, expected.rows_backfilled);
+        assert_eq!(
+            applied.rows_already_dismissed,
+            expected.rows_already_dismissed
+        );
+        assert_eq!(
+            applied.rows_skipped_live_or_unknown,
+            expected.rows_skipped_live_or_unknown
+        );
+        assert_eq!(
+            applied.rows_skipped_no_dismissed_root,
+            expected.rows_skipped_no_dismissed_root
+        );
+        assert_eq!(
+            applied.rows_skipped_decode_errors,
+            expected.rows_skipped_decode_errors
+        );
+        let statements = last_index_sql_statements();
+        assert!(
+            statements < 16,
+            "reconcile SQL must not scale with candidate count, got {statements}"
+        );
     }
 
     #[test]

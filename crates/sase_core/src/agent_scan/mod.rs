@@ -28,6 +28,7 @@ pub use index::{
     rebuild_agent_artifact_index,
     reconcile_agent_artifact_index_dismissed_family_members,
     replace_agent_artifact_index_dismissed_agents,
+    replace_agent_artifact_index_dismissed_agents_with_force,
     resolve_family_dismissal_lineage,
     terminalize_stale_active_agent_artifact_index_rows,
     upsert_agent_artifact_index_row, vacuum_agent_artifact_index,
