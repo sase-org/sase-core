@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.6](https://github.com/sase-org/sase-core/compare/v0.34.5...v0.34.6) - 2026-09-11
+
+### Added
+
+- *(continuation)* validate launch requester continuations
+
 ## [0.34.5](https://github.com/sase-org/sase-core/compare/v0.34.4...v0.34.5) - 2026-09-11
 
 ### Fixed
