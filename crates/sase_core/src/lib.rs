@@ -50,6 +50,7 @@ pub mod fleet_contract;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod fleet_presentation;
+pub mod gate_followup;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -915,6 +916,22 @@ pub use fleet_presentation::{
     FleetPresentationDecisionWire, FleetPresentationRequestWire,
     FLEET_PRESENTATION_RECENT_TERMINAL_MAX_ROWS,
     FLEET_PRESENTATION_RECENT_TERMINAL_WINDOW_SECONDS,
+};
+pub use gate_followup::{
+    decide_gate_followup, gate_followup_attempt_id,
+    gate_followup_decision_request_from_json_value, GateFollowupAttemptWire,
+    GateFollowupDecisionRequestWire, GateFollowupDecisionWire,
+    GateFollowupError, GateFollowupSuccessorEvidenceWire, ATTEMPT_STAGE_FAILED,
+    ATTEMPT_STAGE_LAUNCHED, ATTEMPT_STAGE_LAUNCHING, ATTEMPT_STAGE_PENDING,
+    ATTEMPT_STAGE_PREPARING, ATTEMPT_STAGE_RECORDING, DISPOSITION_AMBIGUOUS,
+    DISPOSITION_FAILED, DISPOSITION_INTENTIONAL_NONE, DISPOSITION_INTERRUPTED,
+    DISPOSITION_IN_PROGRESS, DISPOSITION_LAUNCHED,
+    DISPOSITION_LAUNCHED_DEGRADED, DISPOSITION_NOT_LAUNCHABLE,
+    DISPOSITION_SUPPRESSED, GATE_FOLLOWUP_WIRE_SCHEMA_VERSION, MODE_DIAGNOSE,
+    MODE_RESUME, MODE_SETTLE, OUTCOME_FAILED, OUTCOME_LAUNCHED,
+    OUTCOME_LAUNCHED_DEGRADED, OUTCOME_NOT_LAUNCHABLE, OUTCOME_SUPPRESSED,
+    RECOVERY_ADOPT, RECOVERY_NOOP, RECOVERY_REPORT_AMBIGUOUS, RECOVERY_RESUME,
+    RECOVERY_WAIT,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,

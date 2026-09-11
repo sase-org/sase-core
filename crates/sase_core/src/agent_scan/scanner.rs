@@ -1208,6 +1208,21 @@ fn family_shell_from_object(
             followup_prompt_path: coerce_str(
                 data.get("monitor_followup_prompt_path"),
             ),
+            followup_attempt_id: coerce_str(
+                data.get("monitor_followup_attempt_id"),
+            ),
+            followup_attempt_fingerprint: coerce_str(
+                data.get("monitor_followup_attempt_fingerprint"),
+            ),
+            followup_attempt_stage: coerce_str(
+                data.get("monitor_followup_attempt_stage"),
+            ),
+            followup_error_stage: coerce_str(
+                data.get("monitor_followup_error_stage"),
+            ),
+            followup_error_type: coerce_str(
+                data.get("monitor_followup_error_type"),
+            ),
             monitor: Some(FamilyShellMonitorWire {
                 command: coerce_str(data.get("monitor_command")),
                 cwd: coerce_str(data.get("monitor_cwd")),
@@ -1256,6 +1271,21 @@ fn family_shell_from_object(
             followup_prompt_path: coerce_str(
                 data.get("gate_followup_prompt_path"),
             ),
+            followup_attempt_id: coerce_str(
+                data.get("gate_followup_attempt_id"),
+            ),
+            followup_attempt_fingerprint: coerce_str(
+                data.get("gate_followup_attempt_fingerprint"),
+            ),
+            followup_attempt_stage: coerce_str(
+                data.get("gate_followup_attempt_stage"),
+            ),
+            followup_error_stage: coerce_str(
+                data.get("gate_followup_error_stage"),
+            ),
+            followup_error_type: coerce_str(
+                data.get("gate_followup_error_type"),
+            ),
             monitor: None,
             gate: Some(FamilyShellGateWire {
                 kind: coerce_str(data.get("gate_kind")),
@@ -1266,6 +1296,7 @@ fn family_shell_from_object(
                 bundle_path: coerce_str(data.get("gate_bundle_path")),
                 notification_id: coerce_str(data.get("gate_notification_id")),
                 decision_path: coerce_str(data.get("gate_decision_path")),
+                claim_holder_pid: coerce_int(data.get("gate_claim_holder_pid")),
             }),
         });
     }
@@ -1690,6 +1721,11 @@ mod tests {
                 "gate_followup_error": "claim moved late",
                 "gate_followup_degraded_reason": "workspace unavailable",
                 "gate_followup_prompt_path": "gate_followup.md",
+                "gate_followup_attempt_id": "att-1",
+                "gate_followup_attempt_fingerprint": "sha256:cafe",
+                "gate_followup_attempt_stage": "launched",
+                "gate_followup_error_stage": "recording",
+                "gate_followup_error_type": "OSError",
                 "gate_elapsed_seconds": 2.5,
                 "gate_label": "approval/gate-1",
                 "gate_reason": "Need owner approval",
@@ -1735,6 +1771,12 @@ mod tests {
         assert_eq!(meta_shell.id.as_deref(), Some("gate-1"));
         assert_eq!(meta_shell.state.as_deref(), Some("pending"));
         assert_eq!(meta_shell.next_model.as_deref(), Some("@large"));
+        assert_eq!(meta_shell.followup_attempt_id.as_deref(), Some("att-1"));
+        assert_eq!(
+            meta_shell.followup_attempt_stage.as_deref(),
+            Some("launched")
+        );
+        assert_eq!(meta_shell.followup_error_type.as_deref(), Some("OSError"));
         assert!(meta_shell.output_truncated);
         let meta_gate = meta_shell.gate.as_ref().unwrap();
         assert_eq!(

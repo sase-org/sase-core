@@ -660,6 +660,8 @@ pub struct FamilyShellGateWire {
     pub notification_id: Option<String>,
     #[serde(default)]
     pub decision_path: Option<String>,
+    #[serde(default)]
+    pub claim_holder_pid: Option<i64>,
 }
 
 /// One durable family-shell member: a monitor or a gate, never both.
@@ -710,6 +712,16 @@ pub struct FamilyShellWire {
     pub followup_degraded_reason: Option<String>,
     #[serde(default)]
     pub followup_prompt_path: Option<String>,
+    #[serde(default)]
+    pub followup_attempt_id: Option<String>,
+    #[serde(default)]
+    pub followup_attempt_fingerprint: Option<String>,
+    #[serde(default)]
+    pub followup_attempt_stage: Option<String>,
+    #[serde(default)]
+    pub followup_error_stage: Option<String>,
+    #[serde(default)]
+    pub followup_error_type: Option<String>,
     #[serde(default)]
     pub monitor: Option<FamilyShellMonitorWire>,
     #[serde(default)]
@@ -1086,6 +1098,11 @@ mod tests {
                 followup_prompt_path: Some(
                     "artifacts/followup_prompt.md".to_string(),
                 ),
+                followup_attempt_id: None,
+                followup_attempt_fingerprint: None,
+                followup_attempt_stage: None,
+                followup_error_stage: None,
+                followup_error_type: None,
                 monitor: Some(FamilyShellMonitorWire {
                     command: Some("just check-full".to_string()),
                     cwd: Some("/home/bryan/workspaces/acme".to_string()),
@@ -1147,6 +1164,11 @@ mod tests {
                 followup_prompt_path: Some(
                     "artifacts/gate_followup.md".to_string(),
                 ),
+                followup_attempt_id: None,
+                followup_attempt_fingerprint: None,
+                followup_attempt_stage: None,
+                followup_error_stage: None,
+                followup_error_type: None,
                 elapsed_seconds: Some(12.5),
                 label: Some("approval/gate-1".to_string()),
                 reason: Some("Need owner approval".to_string()),
@@ -1162,6 +1184,7 @@ mod tests {
                     bundle_path: Some("gate_bundle.json".to_string()),
                     notification_id: Some("notif-1".to_string()),
                     decision_path: Some("gate_decision.md".to_string()),
+                    claim_holder_pid: None,
                 }),
             }),
             shell_kind: Some("gate".to_string()),

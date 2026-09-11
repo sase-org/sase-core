@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gate-followup)* classify settled gate coder-handoff disposition and recovery
+
 ## [0.34.7](https://github.com/sase-org/sase-core/compare/v0.34.6...v0.34.7) - 2026-09-11
-
-### Fixed
-
-- *(agent-launch)* preserve per-unit workspace refs and remote dispatch through typed admission
 
 ### Fixed
 

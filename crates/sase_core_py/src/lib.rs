@@ -304,6 +304,9 @@
 //! - `validate_axe_config(request: dict) -> list[dict]`
 //! - `chop_overrun_wire_schema_version() -> int`
 //! - `classify_chop_overrun(request: dict) -> dict`
+//! - `gate_followup_wire_schema_version() -> int`
+//! - `gate_followup_attempt_id(gate_id: str, fingerprint: str) -> str`
+//! - `decide_gate_followup(request: dict) -> dict`
 //! - `axe_status_wire_schema_version() -> int`
 //! - `classify_axe_status(request: dict) -> dict`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
@@ -1107,6 +1110,12 @@ use sase_core::fleet_follow_promotion::{
 use sase_core::fleet_mutation::{
     self as core_fleet_mutation, FleetMutationIntentWire,
     FleetMutationRequestWire,
+};
+use sase_core::gate_followup::{
+    decide_gate_followup as core_decide_gate_followup,
+    gate_followup_attempt_id as core_gate_followup_attempt_id,
+    gate_followup_decision_request_from_json_value, GateFollowupError,
+    GATE_FOLLOWUP_WIRE_SCHEMA_VERSION,
 };
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
@@ -11767,6 +11776,47 @@ fn py_classify_chop_overrun<'py>(
     json_value_to_py(py, &value)
 }
 
+fn gate_followup_error_to_pyerr(error: GateFollowupError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Return the supported gate-follow-up wire schema version.
+#[pyfunction]
+#[pyo3(name = "gate_followup_wire_schema_version")]
+fn py_gate_followup_wire_schema_version() -> u32 {
+    GATE_FOLLOWUP_WIRE_SCHEMA_VERSION
+}
+
+/// Return the stable attempt identity for one gate and request fingerprint.
+#[pyfunction]
+#[pyo3(name = "gate_followup_attempt_id")]
+fn py_gate_followup_attempt_id(gate_id: &str, fingerprint: &str) -> String {
+    core_gate_followup_attempt_id(gate_id, fingerprint)
+}
+
+/// Classify one gate's follow-up disposition without host I/O.
+#[pyfunction]
+#[pyo3(name = "decide_gate_followup")]
+fn py_decide_gate_followup<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request = gate_followup_decision_request_from_json_value(&value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid GateFollowupDecisionRequestWire dict: {error}"
+            ))
+        })?;
+    let verdict = py
+        .allow_threads(|| core_decide_gate_followup(&request))
+        .map_err(gate_followup_error_to_pyerr)?;
+    let value = serde_json::to_value(verdict).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Portable AXE runtime status -----------------------------------------
 
 fn axe_status_error_to_pyerr(error: AxeStatusError) -> PyErr {
@@ -17424,6 +17474,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_runner_capacity_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_overrun_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_chop_overrun, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gate_followup_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_gate_followup_attempt_id, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_gate_followup, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_axe_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
@@ -21988,6 +22041,81 @@ COMMITS:
                 let request =
                     request_obj.bind(py).downcast::<PyDict>().unwrap();
                 let error = py_classify_chop_overrun(py, request).unwrap_err();
+                assert!(error.is_instance_of::<PyValueError>(py));
+                assert!(error.to_string().contains(expected), "{}", error);
+            }
+        });
+    }
+
+    fn incident_gate_followup_request_json() -> JsonValue {
+        json!({
+            "schema_version": GATE_FOLLOWUP_WIRE_SCHEMA_VERSION,
+            "mode": "diagnose",
+            "gate_id": "c117f874-83de-4840-8405-58a8dc1efd66",
+            "gate_kind": "plan",
+            "gate_state": "answered",
+            "already_settled": true,
+            "request_fingerprint": "sha256:plan-approve-commit",
+            "followup_requested": true,
+            "creator_live": false,
+            "auto_suppressed": false,
+        })
+    }
+
+    #[test]
+    fn gate_followup_binding_round_trips_incident_disposition() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_gate_followup_wire_schema_version(),
+                GATE_FOLLOWUP_WIRE_SCHEMA_VERSION
+            );
+            let request_obj =
+                json_value_to_py(py, &incident_gate_followup_request_json())
+                    .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_decide_gate_followup(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value["disposition"], json!("interrupted"));
+            assert_eq!(value["recovery"], json!("resume"));
+            assert_eq!(value["needs_attention"], json!(true));
+            assert_eq!(value["launch_allowed"], json!(false));
+            assert_eq!(value["resume_eligible"], json!(true));
+            let attempt_id = py_gate_followup_attempt_id(
+                "c117f874-83de-4840-8405-58a8dc1efd66",
+                "sha256:plan-approve-commit",
+            );
+            assert_eq!(attempt_id.len(), 64);
+        });
+    }
+
+    #[test]
+    fn gate_followup_binding_maps_schema_and_structural_errors_to_value_error()
+    {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mut schema = incident_gate_followup_request_json();
+            schema["schema_version"] =
+                json!(GATE_FOLLOWUP_WIRE_SCHEMA_VERSION + 1);
+
+            let mut structural = incident_gate_followup_request_json();
+            structural["mode"] = json!("replay");
+
+            let mut unknown = incident_gate_followup_request_json();
+            unknown
+                .as_object_mut()
+                .unwrap()
+                .insert("surprise".to_string(), json!(true));
+
+            for (value, expected) in [
+                (schema, "schema_version_mismatch"),
+                (structural, "invalid_mode"),
+                (unknown, "unknown field `surprise`"),
+            ] {
+                let request_obj = json_value_to_py(py, &value).unwrap();
+                let request =
+                    request_obj.bind(py).downcast::<PyDict>().unwrap();
+                let error = py_decide_gate_followup(py, request).unwrap_err();
                 assert!(error.is_instance_of::<PyValueError>(py));
                 assert!(error.to_string().contains(expected), "{}", error);
             }
