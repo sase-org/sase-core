@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.15](https://github.com/sase-org/sase-core/compare/v0.34.14...v0.34.15) - 2026-09-11
+
+### Added
+
+- *(agent-scan)* expose monitor workflow metadata
+
 ## [0.34.14](https://github.com/sase-org/sase-core/compare/v0.34.13...v0.34.14) - 2026-09-11
 
 ### Added
