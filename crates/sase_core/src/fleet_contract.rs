@@ -3803,14 +3803,42 @@ fn queue_weight_for_record(
 }
 
 fn intent_for_record(record: &AgentArtifactRecordWire) -> Option<String> {
-    first_non_empty([
+    let raw = first_non_empty([
         record
             .agent_meta
             .as_ref()
             .and_then(|value| value.plan_action.as_deref()),
         record.raw_prompt_snippet.as_deref(),
-    ])
-    .map(|value| trim_to_limit(value, MAX_INTENT_BYTES))
+    ])?;
+    // Owner-produced prompts and plan actions are ordinary free text and
+    // routinely span multiple lines; strip control characters (newlines,
+    // CR, tabs, ...) before byte-bounding so a normal multiline prompt
+    // cannot make the display intent fail `validate_label`'s control
+    // character rejection. A value that normalizes to nothing (e.g. only
+    // control characters) becomes an omitted label instead of an invalid
+    // empty one.
+    let bounded =
+        trim_to_limit(&replace_control_characters(raw), MAX_INTENT_BYTES);
+    if bounded.is_empty() {
+        None
+    } else {
+        Some(bounded)
+    }
+}
+
+/// Replace control characters (including newline/CR/tab) with a plain space
+/// so owner-produced free text is safe to display as a single-line label.
+fn replace_control_characters(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn first_non_empty<'a>(
@@ -5014,16 +5042,7 @@ fn fleet_envelope_diagnostic(
 }
 
 fn sanitize_diagnostic_message(message: &str) -> String {
-    let normalized = message
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
+    let normalized = replace_control_characters(message);
     let trimmed = normalized.trim();
     let redacted = if trimmed.contains("://")
         || trimmed.contains("Authorization:")
@@ -6881,6 +6900,100 @@ mod tests {
         assert_eq!(summary.queue_weight, Some(0.5));
         assert!(summary.queue_weight_explicit);
         assert!(!summary.queue_weight_invalid);
+    }
+
+    #[test]
+    fn projection_normalizes_control_characters_in_multiline_raw_prompt_intent()
+    {
+        let locator = logical('a', "multiline");
+        let exact_locator = exact('a', "multiline", "run-1");
+        let mut record = record_running();
+        record.raw_prompt_snippet = Some(
+            "Refactor the widget\nand update the tests\r\nplease\tthanks"
+                .to_string(),
+        );
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        let intent = summary.intent.as_deref().unwrap();
+        assert!(!intent.chars().any(char::is_control));
+        assert_eq!(
+            intent,
+            "Refactor the widget and update the tests  please thanks"
+        );
+    }
+
+    #[test]
+    fn projection_normalizes_control_characters_in_plan_action_intent() {
+        let locator = logical('a', "plan-multiline");
+        let exact_locator = exact('a', "plan-multiline", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.plan_action = Some("Step 1: build\nStep 2: test".to_string());
+        }
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(
+            summary.intent.as_deref(),
+            Some("Step 1: build Step 2: test")
+        );
+    }
+
+    #[test]
+    fn projection_bounds_multiline_unicode_intent_to_byte_limit() {
+        let locator = logical('a', "byte-limit");
+        let exact_locator = exact('a', "byte-limit", "run-1");
+        let mut record = record_running();
+        record.raw_prompt_snippet =
+            Some(format!("line one\nline two\n{}", "é".repeat(400)));
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        let intent = summary.intent.unwrap();
+        assert!(intent.len() <= MAX_INTENT_BYTES);
+        assert!(!intent.chars().any(char::is_control));
+        assert!(validate_label("intent", &intent, MAX_INTENT_BYTES).is_ok());
+    }
+
+    #[test]
+    fn projection_omits_intent_when_normalization_leaves_it_empty() {
+        let locator = logical('a', "empty-intent");
+        let exact_locator = exact('a', "empty-intent", "run-1");
+        let mut record = record_running();
+        record.raw_prompt_snippet = Some("\u{1}\u{2}\u{3}".to_string());
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert!(summary.intent.is_none());
+    }
+
+    #[test]
+    fn external_wire_summary_with_raw_control_character_intent_is_rejected() {
+        let locator = logical('a', "external");
+        let exact_locator = exact('a', "external", "run-1");
+        let request = projection_request(
+            locator,
+            Some(exact_locator),
+            1,
+            record_running(),
+        );
+        let mut summary = project_resolved_agent_summary(&request).unwrap();
+
+        // A projected summary already carries a normalized intent; strict
+        // external validation (the boundary used by federation imports and
+        // any other externally supplied wire payload) must still reject a
+        // raw control character regardless of how the value arrived.
+        summary.intent = Some("bad\nintent".to_string());
+        assert!(validate_resolved_agent_summary(&summary).is_err());
     }
 
     #[test]

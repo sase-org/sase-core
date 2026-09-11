@@ -663,6 +663,8 @@ fn build_snapshot_blocking(
 
     let mut details = Vec::new();
     let mut content_by_handle = BTreeMap::new();
+    let mut unresolved_rows: u32 = 0;
+    let mut unresolved_code: Option<String> = None;
     for record in scan.records {
         if !presentable.contains(&record.artifact_dir) {
             continue;
@@ -671,12 +673,25 @@ fn build_snapshot_blocking(
             .get(&record.artifact_dir)
             .copied()
             .unwrap_or(OwnerLivenessWire::Unknown);
-        let resolved = resolve_record(
+        // One owner-produced record that cannot be projected must not erase
+        // the host's whole presentable set. Drop only that row and report the
+        // snapshot as partial, so hello/summary/catalog/detail keep serving
+        // every row that is still valid instead of failing the whole read.
+        let resolved = match resolve_record(
             &installation.installation_id,
             &record,
             liveness,
             now_unix,
-        )?;
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                unresolved_rows = unresolved_rows.saturating_add(1);
+                if unresolved_code.is_none() {
+                    unresolved_code = Some(error.safe_code());
+                }
+                continue;
+            }
+        };
         for source in resolved.content_sources {
             content_by_handle.insert(source.handle.id.clone(), source);
         }
@@ -706,9 +721,11 @@ fn build_snapshot_blocking(
         freshness: FleetSnapshotFreshnessWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             freshness: ObservationFreshnessWire::Fresh,
-            partial: false,
+            partial: unresolved_rows > 0,
             refreshed_at_unix: Some(now_unix),
-            error: None,
+            error: unresolved_code.map(|code| {
+                format!("unresolved rows: {unresolved_rows} ({code})")
+            }),
         },
     };
     validate_fleet_authoritative_snapshot(&wire)
@@ -1653,6 +1670,131 @@ mod tests {
         }
         write_json(&artifact.join("agent_meta.json"), meta);
         write_json(&artifact.join("running.json"), json!({"pid": 0}));
+    }
+
+    /// Seed an alive agent whose owner-written prompt file spans several
+    /// lines, the ordinary shape produced by every real agent launch.
+    fn seed_agent_with_raw_prompt(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        prompt: &str,
+    ) {
+        seed_agent(projects, timestamp, name, "output");
+        fs::write(
+            projects
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join(timestamp)
+                .join("raw_xprompt.md"),
+            prompt,
+        )
+        .unwrap();
+    }
+
+    fn build_service(home: &Path, projects: &Path) -> FleetReadService {
+        sase_core::rebuild_agent_artifact_index(
+            &home.join("agent_artifact_index.sqlite"),
+            projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        FleetReadService::new(home.to_path_buf())
+    }
+
+    fn recent_timestamp(minutes: i64) -> String {
+        (Utc::now() - chrono::Duration::minutes(minutes))
+            .format("%Y%m%d%H%M%S")
+            .to_string()
+    }
+
+    fn catalog_query() -> FleetCatalogQueryWire {
+        FleetCatalogQueryWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            cursor: None,
+            limit: Some(10),
+            project_ids: Vec::new(),
+            query: None,
+            status_buckets: Vec::new(),
+            include_terminal: true,
+        }
+    }
+
+    /// An ordinary multiline prompt is the exact payload that made a host's
+    /// hello/summary/catalog/detail reads fail owner-side validation. The
+    /// scanner only trims the snippet, so interior newlines reach projection.
+    #[tokio::test]
+    async fn ordinary_multiline_prompt_stays_presentable_across_read_apis() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        seed_agent_with_raw_prompt(
+            &projects,
+            &recent_timestamp(2),
+            "alpha",
+            "Refactor the widget\nand update the tests\r\nplease\tthanks",
+        );
+        let service = build_service(&home, &projects);
+
+        let summary = service.summary().await.unwrap();
+        assert_eq!(summary.counts.logical_agent_total, 1);
+        assert!(!summary.freshness.partial);
+        assert_eq!(summary.freshness.error, None);
+
+        let catalog = service.catalog(catalog_query()).await.unwrap();
+        assert_eq!(catalog.page.rows.len(), 1);
+        let row = catalog.page.rows[0].clone();
+        let intent = row.intent.clone().unwrap();
+        assert!(!intent.chars().any(char::is_control));
+        assert_eq!(
+            intent,
+            "Refactor the widget and update the tests  please thanks"
+        );
+
+        let detail = service
+            .detail(FleetDetailRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                logical_key: row.logical_key.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.detail.summary.intent, Some(intent));
+    }
+
+    /// One malformed owner-produced display value must not erase the host's
+    /// whole presentable set: the bad row drops out, every other row is still
+    /// served, and the snapshot says so through `partial` and a safe reason.
+    #[tokio::test]
+    async fn one_unprojectable_row_does_not_erase_the_presentable_set() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        seed_agent(&projects, &recent_timestamp(3), "alpha", "alpha output");
+        seed_agent(&projects, &recent_timestamp(2), "beta", "beta output");
+        // `agent_label` is byte-bounded but not control-character normalized,
+        // so this name still fails owner-side label validation.
+        seed_agent(&projects, &recent_timestamp(1), "bad\nname", "gamma");
+        let service = build_service(&home, &projects);
+
+        let summary = service.summary().await.unwrap();
+        assert_eq!(summary.counts.logical_agent_total, 2);
+        assert!(summary.freshness.partial);
+        assert_eq!(
+            summary.freshness.error.as_deref(),
+            Some("unresolved rows: 1 (validation)")
+        );
+
+        let catalog = service.catalog(catalog_query()).await.unwrap();
+        let labels = catalog
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["alpha".to_string(), "beta".to_string()]);
     }
 
     #[tokio::test]
