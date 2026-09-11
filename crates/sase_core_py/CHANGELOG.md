@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.13](https://github.com/sase-org/sase-core/compare/v0.34.12...v0.34.13) - 2026-09-11
+
+### Added
+
+- *(continuation)* evaluate and consume host completion intents
+
 ## [0.34.12](https://github.com/sase-org/sase-core/compare/v0.34.11...v0.34.12) - 2026-09-11
 
 ### Added
