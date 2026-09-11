@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0](https://github.com/sase-org/sase-core/compare/v0.33.0...v0.34.0) - 2026-09-11
+
+### Added
+
+- *(fleet)* expose queue weight metadata
+- *(agent_scan)* add capacity_only fast path to scanner
+- *(notifications)* compact old dismissed rows
+- *(fleet)* bound owner-side presentation and derive honest freshness
+- *(agent-scan)* add runner_claim_owner_key wire field and lineage lookup
+- *(artifact-links)* add publication ownership receipts
+- *(beads)* project artifact links by edge receipt
+- *(artifact-links)* add cutover recovery policy
+- *(fleet)* add catalog snapshot history
+
+### Fixed
+
+- *(runner-capacity)* repair weighted claim lineage
+- *(artifact-links)* expose stable producer identity helpers
+- *(agent-scan)* backfill dismissed family identities
+- *(query)* quote canonical property values
+- *(fleet)* keep owner-produced display intent presentable
+- *(agent-scan)* reconcile unloaded dismissed families
+- *(release)* add gateway version metadata for release-plz
+
+### Other
+
+- release recovery: v0.33.0 was tagged from a tree whose `sase_gateway` workspace dependency had no `version` field, so release-plz could not repackage its own release baseline and every run after it failed. This version was set manually (`manual-version`) to move past that tag.
+
 ## [0.33.0](https://github.com/sase-org/sase-core/compare/v0.32.61...v0.33.0) - 2026-09-10
 
 ### Added
