@@ -26,9 +26,10 @@ const CHECK_STAGES: [&str; 5] =
     ["formatting", "ruff", "mypy", "validation", "scoped_tests"];
 const CHECK_FULL_STAGES: [&str; 5] =
     ["formatting", "ruff", "mypy", "validation", "full_tests"];
-const ALLOWED_MESSAGE_PLACEHOLDERS: [&str; 2] =
+pub(crate) const ALLOWED_MESSAGE_PLACEHOLDERS: [&str; 2] =
     ["{duration}", "{evidence_ref}"];
-const FIRST_PARTY_PROVIDERS: [&str; 2] = ["builtin@commit", "builtin@command"];
+pub(crate) const FIRST_PARTY_PROVIDERS: [&str; 2] =
+    ["builtin@commit", "builtin@command"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -435,6 +436,64 @@ pub fn rollback_conditional_completion_binding(
     }
 }
 
+pub fn consume_conditional_completion(
+    intent: ConditionalCompletionIntentWire,
+) -> Result<ConditionalCompletionIntentWire, ContinuationError> {
+    let mut intent = validate_conditional_completion_intent(intent)?;
+    match intent.status {
+        ConditionalCompletionStatusWire::Bound
+        | ConditionalCompletionStatusWire::Consumed => {
+            intent.status = ConditionalCompletionStatusWire::Consumed;
+            Ok(intent)
+        }
+        other => Err(ContinuationError::conflict(format!(
+            "cannot consume conditional completion intent in status {}",
+            status_name(other)
+        ))),
+    }
+}
+
+pub fn invalidate_conditional_completion(
+    intent: ConditionalCompletionIntentWire,
+) -> Result<ConditionalCompletionIntentWire, ContinuationError> {
+    let mut intent = validate_conditional_completion_intent(intent)?;
+    match intent.status {
+        ConditionalCompletionStatusWire::Consumed => {
+            Err(ContinuationError::conflict(
+                "cannot invalidate a consumed conditional completion intent",
+            ))
+        }
+        _ => {
+            intent.status = ConditionalCompletionStatusWire::Invalidated;
+            Ok(intent)
+        }
+    }
+}
+
+pub fn render_conditional_completion_message(
+    message: &str,
+    substitutions: &std::collections::BTreeMap<String, String>,
+) -> Result<String, ContinuationError> {
+    validate_success_message(message)?;
+    let mut rendered = message.to_string();
+    for placeholder in ALLOWED_MESSAGE_PLACEHOLDERS {
+        let key = &placeholder[1..placeholder.len() - 1];
+        if let Some(value) = substitutions.get(key) {
+            if value.contains('$')
+                || value.contains('`')
+                || value.contains("{%")
+                || value.contains("$(")
+            {
+                return Err(ContinuationError::validation(format!(
+                    "substitution for {placeholder} must not contain shell or template execution"
+                )));
+            }
+            rendered = rendered.replace(placeholder, value);
+        }
+    }
+    Ok(rendered)
+}
+
 fn verification_contract(
     command: &[String],
 ) -> Result<VerificationContractWire, ContinuationError> {
@@ -795,7 +854,7 @@ fn reject_protected_or_foreign(
     Ok(())
 }
 
-fn validate_executors(
+pub(crate) fn validate_executors(
     executors: &[ExecutorCapabilityWire],
 ) -> Result<(), ContinuationError> {
     if executors.len() > MAX_EXECUTORS {
@@ -934,7 +993,7 @@ fn normalize_command(
     Ok(command.to_vec())
 }
 
-fn worktree_fingerprint(
+pub(crate) fn worktree_fingerprint(
     observations: &[RepositoryObservationWire],
 ) -> Result<String, ContinuationError> {
     sha256_json(&serde_json::to_value(observations).map_err(|error| {
@@ -1036,7 +1095,9 @@ fn canonical_json(value: &Value) -> Value {
     }
 }
 
-fn status_name(status: ConditionalCompletionStatusWire) -> &'static str {
+pub(crate) fn status_name(
+    status: ConditionalCompletionStatusWire,
+) -> &'static str {
     match status {
         ConditionalCompletionStatusWire::Prepared => "prepared",
         ConditionalCompletionStatusWire::Bound => "bound",
@@ -1262,6 +1323,40 @@ mod tests {
         .unwrap();
         assert_eq!(restored.status, ConditionalCompletionStatusWire::Prepared);
         assert!(restored.binding.monitor_id.is_none());
+    }
+
+    #[test]
+    fn consume_is_idempotent_for_bound_intents() {
+        let prepared = seal_conditional_completion(request()).unwrap();
+        let bound =
+            bind_conditional_completion(ConditionalCompletionBindRequestWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                intent: prepared,
+                monitor_id: "monitor-1".to_string(),
+                command: vec!["just".to_string(), "check-full".to_string()],
+                request_fingerprint: "sha256:abc".to_string(),
+            })
+            .unwrap();
+        let consumed = consume_conditional_completion(bound).unwrap();
+        assert_eq!(consumed.status, ConditionalCompletionStatusWire::Consumed);
+        let again = consume_conditional_completion(consumed).unwrap();
+        assert_eq!(again.status, ConditionalCompletionStatusWire::Consumed);
+    }
+
+    #[test]
+    fn render_substitutes_only_documented_host_facts() {
+        let rendered = render_conditional_completion_message(
+            "Required checks passed in {duration} ({evidence_ref}).",
+            &std::collections::BTreeMap::from([
+                ("duration".to_string(), "3m 02s".to_string()),
+                ("evidence_ref".to_string(), "file:explicit:diag".to_string()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            rendered,
+            "Required checks passed in 3m 02s (file:explicit:diag)."
+        );
     }
 
     #[test]

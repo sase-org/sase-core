@@ -328,6 +328,10 @@
 //! - `continuation_preview_conditional_completion(intent: dict) -> dict`
 //! - `continuation_bind_conditional_completion(request: dict) -> dict`
 //! - `continuation_rollback_conditional_completion_binding(request: dict) -> dict`
+//! - `continuation_evaluate_conditional_completion(request: dict) -> dict`
+//! - `continuation_consume_conditional_completion(request: dict) -> dict`
+//! - `continuation_invalidate_conditional_completion(request: dict) -> dict`
+//! - `continuation_render_conditional_completion_message(request: dict) -> dict`
 //! - `resolve_layout_candidates(policy: str, exists: list[bool]) -> dict`
 //! - `skill_reference_name(skill_name: str, project: str | None = None) -> str`
 //! - `skill_placement_issue(source: str, in_skill_source: bool, declares_skill: bool, migrate_to: str | None = None) -> dict | None`
@@ -1028,9 +1032,13 @@ use sase_core::content_layout::{
 };
 use sase_core::continuation::{
     bind_conditional_completion as core_bind_conditional_completion,
+    consume_conditional_completion_request as core_consume_conditional_completion,
+    evaluate_conditional_completion as core_evaluate_conditional_completion,
+    invalidate_conditional_completion_request as core_invalidate_conditional_completion,
     plan_continuation_budget as core_plan_continuation_budget,
     plan_continuation_replay as core_plan_continuation_replay,
     preview_conditional_completion as core_preview_conditional_completion,
+    render_conditional_completion_message_request as core_render_conditional_completion_message,
     resolve_continuation_policy as core_resolve_continuation_policy,
     rollback_conditional_completion_binding as core_rollback_conditional_completion_binding,
     seal_conditional_completion as core_seal_conditional_completion,
@@ -1044,7 +1052,10 @@ use sase_core::continuation::{
     validate_diagnostic_manifest as core_validate_diagnostic_manifest,
     validate_launch_requester_continuation as core_validate_launch_requester_continuation,
     validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
-    ConditionalCompletionBindRequestWire, ConditionalCompletionIntentWire,
+    ConditionalCompletionBindRequestWire,
+    ConditionalCompletionConsumeRequestWire,
+    ConditionalCompletionEvaluateRequestWire, ConditionalCompletionIntentWire,
+    ConditionalCompletionMessageRequestWire,
     ConditionalCompletionPrepareRequestWire,
     ConditionalCompletionRollbackRequestWire, ContinuationBudgetRequestWire,
     ContinuationDeliveryRecordWire, ContinuationError,
@@ -14667,6 +14678,82 @@ fn py_continuation_rollback_conditional_completion_binding<'py>(
     )
 }
 
+/// Evaluate whether a bound intent is eligible for no-model host completion.
+#[pyfunction]
+#[pyo3(name = "continuation_evaluate_conditional_completion")]
+fn py_continuation_evaluate_conditional_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionEvaluateRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion evaluate",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_evaluate_conditional_completion(request),
+        "conditional completion evaluate",
+    )
+}
+
+/// Mark a bound intent consumed after successful host completion.
+#[pyfunction]
+#[pyo3(name = "continuation_consume_conditional_completion")]
+fn py_continuation_consume_conditional_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionConsumeRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion consume",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_consume_conditional_completion(request),
+        "conditional completion consume",
+    )
+}
+
+/// Invalidate a bound intent that cannot complete and must recover.
+#[pyfunction]
+#[pyo3(name = "continuation_invalidate_conditional_completion")]
+fn py_continuation_invalidate_conditional_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionConsumeRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion invalidate",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_invalidate_conditional_completion(request),
+        "conditional completion invalidate",
+    )
+}
+
+/// Render a prepared success message with documented host-fact substitutions.
+#[pyfunction]
+#[pyo3(name = "continuation_render_conditional_completion_message")]
+fn py_continuation_render_conditional_completion_message<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ConditionalCompletionMessageRequestWire =
+        continuation_wire_from_pydict(
+            request,
+            "conditional completion message",
+        )?;
+    continuation_result_to_py(
+        py,
+        core_render_conditional_completion_message(request),
+        "conditional completion message",
+    )
+}
+
 fn continuation_error_to_pyerr(error: ContinuationError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -17895,6 +17982,22 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_continuation_rollback_conditional_completion_binding,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_evaluate_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_consume_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_invalidate_conditional_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_continuation_render_conditional_completion_message,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
@@ -21201,6 +21304,10 @@ COMMITS:
                 "continuation_preview_conditional_completion",
                 "continuation_bind_conditional_completion",
                 "continuation_rollback_conditional_completion_binding",
+                "continuation_evaluate_conditional_completion",
+                "continuation_consume_conditional_completion",
+                "continuation_invalidate_conditional_completion",
+                "continuation_render_conditional_completion_message",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }

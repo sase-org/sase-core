@@ -6,6 +6,7 @@
 
 pub mod budget;
 pub mod completion;
+pub mod completion_eval;
 pub mod evidence;
 pub mod policy;
 pub mod replay;
@@ -18,7 +19,9 @@ pub use budget::{
     ContinuationBudgetReserveWire,
 };
 pub use completion::{
-    bind_conditional_completion, preview_conditional_completion,
+    bind_conditional_completion, consume_conditional_completion,
+    invalidate_conditional_completion, preview_conditional_completion,
+    render_conditional_completion_message,
     rollback_conditional_completion_binding, seal_conditional_completion,
     validate_conditional_completion_intent,
     ConditionalCompletionBindRequestWire, ConditionalCompletionBindingWire,
@@ -28,6 +31,14 @@ pub use completion::{
     ConditionalCompletionStatusWire, ExecutorCapabilityWire,
     ObservedPathKindWire, ObservedPathWire, RepositoryDecisionWire,
     RepositoryObservationWire, VerificationContractWire, VerificationLevelWire,
+};
+pub use completion_eval::{
+    consume_conditional_completion_request, evaluate_conditional_completion,
+    invalidate_conditional_completion_request,
+    render_conditional_completion_message_request,
+    ConditionalCompletionConsumeRequestWire, ConditionalCompletionDecisionWire,
+    ConditionalCompletionEvaluateRequestWire,
+    ConditionalCompletionMessageRequestWire,
 };
 pub use evidence::{
     select_continuation_evidence, ContinuationEvidenceContextKindWire,
