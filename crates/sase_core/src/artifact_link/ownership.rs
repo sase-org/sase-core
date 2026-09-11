@@ -145,10 +145,7 @@ pub fn artifact_link_publication_receipt(
         pending
             .push("artifact-link bead projection is not committed".to_string());
     }
-    if required_roots.is_empty()
-        && !evidence.bead_owner
-        && !evidence.local_receipt
-    {
+    if required_roots.is_empty() && !evidence.local_receipt {
         pending.push(
             "artifact-link event has no durable owner receipt".to_string(),
         );
@@ -407,6 +404,14 @@ mod tests {
         assert!(!receipt.acknowledged);
         assert!(receipt.pending_reasons[0].contains("bead projection"));
         bead_evidence.bead_receipt = true;
+        let receipt = artifact_link_publication_receipt(
+            &bead_requirements,
+            &bead_evidence,
+        )
+        .unwrap();
+        assert!(!receipt.acknowledged);
+        assert!(receipt.pending_reasons[0].contains("durable owner receipt"));
+        bead_evidence.local_receipt = true;
         assert!(
             artifact_link_publication_receipt(
                 &bead_requirements,
