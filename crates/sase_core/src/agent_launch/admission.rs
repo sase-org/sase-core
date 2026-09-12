@@ -451,7 +451,7 @@ pub fn agent_unit_dispatch_prompt_with_flags(
         lines.push("%hide".to_string());
     }
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
-        capacity: agent.wait_runners,
+        queue_capacity: agent.wait_runners,
         priority: agent.wait_priority,
         weight: if agent.queue_weight_explicit {
             agent.queue_weight

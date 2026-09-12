@@ -426,9 +426,9 @@
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
 //! - `directive_contract() -> list[dict]`
-//! - `collect_queue_fields(occurrences: list[dict]) -> dict`
+//! - `collect_queue_fields(occurrences: list[dict], enabled_feature_flags: list[str] | None = None) -> dict`
 //! - `format_queue_directive(fields: dict) -> str | None`
-//! - `parse_queue_capacity(raw: str) -> int`
+//! - `parse_queue_capacity(raw: str, enabled_feature_flags: list[str] | None = None) -> int`
 //! - `queue_directive_flag_key() -> str`
 //! - `runner_capacity_policy_schema_version() -> int`
 //! - `runner_capacity_snapshot(request: dict) -> dict`
@@ -1478,9 +1478,9 @@ use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
 use sase_core::{
-    collect_queue_fields as core_collect_queue_fields,
+    collect_queue_fields_with_flags as core_collect_queue_fields_with_flags,
     format_queue_directive as core_format_queue_directive,
-    parse_queue_capacity as core_parse_queue_capacity,
+    parse_queue_capacity_with_flags as core_parse_queue_capacity_with_flags,
     queue_directive_flag_key as core_queue_directive_flag_key, QueueFieldsWire,
     QueueOccurrenceWire,
 };
@@ -15535,9 +15535,11 @@ fn py_prompt_has_identity_directive(prompt: &str) -> bool {
 
 #[pyfunction]
 #[pyo3(name = "collect_queue_fields")]
+#[pyo3(signature = (occurrences, enabled_feature_flags = None))]
 fn py_collect_queue_fields<'py>(
     py: Python<'py>,
     occurrences: &Bound<'_, PyAny>,
+    enabled_feature_flags: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
     let occurrences: Vec<QueueOccurrenceWire> = serde_json::from_value(
         py_to_json_value(occurrences)?,
@@ -15545,7 +15547,8 @@ fn py_collect_queue_fields<'py>(
     .map_err(|err| {
         PyValueError::new_err(format!("invalid queue occurrences: {err}"))
     })?;
-    let result = core_collect_queue_fields(&occurrences);
+    let flags = enabled_feature_flags.unwrap_or_default();
+    let result = core_collect_queue_fields_with_flags(&occurrences, &flags);
     let value = serde_json::to_value(&result).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -15566,8 +15569,13 @@ fn py_format_queue_directive(
 
 #[pyfunction]
 #[pyo3(name = "parse_queue_capacity")]
-fn py_parse_queue_capacity(raw: &str) -> PyResult<u32> {
-    core_parse_queue_capacity(raw)
+#[pyo3(signature = (raw, enabled_feature_flags = None))]
+fn py_parse_queue_capacity(
+    raw: &str,
+    enabled_feature_flags: Option<Vec<String>>,
+) -> PyResult<u32> {
+    let flags = enabled_feature_flags.unwrap_or_default();
+    core_parse_queue_capacity_with_flags(raw, &flags)
         .map_err(|error| PyValueError::new_err(error.message))
 }
 
@@ -28712,9 +28720,10 @@ MENTORS:
             )
             .unwrap();
             let collected =
-                py_collect_queue_fields(py, occurrences.bind(py)).unwrap();
+                py_collect_queue_fields(py, occurrences.bind(py), None)
+                    .unwrap();
             let collected = py_to_json_value(collected.bind(py)).unwrap();
-            assert_eq!(collected["fields"]["capacity"], json!(5));
+            assert_eq!(collected["fields"]["queue_capacity"], json!(5));
             assert_eq!(collected["fields"]["weight"], json!(0.25));
             assert!(collected["errors"].as_array().unwrap().is_empty());
             let formatted = py_format_queue_directive(
@@ -28730,10 +28739,15 @@ MENTORS:
                 formatted.as_deref(),
                 Some("%queue(capacity=5, priority=20, weight=2)")
             );
-            assert_eq!(py_parse_queue_capacity("0").unwrap(), 0);
-            assert_eq!(py_parse_queue_capacity("3").unwrap(), 3);
-            assert!(py_parse_queue_capacity("true").is_err());
-            assert_eq!(py_runner_capacity_policy_schema_version(), 3);
+            assert_eq!(py_parse_queue_capacity("0", None).unwrap(), 0);
+            assert_eq!(py_parse_queue_capacity("3", None).unwrap(), 3);
+            assert!(py_parse_queue_capacity(
+                "0",
+                Some(vec!["queue_capacity_budget".to_string()])
+            )
+            .is_err());
+            assert!(py_parse_queue_capacity("true", None).is_err());
+            assert_eq!(py_runner_capacity_policy_schema_version(), 4);
             let capacity_request = json_value_to_py(
                 py,
                 &json!({
@@ -28761,7 +28775,7 @@ MENTORS:
                 py_runner_capacity_snapshot(py, capacity_request.bind(py))
                     .unwrap();
             let capacity = py_to_json_value(capacity.bind(py)).unwrap();
-            assert_eq!(capacity["schema_version"], json!(3));
+            assert_eq!(capacity["schema_version"], json!(4));
             assert_eq!(capacity["occupied_capacity"], json!(0.75));
             assert_eq!(
                 capacity["first_eligible_artifact_dir"],

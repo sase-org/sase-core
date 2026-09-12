@@ -1237,11 +1237,13 @@ pub use query::{
     QueryRow, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
 };
 pub use queue_directive::{
-    collect_queue_fields, format_queue_directive, parse_queue_capacity,
+    collect_queue_fields, collect_queue_fields_with_flags,
+    format_queue_directive, parse_queue_capacity,
+    parse_queue_capacity_with_flags, queue_capacity_budget_enabled,
     queue_directive_disabled_message, queue_directive_enabled,
     queue_directive_flag_key, QueueArgWire, QueueCollectResultWire,
     QueueFieldsWire, QueueOccurrenceWire, QueueParseErrorWire,
-    QUEUE_DIRECTIVE_FLAG,
+    QUEUE_CAPACITY_BUDGET_FLAG, QUEUE_DIRECTIVE_FLAG,
 };
 pub use referenced_by::{
     parse_referenced_by_block, remove_referenced_by_block,

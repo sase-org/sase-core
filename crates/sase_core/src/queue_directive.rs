@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub const QUEUE_DIRECTIVE_FLAG: &str = "queue_directive";
+pub const QUEUE_CAPACITY_BUDGET_FLAG: &str = "queue_capacity_budget";
 pub const DEFAULT_QUEUE_WEIGHT: f64 = 1.0;
 
 /// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
@@ -21,6 +22,12 @@ pub fn queue_directive_flag_key() -> &'static str {
 /// migration window.
 pub fn queue_directive_enabled(_enabled_feature_flags: &[String]) -> bool {
     true
+}
+
+pub fn queue_capacity_budget_enabled(enabled_feature_flags: &[String]) -> bool {
+    enabled_feature_flags
+        .iter()
+        .any(|flag| flag == QUEUE_CAPACITY_BUDGET_FLAG)
 }
 
 /// One already-split queue argument. `name` is absent for positionals.
@@ -50,8 +57,12 @@ pub struct QueueOccurrenceWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct QueueFieldsWire {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<u32>,
+    #[serde(
+        default,
+        alias = "capacity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub queue_capacity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,10 +102,18 @@ enum QueueForm {
 pub fn collect_queue_fields(
     occurrences: &[QueueOccurrenceWire],
 ) -> QueueCollectResultWire {
+    collect_queue_fields_with_flags(occurrences, &[])
+}
+
+pub fn collect_queue_fields_with_flags(
+    occurrences: &[QueueOccurrenceWire],
+    enabled_feature_flags: &[String],
+) -> QueueCollectResultWire {
     let mut fields = QueueFieldsWire::default();
     let mut errors = Vec::new();
+    let capacity_budget = queue_capacity_budget_enabled(enabled_feature_flags);
     for occurrence in occurrences {
-        match parse_queue_occurrence(occurrence) {
+        match parse_queue_occurrence(occurrence, capacity_budget) {
             Ok(part) => {
                 if let Err(error) =
                     merge_queue_part(&mut fields, part, occurrence.source_span)
@@ -103,6 +122,13 @@ pub fn collect_queue_fields(
                 }
             }
             Err(error) => errors.push(error),
+        }
+    }
+    if errors.is_empty() {
+        if let Err(error) =
+            validate_queue_budget_fields(&fields, capacity_budget)
+        {
+            errors.push(error);
         }
     }
     if errors.is_empty() {
@@ -122,7 +148,7 @@ pub fn collect_queue_fields(
 /// omitting absent fields. Returns `None` when every field is omitted.
 pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(capacity) = fields.capacity {
+    if let Some(capacity) = fields.queue_capacity {
         parts.push(format!("capacity={capacity}"));
     }
     if let Some(priority) = fields.priority {
@@ -151,7 +177,18 @@ pub fn format_queue_weight(value: f64) -> String {
 /// Validate a capacity threshold string through the same contract as
 /// `%queue(capacity=...)`.
 pub fn parse_queue_capacity(raw: &str) -> Result<u32, QueueParseErrorWire> {
-    parse_capacity(raw, None)
+    parse_queue_capacity_with_flags(raw, &[])
+}
+
+pub fn parse_queue_capacity_with_flags(
+    raw: &str,
+    enabled_feature_flags: &[String],
+) -> Result<u32, QueueParseErrorWire> {
+    parse_capacity(
+        raw,
+        None,
+        queue_capacity_budget_enabled(enabled_feature_flags),
+    )
 }
 
 /// Legacy diagnostic message from the temporary migration window.
@@ -161,6 +198,7 @@ pub fn queue_directive_disabled_message() -> String {
 
 fn parse_queue_occurrence(
     occurrence: &QueueOccurrenceWire,
+    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     match queue_form(&occurrence.source, occurrence.has_plus_suffix) {
@@ -170,20 +208,21 @@ fn parse_queue_occurrence(
             span,
         )),
         QueueForm::Bare => Err(empty_queue_error(span)),
-        QueueForm::Colon => parse_colon_occurrence(occurrence),
+        QueueForm::Colon => parse_colon_occurrence(occurrence, capacity_budget),
         QueueForm::Parenthesized { closed: false } => Err(queue_error(
             "malformed-queue",
             "Malformed %queue(...) directive: missing closing ')'.",
             span,
         )),
         QueueForm::Parenthesized { closed: true } => {
-            parse_parenthesized_occurrence(occurrence)
+            parse_parenthesized_occurrence(occurrence, capacity_budget)
         }
     }
 }
 
 fn parse_colon_occurrence(
     occurrence: &QueueOccurrenceWire,
+    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     if occurrence.args.iter().any(|arg| arg.name.is_some()) {
@@ -205,7 +244,11 @@ fn parse_colon_occurrence(
         return Err(extra_positional_error(span));
     }
     Ok(QueueFieldsWire {
-        capacity: Some(parse_capacity(&positionals[0].value, span)?),
+        queue_capacity: Some(parse_capacity(
+            &positionals[0].value,
+            span,
+            capacity_budget,
+        )?),
         priority: None,
         weight: None,
     })
@@ -213,6 +256,7 @@ fn parse_colon_occurrence(
 
 fn parse_parenthesized_occurrence(
     occurrence: &QueueOccurrenceWire,
+    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     if occurrence.args.is_empty()
@@ -237,7 +281,12 @@ fn parse_parenthesized_occurrence(
                     return Err(extra_positional_error(span));
                 }
                 positional_seen = true;
-                assign_capacity(&mut fields, &arg.value, span)?;
+                assign_capacity(
+                    &mut fields,
+                    &arg.value,
+                    span,
+                    capacity_budget,
+                )?;
             }
             Some(literal) => {
                 if literal.is_empty() {
@@ -260,7 +309,12 @@ fn parse_parenthesized_occurrence(
                 seen_literals.push(key.clone());
                 match canonical_queue_key(&key).as_str() {
                     "capacity" => {
-                        assign_capacity(&mut fields, &arg.value, span)?;
+                        assign_capacity(
+                            &mut fields,
+                            &arg.value,
+                            span,
+                            capacity_budget,
+                        )?;
                     }
                     "priority" => {
                         assign_priority(&mut fields, &arg.value, span)?;
@@ -290,7 +344,7 @@ fn parse_parenthesized_occurrence(
             }
         }
     }
-    if fields.capacity.is_none()
+    if fields.queue_capacity.is_none()
         && fields.priority.is_none()
         && fields.weight.is_none()
     {
@@ -303,11 +357,12 @@ fn assign_capacity(
     fields: &mut QueueFieldsWire,
     raw: &str,
     span: Option<[usize; 2]>,
+    capacity_budget: bool,
 ) -> Result<(), QueueParseErrorWire> {
-    if fields.capacity.is_some() {
+    if fields.queue_capacity.is_some() {
         return Err(duplicate_field_error("capacity", span));
     }
-    fields.capacity = Some(parse_capacity(raw, span)?);
+    fields.queue_capacity = Some(parse_capacity(raw, span, capacity_budget)?);
     Ok(())
 }
 
@@ -340,11 +395,11 @@ fn merge_queue_part(
     part: QueueFieldsWire,
     span: [usize; 2],
 ) -> Result<(), QueueParseErrorWire> {
-    if let Some(capacity) = part.capacity {
-        if fields.capacity.is_some() {
+    if let Some(capacity) = part.queue_capacity {
+        if fields.queue_capacity.is_some() {
             return Err(duplicate_field_error("capacity", Some(span)));
         }
-        fields.capacity = Some(capacity);
+        fields.queue_capacity = Some(capacity);
     }
     if let Some(priority) = part.priority {
         if fields.priority.is_some() {
@@ -364,10 +419,11 @@ fn merge_queue_part(
 fn parse_capacity(
     raw: &str,
     span: Option<[usize; 2]>,
+    capacity_budget: bool,
 ) -> Result<u32, QueueParseErrorWire> {
     let digits = parse_non_negative_decimal(raw)
         .map_err(|kind| integer_error("capacity", kind, span))?;
-    digits.parse::<u32>().map_err(|_| {
+    let value = digits.parse::<u32>().map_err(|_| {
         queue_error(
             "queue-overflow-capacity",
             &format!(
@@ -376,7 +432,32 @@ fn parse_capacity(
             ),
             span,
         )
-    })
+    })?;
+    if capacity_budget && value == 0 {
+        return Err(invalid_capacity_zero_error(span));
+    }
+    Ok(value)
+}
+
+fn validate_queue_budget_fields(
+    fields: &QueueFieldsWire,
+    capacity_budget: bool,
+) -> Result<(), QueueParseErrorWire> {
+    if !capacity_budget {
+        return Ok(());
+    }
+    if let (Some(capacity), Some(weight)) =
+        (fields.queue_capacity, fields.weight)
+    {
+        if weight > f64::from(capacity) {
+            return Err(queue_error(
+                "queue-weight-exceeds-capacity",
+                "%queue weight exceeds this launch's capacity budget; the launch could never be admitted. Increase capacity or lower weight.",
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_priority(
@@ -484,6 +565,16 @@ fn obsolete_runners_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "obsolete-queue-runners",
         "%queue(runners=...) has been renamed. Use %queue(capacity=N) or %q:N; capacity is a weighted-load threshold, not a count of running agents.",
+        span,
+    )
+}
+
+fn invalid_capacity_zero_error(
+    span: Option<[usize; 2]>,
+) -> QueueParseErrorWire {
+    queue_error(
+        "invalid-queue-capacity-zero",
+        "%queue capacity is this launch's capacity budget and must be at least 1; use %q:1 to run alone.",
         span,
     )
 }
@@ -615,6 +706,19 @@ mod tests {
         result.errors
     }
 
+    fn collect_err_with_flags(
+        occurrences: &[QueueOccurrenceWire],
+        flags: &[String],
+    ) -> Vec<QueueParseErrorWire> {
+        let result = collect_queue_fields_with_flags(occurrences, flags);
+        assert!(result.fields.is_none(), "{result:?}");
+        result.errors
+    }
+
+    fn capacity_budget_flags() -> Vec<String> {
+        vec![QUEUE_CAPACITY_BUDGET_FLAG.to_string()]
+    }
+
     #[test]
     fn legacy_flag_helpers_always_enable_queue() {
         assert_eq!(queue_directive_flag_key(), "queue_directive");
@@ -634,7 +738,7 @@ mod tests {
         assert_eq!(
             fields,
             QueueFieldsWire {
-                capacity: Some(5),
+                queue_capacity: Some(5),
                 priority: Some(20),
                 ..QueueFieldsWire::default()
             }
@@ -653,7 +757,7 @@ mod tests {
             occ("%queue(capacity=5)", vec![named("capacity", "5")]),
         ] {
             let fields = collect_ok(&[source_args]);
-            assert_eq!(fields.capacity, Some(5));
+            assert_eq!(fields.queue_capacity, Some(5));
             assert_eq!(fields.priority, None);
             assert_eq!(
                 format_queue_directive(&fields).as_deref(),
@@ -672,7 +776,7 @@ mod tests {
             "%q(5, p=20, w=0.25)",
             vec![positional("5"), named("p", "20"), named("w", "0.25")],
         )]);
-        assert_eq!(both.capacity, Some(5));
+        assert_eq!(both.queue_capacity, Some(5));
         assert_eq!(both.priority, Some(20));
         assert_eq!(both.weight, Some(0.25));
         assert_eq!(
@@ -684,7 +788,7 @@ mod tests {
     #[test]
     fn explicit_zero_is_distinct_from_omitted() {
         let zero = collect_ok(&[occ("%q:0", vec![positional("0")])]);
-        assert_eq!(zero.capacity, Some(0));
+        assert_eq!(zero.queue_capacity, Some(0));
         assert_eq!(zero.priority, None);
         let omitted = QueueFieldsWire::default();
         assert_ne!(zero, omitted);
@@ -694,6 +798,57 @@ mod tests {
             vec![named("priority", "10")],
         )]);
         assert_eq!(default_priority.priority, Some(10));
+    }
+
+    #[test]
+    fn capacity_budget_flag_rejects_zero_capacity() {
+        let flags = capacity_budget_flags();
+        for occurrence in [
+            occ("%q:0", vec![positional("0")]),
+            occ("%queue(capacity=0)", vec![named("capacity", "0")]),
+        ] {
+            let errors = collect_err_with_flags(&[occurrence], &flags);
+            assert_eq!(errors[0].code, "invalid-queue-capacity-zero");
+            assert!(errors[0].message.contains("%q:1"), "{errors:?}");
+        }
+        assert_eq!(parse_queue_capacity("0"), Ok(0));
+        let error = parse_queue_capacity_with_flags("0", &flags).unwrap_err();
+        assert_eq!(error.code, "invalid-queue-capacity-zero");
+    }
+
+    #[test]
+    fn capacity_budget_flag_rejects_weight_over_capacity() {
+        let occurrence = occ(
+            "%q(capacity=1, w=2)",
+            vec![named("capacity", "1"), named("w", "2")],
+        );
+        let old = collect_ok(std::slice::from_ref(&occurrence));
+        assert_eq!(old.queue_capacity, Some(1));
+        assert_eq!(old.weight, Some(2.0));
+
+        let flags = capacity_budget_flags();
+        let errors = collect_err_with_flags(&[occurrence], &flags);
+        assert_eq!(errors[0].code, "queue-weight-exceeds-capacity");
+
+        let composed = collect_err_with_flags(
+            &[
+                occ("%q:1", vec![positional("1")]),
+                occ("%q(w=2)", vec![named("w", "2")]),
+            ],
+            &flags,
+        );
+        assert_eq!(composed[0].code, "queue-weight-exceeds-capacity");
+    }
+
+    #[test]
+    fn queue_fields_read_legacy_capacity_and_write_queue_capacity() {
+        let fields: QueueFieldsWire =
+            serde_json::from_value(serde_json::json!({"capacity": 3})).unwrap();
+        assert_eq!(fields.queue_capacity, Some(3));
+        assert_eq!(
+            serde_json::to_value(fields).unwrap(),
+            serde_json::json!({"queue_capacity": 3})
+        );
     }
 
     #[test]
@@ -830,7 +985,7 @@ mod tests {
             "%queue(capacity=4294967295)",
             vec![named("capacity", &u32::MAX.to_string())],
         )]);
-        assert_eq!(capacity_max.capacity, Some(u32::MAX));
+        assert_eq!(capacity_max.queue_capacity, Some(u32::MAX));
         let capacity_overflow = occ(
             "%queue(capacity=4294967296)",
             vec![named("capacity", "4294967296")],
@@ -877,7 +1032,7 @@ mod tests {
         ] {
             let fields =
                 collect_ok(&[occ("%q(w=value)", vec![named("w", value)])]);
-            assert_eq!(fields.capacity, None);
+            assert_eq!(fields.queue_capacity, None);
             assert_eq!(fields.priority, None);
             assert_eq!(fields.weight, Some(expected), "{value}");
             assert_eq!(

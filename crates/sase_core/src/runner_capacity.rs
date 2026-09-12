@@ -10,9 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::queue_directive::{queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT};
+use crate::queue_directive::{
+    queue_capacity_budget_enabled, queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+};
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 3;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 4;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,6 +33,8 @@ pub struct RunnerCapacityRequestWire {
     pub deference_seconds_per_step: u32,
     #[serde(default)]
     pub deference_max_seconds: u32,
+    #[serde(default)]
+    pub feature_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,11 +83,10 @@ pub struct RunnerCapacityRecordWire {
     pub queue_weight_invalid: bool,
     #[serde(default)]
     pub slot_requested_at: Option<String>,
-    #[serde(default)]
-    /// Persisted spelling of the optional weighted-load capacity threshold.
-    pub wait_runners: Option<i64>,
-    #[serde(default)]
-    pub wait_runners_explicit: bool,
+    #[serde(default, alias = "wait_runners")]
+    pub queue_capacity: Option<i64>,
+    #[serde(default, alias = "wait_runners_explicit")]
+    pub queue_capacity_explicit: bool,
     #[serde(default)]
     pub wait_priority: Option<i64>,
     #[serde(default)]
@@ -129,6 +132,8 @@ pub struct RunnerCapacityBlockerWire {
     pub occupied_capacity: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_threshold: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_limit: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,8 +145,13 @@ pub struct RunnerCapacityWaiterWire {
     pub slot_requested_at: String,
     pub timestamp: String,
     pub requested_weight: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait_runners: Option<u32>,
+    #[serde(
+        default,
+        alias = "wait_runners",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub queue_capacity: Option<u32>,
+    pub admission_limit: f64,
     pub eligible: bool,
     #[serde(default)]
     pub parked: bool,
@@ -198,7 +208,9 @@ struct WaiterEvaluation<'a> {
     claims: &'a [RunnerCapacityClaimWire],
     occupied_capacity: f64,
     requested_weight: f64,
-    wait_runners: Option<u32>,
+    queue_capacity: Option<u32>,
+    admission_limit: f64,
+    capacity_budget: bool,
     priority: i32,
     fail_closed: bool,
 }
@@ -273,6 +285,7 @@ pub fn runner_capacity_snapshot(
         &claims,
         &active_claims,
         fail_closed,
+        &mut diagnostics,
     );
     let first_eligible_artifact_dir = waiters
         .iter()
@@ -337,6 +350,7 @@ fn request_for_waiters(
         now: request.now.clone(),
         deference_seconds_per_step: request.deference_seconds_per_step,
         deference_max_seconds: request.deference_max_seconds,
+        feature_flags: request.feature_flags.clone(),
     }
 }
 
@@ -436,6 +450,7 @@ fn build_waiters(
     claims: &[RunnerCapacityClaimWire],
     active_claims: &BTreeSet<String>,
     fail_closed: bool,
+    diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
 ) -> Vec<RunnerCapacityWaiterWire> {
     let index = record_index(&request.records);
     let mut candidates: Vec<&RunnerCapacityRecordWire> = request
@@ -447,18 +462,29 @@ fn build_waiters(
 
     let mut drafts = Vec::new();
     let mut prior_eligible = false;
+    let capacity_budget = queue_capacity_budget_enabled(&request.feature_flags);
     for record in candidates {
         let priority = normalize_wait_priority(record.wait_priority);
         let requested_weight =
             effective_weight(record).unwrap_or(DEFAULT_QUEUE_WEIGHT);
-        let wait_runners = explicit_wait_runners(record);
+        let queue_capacity = explicit_queue_capacity(record);
+        let admission_limit = waiter_admission_limit(
+            request,
+            record,
+            requested_weight,
+            queue_capacity,
+            capacity_budget,
+            diagnostics,
+        );
         let mut blockers = waiter_blockers(WaiterEvaluation {
             request,
             record,
             claims,
             occupied_capacity,
             requested_weight,
-            wait_runners,
+            queue_capacity,
+            admission_limit,
+            capacity_budget,
             priority,
             fail_closed,
         });
@@ -467,6 +493,7 @@ fn build_waiters(
                 blockers.push(blocker(
                     "queue-order",
                     "An earlier currently eligible waiter is ahead in priority/FIFO order.",
+                    None,
                     None,
                     None,
                     None,
@@ -480,12 +507,16 @@ fn build_waiters(
         let capacity_shortfall = waiter_capacity_shortfall(
             claims,
             requested_weight,
-            request.effective_limit,
+            admission_limit,
         );
-        let wait_capacity_shortfall = waiter_capacity_condition_shortfall(
-            occupied_capacity,
-            wait_runners,
-        );
+        let wait_capacity_shortfall = if capacity_budget {
+            0.0
+        } else {
+            waiter_capacity_condition_shortfall(
+                occupied_capacity,
+                queue_capacity,
+            )
+        };
         drafts.push(WaiterDraft {
             record,
             wire: RunnerCapacityWaiterWire {
@@ -498,7 +529,8 @@ fn build_waiters(
                     .unwrap_or_default(),
                 timestamp: record.timestamp.clone(),
                 requested_weight,
-                wait_runners,
+                queue_capacity,
+                admission_limit,
                 eligible: blockers.is_empty(),
                 parked,
                 capacity_shortfall,
@@ -518,6 +550,33 @@ fn build_waiters(
         .collect()
 }
 
+fn waiter_admission_limit(
+    request: &RunnerCapacityRequestWire,
+    record: &RunnerCapacityRecordWire,
+    requested_weight: f64,
+    queue_capacity: Option<u32>,
+    capacity_budget: bool,
+    diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
+) -> f64 {
+    if !capacity_budget || !record.queue_capacity_explicit {
+        return request.effective_limit;
+    }
+    match record.queue_capacity {
+        Some(0) => {
+            diagnostics.push(diagnostic(
+                "legacy-capacity-zero",
+                "Persisted queue_capacity=0 was translated to this waiter's effective weight so it drains to zero before admission.",
+                Some(record.artifact_dir.clone()),
+            ));
+            requested_weight
+        }
+        Some(_) => queue_capacity
+            .map(f64::from)
+            .unwrap_or(request.effective_limit),
+        None => request.effective_limit,
+    }
+}
+
 fn waiter_blockers(
     eval: WaiterEvaluation<'_>,
 ) -> Vec<RunnerCapacityBlockerWire> {
@@ -526,6 +585,7 @@ fn waiter_blockers(
         blockers.push(blocker(
             "capacity-snapshot-invalid",
             "Runner capacity cannot admit new work because the live snapshot is invalid.",
+            None,
             None,
             None,
             None,
@@ -540,9 +600,10 @@ fn waiter_blockers(
             None,
             None,
             None,
+            None,
         ));
     }
-    if !queue_weight_is_valid(eval.request.effective_limit) {
+    if !queue_weight_is_valid(eval.admission_limit) {
         blockers.push(blocker(
             "invalid-capacity-limit",
             "The effective runner capacity limit must be positive and finite.",
@@ -550,18 +611,20 @@ fn waiter_blockers(
             None,
             None,
             None,
+            None,
         ));
     } else {
         let free_capacity =
-            (eval.request.effective_limit - eval.occupied_capacity).max(0.0);
-        if !capacity_fits(eval.requested_weight, eval.request.effective_limit) {
+            (eval.admission_limit - eval.occupied_capacity).max(0.0);
+        if !capacity_fits(eval.requested_weight, eval.admission_limit) {
             blockers.push(blocker(
                 "weight-exceeds-limit",
-                "Requested capacity weight exceeds the effective runner limit.",
+                "Requested capacity weight exceeds this waiter's admission limit.",
                 Some(eval.requested_weight),
                 Some(free_capacity),
                 None,
                 None,
+                Some(eval.admission_limit),
             ));
         } else {
             let proposed = compensated_sum(
@@ -578,10 +641,11 @@ fn waiter_blockers(
                     Some(free_capacity),
                     None,
                     None,
+                    Some(eval.admission_limit),
                 ));
             } else if !capacity_fits(
                 proposed.unwrap_or(f64::MAX),
-                eval.request.effective_limit,
+                eval.admission_limit,
             ) {
                 blockers.push(blocker(
                     "insufficient-capacity",
@@ -590,28 +654,32 @@ fn waiter_blockers(
                     Some(free_capacity),
                     None,
                     None,
+                    Some(eval.admission_limit),
                 ));
             }
         }
     }
-    if let Some(threshold) = eval.wait_runners {
-        if occupied_capacity_exceeds_threshold(
-            eval.occupied_capacity,
-            threshold,
-        ) {
-            let message = if threshold == 0 {
-                "Occupied weighted load must drain to zero before this capacity-0 waiter can start."
-            } else {
-                "Occupied weighted load exceeds this explicit capacity threshold."
-            };
-            blockers.push(blocker(
-                "capacity-condition",
-                message,
-                None,
-                None,
-                Some(eval.occupied_capacity),
-                Some(threshold),
-            ));
+    if !eval.capacity_budget {
+        if let Some(threshold) = eval.queue_capacity {
+            if occupied_capacity_exceeds_threshold(
+                eval.occupied_capacity,
+                threshold,
+            ) {
+                let message = if threshold == 0 {
+                    "Occupied weighted load must drain to zero before this capacity-0 waiter can start."
+                } else {
+                    "Occupied weighted load exceeds this explicit capacity threshold."
+                };
+                blockers.push(blocker(
+                    "capacity-condition",
+                    message,
+                    None,
+                    None,
+                    Some(eval.occupied_capacity),
+                    Some(threshold),
+                    Some(eval.admission_limit),
+                ));
+            }
         }
     }
     if blockers.is_empty()
@@ -639,6 +707,7 @@ fn waiter_blockers(
         blockers.push(blocker(
             "deference-window",
             "A better-priority unparked waiter is pending and the deference window has not elapsed.",
+            None,
             None,
             None,
             None,
@@ -687,6 +756,7 @@ fn build_candidate_decision(
             None,
             None,
             None,
+            None,
         ));
         explicit_weight_compatibility = "invalid".to_string();
         decision = "invalid".to_string();
@@ -695,6 +765,7 @@ fn build_candidate_decision(
         blockers.push(blocker(
             "invalid-inherited-weight",
             &message,
+            None,
             None,
             None,
             None,
@@ -712,6 +783,7 @@ fn build_candidate_decision(
                 "active-claim-weight-conflict",
                 "Serial continuation requested a different explicit weight than its active lineage claim.",
                 Some(requested_weight),
+                None,
                 None,
                 None,
                 None,
@@ -739,6 +811,7 @@ fn build_candidate_decision(
             blockers.push(blocker(
                 "capacity-snapshot-invalid",
                 "Runner capacity cannot admit this candidate from the current snapshot.",
+                None,
                 None,
                 None,
                 None,
@@ -1194,11 +1267,11 @@ fn effective_weight(record: &RunnerCapacityRecordWire) -> Result<f64, String> {
     }
 }
 
-fn explicit_wait_runners(record: &RunnerCapacityRecordWire) -> Option<u32> {
-    if !record.wait_runners_explicit {
+fn explicit_queue_capacity(record: &RunnerCapacityRecordWire) -> Option<u32> {
+    if !record.queue_capacity_explicit {
         return None;
     }
-    let runners = record.wait_runners?;
+    let runners = record.queue_capacity?;
     u32::try_from(runners).ok()
 }
 
@@ -1365,6 +1438,7 @@ fn blocker(
     free_capacity: Option<f64>,
     occupied_capacity: Option<f64>,
     capacity_threshold: Option<u32>,
+    admission_limit: Option<f64>,
 ) -> RunnerCapacityBlockerWire {
     RunnerCapacityBlockerWire {
         code: code.to_string(),
@@ -1373,6 +1447,7 @@ fn blocker(
         free_capacity,
         occupied_capacity,
         capacity_threshold,
+        admission_limit,
     }
 }
 
@@ -1413,8 +1488,8 @@ mod tests {
             queue_weight_explicit: false,
             queue_weight_invalid: false,
             slot_requested_at: None,
-            wait_runners: None,
-            wait_runners_explicit: false,
+            queue_capacity: None,
+            queue_capacity_explicit: false,
             wait_priority: None,
             eligible_since: None,
         }
@@ -1442,6 +1517,14 @@ mod tests {
         effective_limit: f64,
         records: Vec<RunnerCapacityRecordWire>,
     ) -> RunnerCapacitySnapshotWire {
+        snapshot_with_flags(effective_limit, records, &[])
+    }
+
+    fn snapshot_with_flags(
+        effective_limit: f64,
+        records: Vec<RunnerCapacityRecordWire>,
+        feature_flags: &[String],
+    ) -> RunnerCapacitySnapshotWire {
         runner_capacity_snapshot(&RunnerCapacityRequestWire {
             schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
             effective_limit,
@@ -1450,6 +1533,7 @@ mod tests {
             now: Some("2026-09-10T00:01:00Z".to_string()),
             deference_seconds_per_step: 5,
             deference_max_seconds: 60,
+            feature_flags: feature_flags.to_vec(),
         })
     }
 
@@ -1466,7 +1550,12 @@ mod tests {
             now: Some("2026-09-10T00:01:00Z".to_string()),
             deference_seconds_per_step: 5,
             deference_max_seconds: 60,
+            feature_flags: Vec::new(),
         })
+    }
+
+    fn capacity_budget_flags() -> Vec<String> {
+        vec!["queue_capacity_budget".to_string()]
     }
 
     fn waiter<'a>(
@@ -1556,13 +1645,58 @@ mod tests {
     fn explicit_capacity_cannot_bypass_global_budget() {
         let occupied = running("occupied", Some(1.0));
         let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-        waiter.wait_runners = Some(99);
-        waiter.wait_runners_explicit = true;
+        waiter.queue_capacity = Some(99);
+        waiter.queue_capacity_explicit = true;
 
         let result = snapshot(1.0, vec![occupied, waiter]);
         assert!(result.first_eligible_artifact_dir.is_none());
         assert_eq!(result.waiters[0].blockers[0].code, "insufficient-capacity");
         assert_eq!(result.waiters[0].wait_capacity_shortfall, 0.0);
+    }
+
+    #[test]
+    fn capacity_budget_can_exceed_global_limit() {
+        let flags = capacity_budget_flags();
+        let occupied = running("occupied", Some(1.0));
+        let mut waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(1.0));
+        waiting_agent.queue_capacity = Some(100);
+        waiting_agent.queue_capacity_explicit = true;
+
+        let result =
+            snapshot_with_flags(1.0, vec![occupied, waiting_agent], &flags);
+        assert_eq!(
+            result.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert_eq!(result.occupied_capacity, 1.0);
+        assert_eq!(result.effective_limit, 1.0);
+        let waiter = waiter(&result, "waiter");
+        assert!(waiter.eligible);
+        assert_eq!(waiter.admission_limit, 100.0);
+        assert_eq!(waiter.capacity_shortfall, 0.0);
+        assert_eq!(waiter.wait_capacity_shortfall, 0.0);
+    }
+
+    #[test]
+    fn capacity_budget_below_global_limit_is_strict() {
+        let flags = capacity_budget_flags();
+        let occupied = running("occupied", Some(1.0));
+        let mut waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(1.0));
+        waiting_agent.queue_capacity = Some(1);
+        waiting_agent.queue_capacity_explicit = true;
+
+        let result =
+            snapshot_with_flags(8.0, vec![occupied, waiting_agent], &flags);
+        assert!(result.first_eligible_artifact_dir.is_none());
+        let waiter = waiter(&result, "waiter");
+        assert!(!waiter.eligible);
+        assert_eq!(waiter.admission_limit, 1.0);
+        assert_eq!(waiter.capacity_shortfall, 1.0);
+        assert_eq!(waiter.wait_capacity_shortfall, 0.0);
+        assert_eq!(waiter.blockers[0].code, "insufficient-capacity");
+        assert_eq!(waiter.blockers[0].admission_limit, Some(1.0));
     }
 
     #[test]
@@ -1572,8 +1706,8 @@ mod tests {
             .collect();
         let mut waiting_agent =
             waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-        waiting_agent.wait_runners = Some(1);
-        waiting_agent.wait_runners_explicit = true;
+        waiting_agent.queue_capacity = Some(1);
+        waiting_agent.queue_capacity_explicit = true;
         records.push(waiting_agent);
 
         let result = snapshot(8.0, records);
@@ -1591,8 +1725,8 @@ mod tests {
     fn one_heavy_claim_exceeds_capacity_one() {
         let occupied = running("heavy", Some(2.0));
         let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-        waiter.wait_runners = Some(1);
-        waiter.wait_runners_explicit = true;
+        waiter.queue_capacity = Some(1);
+        waiter.queue_capacity_explicit = true;
 
         let result = snapshot(8.0, vec![occupied, waiter]);
         assert!(result.first_eligible_artifact_dir.is_none());
@@ -1606,8 +1740,8 @@ mod tests {
     fn capacity_zero_is_true_drain_including_tiny_weight() {
         let occupied = running("tiny", Some(f64::MIN_POSITIVE));
         let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-        waiter.wait_runners = Some(0);
-        waiter.wait_runners_explicit = true;
+        waiter.queue_capacity = Some(0);
+        waiter.queue_capacity_explicit = true;
 
         let blocked = snapshot(8.0, vec![occupied, waiter.clone()]);
         assert!(blocked.first_eligible_artifact_dir.is_none());
@@ -1617,9 +1751,65 @@ mod tests {
         occupied_drain_admits(waiter);
     }
 
+    #[test]
+    fn capacity_budget_one_is_drain_barrier() {
+        let flags = capacity_budget_flags();
+        let occupied = running("occupied", Some(0.25));
+        let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", None);
+        waiter.queue_capacity = Some(1);
+        waiter.queue_capacity_explicit = true;
+
+        let blocked =
+            snapshot_with_flags(8.0, vec![occupied, waiter.clone()], &flags);
+        assert!(blocked.first_eligible_artifact_dir.is_none());
+        assert_eq!(
+            blocked.waiters[0].blockers[0].code,
+            "insufficient-capacity"
+        );
+        assert_eq!(blocked.waiters[0].admission_limit, 1.0);
+
+        let drained = snapshot_with_flags(8.0, vec![waiter], &flags);
+        assert_eq!(
+            drained.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(drained.waiters[0].eligible);
+    }
+
+    #[test]
+    fn legacy_capacity_zero_translates_under_capacity_budget() {
+        let flags = capacity_budget_flags();
+        let occupied = running("occupied", Some(0.1));
+        let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+        waiter.queue_capacity = Some(0);
+        waiter.queue_capacity_explicit = true;
+
+        let blocked =
+            snapshot_with_flags(8.0, vec![occupied, waiter.clone()], &flags);
+        assert!(blocked.first_eligible_artifact_dir.is_none());
+        assert_eq!(blocked.waiters[0].admission_limit, 0.25);
+        assert_eq!(
+            blocked.waiters[0].blockers[0].code,
+            "insufficient-capacity"
+        );
+        assert_eq!(blocked.waiters[0].wait_capacity_shortfall, 0.0);
+        assert!(blocked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "legacy-capacity-zero"));
+
+        let drained = snapshot_with_flags(8.0, vec![waiter], &flags);
+        assert_eq!(
+            drained.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(drained.waiters[0].eligible);
+        assert_eq!(drained.waiters[0].admission_limit, 0.25);
+    }
+
     fn occupied_drain_admits(mut waiter: RunnerCapacityRecordWire) {
-        waiter.wait_runners = Some(0);
-        waiter.wait_runners_explicit = true;
+        waiter.queue_capacity = Some(0);
+        waiter.queue_capacity_explicit = true;
         let drained = snapshot(8.0, vec![waiter]);
         assert_eq!(
             drained.first_eligible_artifact_dir.as_deref(),
@@ -1627,6 +1817,39 @@ mod tests {
         );
         assert!(drained.waiters[0].eligible);
         assert_eq!(drained.waiters[0].wait_capacity_shortfall, 0.0);
+    }
+
+    #[test]
+    fn legacy_wait_runners_aliases_deserialize_to_queue_capacity() {
+        let record: RunnerCapacityRecordWire =
+            serde_json::from_value(serde_json::json!({
+                "artifact_dir": "/tmp/waiter",
+                "project_name": "proj",
+                "timestamp": "waiter",
+                "wait_runners": 3,
+                "wait_runners_explicit": true
+            }))
+            .unwrap();
+        assert_eq!(record.queue_capacity, Some(3));
+        assert!(record.queue_capacity_explicit);
+        let encoded = serde_json::to_value(&record).unwrap();
+        assert_eq!(encoded["queue_capacity"], serde_json::json!(3));
+        assert!(encoded.get("wait_runners").is_none());
+
+        let waiter: RunnerCapacityWaiterWire =
+            serde_json::from_value(serde_json::json!({
+                "artifact_dir": "/tmp/waiter",
+                "queue_position": 1,
+                "priority": 10,
+                "slot_requested_at": "2026-09-10T00:00:00Z",
+                "timestamp": "waiter",
+                "requested_weight": 1.0,
+                "wait_runners": 3,
+                "admission_limit": 3.0,
+                "eligible": false
+            }))
+            .unwrap();
+        assert_eq!(waiter.queue_capacity, Some(3));
     }
 
     #[test]
@@ -1638,8 +1861,8 @@ mod tests {
         serial_child.parent_timestamp = Some("serial-root".to_string());
         let mut waiting_agent =
             waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-        waiting_agent.wait_runners = Some(2);
-        waiting_agent.wait_runners_explicit = true;
+        waiting_agent.queue_capacity = Some(2);
+        waiting_agent.queue_capacity_explicit = true;
 
         let result =
             snapshot(8.0, vec![serial_root, serial_child, waiting_agent]);

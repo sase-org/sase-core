@@ -42,7 +42,8 @@ use crate::fenced_code::{
 };
 use crate::prompt_literals::inline_code_ranges;
 use crate::queue_directive::{
-    collect_queue_fields, QueueArgWire, QueueFieldsWire, QueueOccurrenceWire,
+    collect_queue_fields_with_flags, QueueArgWire, QueueFieldsWire,
+    QueueOccurrenceWire,
 };
 use crate::xprompt_text_block::find_text_block_close_for_args;
 use chrono::{Duration, NaiveDateTime};
@@ -999,6 +1000,7 @@ pub fn plan_typed_launch_units_with_flags(
         raw_units.push(classify_typed_launch_unit(
             slot,
             plan_project.as_deref(),
+            _enabled_feature_flags,
             &mut diagnostics,
         ));
     }
@@ -1067,6 +1069,7 @@ struct ParsedProcDirective {
 fn classify_typed_launch_unit(
     slot: &LaunchFanoutSlotWire,
     selected_project: Option<&str>,
+    enabled_feature_flags: &[String],
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) -> RawLaunchUnit {
     let prompt = slot.prompt.as_str();
@@ -1389,7 +1392,10 @@ fn classify_typed_launch_unit(
         if proc_code.is_some() {
             proc_forbidden_directives.push("%queue".to_string());
         } else {
-            let collected = collect_queue_fields(&queue_occurrences);
+            let collected = collect_queue_fields_with_flags(
+                &queue_occurrences,
+                enabled_feature_flags,
+            );
             for error in collected.errors {
                 diagnostics.push(typed_unit_diagnostic(
                     &error.code,
@@ -1525,7 +1531,7 @@ fn classify_typed_launch_unit(
             auto_enabled,
             auto_mode,
             finalizers,
-            wait_runners: wait_queue.capacity,
+            wait_runners: wait_queue.queue_capacity,
             wait_priority: wait_queue.priority,
             queue_weight: wait_queue.weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
