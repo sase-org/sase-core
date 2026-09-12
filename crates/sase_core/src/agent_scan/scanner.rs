@@ -1087,6 +1087,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         agent_family,
         agent_family_role,
         agent_family_parallel: legacy_parallel,
+        source_machine: coerce_str(data.get("source_machine")),
         imported_source_owner: coerce_imported_source_owner(
             data.get("imported_source_owner"),
         ),
@@ -1381,6 +1382,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         imported_transaction_key: coerce_str(
             data.get("imported_transaction_key"),
         ),
+        source_machine: coerce_str(data.get("source_machine")),
         imported_source_owner: coerce_imported_source_owner(
             data.get("imported_source_owner"),
         ),

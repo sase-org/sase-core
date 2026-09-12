@@ -206,6 +206,8 @@ pub struct DoneMarkerWire {
     #[serde(default)]
     pub imported_transaction_key: Option<String>,
     #[serde(default)]
+    pub source_machine: Option<String>,
+    #[serde(default)]
     pub imported_source_owner: Option<ImportedSourceOwnerWire>,
     #[serde(default)]
     pub status_label: Option<String>,
@@ -523,6 +525,8 @@ pub struct AgentMetaWire {
     pub agent_family_role: Option<String>,
     #[serde(default)]
     pub agent_family_parallel: bool,
+    #[serde(default)]
+    pub source_machine: Option<String>,
     #[serde(default)]
     pub imported_source_owner: Option<ImportedSourceOwnerWire>,
     #[serde(default)]

@@ -44,7 +44,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 27;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 28;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -216,6 +216,7 @@ pub enum AgentArtifactCandidateFieldWire {
     Cl,
     Model,
     Provider,
+    Machine,
     Type,
 }
 
@@ -1209,6 +1210,7 @@ pub fn query_agent_artifact_index(
                     include_hidden: query.include_hidden,
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
+                    candidate_filter: query.candidate_filter.clone(),
                 },
                 &mut stats,
                 &mut by_dir,
@@ -1230,6 +1232,7 @@ pub fn query_agent_artifact_index(
                     include_hidden: query.include_hidden,
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
+                    candidate_filter: query.candidate_filter.clone(),
                 },
                 &mut stats,
                 &mut by_dir,
@@ -1251,6 +1254,7 @@ pub fn query_agent_artifact_index(
                     include_hidden: query.include_hidden,
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
+                    candidate_filter: query.candidate_filter.clone(),
                 },
                 &mut stats,
                 &mut by_dir,
@@ -2570,6 +2574,7 @@ fn open_index_with_busy_timeout(
             started_at TEXT,
             finished_at REAL,
             done_outcome TEXT,
+            source_machine TEXT,
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
@@ -2770,11 +2775,17 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 27) {
         migrate_record_json_refresh_v27(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 28) {
+        ensure_agent_artifacts_column(&conn, "source_machine", "TEXT")?;
+        migrate_source_machine_projection_v28(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_done_outcome \
          ON agent_artifacts(done_outcome); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_source_machine \
+         ON agent_artifacts(source_machine); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
          ON agent_artifacts(agent_clan, agent_clan_generation, timestamp);",
     )
@@ -3247,6 +3258,43 @@ fn migrate_record_json_refresh_v27(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v28 adds the scalar source-machine projection for machine candidate filters.
+fn migrate_source_machine_projection_v28(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>)> = {
+        let mut stmt = tx
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut machines = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let from_record =
+                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+                    .ok()
+                    .and_then(|record| source_machine_from_record(&record));
+            let source_machine = from_record.or_else(|| {
+                source_machine_from_marker_files(Path::new(&artifact_dir))
+            });
+            machines.push((artifact_dir, source_machine));
+        }
+        machines
+    };
+    for (artifact_dir, source_machine) in rows {
+        tx.execute(
+            "UPDATE agent_artifacts SET source_machine = ?1 \
+             WHERE artifact_dir = ?2",
+            params![source_machine, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -3311,13 +3359,13 @@ fn upsert_record(
             running_sig, waiting_sig, pending_question_sig,
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
-            model_alias_origin, done_outcome, indexed_at
+            model_alias_origin, done_outcome, source_machine, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, ?46, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, ?46, ?47, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -3365,6 +3413,7 @@ fn upsert_record(
             record_json = excluded.record_json,
             model_alias_origin = excluded.model_alias_origin,
             done_outcome = excluded.done_outcome,
+            source_machine = excluded.source_machine,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -3414,6 +3463,7 @@ fn upsert_record(
             record_json,
             summary.model_alias_origin,
             done_outcome,
+            summary.source_machine,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -3826,38 +3876,16 @@ fn select_records(
     options: &AgentArtifactScanOptionsWire,
     project_filter: Option<&BTreeSet<String>>,
 ) -> Result<(), String> {
-    let mut sql = format!(
-        "SELECT artifact_dir, projects_root, record_json, \
-         agent_meta_sig, done_sig, running_sig, waiting_sig, \
-         pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig \
-         FROM agent_artifacts {}",
-        query.where_sql
-    );
-    if query.limit.is_some() {
-        sql.push_str(" LIMIT ?1");
-    }
-
-    let mut pending: Vec<PendingRow> = Vec::new();
+    if query.candidate_filter.is_some()
+        && query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
     {
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = if let Some(limit) = query.limit {
-            stmt.query([limit]).map_err(|e| e.to_string())?
-        } else {
-            stmt.query([]).map_err(|e| e.to_string())?
-        };
-
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
-            if by_dir.contains_key(&artifact_dir) {
-                continue;
-            }
-            pending.push(pending_row_from_sql_with_artifact_dir(
-                row,
-                artifact_dir,
-            )?);
-        }
+        refresh_stale_rows(conn, &query.where_sql, options)?;
     }
+    let pending = if query.candidate_filter.is_some() {
+        select_pending_rows_for_candidate_filter(conn, &query, by_dir)?
+    } else {
+        select_pending_rows_for_query(conn, &query, by_dir)?
+    };
 
     for row in pending {
         let record = match query.freshness {
@@ -3935,6 +3963,114 @@ fn select_records(
     Ok(())
 }
 
+fn select_pending_rows_for_query(
+    conn: &Connection,
+    query: &SelectRecordsQuery,
+    by_dir: &BTreeMap<String, AgentArtifactRecordWire>,
+) -> Result<Vec<PendingRow>, String> {
+    let mut sql = format!(
+        "SELECT artifact_dir, projects_root, record_json, \
+         agent_meta_sig, done_sig, running_sig, waiting_sig, \
+         pending_question_sig, workflow_state_sig, plan_path_sig, \
+         prompt_steps_sig, xprompts_sig \
+         FROM agent_artifacts {}",
+        query.where_sql
+    );
+    if query.limit.is_some() {
+        sql.push_str(" LIMIT ?1");
+    }
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut rows = if let Some(limit) = query.limit {
+        stmt.query([limit]).map_err(|e| e.to_string())?
+    } else {
+        stmt.query([]).map_err(|e| e.to_string())?
+    };
+
+    let mut pending = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+        if by_dir.contains_key(&artifact_dir) {
+            continue;
+        }
+        pending
+            .push(pending_row_from_sql_with_artifact_dir(row, artifact_dir)?);
+    }
+    Ok(pending)
+}
+
+fn select_pending_rows_for_candidate_filter(
+    conn: &Connection,
+    query: &SelectRecordsQuery,
+    by_dir: &BTreeMap<String, AgentArtifactRecordWire>,
+) -> Result<Vec<PendingRow>, String> {
+    let Some(filter) = query.candidate_filter.as_ref() else {
+        return select_pending_rows_for_query(conn, query, by_dir);
+    };
+    let candidates = select_candidate_rows(
+        conn,
+        query.where_sql.clone(),
+        CandidateSelection::from_record_selection(query.selection),
+    )?;
+
+    let mut artifact_dirs = Vec::new();
+    for row in candidates {
+        if by_dir.contains_key(&row.artifact_dir) {
+            continue;
+        }
+        if !candidate_filter_matches(&row, filter) {
+            continue;
+        }
+        artifact_dirs.push(row.artifact_dir);
+        if query
+            .limit
+            .is_some_and(|limit| artifact_dirs.len() >= limit as usize)
+        {
+            break;
+        }
+    }
+
+    select_pending_rows_by_artifact_dirs(conn, &artifact_dirs)
+}
+
+fn select_pending_rows_by_artifact_dirs(
+    conn: &Connection,
+    artifact_dirs: &[String],
+) -> Result<Vec<PendingRow>, String> {
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    if artifact_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut rows_by_dir = BTreeMap::new();
+    for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT artifact_dir, projects_root, record_json, \
+             agent_meta_sig, done_sig, running_sig, waiting_sig, \
+             pending_question_sig, workflow_state_sig, plan_path_sig, \
+             prompt_steps_sig, xprompts_sig \
+             FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            rows_by_dir.insert(
+                artifact_dir.clone(),
+                pending_row_from_sql_with_artifact_dir(row, artifact_dir)?,
+            );
+        }
+    }
+
+    Ok(artifact_dirs
+        .iter()
+        .filter_map(|artifact_dir| rows_by_dir.remove(artifact_dir))
+        .collect())
+}
+
 fn pending_row_from_sql(row: &rusqlite::Row<'_>) -> Result<PendingRow, String> {
     let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
     pending_row_from_sql_with_artifact_dir(row, artifact_dir)
@@ -4002,12 +4138,24 @@ struct SelectRecordsQuery {
     include_hidden: bool,
     freshness: AgentArtifactIndexFreshnessWire,
     only_monitors: bool,
+    candidate_filter: Option<AgentArtifactCandidateFilterWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CandidateSelection {
     Active,
     Completed,
+    Visible,
+}
+
+impl CandidateSelection {
+    fn from_record_selection(selection: RecordSelection) -> Self {
+        match selection {
+            RecordSelection::Active => Self::Active,
+            RecordSelection::Completed => Self::Completed,
+            RecordSelection::Visible => Self::Visible,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -4018,6 +4166,7 @@ struct IndexedCandidateRow {
     cl_name: Option<String>,
     model: Option<String>,
     llm_provider: Option<String>,
+    source_machine: Option<String>,
     selection: CandidateSelection,
 }
 
@@ -4038,6 +4187,19 @@ impl IndexedCandidateRow {
             }
             AgentArtifactCandidateFieldWire::Provider => {
                 self.llm_provider.as_deref().into_iter().collect()
+            }
+            AgentArtifactCandidateFieldWire::Machine => {
+                let mut values = vec!["here"];
+                if let Some(machine) = self
+                    .source_machine
+                    .as_deref()
+                    .filter(|machine| !machine.trim().is_empty())
+                {
+                    if !machine.eq_ignore_ascii_case("here") {
+                        values.push(machine);
+                    }
+                }
+                values
             }
             AgentArtifactCandidateFieldWire::Type => {
                 vec![self.agent_type.as_str()]
@@ -4136,7 +4298,8 @@ fn select_candidate_rows(
     selection: CandidateSelection,
 ) -> Result<Vec<IndexedCandidateRow>, String> {
     let sql = format!(
-        "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider \
+        "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider, \
+         source_machine \
          FROM agent_artifacts {where_sql}"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -4150,6 +4313,7 @@ fn select_candidate_rows(
             cl_name: row.get(3).map_err(|e| e.to_string())?,
             model: row.get(4).map_err(|e| e.to_string())?,
             llm_provider: row.get(5).map_err(|e| e.to_string())?,
+            source_machine: row.get(6).map_err(|e| e.to_string())?,
             selection,
         });
     }
@@ -4196,6 +4360,7 @@ fn select_records_for_windowed_candidates(
             let selection = match candidate.selection {
                 CandidateSelection::Active => RecordSelection::Active,
                 CandidateSelection::Completed => RecordSelection::Completed,
+                CandidateSelection::Visible => RecordSelection::Visible,
             };
             if record_matches_selection(
                 conn,
@@ -5364,6 +5529,7 @@ struct RecordSummary {
     retry_chain_root_timestamp: Option<String>,
     retry_attempt: Option<i64>,
     model_alias_origin: Option<String>,
+    source_machine: Option<String>,
 }
 
 impl RecordSummary {
@@ -5456,8 +5622,67 @@ impl RecordSummary {
                 }),
             retry_attempt: meta.and_then(|m| m.retry_attempt),
             model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
+            source_machine: source_machine_from_record(record),
         }
     }
+}
+
+fn source_machine_from_record(
+    record: &AgentArtifactRecordWire,
+) -> Option<String> {
+    let meta = record.agent_meta.as_ref();
+    let done = record.done.as_ref();
+    first_source_machine([
+        meta.and_then(|marker| marker.source_machine.as_deref()),
+        meta.and_then(|marker| {
+            marker
+                .imported_source_owner
+                .as_ref()
+                .map(|owner| owner.machine_name.as_str())
+        }),
+        done.and_then(|marker| marker.source_machine.as_deref()),
+        done.and_then(|marker| {
+            marker
+                .imported_source_owner
+                .as_ref()
+                .map(|owner| owner.machine_name.as_str())
+        }),
+    ])
+}
+
+fn source_machine_from_marker_files(artifact_dir: &Path) -> Option<String> {
+    ["agent_meta.json", "done.json"]
+        .into_iter()
+        .filter_map(|name| {
+            fs::read_to_string(artifact_dir.join(name))
+                .ok()
+                .and_then(|raw| {
+                    serde_json::from_str::<serde_json::Value>(&raw).ok()
+                })
+                .and_then(|value| source_machine_from_json_value(&value))
+        })
+        .find(|value| !value.is_empty())
+}
+
+fn source_machine_from_json_value(value: &serde_json::Value) -> Option<String> {
+    first_source_machine([
+        value.get("source_machine").and_then(|value| value.as_str()),
+        value
+            .get("imported_source_owner")
+            .and_then(|owner| owner.get("machine_name"))
+            .and_then(|value| value.as_str()),
+    ])
+}
+
+fn first_source_machine<'a>(
+    values: impl IntoIterator<Item = Option<&'a str>>,
+) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn summary_finished_at(
@@ -5913,6 +6138,289 @@ mod tests {
         assert_eq!(window.selected_candidate_count, 1);
         assert_eq!(window.completed_candidate_count, 1);
         assert!(!window.has_more);
+    }
+
+    #[test]
+    fn full_history_query_applies_candidate_filter_before_decoding() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let keep = artifact_for_project(&projects, "proj", "20260827102000");
+        let wrong_model =
+            artifact_for_project(&projects, "proj", "20260827102100");
+        let wrong_project =
+            artifact_for_project(&projects, "other", "20260827102200");
+        for (artifact_dir, name, model, provider) in [
+            (&keep, "keep", "claude-opus-4", "anthropic"),
+            (&wrong_model, "wrong-model", "gpt-5", "openai"),
+            (
+                &wrong_project,
+                "wrong-project",
+                "claude-opus-4",
+                "anthropic",
+            ),
+        ] {
+            write_json(
+                &artifact_dir.join("agent_meta.json"),
+                json!({
+                    "name": name,
+                    "cl_name": "target-cl",
+                    "model": model,
+                    "llm_provider": provider,
+                }),
+            );
+            write_json(
+                &artifact_dir.join("done.json"),
+                json!({
+                    "outcome": "completed",
+                    "name": name,
+                    "cl_name": "target-cl"
+                }),
+            );
+        }
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        Connection::open(&index)
+            .unwrap()
+            .execute(
+                "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+                params!["{not valid json", wrong_model.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: Some(AgentArtifactCandidateFilterWire::All {
+                    filters: vec![
+                        AgentArtifactCandidateFilterWire::Any {
+                            filters: vec![
+                                AgentArtifactCandidateFilterWire::Contains {
+                                    field: AgentArtifactCandidateFieldWire::Model,
+                                    value: "opus".to_string(),
+                                },
+                                AgentArtifactCandidateFilterWire::Equals {
+                                    field: AgentArtifactCandidateFieldWire::Provider,
+                                    value: "anthropic".to_string(),
+                                },
+                            ],
+                        },
+                        AgentArtifactCandidateFilterWire::Not {
+                            filter: Box::new(
+                                AgentArtifactCandidateFilterWire::Contains {
+                                    field: AgentArtifactCandidateFieldWire::Project,
+                                    value: "other".to_string(),
+                                },
+                            ),
+                        },
+                    ],
+                }),
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].artifact_dir, keep.to_string_lossy());
+        assert_eq!(snapshot.stats.json_decode_errors, 0);
+        assert!(snapshot.index_window.is_none());
+    }
+
+    #[test]
+    fn machine_candidate_column_is_populated_and_queryable() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let local = artifact(&projects, "20260827103000");
+        let from_meta = artifact(&projects, "20260827103100");
+        let from_done = artifact(&projects, "20260827103200");
+        write_json(&local.join("agent_meta.json"), json!({"name": "local"}));
+        write_json(
+            &from_meta.join("agent_meta.json"),
+            json!({"name": "from-meta", "source_machine": "apollo"}),
+        );
+        write_json(
+            &from_done.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": "from-done",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "zeus"
+                }
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let conn = Connection::open(&index).unwrap();
+        let source_machines = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT timestamp, source_machine FROM agent_artifacts \
+                     ORDER BY timestamp",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                })
+                .unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(
+            source_machines,
+            vec![
+                ("20260827103000".to_string(), None),
+                ("20260827103100".to_string(), Some("apollo".to_string())),
+                ("20260827103200".to_string(), Some("zeus".to_string())),
+            ]
+        );
+
+        let apollo = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                candidate_filter: Some(
+                    AgentArtifactCandidateFilterWire::Equals {
+                        field: AgentArtifactCandidateFieldWire::Machine,
+                        value: "apollo".to_string(),
+                    },
+                ),
+                ..AgentArtifactIndexQueryWire::default()
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(apollo.records.len(), 1);
+        assert_eq!(apollo.records[0].artifact_dir, from_meta.to_string_lossy());
+
+        let not_apollo = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: false,
+                include_full_history: true,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                candidate_filter: Some(AgentArtifactCandidateFilterWire::Not {
+                    filter: Box::new(
+                        AgentArtifactCandidateFilterWire::Equals {
+                            field: AgentArtifactCandidateFieldWire::Machine,
+                            value: "apollo".to_string(),
+                        },
+                    ),
+                }),
+                ..AgentArtifactIndexQueryWire::default()
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = not_apollo
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(
+            timestamps,
+            BTreeSet::from(["20260827103000", "20260827103200"])
+        );
+    }
+
+    #[test]
+    fn schema_v27_upgrade_adds_and_backfills_source_machine_projection() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827104000");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({"name": "legacy", "source_machine": "apollo"}),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            let legacy_record = json!({
+                "project_name": "proj",
+                "project_dir": projects.join("proj").to_string_lossy(),
+                "project_file": projects.join("proj").join("proj.sase").to_string_lossy(),
+                "workflow_dir_name": "ace-run",
+                "artifact_dir": artifact_dir.to_string_lossy(),
+                "timestamp": "20260827104000",
+                "agent_meta": {"name": "legacy"},
+                "prompt_steps": [],
+                "has_done_marker": false
+            });
+            conn.execute(
+                "UPDATE agent_artifacts SET record_json = ?1 WHERE artifact_dir = ?2",
+                params![
+                    legacy_record.to_string(),
+                    artifact_dir.to_string_lossy().as_ref()
+                ],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_agent_artifacts_source_machine;
+                 ALTER TABLE agent_artifacts DROP COLUMN source_machine;
+                 INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '27');",
+            )
+            .unwrap();
+        }
+
+        drop(open_index(&index).unwrap());
+
+        let conn = Connection::open(&index).unwrap();
+        let source_machine: Option<String> = conn
+            .query_row(
+                "SELECT source_machine FROM agent_artifacts \
+                 WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_machine.as_deref(), Some("apollo"));
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
     }
 
     #[test]
