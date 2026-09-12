@@ -788,9 +788,22 @@ fn build_snapshot_blocking(
     let build_instant = Instant::now();
     let now_unix = current_unix_time();
 
-    // Obtain dismissal-lineage facts through the bounded core index API and
-    // resolve owner liveness once per candidate, so both are computed a
+    // Resolve owner liveness and obtain dismissal-lineage facts through the
+    // bounded core index API once per candidate, so both are computed a
     // single time per record instead of being re-derived per read path.
+    // Liveness comes first: a definitively dead, unprotected record is
+    // terminal for presentation even while its markers still claim an active
+    // lifecycle, so the lineage lookup must honor that record's own dismissal.
+    let liveness_by_identity: BTreeMap<String, OwnerLivenessWire> = scan
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.artifact_dir.clone(),
+                owner_liveness_for_record(record),
+            )
+        })
+        .collect();
     let lineage_candidates: Vec<FamilyDismissalLineageCandidateWire> = scan
         .records
         .iter()
@@ -799,6 +812,14 @@ fn build_snapshot_blocking(
             project_name: record.project_name.clone(),
             workflow_dir_name: record.workflow_dir_name.clone(),
             timestamp: record.timestamp.clone(),
+            seed_definitively_dead: record.waiting.is_none()
+                && record.pending_question.is_none()
+                && matches!(
+                    liveness_by_identity.get(&record.artifact_dir),
+                    Some(
+                        OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+                    )
+                ),
         })
         .collect();
     let dismissed_by_identity: BTreeMap<String, bool> =
@@ -813,11 +834,12 @@ fn build_snapshot_blocking(
         .map(|result| (result.identity, result.family_root_dismissed))
         .collect();
 
-    let mut liveness_by_identity = BTreeMap::new();
     let mut presentation_candidates = Vec::with_capacity(scan.records.len());
     for record in &scan.records {
-        let liveness = owner_liveness_for_record(record);
-        liveness_by_identity.insert(record.artifact_dir.clone(), liveness);
+        let liveness = liveness_by_identity
+            .get(&record.artifact_dir)
+            .copied()
+            .unwrap_or(OwnerLivenessWire::Unknown);
         presentation_candidates.push(FleetPresentationCandidateWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             identity: record.artifact_dir.clone(),
@@ -2657,6 +2679,78 @@ mod tests {
             "a dead root and its dead member must both be excluded once the \
              family root is dismissed: {:?}",
             all.page.rows
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_dismissed_workflow_run_is_excluded_from_catalog() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let timestamp = recent_timestamp(10);
+        seed_dead_agent(&projects, &timestamp, "killed", None);
+        // A force-killed `#gh:` workflow run never finalizes its workflow
+        // state, so the owner index still sees an active `workflow` record
+        // while the kill path recorded a `run` dismissal for it.
+        write_json(
+            &projects
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join(&timestamp)
+                .join("workflow_state.json"),
+            json!({
+                "workflow_name": "gh",
+                "cl_name": "proj",
+                "status": "running",
+                "appears_as_agent": true
+            }),
+        );
+        let index = home.join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let before = FleetReadService::new(home.clone())
+            .catalog(catalog_query())
+            .await
+            .unwrap();
+        assert_eq!(
+            before.page.rows.len(),
+            1,
+            "an undismissed dead run stays presentable as recent terminal"
+        );
+
+        sase_core::replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[sase_core::AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "proj".to_string(),
+                raw_suffix: Some(timestamp.clone()),
+            }],
+        )
+        .unwrap();
+        let service = FleetReadService::new(home);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        assert!(
+            presentation.page.rows.is_empty(),
+            "a definitively dead run must honor its own dismissal even while \
+             its workflow state still claims running: {:?}",
+            presentation.page.rows
+        );
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        assert!(
+            history.page.rows.is_empty(),
+            "history applies the same dismissal filter: {:?}",
+            history.page.rows
         );
     }
 

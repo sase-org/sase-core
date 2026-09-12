@@ -2323,6 +2323,15 @@ pub struct FamilyDismissalLineageCandidateWire {
     pub project_name: String,
     pub workflow_dir_name: String,
     pub timestamp: String,
+    /// Caller-resolved evidence that the candidate's own process is
+    /// definitively gone: owner liveness `Dead`/`NotProcess`, with no waiting
+    /// marker or pending question protecting it. Such a record is terminal
+    /// even while its markers still claim an active lifecycle (a force-killed
+    /// workflow run never moves `workflow_state.json` off `running`), so a
+    /// dismissal of its own raw suffix is honored exactly as it is for any
+    /// other terminal record.
+    #[serde(default)]
+    pub seed_definitively_dead: bool,
 }
 
 struct DismissalReconcileCandidate {
@@ -2339,6 +2348,7 @@ impl From<DismissalReconcileCandidate> for FamilyDismissalLineageCandidateWire {
             project_name: candidate.project_name,
             workflow_dir_name: candidate.workflow_dir_name,
             timestamp: candidate.timestamp,
+            seed_definitively_dead: false,
         }
     }
 }
@@ -2357,10 +2367,12 @@ pub struct FamilyDismissalLineageResultWire {
 /// capped by `MAX_RELATED_ARTIFACT_QUERY_ITERATIONS` and
 /// `MAX_RELATED_ARTIFACT_LINEAGE_TIMESTAMPS`) to find the candidate's family
 /// root — the related record with no `parent_timestamp` — then checks
-/// whether that root's identity is a dismissed identity. When no root is
-/// discoverable within the bound, the candidate is reported as not
-/// dismissed: this API never manufactures a dismissal it cannot support with
-/// indexed evidence.
+/// whether that root's identity is a dismissed identity. A candidate flagged
+/// `seed_definitively_dead` is also dismissed when its own raw suffix is a
+/// dismissed identity, the same suffix match terminal records already get.
+/// When no root is discoverable within the bound, the candidate is reported
+/// as not dismissed: this API never manufactures a dismissal it cannot
+/// support with indexed evidence.
 pub fn resolve_family_dismissal_lineage(
     index_path: &Path,
     candidates: &[FamilyDismissalLineageCandidateWire],
@@ -2395,6 +2407,11 @@ fn family_root_dismissed_for_candidate(
         return Ok(false);
     };
     if dismissed_parent_suffix_for_seed(conn, &seed)? {
+        return Ok(true);
+    }
+    if candidate.seed_definitively_dead
+        && dismissed_raw_suffix_exists(conn, &seed.timestamp)?
+    {
         return Ok(true);
     }
     let mut timestamps: BTreeSet<String> = BTreeSet::new();
@@ -5023,6 +5040,11 @@ fn family_root_dismissed_from_snapshot(
         return false;
     };
     if dismissed_parent_suffix_from_index(&seed.lineage, dismissed) {
+        return true;
+    }
+    if candidate.seed_definitively_dead
+        && dismissed.suffix_exists(&seed.lineage.timestamp)
+    {
         return true;
     }
     let mut timestamps: BTreeSet<String> = BTreeSet::new();
@@ -7804,18 +7826,21 @@ mod tests {
                 project_name: "proj".to_string(),
                 workflow_dir_name: "ace-run".to_string(),
                 timestamp: "20260505120000".to_string(),
+                seed_definitively_dead: false,
             },
             FamilyDismissalLineageCandidateWire {
                 identity: "member".to_string(),
                 project_name: "proj".to_string(),
                 workflow_dir_name: "ace-run".to_string(),
                 timestamp: "20260505120500".to_string(),
+                seed_definitively_dead: false,
             },
             FamilyDismissalLineageCandidateWire {
                 identity: "unrelated".to_string(),
                 project_name: "proj".to_string(),
                 workflow_dir_name: "ace-run".to_string(),
                 timestamp: "20260505121000".to_string(),
+                seed_definitively_dead: false,
             },
         ];
 
@@ -7850,6 +7875,65 @@ mod tests {
             !dismissed_by_identity["unrelated"],
             "a parent pointer to a record outside the index must never be \
              treated as a dismissed root"
+        );
+    }
+
+    #[test]
+    fn resolve_family_dismissal_lineage_honors_dead_seed_own_dismissal() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let killed = artifact(&projects, "20260505130000");
+        write_json(&killed.join("agent_meta.json"), json!({"name": "killed"}));
+        // A force-killed workflow run never finalizes its workflow state, so
+        // the index still classifies an active `workflow` record while the
+        // kill path recorded a `run` dismissal for it.
+        write_json(
+            &killed.join("workflow_state.json"),
+            json!({
+                "workflow_name": "gh",
+                "cl_name": "proj",
+                "status": "running",
+                "appears_as_agent": true
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "proj".to_string(),
+                raw_suffix: Some("20260505130000".to_string()),
+            }],
+        )
+        .unwrap();
+        let candidate =
+            |seed_definitively_dead| FamilyDismissalLineageCandidateWire {
+                identity: "killed".to_string(),
+                project_name: "proj".to_string(),
+                workflow_dir_name: "ace-run".to_string(),
+                timestamp: "20260505130000".to_string(),
+                seed_definitively_dead,
+            };
+
+        let unproven =
+            resolve_family_dismissal_lineage(&index, &[candidate(false)])
+                .unwrap();
+        assert!(
+            !unproven[0].family_root_dismissed,
+            "without liveness evidence an active record keeps the strict \
+             identity match: {unproven:?}"
+        );
+        let dead = resolve_family_dismissal_lineage(&index, &[candidate(true)])
+            .unwrap();
+        assert!(
+            dead[0].family_root_dismissed,
+            "a definitively dead record honors its own dismissal: {dead:?}"
         );
     }
 
