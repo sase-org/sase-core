@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.19](https://github.com/sase-org/sase-core/compare/v0.34.18...v0.34.19) - 2026-09-12
+
+### Added
+
+- Shared bead decision contract (sase-zq.1)
+
 ### Added
 
 - *(bead-action)* add explicit close/keep policy and assigned-bead finalizer context
