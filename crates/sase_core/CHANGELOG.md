@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.17](https://github.com/sase-org/sase-core/compare/v0.34.16...v0.34.17) - 2026-09-12
+
+### Added
+
+- *(continuation)* freeze validated monitor outcome policies
+
 ## [0.34.16](https://github.com/sase-org/sase-core/compare/v0.34.15...v0.34.16) - 2026-09-12
 
 ### Fixed
