@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.22](https://github.com/sase-org/sase-core/compare/v0.34.21...v0.34.22) - 2026-09-12
+
+### Added
+
+- make queue capacity an admission budget
+
 ## [0.34.21](https://github.com/sase-org/sase-core/compare/v0.34.20...v0.34.21) - 2026-09-12
 
 ### Added
