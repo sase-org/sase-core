@@ -593,9 +593,10 @@ pub use content_layout::{
     SKILL_NAMESPACE_SEGMENT,
 };
 pub use continuation::{
-    freeze_continuation_policy, plan_continuation_budget,
-    plan_continuation_replay, resolve_continuation_policy,
-    select_continuation_evidence, validate_agent_delta,
+    freeze_continuation_policy, new_continuation_delivery_record,
+    plan_continuation_budget, plan_continuation_replay,
+    resolve_continuation_policy, select_continuation_evidence,
+    transition_continuation_delivery, validate_agent_delta,
     validate_continuation_delivery_record, validate_continuation_graph,
     validate_continuation_intent, validate_continuation_node,
     validate_continuation_node_value, validate_continuation_policy,
@@ -607,7 +608,8 @@ pub use continuation::{
     ContinuationBudgetReserveWire, ContinuationByteRangeWire,
     ContinuationCheckpointCoverageWire, ContinuationDeliveryAttemptWire,
     ContinuationDeliveryDispositionWire, ContinuationDeliveryKeyWire,
-    ContinuationDeliveryRecordWire, ContinuationError,
+    ContinuationDeliveryNewRequestWire, ContinuationDeliveryRecordWire,
+    ContinuationDeliveryTransitionRequestWire, ContinuationError,
     ContinuationEvidenceContextKindWire, ContinuationEvidenceLimitsWire,
     ContinuationEvidencePolicyWire, ContinuationEvidenceSelectionRequestWire,
     ContinuationEvidenceSelectionWire, ContinuationExecutionIdentityWire,

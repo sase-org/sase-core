@@ -7,6 +7,7 @@
 pub mod budget;
 pub mod completion;
 pub mod completion_eval;
+pub mod delivery;
 pub mod evidence;
 pub mod policy;
 pub mod replay;
@@ -39,6 +40,11 @@ pub use completion_eval::{
     ConditionalCompletionConsumeRequestWire, ConditionalCompletionDecisionWire,
     ConditionalCompletionEvaluateRequestWire,
     ConditionalCompletionMessageRequestWire,
+};
+pub use delivery::{
+    new_continuation_delivery_record, transition_continuation_delivery,
+    ContinuationDeliveryNewRequestWire,
+    ContinuationDeliveryTransitionRequestWire,
 };
 pub use evidence::{
     select_continuation_evidence, ContinuationEvidenceContextKindWire,

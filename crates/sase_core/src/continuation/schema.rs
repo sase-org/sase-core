@@ -464,6 +464,10 @@ pub struct ContinuationDeliveryRecordWire {
     pub disposition: ContinuationDeliveryDispositionWire,
     #[serde(default)]
     pub disposition_reason: Option<String>,
+    #[serde(default)]
+    pub workspace_identity: Option<String>,
+    #[serde(default)]
+    pub workspace_degraded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,6 +738,10 @@ pub fn validate_continuation_delivery_record(
         "reserved_identity",
     )?;
     validate_optional_reference(&record.acknowledged_by, "acknowledged_by")?;
+    validate_optional_reference(
+        &record.workspace_identity,
+        "workspace_identity",
+    )?;
     if let Some(reason) = &record.disposition_reason {
         validate_text(reason, "disposition_reason", MAX_TEXT_BYTES)?;
     }

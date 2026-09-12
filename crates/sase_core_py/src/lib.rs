@@ -319,6 +319,8 @@
 //! - `continuation_validate_monitor_result(result: dict) -> dict`
 //! - `continuation_validate_diagnostic_manifest(manifest: dict) -> dict`
 //! - `continuation_validate_delivery_record(record: dict) -> dict`
+//! - `continuation_new_delivery_record(request: dict) -> dict`
+//! - `continuation_transition_delivery(request: dict) -> dict`
 //! - `continuation_plan_replay(request: dict) -> dict`
 //! - `continuation_select_evidence(request: dict) -> dict`
 //! - `continuation_resolve_policy(request: dict) -> dict`
@@ -1038,6 +1040,7 @@ use sase_core::continuation::{
     evaluate_conditional_completion as core_evaluate_conditional_completion,
     freeze_continuation_policy as core_freeze_continuation_policy,
     invalidate_conditional_completion_request as core_invalidate_conditional_completion,
+    new_continuation_delivery_record as core_new_continuation_delivery_record,
     plan_continuation_budget as core_plan_continuation_budget,
     plan_continuation_replay as core_plan_continuation_replay,
     preview_conditional_completion as core_preview_conditional_completion,
@@ -1046,6 +1049,7 @@ use sase_core::continuation::{
     rollback_conditional_completion_binding as core_rollback_conditional_completion_binding,
     seal_conditional_completion as core_seal_conditional_completion,
     select_continuation_evidence as core_select_continuation_evidence,
+    transition_continuation_delivery as core_transition_continuation_delivery,
     validate_agent_delta as core_validate_agent_delta,
     validate_conditional_completion_intent as core_validate_conditional_completion_intent,
     validate_continuation_delivery_record as core_validate_continuation_delivery_record,
@@ -1062,7 +1066,8 @@ use sase_core::continuation::{
     ConditionalCompletionMessageRequestWire,
     ConditionalCompletionPrepareRequestWire,
     ConditionalCompletionRollbackRequestWire, ContinuationBudgetRequestWire,
-    ContinuationDeliveryRecordWire, ContinuationError,
+    ContinuationDeliveryNewRequestWire, ContinuationDeliveryRecordWire,
+    ContinuationDeliveryTransitionRequestWire, ContinuationError,
     ContinuationEvidenceSelectionRequestWire, ContinuationIntentWire,
     ContinuationNodeWire, ContinuationOutcomePolicyWire,
     ContinuationPolicyFreezeRequestWire,
@@ -14522,6 +14527,38 @@ fn py_continuation_validate_delivery_record<'py>(
     )
 }
 
+/// Create a pending continuation delivery record.
+#[pyfunction]
+#[pyo3(name = "continuation_new_delivery_record")]
+fn py_continuation_new_delivery_record<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationDeliveryNewRequestWire =
+        continuation_wire_from_pydict(request, "delivery new request")?;
+    continuation_result_to_py(
+        py,
+        core_new_continuation_delivery_record(request),
+        "delivery new record",
+    )
+}
+
+/// Apply one pure continuation delivery transition.
+#[pyfunction]
+#[pyo3(name = "continuation_transition_delivery")]
+fn py_continuation_transition_delivery<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationDeliveryTransitionRequestWire =
+        continuation_wire_from_pydict(request, "delivery transition")?;
+    continuation_result_to_py(
+        py,
+        core_transition_continuation_delivery(request),
+        "delivery transition",
+    )
+}
+
 /// Validate one LaunchApproval requester-continuation contract.
 #[pyfunction]
 #[pyo3(name = "continuation_validate_launch_requester_continuation")]
@@ -17998,6 +18035,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_continuation_validate_delivery_record,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_new_delivery_record, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_transition_delivery, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_continuation_validate_launch_requester_continuation,
         m
@@ -21339,6 +21378,8 @@ COMMITS:
                 "continuation_validate_monitor_result",
                 "continuation_validate_diagnostic_manifest",
                 "continuation_validate_delivery_record",
+                "continuation_new_delivery_record",
+                "continuation_transition_delivery",
                 "continuation_plan_replay",
                 "continuation_select_evidence",
                 "continuation_resolve_policy",
