@@ -322,6 +322,8 @@
 //! - `continuation_plan_replay(request: dict) -> dict`
 //! - `continuation_select_evidence(request: dict) -> dict`
 //! - `continuation_resolve_policy(request: dict) -> dict`
+//! - `continuation_validate_policy(policy: dict) -> dict`
+//! - `continuation_freeze_policy(request: dict) -> dict`
 //! - `continuation_plan_budget(request: dict) -> dict`
 //! - `continuation_validate_conditional_completion(intent: dict) -> dict`
 //! - `continuation_seal_conditional_completion(request: dict) -> dict`
@@ -1034,6 +1036,7 @@ use sase_core::continuation::{
     bind_conditional_completion as core_bind_conditional_completion,
     consume_conditional_completion_request as core_consume_conditional_completion,
     evaluate_conditional_completion as core_evaluate_conditional_completion,
+    freeze_continuation_policy as core_freeze_continuation_policy,
     invalidate_conditional_completion_request as core_invalidate_conditional_completion,
     plan_continuation_budget as core_plan_continuation_budget,
     plan_continuation_replay as core_plan_continuation_replay,
@@ -1049,6 +1052,7 @@ use sase_core::continuation::{
     validate_continuation_graph as core_validate_continuation_graph,
     validate_continuation_intent as core_validate_continuation_intent,
     validate_continuation_node_value as core_validate_continuation_node_value,
+    validate_continuation_policy as core_validate_continuation_policy,
     validate_diagnostic_manifest as core_validate_diagnostic_manifest,
     validate_launch_requester_continuation as core_validate_launch_requester_continuation,
     validate_monitor_result as core_validate_monitor_result, AgentDeltaWire,
@@ -1060,9 +1064,10 @@ use sase_core::continuation::{
     ConditionalCompletionRollbackRequestWire, ContinuationBudgetRequestWire,
     ContinuationDeliveryRecordWire, ContinuationError,
     ContinuationEvidenceSelectionRequestWire, ContinuationIntentWire,
-    ContinuationNodeWire, ContinuationPolicyResolutionRequestWire,
-    ContinuationReplayPlanRequestWire, DiagnosticManifestWire,
-    LaunchRequesterContinuationWire, MonitorResultWire,
+    ContinuationNodeWire, ContinuationOutcomePolicyWire,
+    ContinuationPolicyFreezeRequestWire,
+    ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
+    DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
@@ -14581,6 +14586,38 @@ fn py_continuation_resolve_policy<'py>(
     )
 }
 
+/// Validate and normalize a versioned outcome-policy object.
+#[pyfunction]
+#[pyo3(name = "continuation_validate_policy")]
+fn py_continuation_validate_policy<'py>(
+    py: Python<'py>,
+    policy: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let policy: ContinuationOutcomePolicyWire =
+        continuation_wire_from_pydict(policy, "outcome policy")?;
+    continuation_result_to_py(
+        py,
+        core_validate_continuation_policy(policy),
+        "policy validation",
+    )
+}
+
+/// Freeze every outcome branch before monitor claim changes.
+#[pyfunction]
+#[pyo3(name = "continuation_freeze_policy")]
+fn py_continuation_freeze_policy<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationPolicyFreezeRequestWire =
+        continuation_wire_from_pydict(request, "policy freeze request")?;
+    continuation_result_to_py(
+        py,
+        core_freeze_continuation_policy(request),
+        "policy freeze",
+    )
+}
+
 /// Decide whether an expanded continuation fits the provider budget.
 #[pyfunction]
 #[pyo3(name = "continuation_plan_budget")]
@@ -17968,6 +18005,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_continuation_plan_replay, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_select_evidence, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_resolve_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_validate_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_freeze_policy, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_plan_budget, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_continuation_validate_conditional_completion,
@@ -21303,6 +21342,8 @@ COMMITS:
                 "continuation_plan_replay",
                 "continuation_select_evidence",
                 "continuation_resolve_policy",
+                "continuation_validate_policy",
+                "continuation_freeze_policy",
                 "continuation_plan_budget",
                 "continuation_validate_conditional_completion",
                 "continuation_seal_conditional_completion",

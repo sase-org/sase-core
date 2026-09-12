@@ -47,9 +47,12 @@ pub use evidence::{
     ContinuationEvidenceSelectionWire,
 };
 pub use policy::{
-    resolve_continuation_policy, ContinuationActionWire,
+    freeze_continuation_policy, resolve_continuation_policy,
+    validate_continuation_policy, ContinuationActionWire,
+    ContinuationFrozenBranchesWire, ContinuationFrozenPolicyWire,
     ContinuationOutcomePolicyWire, ContinuationPolicyBranchWire,
-    ContinuationPolicyDecisionWire, ContinuationPolicyResolutionRequestWire,
+    ContinuationPolicyDecisionWire, ContinuationPolicyFreezeRequestWire,
+    ContinuationPolicyResolutionRequestWire,
 };
 pub use replay::{
     plan_continuation_replay, ContinuationBranchAttributionWire,
