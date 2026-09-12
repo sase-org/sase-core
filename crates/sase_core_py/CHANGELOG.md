@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.21](https://github.com/sase-org/sase-core/compare/v0.34.20...v0.34.21) - 2026-09-12
+
+### Added
+
+- *(retryability)* classify git and gh failures
+
 ## [0.34.20](https://github.com/sase-org/sase-core/compare/v0.34.19...v0.34.20) - 2026-09-12
 
 ### Fixed
