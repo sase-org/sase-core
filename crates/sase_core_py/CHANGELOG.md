@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.18](https://github.com/sase-org/sase-core/compare/v0.34.17...v0.34.18) - 2026-09-12
+
+### Added
+
+- *(continuation)* add ordinary delivery reservation transitions
+
 ## [0.34.17](https://github.com/sase-org/sase-core/compare/v0.34.16...v0.34.17) - 2026-09-12
 
 ### Added
