@@ -11,10 +11,10 @@ use super::completion::{
     ExecutorCapabilityWire, RepositoryObservationWire, FIRST_PARTY_PROVIDERS,
 };
 use super::schema::{
-    validate_non_empty_text, validate_schema, validate_sha256,
-    ContinuationError, DiagnosticStageStatusWire, DiagnosticStageWire,
-    MonitorOutcomeWire, CONTINUATION_WIRE_SCHEMA_VERSION, MAX_COMMAND_PARTS,
-    MAX_REF_BYTES, MAX_STAGES,
+    validate_command_part, validate_non_empty_text, validate_schema,
+    validate_sha256, ContinuationError, DiagnosticStageStatusWire,
+    DiagnosticStageWire, MonitorOutcomeWire, CONTINUATION_WIRE_SCHEMA_VERSION,
+    MAX_COMMAND_PARTS, MAX_REF_BYTES, MAX_STAGES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,11 +86,19 @@ pub fn evaluate_conditional_completion(
         MAX_REF_BYTES,
     )?;
     validate_sha256(&request.current_plan_digest, "current_plan_digest")?;
+    if request.command.is_empty() {
+        return Err(ContinuationError::validation(
+            "command must contain at least one argv part",
+        ));
+    }
     if request.command.len() > MAX_COMMAND_PARTS {
         return Err(ContinuationError::validation(format!(
             "command has {} parts; maximum is {MAX_COMMAND_PARTS}",
             request.command.len()
         )));
+    }
+    for (index, part) in request.command.iter().enumerate() {
+        validate_command_part(part, &format!("command[{index}]"))?;
     }
     if request.stages.len() > MAX_STAGES {
         return Err(ContinuationError::validation(format!(

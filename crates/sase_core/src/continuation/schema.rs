@@ -17,6 +17,7 @@ pub(crate) const MAX_SEGMENTS: usize = 512;
 pub(crate) const MAX_STAGES: usize = 256;
 pub(crate) const MAX_RANGES: usize = 512;
 pub(crate) const MAX_COMMAND_PARTS: usize = 256;
+pub(crate) const MAX_COMMAND_PART_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_ATTEMPTS: usize = 256;
 pub(crate) const MAX_CONTEXT_ENTRIES: usize = 128;
 
@@ -139,6 +140,13 @@ pub(crate) fn validate_reference(
 ) -> Result<(), ContinuationError> {
     validate_identifier(value, field)?;
     validate_text(value, field, MAX_REF_BYTES)
+}
+
+pub(crate) fn validate_command_part(
+    value: &str,
+    field: &str,
+) -> Result<(), ContinuationError> {
+    validate_non_empty_text(value, field, MAX_COMMAND_PART_BYTES)
 }
 
 pub(crate) fn validate_optional_reference(
@@ -645,7 +653,7 @@ pub fn validate_monitor_result(
         validate_non_empty_text(
             part,
             &format!("command[{index}]"),
-            MAX_REF_BYTES,
+            MAX_COMMAND_PART_BYTES,
         )?;
     }
     validate_non_empty_text(&result.cwd, "cwd", MAX_REF_BYTES)?;
@@ -1092,6 +1100,37 @@ mod tests {
         }
     }
 
+    fn monitor_result(command: Vec<String>) -> MonitorResultWire {
+        MonitorResultWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            result_id: "result-1".to_string(),
+            monitor_id: "monitor-1".to_string(),
+            starter_execution_id: "run-1".to_string(),
+            outcome: MonitorOutcomeWire::Completed,
+            exit_code: Some(0),
+            command,
+            cwd: "/repo".to_string(),
+            started_at: "2026-09-11T10:00:00Z".to_string(),
+            ended_at: Some("2026-09-11T10:01:00Z".to_string()),
+            elapsed_ms: Some(60_000),
+            timeout_kind: None,
+            timeout_budget_ms: None,
+            workspace_identity: "workspace-1".to_string(),
+            diagnostic_manifest_ref: Some("file:explicit:manifest".to_string()),
+            retained_log: RetainedLogMetadataWire {
+                log_ref: Some("file:explicit:log".to_string()),
+                local_locator: Some("monitor://monitor-1/log".to_string()),
+                total_observed_bytes: Some(100),
+                retained_ranges: vec![ContinuationByteRangeWire {
+                    start: 0,
+                    end: 100,
+                }],
+                complete: true,
+                drain_confirmed: true,
+            },
+        }
+    }
+
     #[test]
     fn node_value_rejects_unknown_kind() {
         let err = validate_continuation_node_value(json!({
@@ -1132,6 +1171,32 @@ mod tests {
 
         assert_eq!(err.kind, "validation");
         assert!(err.message.contains("node_id is too large"));
+    }
+
+    #[test]
+    fn monitor_result_accepts_shell_command_longer_than_reference_limit() {
+        let long_shell_command = "x".repeat(MAX_REF_BYTES + 42);
+        let result = validate_monitor_result(monitor_result(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            long_shell_command.clone(),
+        ]))
+        .unwrap();
+
+        assert_eq!(result.command[2], long_shell_command);
+    }
+
+    #[test]
+    fn monitor_result_rejects_command_part_over_command_limit() {
+        let err = validate_monitor_result(monitor_result(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "x".repeat(MAX_COMMAND_PART_BYTES + 1),
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err.kind, "validation");
+        assert!(err.message.contains("command[2] is too large"));
     }
 
     #[test]

@@ -10,11 +10,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::schema::{
-    validate_identifier, validate_non_empty_text, validate_optional_reference,
-    validate_reference, validate_schema, validate_sha256, validate_text,
-    validate_unique_ids, ContinuationError, ContinuationExecutionIdentityWire,
-    CONTINUATION_WIRE_SCHEMA_VERSION, MAX_COMMAND_PARTS, MAX_ID_BYTES,
-    MAX_REF_BYTES, MAX_TEXT_BYTES,
+    validate_command_part, validate_identifier, validate_non_empty_text,
+    validate_optional_reference, validate_reference, validate_schema,
+    validate_sha256, validate_text, validate_unique_ids, ContinuationError,
+    ContinuationExecutionIdentityWire, CONTINUATION_WIRE_SCHEMA_VERSION,
+    MAX_COMMAND_PARTS, MAX_ID_BYTES, MAX_REF_BYTES, MAX_TEXT_BYTES,
 };
 
 pub(crate) const MAX_REPOSITORIES: usize = 128;
@@ -984,11 +984,7 @@ fn normalize_command(
         )));
     }
     for (index, part) in command.iter().enumerate() {
-        validate_non_empty_text(
-            part,
-            &format!("{field}[{index}]"),
-            MAX_REF_BYTES,
-        )?;
+        validate_command_part(part, &format!("{field}[{index}]"))?;
     }
     Ok(command.to_vec())
 }
