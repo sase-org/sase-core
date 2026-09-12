@@ -184,6 +184,19 @@ pub struct FinalizerObligationWire {
     pub digest: Option<String>,
 }
 
+/// Host-issued assigned-bead binding for a finalizer turn.
+///
+/// Omitted from the context when there is no association. The owning
+/// primary repository obligation is present only after positive
+/// identification; a failed lookup must not invent one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizerAssignedBeadWire {
+    pub bead_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_repo_obligation_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalizerContextWire {
@@ -196,6 +209,8 @@ pub struct FinalizerContextWire {
     pub requirements: Vec<FinalizerPayloadRequirementWire>,
     #[serde(default)]
     pub obligations: Vec<FinalizerObligationWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_bead: Option<FinalizerAssignedBeadWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_digest: Option<String>,
 }
@@ -352,5 +367,45 @@ mod tests {
         let error =
             serde_json::from_value::<FinalizerDeferralWire>(value).unwrap_err();
         assert!(error.to_string().contains("unknown variant"));
+    }
+
+    fn sample_context(
+        assigned: Option<FinalizerAssignedBeadWire>,
+    ) -> FinalizerContextWire {
+        FinalizerContextWire {
+            schema_version: FINALIZER_WIRE_SCHEMA_VERSION,
+            run_id: "run-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            turn_nonce: "nonce-1".to_string(),
+            plan_digest: "d".repeat(64),
+            requirements: Vec::new(),
+            obligations: Vec::new(),
+            assigned_bead: assigned,
+            context_digest: None,
+        }
+    }
+
+    #[test]
+    fn assigned_bead_is_omitted_from_canonical_json_when_absent() {
+        let encoded = serde_json::to_value(sample_context(None)).unwrap();
+        assert!(encoded.get("assigned_bead").is_none());
+        let parsed: FinalizerContextWire =
+            serde_json::from_value(encoded).unwrap();
+        assert!(parsed.assigned_bead.is_none());
+    }
+
+    #[test]
+    fn assigned_bead_round_trips_and_omits_unidentified_primary() {
+        let assigned = FinalizerAssignedBeadWire {
+            bead_id: "sase-zq.1".to_string(),
+            primary_repo_obligation_id: None,
+        };
+        let encoded =
+            serde_json::to_value(sample_context(Some(assigned.clone())))
+                .unwrap();
+        assert_eq!(encoded["assigned_bead"], json!({"bead_id": "sase-zq.1"}));
+        let parsed: FinalizerContextWire =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(parsed.assigned_bead, Some(assigned));
     }
 }

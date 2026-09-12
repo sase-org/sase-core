@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(bead-action)* add explicit close/keep policy and assigned-bead finalizer context
+
 ## [0.34.18](https://github.com/sase-org/sase-core/compare/v0.34.17...v0.34.18) - 2026-09-12
 
 ### Added

@@ -501,6 +501,11 @@
 //! - `validate_finalizer_submission(plan: dict, context: dict, submission: dict) -> dict`
 //! - `finalizer_json_digest(value: Any) -> str`
 //! - `aggregate_finalizer_outcomes(results: list[dict]) -> dict`
+//! - `bead_action_wire_schema_version() -> int`
+//! - `parse_bead_action_field(payload: dict) -> str | None`
+//! - `decide_bead_action(request: dict) -> dict`
+//! - `validate_finalizer_bead_decision(context: dict, decision: dict) -> dict`
+//! - `validate_finalizer_assigned_bead_binding(context: dict, expected: dict | None) -> None`
 //! - `validate_task_type_spec(spec: dict) -> None`
 //! - `task_type_spec_digest(spec: dict) -> str`
 //! - `validate_task_type_field_values(spec: dict, values: dict[str, str]) -> list[dict]`
@@ -1001,6 +1006,13 @@ use sase_core::bead::{
     BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
     IssueWire,
 };
+use sase_core::bead_action::{
+    decide_bead_action_from_json as core_decide_bead_action_from_json,
+    parse_bead_action_field as core_parse_bead_action_field,
+    validate_finalizer_assigned_bead_binding as core_validate_finalizer_assigned_bead_binding,
+    validate_finalizer_bead_decision_from_json as core_validate_finalizer_bead_decision_from_json,
+    BeadActionError, BEAD_ACTION_WIRE_SCHEMA_VERSION,
+};
 use sase_core::commit_footer::{
     parse_commit_footer as core_parse_commit_footer,
     update_commit_footer as core_update_commit_footer, CommitFooterUpdateWire,
@@ -1110,10 +1122,10 @@ use sase_core::finalizer::{
     validate_finalizer_plan as core_validate_finalizer_plan,
     validate_finalizer_provider_spec as core_validate_finalizer_provider_spec,
     validate_finalizer_submission as core_validate_finalizer_submission,
-    FinalizerContextWire, FinalizerError, FinalizerInstanceResultWire,
-    FinalizerInstanceSpecWire, FinalizerPlanInputWire, FinalizerPlanWire,
-    FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
-    FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerAssignedBeadWire, FinalizerContextWire, FinalizerError,
+    FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
+    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderSpecWire,
+    FinalizerSubmissionEnvelopeWire, FINALIZER_WIRE_SCHEMA_VERSION,
 };
 use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,
@@ -5895,6 +5907,104 @@ fn py_aggregate_finalizer_outcomes<'py>(
         core_aggregate_finalizer_outcomes(results),
         "outcome aggregation",
     )
+}
+
+fn bead_action_error_to_pyerr(error: BeadActionError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn bead_action_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, BeadActionError>,
+    operation: &str,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let value =
+        serde_json::to_value(result.map_err(bead_action_error_to_pyerr)?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal bead-action {operation} serialize error: {error}"
+                ))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the bead-action policy wire schema version.
+#[pyfunction]
+#[pyo3(name = "bead_action_wire_schema_version")]
+fn py_bead_action_wire_schema_version() -> u64 {
+    BEAD_ACTION_WIRE_SCHEMA_VERSION
+}
+
+/// Parse `bead_action` from a payload, preserving omitted vs explicit.
+#[pyfunction]
+#[pyo3(name = "parse_bead_action_field")]
+fn py_parse_bead_action_field(
+    payload: &Bound<'_, PyDict>,
+) -> PyResult<Option<String>> {
+    let value = py_to_json_value(payload.as_any())?;
+    match core_parse_bead_action_field(&value)
+        .map_err(bead_action_error_to_pyerr)?
+    {
+        Some(action) => Ok(Some(action.as_str().to_string())),
+        None => Ok(None),
+    }
+}
+
+/// Decide stitch/commit bead-action disposition from host-collected facts.
+#[pyfunction]
+#[pyo3(name = "decide_bead_action")]
+fn py_decide_bead_action<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    bead_action_result_to_py(
+        py,
+        core_decide_bead_action_from_json(&value),
+        "policy",
+    )
+}
+
+/// Validate one repository decision against authenticated bead context.
+#[pyfunction]
+#[pyo3(name = "validate_finalizer_bead_decision")]
+fn py_validate_finalizer_bead_decision<'py>(
+    py: Python<'py>,
+    context: &Bound<'_, PyDict>,
+    decision: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let context = py_to_json_value(context.as_any())?;
+    let decision = py_to_json_value(decision.as_any())?;
+    bead_action_result_to_py(
+        py,
+        core_validate_finalizer_bead_decision_from_json(&context, &decision),
+        "finalizer decision",
+    )
+}
+
+/// Reject a declaration bound to a different assigned bead.
+#[pyfunction]
+#[pyo3(
+    name = "validate_finalizer_assigned_bead_binding",
+    signature = (context, expected=None)
+)]
+fn py_validate_finalizer_assigned_bead_binding(
+    context: &Bound<'_, PyDict>,
+    expected: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let context: FinalizerContextWire =
+        finalizer_wire_from_pydict(context, "context")?;
+    let expected = match expected {
+        Some(expected) => Some(finalizer_wire_from_pydict::<
+            FinalizerAssignedBeadWire,
+        >(expected, "assigned bead")?),
+        None => None,
+    };
+    core_validate_finalizer_assigned_bead_binding(&context, expected.as_ref())
+        .map_err(bead_action_error_to_pyerr)
 }
 
 fn task_type_spec_from_pydict(
@@ -17400,6 +17510,14 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_finalizer_submission, m)?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_action_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_bead_action_field, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_bead_action, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_finalizer_bead_decision, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_finalizer_assigned_bead_binding,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_spec, m)?)?;
     m.add_function(wrap_pyfunction!(py_task_type_spec_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_field_values, m)?)?;
@@ -24543,6 +24661,151 @@ MENTORS:
             .unwrap();
             let aggregate = py_to_json_value(aggregate.bind(py)).unwrap();
             assert_eq!(aggregate["status"], json!("success"));
+
+            let without_bead = context_digest.clone();
+            context_value["assigned_bead"] = json!({
+                "bead_id": "sase-zq.1",
+                "primary_repo_obligation_id": "repo:primary"
+            });
+            let associated_obj = json_value_to_py(py, &context_value).unwrap();
+            let associated =
+                associated_obj.bind(py).downcast::<PyDict>().unwrap();
+            let associated_digest =
+                py_finalizer_context_digest(associated).unwrap();
+            assert_ne!(without_bead, associated_digest);
+        });
+    }
+
+    #[test]
+    fn bead_action_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "bead_action_wire_schema_version",
+                "parse_bead_action_field",
+                "decide_bead_action",
+                "validate_finalizer_bead_decision",
+                "validate_finalizer_assigned_bead_binding",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(py_bead_action_wire_schema_version(), 1);
+
+            let omitted = json_value_to_py(py, &json!({})).unwrap();
+            assert_eq!(
+                py_parse_bead_action_field(
+                    omitted.bind(py).downcast::<PyDict>().unwrap()
+                )
+                .unwrap(),
+                None
+            );
+            let keep =
+                json_value_to_py(py, &json!({"bead_action": "keep"})).unwrap();
+            assert_eq!(
+                py_parse_bead_action_field(
+                    keep.bind(py).downcast::<PyDict>().unwrap()
+                )
+                .unwrap()
+                .as_deref(),
+                Some("keep")
+            );
+            let invalid =
+                json_value_to_py(py, &json!({"bead_action": true})).unwrap();
+            assert!(py_parse_bead_action_field(
+                invalid.bind(py).downcast::<PyDict>().unwrap()
+            )
+            .is_err());
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "assigned_bead_id": "sase-zq.1",
+                    "commit_method": "create_commit",
+                    "repository_scope": "primary",
+                    "primary_repository_identified": true,
+                    "bead_action": "keep"
+                }),
+            )
+            .unwrap();
+            let decision = py_decide_bead_action(
+                py,
+                request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let decision = py_to_json_value(decision.bind(py)).unwrap();
+            assert_eq!(decision["disposition"], json!("keep"));
+            assert_eq!(decision["close_bead"], json!(false));
+
+            let context = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 2,
+                    "run_id": "run-1",
+                    "agent_id": "agent-1",
+                    "turn_nonce": "nonce-1",
+                    "plan_digest": "d".repeat(64),
+                    "requirements": [],
+                    "obligations": [{
+                        "obligation_id": "repo:primary",
+                        "kind": "repository",
+                        "paths": ["."]
+                    }],
+                    "assigned_bead": {
+                        "bead_id": "sase-zq.1",
+                        "primary_repo_obligation_id": "repo:primary"
+                    }
+                }),
+            )
+            .unwrap();
+            let close_decision = json_value_to_py(
+                py,
+                &json!({
+                    "repo_id": "repo:primary",
+                    "commit_method": "create_commit",
+                    "bead_action": "close",
+                    "bead_status": "in_progress"
+                }),
+            )
+            .unwrap();
+            let close = py_validate_finalizer_bead_decision(
+                py,
+                context.bind(py).downcast::<PyDict>().unwrap(),
+                close_decision.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let close = py_to_json_value(close.bind(py)).unwrap();
+            assert_eq!(close["disposition"], json!("close"));
+            assert_eq!(close["close_bead"], json!(true));
+
+            let expected = json_value_to_py(
+                py,
+                &json!({
+                    "bead_id": "sase-other",
+                    "primary_repo_obligation_id": "repo:primary"
+                }),
+            )
+            .unwrap();
+            assert!(py_validate_finalizer_assigned_bead_binding(
+                context.bind(py).downcast::<PyDict>().unwrap(),
+                Some(expected.bind(py).downcast::<PyDict>().unwrap()),
+            )
+            .is_err());
+            let matching = json_value_to_py(
+                py,
+                &json!({
+                    "bead_id": "sase-zq.1",
+                    "primary_repo_obligation_id": "repo:primary"
+                }),
+            )
+            .unwrap();
+            py_validate_finalizer_assigned_bead_binding(
+                context.bind(py).downcast::<PyDict>().unwrap(),
+                Some(matching.bind(py).downcast::<PyDict>().unwrap()),
+            )
+            .unwrap();
         });
     }
 

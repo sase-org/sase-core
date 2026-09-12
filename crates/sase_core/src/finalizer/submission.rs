@@ -93,6 +93,16 @@ pub fn validate_finalizer_context(
         }
     }
 
+    if let Some(assigned) = &context.assigned_bead {
+        validate_required_text(&assigned.bead_id, "assigned_bead.bead_id")?;
+        if let Some(obligation_id) = &assigned.primary_repo_obligation_id {
+            validate_required_text(
+                obligation_id,
+                "assigned_bead.primary_repo_obligation_id",
+            )?;
+        }
+    }
+
     let digest = finalizer_context_digest(context)?;
     if let Some(expected) = &context.context_digest {
         if expected != &digest {
@@ -279,6 +289,7 @@ mod tests {
                 requirement_digest: None,
             }],
             obligations: Vec::new(),
+            assigned_bead: None,
             context_digest: None,
         };
         context.context_digest =
@@ -403,5 +414,59 @@ mod tests {
             paths: vec!["notes/secret.md".to_string()],
         };
         assert!(validate_finalizer_deferral(&ok).is_ok());
+    }
+
+    #[test]
+    fn assigned_bead_changes_context_digest_and_preserves_unassociated_digest()
+    {
+        use crate::finalizer::wire::FinalizerAssignedBeadWire;
+
+        let plan = plan();
+        let without = context(&plan);
+        let without_digest = finalizer_context_digest(&without).unwrap();
+        let encoded = serde_json::to_value(&without).unwrap();
+        assert!(encoded.get("assigned_bead").is_none());
+
+        let mut with = without.clone();
+        with.assigned_bead = Some(FinalizerAssignedBeadWire {
+            bead_id: "sase-zq.1".to_string(),
+            primary_repo_obligation_id: Some("repo:primary".to_string()),
+        });
+        with.context_digest = None;
+        let with_digest = finalizer_context_digest(&with).unwrap();
+        assert_ne!(without_digest, with_digest);
+
+        let mut other = with.clone();
+        other.assigned_bead.as_mut().unwrap().bead_id =
+            "sase-other".to_string();
+        other.context_digest = None;
+        assert_ne!(with_digest, finalizer_context_digest(&other).unwrap());
+
+        with.obligations.push(
+            crate::finalizer::wire::FinalizerObligationWire {
+                obligation_id: "repo:primary".to_string(),
+                kind: "repository".to_string(),
+                display_name: Some("primary".to_string()),
+                paths: vec![".".to_string()],
+                digest: None,
+            },
+        );
+        with.context_digest = None;
+        with.context_digest = Some(finalizer_context_digest(&with).unwrap());
+        assert!(validate_finalizer_context(&plan, &with).is_ok());
+    }
+
+    #[test]
+    fn assigned_bead_requires_a_nonblank_bead_id() {
+        let plan = plan();
+        let mut context = context(&plan);
+        context.assigned_bead =
+            Some(crate::finalizer::wire::FinalizerAssignedBeadWire {
+                bead_id: "   ".to_string(),
+                primary_repo_obligation_id: None,
+            });
+        context.context_digest = None;
+        let error = validate_finalizer_context(&plan, &context).unwrap_err();
+        assert!(error.to_string().contains("assigned_bead.bead_id"));
     }
 }

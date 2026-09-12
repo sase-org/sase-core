@@ -32,6 +32,7 @@ pub mod axe_chop;
 pub mod axe_overrun;
 pub mod axe_status;
 pub mod bead;
+pub mod bead_action;
 pub mod commit_footer;
 pub mod commit_sha;
 pub mod commit_subject;
@@ -552,6 +553,16 @@ pub use bead::{
     BEAD_HISTORY_WIRE_SCHEMA_VERSION, BEAD_READ_WIRE_SCHEMA_VERSION,
     BEAD_SEARCH_FIELD_NAMES, BEAD_SQLITE_SCHEMA,
 };
+pub use bead_action::{
+    decide_bead_action, decide_bead_action_from_json, parse_bead_action_field,
+    parse_bead_action_value, validate_finalizer_assigned_bead_binding,
+    validate_finalizer_bead_decision,
+    validate_finalizer_bead_decision_from_json, BeadActionDecisionWire,
+    BeadActionDispositionWire, BeadActionError, BeadActionRequestWire,
+    BeadActionStatusFactWire, BeadActionWire, BeadCommitMethodWire,
+    BeadRepositoryScopeWire, FinalizerBeadDecisionWire, BEAD_ACTION_USAGE,
+    BEAD_ACTION_WIRE_SCHEMA_VERSION,
+};
 pub use commit_footer::{
     parse_commit_footer, update_commit_footer, CommitFooterReferenceWire,
     CommitFooterTagWire, CommitFooterUpdateWire, CommitFooterWire,
@@ -780,18 +791,19 @@ pub use finalizer::{
     validate_finalizer_instance_results, validate_finalizer_instance_spec,
     validate_finalizer_plan, validate_finalizer_provider_spec,
     validate_finalizer_submission, FinalizerAggregateResultWire,
-    FinalizerAggregateStatusWire, FinalizerAttemptWire, FinalizerContextWire,
-    FinalizerDeferralReasonWire, FinalizerDeferralWire,
-    FinalizerDiagnosticSeverityWire, FinalizerDiagnosticWire, FinalizerError,
-    FinalizerInstancePolicyWire, FinalizerInstanceResultWire,
-    FinalizerInstanceSpecWire, FinalizerInstanceStatusWire,
-    FinalizerObligationWire, FinalizerOutcomeEvidenceWire,
-    FinalizerPayloadRequirementWire, FinalizerPlanEntryWire,
-    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderCapabilityWire,
-    FinalizerProviderSpecWire, FinalizerRefusalPolicyWire,
-    FinalizerSelectorOpWire, FinalizerSubmissionEnvelopeWire,
-    FinalizerSubmissionPayloadWire, FinalizerSubmissionValidationWire,
-    FinalizerTriggerKindWire, FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerAggregateStatusWire, FinalizerAssignedBeadWire,
+    FinalizerAttemptWire, FinalizerContextWire, FinalizerDeferralReasonWire,
+    FinalizerDeferralWire, FinalizerDiagnosticSeverityWire,
+    FinalizerDiagnosticWire, FinalizerError, FinalizerInstancePolicyWire,
+    FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
+    FinalizerInstanceStatusWire, FinalizerObligationWire,
+    FinalizerOutcomeEvidenceWire, FinalizerPayloadRequirementWire,
+    FinalizerPlanEntryWire, FinalizerPlanInputWire, FinalizerPlanWire,
+    FinalizerProviderCapabilityWire, FinalizerProviderSpecWire,
+    FinalizerRefusalPolicyWire, FinalizerSelectorOpWire,
+    FinalizerSubmissionEnvelopeWire, FinalizerSubmissionPayloadWire,
+    FinalizerSubmissionValidationWire, FinalizerTriggerKindWire,
+    FINALIZER_WIRE_SCHEMA_VERSION,
 };
 pub use fleet_attention::{
     decide_attention_notices, decide_fleet_attention_replay,
