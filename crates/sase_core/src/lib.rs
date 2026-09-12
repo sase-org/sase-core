@@ -82,6 +82,7 @@ pub mod queue_directive;
 mod reference_path;
 pub mod referenced_by;
 pub mod repository_resolution;
+pub mod retryability;
 pub mod runner_capacity;
 pub mod runner_limit_override;
 pub mod sections;
@@ -1255,6 +1256,13 @@ pub use repository_resolution::{
     RepositoryResolutionCandidateWire, RepositoryResolutionDiagnosticWire,
     RepositoryResolutionRequestWire, RepositoryResolutionStatus,
     RepositoryResolutionWire, REPOSITORY_RESOLUTION_WIRE_SCHEMA_VERSION,
+};
+pub use retryability::{
+    classify_failure_retryability, retryability_wire_schema_version,
+    FailureObservationWire, RetryabilityVerdictWire,
+    RETRYABILITY_VERDICT_AFTER_DELAY, RETRYABILITY_VERDICT_PERMANENT,
+    RETRYABILITY_VERDICT_TRANSIENT, RETRYABILITY_WIRE_SCHEMA_VERSION,
+    RETRY_OPERATION_GH, RETRY_OPERATION_GIT, RETRY_OPERATION_GIT_CLONE,
 };
 pub use runner_capacity::{
     runner_capacity_policy_schema_version, runner_capacity_snapshot,

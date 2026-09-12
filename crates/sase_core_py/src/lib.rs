@@ -73,6 +73,8 @@
 //! - `derive_git_workspace_name(remote_url: str | None, root_path: str | None) -> str | None`
 //! - `parse_git_conflicted_files(stdout: str) -> list[str]`
 //! - `parse_git_local_changes(stdout: str) -> str | None`
+//! - `retryability_wire_schema_version() -> int`
+//! - `classify_failure_retryability(operation_kind: str, exit_status: int | None = None, stdout: str = "", stderr: str = "") -> dict`
 //! - `decide_sidecar_publication_after_push(returncode: int, stdout: str, stderr: str, attempt: int) -> dict`
 //! - `vcs_log_wire_schema_version() -> int`
 //! - `parse_git_log(stdout: str) -> list[dict]`
@@ -1406,6 +1408,11 @@ use sase_core::repository_resolution::{
     repository_resolution_wire_schema_version as core_repository_resolution_wire_schema_version,
     resolve_repository_reference as core_resolve_repository_reference,
     RepositoryResolutionRequestWire,
+};
+use sase_core::retryability::{
+    classify_failure_retryability as core_classify_failure_retryability,
+    retryability_wire_schema_version as core_retryability_wire_schema_version,
+    FailureObservationWire, RetryabilityVerdictWire,
 };
 use sase_core::runner_limit_override::{
     clear_runner_limit_override as core_clear_runner_limit_override,
@@ -4547,6 +4554,50 @@ fn py_parse_git_local_changes(py: Python<'_>, stdout: &str) -> PyObject {
         Some(text) => text.into_py(py),
         None => py.None(),
     }
+}
+
+// --- GitHub transport retryability bindings -------------------------------
+
+#[pyfunction]
+#[pyo3(name = "retryability_wire_schema_version")]
+fn py_retryability_wire_schema_version() -> u32 {
+    core_retryability_wire_schema_version()
+}
+
+/// Classify observed git/gh process output into a retryability verdict.
+#[pyfunction]
+#[pyo3(
+    name = "classify_failure_retryability",
+    signature = (operation_kind, exit_status=None, stdout="", stderr="")
+)]
+fn py_classify_failure_retryability<'py>(
+    py: Python<'py>,
+    operation_kind: &str,
+    exit_status: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let observation = FailureObservationWire {
+        operation_kind: operation_kind.to_string(),
+        exit_status,
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
+    };
+    let verdict = core_classify_failure_retryability(&observation);
+    retryability_verdict_to_py(py, &verdict)
+}
+
+fn retryability_verdict_to_py<'py>(
+    py: Python<'py>,
+    verdict: &RetryabilityVerdictWire,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("schema_version", verdict.schema_version)?;
+    dict.set_item("verdict", &verdict.verdict)?;
+    dict.set_item("reason", &verdict.reason)?;
+    dict.set_item("retryable", verdict.retryable)?;
+    dict.set_item("retry_after_seconds", verdict.retry_after_seconds)?;
+    Ok(dict)
 }
 
 /// Decide the next launch-time sidecar publication action after one push.
@@ -17386,6 +17437,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_derive_git_workspace_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_conflicted_files, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_local_changes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_retryability_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_failure_retryability, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_decide_sidecar_publication_after_push,
         m
