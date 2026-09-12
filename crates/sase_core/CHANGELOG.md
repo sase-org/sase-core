@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.24](https://github.com/sase-org/sase-core/compare/v0.34.23...v0.34.24) - 2026-09-12
+
+### Added
+
+- *(agent-scan)* filter full-history index candidates
+
 ## [0.34.23](https://github.com/sase-org/sase-core/compare/v0.34.22...v0.34.23) - 2026-09-12
 
 ### Fixed
