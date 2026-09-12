@@ -509,6 +509,74 @@ pub fn classify_provider_availability_many(
         .collect()
 }
 
+/// Return the primary-pool admission mask from classified members.
+///
+/// `records` are the primary pool members only. Last-resort tail members
+/// must be omitted so a healthy tail cannot spare or invalidate a primary
+/// member. Usable members without an actual soft disable outrank actually
+/// soft-disabled members. Priority then applies only within that preferred
+/// subset: a preferred member spares ordinary backups, and an all-backup
+/// subset rotates normally. Actually soft-disabled members are admitted
+/// only when the pool has no usable non-soft member.
+pub fn pool_eligibility_mask(
+    records: &[ProviderAvailabilityWire],
+) -> Result<Vec<bool>, ProviderPriorityError> {
+    validate_pool_records(records)?;
+    let any_usable_non_soft = records.iter().any(member_is_usable_non_soft);
+    if any_usable_non_soft {
+        let any_preferred_non_soft = records.iter().any(|record| {
+            member_is_usable_non_soft(record)
+                && record.availability
+                    == ProviderEffectiveAvailability::Preferred
+        });
+        return Ok(records
+            .iter()
+            .map(|record| {
+                if !member_is_usable_non_soft(record) {
+                    false
+                } else if any_preferred_non_soft {
+                    record.availability
+                        == ProviderEffectiveAvailability::Preferred
+                } else {
+                    true
+                }
+            })
+            .collect());
+    }
+    Ok(records.iter().map(member_is_usable).collect())
+}
+
+/// Return whether the reserved primary member is still eligible.
+///
+/// Fresh priority masking must not itself invalidate an already-reserved
+/// ordinary backup. An unavailable reserved member is rejected. An actually
+/// soft-disabled reservation is rejected only when a usable non-soft
+/// primary member exists. `reserved_index` is into `records`, which must
+/// be the primary pool members only.
+pub fn pool_reservation_eligible(
+    records: &[ProviderAvailabilityWire],
+    reserved_index: usize,
+) -> Result<bool, ProviderPriorityError> {
+    validate_pool_records(records)?;
+    if reserved_index >= records.len() {
+        return Err(ProviderPriorityError::Validation(format!(
+            "reserved member index {reserved_index} is out of range \
+             for {} pool members",
+            records.len()
+        )));
+    }
+    let reserved = &records[reserved_index];
+    if !member_is_usable(reserved) {
+        return Ok(false);
+    }
+    if actually_soft_disabled(reserved)
+        && records.iter().any(member_is_usable_non_soft)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn write_priority_record(
     sase_home: &Path,
     provider: &str,
@@ -675,6 +743,66 @@ fn priority_write_outcome(
         current,
         reason,
     }
+}
+
+fn validate_pool_records(
+    records: &[ProviderAvailabilityWire],
+) -> Result<(), ProviderPriorityError> {
+    if records.is_empty() {
+        return Err(ProviderPriorityError::Validation(
+            "pool eligibility records must be non-empty".to_string(),
+        ));
+    }
+    for record in records {
+        validate_availability_record(record)?;
+    }
+    Ok(())
+}
+
+fn validate_availability_record(
+    record: &ProviderAvailabilityWire,
+) -> Result<(), ProviderPriorityError> {
+    if record.version != PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION {
+        return Err(ProviderPriorityError::Validation(format!(
+            "provider availability version must be {}, got {}",
+            PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION, record.version
+        )));
+    }
+    validate_provider(&record.provider)?;
+    if record.provenance.is_empty() {
+        return Err(ProviderPriorityError::Validation(
+            "provider availability provenance must be non-empty".to_string(),
+        ));
+    }
+    if let Some(disable) = record.actual_disable.as_ref() {
+        validate_provider_disable_record(disable)?;
+        if disable.provider != record.provider {
+            return Err(ProviderPriorityError::Validation(format!(
+                "actual disable provider {:?} does not match {:?}",
+                disable.provider, record.provider
+            )));
+        }
+    }
+    if let Some(priority) = record.priority.as_ref() {
+        validate_priority_record(priority)
+            .map_err(ProviderPriorityError::Validation)?;
+    }
+    Ok(())
+}
+
+fn actually_soft_disabled(record: &ProviderAvailabilityWire) -> bool {
+    record
+        .actual_disable
+        .as_ref()
+        .is_some_and(|disable| disable.mode == ProviderDisableMode::Soft)
+}
+
+fn member_is_usable(record: &ProviderAvailabilityWire) -> bool {
+    record.availability != ProviderEffectiveAvailability::Unavailable
+}
+
+fn member_is_usable_non_soft(record: &ProviderAvailabilityWire) -> bool {
+    member_is_usable(record) && !actually_soft_disabled(record)
 }
 
 fn provider_availability(
@@ -1547,5 +1675,241 @@ mod tests {
         .unwrap();
         assert!(decode.priority.is_none());
         assert_eq!(decode.diagnostics.len(), 1);
+    }
+
+    fn classified(
+        context: &ProviderRoutingContextWire,
+        provider: &str,
+    ) -> ProviderAvailabilityWire {
+        classify_provider_availability(context, &availability_facts(provider))
+            .unwrap()
+    }
+
+    fn classified_cli(
+        context: &ProviderRoutingContextWire,
+        provider: &str,
+        cli_available: bool,
+    ) -> ProviderAvailabilityWire {
+        let mut facts = availability_facts(provider);
+        facts.cli_available = cli_available;
+        classify_provider_availability(context, &facts).unwrap()
+    }
+
+    fn soft_disable(provider: &str) -> ProviderDisableWire {
+        ProviderDisableWire {
+            version: PROVIDER_DISABLE_WIRE_SCHEMA_VERSION,
+            provider: provider.to_string(),
+            created_at: NOW,
+            expires_at: None,
+            source: "ace".to_string(),
+            mode: ProviderDisableMode::Soft,
+        }
+    }
+
+    fn priority_record(provider: &str) -> ProviderPriorityWire {
+        ProviderPriorityWire {
+            version: PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION,
+            provider: provider.to_string(),
+            created_at: NOW,
+            expires_at: None,
+            source: "ace".to_string(),
+        }
+    }
+
+    #[test]
+    fn pool_mask_prefers_non_soft_when_competing_with_actual_soft() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude")],
+            None,
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![false, true]);
+        assert!(!pool_reservation_eligible(&records, 0).unwrap());
+        assert!(pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_prefers_non_soft_when_priority_is_only_in_the_tail() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude")],
+            Some(priority_record("grok")),
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+
+        assert_eq!(
+            records[0].availability,
+            ProviderEffectiveAvailability::Sparing
+        );
+        assert_eq!(
+            records[1].availability,
+            ProviderEffectiveAvailability::Sparing
+        );
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![false, true]);
+        assert!(!pool_reservation_eligible(&records, 0).unwrap());
+        assert!(pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_prefers_non_soft_when_priority_provider_is_unavailable() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude")],
+            Some(priority_record("grok")),
+            NOW,
+        )
+        .unwrap();
+        let records = [
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+        assert_eq!(
+            classified_cli(&context, "grok", false).availability,
+            ProviderEffectiveAvailability::Unavailable
+        );
+
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![false, true]);
+        assert!(!pool_reservation_eligible(&records, 0).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_keeps_priority_winner_in_the_primary_pool() {
+        let context = provider_routing_context_from_parts(
+            vec![],
+            Some(priority_record("codex")),
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![false, true]);
+        assert!(pool_reservation_eligible(&records, 0).unwrap());
+        assert!(pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_rotates_when_every_usable_member_is_actual_soft() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude"), soft_disable("codex")],
+            None,
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![true, true]);
+        assert!(pool_reservation_eligible(&records, 0).unwrap());
+        assert!(pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_uses_soft_member_when_it_is_the_only_usable_primary() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude")],
+            Some(priority_record("grok")),
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified_cli(&context, "codex", false),
+        ];
+
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![true, false]);
+        assert!(pool_reservation_eligible(&records, 0).unwrap());
+        assert!(!pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_mask_all_unavailable_admits_nobody() {
+        let context =
+            provider_routing_context_from_parts(vec![], None, NOW).unwrap();
+        let records = vec![
+            classified_cli(&context, "claude", false),
+            classified_cli(&context, "codex", false),
+        ];
+
+        assert_eq!(
+            pool_eligibility_mask(&records).unwrap(),
+            vec![false, false]
+        );
+        assert!(!pool_reservation_eligible(&records, 0).unwrap());
+        assert!(!pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn actually_soft_priority_target_loses_to_non_soft_backup() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("codex")],
+            Some(priority_record("codex")),
+            NOW,
+        )
+        .unwrap();
+        let records = vec![
+            classified(&context, "claude"),
+            classified(&context, "codex"),
+        ];
+
+        assert_eq!(
+            records[1].availability,
+            ProviderEffectiveAvailability::Sparing
+        );
+        assert_eq!(pool_eligibility_mask(&records).unwrap(), vec![true, false]);
+        assert!(pool_reservation_eligible(&records, 0).unwrap());
+        assert!(!pool_reservation_eligible(&records, 1).unwrap());
+    }
+
+    #[test]
+    fn pool_policy_rejects_empty_records_and_out_of_range_index() {
+        let error = pool_eligibility_mask(&[]).unwrap_err();
+        assert!(matches!(error, ProviderPriorityError::Validation(_)));
+
+        let context =
+            provider_routing_context_from_parts(vec![], None, NOW).unwrap();
+        let records = vec![classified(&context, "claude")];
+        let error = pool_reservation_eligible(&records, 1).unwrap_err();
+        assert!(matches!(error, ProviderPriorityError::Validation(_)));
+
+        let mut bad = classified(&context, "claude");
+        bad.version = 99;
+        let error = pool_eligibility_mask(&[bad]).unwrap_err();
+        assert!(matches!(error, ProviderPriorityError::Validation(_)));
+    }
+
+    #[test]
+    fn pool_policy_preserves_classified_wire_records() {
+        let context = provider_routing_context_from_parts(
+            vec![soft_disable("claude")],
+            Some(priority_record("grok")),
+            NOW,
+        )
+        .unwrap();
+        let before = classified(&context, "claude");
+        let _mask =
+            pool_eligibility_mask(std::slice::from_ref(&before)).unwrap();
+        let after = classified(&context, "claude");
+        assert_eq!(before, after);
+        assert_eq!(
+            before.provenance,
+            vec![
+                ProviderAvailabilityProvenance::ActualSoftDisable,
+                ProviderAvailabilityProvenance::PriorityBackup
+            ]
+        );
     }
 }

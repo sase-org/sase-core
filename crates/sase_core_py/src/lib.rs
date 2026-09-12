@@ -262,6 +262,8 @@
 //! - `provider_routing_context_from_parts(disables: list[dict], priority: dict | None, captured_at: float) -> dict`
 //! - `provider_availability_classify(context: dict, facts: dict) -> dict`
 //! - `provider_availability_classify_many(context: dict, facts: list[dict]) -> list[dict]`
+//! - `provider_pool_eligibility_mask(records: list[dict]) -> list[bool]`
+//! - `provider_pool_reservation_eligible(records: list[dict], reserved_index: int) -> bool`
 //! - `provider_usage_observation_schema_version() -> int`
 //! - `provider_usage_public_schema_version() -> int`
 //! - `provider_usage_indicator_schema_version() -> int`
@@ -1336,10 +1338,12 @@ use sase_core::provider_priority::{
     get_provider_priority as core_get_provider_priority,
     get_provider_routing_context as core_get_provider_routing_context,
     peek_provider_priority as core_peek_provider_priority,
+    pool_eligibility_mask as core_pool_eligibility_mask,
+    pool_reservation_eligible as core_pool_reservation_eligible,
     provider_routing_context_from_parts as core_provider_routing_context_from_parts,
     set_provider_priority_relative as core_set_provider_priority_relative,
     set_provider_priority_until as core_set_provider_priority_until,
-    ProviderAvailabilityFactsWire,
+    ProviderAvailabilityFactsWire, ProviderAvailabilityWire,
     ProviderPriorityError as ProviderPriorityDomainError,
     ProviderPriorityTargetFactsWire, ProviderPriorityWire,
     ProviderRoutingContextWire,
@@ -13120,6 +13124,34 @@ fn provider_availability_classify_many<'py>(
     provider_priority_wire_to_py(py, &availability)
 }
 
+#[pyfunction]
+fn provider_pool_eligibility_mask<'py>(
+    py: Python<'py>,
+    records: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    let records: Vec<ProviderAvailabilityWire> =
+        provider_priority_dict_from_py(records.as_any(), "records")?;
+    let mask = core_pool_eligibility_mask(&records)
+        .map_err(provider_priority_error_to_pyerr)?;
+    provider_priority_wire_to_py(py, &mask)
+}
+
+#[pyfunction]
+fn provider_pool_reservation_eligible(
+    records: &Bound<'_, PyList>,
+    reserved_index: i64,
+) -> PyResult<bool> {
+    if reserved_index < 0 {
+        return Err(PyValueError::new_err(
+            "reserved member index must be non-negative",
+        ));
+    }
+    let records: Vec<ProviderAvailabilityWire> =
+        provider_priority_dict_from_py(records.as_any(), "records")?;
+    core_pool_reservation_eligible(&records, reserved_index as usize)
+        .map_err(provider_priority_error_to_pyerr)
+}
+
 fn provider_usage_error_to_pyerr(err: ProviderUsageDomainError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
@@ -17966,6 +17998,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(provider_routing_context_from_parts, m)?)?;
     m.add_function(wrap_pyfunction!(provider_availability_classify, m)?)?;
     m.add_function(wrap_pyfunction!(provider_availability_classify_many, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_pool_eligibility_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(provider_pool_reservation_eligible, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_observation_schema_version,
         m
@@ -22306,6 +22340,78 @@ COMMITS:
                 Some(1.0),
             )
             .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn provider_pool_eligibility_bindings_cover_soft_vs_backup() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let disable = PyDict::new_bound(py);
+            disable.set_item("version", 2).unwrap();
+            disable.set_item("provider", "claude").unwrap();
+            disable.set_item("created_at", 1_800_000_000.0).unwrap();
+            disable.set_item("expires_at", py.None()).unwrap();
+            disable.set_item("source", "ace").unwrap();
+            disable.set_item("mode", "soft").unwrap();
+            let disables = PyList::empty_bound(py);
+            disables.append(disable.as_any()).unwrap();
+
+            let priority = PyDict::new_bound(py);
+            priority.set_item("version", 1).unwrap();
+            priority.set_item("provider", "grok").unwrap();
+            priority.set_item("created_at", 1_800_000_000.0).unwrap();
+            priority.set_item("expires_at", py.None()).unwrap();
+            priority.set_item("source", "ace").unwrap();
+
+            let context = provider_routing_context_from_parts(
+                py,
+                &disables,
+                priority.as_any(),
+                1_800_000_000.0,
+            )
+            .unwrap();
+            let context_dict = context.bind(py).downcast::<PyDict>().unwrap();
+
+            let mut records = Vec::new();
+            for provider in ["claude", "codex"] {
+                let facts = PyDict::new_bound(py);
+                facts.set_item("provider", provider).unwrap();
+                facts.set_item("registered", true).unwrap();
+                facts.set_item("user_facing", true).unwrap();
+                facts.set_item("cli_available", true).unwrap();
+                records.push(
+                    provider_availability_classify(py, context_dict, &facts)
+                        .unwrap(),
+                );
+            }
+            let record_list = PyList::empty_bound(py);
+            for record in &records {
+                record_list.append(record.bind(py).as_any()).unwrap();
+            }
+
+            let mask =
+                provider_pool_eligibility_mask(py, &record_list).unwrap();
+            assert_eq!(
+                py_to_json_value(mask.bind(py)).unwrap(),
+                json!([false, true])
+            );
+            assert!(
+                !provider_pool_reservation_eligible(&record_list, 0).unwrap()
+            );
+            assert!(
+                provider_pool_reservation_eligible(&record_list, 1).unwrap()
+            );
+
+            let empty = PyList::empty_bound(py);
+            let error = provider_pool_eligibility_mask(py, &empty).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            let error = provider_pool_reservation_eligible(&record_list, -1)
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            let error = provider_pool_reservation_eligible(&record_list, 2)
+                .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
