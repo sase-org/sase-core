@@ -33,18 +33,18 @@ use super::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
 };
 use super::wire::{
-    AgentArtifactIndexWindowWire, AgentArtifactRecordShapeWire,
-    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
-    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
-    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
-    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
-    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
-    DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
-    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    decode_agent_artifact_record_json, AgentArtifactIndexWindowWire,
+    AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
+    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
+    AgentArtifactScanWire, AgentMetaWire, AgentOutputVariableHistoryQueryWire,
+    AgentOutputVariableHistoryWire, AgentOutputVariableKeyGroupWire,
+    AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
+    AgentOutputVariableValueGroupWire, DoneMarkerWire, OutputVariableValue,
+    UsedXPromptWire, AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 28;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 29;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -795,7 +795,7 @@ fn repair_abandoned_agent_artifact_index_rows(
                 row.get(2).map_err(|e| e.to_string())?;
             let record_json: String = row.get(3).map_err(|e| e.to_string())?;
             let Ok(mut record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+                decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -955,9 +955,9 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
             candidate.project_name.clone(),
             candidate.workflow_dir_name.clone(),
         );
-        let Ok(record) = serde_json::from_str::<AgentArtifactRecordWire>(
-            &candidate.record_json,
-        ) else {
+        let Ok(record) =
+            decode_agent_artifact_record_json(&candidate.record_json)
+        else {
             report.rows_skipped_decode_errors += 1;
             continue;
         };
@@ -1064,7 +1064,7 @@ pub fn load_agent_artifact_records(
             let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
             let Ok(mut record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+                decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -1597,9 +1597,7 @@ fn alias_run_from_sql_row(
         u32::try_from(row.get::<_, i64>(16).map_err(|e| e.to_string())?)
             .unwrap_or(0);
     let record_json: String = row.get(17).map_err(|e| e.to_string())?;
-    let Ok(record) =
-        serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
-    else {
+    let Ok(record) = decode_agent_artifact_record_json(&record_json) else {
         return Ok(None);
     };
     let meta = record.agent_meta.as_ref();
@@ -2525,7 +2523,7 @@ fn load_record_by_artifact_dir(
     let Some(record_json) = record_json else {
         return Ok(None);
     };
-    serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+    decode_agent_artifact_record_json(&record_json)
         .map(Some)
         .map_err(|e| e.to_string())
 }
@@ -2779,6 +2777,9 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "source_machine", "TEXT")?;
         migrate_source_machine_projection_v28(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 29) {
+        migrate_record_json_refresh_v29(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -2992,8 +2993,7 @@ fn migrate_recompute_hidden_v2(conn: &mut Connection) -> Result<(), String> {
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let Ok(record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            let Ok(record) = decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -3168,8 +3168,7 @@ fn migrate_model_alias_projection_v22(
             let projects_root: String =
                 row.get(1).map_err(|e| e.to_string())?;
             let record_json: String = row.get(2).map_err(|e| e.to_string())?;
-            let Ok(record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            let Ok(record) = decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -3220,8 +3219,7 @@ fn migrate_done_outcome_projection_v24(
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let Ok(record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            let Ok(record) = decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -3272,10 +3270,9 @@ fn migrate_source_machine_projection_v28(
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let from_record =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
-                    .ok()
-                    .and_then(|record| source_machine_from_record(&record));
+            let from_record = decode_agent_artifact_record_json(&record_json)
+                .ok()
+                .and_then(|record| source_machine_from_record(&record));
             let source_machine = from_record.or_else(|| {
                 source_machine_from_marker_files(Path::new(&artifact_dir))
             });
@@ -3295,6 +3292,15 @@ fn migrate_source_machine_projection_v28(
     Ok(())
 }
 
+/// v29 refreshes `record_json` with `agent_meta.queue_capacity` and
+/// `waiting.queue_capacity` so indexed running/history rows keep authored
+/// budgets after waiting markers disappear.
+fn migrate_record_json_refresh_v29(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -3312,8 +3318,7 @@ fn migrate_output_variable_projection_v21(
             let projects_root: String =
                 row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let Ok(record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            let Ok(record) = decode_agent_artifact_record_json(&record_json)
             else {
                 continue;
             };
@@ -3661,8 +3666,7 @@ fn terminalize_stale_candidate(
     let current = MarkerSignatures::from_artifact_dir(&row.artifact_dir);
     let projects_root = PathBuf::from(&row.row_projects_root);
     let record = if row.stored == current {
-        match serde_json::from_str::<AgentArtifactRecordWire>(&row.record_json)
-        {
+        match decode_agent_artifact_record_json(&row.record_json) {
             Ok(record) => record,
             Err(_) => return Ok(TerminalizationOutcome::Skipped),
         }
@@ -3890,9 +3894,7 @@ fn select_records(
     for row in pending {
         let record = match query.freshness {
             AgentArtifactIndexFreshnessWire::Cached => {
-                match serde_json::from_str::<AgentArtifactRecordWire>(
-                    &row.record_json,
-                ) {
+                match decode_agent_artifact_record_json(&row.record_json) {
                     Ok(record) => record,
                     Err(_) => {
                         stats.json_decode_errors += 1;
@@ -3904,9 +3906,7 @@ fn select_records(
                 let current =
                     MarkerSignatures::from_artifact_dir(&row.artifact_dir);
                 if row.stored == current {
-                    match serde_json::from_str::<AgentArtifactRecordWire>(
-                        &row.record_json,
-                    ) {
+                    match decode_agent_artifact_record_json(&row.record_json) {
                         Ok(record) => record,
                         Err(_) => {
                             stats.json_decode_errors += 1;
@@ -4351,8 +4351,7 @@ fn select_records_for_windowed_candidates(
                 continue;
             };
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let Ok(record) =
-                serde_json::from_str::<AgentArtifactRecordWire>(&record_json)
+            let Ok(record) = decode_agent_artifact_record_json(&record_json)
             else {
                 stats.json_decode_errors += 1;
                 continue;
@@ -5839,6 +5838,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(update.rows_indexed, 2);
+        assert_eq!(update.schema_version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION);
 
         let indexed = query_agent_artifact_index(
             &index,
@@ -5864,6 +5864,59 @@ mod tests {
             AgentArtifactScanOptionsWire::default(),
         );
         assert_eq!(indexed.records, source.records);
+    }
+
+    #[test]
+    fn index_rebuild_preserves_canonical_queue_capacity_without_waiting_marker()
+    {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let running = artifact(&projects, "20260913020000");
+        write_json(
+            &running.join("agent_meta.json"),
+            json!({
+                "name": "runner",
+                "queue_capacity": 100,
+                "queue_capacity_explicit": true,
+                "pid": 42
+            }),
+        );
+        write_json(&running.join("running.json"), json!({"pid": 42}));
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::List,
+                window_limit: None,
+                candidate_filter: None,
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(meta.queue_capacity, Some(100));
+        assert!(meta.queue_capacity_explicit);
+        assert_eq!(
+            snapshot.records[0].record_shape,
+            AgentArtifactRecordShapeWire::List
+        );
     }
 
     #[test]
@@ -9023,9 +9076,9 @@ mod tests {
         };
         let mut additions = BTreeSet::new();
         for candidate in candidates {
-            let Ok(record) = serde_json::from_str::<AgentArtifactRecordWire>(
-                &candidate.record_json,
-            ) else {
+            let Ok(record) =
+                decode_agent_artifact_record_json(&candidate.record_json)
+            else {
                 report.rows_skipped_decode_errors += 1;
                 continue;
             };

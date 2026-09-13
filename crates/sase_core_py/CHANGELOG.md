@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Expose flag-aware `directive_contract` and
+  `normalize_persisted_queue_capacity` for queue capacity budget resume.
+
 ## [0.34.22](https://github.com/sase-org/sase-core/compare/v0.34.21...v0.34.22) - 2026-09-12
 
 ### Added

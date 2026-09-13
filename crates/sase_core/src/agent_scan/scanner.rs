@@ -1056,6 +1056,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
     };
     let (queue_weight, queue_weight_invalid, queue_weight_error) =
         coerce_queue_weight(data);
+    let (queue_capacity, queue_capacity_explicit) =
+        crate::queue_directive::queue_capacity_from_map(data);
 
     AgentMetaWire {
         name: coerce_str(data.get("name")),
@@ -1126,6 +1128,10 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         wait_priority: coerce_int(data.get("wait_priority")),
+        queue_capacity,
+        queue_capacity_explicit,
+        wait_runners: None,
+        wait_runners_explicit: false,
         queue_weight,
         queue_weight_explicit: coerce_bool_truthy(
             data.get("queue_weight_explicit"),
@@ -1427,12 +1433,14 @@ fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {
 fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
     let (queue_weight, queue_weight_invalid, queue_weight_error) =
         coerce_queue_weight(data);
+    let (queue_capacity, queue_capacity_explicit) =
+        crate::queue_directive::queue_capacity_from_map(data);
     WaitingMarkerWire {
         waiting_for: coerce_str_list(data.get("waiting_for")),
         wait_for_beads: coerce_str_list(data.get("wait_for_beads")),
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
-        wait_runners: coerce_int(data.get("wait_runners")),
+        queue_capacity,
         wait_priority: coerce_int(data.get("wait_priority")),
         queue_weight,
         queue_weight_explicit: coerce_bool_truthy(
@@ -1443,9 +1451,9 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_priority_explicit: coerce_bool_truthy(
             data.get("wait_priority_explicit"),
         ),
-        wait_runners_explicit: coerce_bool_truthy(
-            data.get("wait_runners_explicit"),
-        ),
+        queue_capacity_explicit,
+        wait_runners: None,
+        wait_runners_explicit: false,
         slot_requested_at: coerce_str(data.get("slot_requested_at")),
         eligible_since: coerce_str(data.get("eligible_since")),
     }
@@ -2163,6 +2171,8 @@ mod tests {
             Some("2026-04-27T15:00:05Z")
         );
         assert_eq!(waiting_marker.wait_priority, Some(3));
+        assert_eq!(waiting_marker.queue_capacity, Some(1));
+        assert!(!waiting_marker.queue_capacity_explicit);
         assert_eq!(waiting_marker.queue_weight, Some(2.5));
         assert!(waiting_marker.queue_weight_explicit);
         let waiting_meta = waiting_record.agent_meta.as_ref().unwrap();
@@ -2259,5 +2269,199 @@ mod tests {
         assert!(!snapshot.records[0].has_done_marker);
         assert!(snapshot.records[0].running.is_none());
         assert!(snapshot.records[0].waiting.is_none());
+    }
+
+    #[test]
+    fn scanner_preserves_canonical_legacy_and_dual_queue_capacity() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let canonical = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913010000");
+        let legacy = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913010001");
+        let dual = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913010002");
+        let omitted = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913010003");
+        let zero = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913010004");
+
+        write_json(
+            &canonical.join("agent_meta.json"),
+            json!({
+                "name": "canonical",
+                "queue_capacity": 100,
+                "queue_capacity_explicit": true
+            }),
+        );
+        write_json(
+            &canonical.join("waiting.json"),
+            json!({
+                "queue_capacity": 100,
+                "queue_capacity_explicit": true
+            }),
+        );
+        write_json(
+            &legacy.join("agent_meta.json"),
+            json!({
+                "name": "legacy",
+                "wait_runners": 3,
+                "wait_runners_explicit": true
+            }),
+        );
+        write_json(
+            &legacy.join("waiting.json"),
+            json!({
+                "wait_runners": 3,
+                "wait_runners_explicit": true
+            }),
+        );
+        write_json(
+            &dual.join("agent_meta.json"),
+            json!({
+                "name": "dual",
+                "queue_capacity": 100,
+                "wait_runners": 0,
+                "queue_capacity_explicit": true,
+                "wait_runners_explicit": true
+            }),
+        );
+        write_json(
+            &dual.join("waiting.json"),
+            json!({
+                "queue_capacity": 100,
+                "wait_runners": 0,
+                "queue_capacity_explicit": true,
+                "wait_runners_explicit": true
+            }),
+        );
+        write_json(
+            &omitted.join("agent_meta.json"),
+            json!({"name": "omitted"}),
+        );
+        write_json(
+            &zero.join("agent_meta.json"),
+            json!({
+                "name": "zero",
+                "queue_capacity": 0,
+                "queue_capacity_explicit": true
+            }),
+        );
+        write_json(
+            &zero.join("waiting.json"),
+            json!({
+                "queue_capacity": 0,
+                "queue_capacity_explicit": true
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let by_ts = |ts: &str| {
+            snapshot
+                .records
+                .iter()
+                .find(|record| record.timestamp == ts)
+                .unwrap()
+        };
+
+        let canonical_rec = by_ts("20260913010000");
+        assert_eq!(
+            canonical_rec.agent_meta.as_ref().unwrap().queue_capacity,
+            Some(100)
+        );
+        assert!(
+            canonical_rec
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_explicit
+        );
+        assert_eq!(
+            canonical_rec.waiting.as_ref().unwrap().queue_capacity,
+            Some(100)
+        );
+        assert!(
+            canonical_rec
+                .waiting
+                .as_ref()
+                .unwrap()
+                .queue_capacity_explicit
+        );
+
+        let legacy_rec = by_ts("20260913010001");
+        assert_eq!(
+            legacy_rec.agent_meta.as_ref().unwrap().queue_capacity,
+            Some(3)
+        );
+        assert!(
+            legacy_rec
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_explicit
+        );
+        assert_eq!(
+            legacy_rec.waiting.as_ref().unwrap().queue_capacity,
+            Some(3)
+        );
+
+        let dual_rec = by_ts("20260913010002");
+        assert_eq!(
+            dual_rec.agent_meta.as_ref().unwrap().queue_capacity,
+            Some(100)
+        );
+        assert_eq!(
+            dual_rec.waiting.as_ref().unwrap().queue_capacity,
+            Some(100)
+        );
+        let encoded = serde_json::to_value(dual_rec).unwrap();
+        assert!(encoded["agent_meta"].get("wait_runners").is_none());
+        assert_eq!(encoded["waiting"]["queue_capacity"], json!(100));
+
+        let omitted_rec = by_ts("20260913010003");
+        assert_eq!(
+            omitted_rec.agent_meta.as_ref().unwrap().queue_capacity,
+            None
+        );
+        assert!(
+            !omitted_rec
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_explicit
+        );
+
+        let zero_rec = by_ts("20260913010004");
+        assert_eq!(
+            zero_rec.agent_meta.as_ref().unwrap().queue_capacity,
+            Some(0)
+        );
+        assert!(
+            zero_rec
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_explicit
+        );
+        assert_eq!(zero_rec.waiting.as_ref().unwrap().queue_capacity, Some(0));
+        assert!(zero_rec.waiting.as_ref().unwrap().queue_capacity_explicit);
     }
 }

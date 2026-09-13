@@ -327,7 +327,9 @@ pub struct AgentUnitWire {
     #[serde(default)]
     pub finalizers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait_runners: Option<u32>,
+    pub queue_capacity: Option<u32>,
+    #[serde(default, skip_serializing)]
+    wait_runners: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,6 +355,17 @@ fn skip_if_false(value: &bool) -> bool {
 }
 
 impl AgentUnitWire {
+    pub fn authored_queue_capacity(&self) -> Option<u32> {
+        self.queue_capacity.or(self.wait_runners)
+    }
+
+    pub fn normalize_queue_capacity_aliases(&mut self) {
+        if self.queue_capacity.is_none() {
+            self.queue_capacity = self.wait_runners;
+        }
+        self.wait_runners = None;
+    }
+
     /// Return the launch identity used for waits and collision checks.
     ///
     /// Clan joiners compose `<clan>.<member>`; family attachments compose
@@ -1531,7 +1544,8 @@ fn classify_typed_launch_unit(
             auto_enabled,
             auto_mode,
             finalizers,
-            wait_runners: wait_queue.queue_capacity,
+            queue_capacity: wait_queue.queue_capacity,
+            wait_runners: None,
             wait_priority: wait_queue.priority,
             queue_weight: wait_queue.weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
@@ -7340,7 +7354,7 @@ Keep this comma, and the rest of the prose in the summary.";
     ) -> (Option<u32>, Option<i32>, Option<f64>, bool, String) {
         match &plan.units[0].payload {
             LaunchUnitPayloadWire::Agent(agent) => (
-                agent.wait_runners,
+                agent.authored_queue_capacity(),
                 agent.wait_priority,
                 agent.queue_weight,
                 agent.queue_weight_explicit,
@@ -7381,7 +7395,7 @@ Keep this comma, and the rest of the prose in the summary.";
             plan_queue("%w(builder, time=5m) %q(1, p=20, weight=2)\nDo work");
         match &both.units[0].payload {
             LaunchUnitPayloadWire::Agent(agent) => {
-                assert_eq!(agent.wait_runners, Some(1));
+                assert_eq!(agent.authored_queue_capacity(), Some(1));
                 assert_eq!(agent.wait_priority, Some(20));
                 assert_eq!(agent.queue_weight, Some(2.0));
                 assert!(agent.queue_weight_explicit);
@@ -7438,7 +7452,7 @@ Keep this comma, and the rest of the prose in the summary.";
         .unwrap();
         match &plan.units[0].payload {
             LaunchUnitPayloadWire::Agent(agent) => {
-                assert_eq!(agent.wait_runners, Some(0));
+                assert_eq!(agent.authored_queue_capacity(), Some(0));
                 assert_eq!(agent.wait_priority, Some(10));
                 assert_eq!(agent.prompt, "First");
             }
@@ -7446,7 +7460,7 @@ Keep this comma, and the rest of the prose in the summary.";
         }
         match &plan.units[1].payload {
             LaunchUnitPayloadWire::Agent(agent) => {
-                assert_eq!(agent.wait_runners, None);
+                assert_eq!(agent.authored_queue_capacity(), None);
                 assert_eq!(agent.wait_priority, Some(1));
                 assert_eq!(agent.queue_weight, Some(0.25));
                 assert!(agent.queue_weight_explicit);

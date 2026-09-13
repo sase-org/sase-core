@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Preserve canonical `queue_capacity` through agent-scan metadata, waiting
+  markers, launch wires, and indexed records, including legacy and dual
+  spellings, persisted-zero drain translation, and flag-aware `%queue`
+  editor suggestions.
+
 ## [0.34.24](https://github.com/sase-org/sase-core/compare/v0.34.23...v0.34.24) - 2026-09-12
 
 ### Added

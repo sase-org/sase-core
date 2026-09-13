@@ -451,7 +451,7 @@ pub fn agent_unit_dispatch_prompt_with_flags(
         lines.push("%hide".to_string());
     }
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
-        queue_capacity: agent.wait_runners,
+        queue_capacity: agent.authored_queue_capacity(),
         priority: agent.wait_priority,
         weight: if agent.queue_weight_explicit {
             agent.queue_weight
@@ -963,7 +963,7 @@ mod tests {
             auto_enabled: true,
             auto_mode: Some("plan".to_string()),
             finalizers: vec!["commit".to_string()],
-            wait_runners: Some(2),
+            queue_capacity: Some(2),
             wait_priority: Some(1),
             queue_weight: Some(2.0),
             queue_weight_explicit: true,

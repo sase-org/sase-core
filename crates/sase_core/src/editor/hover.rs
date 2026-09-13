@@ -1,5 +1,5 @@
 use super::completion::classify_completion_context;
-use super::directive::directive_metadata;
+use super::directive::directive_metadata_with_flags;
 use super::frontmatter;
 use super::token::{
     extract_token_at_position, slash_skill_reference_name,
@@ -13,6 +13,15 @@ pub fn hover_at_position(
     document: &DocumentSnapshot,
     position: EditorPosition,
     entries: &[XpromptAssistEntry],
+) -> Option<HoverPayload> {
+    hover_at_position_with_flags(document, position, entries, &[])
+}
+
+pub fn hover_at_position_with_flags(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    entries: &[XpromptAssistEntry],
+    enabled_feature_flags: &[String],
 ) -> Option<HoverPayload> {
     if let Some(context) =
         classify_completion_context(document, position, entries)
@@ -39,7 +48,8 @@ pub fn hover_at_position(
         if context.kind == CompletionContextKind::DirectiveName {
             let token = context.token.as_ref()?;
             let raw = token.text.strip_prefix('%').unwrap_or(&token.text);
-            let metadata = directive_metadata(raw)?;
+            let metadata =
+                directive_metadata_with_flags(raw, enabled_feature_flags)?;
             return Some(HoverPayload {
                 range: token.range,
                 markdown: format!(
@@ -56,7 +66,8 @@ pub fn hover_at_position(
                 | CompletionContextKind::DirectiveArgumentValue
         ) {
             let name = context.directive_name.as_deref()?;
-            let metadata = directive_metadata(name)?;
+            let metadata =
+                directive_metadata_with_flags(name, enabled_feature_flags)?;
             return Some(HoverPayload {
                 range: context.replacement_range,
                 markdown: format!(

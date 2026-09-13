@@ -425,10 +425,11 @@
 //! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
-//! - `directive_contract() -> list[dict]`
+//! - `directive_contract(enabled_feature_flags: list[str] | None = None) -> list[dict]`
 //! - `collect_queue_fields(occurrences: list[dict], enabled_feature_flags: list[str] | None = None) -> dict`
 //! - `format_queue_directive(fields: dict) -> str | None`
 //! - `parse_queue_capacity(raw: str, enabled_feature_flags: list[str] | None = None) -> int`
+//! - `normalize_persisted_queue_capacity(queue_capacity: int | None, queue_capacity_explicit: bool, effective_weight: float, global_limit: float, capacity_budget: bool) -> dict`
 //! - `queue_directive_flag_key() -> str`
 //! - `runner_capacity_policy_schema_version() -> int`
 //! - `runner_capacity_snapshot(request: dict) -> dict`
@@ -1484,6 +1485,7 @@ use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
 use sase_core::{
     collect_queue_fields_with_flags as core_collect_queue_fields_with_flags,
     format_queue_directive as core_format_queue_directive,
+    normalize_persisted_queue_capacity as core_normalize_persisted_queue_capacity,
     parse_queue_capacity_with_flags as core_parse_queue_capacity_with_flags,
     queue_directive_flag_key as core_queue_directive_flag_key, QueueFieldsWire,
     QueueOccurrenceWire,
@@ -11910,8 +11912,13 @@ fn py_placeholder_input_names(texts: Vec<String>) -> Vec<String> {
 /// Return the canonical directive completion contract as a list of dicts.
 #[pyfunction]
 #[pyo3(name = "directive_contract")]
-fn py_directive_contract(py: Python<'_>) -> PyResult<PyObject> {
-    let contract = sase_core::editor_directive_contract();
+#[pyo3(signature = (enabled_feature_flags = None))]
+fn py_directive_contract(
+    py: Python<'_>,
+    enabled_feature_flags: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let flags = enabled_feature_flags.unwrap_or_default();
+    let contract = sase_core::editor_directive_contract_with_flags(&flags);
     let value = serde_json::to_value(&contract).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -15626,13 +15633,39 @@ fn py_runner_capacity_policy_schema_version() -> u32 {
 }
 
 #[pyfunction]
+#[pyo3(name = "normalize_persisted_queue_capacity")]
+#[pyo3(signature = (queue_capacity, queue_capacity_explicit, effective_weight, global_limit, capacity_budget))]
+fn py_normalize_persisted_queue_capacity(
+    py: Python<'_>,
+    queue_capacity: Option<u32>,
+    queue_capacity_explicit: bool,
+    effective_weight: f64,
+    global_limit: f64,
+    capacity_budget: bool,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_normalize_persisted_queue_capacity(
+        queue_capacity,
+        queue_capacity_explicit,
+        effective_weight,
+        global_limit,
+        capacity_budget,
+    ))
+    .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(name = "runner_capacity_snapshot")]
 fn py_runner_capacity_snapshot<'py>(
     py: Python<'py>,
     request: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
-    let request: RunnerCapacityRequestWire =
-        serde_json::from_value(py_to_json_value(request)?).map_err(|err| {
+    let mut value = py_to_json_value(request)?;
+    sase_core::merge_queue_capacity_aliases_in_capacity_request(&mut value);
+    let request: RunnerCapacityRequestWire = serde_json::from_value(value)
+        .map_err(|err| {
             PyValueError::new_err(format!(
                 "invalid runner capacity request: {err}"
             ))
@@ -18001,6 +18034,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_substitute_raw_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_input_names, m)?)?;
     m.add_function(wrap_pyfunction!(py_directive_contract, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_normalize_persisted_queue_capacity,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_directive_completion_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_directive_completion_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_collect_queue_fields, m)?)?;
@@ -18499,6 +18536,47 @@ mod tests {
             let legacy_dict = legacy.bind(py).downcast::<PyDict>().unwrap();
             let direct_dict = direct.bind(py).downcast::<PyDict>().unwrap();
             assert_eq!(py_dict_keys(direct_dict), py_dict_keys(legacy_dict));
+        });
+    }
+
+    #[test]
+    fn scan_agent_artifacts_binding_preserves_canonical_and_legacy_capacity() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("projects");
+            let dir = root
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join("20260913030000");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("agent_meta.json"),
+                r#"{"name":"canonical","queue_capacity":100,"queue_capacity_explicit":true}"#,
+            )
+            .unwrap();
+            fs::write(
+                dir.join("waiting.json"),
+                r#"{"wait_runners":0,"wait_runners_explicit":true,"queue_capacity":100,"queue_capacity_explicit":true}"#,
+            )
+            .unwrap();
+            let snapshot = py_scan_agent_artifacts(
+                py,
+                root.to_string_lossy().as_ref(),
+                None,
+            )
+            .unwrap();
+            let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot["schema_version"], json!(9));
+            let record = &snapshot["records"][0];
+            assert_eq!(record["agent_meta"]["queue_capacity"], json!(100));
+            assert_eq!(
+                record["agent_meta"]["queue_capacity_explicit"],
+                json!(true)
+            );
+            assert_eq!(record["waiting"]["queue_capacity"], json!(100));
+            assert!(record["waiting"].get("wait_runners").is_none());
         });
     }
 
@@ -28705,7 +28783,7 @@ MENTORS:
     fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
-            let contract = py_directive_contract(py).unwrap();
+            let contract = py_directive_contract(py, None).unwrap();
             let contract = py_to_json_value(contract.bind(py)).unwrap();
             let names: Vec<&str> = contract
                 .as_array()
@@ -28787,6 +28865,47 @@ MENTORS:
             .is_err());
             assert!(py_parse_queue_capacity("true", None).is_err());
             assert_eq!(py_runner_capacity_policy_schema_version(), 4);
+            let on_contract = py_directive_contract(
+                py,
+                Some(vec!["queue_capacity_budget".to_string()]),
+            )
+            .unwrap();
+            let on_contract = py_to_json_value(on_contract.bind(py)).unwrap();
+            let on_queue = on_contract
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == "queue")
+                .unwrap();
+            assert_eq!(on_queue["positional_role"], json!("positive_int"));
+            let suggestions = on_queue["positional_suggestions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value["value"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(suggestions, ["1", "100"]);
+            assert!(!suggestions.contains(&"0"));
+            let capacity_kw = on_queue["keywords"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|keyword| keyword["name"] == "capacity")
+                .unwrap();
+            assert_eq!(capacity_kw["value_role"], json!("positive_int"));
+            let normalized = py_normalize_persisted_queue_capacity(
+                py,
+                Some(0),
+                true,
+                0.25,
+                8.0,
+                true,
+            )
+            .unwrap();
+            let normalized = py_to_json_value(normalized.bind(py)).unwrap();
+            assert_eq!(normalized["admission_limit"], json!(0.25));
+            assert_eq!(normalized["legacy_zero"], json!(true));
+            assert!(normalized.get("reauthor_capacity").is_none());
             let capacity_request = json_value_to_py(
                 py,
                 &json!({

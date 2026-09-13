@@ -584,7 +584,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
                 .iter()
                 .map(|example| (*example).to_string())
                 .collect(),
-            recipes: directive_snippet_recipes(metadata.name),
+            recipes: directive_snippet_recipes_with_flags(metadata.name, &[]),
         }
     }
 }
@@ -646,6 +646,13 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
 pub fn directive_snippet_recipes(
     name: &str,
 ) -> Vec<DirectiveSnippetRecipeContract> {
+    directive_snippet_recipes_with_flags(name, &[])
+}
+
+pub fn directive_snippet_recipes_with_flags(
+    name: &str,
+    enabled_feature_flags: &[String],
+) -> Vec<DirectiveSnippetRecipeContract> {
     match name {
         "alt" => vec![recipe(
             "%alt:...",
@@ -666,25 +673,40 @@ pub fn directive_snippet_recipes(
                 "Declare a parallel clan and assign it to a tribe.",
             ),
         ],
-        "queue" => vec![
-            colon_recipe("queue", "5"),
-            recipe(
-                "%q:...",
-                "directive snippet",
-                "%q:${1:5}$0",
-                "%q:$1$0",
-                "%q:5",
-                "Set a weighted-load capacity threshold with the short alias.",
-            ),
-            recipe(
-                "%queue(capacity=..., priority=...)",
-                "directive snippet",
-                "%queue(capacity=${1:5}, priority=${2:10})$0",
-                "%queue(capacity=$1, priority=$2)$0",
-                "%queue(capacity=5, priority=10)",
-                "Set both weighted-load capacity and priority.",
-            ),
-        ],
+        "queue" => {
+            let budget = crate::queue_directive::queue_capacity_budget_enabled(
+                enabled_feature_flags,
+            );
+            let colon_help = if budget {
+                "Set this launch's capacity budget with the short alias."
+            } else {
+                "Set a weighted-load capacity threshold with the short alias."
+            };
+            let paren_help = if budget {
+                "Set this launch's capacity budget and priority."
+            } else {
+                "Set both weighted-load capacity and priority."
+            };
+            vec![
+                colon_recipe("queue", "5"),
+                recipe(
+                    "%q:...",
+                    "directive snippet",
+                    "%q:${1:5}$0",
+                    "%q:$1$0",
+                    "%q:5",
+                    colon_help,
+                ),
+                recipe(
+                    "%queue(capacity=..., priority=...)",
+                    "directive snippet",
+                    "%queue(capacity=${1:5}, priority=${2:10})$0",
+                    "%queue(capacity=$1, priority=$2)$0",
+                    "%queue(capacity=5, priority=10)",
+                    paren_help,
+                ),
+            ]
+        }
         "wait" => vec![
             colon_recipe("wait", "value"),
             recipe(

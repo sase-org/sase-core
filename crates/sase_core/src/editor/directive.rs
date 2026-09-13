@@ -1,3 +1,4 @@
+use crate::queue_directive::queue_capacity_budget_enabled;
 use crate::xprompt_text_block::find_text_block_close_for_args_bytes;
 
 use super::token::DocumentSnapshot;
@@ -104,6 +105,19 @@ const WAIT_CAPACITY_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "1",
         documentation: "Start when occupied weighted load is at most 1",
+    },
+];
+
+const WAIT_CAPACITY_BUDGET_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "1",
+        documentation:
+            "Capacity budget of 1: run alone when this launch's effective weight is 1",
+    },
+    DirectiveSuggestedValue {
+        value: "100",
+        documentation:
+            "Capacity budget of 100: replace max_running_agents for this launch",
     },
 ];
 
@@ -349,6 +363,79 @@ const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
     },
 ];
 
+const QUEUE_DIRECTIVE_OFF: DirectiveMetadata = DirectiveMetadata {
+    name: "queue",
+    alias: Some("q"),
+    description: "Set weighted-load capacity, priority, and capacity weight",
+    argument_hint: ":N or (N, capacity=, priority=, p=, weight=, w=)",
+    takes_argument: true,
+    allows_multiple: true,
+    syntax_forms: COLON_PAREN,
+    positional_role: Some(DirectiveValueRole::NonNegativeInt),
+    positional_suggestions: WAIT_CAPACITY_SUGGESTIONS,
+    keywords: QUEUE_KEYWORDS,
+    dynamic_keyword_role: None,
+};
+
+const QUEUE_DIRECTIVE_ON: DirectiveMetadata = DirectiveMetadata {
+    name: "queue",
+    alias: Some("q"),
+    description:
+        "Set this launch's capacity budget, priority, and capacity weight",
+    argument_hint: ":N or (N, capacity=, priority=, p=, weight=, w=)",
+    takes_argument: true,
+    allows_multiple: true,
+    syntax_forms: COLON_PAREN,
+    positional_role: Some(DirectiveValueRole::PositiveInt),
+    positional_suggestions: WAIT_CAPACITY_BUDGET_SUGGESTIONS,
+    keywords: QUEUE_BUDGET_KEYWORDS,
+    dynamic_keyword_role: None,
+};
+
+const QUEUE_BUDGET_KEYWORDS: &[DirectiveKeywordSpec] = &[
+    DirectiveKeywordSpec {
+        name: "capacity",
+        description:
+            "This launch's capacity budget, replacing max_running_agents",
+        value_role: DirectiveValueRole::PositiveInt,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: WAIT_CAPACITY_BUDGET_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "p",
+        description: "Alias for priority=; lower values start first",
+        value_role: DirectiveValueRole::NonNegativeInt,
+        repeatable: false,
+        conflicts_with: &["priority"],
+        suggested_values: WAIT_PRIORITY_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "priority",
+        description: "Lower values start first; the default is 10",
+        value_role: DirectiveValueRole::NonNegativeInt,
+        repeatable: false,
+        conflicts_with: &["p"],
+        suggested_values: WAIT_PRIORITY_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "w",
+        description: "Alias for weight=; positive capacity units",
+        value_role: DirectiveValueRole::PositiveFloat,
+        repeatable: false,
+        conflicts_with: &["weight"],
+        suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "weight",
+        description: "Positive capacity units claimed by this launch",
+        value_role: DirectiveValueRole::PositiveFloat,
+        repeatable: false,
+        conflicts_with: &["w"],
+        suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
+    },
+];
+
 const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
         name: "agent",
@@ -486,19 +573,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         keywords: WAIT_KEYWORDS,
         dynamic_keyword_role: None,
     },
-    DirectiveMetadata {
-        name: "queue",
-        alias: Some("q"),
-        description: "Set weighted-load capacity, priority, and capacity weight",
-        argument_hint: ":N or (N, capacity=, priority=, p=, weight=, w=)",
-        takes_argument: true,
-        allows_multiple: true,
-        syntax_forms: COLON_PAREN,
-        positional_role: Some(DirectiveValueRole::NonNegativeInt),
-        positional_suggestions: WAIT_CAPACITY_SUGGESTIONS,
-        keywords: QUEUE_KEYWORDS,
-        dynamic_keyword_role: None,
-    },
+    QUEUE_DIRECTIVE_OFF,
     DirectiveMetadata {
         name: "dispatch",
         alias: None,
@@ -648,17 +723,58 @@ pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
 }
 
 pub fn directive_metadata(raw: &str) -> Option<&'static DirectiveMetadata> {
+    directive_metadata_with_flags(raw, &[])
+}
+
+pub fn directive_metadata_with_flags(
+    raw: &str,
+    enabled_feature_flags: &[String],
+) -> Option<&'static DirectiveMetadata> {
     let canonical = canonical_directive_name(raw)?;
+    if canonical == "queue" {
+        return Some(queue_directive_metadata(enabled_feature_flags));
+    }
     DIRECTIVES
         .iter()
         .find(|directive| directive.name == canonical)
 }
 
+pub fn queue_directive_metadata(
+    enabled_feature_flags: &[String],
+) -> &'static DirectiveMetadata {
+    if queue_capacity_budget_enabled(enabled_feature_flags) {
+        &QUEUE_DIRECTIVE_ON
+    } else {
+        &QUEUE_DIRECTIVE_OFF
+    }
+}
+
 /// Owned JSON-shaped copy of the canonical directive completion contract.
 pub fn directive_contract() -> Vec<DirectiveContractEntry> {
+    directive_contract_with_flags(&[])
+}
+
+pub fn directive_contract_with_flags(
+    enabled_feature_flags: &[String],
+) -> Vec<DirectiveContractEntry> {
     DIRECTIVES
         .iter()
-        .map(DirectiveContractEntry::from)
+        .map(|metadata| {
+            let metadata = if metadata.name == "queue" {
+                queue_directive_metadata(enabled_feature_flags)
+            } else {
+                metadata
+            };
+            let mut entry = DirectiveContractEntry::from(metadata);
+            if metadata.name == "queue" {
+                entry.recipes =
+                    crate::editor::wire::directive_snippet_recipes_with_flags(
+                        metadata.name,
+                        enabled_feature_flags,
+                    );
+            }
+            entry
+        })
         .collect()
 }
 
@@ -1584,6 +1700,34 @@ mod tests {
             queue.positional_role,
             Some(DirectiveValueRole::NonNegativeInt)
         );
+        assert_eq!(queue.positional_suggestions[0].value, "0");
+        let on_queue = directive_contract_with_flags(&[
+            "queue_capacity_budget".to_string(),
+        ])
+        .into_iter()
+        .find(|entry| entry.name == "queue")
+        .expect("queue contract");
+        assert_eq!(
+            on_queue.positional_role,
+            Some(DirectiveValueRole::PositiveInt)
+        );
+        assert_eq!(
+            on_queue
+                .positional_suggestions
+                .iter()
+                .map(|value| value.value.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "100"]
+        );
+        assert_eq!(
+            on_queue
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == "capacity")
+                .map(|keyword| keyword.value_role),
+            Some(DirectiveValueRole::PositiveInt)
+        );
+        assert!(on_queue.description.contains("capacity budget"));
         assert_eq!(
             queue
                 .keywords

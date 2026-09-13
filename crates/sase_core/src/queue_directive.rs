@@ -5,6 +5,7 @@
 //! occurrence scanning. This module never reads global configuration.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 /// Legacy feature-flag key retained for older bindings. `%queue` is always enabled.
 pub const QUEUE_DIRECTIVE_FLAG: &str = "queue_directive";
@@ -28,6 +29,181 @@ pub fn queue_capacity_budget_enabled(enabled_feature_flags: &[String]) -> bool {
     enabled_feature_flags
         .iter()
         .any(|flag| flag == QUEUE_CAPACITY_BUDGET_FLAG)
+}
+
+/// Fold legacy `wait_runners*` keys into canonical `queue_capacity*`.
+/// Canonical values win when both spellings are present.
+pub fn merge_queue_capacity_aliases(map: &mut Map<String, Value>) {
+    if map.contains_key("queue_capacity") {
+        map.remove("wait_runners");
+    } else if let Some(legacy) = map.remove("wait_runners") {
+        map.insert("queue_capacity".to_string(), legacy);
+    }
+    if map.contains_key("queue_capacity_explicit") {
+        map.remove("wait_runners_explicit");
+    } else if let Some(legacy) = map.remove("wait_runners_explicit") {
+        map.insert("queue_capacity_explicit".to_string(), legacy);
+    }
+}
+
+/// Merge capacity aliases on `agent_meta` and `waiting` objects of a scan record.
+pub fn merge_queue_capacity_aliases_in_scan_record(value: &mut Value) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    if let Some(Value::Object(meta)) = map.get_mut("agent_meta") {
+        merge_queue_capacity_aliases(meta);
+    }
+    if let Some(Value::Object(waiting)) = map.get_mut("waiting") {
+        merge_queue_capacity_aliases(waiting);
+    }
+}
+
+/// Merge capacity aliases on a runner-capacity request and its nested records.
+pub fn merge_queue_capacity_aliases_in_capacity_request(value: &mut Value) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    if let Some(Value::Array(records)) = map.get_mut("records") {
+        for record in records {
+            if let Value::Object(item) = record {
+                merge_queue_capacity_aliases(item);
+            }
+        }
+    }
+    if let Some(Value::Object(candidate)) = map.get_mut("candidate") {
+        merge_queue_capacity_aliases(candidate);
+    }
+}
+
+/// Prefer canonical `queue_capacity*` over legacy `wait_runners*`.
+pub fn resolve_queue_capacity(
+    canonical: Option<i64>,
+    legacy: Option<i64>,
+    canonical_explicit: bool,
+    legacy_explicit: bool,
+) -> (Option<i64>, bool) {
+    if canonical.is_some() {
+        (canonical, canonical_explicit)
+    } else if legacy.is_some() {
+        (legacy, legacy_explicit)
+    } else {
+        (None, canonical_explicit || legacy_explicit)
+    }
+}
+
+/// Read authored capacity from a JSON object, accepting either spelling.
+///
+/// Omission (`None`/`false`), explicit false, and explicit zero stay
+/// distinguishable. Canonical names win when both spellings are present.
+pub fn queue_capacity_from_map(
+    data: &Map<String, Value>,
+) -> (Option<i64>, bool) {
+    let canonical_present = data.contains_key("queue_capacity");
+    let explicit_present = data.contains_key("queue_capacity_explicit");
+    let capacity = if canonical_present {
+        json_int(data.get("queue_capacity"))
+    } else {
+        json_int(data.get("wait_runners"))
+    };
+    let explicit = if explicit_present {
+        json_truthy(data.get("queue_capacity_explicit"))
+    } else {
+        json_truthy(data.get("wait_runners_explicit"))
+    };
+    (capacity, explicit)
+}
+
+pub fn queue_capacity_as_u32(value: Option<i64>) -> Option<u32> {
+    value.and_then(|value| u32::try_from(value).ok())
+}
+
+/// Shared persisted-zero translation for admission and continuation resume.
+///
+/// Newly authored zero remains a parse error when the budget flag is on.
+/// A persisted explicit zero becomes an exact effective-weight drain budget
+/// rather than a rounded integer or a silent fall-back to the global limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistedQueueCapacityNormWire {
+    pub admission_limit: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_capacity: Option<u32>,
+    pub authored_explicit: bool,
+    pub legacy_zero: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reauthor_capacity: Option<u32>,
+}
+
+pub fn normalize_persisted_queue_capacity(
+    queue_capacity: Option<u32>,
+    queue_capacity_explicit: bool,
+    effective_weight: f64,
+    global_limit: f64,
+    capacity_budget: bool,
+) -> PersistedQueueCapacityNormWire {
+    if !capacity_budget || !queue_capacity_explicit {
+        return PersistedQueueCapacityNormWire {
+            admission_limit: global_limit,
+            authored_capacity: queue_capacity,
+            authored_explicit: queue_capacity_explicit,
+            legacy_zero: false,
+            reauthor_capacity: queue_capacity,
+        };
+    }
+    match queue_capacity {
+        Some(0) => PersistedQueueCapacityNormWire {
+            admission_limit: effective_weight,
+            authored_capacity: Some(0),
+            authored_explicit: true,
+            legacy_zero: true,
+            reauthor_capacity: None,
+        },
+        Some(capacity) => PersistedQueueCapacityNormWire {
+            admission_limit: f64::from(capacity),
+            authored_capacity: Some(capacity),
+            authored_explicit: true,
+            legacy_zero: false,
+            reauthor_capacity: Some(capacity),
+        },
+        None => PersistedQueueCapacityNormWire {
+            admission_limit: global_limit,
+            authored_capacity: None,
+            authored_explicit: true,
+            legacy_zero: false,
+            reauthor_capacity: None,
+        },
+    }
+}
+
+fn json_int(value: Option<&Value>) -> Option<i64> {
+    match value {
+        Some(Value::Bool(_)) | None | Some(Value::Null) => None,
+        Some(Value::Number(n)) => {
+            n.as_i64().or_else(|| n.as_f64().map(|float| float as i64))
+        }
+        Some(Value::String(s)) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                i != 0
+            } else if let Some(u) = n.as_u64() {
+                u != 0
+            } else {
+                n.as_f64().map(|float| float != 0.0).unwrap_or(false)
+            }
+        }
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(object)) => !object.is_empty(),
+    }
 }
 
 /// One already-split queue argument. `name` is absent for positionals.
@@ -1078,5 +1254,58 @@ mod tests {
         };
         let errors = collect_err(&[occurrence]);
         assert_eq!(errors[0].source_span, Some([3, 20]));
+    }
+
+    #[test]
+    fn capacity_aliases_prefer_canonical_and_keep_zero_distinct() {
+        let mut dual = serde_json::Map::new();
+        dual.insert("queue_capacity".into(), serde_json::json!(100));
+        dual.insert("wait_runners".into(), serde_json::json!(0));
+        dual.insert("queue_capacity_explicit".into(), serde_json::json!(true));
+        dual.insert("wait_runners_explicit".into(), serde_json::json!(true));
+        assert_eq!(queue_capacity_from_map(&dual), (Some(100), true));
+        merge_queue_capacity_aliases(&mut dual);
+        assert_eq!(dual.get("queue_capacity"), Some(&serde_json::json!(100)));
+        assert!(dual.get("wait_runners").is_none());
+        assert_eq!(
+            dual.get("queue_capacity_explicit"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(dual.get("wait_runners_explicit").is_none());
+
+        let mut legacy = serde_json::Map::new();
+        legacy.insert("wait_runners".into(), serde_json::json!(0));
+        legacy.insert("wait_runners_explicit".into(), serde_json::json!(true));
+        assert_eq!(queue_capacity_from_map(&legacy), (Some(0), true));
+
+        let omitted = serde_json::Map::new();
+        assert_eq!(queue_capacity_from_map(&omitted), (None, false));
+
+        let mut explicit_false = serde_json::Map::new();
+        explicit_false
+            .insert("queue_capacity_explicit".into(), serde_json::json!(false));
+        assert_eq!(queue_capacity_from_map(&explicit_false), (None, false));
+    }
+
+    #[test]
+    fn persisted_zero_keeps_exact_effective_weight_drain_budget() {
+        let translated =
+            normalize_persisted_queue_capacity(Some(0), true, 0.25, 8.0, true);
+        assert_eq!(translated.admission_limit, 0.25);
+        assert_eq!(translated.authored_capacity, Some(0));
+        assert!(translated.legacy_zero);
+        assert_eq!(translated.reauthor_capacity, None);
+
+        let positive =
+            normalize_persisted_queue_capacity(Some(100), true, 1.0, 1.0, true);
+        assert_eq!(positive.admission_limit, 100.0);
+        assert_eq!(positive.reauthor_capacity, Some(100));
+        assert!(!positive.legacy_zero);
+
+        let off =
+            normalize_persisted_queue_capacity(Some(0), true, 0.25, 8.0, false);
+        assert_eq!(off.admission_limit, 8.0);
+        assert_eq!(off.reauthor_capacity, Some(0));
+        assert!(!off.legacy_zero);
     }
 }

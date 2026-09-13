@@ -55,8 +55,9 @@ pub use directive::{
     build_filtered_directive_keyword_candidates, canonical_directive_name,
     detect_directive_context_at_position, directive_allows_keywords,
     directive_argument_candidates, directive_contract,
-    directive_is_hidden_from_name_completion,
+    directive_contract_with_flags, directive_is_hidden_from_name_completion,
     directive_is_hidden_from_name_completion_with_flags, directive_metadata,
+    directive_metadata_with_flags, queue_directive_metadata,
     rank_and_filter_bead_entries, BEAD_COMPLETION_LIMIT, DIRECTIVES,
 };
 pub use file::{
@@ -71,7 +72,7 @@ pub use frontmatter::{
     validate_field as validate_frontmatter_field,
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
-pub use hover::hover_at_position;
+pub use hover::{hover_at_position, hover_at_position_with_flags};
 pub use model_alias_shortcut::{
     detect_model_alias_shortcut_context,
     filter_explicit_model_shortcut_entries,
@@ -98,8 +99,9 @@ pub use token::{
 };
 pub use wire::{
     directive_body_kind, directive_examples, directive_feature_flag,
-    directive_snippet_recipes, directive_synopsis, AgentCatalogRequest,
-    AgentCatalogResponse, AgentCompletionEntry, ArtifactRefCompletionMode,
+    directive_snippet_recipes, directive_snippet_recipes_with_flags,
+    directive_synopsis, AgentCatalogRequest, AgentCatalogResponse,
+    AgentCompletionEntry, ArtifactRefCompletionMode,
     ArtifactRefCompletionTrigger, BeadCompletionEntry, CompletionCandidate,
     CompletionContext, CompletionContextKind, CompletionList,
     DiagnosticSeverity, DirectiveBodyKind, DirectiveClauseContext,

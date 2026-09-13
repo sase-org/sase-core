@@ -43,13 +43,14 @@ use sase_core::{
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
-    editor_detect_model_alias_shortcut_context, editor_directive_contract,
+    editor_detect_model_alias_shortcut_context,
+    editor_directive_contract_with_flags,
     editor_directive_is_hidden_from_name_completion_with_flags,
     editor_extract_token_at_position,
     editor_filter_explicit_model_shortcut_entries,
-    editor_filter_model_alias_shortcut_entries, editor_hover_at_position,
-    editor_model_shortcut_context, editor_model_shortcut_edit,
-    editor_plan_model_alias_shortcut_edit,
+    editor_filter_model_alias_shortcut_entries,
+    editor_hover_at_position_with_flags, editor_model_shortcut_context,
+    editor_model_shortcut_edit, editor_plan_model_alias_shortcut_edit,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
     AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
@@ -100,6 +101,7 @@ const MACHINE_CATALOG_ENV: &str = "SASE_XPROMPT_MACHINE_CATALOG";
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
+const QUEUE_CAPACITY_BUDGET_ENV: &str = "SASE_QUEUE_CAPACITY_BUDGET";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -129,6 +131,8 @@ struct ServerConfig {
     glossary_catalog: Option<PathBuf>,
     /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
     typed_launch_units: bool,
+    /// Startup-resolved `queue_capacity_budget` sunset flag. Defaults on.
+    queue_capacity_budget: bool,
 }
 
 impl Default for ServerConfig {
@@ -145,6 +149,7 @@ impl Default for ServerConfig {
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
+            queue_capacity_budget: queue_capacity_budget_from_env(),
         }
     }
 }
@@ -481,7 +486,10 @@ impl XpromptLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
-                    &enabled_feature_flags(config.typed_launch_units),
+                    &enabled_feature_flags(
+                        config.typed_launch_units,
+                        config.queue_capacity_budget,
+                    ),
                     config.snippet_support,
                 ));
             }
@@ -705,6 +713,7 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
+                config.queue_capacity_budget,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -744,6 +753,7 @@ impl XpromptLspServer {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
+                config.queue_capacity_budget,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -871,10 +881,14 @@ impl XpromptLspServer {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
-        if let Some(hover) = editor_hover_at_position(
+        if let Some(hover) = editor_hover_at_position_with_flags(
             &document,
             to_editor_position(position),
             entries.as_slice(),
+            &enabled_feature_flags(
+                config.typed_launch_units,
+                config.queue_capacity_budget,
+            ),
         ) {
             return Some(lsp_hover(hover));
         }
@@ -1366,7 +1380,10 @@ impl XpromptLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates_with_flags(
                     token,
-                    &enabled_feature_flags(config.typed_launch_units),
+                    &enabled_feature_flags(
+                        config.typed_launch_units,
+                        config.queue_capacity_budget,
+                    ),
                 )
             }
             CompletionContextKind::DirectiveArgument
@@ -1815,6 +1832,8 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
         glossary_catalog: glossary_catalog_path(),
         typed_launch_units: typed_launch_units_from_initialize(params)
             .unwrap_or_else(typed_launch_units_from_env),
+        queue_capacity_budget: queue_capacity_budget_from_initialize(params)
+            .unwrap_or_else(queue_capacity_budget_from_env),
     }
 }
 
@@ -1836,6 +1855,24 @@ fn typed_launch_units_from_env() -> bool {
         .unwrap_or(false)
 }
 
+fn queue_capacity_budget_from_initialize(
+    params: &InitializeParams,
+) -> Option<bool> {
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("queue_capacity_budget"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn queue_capacity_budget_from_env() -> bool {
+    std::env::var(QUEUE_CAPACITY_BUDGET_ENV)
+        .ok()
+        .as_deref()
+        .map(env_flag_enabled)
+        .unwrap_or(true)
+}
+
 fn env_flag_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -1843,10 +1880,16 @@ fn env_flag_enabled(value: &str) -> bool {
     )
 }
 
-fn enabled_feature_flags(typed_launch_units: bool) -> Vec<String> {
+fn enabled_feature_flags(
+    typed_launch_units: bool,
+    queue_capacity_budget: bool,
+) -> Vec<String> {
     let mut flags = Vec::new();
     if typed_launch_units {
         flags.push("typed_launch_units".to_string());
+    }
+    if queue_capacity_budget {
+        flags.push("queue_capacity_budget".to_string());
     }
     flags
 }
@@ -2059,7 +2102,7 @@ fn directive_snippet_items(
         .unwrap_or_default()
         .strip_prefix('%')
         .unwrap_or_default();
-    editor_directive_contract()
+    editor_directive_contract_with_flags(enabled_feature_flags)
         .into_iter()
         .filter(|directive| !directive.recipes.is_empty())
         .filter(|directive| directive.takes_argument)
@@ -4429,7 +4472,7 @@ mod tests {
         assert_eq!(labels_at(server, "%wait(time=").await, vec!["5m", "1430"]);
         assert!(labels_at(server, "%wait(runners=").await.is_empty());
         assert!(labels_at(server, "%wait(priority=").await.is_empty());
-        assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%q:").await, vec!["1", "100"]);
         assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
         assert_eq!(labels_at(server, "%repeat:").await, vec!["2", "3"]);
         assert_eq!(
@@ -4452,7 +4495,7 @@ mod tests {
         );
         assert_eq!(
             labels_at(server, "%queue(").await,
-            vec!["capacity=", "p=", "priority=", "w=", "weight=", "0", "1"]
+            vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
         );
     }
 
@@ -4478,15 +4521,18 @@ mod tests {
 
         assert_eq!(
             labels_at(server, "%q(").await,
-            vec!["capacity=", "p=", "priority=", "w=", "weight=", "0", "1"]
+            vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
         );
-        assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%q:").await, vec!["1", "100"]);
         assert_eq!(
             labels_at(server, "%q(5, ").await,
             vec!["p=", "priority=", "w=", "weight="]
         );
         assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
-        assert_eq!(labels_at(server, "%queue(capacity=").await, vec!["0", "1"]);
+        assert_eq!(
+            labels_at(server, "%queue(capacity=").await,
+            vec!["1", "100"]
+        );
         assert_eq!(
             labels_at(server, "%wait(").await,
             vec!["agent=", "bead=", "proc=", "time=", "unit=", "planner"]
@@ -4496,6 +4542,9 @@ mod tests {
             .await
             .iter()
             .all(|value| value != "planner"));
+        server.config.write().unwrap().queue_capacity_budget = false;
+        assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
+        assert_eq!(labels_at(server, "%queue(capacity=").await, vec!["0", "1"]);
     }
 
     #[tokio::test]

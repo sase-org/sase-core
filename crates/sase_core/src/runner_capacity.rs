@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::queue_directive::{
-    queue_capacity_budget_enabled, queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+    normalize_persisted_queue_capacity, queue_capacity_as_u32,
+    queue_capacity_budget_enabled, queue_weight_is_valid,
+    resolve_queue_capacity, DEFAULT_QUEUE_WEIGHT,
 };
 
 pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 4;
@@ -83,10 +85,14 @@ pub struct RunnerCapacityRecordWire {
     pub queue_weight_invalid: bool,
     #[serde(default)]
     pub slot_requested_at: Option<String>,
-    #[serde(default, alias = "wait_runners")]
+    #[serde(default)]
     pub queue_capacity: Option<i64>,
-    #[serde(default, alias = "wait_runners_explicit")]
+    #[serde(default)]
     pub queue_capacity_explicit: bool,
+    #[serde(default, skip_serializing)]
+    wait_runners: Option<i64>,
+    #[serde(default, skip_serializing)]
+    wait_runners_explicit: bool,
     #[serde(default)]
     pub wait_priority: Option<i64>,
     #[serde(default)]
@@ -241,9 +247,31 @@ pub fn runner_capacity_policy_schema_version() -> u32 {
     RUNNER_CAPACITY_POLICY_SCHEMA_VERSION
 }
 
+impl RunnerCapacityRecordWire {
+    fn normalize_queue_capacity_aliases(&mut self) {
+        let (capacity, explicit) = resolve_queue_capacity(
+            self.queue_capacity,
+            self.wait_runners.take(),
+            self.queue_capacity_explicit,
+            self.wait_runners_explicit,
+        );
+        self.queue_capacity = capacity;
+        self.queue_capacity_explicit = explicit;
+        self.wait_runners_explicit = false;
+    }
+}
+
 pub fn runner_capacity_snapshot(
     request: &RunnerCapacityRequestWire,
 ) -> RunnerCapacitySnapshotWire {
+    let mut request = request.clone();
+    for record in &mut request.records {
+        record.normalize_queue_capacity_aliases();
+    }
+    if let Some(candidate) = &mut request.candidate {
+        candidate.normalize_queue_capacity_aliases();
+    }
+    let request = &request;
     let mut diagnostics = Vec::new();
     let claim_records = records_excluding_candidate(request);
     let (mut claims, invalid_live_claim) =
@@ -558,23 +586,21 @@ fn waiter_admission_limit(
     capacity_budget: bool,
     diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
 ) -> f64 {
-    if !capacity_budget || !record.queue_capacity_explicit {
-        return request.effective_limit;
+    let normalized = normalize_persisted_queue_capacity(
+        queue_capacity,
+        record.queue_capacity_explicit,
+        requested_weight,
+        request.effective_limit,
+        capacity_budget,
+    );
+    if normalized.legacy_zero {
+        diagnostics.push(diagnostic(
+            "legacy-capacity-zero",
+            "Persisted queue_capacity=0 was translated to this waiter's effective weight so it drains to zero before admission.",
+            Some(record.artifact_dir.clone()),
+        ));
     }
-    match record.queue_capacity {
-        Some(0) => {
-            diagnostics.push(diagnostic(
-                "legacy-capacity-zero",
-                "Persisted queue_capacity=0 was translated to this waiter's effective weight so it drains to zero before admission.",
-                Some(record.artifact_dir.clone()),
-            ));
-            requested_weight
-        }
-        Some(_) => queue_capacity
-            .map(f64::from)
-            .unwrap_or(request.effective_limit),
-        None => request.effective_limit,
-    }
+    normalized.admission_limit
 }
 
 fn waiter_blockers(
@@ -1271,8 +1297,7 @@ fn explicit_queue_capacity(record: &RunnerCapacityRecordWire) -> Option<u32> {
     if !record.queue_capacity_explicit {
         return None;
     }
-    let runners = record.queue_capacity?;
-    u32::try_from(runners).ok()
+    queue_capacity_as_u32(record.queue_capacity)
 }
 
 fn normalize_wait_priority(value: Option<i64>) -> i32 {
@@ -1490,6 +1515,8 @@ mod tests {
             slot_requested_at: None,
             queue_capacity: None,
             queue_capacity_explicit: false,
+            wait_runners: None,
+            wait_runners_explicit: false,
             wait_priority: None,
             eligible_since: None,
         }
@@ -1821,7 +1848,7 @@ mod tests {
 
     #[test]
     fn legacy_wait_runners_aliases_deserialize_to_queue_capacity() {
-        let record: RunnerCapacityRecordWire =
+        let mut record: RunnerCapacityRecordWire =
             serde_json::from_value(serde_json::json!({
                 "artifact_dir": "/tmp/waiter",
                 "project_name": "proj",
@@ -1830,6 +1857,7 @@ mod tests {
                 "wait_runners_explicit": true
             }))
             .unwrap();
+        record.normalize_queue_capacity_aliases();
         assert_eq!(record.queue_capacity, Some(3));
         assert!(record.queue_capacity_explicit);
         let encoded = serde_json::to_value(&record).unwrap();
@@ -1850,6 +1878,44 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(waiter.queue_capacity, Some(3));
+    }
+
+    #[test]
+    fn dual_written_capacity_fields_prefer_canonical_without_duplicate_error() {
+        let record: RunnerCapacityRecordWire =
+            serde_json::from_value(serde_json::json!({
+                "artifact_dir": "/tmp/waiter",
+                "project_name": "proj",
+                "timestamp": "waiter",
+                "queue_capacity": 100,
+                "wait_runners": 0,
+                "queue_capacity_explicit": true,
+                "wait_runners_explicit": true
+            }))
+            .unwrap();
+        let mut record = record;
+        record.normalize_queue_capacity_aliases();
+        assert_eq!(record.queue_capacity, Some(100));
+        assert!(record.queue_capacity_explicit);
+        assert!(record.wait_runners.is_none());
+
+        let mut waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+        waiting_agent.queue_capacity = Some(100);
+        waiting_agent.wait_runners = Some(0);
+        waiting_agent.queue_capacity_explicit = true;
+        waiting_agent.wait_runners_explicit = true;
+        let result = snapshot_with_flags(
+            1.0,
+            vec![running("busy", Some(1.0)), waiting_agent],
+            &capacity_budget_flags(),
+        );
+        assert_eq!(
+            result.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert_eq!(result.waiters[0].queue_capacity, Some(100));
+        assert_eq!(result.waiters[0].admission_limit, 100.0);
     }
 
     #[test]

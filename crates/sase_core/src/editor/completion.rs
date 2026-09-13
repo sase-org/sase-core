@@ -30,7 +30,7 @@ use super::directive::{
     build_filtered_directive_keyword_candidates,
     detect_directive_context_at_position, directive_allows_keywords,
     directive_is_hidden_from_name_completion_with_flags, directive_metadata,
-    wait_queue_keyword_retired,
+    directive_metadata_with_flags, wait_queue_keyword_retired,
 };
 use super::placeholder::detect_placeholder_context_at_position;
 use super::token::{
@@ -1519,7 +1519,10 @@ fn build_queue_completion_candidates(
     token: &str,
     replacement: Option<EditorRange>,
 ) -> CompletionList {
-    let Some(metadata) = directive_metadata("queue") else {
+    let Some(metadata) = directive_metadata_with_flags(
+        "queue",
+        &inventories.enabled_feature_flags,
+    ) else {
         return CompletionList {
             candidates: Vec::new(),
             shared_extension: String::new(),
@@ -1599,10 +1602,13 @@ pub fn build_directive_clause_candidates(
             );
         }
         CompletionContextKind::DirectiveArgumentKeyword => {
-            if let Some(metadata) = context
-                .directive_name
-                .as_deref()
-                .and_then(directive_metadata)
+            if let Some(metadata) =
+                context.directive_name.as_deref().and_then(|name| {
+                    directive_metadata_with_flags(
+                        name,
+                        &inventories.enabled_feature_flags,
+                    )
+                })
             {
                 let mut list = build_filtered_directive_keyword_candidates(
                     metadata,
@@ -1703,7 +1709,9 @@ pub fn build_directive_clause_candidates(
     if context.value_role() == Some(DirectiveValueRole::FinalizerInstance) {
         return finalizer_value_candidates(token, inventories, replacement);
     }
-    let Some(metadata) = directive_metadata(name) else {
+    let Some(metadata) =
+        directive_metadata_with_flags(name, &inventories.enabled_feature_flags)
+    else {
         return CompletionList {
             candidates: Vec::new(),
             shared_extension: String::new(),
@@ -1800,10 +1808,13 @@ fn build_directive_value_candidates(
             machine_value_candidates(token, inventories, replacement)
         }
         _ => {
-            let Some(metadata) = context
-                .directive_name
-                .as_deref()
-                .and_then(directive_metadata)
+            let Some(metadata) =
+                context.directive_name.as_deref().and_then(|name| {
+                    directive_metadata_with_flags(
+                        name,
+                        &inventories.enabled_feature_flags,
+                    )
+                })
             else {
                 return CompletionList {
                     candidates: Vec::new(),

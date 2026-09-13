@@ -1791,10 +1791,10 @@ fn waiting_marker_carries_runner_slot_fields() {
     );
     assert_eq!(waiting.wait_duration, Some(600.0));
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
-    assert_eq!(waiting.wait_runners, Some(3));
+    assert_eq!(waiting.queue_capacity, Some(3));
     assert_eq!(waiting.wait_priority, Some(5));
     assert!(waiting.wait_priority_explicit);
-    assert!(waiting.wait_runners_explicit);
+    assert!(waiting.queue_capacity_explicit);
     assert_eq!(
         waiting.slot_requested_at.as_deref(),
         Some("2026-07-12T19:20:00Z")
