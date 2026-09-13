@@ -394,7 +394,9 @@ fn candidate_record_with_effective_weight(
     let lineage = claim_lineage(candidate, &index);
     let inherited = claims
         .iter()
-        .find(|claim| claim.owner_key == lineage.owner_key)
+        .find(|claim| {
+            claim.owner_key == lineage.owner_key && claim_is_reusable(claim)
+        })
         .map(|claim| Ok(Some(claim.occupied_capacity)))
         .unwrap_or_else(|| inherited_lineage_weight(candidate, &index));
     match inherited {
@@ -754,9 +756,9 @@ fn build_candidate_decision(
     let index = record_index(records);
     let lineage = claim_lineage(candidate, &index);
     let requested = effective_weight(candidate);
-    let active_claim = claims
-        .iter()
-        .find(|claim| claim.owner_key == lineage.owner_key);
+    let active_claim = claims.iter().find(|claim| {
+        claim.owner_key == lineage.owner_key && claim_is_reusable(claim)
+    });
     let inherited_result = active_claim
         .map(|claim| Ok(Some(claim.occupied_capacity)))
         .unwrap_or_else(|| inherited_lineage_weight(candidate, &index));
@@ -1005,7 +1007,18 @@ fn weights_equal(left: f64, right: f64) -> bool {
 }
 
 fn active_claim_keys(claims: &[RunnerCapacityClaimWire]) -> BTreeSet<String> {
-    claims.iter().map(|claim| claim.owner_key.clone()).collect()
+    claims
+        .iter()
+        .filter(|claim| claim_is_reusable(claim))
+        .map(|claim| claim.owner_key.clone())
+        .collect()
+}
+
+/// A claim whose live occupiers are all explicit zero-weight records (e.g. an
+/// epic-launch monitor) holds no real capacity footprint: a successor must
+/// not reuse it for free and instead acquires its own capacity.
+fn claim_is_reusable(claim: &RunnerCapacityClaimWire) -> bool {
+    claim.occupied_capacity != 0.0
 }
 
 fn record_index(
@@ -1284,12 +1297,29 @@ fn effective_weight(record: &RunnerCapacityRecordWire) -> Result<f64, String> {
         ));
     }
     match record.queue_weight {
-        Some(weight) if queue_weight_is_valid(weight) => Ok(weight),
+        Some(weight)
+            if record_weight_is_valid(weight, record.queue_weight_explicit) =>
+        {
+            Ok(weight)
+        }
         Some(_) => Err(format!(
-            "{} has an invalid queue_weight; expected a positive finite capacity weight.",
+            "{} has an invalid queue_weight; expected a positive finite capacity weight, or an explicit zero.",
             record.artifact_dir
         )),
         None => Ok(DEFAULT_QUEUE_WEIGHT),
+    }
+}
+
+/// Record-weight validity for wire capacity records.
+///
+/// An explicit `0.0` is a valid non-occupying weight (e.g. the epic-launch
+/// monitor); every other value, and every implicit weight, still follows the
+/// strictly-positive `%queue`/`%q` weight contract in `queue_weight_is_valid`.
+fn record_weight_is_valid(weight: f64, explicit: bool) -> bool {
+    if explicit {
+        weight.is_finite() && weight >= 0.0
+    } else {
+        queue_weight_is_valid(weight)
     }
 }
 
@@ -2408,5 +2438,105 @@ mod tests {
         lower.eligible_since = Some("2026-09-10T00:00:00Z".to_string());
         let satisfied = snapshot(1.0, vec![pending_better, lower]);
         assert!(satisfied.waiters[0].eligible);
+    }
+
+    #[test]
+    fn explicit_zero_weight_monitor_occupies_nothing_at_a_full_limit() {
+        let busy = running("busy", Some(1.0));
+        let mut zero_weight_monitor = running("monitor", Some(0.0));
+        zero_weight_monitor.queue_weight_explicit = true;
+
+        let result = snapshot(1.0, vec![busy, zero_weight_monitor]);
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.occupied_lanes, 2);
+        assert_eq!(result.occupied_capacity, 1.0);
+        assert_eq!(
+            result
+                .claims
+                .iter()
+                .find(|claim| claim.artifact_dirs == ["/tmp/monitor"])
+                .unwrap()
+                .occupied_capacity,
+            0.0
+        );
+    }
+
+    #[test]
+    fn waiter_admits_when_only_other_records_are_zero_weight() {
+        let mut zero_weight_monitor = running("monitor", Some(0.0));
+        zero_weight_monitor.queue_weight_explicit = true;
+        let waiting_agent =
+            waiting("waiter", "2026-09-10T00:00:00Z", Some(1.0));
+
+        let result = snapshot(1.0, vec![zero_weight_monitor, waiting_agent]);
+        assert_eq!(result.occupied_capacity, 0.0);
+        assert_eq!(
+            result.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(waiter(&result, "waiter").eligible);
+    }
+
+    #[test]
+    fn implicit_zero_negative_and_nan_record_weights_still_fail_closed() {
+        let implicit_zero =
+            waiting("implicit-zero", "2026-09-10T00:00:00Z", Some(0.0));
+
+        let mut negative =
+            waiting("negative", "2026-09-10T00:00:01Z", Some(-1.0));
+        negative.queue_weight_explicit = true;
+
+        let mut nan = waiting("nan", "2026-09-10T00:00:02Z", Some(f64::NAN));
+        nan.queue_weight_explicit = true;
+
+        for bad in [implicit_zero, negative, nan] {
+            let name = bad.timestamp.clone();
+            let result = snapshot(8.0, vec![bad]);
+            assert_eq!(
+                waiter(&result, &name).blockers[0].code,
+                "invalid-request-weight",
+                "{name}"
+            );
+            assert!(!waiter(&result, &name).eligible, "{name}");
+        }
+    }
+
+    #[test]
+    fn zero_weight_claim_is_not_reusable_by_a_serial_successor() {
+        let mut starter = running("starter", Some(2.0));
+        starter.agent_family = Some("fam".to_string());
+        starter.live = false;
+        let mut monitor = running("monitor", Some(0.0));
+        monitor.agent_family = Some("fam".to_string());
+        monitor.agent_family_role = Some("monitor".to_string());
+        monitor.family_shell_kind = Some("monitor".to_string());
+        monitor.family_shell_id = Some("mon-1".to_string());
+        monitor.parent_timestamp = Some("starter".to_string());
+        monitor.pid = Some(99);
+        monitor.run_started_at = None;
+        monitor.queue_weight_explicit = true;
+        let mut successor =
+            waiting("successor", "2026-09-10T00:00:00Z", Some(1.0));
+        successor.agent_family = Some("fam".to_string());
+        successor.parent_timestamp = Some("monitor".to_string());
+        successor.queue_weight_explicit = true;
+
+        let result = snapshot(
+            4.0,
+            vec![starter.clone(), monitor.clone(), successor.clone()],
+        );
+        assert_eq!(result.claims.len(), 1);
+        assert_eq!(result.claims[0].occupied_capacity, 0.0);
+        assert_eq!(result.occupied_capacity, 0.0);
+        assert_eq!(result.waiters.len(), 1);
+        assert!(result.waiters[0].eligible);
+        assert_eq!(result.waiters[0].requested_weight, 1.0);
+
+        let decision =
+            snapshot_with_candidate(4.0, vec![starter, monitor], successor)
+                .candidate_decision
+                .unwrap();
+        assert_eq!(decision.decision, "acquire_capacity");
+        assert_eq!(decision.effective_weight, 1.0);
     }
 }
