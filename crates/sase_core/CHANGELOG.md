@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(agent-scan)* project every live index-resident machine value into candidate
+  selection, including a conflicting `imported_source_owner.machine_name`, and
+  keep family/clan/workflow relatives of machine matches so tree-aware filters
+  never under-select.
+
 - *(agent-scan)* treat indexed full history as complete only after source-directory
   discovery, drop deleted rows instead of serving stale `record_json`, and bound
   marker-signature work once that reconciliation has settled.

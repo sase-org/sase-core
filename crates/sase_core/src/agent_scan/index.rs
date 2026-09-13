@@ -46,7 +46,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 29;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 30;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -2602,6 +2602,7 @@ fn open_index_with_busy_timeout(
             finished_at REAL,
             done_outcome TEXT,
             source_machine TEXT,
+            imported_owner_machine TEXT,
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
@@ -2809,6 +2810,10 @@ fn open_index_with_busy_timeout(
     if prior_version.map_or(true, |v| v < 29) {
         migrate_record_json_refresh_v29(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 30) {
+        ensure_agent_artifacts_column(&conn, "imported_owner_machine", "TEXT")?;
+        migrate_imported_owner_machine_projection_v30(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -2816,6 +2821,8 @@ fn open_index_with_busy_timeout(
          ON agent_artifacts(done_outcome); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_source_machine \
          ON agent_artifacts(source_machine); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_imported_owner_machine \
+         ON agent_artifacts(imported_owner_machine); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
          ON agent_artifacts(agent_clan, agent_clan_generation, timestamp);",
     )
@@ -3330,6 +3337,55 @@ fn migrate_record_json_refresh_v29(
     conn.execute_batch("").map_err(|e| e.to_string())
 }
 
+/// v30 adds the imported-owner machine projection so candidate filters can
+/// match every live index-resident machine value, not only `source_machine`.
+fn migrate_imported_owner_machine_projection_v30(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>, Option<String>)> = {
+        let mut stmt = tx
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut machines = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let from_record = decode_agent_artifact_record_json(&record_json)
+                .ok()
+                .map(|record| machine_projection_from_record(&record))
+                .unwrap_or_default();
+            let from_markers =
+                machine_projection_from_marker_files(Path::new(&artifact_dir));
+            let projection = MachineProjection {
+                source_machine: from_record
+                    .source_machine
+                    .or(from_markers.source_machine),
+                imported_owner_machine: from_record
+                    .imported_owner_machine
+                    .or(from_markers.imported_owner_machine),
+            };
+            machines.push((
+                artifact_dir,
+                projection.source_machine,
+                projection.imported_owner_machine,
+            ));
+        }
+        machines
+    };
+    for (artifact_dir, source_machine, imported_owner_machine) in rows {
+        tx.execute(
+            "UPDATE agent_artifacts SET source_machine = ?1, \
+             imported_owner_machine = ?2 WHERE artifact_dir = ?3",
+            params![source_machine, imported_owner_machine, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -3393,13 +3449,14 @@ fn upsert_record(
             running_sig, waiting_sig, pending_question_sig,
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
-            model_alias_origin, done_outcome, source_machine, indexed_at
+            model_alias_origin, done_outcome, source_machine,
+            imported_owner_machine, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, ?46, ?47, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -3448,6 +3505,7 @@ fn upsert_record(
             model_alias_origin = excluded.model_alias_origin,
             done_outcome = excluded.done_outcome,
             source_machine = excluded.source_machine,
+            imported_owner_machine = excluded.imported_owner_machine,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -3498,6 +3556,7 @@ fn upsert_record(
             summary.model_alias_origin,
             done_outcome,
             summary.source_machine,
+            summary.imported_owner_machine,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -4256,6 +4315,9 @@ fn select_pending_rows_for_candidate_filter(
             break;
         }
     }
+    if candidate_filter_uses_machine(filter) {
+        artifact_dirs = expand_machine_tree_relatives(conn, &artifact_dirs)?;
+    }
 
     select_pending_rows_by_artifact_dirs(conn, &artifact_dirs)
 }
@@ -4394,6 +4456,7 @@ struct IndexedCandidateRow {
     model: Option<String>,
     llm_provider: Option<String>,
     source_machine: Option<String>,
+    imported_owner_machine: Option<String>,
     selection: CandidateSelection,
 }
 
@@ -4416,15 +4479,13 @@ impl IndexedCandidateRow {
                 self.llm_provider.as_deref().into_iter().collect()
             }
             AgentArtifactCandidateFieldWire::Machine => {
-                let mut values = vec!["here"];
-                if let Some(machine) = self
-                    .source_machine
-                    .as_deref()
-                    .filter(|machine| !machine.trim().is_empty())
-                {
-                    if !machine.eq_ignore_ascii_case("here") {
-                        values.push(machine);
-                    }
+                let mut values = Vec::new();
+                push_machine_value(&mut values, "here");
+                if let Some(machine) = self.source_machine.as_deref() {
+                    push_machine_value(&mut values, machine);
+                }
+                if let Some(machine) = self.imported_owner_machine.as_deref() {
+                    push_machine_value(&mut values, machine);
                 }
                 values
             }
@@ -4497,6 +4558,27 @@ fn select_windowed_records(
     let mut selected = active_candidates.clone();
     selected
         .extend(completed_candidates.iter().take(completed_budget).cloned());
+    if query
+        .candidate_filter
+        .as_ref()
+        .is_some_and(candidate_filter_uses_machine)
+    {
+        let selected_dirs: Vec<String> = selected
+            .iter()
+            .map(|row| row.artifact_dir.clone())
+            .collect();
+        let expanded_dirs =
+            expand_machine_tree_relatives(conn, &selected_dirs)?;
+        let extras: Vec<String> = expanded_dirs
+            .into_iter()
+            .filter(|dir| !selected.iter().any(|row| &row.artifact_dir == dir))
+            .collect();
+        selected.extend(select_candidate_rows_for_dirs(
+            conn,
+            &extras,
+            CandidateSelection::Visible,
+        )?);
+    }
     let selected_candidate_count = selected.len() as u64;
     let has_more = completed_candidates.len() > completed_budget;
     select_records_for_windowed_candidates(
@@ -4526,7 +4608,7 @@ fn select_candidate_rows(
 ) -> Result<Vec<IndexedCandidateRow>, String> {
     let sql = format!(
         "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider, \
-         source_machine \
+         source_machine, imported_owner_machine \
          FROM agent_artifacts {where_sql}"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -4541,10 +4623,211 @@ fn select_candidate_rows(
             model: row.get(4).map_err(|e| e.to_string())?,
             llm_provider: row.get(5).map_err(|e| e.to_string())?,
             source_machine: row.get(6).map_err(|e| e.to_string())?,
+            imported_owner_machine: row.get(7).map_err(|e| e.to_string())?,
             selection,
         });
     }
     Ok(result)
+}
+
+fn select_candidate_rows_for_dirs(
+    conn: &Connection,
+    artifact_dirs: &[String],
+    selection: CandidateSelection,
+) -> Result<Vec<IndexedCandidateRow>, String> {
+    if artifact_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    let mut result = Vec::new();
+    for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider, \
+             source_machine, imported_owner_machine \
+             FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            result.push(IndexedCandidateRow {
+                artifact_dir: row.get(0).map_err(|e| e.to_string())?,
+                project_name: row.get(1).map_err(|e| e.to_string())?,
+                agent_type: row.get(2).map_err(|e| e.to_string())?,
+                cl_name: row.get(3).map_err(|e| e.to_string())?,
+                model: row.get(4).map_err(|e| e.to_string())?,
+                llm_provider: row.get(5).map_err(|e| e.to_string())?,
+                source_machine: row.get(6).map_err(|e| e.to_string())?,
+                imported_owner_machine: row
+                    .get(7)
+                    .map_err(|e| e.to_string())?,
+                selection,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn expand_machine_tree_relatives(
+    conn: &Connection,
+    selected_dirs: &[String],
+) -> Result<Vec<String>, String> {
+    let mut dirs: BTreeSet<String> = selected_dirs.iter().cloned().collect();
+    if dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+    for _ in 0..8 {
+        let keys = select_candidate_tree_keys(
+            conn,
+            &dirs.iter().cloned().collect::<Vec<_>>(),
+        )?;
+        let extra = select_related_tree_dirs(conn, &keys)?;
+        let before = dirs.len();
+        dirs.extend(extra);
+        if dirs.len() == before {
+            break;
+        }
+    }
+    let mut ordered = Vec::with_capacity(dirs.len());
+    let mut seen = BTreeSet::new();
+    for dir in selected_dirs {
+        if seen.insert(dir.clone()) {
+            ordered.push(dir.clone());
+        }
+    }
+    for dir in dirs {
+        if seen.insert(dir.clone()) {
+            ordered.push(dir);
+        }
+    }
+    Ok(ordered)
+}
+
+#[derive(Debug, Clone)]
+struct CandidateTreeKeys {
+    timestamp: String,
+    agent_family: Option<String>,
+    agent_clan: Option<String>,
+    parent_timestamp: Option<String>,
+}
+
+fn select_candidate_tree_keys(
+    conn: &Connection,
+    artifact_dirs: &[String],
+) -> Result<Vec<CandidateTreeKeys>, String> {
+    if artifact_dirs.is_empty() {
+        return Ok(Vec::new());
+    }
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    let mut result = Vec::new();
+    for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT timestamp, agent_family, agent_clan, parent_timestamp \
+             FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            result.push(CandidateTreeKeys {
+                timestamp: row.get(0).map_err(|e| e.to_string())?,
+                agent_family: row.get(1).map_err(|e| e.to_string())?,
+                agent_clan: row.get(2).map_err(|e| e.to_string())?,
+                parent_timestamp: row.get(3).map_err(|e| e.to_string())?,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn select_related_tree_dirs(
+    conn: &Connection,
+    keys: &[CandidateTreeKeys],
+) -> Result<Vec<String>, String> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut families = BTreeSet::new();
+    let mut clans = BTreeSet::new();
+    let mut timestamps = BTreeSet::new();
+    for key in keys {
+        if let Some(family) = key
+            .agent_family
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            families.insert(family.to_string());
+        }
+        if let Some(clan) =
+            key.agent_clan.as_deref().filter(|value| !value.is_empty())
+        {
+            clans.insert(clan.to_string());
+        }
+        timestamps.insert(key.timestamp.clone());
+        if let Some(parent) = key
+            .parent_timestamp
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            timestamps.insert(parent.to_string());
+        }
+    }
+
+    let mut dirs = BTreeSet::new();
+    if !families.is_empty() {
+        dirs.extend(select_dirs_in_column(
+            conn,
+            "agent_family",
+            &families.into_iter().collect::<Vec<_>>(),
+        )?);
+    }
+    if !clans.is_empty() {
+        dirs.extend(select_dirs_in_column(
+            conn,
+            "agent_clan",
+            &clans.into_iter().collect::<Vec<_>>(),
+        )?);
+    }
+    if !timestamps.is_empty() {
+        let stamps: Vec<String> = timestamps.into_iter().collect();
+        dirs.extend(select_dirs_in_column(conn, "timestamp", &stamps)?);
+        dirs.extend(select_dirs_in_column(conn, "parent_timestamp", &stamps)?);
+    }
+    Ok(dirs.into_iter().collect())
+}
+
+fn select_dirs_in_column(
+    conn: &Connection,
+    column: &'static str,
+    values: &[String],
+) -> Result<Vec<String>, String> {
+    match column {
+        "agent_family" | "agent_clan" | "timestamp" | "parent_timestamp" => {}
+        _ => return Err(format!("unsupported tree column {column}")),
+    }
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    const LOAD_RECORDS_BATCH_SIZE: usize = 500;
+    let mut dirs = Vec::new();
+    for chunk in values.chunks(LOAD_RECORDS_BATCH_SIZE) {
+        let placeholders = placeholders(chunk.len());
+        let sql = format!(
+            "SELECT artifact_dir FROM agent_artifacts WHERE {column} IN ({placeholders})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query(params_from_iter(chunk.iter()))
+            .map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            dirs.push(row.get(0).map_err(|e| e.to_string())?);
+        }
+    }
+    Ok(dirs)
 }
 
 fn select_records_for_windowed_candidates(
@@ -4634,6 +4917,38 @@ fn candidate_filter_matches(
             .scalar_values(*field)
             .into_iter()
             .any(|candidate| scalar_equals(candidate, value)),
+    }
+}
+
+fn push_machine_value<'a>(values: &mut Vec<&'a str>, machine: &'a str) {
+    let trimmed = machine.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if values
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+    {
+        return;
+    }
+    values.push(trimmed);
+}
+
+fn candidate_filter_uses_machine(
+    filter: &AgentArtifactCandidateFilterWire,
+) -> bool {
+    match filter {
+        AgentArtifactCandidateFilterWire::All { filters }
+        | AgentArtifactCandidateFilterWire::Any { filters } => {
+            filters.iter().any(candidate_filter_uses_machine)
+        }
+        AgentArtifactCandidateFilterWire::Not { filter } => {
+            candidate_filter_uses_machine(filter)
+        }
+        AgentArtifactCandidateFilterWire::Contains { field, .. }
+        | AgentArtifactCandidateFilterWire::Equals { field, .. } => {
+            *field == AgentArtifactCandidateFieldWire::Machine
+        }
     }
 }
 
@@ -5757,6 +6072,7 @@ struct RecordSummary {
     retry_attempt: Option<i64>,
     model_alias_origin: Option<String>,
     source_machine: Option<String>,
+    imported_owner_machine: Option<String>,
 }
 
 impl RecordSummary {
@@ -5788,6 +6104,7 @@ impl RecordSummary {
         .to_string();
 
         let clan_key = meta.and_then(clan_key_from_meta);
+        let machines = machine_projection_from_record(record);
         Self {
             status,
             agent_type: if workflow_state.is_some() {
@@ -5849,17 +6166,24 @@ impl RecordSummary {
                 }),
             retry_attempt: meta.and_then(|m| m.retry_attempt),
             model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
-            source_machine: source_machine_from_record(record),
+            source_machine: machines.source_machine,
+            imported_owner_machine: machines.imported_owner_machine,
         }
     }
 }
 
-fn source_machine_from_record(
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MachineProjection {
+    source_machine: Option<String>,
+    imported_owner_machine: Option<String>,
+}
+
+fn machine_projection_from_record(
     record: &AgentArtifactRecordWire,
-) -> Option<String> {
+) -> MachineProjection {
     let meta = record.agent_meta.as_ref();
     let done = record.done.as_ref();
-    first_source_machine([
+    machine_projection_from_parts(
         meta.and_then(|marker| marker.source_machine.as_deref()),
         meta.and_then(|marker| {
             marker
@@ -5874,41 +6198,80 @@ fn source_machine_from_record(
                 .as_ref()
                 .map(|owner| owner.machine_name.as_str())
         }),
-    ])
+    )
+}
+
+fn source_machine_from_record(
+    record: &AgentArtifactRecordWire,
+) -> Option<String> {
+    machine_projection_from_record(record).source_machine
 }
 
 fn source_machine_from_marker_files(artifact_dir: &Path) -> Option<String> {
-    ["agent_meta.json", "done.json"]
-        .into_iter()
-        .filter_map(|name| {
-            fs::read_to_string(artifact_dir.join(name))
-                .ok()
-                .and_then(|raw| {
-                    serde_json::from_str::<serde_json::Value>(&raw).ok()
-                })
-                .and_then(|value| source_machine_from_json_value(&value))
-        })
-        .find(|value| !value.is_empty())
+    machine_projection_from_marker_files(artifact_dir).source_machine
 }
 
-fn source_machine_from_json_value(value: &serde_json::Value) -> Option<String> {
-    first_source_machine([
-        value.get("source_machine").and_then(|value| value.as_str()),
-        value
-            .get("imported_source_owner")
-            .and_then(|owner| owner.get("machine_name"))
-            .and_then(|value| value.as_str()),
-    ])
+fn machine_projection_from_marker_files(
+    artifact_dir: &Path,
+) -> MachineProjection {
+    let meta = read_marker_json(artifact_dir, "agent_meta.json");
+    let done = read_marker_json(artifact_dir, "done.json");
+    machine_projection_from_parts(
+        json_machine_field(meta.as_ref(), "source_machine"),
+        json_owner_machine(meta.as_ref()),
+        json_machine_field(done.as_ref(), "source_machine"),
+        json_owner_machine(done.as_ref()),
+    )
 }
 
-fn first_source_machine<'a>(
-    values: impl IntoIterator<Item = Option<&'a str>>,
-) -> Option<String> {
-    values
-        .into_iter()
-        .flatten()
+fn read_marker_json(
+    artifact_dir: &Path,
+    name: &str,
+) -> Option<serde_json::Value> {
+    fs::read_to_string(artifact_dir.join(name))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+fn json_machine_field<'a>(
+    value: Option<&'a serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    value
+        .and_then(|payload| payload.get(key))
+        .and_then(|value| value.as_str())
+}
+
+fn json_owner_machine(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(|payload| payload.get("imported_source_owner"))
+        .and_then(|owner| owner.get("machine_name"))
+        .and_then(|value| value.as_str())
+}
+
+fn machine_projection_from_parts(
+    meta_source: Option<&str>,
+    meta_owner: Option<&str>,
+    done_source: Option<&str>,
+    done_owner: Option<&str>,
+) -> MachineProjection {
+    let meta_owner = trim_machine(meta_owner);
+    let done_owner = trim_machine(done_owner);
+    MachineProjection {
+        // Match Python loader precedence: meta source, then the already-applied
+        // meta owner fallback, then done source, then done owner.
+        source_machine: trim_machine(meta_source)
+            .or_else(|| meta_owner.clone())
+            .or_else(|| trim_machine(done_source))
+            .or_else(|| done_owner.clone()),
+        imported_owner_machine: meta_owner.or(done_owner),
+    }
+}
+
+fn trim_machine(value: Option<&str>) -> Option<String> {
+    value
         .map(str::trim)
-        .find(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
 
@@ -6634,6 +6997,325 @@ mod tests {
             timestamps,
             BTreeSet::from(["20260827103000", "20260827103200"])
         );
+    }
+
+    fn machine_index_query(
+        value: &str,
+        negated: bool,
+    ) -> AgentArtifactIndexQueryWire {
+        let equals = AgentArtifactCandidateFilterWire::Equals {
+            field: AgentArtifactCandidateFieldWire::Machine,
+            value: value.to_string(),
+        };
+        AgentArtifactIndexQueryWire {
+            include_active: false,
+            include_recent_completed: false,
+            include_full_history: true,
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+            candidate_filter: Some(if negated {
+                AgentArtifactCandidateFilterWire::Not {
+                    filter: Box::new(equals),
+                }
+            } else {
+                equals
+            }),
+            ..AgentArtifactIndexQueryWire::default()
+        }
+    }
+
+    fn query_timestamps(
+        index: &Path,
+        projects: &Path,
+        query: AgentArtifactIndexQueryWire,
+    ) -> BTreeSet<String> {
+        query_agent_artifact_index(
+            index,
+            projects,
+            query,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap()
+        .records
+        .into_iter()
+        .map(|record| record.timestamp)
+        .collect()
+    }
+
+    #[test]
+    fn machine_candidate_keeps_conflicting_source_and_owner_values() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let conflicting = artifact(&projects, "20260827105000");
+        write_json(
+            &conflicting.join("agent_meta.json"),
+            json!({
+                "name": "different-provenance",
+                "source_machine": "athena",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "apollo"
+                }
+            }),
+        );
+        write_json(
+            &conflicting.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": "different-provenance",
+                "source_machine": "athena",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "apollo"
+                }
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let conn = Connection::open(&index).unwrap();
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_machine, imported_owner_machine \
+                 FROM agent_artifacts WHERE artifact_dir = ?1",
+                [conflicting.to_string_lossy().as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (Some("athena".to_string()), Some("apollo".to_string()))
+        );
+
+        let apollo = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("apollo", false),
+        );
+        assert_eq!(apollo, BTreeSet::from(["20260827105000".to_string()]));
+        let athena = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("athena", false),
+        );
+        assert_eq!(athena, BTreeSet::from(["20260827105000".to_string()]));
+        let not_apollo = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("apollo", true),
+        );
+        assert!(not_apollo.is_empty());
+    }
+
+    #[test]
+    fn machine_candidate_uses_meta_then_done_machine_precedence() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827105100");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "meta-wins",
+                "source_machine": "  Athena ",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "apollo"
+                }
+            }),
+        );
+        write_json(
+            &artifact_dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": "meta-wins",
+                "source_machine": "zeus",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "hera"
+                }
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let conn = Connection::open(&index).unwrap();
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_machine, imported_owner_machine \
+                 FROM agent_artifacts WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (Some("Athena".to_string()), Some("apollo".to_string()))
+        );
+
+        let timestamps = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("athena", false),
+        );
+        assert_eq!(timestamps, BTreeSet::from(["20260827105100".to_string()]));
+        assert!(query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("zeus", false),
+        )
+        .is_empty());
+        assert!(query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("hera", false),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn machine_candidate_includes_mixed_provenance_family_relatives() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let parent = artifact(&projects, "20260827105200");
+        let child = artifact(&projects, "20260827105201");
+        let unrelated = artifact(&projects, "20260827105202");
+        write_json(
+            &parent.join("agent_meta.json"),
+            json!({
+                "name": "crew--plan",
+                "agent_family": "crew",
+                "agent_family_role": "plan",
+                "source_machine": "athena"
+            }),
+        );
+        write_json(
+            &parent.join("done.json"),
+            json!({"outcome": "completed", "name": "crew--plan"}),
+        );
+        write_json(
+            &child.join("agent_meta.json"),
+            json!({
+                "name": "crew--code",
+                "agent_family": "crew",
+                "agent_family_role": "code",
+                "parent_timestamp": "20260827105200",
+                "source_machine": "athena",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "apollo"
+                }
+            }),
+        );
+        write_json(
+            &child.join("done.json"),
+            json!({"outcome": "completed", "name": "crew--code"}),
+        );
+        write_json(
+            &unrelated.join("agent_meta.json"),
+            json!({"name": "other", "source_machine": "hera"}),
+        );
+        write_json(
+            &unrelated.join("done.json"),
+            json!({"outcome": "completed", "name": "other"}),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let apollo = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("apollo", false),
+        );
+        assert_eq!(
+            apollo,
+            BTreeSet::from([
+                "20260827105200".to_string(),
+                "20260827105201".to_string()
+            ])
+        );
+        let not_apollo = query_timestamps(
+            &index,
+            &projects,
+            machine_index_query("apollo", true),
+        );
+        assert_eq!(
+            not_apollo,
+            BTreeSet::from([
+                "20260827105200".to_string(),
+                "20260827105201".to_string(),
+                "20260827105202".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn schema_v29_upgrade_adds_imported_owner_machine_projection() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact_dir = artifact(&projects, "20260827105300");
+        write_json(
+            &artifact_dir.join("agent_meta.json"),
+            json!({
+                "name": "legacy-owner",
+                "source_machine": "athena",
+                "imported_source_owner": {
+                    "username": "bryan",
+                    "machine_name": "apollo"
+                }
+            }),
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_agent_artifacts_imported_owner_machine;
+                 ALTER TABLE agent_artifacts DROP COLUMN imported_owner_machine;
+                 INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '29');",
+            )
+            .unwrap();
+        }
+
+        drop(open_index(&index).unwrap());
+
+        let conn = Connection::open(&index).unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT imported_owner_machine FROM agent_artifacts \
+                 WHERE artifact_dir = ?1",
+                [artifact_dir.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner.as_deref(), Some("apollo"));
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
     }
 
     #[test]
