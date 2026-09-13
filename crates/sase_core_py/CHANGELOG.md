@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Expose `artifact_ref_split_link_location` and
+  `artifact_ref_link_location_wire_schema_version`.
+
 - Expose flag-aware `directive_contract` and
   `normalize_persisted_queue_capacity` for queue capacity budget resume.
 

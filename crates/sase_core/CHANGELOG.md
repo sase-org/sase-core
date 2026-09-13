@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Split colon and GitHub-style line locations off document links
+  (`split_link_location`), accept `L12C5` / `L12-40` fragments, and keep
+  those suffixes inside scanned file-path spans.
+
 - Preserve canonical `queue_capacity` through agent-scan metadata, waiting
   markers, launch wires, and indexed records, including legacy and dual
   spellings, persisted-zero drain translation, and flag-aware `%queue`

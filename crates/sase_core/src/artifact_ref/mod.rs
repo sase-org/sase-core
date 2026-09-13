@@ -6,6 +6,7 @@ mod file_roots;
 mod filter;
 mod kinds;
 mod list;
+mod location;
 mod provider_spec;
 mod ref_files;
 mod repository_resolution;
@@ -46,6 +47,7 @@ pub use list::{
     normalize_artifact_ref_list, parse_artifact_ref_list,
     resolve_artifact_ref_list,
 };
+pub use location::split_link_location;
 pub(crate) use provider_spec::is_known_property_type;
 pub use provider_spec::{
     artifact_ref_provider_spec_digest, validate_artifact_ref_provider_spec,
@@ -83,14 +85,15 @@ pub use wire::{
     ArtifactRefPromptCandidateWire, ArtifactRefRepositoryWire,
     ArtifactRefResolutionWire, ArtifactRefSpanWire,
     ArtifactRefTargetCandidateWire, ArtifactRefTargetFailureCategoryWire,
-    ArtifactRefTargetResolutionWire, ParsedArtifactRefWire,
-    ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
+    ArtifactRefTargetResolutionWire, LinkLocationSplitWire, LinkLocationWire,
+    ParsedArtifactRefWire, ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PARSE_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION,
+    LINK_LOCATION_WIRE_SCHEMA_VERSION,
 };
 
 use file_roots::resolve_artifact_file_path;
@@ -564,22 +567,32 @@ fn parse_payload(
 fn parse_fragment(
     fragment: &str,
 ) -> Result<ArtifactRefFragmentWire, ArtifactRefError> {
-    if let Some(lines) = fragment.strip_prefix('L') {
-        let (start, end) = match lines.split_once("-L") {
-            Some((start, end)) => {
-                (parse_positive(start, "line")?, parse_positive(end, "line")?)
-            }
-            None => {
-                let line = parse_positive(lines, "line")?;
-                (line, line)
-            }
-        };
-        if end < start {
+    if let Some(parsed) = location::parse_github_line_fragment(fragment) {
+        if parsed.line == 0 {
+            return Err(ArtifactRefError::validation(
+                "line number must be positive",
+            ));
+        }
+        if parsed.column == Some(0) {
+            return Err(ArtifactRefError::validation(
+                "column number must be positive",
+            ));
+        }
+        let end = parsed.end_line.unwrap_or(parsed.line);
+        if end == 0 {
+            return Err(ArtifactRefError::validation(
+                "line number must be positive",
+            ));
+        }
+        if end < parsed.line {
             return Err(ArtifactRefError::validation(
                 "line fragment end must not precede its start",
             ));
         }
-        return Ok(ArtifactRefFragmentWire::Lines { start, end });
+        return Ok(ArtifactRefFragmentWire::Lines {
+            start: parsed.line,
+            end,
+        });
     }
     if let Some(page) = fragment.strip_prefix("page=") {
         return Ok(ArtifactRefFragmentWire::Page {
@@ -1433,6 +1446,10 @@ mod tests {
             ("plans:202607/plan.md", "plans:202607/plan.md"),
             ("designs:guide.md#L12", "designs:guide.md#L12"),
             ("chat:202607/main.md#L12-L18", "chat:202607/main.md#L12-L18"),
+            ("plans:x.md#L12-40", "plans:x.md#L12-L40"),
+            ("plans:x.md#L12C5", "plans:x.md#L12"),
+            ("plans:x.md#L12C5-L40C2", "plans:x.md#L12-L40"),
+            ("plans:x.md#l12c5-l40c2", "plans:x.md#L12-L40"),
             ("chat:202607/main.md#page=2", "chat:202607/main.md#page=2"),
             (
                 "file:default:52895d68931185056fd0e49f#t=90",
@@ -1494,6 +1511,8 @@ mod tests {
             "file:default:52895d68931185056fd0e49",
             "plans:x.md#L0",
             "plans:x.md#L3-L2",
+            "plans:x.md#L12C0",
+            "plans:x.md#L12-L2",
             "plans:x.md#page=0",
             "plans:x.md#t=nope",
             "bead:",

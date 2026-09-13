@@ -365,6 +365,8 @@
 //! - `artifact_ref_scan_prompt(text: str) -> list[dict]`
 //! - `artifact_ref_scan_document(text: str, known_kinds: list[str] | None = None) -> dict`
 //! - `artifact_ref_document_scan_wire_schema_version() -> int`
+//! - `artifact_ref_split_link_location(target: str) -> dict`
+//! - `artifact_ref_link_location_wire_schema_version() -> int`
 //! - `artifact_ref_resolve_document_source_target(path: str, owner: dict, context: dict) -> dict`
 //! - `artifact_ref_target_resolution_wire_schema_version() -> int`
 //! - `artifact_ref_wire_schema_version() -> int`
@@ -888,6 +890,7 @@ use sase_core::artifact_ref::{
     resolve_document_source_target as core_resolve_document_source_target,
     scan_artifact_ref_document_links as core_scan_artifact_ref_document_links,
     scan_artifact_refs as core_scan_artifact_refs,
+    split_link_location as core_split_link_location,
     validate_artifact_entry as core_validate_artifact_entry,
     validate_artifact_ref_expansion_format as core_validate_artifact_ref_expansion_format,
     validate_artifact_ref_file_row as core_validate_artifact_ref_file_row,
@@ -906,7 +909,7 @@ use sase_core::artifact_ref::{
     ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION,
-    ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION,
+    ARTIFACT_REF_USE_WIRE_SCHEMA_VERSION, LINK_LOCATION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::axe_chop::{
     apply_checkpoint_update as core_apply_checkpoint_update,
@@ -5624,6 +5627,29 @@ fn py_artifact_ref_scan_document<'py>(
 #[pyo3(name = "artifact_ref_document_scan_wire_schema_version")]
 fn py_artifact_ref_document_scan_wire_schema_version() -> u64 {
     ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION
+}
+
+/// Split a trailing colon or GitHub-style line location off a link target.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_split_link_location")]
+fn py_artifact_ref_split_link_location(
+    py: Python<'_>,
+    target: &str,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(core_split_link_location(target))
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "internal link location serialize error: {error}"
+            ))
+        })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the link-location wire schema version.
+#[pyfunction]
+#[pyo3(name = "artifact_ref_link_location_wire_schema_version")]
+fn py_artifact_ref_link_location_wire_schema_version() -> u64 {
+    LINK_LOCATION_WIRE_SCHEMA_VERSION
 }
 
 /// Resolve an unqualified source-path target in its owning repository.
@@ -17623,6 +17649,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_artifact_ref_document_scan_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_artifact_ref_split_link_location, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_artifact_ref_link_location_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_artifact_ref_resolve_document_source_target,
         m
@@ -23631,6 +23662,8 @@ MENTORS:
                 "artifact_ref_scan_prompt",
                 "artifact_ref_scan_document",
                 "artifact_ref_document_scan_wire_schema_version",
+                "artifact_ref_split_link_location",
+                "artifact_ref_link_location_wire_schema_version",
                 "artifact_ref_wire_schema_version",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
@@ -23791,6 +23824,16 @@ MENTORS:
             );
 
             assert_eq!(py_artifact_ref_document_scan_wire_schema_version(), 1);
+            assert_eq!(py_artifact_ref_link_location_wire_schema_version(), 1);
+            let split =
+                py_artifact_ref_split_link_location(py, "src/app.py:12:5-40")
+                    .unwrap();
+            let split_value = py_to_json_value(split.bind(py)).unwrap();
+            assert_eq!(split_value["schema_version"], json!(1));
+            assert_eq!(split_value["base"], json!("src/app.py"));
+            assert_eq!(split_value["location"]["line"], json!(12));
+            assert_eq!(split_value["location"]["column"], json!(5));
+            assert_eq!(split_value["location"]["end_line"], json!(40));
             assert_eq!(py_artifact_ref_wire_schema_version(), 5);
             assert!(py_artifact_ref_parse(py, "commit:sase@BAD").is_err());
             assert_eq!(

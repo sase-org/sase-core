@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use super::location::FILE_PATH_LOCATION_SUFFIX;
 use super::wire::{
     ArtifactRefDocumentScanWire, ArtifactRefDocumentTargetKindWire,
     ArtifactRefDocumentTargetWire, ArtifactRefPromptCandidateWire,
@@ -712,9 +713,11 @@ fn scan_document_file_paths(
 ) -> Vec<ArtifactRefDocumentTargetWire> {
     static FILE_PATH_RE: OnceLock<Regex> = OnceLock::new();
     let regex = FILE_PATH_RE.get_or_init(|| {
-        Regex::new(
-            r"@?(?:~?/[\w.+-][\w.+/-]*|\.{1,2}/[\w.+-][\w.+/-]*|\.[\w-]+/[\w.+/-]*|[\w-]+/[\w.+/-]*\.[\w]+)(?::\d+(?::\d+)?)?",
-        )
+        // Suffix is the colon-or-fragment grammar in location.rs so
+        // `src/foo.py:12-40` and `src/foo.py#L12-L40` stay one span.
+        Regex::new(&format!(
+            r"@?(?:~?/[\w.+-][\w.+/-]*|\.{{1,2}}/[\w.+-][\w.+/-]*|\.[\w-]+/[\w.+/-]*|[\w-]+/[\w.+/-]*\.[\w]+){FILE_PATH_LOCATION_SUFFIX}"
+        ))
         .unwrap()
     });
     let mut links = Vec::new();
@@ -1144,6 +1147,88 @@ mod tests {
             links[1].target,
             "https://github.com/bobs-org/bob-cli/blob/main/.sase/plans/202609/capture_line_edge_cycling.md"
         );
+    }
+
+    fn span_text<'a>(
+        source: &'a str,
+        link: &ArtifactRefDocumentTargetWire,
+    ) -> &'a str {
+        &source[link.source_span.start..link.source_span.end]
+    }
+
+    #[test]
+    fn document_scan_keeps_line_location_suffixes_inside_file_path_spans() {
+        let source = "see src/foo.py:12-40.";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target_kind,
+            ArtifactRefDocumentTargetKindWire::FilePath
+        );
+        assert_eq!(links[0].target, "src/foo.py:12-40");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py:12-40");
+
+        let source = "(see src/foo.py#L12)";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "src/foo.py#L12");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py#L12");
+
+        let source = "src/foo.py#L12C5-L40C2";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "src/foo.py#L12C5-L40C2");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py#L12C5-L40C2");
+
+        let source = "src/foo.py:12:5-40";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "src/foo.py:12:5-40");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py:12:5-40");
+
+        let source = "src/foo.py#L12-L40";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "src/foo.py#L12-L40");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py#L12-L40");
+
+        let source = "[x](src/foo.py:27-44)";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target_kind,
+            ArtifactRefDocumentTargetKindWire::FilePath
+        );
+        assert_eq!(links[0].target, "src/foo.py:27-44");
+        assert_eq!(span_text(source, &links[0]), "[x](src/foo.py:27-44)");
+
+        let source = "https://example.com/src/foo.py:12?q=a#frag";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target_kind,
+            ArtifactRefDocumentTargetKindWire::Url
+        );
+        assert_eq!(links[0].target, source);
+        assert_eq!(span_text(source, &links[0]), source);
+
+        let source = "src/foo.py:12- leftover";
+        let links = document_links(source);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "src/foo.py:12");
+        assert_eq!(span_text(source, &links[0]), "src/foo.py:12");
+    }
+
+    #[test]
+    fn document_scan_links_github_column_fragments_on_typed_refs() {
+        let links = document_links("see plan:x.md#L12C5");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target_kind,
+            ArtifactRefDocumentTargetKindWire::ArtifactRef
+        );
+        assert!(links[0].well_formed);
+        assert_eq!(links[0].target, "plan:x.md#L12");
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const LINK_LOCATION_WIRE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{kind}: {message}")]
@@ -391,6 +392,30 @@ pub struct ArtifactRefDocumentScanWire {
     pub links: Vec<ArtifactRefDocumentTargetWire>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+}
+
+/// Line/column/range carried by a document link, orthogonal to the target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkLocationWire {
+    pub line: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u64>,
+}
+
+/// Result of splitting a trailing link location off a target string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkLocationSplitWire {
+    #[serde(default = "link_location_schema_version")]
+    pub schema_version: u64,
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LinkLocationWire>,
+}
+
+fn link_location_schema_version() -> u64 {
+    LINK_LOCATION_WIRE_SCHEMA_VERSION
 }
 
 /// Provenance for a scanned document link's own source, used to resolve an
