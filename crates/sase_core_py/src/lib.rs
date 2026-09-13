@@ -325,7 +325,9 @@
 //! - `continuation_validate_delivery_record(record: dict) -> dict`
 //! - `continuation_new_delivery_record(request: dict) -> dict`
 //! - `continuation_transition_delivery(request: dict) -> dict`
+//! - `continuation_decide_resume_adoption(request: dict) -> dict`
 //! - `continuation_plan_replay(request: dict) -> dict`
+//! - `continuation_plan_retention(request: dict) -> dict`
 //! - `continuation_select_evidence(request: dict) -> dict`
 //! - `continuation_resolve_policy(request: dict) -> dict`
 //! - `continuation_validate_policy(policy: dict) -> dict`
@@ -1057,12 +1059,14 @@ use sase_core::content_layout::{
 use sase_core::continuation::{
     bind_conditional_completion as core_bind_conditional_completion,
     consume_conditional_completion_request as core_consume_conditional_completion,
+    decide_resume_adoption as core_decide_resume_adoption,
     evaluate_conditional_completion as core_evaluate_conditional_completion,
     freeze_continuation_policy as core_freeze_continuation_policy,
     invalidate_conditional_completion_request as core_invalidate_conditional_completion,
     new_continuation_delivery_record as core_new_continuation_delivery_record,
     plan_continuation_budget as core_plan_continuation_budget,
     plan_continuation_replay as core_plan_continuation_replay,
+    plan_continuation_retention as core_plan_continuation_retention,
     preview_conditional_completion as core_preview_conditional_completion,
     render_conditional_completion_message_request as core_render_conditional_completion_message,
     resolve_continuation_policy as core_resolve_continuation_policy,
@@ -1092,6 +1096,7 @@ use sase_core::continuation::{
     ContinuationNodeWire, ContinuationOutcomePolicyWire,
     ContinuationPolicyFreezeRequestWire,
     ContinuationPolicyResolutionRequestWire, ContinuationReplayPlanRequestWire,
+    ContinuationResumeAdoptionRequestWire, ContinuationRetentionRequestWire,
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
@@ -14819,6 +14824,22 @@ fn py_continuation_transition_delivery<'py>(
     )
 }
 
+/// Decide whether resume may fence undelivered branches and admit.
+#[pyfunction]
+#[pyo3(name = "continuation_decide_resume_adoption")]
+fn py_continuation_decide_resume_adoption<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationResumeAdoptionRequestWire =
+        continuation_wire_from_pydict(request, "resume adoption request")?;
+    continuation_result_to_py(
+        py,
+        core_decide_resume_adoption(request),
+        "resume adoption",
+    )
+}
+
 /// Validate one LaunchApproval requester-continuation contract.
 #[pyfunction]
 #[pyo3(name = "continuation_validate_launch_requester_continuation")]
@@ -14848,6 +14869,22 @@ fn py_continuation_plan_replay<'py>(
         py,
         core_plan_continuation_replay(request),
         "replay planning",
+    )
+}
+
+/// Compute the live/recoverable continuation ancestry retention closure.
+#[pyfunction]
+#[pyo3(name = "continuation_plan_retention")]
+fn py_continuation_plan_retention<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ContinuationRetentionRequestWire =
+        continuation_wire_from_pydict(request, "retention request")?;
+    continuation_result_to_py(
+        py,
+        core_plan_continuation_retention(request),
+        "retention planning",
     )
 }
 
@@ -18358,10 +18395,15 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_continuation_new_delivery_record, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_transition_delivery, m)?)?;
     m.add_function(wrap_pyfunction!(
+        py_continuation_decide_resume_adoption,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         py_continuation_validate_launch_requester_continuation,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_continuation_plan_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_continuation_plan_retention, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_select_evidence, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_resolve_policy, m)?)?;
     m.add_function(wrap_pyfunction!(py_continuation_validate_policy, m)?)?;
@@ -21741,7 +21783,9 @@ COMMITS:
                 "continuation_validate_delivery_record",
                 "continuation_new_delivery_record",
                 "continuation_transition_delivery",
+                "continuation_decide_resume_adoption",
                 "continuation_plan_replay",
+                "continuation_plan_retention",
                 "continuation_select_evidence",
                 "continuation_resolve_policy",
                 "continuation_validate_policy",

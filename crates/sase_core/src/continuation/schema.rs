@@ -295,6 +295,8 @@ pub struct ContinuationNodeWire {
     pub content_ref: String,
     pub content_sha256: String,
     #[serde(default)]
+    pub portable_content_ref: Option<String>,
+    #[serde(default)]
     pub checkpoint_ref: Option<String>,
     #[serde(default)]
     pub intent_ref: Option<String>,
@@ -552,6 +554,10 @@ pub fn validate_continuation_node(
     validate_execution_identity(&node.owner)?;
     validate_reference(&node.content_ref, "content_ref")?;
     validate_sha256(&node.content_sha256, "content_sha256")?;
+    validate_optional_reference(
+        &node.portable_content_ref,
+        "portable_content_ref",
+    )?;
     validate_optional_reference(&node.checkpoint_ref, "checkpoint_ref")?;
     validate_optional_reference(&node.intent_ref, "intent_ref")?;
     validate_optional_reference(&node.workspace_ref, "workspace_ref")?;
@@ -1101,6 +1107,7 @@ mod tests {
             content_ref: format!("file:explicit:{id}"),
             content_sha256:
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            portable_content_ref: None,
             checkpoint_ref: None,
             intent_ref: None,
             workspace_ref: None,

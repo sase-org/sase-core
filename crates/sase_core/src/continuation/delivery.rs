@@ -14,6 +14,8 @@
 //! because there is no successor process. Ordinary `continue` deliveries
 //! must not.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::schema::{
@@ -24,6 +26,13 @@ use super::schema::{
     ContinuationError, CONTINUATION_WIRE_SCHEMA_VERSION, MAX_REF_BYTES,
     MAX_TEXT_BYTES,
 };
+
+const KIND_MANUAL_REVISION: &str = "manual_revision";
+const OUTCOME_ADMIT: &str = "admit";
+const OUTCOME_ALREADY_DELIVERED: &str = "already_delivered";
+const OUTCOME_EXISTING_RECEIVER: &str = "existing_receiver";
+const OUTCOME_NEEDS_ATTENTION: &str = "needs_attention";
+const AMBIGUOUS_RECEIVER_REASON: &str = "receiver ownership is ambiguous";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationDeliveryNewRequestWire {
@@ -50,6 +59,66 @@ pub struct ContinuationDeliveryTransitionRequestWire {
     pub workspace_identity: Option<String>,
     #[serde(default)]
     pub workspace_degraded: bool,
+    #[serde(default)]
+    pub retryable_pre_dispatch_failure: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationResumeAdoptionRequestBodyWire {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub monitor_id: String,
+    #[serde(default)]
+    pub result_id: String,
+    #[serde(default)]
+    pub requested_branch: Option<String>,
+    #[serde(default)]
+    pub revision_fingerprint: Option<String>,
+    #[serde(default)]
+    pub existing_manual_branch: Option<String>,
+    #[serde(default)]
+    pub next_manual_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationReceiverProofWire {
+    #[serde(default)]
+    pub branch: String,
+    #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
+    pub discoverable: bool,
+    #[serde(default)]
+    pub process_alive: bool,
+    #[serde(default)]
+    pub spawn_recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationResumeAdoptionRequestWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub records: Vec<ContinuationDeliveryRecordWire>,
+    pub request: ContinuationResumeAdoptionRequestBodyWire,
+    #[serde(default)]
+    pub receiver_proofs: Vec<ContinuationReceiverProofWire>,
+    #[serde(default)]
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationResumeAdoptionDecisionWire {
+    pub schema_version: u32,
+    pub outcome: String,
+    pub admit: bool,
+    pub selected_branch: String,
+    #[serde(default)]
+    pub preserve_keys: Vec<ContinuationDeliveryKeyWire>,
+    #[serde(default)]
+    pub fence_keys: Vec<ContinuationDeliveryKeyWire>,
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(default)]
     pub retryable_pre_dispatch_failure: bool,
 }
@@ -148,6 +217,263 @@ pub fn transition_continuation_delivery(
         record.disposition_reason = request.reason;
     }
     validate_continuation_delivery_record(record)
+}
+
+pub fn decide_resume_adoption(
+    request: ContinuationResumeAdoptionRequestWire,
+) -> Result<ContinuationResumeAdoptionDecisionWire, ContinuationError> {
+    validate_schema(
+        request.schema_version,
+        "ContinuationResumeAdoptionRequestWire",
+    )?;
+    if !request.recorded_at.is_empty() {
+        validate_non_empty_text(
+            &request.recorded_at,
+            "recorded_at",
+            MAX_REF_BYTES,
+        )?;
+    }
+    let mut records = Vec::with_capacity(request.records.len());
+    for record in request.records {
+        records.push(validate_continuation_delivery_record(record)?);
+    }
+    let body = &request.request;
+    if !body.monitor_id.is_empty() {
+        validate_non_empty_text(
+            &body.monitor_id,
+            "request.monitor_id",
+            MAX_REF_BYTES,
+        )?;
+    }
+    if !body.result_id.is_empty() {
+        validate_non_empty_text(
+            &body.result_id,
+            "request.result_id",
+            MAX_REF_BYTES,
+        )?;
+    }
+    let records: Vec<ContinuationDeliveryRecordWire> = records
+        .into_iter()
+        .filter(|record| {
+            (body.monitor_id.is_empty()
+                || record.key.monitor_id == body.monitor_id)
+                && (body.result_id.is_empty()
+                    || record.key.result_id == body.result_id)
+        })
+        .collect();
+    let proofs: HashMap<&str, &ContinuationReceiverProofWire> = request
+        .receiver_proofs
+        .iter()
+        .filter(|proof| !proof.branch.is_empty())
+        .map(|proof| (proof.branch.as_str(), proof))
+        .collect();
+    let requested_branch = body
+        .requested_branch
+        .as_deref()
+        .or(body.next_manual_branch.as_deref())
+        .or_else(|| records.first().map(|record| record.key.branch.as_str()))
+        .unwrap_or("failed")
+        .to_string();
+    Ok(decide_resume_adoption_inner(
+        &records,
+        body,
+        &proofs,
+        requested_branch,
+    ))
+}
+
+fn decide_resume_adoption_inner(
+    records: &[ContinuationDeliveryRecordWire],
+    body: &ContinuationResumeAdoptionRequestBodyWire,
+    proofs: &HashMap<&str, &ContinuationReceiverProofWire>,
+    requested_branch: String,
+) -> ContinuationResumeAdoptionDecisionWire {
+    let manual = body.kind == KIND_MANUAL_REVISION;
+    let delivered: Vec<&ContinuationDeliveryRecordWire> = records
+        .iter()
+        .filter(|record| is_delivered(record.disposition))
+        .collect();
+    if !delivered.is_empty() {
+        return ContinuationResumeAdoptionDecisionWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            outcome: OUTCOME_ALREADY_DELIVERED.to_string(),
+            admit: false,
+            selected_branch: delivered[0].key.branch.clone(),
+            preserve_keys: delivered
+                .iter()
+                .map(|record| record.key.clone())
+                .collect(),
+            fence_keys: Vec::new(),
+            reason: None,
+            retryable_pre_dispatch_failure: false,
+        };
+    }
+
+    let active: Vec<&ContinuationDeliveryRecordWire> = records
+        .iter()
+        .filter(|record| is_active(record.disposition))
+        .collect();
+    if let Some(existing) = body.existing_manual_branch.as_deref() {
+        if !existing.is_empty() {
+            if let Some(record) =
+                records.iter().find(|record| record.key.branch == existing)
+            {
+                if is_active(record.disposition) {
+                    return no_admit(
+                        OUTCOME_EXISTING_RECEIVER,
+                        existing.to_string(),
+                        Vec::new(),
+                    );
+                }
+            }
+            return no_admit(
+                OUTCOME_EXISTING_RECEIVER,
+                existing.to_string(),
+                Vec::new(),
+            );
+        }
+    }
+
+    if !active.is_empty() {
+        let mut live = Vec::new();
+        let mut stale = Vec::new();
+        let mut unproven = Vec::new();
+        for record in &active {
+            let proof = proofs.get(record.key.branch.as_str()).copied();
+            if proof_live(proof) {
+                live.push(*record);
+            } else if proof_stale(proof) {
+                stale.push(*record);
+            } else {
+                unproven.push(*record);
+            }
+        }
+        if !live.is_empty() {
+            if manual {
+                return ContinuationResumeAdoptionDecisionWire {
+                    schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                    outcome: OUTCOME_NEEDS_ATTENTION.to_string(),
+                    admit: false,
+                    selected_branch: live[0].key.branch.clone(),
+                    preserve_keys: Vec::new(),
+                    fence_keys: Vec::new(),
+                    reason: Some(AMBIGUOUS_RECEIVER_REASON.to_string()),
+                    retryable_pre_dispatch_failure: false,
+                };
+            }
+            return no_admit(
+                OUTCOME_EXISTING_RECEIVER,
+                live[0].key.branch.clone(),
+                Vec::new(),
+            );
+        }
+        if !stale.is_empty() {
+            return ContinuationResumeAdoptionDecisionWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                outcome: OUTCOME_NEEDS_ATTENTION.to_string(),
+                admit: false,
+                selected_branch: stale[0].key.branch.clone(),
+                preserve_keys: Vec::new(),
+                fence_keys: stale
+                    .iter()
+                    .map(|record| record.key.clone())
+                    .collect(),
+                reason: Some(AMBIGUOUS_RECEIVER_REASON.to_string()),
+                retryable_pre_dispatch_failure: false,
+            };
+        }
+        if !manual {
+            return no_admit(
+                OUTCOME_EXISTING_RECEIVER,
+                unproven
+                    .first()
+                    .map(|record| record.key.branch.clone())
+                    .unwrap_or(requested_branch),
+                Vec::new(),
+            );
+        }
+        let selected = body
+            .next_manual_branch
+            .clone()
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or(requested_branch);
+        return ContinuationResumeAdoptionDecisionWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            outcome: OUTCOME_ADMIT.to_string(),
+            admit: true,
+            selected_branch: selected,
+            preserve_keys: Vec::new(),
+            fence_keys: unproven
+                .iter()
+                .map(|record| record.key.clone())
+                .collect(),
+            reason: None,
+            retryable_pre_dispatch_failure: false,
+        };
+    }
+
+    let selected = if manual {
+        body.next_manual_branch
+            .clone()
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or(requested_branch)
+    } else {
+        requested_branch
+    };
+    ContinuationResumeAdoptionDecisionWire {
+        schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+        outcome: OUTCOME_ADMIT.to_string(),
+        admit: true,
+        selected_branch: selected,
+        preserve_keys: Vec::new(),
+        fence_keys: Vec::new(),
+        reason: None,
+        retryable_pre_dispatch_failure: false,
+    }
+}
+
+fn no_admit(
+    outcome: &str,
+    selected_branch: String,
+    fence_keys: Vec<ContinuationDeliveryKeyWire>,
+) -> ContinuationResumeAdoptionDecisionWire {
+    ContinuationResumeAdoptionDecisionWire {
+        schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+        outcome: outcome.to_string(),
+        admit: false,
+        selected_branch,
+        preserve_keys: Vec::new(),
+        fence_keys,
+        reason: None,
+        retryable_pre_dispatch_failure: false,
+    }
+}
+
+fn is_delivered(disposition: ContinuationDeliveryDispositionWire) -> bool {
+    matches!(
+        disposition,
+        ContinuationDeliveryDispositionWire::Acknowledged
+            | ContinuationDeliveryDispositionWire::Settled
+    )
+}
+
+fn is_active(disposition: ContinuationDeliveryDispositionWire) -> bool {
+    matches!(
+        disposition,
+        ContinuationDeliveryDispositionWire::Pending
+            | ContinuationDeliveryDispositionWire::Reserved
+            | ContinuationDeliveryDispositionWire::Dispatching
+    )
+}
+
+fn proof_live(proof: Option<&ContinuationReceiverProofWire>) -> bool {
+    proof.is_some_and(|proof| proof.process_alive || proof.discoverable)
+}
+
+fn proof_stale(proof: Option<&ContinuationReceiverProofWire>) -> bool {
+    proof.is_some_and(|proof| {
+        proof.spawn_recorded && !proof.process_alive && !proof.discoverable
+    })
 }
 
 fn discover_existing(
@@ -619,5 +945,133 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, "validation");
         assert!(err.message.contains("reserved_identity"));
+    }
+
+    fn adoption(
+        records: Vec<ContinuationDeliveryRecordWire>,
+        kind: &str,
+        next_manual: Option<&str>,
+        existing_manual: Option<&str>,
+        proofs: Vec<ContinuationReceiverProofWire>,
+    ) -> ContinuationResumeAdoptionDecisionWire {
+        decide_resume_adoption(ContinuationResumeAdoptionRequestWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            records,
+            request: ContinuationResumeAdoptionRequestBodyWire {
+                kind: kind.to_string(),
+                monitor_id: "monitor-1".to_string(),
+                result_id: "result-1".to_string(),
+                requested_branch: Some("failed".to_string()),
+                revision_fingerprint: None,
+                existing_manual_branch: existing_manual.map(str::to_string),
+                next_manual_branch: next_manual.map(str::to_string),
+            },
+            receiver_proofs: proofs,
+            recorded_at: "2026-09-13T00:00:00Z".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn proof(
+        branch: &str,
+        spawn_recorded: bool,
+        process_alive: bool,
+    ) -> ContinuationReceiverProofWire {
+        ContinuationReceiverProofWire {
+            branch: branch.to_string(),
+            identity: Some("acme--1".to_string()),
+            discoverable: process_alive,
+            process_alive,
+            spawn_recorded,
+        }
+    }
+
+    #[test]
+    fn resume_adoption_preserves_acknowledged_records() {
+        let dispatching = dispatch(reserve(pending("continue")));
+        let mut ack = request(
+            dispatching,
+            ContinuationDeliveryDispositionWire::Acknowledged,
+        );
+        ack.acknowledged_by = Some("acme--1".to_string());
+        let acknowledged = transition_continuation_delivery(ack).unwrap();
+        let decision = adoption(
+            vec![acknowledged.clone()],
+            KIND_MANUAL_REVISION,
+            Some("manual-recovery-1"),
+            None,
+            vec![],
+        );
+        assert_eq!(decision.outcome, OUTCOME_ALREADY_DELIVERED);
+        assert!(!decision.admit);
+        assert_eq!(decision.preserve_keys, vec![acknowledged.key]);
+        assert!(decision.fence_keys.is_empty());
+    }
+
+    #[test]
+    fn ordinary_resume_does_not_retry_unproven_dispatching() {
+        let dispatching = dispatch(reserve(pending("continue")));
+        let decision =
+            adoption(vec![dispatching.clone()], "ordinary", None, None, vec![]);
+        assert_eq!(decision.outcome, OUTCOME_EXISTING_RECEIVER);
+        assert!(!decision.admit);
+        assert!(decision.fence_keys.is_empty());
+        assert_eq!(decision.selected_branch, dispatching.key.branch);
+    }
+
+    #[test]
+    fn stale_receiver_without_live_process_needs_attention() {
+        let mut dispatching = dispatch(reserve(pending("continue")));
+        dispatching.workspace_identity = Some("/tmp/work".to_string());
+        let decision = adoption(
+            vec![dispatching.clone()],
+            "ordinary",
+            None,
+            None,
+            vec![proof("failed", true, false)],
+        );
+        assert_eq!(decision.outcome, OUTCOME_NEEDS_ATTENTION);
+        assert!(!decision.admit);
+        assert_eq!(decision.fence_keys, vec![dispatching.key]);
+        assert_eq!(decision.reason.as_deref(), Some(AMBIGUOUS_RECEIVER_REASON));
+    }
+
+    #[test]
+    fn manual_revision_fences_unproven_dispatching_and_admits() {
+        let dispatching = dispatch(reserve(pending("continue")));
+        let decision = adoption(
+            vec![dispatching.clone()],
+            KIND_MANUAL_REVISION,
+            Some("manual-recovery-1"),
+            None,
+            vec![],
+        );
+        assert_eq!(decision.outcome, OUTCOME_ADMIT);
+        assert!(decision.admit);
+        assert_eq!(decision.selected_branch, "manual-recovery-1");
+        assert_eq!(decision.fence_keys, vec![dispatching.key]);
+    }
+
+    #[test]
+    fn empty_records_admit_requested_ordinary_branch() {
+        let decision = adoption(vec![], "ordinary", None, None, vec![]);
+        assert_eq!(decision.outcome, OUTCOME_ADMIT);
+        assert!(decision.admit);
+        assert_eq!(decision.selected_branch, "failed");
+        assert!(decision.fence_keys.is_empty());
+    }
+
+    #[test]
+    fn existing_manual_branch_does_not_admit_a_second_spawn() {
+        let decision = adoption(
+            vec![],
+            KIND_MANUAL_REVISION,
+            Some("manual-recovery-1"),
+            Some("manual-recovery-1"),
+            vec![],
+        );
+        assert_eq!(decision.outcome, OUTCOME_EXISTING_RECEIVER);
+        assert!(!decision.admit);
+        assert_eq!(decision.selected_branch, "manual-recovery-1");
     }
 }

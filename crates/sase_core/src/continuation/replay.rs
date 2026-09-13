@@ -369,6 +369,7 @@ mod tests {
             content_ref: format!("file:explicit:{id}"),
             content_sha256:
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            portable_content_ref: None,
             checkpoint_ref: None,
             intent_ref: None,
             workspace_ref: None,
@@ -477,6 +478,7 @@ mod tests {
                 content_sha256:
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
+                portable_content_ref: None,
                 checkpoint_ref: None,
                 intent_ref: None,
                 workspace_ref: None,

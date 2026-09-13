@@ -11,6 +11,7 @@ pub mod delivery;
 pub mod evidence;
 pub mod policy;
 pub mod replay;
+pub mod retention;
 pub mod schema;
 
 pub use budget::{
@@ -42,9 +43,12 @@ pub use completion_eval::{
     ConditionalCompletionMessageRequestWire,
 };
 pub use delivery::{
-    new_continuation_delivery_record, transition_continuation_delivery,
-    ContinuationDeliveryNewRequestWire,
-    ContinuationDeliveryTransitionRequestWire,
+    decide_resume_adoption, new_continuation_delivery_record,
+    transition_continuation_delivery, ContinuationDeliveryNewRequestWire,
+    ContinuationDeliveryTransitionRequestWire, ContinuationReceiverProofWire,
+    ContinuationResumeAdoptionDecisionWire,
+    ContinuationResumeAdoptionRequestBodyWire,
+    ContinuationResumeAdoptionRequestWire,
 };
 pub use evidence::{
     select_continuation_evidence, ContinuationEvidenceContextKindWire,
@@ -65,6 +69,10 @@ pub use replay::{
     ContinuationParentEdgeWire, ContinuationRenderedComponentSizesWire,
     ContinuationReplayBlockWire, ContinuationReplayManifestWire,
     ContinuationReplayPlanRequestWire,
+};
+pub use retention::{
+    plan_continuation_retention, ContinuationRetentionPlanWire,
+    ContinuationRetentionRequestWire, ContinuationRetentionRunWire,
 };
 pub use schema::{
     validate_agent_delta, validate_continuation_delivery_record,
