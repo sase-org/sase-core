@@ -58,6 +58,7 @@ pub mod host_bridge;
 pub mod machine_hood;
 pub mod machine_setup;
 pub mod managed_origin;
+pub mod managed_tmp;
 pub mod markdown_link_refs;
 pub mod migration;
 pub mod model_completion;
@@ -1013,6 +1014,10 @@ pub use managed_origin::{
     ManagedOriginReconciliationRequestWire, MANAGED_ORIGIN_ACTION_FAIL,
     MANAGED_ORIGIN_ACTION_NONE, MANAGED_ORIGIN_ACTION_REWRITE,
     MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION,
+};
+pub use managed_tmp::{
+    reap_managed_tmpdir, ManagedTmpReapError, ManagedTmpReapRequestWire,
+    ManagedTmpReapResultWire, MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
 };
 pub use markdown_link_refs::{
     allocate_markdown_reference_label, append_markdown_reference_definitions,

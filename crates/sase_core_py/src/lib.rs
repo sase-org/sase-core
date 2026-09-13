@@ -1203,6 +1203,10 @@ use sase_core::managed_origin::{
     ManagedOriginReconciliationRequestWire,
     MANAGED_ORIGIN_RECONCILIATION_WIRE_SCHEMA_VERSION,
 };
+use sase_core::managed_tmp::{
+    reap_managed_tmpdir as core_reap_managed_tmpdir, ManagedTmpReapError,
+    ManagedTmpReapRequestWire, MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
+};
 use sase_core::markdown_link_refs::{
     allocate_markdown_reference_label as core_allocate_markdown_reference_label,
     append_markdown_reference_definitions as core_append_markdown_reference_definitions,
@@ -1850,6 +1854,36 @@ fn py_reconcile_machine_enrollments<'py>(
     )?;
     let result = core_reconcile_machine_enrollments(&request)
         .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+fn managed_tmp_reap_error_to_pyerr(error: ManagedTmpReapError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "managed_tmp_reap_wire_schema_version")]
+fn py_managed_tmp_reap_wire_schema_version() -> u32 {
+    MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "reap_managed_tmpdir")]
+fn py_reap_managed_tmpdir<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ManagedTmpReapRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ManagedTmpReapRequestWire dict: {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_reap_managed_tmpdir(&request))
+        .map_err(managed_tmp_reap_error_to_pyerr)?;
     serialize_to_py(py, &result)
 }
 
@@ -17242,6 +17276,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_managed_tmp_reap_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_reap_managed_tmpdir, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_pending_commit_checkpoint_wire_schema_version,
         m
