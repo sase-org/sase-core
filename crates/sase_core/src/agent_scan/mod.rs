@@ -21,7 +21,7 @@ pub mod wire;
 pub use index::{
     agent_artifact_index_status, delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout,
-    load_agent_artifact_records,
+    find_gate_shell_by_gate_id, load_agent_artifact_records,
     prune_hidden_terminal_agent_artifact_index_rows, query_agent_alias_history,
     query_agent_artifact_index, query_agent_output_variable_history,
     query_related_agent_artifact_dirs, read_agent_artifact_index_meta,

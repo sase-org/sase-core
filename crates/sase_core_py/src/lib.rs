@@ -731,6 +731,7 @@ use sase_core::agent_scan::{
     collect_workflow_artifact_candidates as core_collect_workflow_artifact_candidates,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
+    find_gate_shell_by_gate_id as core_find_gate_shell_by_gate_id,
     load_agent_artifact_records as core_load_agent_artifact_records,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     parse_output_variable_selector as core_parse_output_variable_selector,
@@ -3604,6 +3605,30 @@ fn py_load_agent_artifact_records<'py>(
         })
         .map_err(PyRuntimeError::new_err)?;
     serialize_to_py(py, &records)
+}
+
+/// Return the newest real gate-shell record for `gate_id`, or `None`.
+///
+/// Uses the persistent index's indexed `gate_shell_id` column, an O(1) SQL
+/// lookup instead of decoding every historical record.
+#[pyfunction]
+#[pyo3(
+    name = "find_gate_shell_by_gate_id",
+    signature = (index_path, project_name, gate_id)
+)]
+fn py_find_gate_shell_by_gate_id<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    project_name: Option<&str>,
+    gate_id: &str,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let record = py
+        .allow_threads(|| {
+            core_find_gate_shell_by_gate_id(&index, project_name, gate_id)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    serialize_to_py(py, &record)
 }
 
 #[pyfunction(name = "agent_output_variable_history_wire_schema_version")]
@@ -17491,6 +17516,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_vacuum_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
+    m.add_function(wrap_pyfunction!(py_find_gate_shell_by_gate_id, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

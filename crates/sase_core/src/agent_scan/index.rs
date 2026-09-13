@@ -23,7 +23,8 @@ use crate::agent_clan_tribe::ClanTribeMemberWire;
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_launch::list_workspace_claims_from_content;
 use crate::agent_runtime::{
-    is_real_monitor_member_record, parse_runtime_timestamp,
+    is_real_gate_member_record, is_real_monitor_member_record,
+    parse_runtime_timestamp,
 };
 
 use super::context::{
@@ -46,7 +47,7 @@ use super::wire::{
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 30;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 31;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -199,6 +200,29 @@ fn record_index_sql_statements(count: u64) {
 #[cfg(test)]
 fn last_index_sql_statements() -> u64 {
     LAST_INDEX_SQL_STATEMENTS.with(|cell| cell.get())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Records decoded (`record_json` parses) by the last
+    /// [`find_gate_shell_by_gate_id`] call. A warm-cache lookup that stays
+    /// fast could still be decoding every historical row in Rust after an
+    /// unfiltered SQL scan; this proves the `WHERE gate_shell_id = ?`
+    /// predicate — not warm caches or an incidentally fast host — is what
+    /// keeps the lookup bounded as unrelated history grows.
+    static LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+fn record_gate_shell_lookup_records_decoded(count: u64) {
+    let _ = count;
+    #[cfg(test)]
+    LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED.with(|cell| cell.set(count));
+}
+
+#[cfg(test)]
+fn last_gate_shell_lookup_records_decoded() -> u64 {
+    LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED.with(|cell| cell.get())
 }
 
 /// Freshness policy for persistent artifact index queries.
@@ -1081,6 +1105,54 @@ pub fn load_agent_artifact_records(
         .into_iter()
         .filter_map(|dir| records_by_dir.get(&dir).cloned())
         .collect())
+}
+
+/// Return the newest real gate-shell member matching `gate_id`, if any.
+///
+/// Uses the indexed `gate_shell_id` column for a single-row `WHERE` lookup
+/// instead of decoding every historical record, the cost that made the
+/// previous full-history scan take seconds on a long-lived host. Only rows
+/// projected from a genuine gate-shell member carry a `gate_shell_id`
+/// (see [`gate_shell_id_from_record`]), so a later descendant that merely
+/// inherited the gate id can never shadow the owning shell here.
+///
+/// `project_name` of `None` searches every project, the same unscoped
+/// sweep the historical Python lookup performed for the reclaim chop.
+/// Ties (which should not occur for a durable gate id, but are possible
+/// for a replayed/duplicated bundle) resolve to the newest row by
+/// `timestamp`, then `artifact_dir`, mirroring the prior newest-first sort.
+pub fn find_gate_shell_by_gate_id(
+    index_path: &Path,
+    project_name: Option<&str>,
+    gate_id: &str,
+) -> Result<Option<AgentArtifactRecordWire>, String> {
+    let conn = open_index_read_only(index_path)?;
+    let record_json: Option<String> = match project_name {
+        Some(project) => conn
+            .query_row(
+                "SELECT record_json FROM agent_artifacts \
+                 WHERE gate_shell_id = ?1 AND project_name = ?2 \
+                 ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1",
+                params![gate_id, project],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?,
+        None => conn
+            .query_row(
+                "SELECT record_json FROM agent_artifacts \
+                 WHERE gate_shell_id = ?1 \
+                 ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1",
+                params![gate_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?,
+    };
+    record_gate_shell_lookup_records_decoded(record_json.is_some() as u64);
+    record_json
+        .map(|json| decode_agent_artifact_record_json(&json))
+        .transpose()
 }
 
 /// Return `(page_count, freelist_count, page_size)` for *conn*.
@@ -2603,6 +2675,7 @@ fn open_index_with_busy_timeout(
             done_outcome TEXT,
             source_machine TEXT,
             imported_owner_machine TEXT,
+            gate_shell_id TEXT,
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
@@ -2814,6 +2887,10 @@ fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "imported_owner_machine", "TEXT")?;
         migrate_imported_owner_machine_projection_v30(&mut conn)?;
     }
+    if prior_version.map_or(true, |v| v < 31) {
+        ensure_agent_artifacts_column(&conn, "gate_shell_id", "TEXT")?;
+        migrate_gate_shell_id_projection_v31(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -2824,7 +2901,9 @@ fn open_index_with_busy_timeout(
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_imported_owner_machine \
          ON agent_artifacts(imported_owner_machine); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
-         ON agent_artifacts(agent_clan, agent_clan_generation, timestamp);",
+         ON agent_artifacts(agent_clan, agent_clan_generation, timestamp); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_gate_shell_id \
+         ON agent_artifacts(gate_shell_id, project_name, timestamp);",
     )
     .map_err(|e| e.to_string())?;
 
@@ -3386,6 +3465,42 @@ fn migrate_imported_owner_machine_projection_v30(
     Ok(())
 }
 
+/// v31 adds the indexed `gate_shell_id` projection so an exact gate-id
+/// lookup can use `WHERE gate_shell_id = ?` instead of decoding every
+/// historical row. Only rows that are a real gate-shell member (not a
+/// descendant that merely inherited the gate id) get a non-null value.
+fn migrate_gate_shell_id_projection_v31(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let rows: Vec<(String, Option<String>)> = {
+        let mut stmt = tx
+            .prepare("SELECT artifact_dir, record_json FROM agent_artifacts")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut projected = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
+            let record_json: String = row.get(1).map_err(|e| e.to_string())?;
+            let gate_shell_id = decode_agent_artifact_record_json(&record_json)
+                .ok()
+                .and_then(|record| gate_shell_id_from_record(&record));
+            projected.push((artifact_dir, gate_shell_id));
+        }
+        projected
+    };
+    for (artifact_dir, gate_shell_id) in rows {
+        tx.execute(
+            "UPDATE agent_artifacts SET gate_shell_id = ?1 \
+             WHERE artifact_dir = ?2",
+            params![gate_shell_id, artifact_dir],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// v21 adds a regenerable child projection for indexed output variables.
 fn migrate_output_variable_projection_v21(
     conn: &mut Connection,
@@ -3450,13 +3565,13 @@ fn upsert_record(
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
             model_alias_origin, done_outcome, source_machine,
-            imported_owner_machine, indexed_at
+            imported_owner_machine, gate_shell_id, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
             ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, CURRENT_TIMESTAMP
+            ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, CURRENT_TIMESTAMP
         )
         ON CONFLICT(artifact_dir) DO UPDATE SET
             projects_root = excluded.projects_root,
@@ -3506,6 +3621,7 @@ fn upsert_record(
             done_outcome = excluded.done_outcome,
             source_machine = excluded.source_machine,
             imported_owner_machine = excluded.imported_owner_machine,
+            gate_shell_id = excluded.gate_shell_id,
             indexed_at = CURRENT_TIMESTAMP
         "#,
         params![
@@ -3557,6 +3673,7 @@ fn upsert_record(
             done_outcome,
             summary.source_machine,
             summary.imported_owner_machine,
+            summary.gate_shell_id,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -6073,6 +6190,7 @@ struct RecordSummary {
     model_alias_origin: Option<String>,
     source_machine: Option<String>,
     imported_owner_machine: Option<String>,
+    gate_shell_id: Option<String>,
 }
 
 impl RecordSummary {
@@ -6168,8 +6286,29 @@ impl RecordSummary {
             model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
             source_machine: machines.source_machine,
             imported_owner_machine: machines.imported_owner_machine,
+            gate_shell_id: gate_shell_id_from_record(record),
         }
     }
+}
+
+/// Return the durable gate id iff *record* is a real gate-shell member.
+///
+/// `gate_id` alone is inherited by later gate-associated follow-ups, so
+/// indexing it unconditionally would let a successor shadow the shell that
+/// actually owns the gate. Only [`is_real_gate_member_record`] rows project
+/// a value here, which is what makes an exact `gate_shell_id` match resolve
+/// the owning shell instead of an inheritor.
+fn gate_shell_id_from_record(
+    record: &AgentArtifactRecordWire,
+) -> Option<String> {
+    if !is_real_gate_member_record(record) {
+        return None;
+    }
+    record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.family_shell.as_ref())
+        .and_then(|shell| shell.id.clone())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -12504,5 +12643,256 @@ mod tests {
         .unwrap();
         assert!(fresh.records.is_empty());
         assert!(fresh.stats.rows_repaired >= 1);
+    }
+
+    fn write_gate_shell_artifact(
+        projects: &Path,
+        project: &str,
+        ts: &str,
+        gate_id: &str,
+    ) -> PathBuf {
+        let dir = artifact_for_project(projects, project, ts);
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({
+                "name": format!("{project}--gate"),
+                "agent_family": "approvals",
+                "agent_family_role": "gate",
+                "gate_id": gate_id,
+                "gate_kind": "approval",
+                "gate_state": "pending",
+                "gate_start_status": "WAITING",
+                "gate_stop_status": "ANSWERED"
+            }),
+        );
+        dir
+    }
+
+    #[test]
+    fn find_gate_shell_by_gate_id_uses_indexed_lookup_not_full_decode() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for n in 0..40 {
+            write_gate_shell_artifact(
+                &projects,
+                "proj",
+                &format!("2026081210{n:04}"),
+                &format!("unrelated-{n}"),
+            );
+        }
+        let target = write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812999999",
+            "gate-target",
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let found =
+            find_gate_shell_by_gate_id(&index, Some("proj"), "gate-target")
+                .unwrap()
+                .expect("gate-target must resolve");
+        assert_eq!(found.artifact_dir, target.to_string_lossy());
+        assert_eq!(
+            last_gate_shell_lookup_records_decoded(),
+            1,
+            "an indexed exact lookup must decode only the matched row, \
+             regardless of how many unrelated gate shells are indexed"
+        );
+    }
+
+    #[test]
+    fn find_gate_shell_by_gate_id_returns_none_for_unknown_id() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812100000",
+            "gate-1",
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let found =
+            find_gate_shell_by_gate_id(&index, Some("proj"), "no-such-gate")
+                .unwrap();
+        assert!(found.is_none());
+        assert_eq!(last_gate_shell_lookup_records_decoded(), 0);
+    }
+
+    #[test]
+    fn find_gate_shell_by_gate_id_ignores_inherited_id_on_descendant() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let owner = write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812100000",
+            "gate-1",
+        );
+        // A follow-up agent launched after the gate settles inherits the
+        // same on-disk `gate_id` but is not itself a gate-shell member: its
+        // `agent_family_role` is not "gate".
+        write_json(
+            &artifact_for_project(&projects, "proj", "20260812100100")
+                .join("agent_meta.json"),
+            json!({
+                "name": "follow-up",
+                "agent_family": "approvals",
+                "agent_family_role": "code",
+                "gate_id": "gate-1",
+                "gate_kind": "approval",
+                "gate_state": "answered"
+            }),
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let found = find_gate_shell_by_gate_id(&index, Some("proj"), "gate-1")
+            .unwrap()
+            .expect("gate-1 must resolve to its owning shell");
+        assert_eq!(found.artifact_dir, owner.to_string_lossy());
+    }
+
+    #[test]
+    fn find_gate_shell_by_gate_id_respects_project_scoping() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let alpha = write_gate_shell_artifact(
+            &projects,
+            "alpha",
+            "20260812100000",
+            "gate-shared",
+        );
+        write_gate_shell_artifact(
+            &projects,
+            "beta",
+            "20260812200000",
+            "gate-shared",
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let scoped =
+            find_gate_shell_by_gate_id(&index, Some("alpha"), "gate-shared")
+                .unwrap()
+                .expect(
+                    "alpha's gate must resolve even though beta's is newer",
+                );
+        assert_eq!(scoped.artifact_dir, alpha.to_string_lossy());
+        assert_eq!(scoped.project_name, "alpha");
+
+        let unscoped = find_gate_shell_by_gate_id(&index, None, "gate-shared")
+            .unwrap()
+            .expect("an unscoped search must still resolve one match");
+        assert_eq!(
+            unscoped.project_name, "beta",
+            "newest-first across projects"
+        );
+    }
+
+    #[test]
+    fn find_gate_shell_by_gate_id_prefers_newest_real_shell() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812100000",
+            "gate-dup",
+        );
+        let newest = write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812200000",
+            "gate-dup",
+        );
+
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let found =
+            find_gate_shell_by_gate_id(&index, Some("proj"), "gate-dup")
+                .unwrap()
+                .expect("gate-dup must resolve");
+        assert_eq!(found.artifact_dir, newest.to_string_lossy());
+    }
+
+    #[test]
+    fn schema_v30_upgrade_adds_and_backfills_gate_shell_id_projection() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let owner = write_gate_shell_artifact(
+            &projects,
+            "proj",
+            "20260812100000",
+            "gate-legacy",
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        {
+            let conn = Connection::open(&index).unwrap();
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_agent_artifacts_gate_shell_id;
+                 ALTER TABLE agent_artifacts DROP COLUMN gate_shell_id;
+                 INSERT OR REPLACE INTO meta(key, value)
+                 VALUES ('schema_version', '30');",
+            )
+            .unwrap();
+        }
+
+        let found =
+            find_gate_shell_by_gate_id(&index, Some("proj"), "gate-legacy")
+                .unwrap()
+                .expect(
+                    "an index predating the gate_shell_id column must \
+                     self-migrate and still resolve the gate",
+                );
+        assert_eq!(found.artifact_dir, owner.to_string_lossy());
+
+        let conn = Connection::open(&index).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
     }
 }
