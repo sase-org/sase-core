@@ -3346,6 +3346,15 @@ mod tests {
         items.iter().map(|item| item.label.clone()).collect()
     }
 
+    fn markdown_documentation(item: &CompletionItem) -> Option<&str> {
+        match item.documentation.as_ref()? {
+            Documentation::MarkupContent(content) => {
+                Some(content.value.as_str())
+            }
+            Documentation::String(value) => Some(value.as_str()),
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct CountingAgentBridge {
         calls: Arc<std::sync::atomic::AtomicU32>,
@@ -4496,6 +4505,46 @@ mod tests {
         assert_eq!(
             labels_at(server, "%queue(").await,
             vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
+        );
+    }
+
+    #[tokio::test]
+    async fn directive_name_completion_documents_queue_capacity_flag_state() {
+        let (service, _) = LspService::new(|client| {
+            XpromptLspServer::with_bridge(
+                client,
+                Arc::new(bridge_with_catalog_entries(Vec::new())),
+            )
+        });
+        let server = service.inner();
+
+        let response = server
+            .completion_for_text("%q".to_string(), Position::new(0, 2))
+            .await
+            .unwrap();
+        let items = completion_items(response);
+        let queue = items
+            .iter()
+            .find(|item| item.label == "%queue")
+            .expect("%queue item");
+        assert_eq!(
+            markdown_documentation(queue),
+            Some("Set this launch's capacity budget, priority, and capacity weight")
+        );
+
+        server.config.write().unwrap().queue_capacity_budget = false;
+        let response = server
+            .completion_for_text("%q".to_string(), Position::new(0, 2))
+            .await
+            .unwrap();
+        let items = completion_items(response);
+        let queue = items
+            .iter()
+            .find(|item| item.label == "%queue")
+            .expect("%queue item");
+        assert_eq!(
+            markdown_documentation(queue),
+            Some("Set weighted-load capacity, priority, and capacity weight")
         );
     }
 

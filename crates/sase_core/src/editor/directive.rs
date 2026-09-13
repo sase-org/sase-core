@@ -798,24 +798,29 @@ pub fn build_directive_completion_candidates_with_flags(
     let partial = token.strip_prefix('%').unwrap_or(token).to_lowercase();
     let mut candidates = Vec::new();
     for directive in DIRECTIVES {
+        let metadata = if directive.name == "queue" {
+            queue_directive_metadata(enabled_feature_flags)
+        } else {
+            directive
+        };
         if directive_is_hidden_from_name_completion_with_flags(
-            directive.name,
+            metadata.name,
             enabled_feature_flags,
         ) {
             continue;
         }
-        if directive.name.starts_with(&partial)
-            || directive
+        if metadata.name.starts_with(&partial)
+            || metadata
                 .alias
                 .is_some_and(|alias| alias.starts_with(&partial))
         {
             candidates.push(CompletionCandidate {
-                display: format!("%{}", directive.name),
-                insertion: format!("%{}", directive.name),
-                detail: directive.alias.map(|alias| format!("alias %{alias}")),
-                documentation: Some(directive.description.to_string()),
+                display: format!("%{}", metadata.name),
+                insertion: format!("%{}", metadata.name),
+                detail: metadata.alias.map(|alias| format!("alias %{alias}")),
+                documentation: Some(metadata.description.to_string()),
                 is_dir: false,
-                name: directive.name.to_string(),
+                name: metadata.name.to_string(),
                 replacement: None,
                 additional_edits: Vec::new(),
                 kind: String::new(),
@@ -2161,6 +2166,38 @@ mod tests {
         assert_eq!(list.candidates.len(), 1);
         assert_eq!(list.candidates[0].insertion, "%queue");
         assert_eq!(list.candidates[0].detail.as_deref(), Some("alias %q"));
+    }
+
+    #[test]
+    fn queue_name_completion_uses_flag_aware_documentation() {
+        let off = build_directive_completion_candidates_with_flags("%q", &[]);
+        let off_queue = off
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "queue")
+            .expect("queue completion candidate");
+        assert_eq!(off_queue.insertion, "%queue");
+        assert_eq!(off_queue.detail.as_deref(), Some("alias %q"));
+        assert_eq!(
+            off_queue.documentation.as_deref(),
+            Some("Set weighted-load capacity, priority, and capacity weight")
+        );
+
+        let on = build_directive_completion_candidates_with_flags(
+            "%q",
+            &["queue_capacity_budget".to_string()],
+        );
+        let on_queue = on
+            .candidates
+            .iter()
+            .find(|candidate| candidate.name == "queue")
+            .expect("queue completion candidate");
+        assert_eq!(on_queue.insertion, "%queue");
+        assert_eq!(on_queue.detail.as_deref(), Some("alias %q"));
+        assert_eq!(
+            on_queue.documentation.as_deref(),
+            Some("Set this launch's capacity budget, priority, and capacity weight")
+        );
     }
 
     #[test]
