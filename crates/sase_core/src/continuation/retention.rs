@@ -12,10 +12,18 @@ use serde::{Deserialize, Serialize};
 use super::schema::{
     validate_identifier, validate_non_empty_text, validate_reference,
     validate_schema, ContinuationError, CONTINUATION_WIRE_SCHEMA_VERSION,
-    MAX_NODES, MAX_PARENTS_PER_NODE,
+    MAX_PARENTS_PER_NODE,
 };
 
 const MAX_PATH_BYTES: usize = 4096;
+
+/// Retention requests carry every ACE-run dir on the host, a population that
+/// scales with disk usage and retention backlog rather than with any single
+/// continuation graph, so this is deliberately much larger than `MAX_NODES`
+/// (the single-graph bound). The 2026-09-13 incident: hosts with more than
+/// 10,000 run dirs locked up permanently because pruning — the only thing
+/// that shrinks the inventory — could no longer run.
+const MAX_RETENTION_RUNS: usize = 100_000;
 
 const REASON_LIVE: &str = "continuation_live";
 const REASON_RECOVERABLE: &str = "continuation_recoverable";
@@ -73,9 +81,9 @@ pub fn plan_continuation_retention(
         request.schema_version,
         "ContinuationRetentionRequestWire",
     )?;
-    if request.runs.len() > MAX_NODES {
+    if request.runs.len() > MAX_RETENTION_RUNS {
         return Err(ContinuationError::validation(format!(
-            "runs has {} entries; maximum is {MAX_NODES}",
+            "runs has {} entries; maximum is {MAX_RETENTION_RUNS}",
             request.runs.len()
         )));
     }
@@ -125,7 +133,7 @@ pub fn plan_continuation_retention(
     let mut visited = 0usize;
     while let Some(dir) = queue.pop_front() {
         visited += 1;
-        if visited > MAX_NODES {
+        if visited > MAX_RETENTION_RUNS.saturating_mul(2) {
             return Err(ContinuationError::validation(
                 "continuation retention closure exceeded the node bound"
                     .to_string(),
@@ -408,5 +416,49 @@ mod tests {
             result.reasons_by_dir.get(missing_starter).unwrap(),
             &vec![REASON_ANCESTRY.to_string()]
         );
+    }
+
+    #[test]
+    fn over_max_nodes_but_under_retention_cap_protects_live_ancestry() {
+        let old = "/tmp/proj/artifacts/ace-run/old";
+        let live = "/tmp/proj/artifacts/ace-run/live";
+        let mut runs: Vec<ContinuationRetentionRunWire> = (0..10_001)
+            .map(|index| {
+                run(&format!("/tmp/filler/{index}"), None, &[], None, false, false)
+            })
+            .collect();
+        runs.push(run(old, Some("agent-delta:old"), &[], None, false, false));
+        runs.push(run(
+            live,
+            None,
+            &["agent-delta:old"],
+            Some(old),
+            true,
+            false,
+        ));
+
+        let result = plan(runs);
+
+        assert!(result.protected_dirs.contains(&old.to_string()));
+        assert!(result.protected_dirs.contains(&live.to_string()));
+    }
+
+    #[test]
+    fn exceeding_retention_cap_fails_with_cap_message() {
+        let runs: Vec<ContinuationRetentionRunWire> = (0..MAX_RETENTION_RUNS + 1)
+            .map(|index| {
+                run(&format!("/tmp/filler/{index}"), None, &[], None, false, false)
+            })
+            .collect();
+
+        let err = plan_continuation_retention(ContinuationRetentionRequestWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            runs,
+        })
+        .unwrap_err();
+
+        assert!(err
+            .message
+            .contains(&format!("maximum is {MAX_RETENTION_RUNS}")));
     }
 }
