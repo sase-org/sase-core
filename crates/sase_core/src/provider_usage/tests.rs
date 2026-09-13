@@ -317,7 +317,7 @@ fn indicator_defaults_select_weekly_all_and_low_independent_windows() {
             .iter()
             .map(|entry| entry.window_key.as_str())
             .collect::<Vec<_>>(),
-        vec!["session", "weekly"]
+        vec!["weekly", "session"]
     );
     let weekly = projection
         .entries
@@ -1609,6 +1609,95 @@ fn usage_attention_rank_order_places_collection_problem_above_low() {
             > UsageAttentionKind::Low.rank()
     );
     assert!(UsageAttentionKind::Low.rank() > UsageAttentionKind::None.rank());
+}
+
+#[test]
+fn indicator_projection_order_is_provider_then_weekly_all_then_window_key() {
+    let claude_product = UsageApplicabilityWire::Product {
+        product: "claude".to_string(),
+        model_ids: vec![],
+    };
+    let snapshot = indicator_snapshot(
+        vec![
+            usage_observation(
+                "grok",
+                "ctx-grok",
+                1,
+                NOW - 9.0,
+                UsageCompleteness::Complete,
+                vec![
+                    indicator_window(
+                        "included_monthly",
+                        90.0,
+                        Some(NOW + MONTH_SECONDS),
+                        None,
+                        UsageApplicabilityWire::Account,
+                        NOW - 9.0,
+                    ),
+                    indicator_window(
+                        "included_weekly",
+                        95.0,
+                        Some(NOW + WEEK_SECONDS),
+                        None,
+                        UsageApplicabilityWire::Account,
+                        NOW - 9.0,
+                    ),
+                ],
+            ),
+            usage_observation(
+                "claude",
+                "ctx-claude",
+                1,
+                NOW - 10.0,
+                UsageCompleteness::Complete,
+                vec![
+                    indicator_window(
+                        "session",
+                        82.0,
+                        Some(NOW + 5.0 * 60.0 * 60.0),
+                        None,
+                        claude_product.clone(),
+                        NOW - 10.0,
+                    ),
+                    indicator_window(
+                        "weekly",
+                        20.0,
+                        Some(NOW + WEEK_SECONDS),
+                        None,
+                        claude_product,
+                        NOW - 10.0,
+                    ),
+                ],
+            ),
+        ],
+        NOW,
+    );
+    let projection = indicator_projection(snapshot, None, NOW);
+    assert_eq!(
+        projection
+            .entries
+            .iter()
+            .map(|entry| (
+                entry.provider.as_str(),
+                entry.window_key.as_str(),
+                entry.weekly_all
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("claude", "weekly", true),
+            ("claude", "session", false),
+            ("grok", "included_weekly", true),
+            ("grok", "included_monthly", false),
+        ]
+    );
+    assert_eq!(
+        projection.entries[0].display_attention,
+        UsageAttentionKind::None
+    );
+    assert_eq!(
+        projection.entries[2].display_attention,
+        UsageAttentionKind::VeryLow
+    );
 }
 
 #[test]

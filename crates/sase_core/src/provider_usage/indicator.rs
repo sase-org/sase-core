@@ -886,11 +886,8 @@ fn max_attention(
 
 fn sort_entries(entries: &mut [UsageIndicatorWindowEntryWire]) {
     entries.sort_by(|left, right| {
-        right
-            .display_attention
-            .rank()
-            .cmp(&left.display_attention.rank())
-            .then_with(|| left.provider.cmp(&right.provider))
+        left.provider
+            .cmp(&right.provider)
             .then_with(|| right.weekly_all.cmp(&left.weekly_all))
             .then_with(|| left.window_key.cmp(&right.window_key))
     });
