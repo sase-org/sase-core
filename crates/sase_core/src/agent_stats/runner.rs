@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 

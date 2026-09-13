@@ -590,7 +590,10 @@ fn filesystem_available_bytes(path: &Path) -> Option<u64> {
         return None;
     }
     let stats = unsafe { stats.assume_init() };
-    Some(stats.f_bavail.saturating_mul(stats.f_frsize))
+    // statvfs field widths are platform-dependent (f_bavail is u32 on
+    // macOS, u64 on Linux); widen before multiplying, then saturate back.
+    let available = u128::from(stats.f_bavail) * u128::from(stats.f_frsize);
+    Some(u64::try_from(available).unwrap_or(u64::MAX))
 }
 
 #[cfg(not(unix))]
