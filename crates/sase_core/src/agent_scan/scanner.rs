@@ -127,6 +127,7 @@ pub fn scan_agent_artifacts(
         index_window: None,
         records,
         clan_context,
+        index_completeness: None,
     }
 }
 
@@ -210,7 +211,29 @@ pub fn scan_agent_artifact_dirs(
         index_window: None,
         records,
         clan_context,
+        index_completeness: None,
     }
+}
+
+/// List canonical artifact timestamp directories without parsing markers.
+///
+/// Used by index source-discovery so a query can account for previously
+/// unindexed directories without paying an archive-wide JSON read.
+pub(crate) fn list_agent_artifact_dirs(
+    projects_root: &Path,
+    options: &AgentArtifactScanOptionsWire,
+) -> Vec<PathBuf> {
+    let mut stats = AgentArtifactScanStatsWire::default();
+    let project_filter = project_filter_for_scan(projects_root, options);
+    collect_artifact_candidates(
+        projects_root,
+        options,
+        project_filter.as_ref(),
+        &mut stats,
+    )
+    .into_iter()
+    .map(|candidate| candidate.artifact_dir)
+    .collect()
 }
 
 fn collect_artifact_candidates(

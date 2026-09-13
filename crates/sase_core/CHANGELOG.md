@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(agent-scan)* treat indexed full history as complete only after source-directory
+  discovery, drop deleted rows instead of serving stale `record_json`, and bound
+  marker-signature work once that reconciliation has settled.
+
 ### Added
 
 - Split colon and GitHub-style line locations off document links

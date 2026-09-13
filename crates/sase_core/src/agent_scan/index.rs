@@ -13,6 +13,7 @@ use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{TimeZone, Utc};
 use rusqlite::{
     params, params_from_iter, Connection, OpenFlags, OptionalExtension,
 };
@@ -29,18 +30,19 @@ use super::context::{
     clan_key_from_meta, represented_clan_keys, resolve_clan_context,
 };
 use super::scanner::{
-    project_allowed_by_filter, project_filter_for_scan,
-    scan_agent_artifact_dir, scan_agent_artifacts,
+    list_agent_artifact_dirs, project_allowed_by_filter,
+    project_filter_for_scan, scan_agent_artifact_dir, scan_agent_artifacts,
 };
 use super::wire::{
-    decode_agent_artifact_record_json, AgentArtifactIndexWindowWire,
-    AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, AgentArtifactScanStatsWire,
-    AgentArtifactScanWire, AgentMetaWire, AgentOutputVariableHistoryQueryWire,
-    AgentOutputVariableHistoryWire, AgentOutputVariableKeyGroupWire,
-    AgentOutputVariableLimitWire, AgentOutputVariableOccurrenceWire,
-    AgentOutputVariableValueGroupWire, DoneMarkerWire, OutputVariableValue,
-    UsedXPromptWire, AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
+    decode_agent_artifact_record_json, AgentArtifactIndexCompletenessWire,
+    AgentArtifactIndexWindowWire, AgentArtifactRecordShapeWire,
+    AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
+    AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
+    AgentOutputVariableHistoryQueryWire, AgentOutputVariableHistoryWire,
+    AgentOutputVariableKeyGroupWire, AgentOutputVariableLimitWire,
+    AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
+    DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
+    AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 
@@ -179,6 +181,8 @@ const MAX_RELATED_ARTIFACT_QUERY_ITERATIONS: usize = 32;
 const ABANDONED_DONE_OUTCOME: &str = "abandoned";
 const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const DISMISSED_IDENTITY_SQL_BATCH: usize = 200;
+const SOURCE_RECONCILE_ROOT_META_KEY: &str = "source_reconcile_projects_root";
+const SOURCE_RECONCILE_OK_META_KEY: &str = "source_reconcile_ok";
 
 #[cfg(test)]
 thread_local! {
@@ -1168,8 +1172,8 @@ pub fn query_agent_artifact_index(
     query: AgentArtifactIndexQueryWire,
     options: AgentArtifactScanOptionsWire,
 ) -> Result<AgentArtifactScanWire, String> {
-    // Revalidate may write repaired rows back through repair_stale_rows_for_query;
-    // Cached never writes, so it can use the cheaper read-only open.
+    // Revalidate may write repaired or newly discovered rows; Cached never
+    // writes, so it can use the cheaper read-only open.
     let conn = if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
     {
         open_index(index_path)?
@@ -1179,13 +1183,28 @@ pub fn query_agent_artifact_index(
     let mut stats = AgentArtifactScanStatsWire::default();
     let mut by_dir: BTreeMap<String, AgentArtifactRecordWire> = BTreeMap::new();
     let project_filter = project_filter_for_scan(projects_root, &options);
+    let mut source_reconciled = false;
     if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate {
+        if query.include_full_history {
+            reconcile_source_directories(
+                &conn,
+                projects_root,
+                &options,
+                &mut stats,
+            )?;
+            stamp_source_reconcile_watermark(&conn, projects_root)?;
+            source_reconciled = true;
+        }
         repair_stale_rows_for_query(
             &conn,
             &query,
             &options,
             project_filter.as_ref(),
+            &mut stats,
         )?;
+    } else if query.include_full_history {
+        source_reconciled =
+            source_reconcile_watermark_valid(&conn, projects_root)?;
     }
 
     let index_window = if should_use_windowed_candidate_query(&query) {
@@ -1286,6 +1305,15 @@ pub fn query_agent_artifact_index(
         }
     }
     let clan_context = select_clan_context(&conn, &records)?;
+    let index_completeness = Some(AgentArtifactIndexCompletenessWire {
+        complete_history: query.include_full_history && source_reconciled,
+        source_reconciled,
+        rows_discovered: stats.rows_discovered,
+        rows_removed: stats.rows_removed,
+        marker_signatures_checked: stats.marker_signatures_checked,
+        rows_repaired: stats.rows_repaired,
+        record_json_decoded: stats.record_json_decoded,
+    });
 
     Ok(AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -1295,6 +1323,7 @@ pub fn query_agent_artifact_index(
         index_window,
         records,
         clan_context,
+        index_completeness,
     })
 }
 
@@ -3591,11 +3620,197 @@ fn output_variable_scalar_text(value: &OutputVariableValue) -> Option<String> {
     }
 }
 
+fn discovery_scan_options(
+    options: &AgentArtifactScanOptionsWire,
+) -> AgentArtifactScanOptionsWire {
+    let mut discovery = options.clone();
+    discovery.only_projects.clear();
+    discovery.max_records = None;
+    discovery.not_before_timestamp = None;
+    discovery.newest_first = false;
+    discovery.capacity_only = false;
+    discovery
+}
+
+fn projects_root_key(projects_root: &Path) -> String {
+    projects_root.to_string_lossy().into_owned()
+}
+
+fn source_reconcile_watermark_valid(
+    conn: &Connection,
+    projects_root: &Path,
+) -> Result<bool, String> {
+    let ok: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [SOURCE_RECONCILE_OK_META_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if ok.as_deref() != Some("1") {
+        return Ok(false);
+    }
+    let stored_root: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [SOURCE_RECONCILE_ROOT_META_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(stored_root.as_deref()
+        == Some(projects_root_key(projects_root).as_str()))
+}
+
+fn stamp_source_reconcile_watermark(
+    conn: &Connection,
+    projects_root: &Path,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![
+            SOURCE_RECONCILE_ROOT_META_KEY,
+            projects_root_key(projects_root)
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![SOURCE_RECONCILE_OK_META_KEY, "1"],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn parse_indexed_at(raw: &str) -> Option<SystemTime> {
+    let naive =
+        chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S").ok()?;
+    let datetime = Utc.from_utc_datetime(&naive);
+    let secs = u64::try_from(datetime.timestamp()).ok()?;
+    Some(UNIX_EPOCH + Duration::new(secs, datetime.timestamp_subsec_nanos()))
+}
+
+fn artifact_dir_is_dirty(artifact_dir: &str, indexed_at: &str) -> bool {
+    let Some(indexed_at) = parse_indexed_at(indexed_at) else {
+        return true;
+    };
+    let Ok(mtime) = fs::metadata(artifact_dir).and_then(|meta| meta.modified())
+    else {
+        return true;
+    };
+    mtime > indexed_at
+}
+
+fn indexed_artifact_rows(
+    conn: &Connection,
+    projects_root: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT artifact_dir, indexed_at FROM agent_artifacts \
+             WHERE projects_root = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query([projects_root_key(projects_root)])
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        result.push((
+            row.get(0).map_err(|e| e.to_string())?,
+            row.get(1).map_err(|e| e.to_string())?,
+        ));
+    }
+    Ok(result)
+}
+
+fn reconcile_source_directories(
+    conn: &Connection,
+    projects_root: &Path,
+    options: &AgentArtifactScanOptionsWire,
+    stats: &mut AgentArtifactScanStatsWire,
+) -> Result<(), String> {
+    let discovery_options = discovery_scan_options(options);
+    let source_dirs: BTreeSet<String> =
+        list_agent_artifact_dirs(projects_root, &discovery_options)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+    let indexed_rows = indexed_artifact_rows(conn, projects_root)?;
+    let indexed_dirs: BTreeSet<String> =
+        indexed_rows.iter().map(|(dir, _)| dir.clone()).collect();
+
+    let missing: Vec<String> =
+        indexed_dirs.difference(&source_dirs).cloned().collect();
+    if !missing.is_empty() {
+        stats.rows_removed += missing.len() as u64;
+        delete_agent_artifact_projection_rows(conn, &missing)?;
+    }
+
+    let mut dirty_dirs = Vec::new();
+    for (artifact_dir, indexed_at) in &indexed_rows {
+        if missing.iter().any(|dir| dir == artifact_dir) {
+            continue;
+        }
+        if artifact_dir_is_dirty(artifact_dir, indexed_at) {
+            dirty_dirs.push(artifact_dir.clone());
+        }
+    }
+    if !dirty_dirs.is_empty() {
+        let placeholders = placeholders(dirty_dirs.len());
+        let where_sql = format!("WHERE artifact_dir IN ({placeholders})");
+        let pending = {
+            let mut stmt = conn
+                .prepare(&refresh_stale_rows_sql(&where_sql))
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt
+                .query(params_from_iter(dirty_dirs.iter()))
+                .map_err(|e| e.to_string())?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                pending.push(pending_refresh_row_from_sql(row)?);
+            }
+            pending
+        };
+        for row in pending {
+            stats.marker_signatures_checked += 1;
+            let current =
+                MarkerSignatures::from_artifact_dir(&row.artifact_dir);
+            if row.stored == current {
+                continue;
+            }
+            let row_projects_root = PathBuf::from(&row.row_projects_root);
+            let artifact_dir = PathBuf::from(&row.artifact_dir);
+            if let Some(refreshed) = scan_agent_artifact_dir(
+                &row_projects_root,
+                &artifact_dir,
+                options,
+            ) {
+                let _ = upsert_record(conn, &row_projects_root, &refreshed);
+                stats.rows_repaired += 1;
+            }
+        }
+    }
+
+    for artifact_dir in source_dirs.difference(&indexed_dirs) {
+        let path = PathBuf::from(artifact_dir);
+        if let Some(record) =
+            scan_agent_artifact_dir(projects_root, &path, options)
+        {
+            upsert_record(conn, projects_root, &record)?;
+            stats.rows_discovered += 1;
+        }
+    }
+    Ok(())
+}
+
 fn repair_stale_rows_for_query(
     conn: &Connection,
     query: &AgentArtifactIndexQueryWire,
     options: &AgentArtifactScanOptionsWire,
     project_filter: Option<&BTreeSet<String>>,
+    stats: &mut AgentArtifactScanStatsWire,
 ) -> Result<(), String> {
     let mut clauses: Vec<&str> = Vec::new();
     if !query.include_hidden {
@@ -3615,7 +3830,7 @@ fn repair_stale_rows_for_query(
         format!("WHERE {}", clauses.join(" OR ")),
         project_filter,
     );
-    refresh_stale_rows(conn, &where_sql, options)
+    refresh_stale_rows(conn, &where_sql, options, stats)
 }
 
 fn select_terminalization_candidates(
@@ -3836,6 +4051,7 @@ fn refresh_stale_rows(
     conn: &Connection,
     where_sql: &str,
     options: &AgentArtifactScanOptionsWire,
+    stats: &mut AgentArtifactScanStatsWire,
 ) -> Result<(), String> {
     let sql = refresh_stale_rows_sql(where_sql);
     let mut pending: Vec<PendingRefreshRow> = Vec::new();
@@ -3847,7 +4063,9 @@ fn refresh_stale_rows(
         }
     }
 
+    let mut missing = Vec::new();
     for row in pending {
+        stats.marker_signatures_checked += 1;
         let current = MarkerSignatures::from_artifact_dir(&row.artifact_dir);
         if row.stored == current {
             continue;
@@ -3858,7 +4076,14 @@ fn refresh_stale_rows(
             scan_agent_artifact_dir(&projects_root, &artifact_dir, options)
         {
             let _ = upsert_record(conn, &projects_root, &refreshed);
+            stats.rows_repaired += 1;
+        } else {
+            missing.push(row.artifact_dir);
         }
+    }
+    if !missing.is_empty() {
+        stats.rows_removed += missing.len() as u64;
+        delete_agent_artifact_projection_rows(conn, &missing)?;
     }
     Ok(())
 }
@@ -3880,22 +4105,21 @@ fn select_records(
     options: &AgentArtifactScanOptionsWire,
     project_filter: Option<&BTreeSet<String>>,
 ) -> Result<(), String> {
-    if query.candidate_filter.is_some()
-        && query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
-    {
-        refresh_stale_rows(conn, &query.where_sql, options)?;
-    }
     let pending = if query.candidate_filter.is_some() {
         select_pending_rows_for_candidate_filter(conn, &query, by_dir)?
     } else {
         select_pending_rows_for_query(conn, &query, by_dir)?
     };
 
+    let mut missing = Vec::new();
     for row in pending {
         let record = match query.freshness {
             AgentArtifactIndexFreshnessWire::Cached => {
                 match decode_agent_artifact_record_json(&row.record_json) {
-                    Ok(record) => record,
+                    Ok(record) => {
+                        stats.record_json_decoded += 1;
+                        record
+                    }
                     Err(_) => {
                         stats.json_decode_errors += 1;
                         continue;
@@ -3903,11 +4127,15 @@ fn select_records(
                 }
             }
             AgentArtifactIndexFreshnessWire::Revalidate => {
+                stats.marker_signatures_checked += 1;
                 let current =
                     MarkerSignatures::from_artifact_dir(&row.artifact_dir);
                 if row.stored == current {
                     match decode_agent_artifact_record_json(&row.record_json) {
-                        Ok(record) => record,
+                        Ok(record) => {
+                            stats.record_json_decoded += 1;
+                            record
+                        }
                         Err(_) => {
                             stats.json_decode_errors += 1;
                             continue;
@@ -3931,18 +4159,13 @@ fn select_records(
                             // return the refreshed record to the caller.
                             let _ =
                                 upsert_record(conn, &projects_root, &refreshed);
+                            stats.rows_repaired += 1;
                             refreshed
                         }
-                        None => match serde_json::from_str::<
-                            AgentArtifactRecordWire,
-                        >(&row.record_json)
-                        {
-                            Ok(record) => record,
-                            Err(_) => {
-                                stats.json_decode_errors += 1;
-                                continue;
-                            }
-                        },
+                        None => {
+                            missing.push(row.artifact_dir.clone());
+                            continue;
+                        }
                     }
                 }
             }
@@ -3959,6 +4182,10 @@ fn select_records(
         )? {
             by_dir.insert(row.artifact_dir, record);
         }
+    }
+    if !missing.is_empty() {
+        stats.rows_removed += missing.len() as u64;
+        delete_agent_artifact_projection_rows(conn, &missing)?;
     }
     Ok(())
 }
@@ -4356,6 +4583,7 @@ fn select_records_for_windowed_candidates(
                 stats.json_decode_errors += 1;
                 continue;
             };
+            stats.record_json_decoded += 1;
             let selection = match candidate.selection {
                 CandidateSelection::Active => RecordSelection::Active,
                 CandidateSelection::Completed => RecordSelection::Completed,
@@ -11327,5 +11555,272 @@ mod tests {
             .as_ref()
             .and_then(|m| m.name.as_deref());
         assert_eq!(returned_name, Some(sentinel_name));
+    }
+
+    fn full_history_revalidate_query() -> AgentArtifactIndexQueryWire {
+        AgentArtifactIndexQueryWire {
+            include_active: false,
+            include_recent_completed: false,
+            include_full_history: true,
+            active_limit: None,
+            recent_completed_limit: None,
+            include_hidden: false,
+            freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+            only_monitors: false,
+            record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: None,
+            candidate_filter: None,
+        }
+    }
+
+    fn full_history_cached_query() -> AgentArtifactIndexQueryWire {
+        AgentArtifactIndexQueryWire {
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+            ..full_history_revalidate_query()
+        }
+    }
+
+    fn write_completed_artifact(dir: &Path, name: &str) {
+        write_json(
+            &dir.join("agent_meta.json"),
+            json!({"name": name, "source_machine": "athena"}),
+        );
+        write_json(
+            &dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": name,
+                "source_machine": "athena"
+            }),
+        );
+    }
+
+    #[test]
+    fn full_history_revalidate_discovers_unindexed_artifact_and_claims_complete(
+    ) {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let first = artifact(&projects, "20260912090000");
+        write_completed_artifact(&first, "indexed");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let second = artifact(&projects, "20260912090100");
+        write_completed_artifact(&second, "unindexed");
+
+        let cached = query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_cached_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let cached_names: BTreeSet<&str> = cached
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(cached_names, BTreeSet::from(["20260912090000"]));
+        let cached_complete = cached.index_completeness.unwrap();
+        assert!(!cached_complete.complete_history);
+        assert!(!cached_complete.source_reconciled);
+
+        let fresh = query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_revalidate_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let fresh_names: BTreeSet<&str> = fresh
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(
+            fresh_names,
+            BTreeSet::from(["20260912090000", "20260912090100"])
+        );
+        let completeness = fresh.index_completeness.unwrap();
+        assert!(completeness.complete_history);
+        assert!(completeness.source_reconciled);
+        assert_eq!(fresh.stats.rows_discovered, 1);
+    }
+
+    #[test]
+    fn full_history_revalidate_drops_deleted_artifact_instead_of_stale_json() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let first = artifact(&projects, "20260912090000");
+        let second = artifact(&projects, "20260912090100");
+        write_completed_artifact(&first, "keep");
+        write_completed_artifact(&second, "delete-me");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        fs::remove_dir_all(&second).unwrap();
+        let fresh = query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_revalidate_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let names: BTreeSet<&str> = fresh
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(names, BTreeSet::from(["20260912090000"]));
+        assert_eq!(fresh.stats.rows_removed, 1);
+        assert!(fresh.index_completeness.unwrap().complete_history);
+    }
+
+    #[test]
+    fn cached_full_history_after_reconcile_reuses_watermark_without_discovery()
+    {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        write_completed_artifact(
+            &artifact(&projects, "20260912090000"),
+            "keep",
+        );
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_revalidate_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let cached = query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_cached_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(cached.index_completeness.unwrap().complete_history);
+        assert_eq!(cached.stats.rows_discovered, 0);
+        assert_eq!(cached.stats.marker_signatures_checked, 0);
+        assert_eq!(cached.stats.rows_repaired, 0);
+    }
+
+    #[test]
+    fn tier1_revalidate_with_candidate_filter_does_not_prefilter_all_rows() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        for index in 0..6 {
+            let dir = artifact(&projects, &format!("2026091210000{index}"));
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({
+                    "name": format!("row-{index}"),
+                    "model": if index == 5 { "keep-me" } else { "other" },
+                }),
+            );
+            write_json(
+                &dir.join("done.json"),
+                json!({
+                    "outcome": "completed",
+                    "name": format!("row-{index}")
+                }),
+            );
+        }
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: false,
+                include_recent_completed: true,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: Some(2),
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: Some(
+                    AgentArtifactCandidateFilterWire::Contains {
+                        field: AgentArtifactCandidateFieldWire::Model,
+                        value: "keep".to_string(),
+                    },
+                ),
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(
+            snapshot.stats.marker_signatures_checked <= 2,
+            "capped candidate revalidate must not signature-check the whole tier, got {}",
+            snapshot.stats.marker_signatures_checked
+        );
+    }
+
+    #[test]
+    fn full_history_revalidate_repairs_hidden_toggle_via_dirty_directory() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let dir = artifact(&projects, "20260912090000");
+        write_completed_artifact(&dir, "visible");
+        let index = tmp.path().join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_revalidate_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+
+        write_json(
+            &dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "name": "visible",
+                "hidden": true
+            }),
+        );
+        let fresh = query_agent_artifact_index(
+            &index,
+            &projects,
+            full_history_revalidate_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert!(fresh.records.is_empty());
+        assert!(fresh.stats.rows_repaired >= 1);
     }
 }

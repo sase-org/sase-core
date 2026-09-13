@@ -114,6 +114,43 @@ pub struct AgentArtifactScanStatsWire {
     pub json_decode_errors: u64,
     pub os_errors: u64,
     pub prompt_step_markers_parsed: u64,
+    /// Marker-signature comparisons against indexed rows.
+    #[serde(default)]
+    pub marker_signatures_checked: u64,
+    /// Indexed rows rewritten from a source rescan.
+    #[serde(default)]
+    pub rows_repaired: u64,
+    /// Previously unindexed source directories upserted during discovery.
+    #[serde(default)]
+    pub rows_discovered: u64,
+    /// Indexed rows deleted because the source directory is gone.
+    #[serde(default)]
+    pub rows_removed: u64,
+    /// `record_json` blobs decoded for this query.
+    #[serde(default)]
+    pub record_json_decoded: u64,
+}
+
+/// Completeness of one artifact-index snapshot relative to the source tree.
+///
+/// Marker revalidation repairs rows the index already stores. It does not
+/// discover previously unindexed directories or drop deleted ones. A
+/// snapshot may claim `complete_history` only after a source-directory
+/// reconciliation (or a still-valid watermark from one).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexCompletenessWire {
+    pub complete_history: bool,
+    pub source_reconciled: bool,
+    #[serde(default)]
+    pub rows_discovered: u64,
+    #[serde(default)]
+    pub rows_removed: u64,
+    #[serde(default)]
+    pub marker_signatures_checked: u64,
+    #[serde(default)]
+    pub rows_repaired: u64,
+    #[serde(default)]
+    pub record_json_decoded: u64,
 }
 
 /// Metadata for an intentionally bounded artifact-index window.
@@ -1156,6 +1193,8 @@ pub struct AgentArtifactScanWire {
     pub records: Vec<AgentArtifactRecordWire>,
     #[serde(default)]
     pub clan_context: Vec<AgentClanContextWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_completeness: Option<AgentArtifactIndexCompletenessWire>,
 }
 
 /// Return true iff `name` is one of the workflow folder names the
