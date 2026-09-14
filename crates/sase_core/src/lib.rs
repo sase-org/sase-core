@@ -40,6 +40,7 @@ pub mod commit_subject;
 pub mod config;
 pub mod content_layout;
 pub mod continuation;
+pub mod disk_pressure;
 pub mod editor;
 pub mod effort;
 pub mod effort_override;
@@ -645,6 +646,13 @@ pub use continuation::{
     DiagnosticStageStatusWire, DiagnosticStageWire, MonitorOutcomeWire,
     MonitorResultWire, MonitorTimeoutKindWire, RetainedLogMetadataWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
+};
+pub use disk_pressure::{
+    classify_disk_pressure, DiskPressureError,
+    DiskPressureObservationResultWire, DiskPressureObservationWire,
+    DiskPressureOwnerRowWire, DiskPressureRequestWire, DiskPressureResultWire,
+    DISK_PRESSURE_WIRE_SCHEMA_VERSION, PRESSURE_STATUS_ERROR,
+    PRESSURE_STATUS_OK, PRESSURE_STATUS_WARN,
 };
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,

@@ -1117,6 +1117,10 @@ use sase_core::continuation::{
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
+use sase_core::disk_pressure::{
+    classify_disk_pressure as core_classify_disk_pressure, DiskPressureError,
+    DiskPressureRequestWire, DISK_PRESSURE_WIRE_SCHEMA_VERSION,
+};
 use sase_core::effort::resolve_effective_effort as core_resolve_effective_effort;
 use sase_core::effort_override::{
     clear_effort_override as core_clear_effort_override,
@@ -1928,6 +1932,36 @@ fn py_reconcile_machine_enrollments<'py>(
 
 fn managed_tmp_reap_error_to_pyerr(error: ManagedTmpReapError) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+fn disk_pressure_error_to_pyerr(error: DiskPressureError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "disk_pressure_wire_schema_version")]
+fn py_disk_pressure_wire_schema_version() -> u32 {
+    DISK_PRESSURE_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_disk_pressure")]
+fn py_classify_disk_pressure<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: DiskPressureRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid DiskPressureRequestWire dict: {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_classify_disk_pressure(&request))
+        .map_err(disk_pressure_error_to_pyerr)?;
+    serialize_to_py(py, &result)
 }
 
 #[pyfunction]
@@ -17807,6 +17841,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
+    m.add_function(wrap_pyfunction!(py_disk_pressure_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_disk_pressure, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_managed_tmp_reap_wire_schema_version,
         m

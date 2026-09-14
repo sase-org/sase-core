@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION: u32 = 2;
 
 const TOP_LEVEL_BUCKET: &str = "<root>";
 
@@ -27,6 +27,7 @@ pub enum ManagedTmpReapError {
 pub struct ManagedTmpReapRequestWire {
     pub schema_version: u32,
     pub root: String,
+    pub apply: bool,
     pub now_epoch_seconds: f64,
     pub horizons: BTreeMap<String, f64>,
     pub default_horizon_seconds: f64,
@@ -47,12 +48,18 @@ pub struct ManagedTmpReapRequestWire {
 pub struct ManagedTmpReapResultWire {
     pub schema_version: u32,
     pub root: String,
+    pub apply: bool,
     pub scanned: u64,
+    pub selected: u64,
     pub removed: u64,
+    pub selected_by_subdir: BTreeMap<String, u64>,
     pub removed_by_subdir: BTreeMap<String, u64>,
+    pub selected_directories: Vec<String>,
     pub removed_directories: Vec<String>,
     pub capped: bool,
+    pub pressure_selected: u64,
     pub pressure_removed: u64,
+    pub pressure_reclaimable_bytes: u64,
     pub pressure_reclaimed_bytes: u64,
     pub pressure_trigger: Option<String>,
     pub pressure_root_size_bytes: u64,
@@ -66,6 +73,7 @@ pub struct ManagedTmpReapResultWire {
 struct RemovalOutcome {
     kind: RemovedKind,
     size_bytes: u64,
+    removed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,17 +104,21 @@ struct PressurePlan {
     trigger: Option<&'static str>,
     root_size: u64,
     available: Option<u64>,
-    free_space_floor_breached: bool,
     target_size: u64,
     recovery_available: u64,
+    effective_min_age_seconds: f64,
 }
 
 #[derive(Debug, Default)]
 struct PressureReapResult {
     scanned: u64,
+    selected: u64,
     removed: u64,
+    selected_by_subdir: BTreeMap<String, u64>,
     removed_by_subdir: BTreeMap<String, u64>,
+    selected_directories: Vec<PathBuf>,
     removed_directories: Vec<PathBuf>,
+    reclaimable_bytes: u64,
     reclaimed_bytes: u64,
     capped: bool,
     trigger: Option<String>,
@@ -123,7 +135,9 @@ pub fn reap_managed_tmpdir(
     let root_string = root.to_string_lossy().into_owned();
     let clock = request.now_epoch_seconds;
     let mut scanned = 0_u64;
+    let mut selected_by_subdir: BTreeMap<String, u64> = BTreeMap::new();
     let mut removed_by_subdir: BTreeMap<String, u64> = BTreeMap::new();
+    let mut selected_directories: Vec<PathBuf> = Vec::new();
     let mut removed_directories: Vec<PathBuf> = Vec::new();
     let mut budget = u64::from(request.max_removals);
     let mut capped = false;
@@ -159,13 +173,21 @@ pub fn reap_managed_tmpdir(
                 break;
             }
             scanned += 1;
-            let Some(outcome) = remove_if_stale(&candidate, cutoff) else {
+            let Some(outcome) =
+                remove_if_stale(&candidate, cutoff, request.apply)
+            else {
                 continue;
             };
             if outcome.kind == RemovedKind::Directory {
-                removed_directories.push(candidate);
+                selected_directories.push(candidate.clone());
+                if outcome.removed {
+                    removed_directories.push(candidate);
+                }
             }
-            *removed_by_subdir.entry(bucket).or_insert(0) += 1;
+            *selected_by_subdir.entry(bucket.clone()).or_insert(0) += 1;
+            if outcome.removed {
+                *removed_by_subdir.entry(bucket).or_insert(0) += 1;
+            }
             budget -= 1;
         }
     }
@@ -175,7 +197,11 @@ pub fn reap_managed_tmpdir(
         pressure = reap_pressure_candidates(&root, request, budget);
         scanned += pressure.scanned;
         capped = capped || pressure.capped;
+        selected_directories.extend(pressure.selected_directories);
         removed_directories.extend(pressure.removed_directories);
+        for (bucket, count) in pressure.selected_by_subdir {
+            *selected_by_subdir.entry(bucket).or_insert(0) += count;
+        }
         for (bucket, count) in pressure.removed_by_subdir {
             *removed_by_subdir.entry(bucket).or_insert(0) += count;
         }
@@ -188,19 +214,29 @@ pub fn reap_managed_tmpdir(
         pressure.recovery_available = request.pressure_recovery_available_bytes;
     }
 
+    let selected = selected_by_subdir.values().sum();
     let removed = removed_by_subdir.values().sum();
     Ok(ManagedTmpReapResultWire {
         schema_version: MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
         root: root_string,
+        apply: request.apply,
         scanned,
+        selected,
         removed,
+        selected_by_subdir,
         removed_by_subdir,
+        selected_directories: selected_directories
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
         removed_directories: removed_directories
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
         capped,
+        pressure_selected: pressure.selected,
         pressure_removed: pressure.removed,
+        pressure_reclaimable_bytes: pressure.reclaimable_bytes,
         pressure_reclaimed_bytes: pressure.reclaimed_bytes,
         pressure_trigger: pressure.trigger,
         pressure_root_size_bytes: pressure.root_size,
@@ -229,15 +265,13 @@ fn reap_pressure_candidates(
         };
     };
     if current_budget == 0 {
-        let effective_min_age_seconds =
-            pressure_effective_min_age_seconds(request, &plan);
         return PressureReapResult {
             capped: true,
             trigger: plan.trigger.map(str::to_string),
             root_size: plan.root_size,
             available: plan.available,
             recovery_available: plan.recovery_available,
-            effective_min_age_seconds: Some(effective_min_age_seconds),
+            effective_min_age_seconds: Some(plan.effective_min_age_seconds),
             ..PressureReapResult::default()
         };
     }
@@ -247,9 +281,7 @@ fn reap_pressure_candidates(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let effective_min_age_seconds =
-        pressure_effective_min_age_seconds(request, &plan);
-    let cutoff = request.now_epoch_seconds - effective_min_age_seconds;
+    let cutoff = request.now_epoch_seconds - plan.effective_min_age_seconds;
     let mut candidates = Vec::new();
     let mut scanned = 0_u64;
     for entry in iter_children(root) {
@@ -302,9 +334,13 @@ fn reap_pressure_candidates(
     let mut budget = current_budget;
     let mut estimated_size = plan.root_size;
     let mut estimated_available = plan.available;
+    let mut selected = 0_u64;
     let mut removed = 0_u64;
+    let mut reclaimable_bytes = 0_u64;
     let mut reclaimed_bytes = 0_u64;
+    let mut selected_by_subdir = BTreeMap::new();
     let mut removed_by_subdir = BTreeMap::new();
+    let mut selected_directories = Vec::new();
     let mut removed_directories = Vec::new();
     let mut capped = false;
 
@@ -322,33 +358,56 @@ fn reap_pressure_candidates(
             capped = true;
             break;
         }
-        let Some(outcome) = remove_if_stale(&candidate.path, cutoff) else {
+        let Some(outcome) =
+            remove_if_stale(&candidate.path, cutoff, request.apply)
+        else {
             continue;
         };
         if outcome.kind == RemovedKind::Directory {
-            removed_directories.push(candidate.path);
+            selected_directories.push(candidate.path.clone());
+            if outcome.removed {
+                removed_directories.push(candidate.path);
+            }
         }
-        removed += 1;
-        reclaimed_bytes = reclaimed_bytes.saturating_add(candidate.size_bytes);
-        *removed_by_subdir.entry(candidate.bucket).or_insert(0) += 1;
-        estimated_size = estimated_size.saturating_sub(outcome.size_bytes);
-        estimated_available = estimated_available
-            .map(|free| free.saturating_add(outcome.size_bytes));
+        selected += 1;
+        reclaimable_bytes =
+            reclaimable_bytes.saturating_add(candidate.size_bytes);
+        *selected_by_subdir
+            .entry(candidate.bucket.clone())
+            .or_insert(0) += 1;
+        if outcome.removed {
+            removed += 1;
+            reclaimed_bytes =
+                reclaimed_bytes.saturating_add(candidate.size_bytes);
+            *removed_by_subdir.entry(candidate.bucket).or_insert(0) += 1;
+            estimated_size = estimated_size.saturating_sub(outcome.size_bytes);
+            estimated_available = estimated_available
+                .map(|free| free.saturating_add(outcome.size_bytes));
+        } else {
+            estimated_size =
+                estimated_size.saturating_sub(candidate.size_bytes);
+            estimated_available = estimated_available
+                .map(|free| free.saturating_add(candidate.size_bytes));
+        }
         budget -= 1;
     }
 
     PressureReapResult {
         scanned,
+        selected,
         removed,
+        selected_by_subdir,
         removed_by_subdir,
+        selected_directories,
         removed_directories,
+        reclaimable_bytes,
         reclaimed_bytes,
         capped,
         trigger: plan.trigger.map(str::to_string),
         root_size: plan.root_size,
         available: plan.available,
         recovery_available: plan.recovery_available,
-        effective_min_age_seconds: Some(effective_min_age_seconds),
+        effective_min_age_seconds: Some(plan.effective_min_age_seconds),
     }
 }
 
@@ -384,22 +443,24 @@ fn pressure_plan(
         (false, true) => "free_space",
         (false, false) => unreachable!(),
     };
+    let effective_min_age_seconds =
+        pressure_effective_min_age_seconds(request, free_pressure);
 
     Some(PressurePlan {
         trigger: Some(trigger),
         root_size,
         available,
-        free_space_floor_breached: free_pressure,
         target_size,
         recovery_available: request.pressure_recovery_available_bytes,
+        effective_min_age_seconds,
     })
 }
 
 fn pressure_effective_min_age_seconds(
     request: &ManagedTmpReapRequestWire,
-    plan: &PressurePlan,
+    free_space_floor_breached: bool,
 ) -> f64 {
-    if !plan.free_space_floor_breached {
+    if !free_space_floor_breached {
         return request.pressure_min_age_seconds;
     }
     request
@@ -479,9 +540,31 @@ fn pressure_candidate(
     })
 }
 
-fn remove_if_stale(path: &Path, cutoff: f64) -> Option<RemovalOutcome> {
+fn remove_if_stale(
+    path: &Path,
+    cutoff: f64,
+    apply: bool,
+) -> Option<RemovalOutcome> {
     let snapshot = tree_snapshot(path)?;
     if snapshot.is_symlink || snapshot.latest_mtime >= cutoff {
+        return None;
+    }
+
+    if !apply {
+        if snapshot.is_dir {
+            return Some(RemovalOutcome {
+                kind: RemovedKind::Directory,
+                size_bytes: snapshot.size_bytes,
+                removed: false,
+            });
+        }
+        if snapshot.is_file {
+            return Some(RemovalOutcome {
+                kind: RemovedKind::File,
+                size_bytes: snapshot.size_bytes,
+                removed: false,
+            });
+        }
         return None;
     }
 
@@ -490,6 +573,7 @@ fn remove_if_stale(path: &Path, cutoff: f64) -> Option<RemovalOutcome> {
             return Some(RemovalOutcome {
                 kind: RemovedKind::Directory,
                 size_bytes: snapshot.size_bytes,
+                removed: true,
             });
         }
         return None;
@@ -498,6 +582,7 @@ fn remove_if_stale(path: &Path, cutoff: f64) -> Option<RemovalOutcome> {
         return Some(RemovalOutcome {
             kind: RemovedKind::File,
             size_bytes: snapshot.size_bytes,
+            removed: true,
         });
     }
     None
@@ -647,6 +732,7 @@ mod tests {
         ManagedTmpReapRequestWire {
             schema_version: MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
             root: root.to_string_lossy().into_owned(),
+            apply: true,
             now_epoch_seconds: NOW,
             horizons: BTreeMap::from([
                 ("agent-tmp".to_string(), 12.0 * HOUR),
@@ -738,6 +824,23 @@ mod tests {
         assert!(!stale.exists());
         assert!(fresh.exists());
         assert_eq!(result.removed_by_subdir.get("future"), Some(&1));
+    }
+
+    #[test]
+    fn dry_run_selects_stale_entries_without_removing_them() {
+        let temp = tempdir().unwrap();
+        let stale = aged_file(temp.path(), "future/old.tmp", 4.0 * DAY, 8);
+        let mut req = request(temp.path());
+        req.apply = false;
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(stale.exists());
+        assert!(!result.apply);
+        assert_eq!(result.selected, 1);
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.selected_by_subdir.get("future"), Some(&1));
+        assert!(result.removed_by_subdir.is_empty());
     }
 
     #[test]
