@@ -122,6 +122,7 @@
       "defined_by": "sase_core::fleet_attention",
       "id": "string; opaque",
       "label": "string",
+      "requires_tty": "bool; true when selecting this option requires local controlling TTY",
       "schema_version": "u32"
     },
     "FleetAttentionReceiptWire": {

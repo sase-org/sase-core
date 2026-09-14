@@ -62,7 +62,8 @@
             "icon": "✅",
             "default_selected": true,
             "feedback": "disabled",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null
@@ -75,7 +76,8 @@
             "icon": "❌",
             "default_selected": true,
             "feedback": "disabled",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null
@@ -88,7 +90,8 @@
             "icon": "💬",
             "default_selected": true,
             "feedback": "required",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null

@@ -105,6 +105,7 @@ pub enum MobileActionKindWire {
     FlagTriage,
     BeadStaleCleanup,
     PluginsRequired,
+    SudoRequest,
     CustomGate,
     NonAction,
     Unsupported,
@@ -123,6 +124,7 @@ impl MobileActionKindWire {
             Some("FlagTriage") => Self::FlagTriage,
             Some("BeadStaleCleanup") => Self::BeadStaleCleanup,
             Some("PluginsRequired") => Self::PluginsRequired,
+            Some("SudoRequest") => Self::SudoRequest,
             Some("CustomGate") => Self::CustomGate,
             None => Self::NonAction,
             Some(_) => Self::Unsupported,
@@ -141,6 +143,7 @@ impl MobileActionKindWire {
             Self::FlagTriage => Some("FlagTriage"),
             Self::BeadStaleCleanup => Some("BeadStaleCleanup"),
             Self::PluginsRequired => Some("PluginsRequired"),
+            Self::SudoRequest => Some("SudoRequest"),
             Self::CustomGate => Some("CustomGate"),
             Self::NonAction | Self::Unsupported => None,
         }
@@ -159,6 +162,7 @@ impl MobileActionKindWire {
                 | Self::FlagTriage
                 | Self::BeadStaleCleanup
                 | Self::PluginsRequired
+                | Self::SudoRequest
                 | Self::CustomGate
         )
     }
@@ -175,6 +179,7 @@ impl MobileActionKindWire {
                 | Self::FlagTriage
                 | Self::BeadStaleCleanup
                 | Self::PluginsRequired
+                | Self::SudoRequest
         )
     }
 
@@ -190,6 +195,7 @@ impl MobileActionKindWire {
                 | Self::FlagTriage
                 | Self::BeadStaleCleanup
                 | Self::PluginsRequired
+                | Self::SudoRequest
                 | Self::CustomGate
         )
     }
@@ -206,6 +212,7 @@ impl MobileActionKindWire {
             Self::FlagTriage => "Flag triage",
             Self::BeadStaleCleanup => "Stale task cleanup",
             Self::PluginsRequired => "Required plugins",
+            Self::SudoRequest => "Sudo request",
             Self::CustomGate => "Custom gate",
             Self::NonAction => "Notification",
             Self::Unsupported => "Unsupported action",
@@ -325,6 +332,8 @@ pub struct GateOptionWire {
     pub feedback: GateFeedbackModeWire,
     #[serde(default)]
     pub inputs: Vec<MobileGateInputFieldWire>,
+    #[serde(default)]
+    pub requires_tty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,6 +673,7 @@ pub fn mobile_action_detail_from_notification(
         | MobileActionKindWire::FlagTriage
         | MobileActionKindWire::BeadStaleCleanup
         | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::SudoRequest
         | MobileActionKindWire::CustomGate => {
             MobileActionDetailWire::CustomGate {
                 identity,
@@ -1294,9 +1304,9 @@ mod tests {
                 "source_surface": "agent",
                 "slot_count": 3,
                 "branches": [
-                    {"options": [{"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled", "inputs": []}], "submit": null},
-                    {"options": [{"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled", "inputs": []}], "submit": null},
-                    {"options": [{"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required", "inputs": []}], "submit": null}
+                    {"options": [{"id": "approve", "label": "Approve", "icon": "✅", "default_selected": true, "feedback": "disabled", "inputs": [], "requires_tty": false}], "submit": null},
+                    {"options": [{"id": "reject", "label": "Reject", "icon": "❌", "default_selected": true, "feedback": "disabled", "inputs": [], "requires_tty": false}], "submit": null},
+                    {"options": [{"id": "feedback", "label": "Send Feedback", "icon": "💬", "default_selected": true, "feedback": "required", "inputs": [], "requires_tty": false}], "submit": null}
                 ],
             })
         );
@@ -1529,6 +1539,7 @@ mod tests {
             ("FlagTriage", MobileActionKindWire::FlagTriage),
             ("BeadStaleCleanup", MobileActionKindWire::BeadStaleCleanup),
             ("PluginsRequired", MobileActionKindWire::PluginsRequired),
+            ("SudoRequest", MobileActionKindWire::SudoRequest),
             ("CustomGate", MobileActionKindWire::CustomGate),
         ];
         for (action, kind) in expected {
@@ -1565,6 +1576,7 @@ mod tests {
             "EpicApproval",
             "HITL",
             "LaunchApproval",
+            "SudoRequest",
             "CustomGate",
         ] {
             let notification = NotificationWire {
@@ -1591,7 +1603,8 @@ mod tests {
                         "icon": "✅",
                         "default_selected": true,
                         "feedback": "disabled",
-                        "inputs": []
+                        "inputs": [],
+                        "requires_tty": false
                     }],
                     "submit": null
                 }]),
@@ -1702,6 +1715,7 @@ mod tests {
         let v2_branches = gate_branches_from_notification(&v2_notification);
         assert_eq!(v2_branches.len(), 1);
         assert_eq!(v2_branches[0].options[0].inputs, Vec::new());
+        assert!(!v2_branches[0].options[0].requires_tty);
 
         let v4_path = tmp.path().join("v4_request.json");
         write_gate_request(

@@ -315,7 +315,7 @@ pub fn api_v1_contract_snapshot() -> Value {
             "ActionResultWire": {
                 "defined_by": "sase_core::notifications::mobile",
                 "schema_version": "u32",
-                "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|non_action|unsupported",
+                "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|sudo_request|non_action|unsupported",
                 "prefix": "string",
                 "notification_id": "string|null",
                 "state": "available|already_handled|stale|missing_request|missing_target|unsupported",
@@ -773,7 +773,8 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "icon": "string|null",
                 "feedback": "disabled|optional|required",
                 "default_selected": "bool",
-                "inputs": "MobileGateInputFieldWire[]; default [] when absent"
+                "inputs": "MobileGateInputFieldWire[]; default [] when absent",
+                "requires_tty": "bool; true when selecting this option requires local controlling TTY"
             },
             "GateSubmitWire": {
                 "defined_by": "sase_core::notifications::mobile",
@@ -1502,7 +1503,8 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "defined_by": "sase_core::fleet_attention",
                 "schema_version": "u32",
                 "id": "string; opaque",
-                "label": "string"
+                "label": "string",
+                "requires_tty": "bool; true when selecting this option requires local controlling TTY"
             },
             "FleetAttentionEntryWire": {
                 "defined_by": "sase_core::fleet_attention",

@@ -96,6 +96,14 @@ update worker.
 are absent (`repeatable` defaults to false).
 The Rust gateway does not parse xprompt arguments itself.
 
+## Sudo Runner
+
+`sase_sudo_runner --manifest PATH --expected-sha256 SHA256` reads one reviewed sudo manifest, validates and canonicalizes
+it through `sase_core::sudo`, compares the canonical lowercase SHA-256 to the expected digest, and then emits exactly one
+JSON execution ledger on stdout for execution outcomes. Progress and command output go to stderr/the inherited terminal
+so stdout remains machine-readable. Authentication is a TTY handoff to `/usr/bin/sudo`; the runner never reads or stores
+authentication material and refuses execution before invoking sudo when no controlling TTY is available.
+
 The gateway currently reads notifications by polling the host JSONL store on each request. Successful notification state
 and action mutations publish `notifications_changed` SSE events; passive file watching is intentionally left out of the
 MVP.

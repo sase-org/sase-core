@@ -31,6 +31,9 @@ without a local Rust toolchain.
 - `directive_contract()`, `directive_completion_context(text, line, character)`,
   `directive_completion_candidates(context, inventories=None)` — shared xprompt
   directive completion contract, cursor classifier, and JSON-shaped candidates.
+- `sudo_validate_manifest`, `sudo_manifest_sha256`,
+  `sudo_derive_risk_badges`, `sudo_validate_ledger` — reviewed sudo manifest
+  and ledger contracts shared with the installed `sase_sudo_runner` script.
 
 `classify_axe_status` performs no filesystem, process, or clock access. Python
 supplies lock/PID liveness, marker ages, runner occupancy, lumberjack reports,

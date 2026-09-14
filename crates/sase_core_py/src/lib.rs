@@ -242,6 +242,11 @@
 //! - `fleet_issue_bootstrap(sase_home: str, request: dict) -> dict`
 //! - `gateway_main(args: list[str]) -> None`
 //! - `federation_worker_main(args: list[str]) -> None`
+//! - `sudo_validate_manifest(manifest: dict) -> dict`
+//! - `sudo_manifest_sha256(manifest: dict) -> str`
+//! - `sudo_derive_risk_badges(manifest: dict) -> list[dict]`
+//! - `sudo_validate_ledger(ledger: dict, manifest: dict | None = None) -> dict`
+//! - `sudo_runner_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
 //! - `fleet_classify_cache_freshness(request: dict) -> dict`
 //! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
@@ -14759,6 +14764,98 @@ fn py_federation_worker_main(
         .map_err(PyRuntimeError::new_err)
 }
 
+fn sudo_error_to_pyerr(error: sase_core::SudoWireError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn sudo_wire_to_py<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    value: &T,
+) -> PyResult<PyObject> {
+    let json = serde_json::to_value(value).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "internal sudo wire serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_validate_manifest")]
+fn py_sudo_validate_manifest<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(manifest.as_any())?;
+    let normalized = py
+        .allow_threads(|| sase_core::sudo_manifest_from_json_value(&value))
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &normalized)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_manifest_sha256")]
+fn py_sudo_manifest_sha256(
+    py: Python<'_>,
+    manifest: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let value = py_to_json_value(manifest.as_any())?;
+    py.allow_threads(|| sase_core::sudo_manifest_json_sha256(&value))
+        .map_err(sudo_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_derive_risk_badges")]
+fn py_sudo_derive_risk_badges<'py>(
+    py: Python<'py>,
+    manifest: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(manifest.as_any())?;
+    let assessments = py
+        .allow_threads(|| {
+            let manifest = sase_core::sudo_manifest_from_json_value(&value)?;
+            sase_core::derive_sudo_risk_badges(&manifest)
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &assessments)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_validate_ledger", signature = (ledger, manifest=None))]
+fn py_sudo_validate_ledger<'py>(
+    py: Python<'py>,
+    ledger: &Bound<'py, PyDict>,
+    manifest: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let ledger = py_to_json_value(ledger.as_any())?;
+    let manifest = manifest
+        .map(|value| py_to_json_value(value.as_any()))
+        .transpose()?;
+    let normalized = py
+        .allow_threads(|| {
+            sase_core::sudo_validate_ledger_json_value(
+                &ledger,
+                manifest.as_ref(),
+            )
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &normalized)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_runner_main")]
+fn py_sudo_runner_main(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
+    py.allow_threads(|| sase_gateway::run_sudo_runner_cli(args))
+        .map_err(|error| {
+            let err = format!(
+                "sase_sudo_runner exited with {}: {}",
+                error.exit_code(),
+                error
+            );
+            PyRuntimeError::new_err(err)
+        })
+}
+
 #[pyfunction]
 #[pyo3(name = "fleet_classify_runtime_duration")]
 fn py_fleet_classify_runtime_duration<'py>(
@@ -17047,6 +17144,113 @@ fn gateway_and_bootstrap_bindings_are_registered() {
             .getattr("fleet_validate_attention_inventory_response")
             .unwrap()
             .is_callable());
+        assert!(module
+            .getattr("sudo_validate_manifest")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("sudo_manifest_sha256")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("sudo_derive_risk_badges")
+            .unwrap()
+            .is_callable());
+        assert!(module
+            .getattr("sudo_validate_ledger")
+            .unwrap()
+            .is_callable());
+        assert!(module.getattr("sudo_runner_main").unwrap().is_callable());
+    });
+}
+
+#[test]
+fn sudo_bindings_validate_manifest_risk_ledger_and_help() {
+    use serde_json::json;
+
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let manifest = json!({
+            "schema_version": 1,
+            "request_id": "sudo-bindings",
+            "host": "athena",
+            "host_is_remote": true,
+            "run_as": "root",
+            "cwd": "/tmp",
+            "env": {},
+            "stop_on_failure": true,
+            "output_to_agent": "tail",
+            "commands": [
+                {
+                    "id": "pkg",
+                    "argv": ["apt-get", "update"],
+                    "why": "Refresh package metadata",
+                    "timeout_seconds": 10.0,
+                    "shell": false
+                },
+                {
+                    "id": "ssh",
+                    "argv": ["systemctl", "restart", "sshd.service"],
+                    "why": "Restart ssh",
+                    "shell": false
+                }
+            ],
+            "resume_from": null
+        });
+        let manifest_obj =
+            json_value_to_py(py, &manifest).unwrap().into_bound(py);
+        let manifest_dict = manifest_obj.downcast::<PyDict>().unwrap();
+
+        let normalized = py_sudo_validate_manifest(py, manifest_dict).unwrap();
+        let normalized_value = py_to_json_value(normalized.bind(py)).unwrap();
+        assert_eq!(normalized_value["commands"][0]["id"], json!("pkg"));
+
+        let digest = py_sudo_manifest_sha256(py, manifest_dict).unwrap();
+        let rust_manifest =
+            sase_core::sudo_manifest_from_json_value(&manifest).unwrap();
+        assert_eq!(
+            digest,
+            sase_core::sudo_manifest_sha256(&rust_manifest).unwrap()
+        );
+
+        let risks = py_sudo_derive_risk_badges(py, manifest_dict).unwrap();
+        let risks = py_to_json_value(risks.bind(py)).unwrap();
+        assert_eq!(risks[0]["badges"], json!(["network", "package-manager"]));
+        assert_eq!(risks[1]["badges"], json!(["service-restart"]));
+        assert_eq!(risks[1]["lockout_prone"], json!(true));
+
+        let ledger = json!({
+            "schema_version": 1,
+            "request_id": "sudo-bindings",
+            "manifest_sha256": digest,
+            "outcome": "completed",
+            "entries": [
+                {
+                    "id": "pkg",
+                    "status": "ran",
+                    "exit_code": 0,
+                    "duration_seconds": 0.1,
+                    "output_tail": ""
+                },
+                {
+                    "id": "ssh",
+                    "status": "skipped",
+                    "exit_code": null,
+                    "duration_seconds": 0.0,
+                    "output_tail": ""
+                }
+            ],
+            "diagnostic": null
+        });
+        let ledger_obj = json_value_to_py(py, &ledger).unwrap().into_bound(py);
+        let ledger_dict = ledger_obj.downcast::<PyDict>().unwrap();
+        let validated =
+            py_sudo_validate_ledger(py, ledger_dict, Some(manifest_dict))
+                .unwrap();
+        let validated = py_to_json_value(validated.bind(py)).unwrap();
+        assert_eq!(validated["entries"][1]["status"], json!("skipped"));
+
+        py_sudo_runner_main(py, vec!["--help".to_string()]).unwrap();
     });
 }
 
@@ -18621,6 +18825,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_issue_bootstrap, m)?)?;
     m.add_function(wrap_pyfunction!(py_gateway_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_federation_worker_main, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_validate_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_manifest_sha256, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_derive_risk_badges, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_validate_ledger, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_runner_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_effective_effort, m)?)?;

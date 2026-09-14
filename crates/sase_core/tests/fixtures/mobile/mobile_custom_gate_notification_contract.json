@@ -47,7 +47,8 @@
             "icon": "✅",
             "default_selected": true,
             "feedback": "required",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           },
           {
             "id": "open_report",
@@ -55,7 +56,8 @@
             "icon": "📄",
             "default_selected": true,
             "feedback": "optional",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": {
@@ -71,7 +73,8 @@
             "icon": null,
             "default_selected": true,
             "feedback": "optional",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null

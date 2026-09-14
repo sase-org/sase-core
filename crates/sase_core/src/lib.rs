@@ -97,6 +97,7 @@ pub mod snippet_session;
 pub mod source_language;
 pub mod status;
 mod store_lock;
+pub mod sudo;
 pub mod suffix;
 pub mod task_type;
 pub mod telemetry;
@@ -1346,6 +1347,21 @@ pub use status::{
     MENTOR_ACTION_CLEAR, MENTOR_ACTION_NONE, MENTOR_ACTION_SET,
     STATUS_WIRE_SCHEMA_VERSION, SUFFIX_ACTION_APPEND, SUFFIX_ACTION_NONE,
     SUFFIX_ACTION_STRIP, VALID_STATUSES,
+};
+pub use sudo::{
+    derive_sudo_risk_badges, sudo_ledger_from_json_value,
+    sudo_manifest_canonical_json_bytes, sudo_manifest_from_json_slice,
+    sudo_manifest_from_json_value, sudo_manifest_json_sha256,
+    sudo_manifest_sha256, sudo_validate_ledger_json_value,
+    truncate_sudo_output_tail, validate_sudo_ledger, validate_sudo_manifest,
+    SudoCommandWire, SudoErrorCodeWire, SudoErrorWire,
+    SudoLedgerEntryStatusWire, SudoLedgerEntryWire, SudoLedgerOutcomeWire,
+    SudoLedgerWire, SudoManifestWire, SudoOutputPolicyWire,
+    SudoRiskAssessmentWire, SudoRiskBadgeKindWire, SudoWireError,
+    SUDO_LEDGER_MAX_BYTES, SUDO_LEDGER_WIRE_SCHEMA_VERSION,
+    SUDO_MANIFEST_MAX_BYTES, SUDO_MANIFEST_WIRE_SCHEMA_VERSION,
+    SUDO_MAX_COMMANDS, SUDO_MAX_DIAGNOSTIC_BYTES, SUDO_MAX_OUTPUT_TAIL_BYTES,
+    SUDO_MAX_TIMEOUT_SECONDS, SUDO_RISK_WIRE_SCHEMA_VERSION,
 };
 pub use suffix::{is_entry_ref_suffix, parse_suffix_prefix, ParsedSuffix};
 pub use task_type::{

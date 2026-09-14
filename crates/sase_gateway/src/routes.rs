@@ -1726,7 +1726,11 @@ async fn fleet_attention_resolve(
         resource: match &entry {
             Some(entry)
                 if entry.state
-                    == sase_core::FleetAttentionStateWire::Pending =>
+                    == sase_core::FleetAttentionStateWire::Pending
+                    && remote_attention_capability_allowed(
+                        entry,
+                        &payload.intent,
+                    ) =>
             {
                 vec![payload.intent.kind.required_capability().to_string()]
             }
@@ -1855,6 +1859,25 @@ async fn fleet_attention_resolve(
         reason: admission.reason,
         receipt,
     }))
+}
+
+fn remote_attention_capability_allowed(
+    entry: &sase_core::FleetAttentionEntryWire,
+    intent: &sase_core::FleetAttentionIntentWire,
+) -> bool {
+    if intent.kind != sase_core::FleetAttentionKindWire::Gate {
+        return true;
+    }
+    let options = entry
+        .options
+        .iter()
+        .map(|option| (option.id.as_str(), option.requires_tty))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    intent.selected_option_ids.iter().all(|id| {
+        options
+            .get(id.as_str())
+            .is_some_and(|requires_tty| !requires_tty)
+    })
 }
 
 type FleetAttentionRefusalSettlement = (
@@ -3729,6 +3752,7 @@ fn attachment_candidates(
         | MobileActionKindWire::FlagTriage
         | MobileActionKindWire::BeadStaleCleanup
         | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::SudoRequest
         | MobileActionKindWire::CustomGate
         | MobileActionKindWire::NonAction
         | MobileActionKindWire::Unsupported => {}
@@ -6885,6 +6909,30 @@ exit 4
         .unwrap();
     }
 
+    fn write_sudo_gate_envelope(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "schema_version": 3,
+                "options": [
+                    {
+                        "id": "approve",
+                        "label": "Approve",
+                        "requires_tty": true
+                    },
+                    {
+                        "id": "deny",
+                        "label": "Deny",
+                        "requires_tty": false
+                    }
+                ],
+                "branches": [["approve"], ["deny"]]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     fn attention_question_notification(
         id: &str,
         sender: &str,
@@ -7327,6 +7375,116 @@ exit 4
         let (conflict_status, conflict) =
             post_attention_resolve(state, &token, changed_body).await;
         assert_eq!(conflict_status, StatusCode::CONFLICT, "{conflict}");
+    }
+
+    #[tokio::test]
+    async fn fleet_attention_resolve_sudo_approve_is_deny_only_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+        let summary = first_summary(&state).await;
+        let agent_label = summary
+            .labels
+            .agent_label
+            .clone()
+            .unwrap_or_else(|| summary.logical_locator.agent_id.clone());
+
+        let envelope_path = tmp.path().join("sudo_gate_request.json");
+        write_sudo_gate_envelope(&envelope_path);
+        let mut notification = attention_gate_notification(
+            "sudo-00000001",
+            &agent_label,
+            envelope_path.to_str().unwrap(),
+        );
+        notification.action = Some("SudoRequest".to_string());
+        let bridge =
+            Arc::new(FakeAttentionNotificationBridge::with_notifications(
+                vec![notification],
+            ));
+        state.notification_bridge =
+            DynNotificationHostBridge::new(bridge.clone());
+        let (token, installation_id) = enroll_mutate(
+            &state,
+            &[FLEET_SCOPE_ATTENTION_READ, FLEET_SCOPE_ATTENTION_RESOLVE],
+        )
+        .await;
+
+        let (read_status, snapshot) = post_attention_read(
+            state.clone(),
+            &token,
+            vec![summary.logical_key.clone()],
+        )
+        .await;
+        assert_eq!(read_status, StatusCode::OK, "{snapshot}");
+        let entry = &snapshot["entries"][0];
+        assert_eq!(entry["options"][0]["requires_tty"], json!(true));
+        assert_eq!(entry["options"][1]["requires_tty"], json!(false));
+        let revision = entry["revision"].as_u64().unwrap();
+
+        let approve_intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Gate,
+            request_key: attention_request_key(
+                &installation_id,
+                "sudo-00000001",
+            ),
+            observed_revision: revision,
+            selected_option_ids: vec!["approve".to_string()],
+            feedback: None,
+            question_choice: None,
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: None,
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            approve_intent,
+            &installation_id,
+            "controller-a",
+            "sudo-op-approve",
+        );
+        let (status, resolved) =
+            post_attention_resolve(state.clone(), &token, body).await;
+        assert_eq!(status, StatusCode::OK, "{resolved}");
+        assert_eq!(resolved["decision"], "accept_new");
+        assert_eq!(resolved["receipt"]["outcome"], json!("capability_missing"));
+        assert_eq!(bridge.gate_calls.lock().unwrap().len(), 0);
+
+        let deny_intent = sase_core::FleetAttentionIntentWire {
+            schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            kind: sase_core::FleetAttentionKindWire::Gate,
+            request_key: attention_request_key(
+                &installation_id,
+                "sudo-00000001",
+            ),
+            observed_revision: revision,
+            selected_option_ids: vec!["deny".to_string()],
+            feedback: None,
+            question_choice: None,
+            question_index: None,
+            selected_option_id: None,
+            selected_option_label: None,
+            selected_option_index: None,
+            custom_answer: None,
+            global_note: None,
+        };
+        let body = attention_resolve_body(
+            deny_intent,
+            &installation_id,
+            "controller-b",
+            "sudo-op-deny",
+        );
+        let (status, denied) =
+            post_attention_resolve(state, &token, body).await;
+        assert_eq!(status, StatusCode::OK, "{denied}");
+        assert_eq!(denied["receipt"]["outcome"], json!("applied"));
+        assert_eq!(
+            denied["receipt"]["settled_response"]["selected_option_ids"],
+            json!(["deny"])
+        );
+        assert_eq!(bridge.gate_calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

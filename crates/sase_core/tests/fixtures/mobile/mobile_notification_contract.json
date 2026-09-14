@@ -62,7 +62,8 @@
             "icon": "✅",
             "default_selected": true,
             "feedback": "disabled",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           },
           {
             "id": "commit",
@@ -70,7 +71,8 @@
             "icon": "💾",
             "default_selected": true,
             "feedback": "disabled",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": {
@@ -86,7 +88,8 @@
             "icon": "❌",
             "default_selected": true,
             "feedback": "disabled",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null
@@ -99,7 +102,8 @@
             "icon": "💬",
             "default_selected": true,
             "feedback": "required",
-            "inputs": []
+            "inputs": [],
+            "requires_tty": false
           }
         ],
         "submit": null

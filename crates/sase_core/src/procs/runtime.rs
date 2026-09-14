@@ -73,28 +73,25 @@ pub fn apply_proc_runtime_retention(
             .filter(|row| is_active_status(&row.status))
             .map(|row| row.proc_id.clone())
             .collect::<BTreeSet<_>>();
+        let evaluation = CandidateEvaluation {
+            runtime_root,
+            retained_ids: &retained_ids,
+            active_ids: &active_ids,
+            apply: request.apply,
+        };
 
         for proc_id in &request.pruned_proc_ids {
             evaluate_candidate(
-                runtime_root,
+                &evaluation,
                 proc_id,
                 CandidateKind::PrunedRow,
-                &retained_ids,
-                &active_ids,
                 None,
-                request.apply,
                 &mut result,
             );
         }
 
         if request.sweep_orphans {
-            sweep_orphans(
-                runtime_root,
-                request,
-                &retained_ids,
-                &active_ids,
-                &mut result,
-            )?;
+            sweep_orphans(request, &evaluation, &mut result)?;
         }
 
         Ok::<_, ProcStoreError>(result)
@@ -104,13 +101,11 @@ pub fn apply_proc_runtime_retention(
 }
 
 fn sweep_orphans(
-    runtime_root: &Path,
     request: &ProcRuntimeRetentionRequestWire,
-    retained_ids: &BTreeSet<String>,
-    active_ids: &BTreeSet<String>,
+    evaluation: &CandidateEvaluation<'_>,
     result: &mut ProcRuntimeRetentionResultWire,
 ) -> Result<(), ProcStoreError> {
-    let mut paths = fs::read_dir(runtime_root)
+    let mut paths = fs::read_dir(evaluation.runtime_root)
         .map_err(|error| ProcStoreError::Store(error.to_string()))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -123,10 +118,10 @@ fn sweep_orphans(
         if selected_orphans >= request.max_orphan_removals {
             result.capped = paths[index..].iter().any(|candidate| {
                 orphan_would_select(
-                    runtime_root,
+                    evaluation.runtime_root,
                     candidate,
-                    retained_ids,
-                    active_ids,
+                    evaluation.retained_ids,
+                    evaluation.active_ids,
                     cutoff,
                 )
             });
@@ -139,13 +134,10 @@ fn sweep_orphans(
             .to_string();
         let before = result.selected;
         evaluate_candidate(
-            runtime_root,
+            evaluation,
             &proc_id,
             CandidateKind::Orphan { cutoff },
-            retained_ids,
-            active_ids,
             Some(path.clone()),
-            request.apply,
             result,
         );
         if result.selected > before {
@@ -186,33 +178,38 @@ enum CandidateKind {
     Orphan { cutoff: f64 },
 }
 
+struct CandidateEvaluation<'a> {
+    runtime_root: &'a Path,
+    retained_ids: &'a BTreeSet<String>,
+    active_ids: &'a BTreeSet<String>,
+    apply: bool,
+}
+
 fn evaluate_candidate(
-    runtime_root: &Path,
+    evaluation: &CandidateEvaluation<'_>,
     proc_id: &str,
     kind: CandidateKind,
-    retained_ids: &BTreeSet<String>,
-    active_ids: &BTreeSet<String>,
     observed_path: Option<PathBuf>,
-    apply: bool,
     result: &mut ProcRuntimeRetentionResultWire,
 ) {
     result.scanned = result.scanned.saturating_add(1);
-    let path = observed_path.unwrap_or_else(|| runtime_root.join(proc_id));
+    let path =
+        observed_path.unwrap_or_else(|| evaluation.runtime_root.join(proc_id));
     let path_string = path.to_string_lossy().into_owned();
 
     if !valid_proc_id(proc_id) {
         result.push_skip(proc_id, path_string, "invalid_proc_id", 0);
         return;
     }
-    if !is_direct_child(runtime_root, &path) {
+    if !is_direct_child(evaluation.runtime_root, &path) {
         result.push_skip(proc_id, path_string, "outside_runtime_root", 0);
         return;
     }
-    if active_ids.contains(proc_id) {
+    if evaluation.active_ids.contains(proc_id) {
         result.push_skip(proc_id, path_string, "active_proc_row", 0);
         return;
     }
-    if retained_ids.contains(proc_id) {
+    if evaluation.retained_ids.contains(proc_id) {
         result.push_skip(proc_id, path_string, "retained_proc_row", 0);
         return;
     }
@@ -244,7 +241,7 @@ fn evaluate_candidate(
     result.selected = result.selected.saturating_add(1);
     result.reclaimable_bytes =
         result.reclaimable_bytes.saturating_add(snapshot.size_bytes);
-    if !apply {
+    if !evaluation.apply {
         result.entries.push(ProcRuntimeRetentionEntryWire {
             proc_id: proc_id.to_string(),
             path: path_string,

@@ -979,6 +979,7 @@ fn externally_handled_state(notification: &NotificationWire) -> bool {
         | MobileActionKindWire::FlagTriage
         | MobileActionKindWire::BeadStaleCleanup
         | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::SudoRequest
         | MobileActionKindWire::CustomGate => {
             let Some(bundle_path) = action_path(notification, "bundle_path")
             else {
@@ -1011,6 +1012,7 @@ fn required_target_missing(notification: &NotificationWire) -> bool {
         | MobileActionKindWire::FlagTriage
         | MobileActionKindWire::BeadStaleCleanup
         | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::SudoRequest
         | MobileActionKindWire::CustomGate => {
             action_path(notification, "bundle_path").is_none()
         }

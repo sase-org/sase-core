@@ -16,6 +16,7 @@ pub mod push;
 pub mod routes;
 pub mod server;
 pub mod storage;
+pub mod sudo_runner;
 pub mod wire;
 
 pub use cli::run_gateway_cli;
@@ -84,6 +85,12 @@ pub use server::{
     GatewayRunError,
 };
 pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
+pub use sudo_runner::{
+    run_sudo_runner_cli, SudoRunnerCliError, SudoRunnerExitStatus,
+    SUDO_RUNNER_AUTH_FAILED_EXIT, SUDO_RUNNER_CANCELLED_EXIT,
+    SUDO_RUNNER_INVALID_INPUT_EXIT, SUDO_RUNNER_RUNNER_ERROR_EXIT,
+    SUDO_RUNNER_SUCCESS_EXIT, SUDO_RUNNER_TTY_UNAVAILABLE_EXIT,
+};
 pub use wire::{
     ApiErrorCodeWire, ApiErrorWire, DeviceRecordWire, EventPayloadWire,
     EventRecordWire, FleetAuthoritativeSnapshotWire,

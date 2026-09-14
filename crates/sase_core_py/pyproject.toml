@@ -37,6 +37,7 @@ Issues = "https://github.com/sase-org/sase-core/issues"
 [project.scripts]
 sase_gateway = "sase_core_rs.gateway:main"
 sase_federation_worker = "sase_core_rs.federation_worker:main"
+sase_sudo_runner = "sase_core_rs.sudo_runner:main"
 
 # Distribution name (`sase-core-rs`) differs from the import module name
 # (`sase_core_rs`). The crate name `sase_core_py` is the Cargo crate name

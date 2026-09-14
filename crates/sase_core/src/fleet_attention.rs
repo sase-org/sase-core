@@ -143,6 +143,8 @@ pub struct FleetAttentionOptionWire {
     pub schema_version: u32,
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub requires_tty: bool,
 }
 
 impl FleetAttentionOptionWire {
@@ -647,6 +649,7 @@ fn fleet_attention_kind_for(
         | MobileActionKindWire::FlagTriage
         | MobileActionKindWire::BeadStaleCleanup
         | MobileActionKindWire::PluginsRequired
+        | MobileActionKindWire::SudoRequest
         | MobileActionKindWire::CustomGate => {
             Some(FleetAttentionKindWire::Gate)
         }
@@ -736,6 +739,7 @@ fn attention_options(
                     schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                     id: option.id.clone(),
                     label: option.label.clone(),
+                    requires_tty: option.requires_tty,
                 });
             }
         }
@@ -1266,28 +1270,32 @@ pub fn evaluate_attention_precondition(
             None,
         ));
     }
-    if !capability_present(capabilities, &required_capability) {
-        return Ok(precondition(
-            FleetAttentionPreconditionReasonWire::CapabilityMissing,
-            required_capability,
-            None,
-            None,
-        ));
-    }
     match intent.kind {
         FleetAttentionKindWire::Gate => {
-            let known: BTreeSet<&str> = entry
+            let known: BTreeMap<&str, bool> = entry
                 .options
                 .iter()
-                .map(|option| option.id.as_str())
+                .map(|option| (option.id.as_str(), option.requires_tty))
                 .collect();
             if intent
                 .selected_option_ids
                 .iter()
-                .any(|id| !known.contains(id.as_str()))
+                .any(|id| !known.contains_key(id.as_str()))
             {
                 return Ok(precondition(
                     FleetAttentionPreconditionReasonWire::InvalidOption,
+                    required_capability,
+                    None,
+                    None,
+                ));
+            }
+            if intent
+                .selected_option_ids
+                .iter()
+                .any(|id| known.get(id.as_str()).copied().unwrap_or(true))
+            {
+                return Ok(precondition(
+                    FleetAttentionPreconditionReasonWire::CapabilityMissing,
                     required_capability,
                     None,
                     None,
@@ -1311,6 +1319,14 @@ pub fn evaluate_attention_precondition(
                 }
             }
         }
+    }
+    if !capability_present(capabilities, &required_capability) {
+        return Ok(precondition(
+            FleetAttentionPreconditionReasonWire::CapabilityMissing,
+            required_capability,
+            None,
+            None,
+        ));
     }
     Ok(precondition(
         FleetAttentionPreconditionReasonWire::Ok,
@@ -1594,6 +1610,104 @@ mod tests {
     }
 
     #[test]
+    fn projection_carries_sudo_requires_tty_and_hashes_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request_path = tmp.path().join("sudo_gate.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 3,
+                "branches": [["approve"], ["deny"]],
+                "options": [
+                    {
+                        "id": "approve",
+                        "label": "Approve",
+                        "feedback": "disabled",
+                        "requires_tty": true
+                    },
+                    {
+                        "id": "deny",
+                        "label": "Deny",
+                        "feedback": "disabled"
+                    }
+                ],
+                "groups": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut action_data = BTreeMap::new();
+        action_data
+            .insert("origin_agent".to_string(), "athena.worker".to_string());
+        action_data.insert(
+            "request_path".to_string(),
+            request_path.to_string_lossy().into_owned(),
+        );
+        let row = FleetAttentionNotificationRowWire {
+            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+            notification: NotificationWire {
+                id: "sudo-0001".to_string(),
+                timestamp: "2026-09-14T00:00:00Z".to_string(),
+                sender: "sudo".to_string(),
+                action: Some("SudoRequest".to_string()),
+                action_data,
+                ..Default::default()
+            },
+            state: MobileActionStateWire::Available,
+        };
+        let snapshot = project_fleet_attention(
+            &installation('a'),
+            std::slice::from_ref(&row),
+            &[identity("athena.worker")],
+            100.0,
+        )
+        .unwrap();
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.kind, FleetAttentionKindWire::Gate);
+        assert_eq!(entry.title, "Sudo request");
+        assert!(entry.options[0].requires_tty);
+        assert!(!entry.options[1].requires_tty);
+
+        let mut lowered = row.clone();
+        let request_path = tmp.path().join("sudo_gate_no_tty.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 3,
+                "branches": [["approve"], ["deny"]],
+                "options": [
+                    {
+                        "id": "approve",
+                        "label": "Approve",
+                        "feedback": "disabled",
+                        "requires_tty": false
+                    },
+                    {
+                        "id": "deny",
+                        "label": "Deny",
+                        "feedback": "disabled"
+                    }
+                ],
+                "groups": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        lowered.notification.action_data.insert(
+            "request_path".to_string(),
+            request_path.to_string_lossy().into_owned(),
+        );
+        let lowered = project_fleet_attention(
+            &installation('a'),
+            &[lowered],
+            &[identity("athena.worker")],
+            100.0,
+        )
+        .unwrap();
+        assert_ne!(entry.revision, lowered.entries[0].revision);
+    }
+
+    #[test]
     fn projection_correlates_question_by_sender() {
         let rows = vec![question_row("notif-2", "athena.worker")];
         let resolved = vec![identity("athena.worker")];
@@ -1797,6 +1911,7 @@ mod tests {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             id: "/tmp/evil".to_string(),
             label: "Evil".to_string(),
+            requires_tty: false,
         };
         let error = option.validate().unwrap_err().to_string();
         assert!(error.contains("must not look like a path"), "{error}");
@@ -1991,6 +2106,7 @@ mod tests {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 id: "approve".to_string(),
                 label: "Approve".to_string(),
+                requires_tty: false,
             }],
             feedback_required: false,
             question_form: None,
@@ -2096,6 +2212,27 @@ mod tests {
     }
 
     #[test]
+    fn precondition_requires_tty_option_is_capability_missing() {
+        let intent = gate_intent("notif-1", 42);
+        let mut entry = entry_for(&intent);
+        entry.options[0].requires_tty = true;
+        let decision = evaluate_attention_precondition(
+            &intent,
+            Some(&entry),
+            &full_capabilities(),
+        )
+        .unwrap();
+        assert_eq!(
+            decision.reason,
+            FleetAttentionPreconditionReasonWire::CapabilityMissing
+        );
+        assert_eq!(
+            decision.required_capability,
+            FLEET_ATTENTION_CAPABILITY_APPROVE_GATE
+        );
+    }
+
+    #[test]
     fn precondition_invalid_option() {
         let mut intent = gate_intent("notif-1", 42);
         intent.selected_option_ids = vec!["not-an-option".to_string()];
@@ -2103,7 +2240,12 @@ mod tests {
         let decision = evaluate_attention_precondition(
             &intent,
             Some(&entry),
-            &full_capabilities(),
+            &CapabilitySetWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                resource: Vec::new(),
+                host: Vec::new(),
+                protocol: vec!["fleet.v1".to_string()],
+            },
         )
         .unwrap();
         assert_eq!(

@@ -29,7 +29,7 @@
   },
   "records": {
     "ActionResultWire": {
-      "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|non_action|unsupported",
+      "action_kind": "plan_approval|epic_approval|hitl|user_question|launch_approval|custom_gate|sudo_request|non_action|unsupported",
       "defined_by": "sase_core::notifications::mobile",
       "message": "string|null",
       "notification_id": "string|null",
@@ -133,7 +133,8 @@
       "icon": "string|null",
       "id": "string",
       "inputs": "MobileGateInputFieldWire[]; default [] when absent",
-      "label": "string"
+      "label": "string",
+      "requires_tty": "bool; true when selecting this option requires local controlling TTY"
     },
     "GateSubmitWire": {
       "defined_by": "sase_core::notifications::mobile",

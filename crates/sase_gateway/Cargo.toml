@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "sase_federation_worker"
 path = "src/federation_worker_main.rs"
 
+[[bin]]
+name = "sase_sudo_runner"
+path = "src/sudo_runner_main.rs"
+
 [dependencies]
 async-stream = { workspace = true }
 axum = { workspace = true }
