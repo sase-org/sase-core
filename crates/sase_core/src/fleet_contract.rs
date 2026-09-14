@@ -2883,9 +2883,10 @@ pub fn validate_resolved_agent_summary(
         }
     }
     if let Some(weight) = summary.queue_weight {
-        if !queue_weight_is_valid(weight) {
+        if !fleet_queue_weight_is_valid(weight, summary.queue_weight_explicit) {
             return Err(FleetContractError::Validation(
-                "summary queue_weight must be a positive finite capacity weight"
+                "summary queue_weight must be a positive finite capacity \
+                 weight, or an explicit zero"
                     .to_string(),
             ));
         }
@@ -4471,7 +4472,7 @@ fn queue_weight_for_record(
             );
         }
         if let Some(weight) = waiting.queue_weight {
-            if queue_weight_is_valid(weight) {
+            if fleet_queue_weight_is_valid(weight, waiting.queue_weight_explicit) {
                 return (
                     Some(weight),
                     waiting.queue_weight_explicit,
@@ -4492,13 +4493,26 @@ fn queue_weight_for_record(
             );
         }
         if let Some(weight) = meta.queue_weight {
-            if queue_weight_is_valid(weight) {
+            if fleet_queue_weight_is_valid(weight, meta.queue_weight_explicit) {
                 return (Some(weight), meta.queue_weight_explicit, false, None);
             }
             return (None, meta.queue_weight_explicit, true, None);
         }
     }
     (None, false, false, None)
+}
+
+/// Fleet summary weight validity, mirroring `runner_capacity`'s and the
+/// artifact scanner's `record_weight_is_valid`/`marker_queue_weight_is_valid`:
+/// an explicit `0.0` is a valid non-occupying weight (e.g. the epic-launch
+/// monitor); every other value, and every implicit weight, still follows the
+/// strictly-positive `%queue`/`%q` weight contract in `queue_weight_is_valid`.
+fn fleet_queue_weight_is_valid(weight: f64, explicit: bool) -> bool {
+    if explicit {
+        weight.is_finite() && weight >= 0.0
+    } else {
+        queue_weight_is_valid(weight)
+    }
 }
 
 fn queue_capacity_for_record(
@@ -8028,6 +8042,53 @@ mod tests {
         assert_eq!(summary.queue_weight, Some(0.5));
         assert!(summary.queue_weight_explicit);
         assert!(!summary.queue_weight_invalid);
+    }
+
+    #[test]
+    fn projection_accepts_explicit_zero_queue_weight_but_rejects_implicit_zero() {
+        let explicit_locator = logical('a', "epic-launch-monitor");
+        let explicit_exact = exact('a', "epic-launch-monitor", "run-1");
+        let mut explicit_record = record_running();
+        if let Some(meta) = explicit_record.agent_meta.as_mut() {
+            meta.queue_weight = Some(0.0);
+            meta.queue_weight_explicit = true;
+        }
+        let explicit_request = projection_request(
+            explicit_locator,
+            Some(explicit_exact),
+            1,
+            explicit_record,
+        );
+
+        let explicit_summary =
+            project_resolved_agent_summary(&explicit_request).unwrap();
+        assert_eq!(explicit_summary.queue_weight, Some(0.0));
+        assert!(explicit_summary.queue_weight_explicit);
+        assert!(!explicit_summary.queue_weight_invalid);
+        assert_eq!(
+            validate_resolved_agent_summary(&explicit_summary).unwrap(),
+            explicit_summary
+        );
+
+        let implicit_locator = logical('a', "no-directive");
+        let implicit_exact = exact('a', "no-directive", "run-2");
+        let mut implicit_record = record_running();
+        if let Some(meta) = implicit_record.agent_meta.as_mut() {
+            meta.queue_weight = Some(0.0);
+            meta.queue_weight_explicit = false;
+        }
+        let implicit_request = projection_request(
+            implicit_locator,
+            Some(implicit_exact),
+            1,
+            implicit_record,
+        );
+
+        let implicit_summary =
+            project_resolved_agent_summary(&implicit_request).unwrap();
+        assert_eq!(implicit_summary.queue_weight, None);
+        assert!(!implicit_summary.queue_weight_explicit);
+        assert!(implicit_summary.queue_weight_invalid);
     }
 
     #[test]

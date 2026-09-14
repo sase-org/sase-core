@@ -860,19 +860,34 @@ fn coerce_queue_weight(
     if !data.contains_key("queue_weight") {
         return (None, false, None);
     }
+    let explicit = coerce_bool_truthy(data.get("queue_weight_explicit"));
     let value = coerce_float(data.get("queue_weight"));
     match value {
-        Some(weight) if queue_weight_is_valid(weight) => {
+        Some(weight) if marker_queue_weight_is_valid(weight, explicit) => {
             (Some(weight), false, None)
         }
         _ => (
             None,
             true,
             Some(
-                "queue_weight must be a positive finite capacity weight"
+                "queue_weight must be a positive finite capacity weight, \
+                 or an explicit zero"
                     .to_string(),
             ),
         ),
+    }
+}
+
+/// Marker-scan weight validity, mirroring `runner_capacity`'s
+/// `record_weight_is_valid`: an explicit `0.0` is a valid non-occupying
+/// weight (e.g. the epic-launch monitor); every other value, and every
+/// implicit weight, still follows the strictly-positive `%queue`/`%q`
+/// weight contract in `queue_weight_is_valid`.
+fn marker_queue_weight_is_valid(weight: f64, explicit: bool) -> bool {
+    if explicit {
+        weight.is_finite() && weight >= 0.0
+    } else {
+        queue_weight_is_valid(weight)
     }
 }
 
@@ -1800,6 +1815,65 @@ mod tests {
         assert_eq!(invalid_waiting.queue_weight, None);
         assert!(invalid_waiting.queue_weight_invalid);
         assert!(invalid_waiting.queue_weight_error.is_some());
+    }
+
+    #[test]
+    fn scanner_accepts_explicit_zero_queue_weight_but_rejects_implicit_zero() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let explicit_zero = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913120101");
+        let implicit_zero = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260913120102");
+
+        write_json(
+            &explicit_zero.join("agent_meta.json"),
+            json!({
+                "name": "epic-launch-monitor",
+                "queue_weight": 0,
+                "queue_weight_explicit": true
+            }),
+        );
+        write_json(
+            &explicit_zero.join("waiting.json"),
+            json!({
+                "slot_requested_at": "2026-09-13T12:01:01Z",
+                "queue_weight": 0.0,
+                "queue_weight_explicit": true
+            }),
+        );
+        write_json(
+            &implicit_zero.join("agent_meta.json"),
+            json!({"name": "no-directive", "queue_weight": 0}),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 2);
+
+        let explicit_meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        assert_eq!(explicit_meta.queue_weight, Some(0.0));
+        assert!(explicit_meta.queue_weight_explicit);
+        assert!(!explicit_meta.queue_weight_invalid);
+        assert_eq!(explicit_meta.queue_weight_error, None);
+        let explicit_waiting = snapshot.records[0].waiting.as_ref().unwrap();
+        assert_eq!(explicit_waiting.queue_weight, Some(0.0));
+        assert!(explicit_waiting.queue_weight_explicit);
+        assert!(!explicit_waiting.queue_weight_invalid);
+
+        let implicit_meta = snapshot.records[1].agent_meta.as_ref().unwrap();
+        assert_eq!(implicit_meta.queue_weight, None);
+        assert!(!implicit_meta.queue_weight_explicit);
+        assert!(implicit_meta.queue_weight_invalid);
+        assert!(implicit_meta.queue_weight_error.is_some());
     }
 
     #[test]
