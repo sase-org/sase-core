@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.27](https://github.com/sase-org/sase-core/compare/v0.34.26...v0.34.27) - 2026-09-14
+
+### Added
+
+- *(sudo)* add reviewed sudo runner contracts
+- *(managed-tmp)* lower pressure age under low space
+- *(core)* plan git object sharing rewrites
+- Complete protected run retention and empty-shard cleanup (sase-zw.8.3)
+- *(procs)* add runtime retention owner
+- *(editor)* support argument colon on-type edits
+
 ## [0.34.26](https://github.com/sase-org/sase-core/compare/v0.34.25...v0.34.26) - 2026-09-14
 
 ### Added
