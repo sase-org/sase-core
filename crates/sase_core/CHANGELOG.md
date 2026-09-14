@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.26](https://github.com/sase-org/sase-core/compare/v0.34.25...v0.34.26) - 2026-09-14
+
+### Added
+
+- *(fleet)* publish queue capacity in summaries
+- *(gate_decision)* add durable decision-acceptance policy and binding
+
 ## [0.34.25](https://github.com/sase-org/sase-core/compare/v0.34.24...v0.34.25) - 2026-09-14
 
 ### Added
