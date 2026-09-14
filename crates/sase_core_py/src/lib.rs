@@ -1512,6 +1512,7 @@ use sase_core::{
     editor_filter_model_alias_shortcut_entries as core_filter_model_alias_shortcut_entries,
     editor_model_shortcut_context as core_model_shortcut_context,
     editor_model_shortcut_edit as core_model_shortcut_edit,
+    editor_plan_argument_colon_to_parentheses_edit as core_plan_argument_colon_to_parentheses_edit,
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
@@ -2371,6 +2372,20 @@ fn py_model_shortcut_edit(
     let position = editor_position_from_py(position)?;
     let entries = model_completion_entries_from_py_list(entries)?;
     core_model_shortcut_edit(text, position, &entries, selected_value)
+        .map(|edit| serialize_to_py(py, &edit))
+        .transpose()
+}
+
+#[pyfunction]
+#[pyo3(name = "argument_colon_to_parentheses_edit")]
+fn py_argument_colon_to_parentheses_edit(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    let document = sase_core::DocumentSnapshot::new(text);
+    core_plan_argument_colon_to_parentheses_edit(&document, position)
         .map(|edit| serialize_to_py(py, &edit))
         .transpose()
 }
@@ -17511,6 +17526,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_model_shortcut_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_shortcut_edit, m)?)?;
     m.add_function(wrap_pyfunction!(
+        py_argument_colon_to_parentheses_edit,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         py_filter_explicit_model_shortcut_entries,
         m
     )?)?;
@@ -21168,6 +21187,62 @@ COMMITS:
             assert!(
                 catalog_error.contains("missing field"),
                 "unexpected error: {catalog_error}"
+            );
+        });
+    }
+
+    #[test]
+    fn argument_colon_to_parentheses_binding_returns_plain_edit_or_none() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_argument_colon_to_parentheses_edit,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let position =
+                json_value_to_py(py, &json!({"line": 0, "character": 3}))
+                    .unwrap();
+            let edit = module
+                .getattr("argument_colon_to_parentheses_edit")
+                .unwrap()
+                .call1(("%q:", position.clone_ref(py)))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&edit).unwrap(),
+                json!({
+                    "range": {
+                        "start": {"line": 0, "character": 2},
+                        "end": {"line": 0, "character": 3}
+                    },
+                    "new_text": ""
+                })
+            );
+
+            let ordinary = module
+                .getattr("argument_colon_to_parentheses_edit")
+                .unwrap()
+                .call1(("Note:", position.clone_ref(py)))
+                .unwrap();
+            assert!(ordinary.is_none());
+
+            let malformed_position =
+                json_value_to_py(py, &json!({"line": "0", "character": 3}))
+                    .unwrap();
+            let error = module
+                .getattr("argument_colon_to_parentheses_edit")
+                .unwrap()
+                .call1(("%q:", malformed_position))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("position is not a valid EditorPosition"),
+                "unexpected error: {error}"
             );
         });
     }

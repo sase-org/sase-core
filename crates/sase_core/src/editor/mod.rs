@@ -1,8 +1,10 @@
+pub mod argument_syntax_edit;
 pub mod at_reference;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
 pub mod directive;
+mod exclusion;
 pub mod file;
 mod frontmatter;
 pub mod fuzzy;
@@ -13,6 +15,7 @@ pub mod token;
 pub mod wire;
 mod xprompt_args;
 
+pub use argument_syntax_edit::plan_argument_colon_to_parentheses_edit;
 pub use at_reference::{
     build_at_reference_menu, build_at_reference_menu_with_options,
     build_at_reference_menu_with_payload_index, detect_at_reference_context,

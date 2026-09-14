@@ -14,6 +14,7 @@ use lsp_types::{
     CompletionParams, CompletionResponse, CompletionTriggerKind,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentChanges,
+    DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
     ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     InitializeParams, InitializeResult, InitializedParams, LSPAny, Location,
@@ -50,7 +51,8 @@ use sase_core::{
     editor_filter_explicit_model_shortcut_entries,
     editor_filter_model_alias_shortcut_entries,
     editor_hover_at_position_with_flags, editor_model_shortcut_context,
-    editor_model_shortcut_edit, editor_plan_model_alias_shortcut_edit,
+    editor_model_shortcut_edit, editor_plan_argument_colon_to_parentheses_edit,
+    editor_plan_model_alias_shortcut_edit,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
     AtReferenceContextWire, AtReferenceInventoryWire, AtReferenceKindRowWire,
@@ -1138,6 +1140,47 @@ impl XpromptLspServer {
         .map(GotoDefinitionResponse::Scalar)
     }
 
+    pub fn on_type_formatting_for_text(
+        &self,
+        text: String,
+        position: Position,
+        ch: &str,
+    ) -> Option<Vec<TextEdit>> {
+        if ch != "(" {
+            return None;
+        }
+        let document = DocumentSnapshot::new(text);
+        let cursor =
+            document.position_to_byte_offset(to_editor_position(position))?;
+        let text = document.text();
+        let (opener_idx, after_opener_idx) =
+            if text.as_bytes().get(cursor) == Some(&b'(') {
+                (cursor, cursor + 1)
+            } else {
+                let opener_idx = cursor.checked_sub(1)?;
+                if text.as_bytes().get(opener_idx) != Some(&b'(') {
+                    return None;
+                }
+                (opener_idx, cursor)
+            };
+
+        let mut pre_insert_text =
+            String::with_capacity(text.len().saturating_sub(1));
+        pre_insert_text.push_str(text.get(..opener_idx)?);
+        pre_insert_text.push_str(text.get(after_opener_idx..)?);
+        let pre_insert_document = DocumentSnapshot::new(pre_insert_text);
+        let pre_insert_position =
+            pre_insert_document.byte_offset_to_position(opener_idx)?;
+        let edit = editor_plan_argument_colon_to_parentheses_edit(
+            &pre_insert_document,
+            pre_insert_position,
+        )?;
+        Some(vec![TextEdit {
+            range: to_lsp_range(edit.range),
+            new_text: edit.new_text,
+        }])
+    }
+
     fn current_config(&self) -> ServerConfig {
         self.config
             .read()
@@ -1606,6 +1649,12 @@ impl LanguageServer for XpromptLspServer {
                         },
                     ),
                 ),
+                document_on_type_formatting_provider: Some(
+                    DocumentOnTypeFormattingOptions {
+                        first_trigger_character: "(".to_string(),
+                        more_trigger_character: None,
+                    },
+                ),
                 ..Default::default()
             },
         })
@@ -1698,6 +1747,24 @@ impl LanguageServer for XpromptLspServer {
         params: CompletionItem,
     ) -> Result<CompletionItem> {
         Ok(params)
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let Some(document) = self.document_for_uri(&uri) else {
+            return Ok(None);
+        };
+        if !document.eligible {
+            return Ok(None);
+        }
+        Ok(self.on_type_formatting_for_text(
+            document.text,
+            params.text_document_position.position,
+            &params.ch,
+        ))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

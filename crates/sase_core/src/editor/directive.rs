@@ -787,6 +787,54 @@ pub fn directive_allows_keywords(
             || metadata.dynamic_keyword_role.is_some())
 }
 
+pub(crate) fn directive_argument_open_colon_at(
+    text: &str,
+    colon_idx: usize,
+) -> bool {
+    if text.as_bytes().get(colon_idx) != Some(&b':') {
+        return false;
+    }
+    let Some(line_start) = text[..colon_idx]
+        .rfind('\n')
+        .map_or(Some(0), |idx| idx.checked_add(1))
+    else {
+        return false;
+    };
+    let before_colon = &text[line_start..colon_idx];
+    let Some(percent_rel) = before_colon.rfind('%') else {
+        return false;
+    };
+    let percent_idx = line_start + percent_rel;
+    if !directive_left_boundary(text, percent_idx) {
+        return false;
+    }
+    let name = &text[percent_idx + 1..colon_idx];
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+    {
+        return false;
+    }
+    let Some(metadata) = directive_metadata(name) else {
+        return false;
+    };
+    metadata.syntax_forms.contains(&DirectiveSyntaxForm::Colon)
+        && metadata
+            .syntax_forms
+            .contains(&DirectiveSyntaxForm::Parenthesized)
+}
+
+fn directive_left_boundary(text: &str, percent_idx: usize) -> bool {
+    if percent_idx == 0 {
+        return true;
+    }
+    let Some(previous) = text[..percent_idx].chars().next_back() else {
+        return true;
+    };
+    previous.is_whitespace() || "([{\"'".contains(previous)
+}
+
 pub fn build_directive_completion_candidates(token: &str) -> CompletionList {
     build_directive_completion_candidates_with_flags(token, &[])
 }

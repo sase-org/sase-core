@@ -85,6 +85,25 @@ pub(crate) fn parse_xprompt_calls(text: &str) -> Vec<ParsedXpromptCall> {
     calls
 }
 
+pub(crate) fn xprompt_argument_open_colon_at(
+    text: &str,
+    colon_idx: usize,
+) -> bool {
+    if text.as_bytes().get(colon_idx) != Some(&b':') {
+        return false;
+    }
+    xprompt_ref_re().captures_iter(text).any(|caps| {
+        let Some(name_match) = caps.name("name") else {
+            return false;
+        };
+        let suffix_start = caps
+            .name("hitl")
+            .map(|hitl| hitl.end())
+            .unwrap_or_else(|| name_match.end());
+        suffix_start == colon_idx
+    })
+}
+
 fn parse_call_suffix(
     text: &str,
     name: String,
