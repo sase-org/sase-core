@@ -5870,16 +5870,16 @@ exit 4
         assert_eq!(hello["credential"]["controller_id"], "controller-a");
         assert_eq!(
             hello["cursor"]["schema_version"],
-            GATEWAY_WIRE_SCHEMA_VERSION
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION
         );
         assert_eq!(
             hello["counts"]["schema_version"],
-            GATEWAY_WIRE_SCHEMA_VERSION
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION
         );
         assert!(hello["counts"]["logical_agent_total"].is_u64());
         assert_eq!(
             hello["freshness"]["schema_version"],
-            GATEWAY_WIRE_SCHEMA_VERSION
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION
         );
     }
 
@@ -6299,7 +6299,7 @@ exit 4
         name: &str,
         live: bool,
         proc: bool,
-    ) {
+    ) -> std::path::PathBuf {
         use sase_core::agent_scan::AgentArtifactScanOptionsWire;
         let projects = home.join("projects");
         let project = projects.join("sase");
@@ -6315,7 +6315,7 @@ exit 4
         let artifact = project
             .join("artifacts")
             .join("ace-run")
-            .join("20260906120000");
+            .join(chrono::Utc::now().format("%Y%m%d%H%M%S").to_string());
         std::fs::create_dir_all(&artifact).unwrap();
         let mut meta = serde_json::json!({
             "name": name,
@@ -6356,6 +6356,7 @@ exit 4
             AgentArtifactScanOptionsWire::default(),
         )
         .unwrap();
+        artifact
     }
 
     async fn enroll_mutate(
@@ -6622,15 +6623,8 @@ exit 4
     #[tokio::test]
     async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
         let tmp = tempfile::tempdir().unwrap();
-        seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
-        let running_path = tmp
-            .path()
-            .join("projects")
-            .join("sase")
-            .join("artifacts")
-            .join("ace-run")
-            .join("20260906120000")
-            .join("running.json");
+        let artifact = seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+        let running_path = artifact.join("running.json");
         let running_before = std::fs::read(&running_path).unwrap();
         let state = state_for_agent_bridge(&tmp);
         let (token, installation_id) =

@@ -424,7 +424,14 @@ mod tests {
         let live = "/tmp/proj/artifacts/ace-run/live";
         let mut runs: Vec<ContinuationRetentionRunWire> = (0..10_001)
             .map(|index| {
-                run(&format!("/tmp/filler/{index}"), None, &[], None, false, false)
+                run(
+                    &format!("/tmp/filler/{index}"),
+                    None,
+                    &[],
+                    None,
+                    false,
+                    false,
+                )
             })
             .collect();
         runs.push(run(old, Some("agent-delta:old"), &[], None, false, false));
@@ -445,17 +452,26 @@ mod tests {
 
     #[test]
     fn exceeding_retention_cap_fails_with_cap_message() {
-        let runs: Vec<ContinuationRetentionRunWire> = (0..MAX_RETENTION_RUNS + 1)
+        let runs: Vec<ContinuationRetentionRunWire> = (0..MAX_RETENTION_RUNS
+            + 1)
             .map(|index| {
-                run(&format!("/tmp/filler/{index}"), None, &[], None, false, false)
+                run(
+                    &format!("/tmp/filler/{index}"),
+                    None,
+                    &[],
+                    None,
+                    false,
+                    false,
+                )
             })
             .collect();
 
-        let err = plan_continuation_retention(ContinuationRetentionRequestWire {
-            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
-            runs,
-        })
-        .unwrap_err();
+        let err =
+            plan_continuation_retention(ContinuationRetentionRequestWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                runs,
+            })
+            .unwrap_err();
 
         assert!(err
             .message

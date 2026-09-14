@@ -16305,7 +16305,10 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(py_fleet_contract_schema_version(), 1);
+        assert_eq!(
+            py_fleet_contract_schema_version(),
+            core_fleet_contract::FLEET_CONTRACT_SCHEMA_VERSION
+        );
         let missing = py_fleet_installation_identity_load(
             py,
             home.path().to_str().unwrap(),
@@ -16424,6 +16427,14 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
                 "connection_health": "online",
                 "freshness": "fresh",
                 "observed_at_unix": 10.0,
+                "started_at_unix": 8.5,
+                "stopped_at_unix": null,
+                "workspace_num": 17,
+                "project_label": "sase",
+                "agent_clan": "fleet",
+                "agent_clan_generation": "20260913",
+                "clan_tribe": "parity",
+                "tribe": "review",
                 "row_kind": "agent_shell",
                 "current_instance": true,
                 "dismissable": false,
@@ -16444,7 +16455,18 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
         let summary =
             py_fleet_project_resolved_agent_summary(py, request).unwrap();
         let summary_value = py_to_json_value(summary.bind(py)).unwrap();
+        assert_eq!(
+            summary_value["schema_version"],
+            json!(core_fleet_contract::FLEET_CONTRACT_SCHEMA_VERSION)
+        );
         assert_eq!(summary_value["lifecycle"], json!("running"));
+        assert_eq!(summary_value["labels"]["project_label"], json!("sase"));
+        assert_eq!(summary_value["started_at_unix"], json!(8.5));
+        assert_eq!(summary_value["workspace_num"], json!(17));
+        assert_eq!(summary_value["agent_clan"], json!("fleet"));
+        assert_eq!(summary_value["agent_clan_generation"], json!("20260913"));
+        assert_eq!(summary_value["clan_tribe"], json!("parity"));
+        assert_eq!(summary_value["tribe"], json!("review"));
         assert_eq!(summary_value["content"]["handle_count"], json!(1));
         let summary_dict = summary.bind(py).downcast::<PyDict>().unwrap();
         let validated =
@@ -20157,7 +20179,10 @@ COMMITS:
                 .call1((request.bind(py).downcast::<PyDict>().unwrap(),))
                 .unwrap();
             let result = py_to_json_value(&result).unwrap();
-            assert_eq!(result["schema_version"], json!(1));
+            assert_eq!(
+                result["schema_version"],
+                json!(core_fleet_contract::FLEET_CONTRACT_SCHEMA_VERSION)
+            );
             assert_eq!(result["promotions"][0]["from"], singleton);
             assert_eq!(result["promotions"][0]["to"], family);
 

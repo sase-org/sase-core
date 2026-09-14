@@ -787,6 +787,7 @@ fn build_snapshot_blocking(
 
     let build_instant = Instant::now();
     let now_unix = current_unix_time();
+    let project_labels = project_display_labels(&request.projects_root)?;
 
     // Resolve owner liveness and obtain dismissal-lineage facts through the
     // bounded core index API once per candidate, so both are computed a
@@ -900,6 +901,7 @@ fn build_snapshot_blocking(
             &record,
             liveness,
             now_unix,
+            &project_labels,
         ) {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -993,6 +995,7 @@ fn resolve_record(
     record: &AgentArtifactRecordWire,
     liveness: OwnerLivenessWire,
     build_unix: f64,
+    project_labels: &BTreeMap<String, String>,
 ) -> Result<ResolvedRecord, FleetReadError> {
     let logical_locator = logical_locator_for_record(installation_id, record);
     let logical_key =
@@ -1038,6 +1041,7 @@ fn resolve_record(
         &content_handles,
         record.pending_question.is_some(),
     );
+    let meta = record.agent_meta.as_ref();
     let detail =
         project_resolved_agent_detail(&ResolvedAgentProjectionRequestWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -1058,6 +1062,18 @@ fn resolve_record(
                 },
                 freshness: ObservationFreshnessWire::Fresh,
                 observed_at_unix: build_unix,
+                started_at_unix: started_at_unix_for_record(record),
+                stopped_at_unix: stopped_at_unix_for_record(record),
+                workspace_num: workspace_num_for_record(record),
+                project_label: project_labels
+                    .get(&record.project_name)
+                    .cloned()
+                    .or_else(|| Some(record.project_name.clone())),
+                agent_clan: meta.and_then(|value| value.agent_clan.clone()),
+                agent_clan_generation: meta
+                    .and_then(|value| value.agent_clan_generation.clone()),
+                clan_tribe: meta.and_then(|value| value.clan_tribe.clone()),
+                tribe: meta.and_then(|value| value.tribe.clone()),
                 row_kind,
                 current_instance: !presentation_terminal
                     && row_kind == FleetRowKindWire::AgentShell,
@@ -1527,6 +1543,75 @@ fn current_unix_time() -> f64 {
     let now = Utc::now();
     now.timestamp() as f64
         + f64::from(now.timestamp_subsec_micros()) / 1_000_000.0
+}
+
+fn project_display_labels(
+    projects_root: &Path,
+) -> Result<BTreeMap<String, String>, FleetReadError> {
+    let records = list_project_records(projects_root, &[], false, true)
+        .map_err(|_| {
+            FleetReadError::Backend("project_lifecycle".to_string())
+        })?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let project_name = record.project_name;
+            let display_name =
+                record.display_name.unwrap_or_else(|| project_name.clone());
+            (project_name, display_name)
+        })
+        .collect())
+}
+
+fn started_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
+    record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| {
+            meta.run_started_at
+                .as_deref()
+                .or(meta.wait_completed_at.as_deref())
+                .and_then(parse_rfc3339_unix)
+        })
+        .or_else(|| {
+            record
+                .workflow_state
+                .as_ref()
+                .and_then(|state| state.start_time.as_deref())
+                .and_then(parse_rfc3339_unix)
+        })
+        .or_else(|| parse_record_timestamp(&record.timestamp))
+}
+
+fn stopped_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
+    record
+        .done
+        .as_ref()
+        .and_then(|done| done.finished_at)
+        .or_else(|| {
+            record
+                .agent_meta
+                .as_ref()
+                .and_then(|meta| meta.stopped_at.as_deref())
+                .and_then(parse_rfc3339_unix)
+        })
+}
+
+fn workspace_num_for_record(record: &AgentArtifactRecordWire) -> Option<u32> {
+    record
+        .agent_meta
+        .as_ref()
+        .and_then(|meta| meta.workspace_num)
+        .or_else(|| record.done.as_ref().and_then(|done| done.workspace_num))
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn parse_rfc3339_unix(value: &str) -> Option<f64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    Some(
+        parsed.timestamp() as f64
+            + f64::from(parsed.timestamp_subsec_micros()) / 1_000_000.0,
+    )
 }
 
 fn observation_freshness_for_age(
