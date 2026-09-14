@@ -5,6 +5,7 @@ use crate::serde_option::deserialize_present_option;
 pub const PROC_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS: [u32; 3] =
     [1, 2, PROC_WIRE_SCHEMA_VERSION];
+pub const PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION: u32 = 1;
 
 /// One durable background proc record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -452,6 +453,47 @@ pub struct ProcPruneOutcomeWire {
     pub pruned_proc_ids: Vec<String>,
     #[serde(default)]
     pub pruned_log_proc_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcRuntimeRetentionRequestWire {
+    pub schema_version: u32,
+    pub store_path: String,
+    pub runtime_root: String,
+    pub now_epoch_seconds: f64,
+    pub orphan_horizon_seconds: f64,
+    pub max_orphan_removals: u32,
+    #[serde(default)]
+    pub apply: bool,
+    #[serde(default)]
+    pub pruned_proc_ids: Vec<String>,
+    #[serde(default)]
+    pub sweep_orphans: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcRuntimeRetentionEntryWire {
+    pub proc_id: String,
+    pub path: String,
+    pub status: String,
+    pub reason: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProcRuntimeRetentionResultWire {
+    pub schema_version: u32,
+    pub runtime_root: String,
+    pub apply: bool,
+    pub scanned: u64,
+    pub selected: u64,
+    pub removed: u64,
+    pub skipped: u64,
+    pub errors: u64,
+    pub reclaimable_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub capped: bool,
+    pub entries: Vec<ProcRuntimeRetentionEntryWire>,
 }
 
 fn legacy_proc_row_schema_version() -> u32 {

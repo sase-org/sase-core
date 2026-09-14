@@ -433,7 +433,7 @@ where
     result
 }
 
-fn read_rows_unlocked(
+pub(super) fn read_rows_unlocked(
     path: &Path,
 ) -> Result<(Vec<ProcWire>, ProcStoreStatsWire), String> {
     let file = match File::open(path) {
@@ -1078,7 +1078,7 @@ fn validate_status(status: &str) -> Result<(), String> {
     }
 }
 
-fn is_active_status(status: &str) -> bool {
+pub(super) fn is_active_status(status: &str) -> bool {
     matches!(status, "pending" | "running" | "settling")
 }
 
@@ -1213,7 +1213,10 @@ fn invalid_proc(proc: &ProcWire, reason: String) -> ProcStoreError {
     }
 }
 
-fn write_procs_atomic(path: &Path, procs: &[ProcWire]) -> Result<(), String> {
+pub(super) fn write_procs_atomic(
+    path: &Path,
+    procs: &[ProcWire],
+) -> Result<(), String> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let tmp_path = temp_path_for(path);
@@ -1247,7 +1250,7 @@ fn write_procs_atomic(path: &Path, procs: &[ProcWire]) -> Result<(), String> {
     write_result
 }
 
-fn proc_store_lock_timeout() -> Duration {
+pub(super) fn proc_store_lock_timeout() -> Duration {
     if std::env::var_os(LOCK_TIMEOUT_ENV).is_some() {
         timeout_from_env(LOCK_TIMEOUT_ENV, LOCK_TIMEOUT_DEFAULT)
     } else {
@@ -1255,7 +1258,7 @@ fn proc_store_lock_timeout() -> Duration {
     }
 }
 
-fn lock_with_timeout(
+pub(super) fn lock_with_timeout(
     path: &Path,
     mode: LockMode,
     timeout: Duration,
@@ -1316,7 +1319,7 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
 }
 
 #[allow(clippy::incompatible_msrv)]
-fn unlock(lock: HeldStoreLock) -> Result<(), String> {
+pub(super) fn unlock(lock: HeldStoreLock) -> Result<(), String> {
     lock.release().map_err(|error| error.to_string())
 }
 

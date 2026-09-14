@@ -115,6 +115,8 @@
 //! - `append_proc(path: str, proc: dict, history_limit: int) -> dict`
 //! - `update_proc(path: str, update: dict) -> dict`
 //! - `prune_procs(path: str, history_limit: int) -> dict`
+//! - `proc_runtime_retention_wire_schema_version() -> int`
+//! - `apply_proc_runtime_retention(request: dict) -> dict`
 //! - `read_tasks_snapshot(path: str) -> dict` (legacy alias)
 //! - `append_task(path: str, task: dict, history_limit: int) -> dict` (legacy alias)
 //! - `update_task(path: str, update: dict) -> dict` (legacy alias)
@@ -1306,14 +1308,17 @@ use sase_core::plan::{
 };
 use sase_core::procs::{
     append_proc as core_append_proc,
+    apply_proc_runtime_retention as core_apply_proc_runtime_retention,
     begin_proc_settlement as core_begin_proc_settlement,
     claim_proc_supervisor as core_claim_proc_supervisor,
     finish_proc as core_finish_proc, prune_procs as core_prune_procs,
     read_procs_snapshot as core_read_procs_snapshot,
     request_proc_stop as core_request_proc_stop,
     reserve_proc as core_reserve_proc, update_proc as core_update_proc,
-    ProcFinishWire, ProcReserveWire, ProcSettlementWire, ProcStopRequestWire,
-    ProcStoreError, ProcSupervisorClaimWire, ProcUpdateWire, ProcWire,
+    ProcFinishWire, ProcReserveWire, ProcRuntimeRetentionRequestWire,
+    ProcSettlementWire, ProcStopRequestWire, ProcStoreError,
+    ProcSupervisorClaimWire, ProcUpdateWire, ProcWire,
+    PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,
@@ -10483,6 +10488,31 @@ fn py_prune_procs(
 }
 
 #[pyfunction]
+#[pyo3(name = "proc_runtime_retention_wire_schema_version")]
+fn py_proc_runtime_retention_wire_schema_version() -> u32 {
+    PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "apply_proc_runtime_retention")]
+fn py_apply_proc_runtime_retention<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ProcRuntimeRetentionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ProcRuntimeRetentionRequestWire dict: {error}"
+        ))
+    })?;
+    let outcome =
+        py.allow_threads(|| core_apply_proc_runtime_retention(&request));
+    proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
+}
+
+#[pyfunction]
 #[pyo3(name = "read_tasks_snapshot")]
 fn py_read_tasks_snapshot(py: Python<'_>, path: &str) -> PyResult<PyObject> {
     py_read_procs_snapshot(py, path)
@@ -18207,6 +18237,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_begin_proc_settlement, m)?)?;
     m.add_function(wrap_pyfunction!(py_finish_proc, m)?)?;
     m.add_function(wrap_pyfunction!(py_prune_procs, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_proc_runtime_retention_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_apply_proc_runtime_retention, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
@@ -19722,6 +19757,8 @@ COMMITS:
                 "begin_proc_settlement",
                 "finish_proc",
                 "prune_procs",
+                "proc_runtime_retention_wire_schema_version",
+                "apply_proc_runtime_retention",
                 "read_tasks_snapshot",
                 "append_task",
                 "update_task",

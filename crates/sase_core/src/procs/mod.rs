@@ -1,6 +1,8 @@
+pub mod runtime;
 pub mod store;
 pub mod wire;
 
+pub use runtime::apply_proc_runtime_retention;
 pub use store::{
     append_proc, begin_proc_settlement, claim_proc_supervisor, finish_proc,
     prune_procs, read_procs_snapshot, request_proc_stop, reserve_proc,
@@ -8,9 +10,11 @@ pub use store::{
 };
 pub use wire::{
     ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,
-    ProcReserveOutcomeWire, ProcReserveWire, ProcSettlementWire,
-    ProcStopRequestWire, ProcStoreSnapshotWire, ProcStoreStatsWire,
-    ProcSupervisorClaimWire, ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire,
-    XpromptProcMetaWire, PROC_WIRE_SCHEMA_VERSION,
+    ProcReserveOutcomeWire, ProcReserveWire, ProcRuntimeRetentionEntryWire,
+    ProcRuntimeRetentionRequestWire, ProcRuntimeRetentionResultWire,
+    ProcSettlementWire, ProcStopRequestWire, ProcStoreSnapshotWire,
+    ProcStoreStatsWire, ProcSupervisorClaimWire, ProcUpdateOutcomeWire,
+    ProcUpdateWire, ProcWire, XpromptProcMetaWire,
+    PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION, PROC_WIRE_SCHEMA_VERSION,
     SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };
