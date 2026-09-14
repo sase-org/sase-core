@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.25](https://github.com/sase-org/sase-core/compare/v0.34.24...v0.34.25) - 2026-09-14
+
+### Added
+
+- *(fleet)* publish remote renderer parity fields
+- *(agent_scan)* add core index module and Python bindings for gate-shell lookup
+- *(continuation)* plan ancestry retention and resume-adoption decisions
+- *(artifact-ref)* add the one link-location grammar
+- *(agent-scan)* preserve canonical queue capacity through scan and editor
+- Finish safe disk-pressure reaping in the Rust core (sase-zn.9.2)
+
 ### Added
 
 - Expose `artifact_ref_split_link_location` and

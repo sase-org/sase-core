@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.25](https://github.com/sase-org/sase-core/compare/v0.34.24...v0.34.25) - 2026-09-14
+
+### Added
+
+- *(fleet)* publish remote renderer parity fields
+- *(runner_capacity)* accept explicit zero-weight capacity records
+- *(agent_scan)* add core index module and Python bindings for gate-shell lookup
+- *(continuation)* plan ancestry retention and resume-adoption decisions
+- *(artifact-ref)* add the one link-location grammar
+- *(agent-scan)* preserve canonical queue capacity through scan and editor
+- Finish safe disk-pressure reaping in the Rust core (sase-zn.9.2)
+
+### Fixed
+
+- *(provider_usage)* make indicator projection order deterministic
+- *(continuation)* decouple retention run cap from MAX_NODES via new MAX_RETENTION_RUNS constant
+- *(managed-tmp)* make statvfs math and ErrorKind import portable to macOS
+- *(editor)* honor queue flag in directive completion
+- *(agent-scan)* project every live machine value into candidate filters
+- *(agent-scan)* discover source dirs before claiming complete history
+
 ### Fixed
 
 - *(agent-scan)* project every live index-resident machine value into candidate
