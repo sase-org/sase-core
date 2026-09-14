@@ -11,6 +11,7 @@
 //! UniFFI/WASM/server work can reuse the same logic.
 
 pub mod agent_archive;
+pub mod agent_artifact_run_retention;
 pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_family;

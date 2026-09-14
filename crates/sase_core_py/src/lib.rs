@@ -117,6 +117,8 @@
 //! - `prune_procs(path: str, history_limit: int) -> dict`
 //! - `proc_runtime_retention_wire_schema_version() -> int`
 //! - `apply_proc_runtime_retention(request: dict) -> dict`
+//! - `agent_artifact_run_retention_wire_schema_version() -> int`
+//! - `apply_agent_artifact_run_retention(request: dict) -> dict`
 //! - `read_tasks_snapshot(path: str) -> dict` (legacy alias)
 //! - `append_task(path: str, task: dict, history_limit: int) -> dict` (legacy alias)
 //! - `update_task(path: str, update: dict) -> dict` (legacy alias)
@@ -607,6 +609,11 @@ use sase_core::agent_archive::{
     AgentArchiveCapabilityValidationRequestWire, AgentArchiveFacetRequestWire,
     AgentArchiveKeyWire, AgentArchiveQueryRequestWire,
     AgentArchiveReviveMarkRequestWire, AgentArchiveVisibilityWire,
+};
+use sase_core::agent_artifact_run_retention::{
+    apply_agent_artifact_run_retention as core_apply_agent_artifact_run_retention,
+    AgentArtifactRunRetentionError, AgentArtifactRunRetentionRequestWire,
+    AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::agent_clan_tribe::{
     resolve_clan_summary as core_resolve_clan_summary,
@@ -10512,6 +10519,43 @@ fn py_apply_proc_runtime_retention<'py>(
     proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
 }
 
+fn agent_artifact_run_retention_error_to_pyerr(
+    error: AgentArtifactRunRetentionError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Return the agent-artifact run-retention wire's schema version.
+#[pyfunction]
+#[pyo3(name = "agent_artifact_run_retention_wire_schema_version")]
+fn py_agent_artifact_run_retention_wire_schema_version() -> u32 {
+    AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION
+}
+
+/// Preview or apply ACE-run artifact-directory retention and the bottom-up
+/// empty-shard walk in one owner call.
+#[pyfunction]
+#[pyo3(name = "apply_agent_artifact_run_retention")]
+fn py_apply_agent_artifact_run_retention<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AgentArtifactRunRetentionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentArtifactRunRetentionRequestWire dict: {error}"
+        ))
+    })?;
+    let outcome =
+        py.allow_threads(|| core_apply_agent_artifact_run_retention(&request));
+    proc_store_result_to_py(
+        py,
+        &outcome.map_err(agent_artifact_run_retention_error_to_pyerr)?,
+    )
+}
+
 #[pyfunction]
 #[pyo3(name = "read_tasks_snapshot")]
 fn py_read_tasks_snapshot(py: Python<'_>, path: &str) -> PyResult<PyObject> {
@@ -18242,6 +18286,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_apply_proc_runtime_retention, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_agent_artifact_run_retention_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_apply_agent_artifact_run_retention, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
@@ -19759,6 +19808,8 @@ COMMITS:
                 "prune_procs",
                 "proc_runtime_retention_wire_schema_version",
                 "apply_proc_runtime_retention",
+                "agent_artifact_run_retention_wire_schema_version",
+                "apply_agent_artifact_run_retention",
                 "read_tasks_snapshot",
                 "append_task",
                 "update_task",
