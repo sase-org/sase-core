@@ -780,6 +780,8 @@ mod tests {
                 supports_range: false,
                 supports_growth: false,
             },
+            queue_capacity: None,
+            queue_capacity_explicit: false,
             queue_weight: None,
             queue_weight_explicit: false,
             queue_weight_invalid: false,

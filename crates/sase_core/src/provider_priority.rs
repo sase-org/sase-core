@@ -25,7 +25,7 @@ pub const PROVIDER_PRIORITY_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_ROUTING_CONTEXT_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_AVAILABILITY_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_PRIORITY_STATE_FILENAME: &str = "llm_provider_priority.json";
-const LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 /// Stable priority record returned to frontends and stored on disk.

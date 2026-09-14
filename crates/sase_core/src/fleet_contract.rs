@@ -29,14 +29,16 @@ use thiserror::Error;
 use crate::agent_scan::{
     AgentArtifactRecordWire, AgentMetaWire, DoneMarkerWire, RunningMarkerWire,
 };
-use crate::queue_directive::queue_weight_is_valid;
+use crate::queue_directive::{
+    queue_capacity_as_u32, queue_weight_is_valid, resolve_queue_capacity,
+};
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, HeldStoreLock,
     LockMode, StoreLockError,
 };
 
 /// Schema version shared by the fleet contract surface.
-pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 2;
+pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 3;
 const FLEET_CONTRACT_MIN_READABLE_SCHEMA_VERSION: u32 = 1;
 /// Current fleet protocol version advertised by gateways and required by
 /// viewers. Discovery compatibility is derived from this constant.
@@ -555,6 +557,10 @@ pub struct ResolvedAgentSummaryWire {
     pub freshness: ObservationFreshnessWire,
     pub capabilities: CapabilitySetWire,
     pub content: ContentMetadataWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity: Option<u32>,
+    #[serde(default)]
+    pub queue_capacity_explicit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_weight: Option<f64>,
     #[serde(default)]
@@ -1910,6 +1916,8 @@ pub fn project_resolved_agent_summary(
         queue_weight_invalid,
         queue_weight_error,
     ) = queue_weight_for_record(&request.record);
+    let (queue_capacity, queue_capacity_explicit) =
+        queue_capacity_for_record(&request.record);
     let family = meta
         .and_then(|value| value.family_shell.as_ref())
         .or_else(|| done.and_then(|value| value.family_shell.as_ref()));
@@ -1981,6 +1989,8 @@ pub fn project_resolved_agent_summary(
         freshness: facts.freshness,
         capabilities: facts.capabilities.clone(),
         content: content_metadata(&facts.content_handles)?,
+        queue_capacity,
+        queue_capacity_explicit,
         queue_weight,
         queue_weight_explicit,
         queue_weight_invalid,
@@ -2895,6 +2905,12 @@ pub fn validate_resolved_agent_summary(
     if let Some(error) = &summary.queue_weight_error {
         validate_label("queue_weight_error", error, MAX_INTENT_BYTES)?;
         reject_secretish("queue_weight_error", error)?;
+    }
+    if summary.queue_capacity.is_none() && summary.queue_capacity_explicit {
+        return Err(FleetContractError::Validation(
+            "summary queue_capacity_explicit requires queue_capacity"
+                .to_string(),
+        ));
     }
     let normalized = summary.capabilities.normalized()?;
     if normalized != summary.capabilities {
@@ -4483,6 +4499,36 @@ fn queue_weight_for_record(
         }
     }
     (None, false, false, None)
+}
+
+fn queue_capacity_for_record(
+    record: &AgentArtifactRecordWire,
+) -> (Option<u32>, bool) {
+    if let Some(waiting) = &record.waiting {
+        if waiting.queue_capacity.is_some() || waiting.wait_runners.is_some() {
+            let (capacity, explicit) = resolve_queue_capacity(
+                waiting.queue_capacity,
+                waiting.wait_runners,
+                waiting.queue_capacity_explicit,
+                waiting.wait_runners_explicit,
+            );
+            let capacity = queue_capacity_as_u32(capacity);
+            return (capacity, explicit && capacity.is_some());
+        }
+    }
+    if let Some(meta) = &record.agent_meta {
+        if meta.queue_capacity.is_some() || meta.wait_runners.is_some() {
+            let (capacity, explicit) = resolve_queue_capacity(
+                meta.queue_capacity,
+                meta.wait_runners,
+                meta.queue_capacity_explicit,
+                meta.wait_runners_explicit,
+            );
+            let capacity = queue_capacity_as_u32(capacity);
+            return (capacity, explicit && capacity.is_some());
+        }
+    }
+    (None, false)
 }
 
 fn intent_for_record(record: &AgentArtifactRecordWire) -> Option<String> {
@@ -7855,6 +7901,109 @@ mod tests {
         let mut invalid = summary;
         invalid.stopped_at_unix = Some(99.0);
         assert!(validate_resolved_agent_summary(&invalid).is_err());
+    }
+
+    #[test]
+    fn projection_carries_canonical_queue_capacity_from_metadata() {
+        let locator = logical('a', "capacity");
+        let exact_locator = exact('a', "capacity", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.queue_capacity = Some(100);
+            meta.wait_runners = Some(0);
+            meta.queue_capacity_explicit = true;
+            meta.wait_runners_explicit = true;
+        }
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.queue_capacity, Some(100));
+        assert!(summary.queue_capacity_explicit);
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["queue_capacity"], json!(100));
+        assert_eq!(value["queue_capacity_explicit"], json!(true));
+        assert!(value.get("wait_runners").is_none());
+        let decoded: ResolvedAgentSummaryWire =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(validate_resolved_agent_summary(&decoded).unwrap(), summary);
+    }
+
+    #[test]
+    fn projection_reads_legacy_queue_capacity_without_emitting_legacy_alias() {
+        let locator = logical('a', "legacy-capacity");
+        let exact_locator = exact('a', "legacy-capacity", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.wait_runners = Some(0);
+            meta.wait_runners_explicit = true;
+        }
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.queue_capacity, Some(0));
+        assert!(summary.queue_capacity_explicit);
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["queue_capacity"], json!(0));
+        assert!(value.get("wait_runners").is_none());
+    }
+
+    #[test]
+    fn projection_prefers_waiting_queue_capacity_over_metadata() {
+        let locator = logical('a', "waiting-capacity");
+        let exact_locator = exact('a', "waiting-capacity", "run-1");
+        let mut record = record_running();
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.queue_capacity = Some(100);
+            meta.queue_capacity_explicit = true;
+        }
+        record.waiting = Some(crate::agent_scan::WaitingMarkerWire {
+            queue_capacity: Some(0),
+            queue_capacity_explicit: true,
+            ..crate::agent_scan::WaitingMarkerWire::default()
+        });
+        let request =
+            projection_request(locator, Some(exact_locator), 1, record);
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.queue_capacity, Some(0));
+        assert!(summary.queue_capacity_explicit);
+    }
+
+    #[test]
+    fn projection_leaves_absent_queue_capacity_quiet_and_reads_schema_two() {
+        let locator = logical('a', "absent-capacity");
+        let exact_locator = exact('a', "absent-capacity", "run-1");
+        let request = projection_request(
+            locator,
+            Some(exact_locator),
+            1,
+            record_running(),
+        );
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.queue_capacity, None);
+        assert!(!summary.queue_capacity_explicit);
+
+        let mut old_value = serde_json::to_value(&summary).unwrap();
+        let object = old_value.as_object_mut().unwrap();
+        object.insert("schema_version".to_string(), json!(2));
+        object.remove("queue_capacity");
+        object.remove("queue_capacity_explicit");
+        let old_summary: ResolvedAgentSummaryWire =
+            serde_json::from_value(old_value).unwrap();
+
+        assert_eq!(old_summary.queue_capacity, None);
+        assert!(!old_summary.queue_capacity_explicit);
+        assert_eq!(
+            validate_resolved_agent_summary(&old_summary).unwrap(),
+            old_summary
+        );
     }
 
     #[test]

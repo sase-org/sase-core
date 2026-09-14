@@ -591,12 +591,14 @@
         "agent_clan_generation": "string|null; owner-projected clan generation identity",
         "clan_tribe": "string|null; owner-resolved clan tribe label",
         "labels.project_label": "string; owner human project display label, falling back to the portable project id",
+        "queue_capacity": "u32|null; canonical owner-projected queue capacity, normalized from queue_capacity or legacy wait_runners",
+        "queue_capacity_explicit": "bool; true when queue_capacity was explicitly authored",
         "started_at_unix": "f64|null; owner lifecycle start time, distinct from observation freshness",
         "stopped_at_unix": "f64|null; owner lifecycle stop time",
         "tribe": "string|null; owner-resolved agent tribe label",
         "workspace_num": "u32|null; owner workspace number"
       },
-      "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, lifecycle timestamps, workspace number, clan/tribe identity, capabilities, content metadata"
+      "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, lifecycle timestamps, workspace number, clan/tribe identity, queue capacity, capabilities, content metadata"
     },
     "ResourceRevisionWire": {
       "defined_by": "sase_core::fleet_contract",

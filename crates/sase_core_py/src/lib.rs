@@ -16459,7 +16459,9 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
                     "name": "athena.agent-1",
                     "model": "gpt-5",
                     "llm_provider": "codex",
-                    "agent_family": "family-1"
+                    "agent_family": "family-1",
+                    "queue_capacity": 100,
+                    "queue_capacity_explicit": true
                 },
                 "running": {
                     "pid": 1234,
@@ -16519,6 +16521,8 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
         assert_eq!(summary_value["agent_clan_generation"], json!("20260913"));
         assert_eq!(summary_value["clan_tribe"], json!("parity"));
         assert_eq!(summary_value["tribe"], json!("review"));
+        assert_eq!(summary_value["queue_capacity"], json!(100));
+        assert_eq!(summary_value["queue_capacity_explicit"], json!(true));
         assert_eq!(summary_value["content"]["handle_count"], json!(1));
         let summary_dict = summary.bind(py).downcast::<PyDict>().unwrap();
         let validated =

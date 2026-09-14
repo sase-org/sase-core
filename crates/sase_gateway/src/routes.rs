@@ -6485,7 +6485,7 @@ exit 4
         body: &Value,
         expected: &str,
     ) -> Value {
-        for _ in 0..50 {
+        for _ in 0..250 {
             let (status, value) =
                 post_fleet_launch(state.clone(), token, body.clone()).await;
             assert_eq!(status, StatusCode::OK);

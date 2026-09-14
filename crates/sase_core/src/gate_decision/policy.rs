@@ -48,7 +48,7 @@ pub fn gate_decision_identity_fingerprint(
     hasher.update([0u8]);
     for option_id in selected_option_ids {
         hasher.update(option_id.as_bytes());
-        hasher.update([b',']);
+        hasher.update(*b",");
     }
     hasher.update([0u8]);
     hasher.update(input_identity.as_bytes());
