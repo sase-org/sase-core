@@ -1194,6 +1194,11 @@ use sase_core::gate_followup::{
     gate_followup_decision_request_from_json_value, GateFollowupError,
     GATE_FOLLOWUP_WIRE_SCHEMA_VERSION,
 };
+use sase_core::git_object_sharing::{
+    plan_git_object_sharing as core_plan_git_object_sharing,
+    GitObjectSharingError, GitObjectSharingPlanRequestWire,
+    GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION,
+};
 use sase_core::git_query::{
     derive_git_workspace_name as core_derive_git_workspace_name,
     parse_git_branch_name as core_parse_git_branch_name,
@@ -1830,6 +1835,35 @@ fn py_decide_managed_origin_reconciliation<'py>(
         )?;
     let decision = core_decide_managed_origin_reconciliation(&request);
     serialize_to_py(py, &decision)
+}
+
+fn git_object_sharing_error_to_pyerr(error: GitObjectSharingError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "git_object_sharing_wire_schema_version")]
+fn py_git_object_sharing_wire_schema_version() -> u32 {
+    GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "plan_git_object_sharing")]
+fn py_plan_git_object_sharing<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: GitObjectSharingPlanRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid GitObjectSharingPlanRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_plan_git_object_sharing(&request)
+        .map_err(git_object_sharing_error_to_pyerr)?;
+    serialize_to_py(py, &result)
 }
 
 fn machine_setup_error_to_pyerr(error: MachineSetupError) -> PyErr {
@@ -17560,6 +17594,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_decide_managed_origin_reconciliation,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_git_object_sharing_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_plan_git_object_sharing, m)?)?;
     m.add_function(wrap_pyfunction!(py_machine_setup_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;

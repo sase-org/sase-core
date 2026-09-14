@@ -54,6 +54,7 @@ pub mod fleet_mutation;
 pub mod fleet_presentation;
 pub mod gate_decision;
 pub mod gate_followup;
+pub mod git_object_sharing;
 pub mod git_query;
 pub mod glossary;
 pub mod host_bridge;
@@ -961,6 +962,13 @@ pub use gate_followup::{
     OUTCOME_LAUNCHED_DEGRADED, OUTCOME_NOT_LAUNCHABLE, OUTCOME_SUPPRESSED,
     RECOVERY_ADOPT, RECOVERY_NOOP, RECOVERY_REPORT_AMBIGUOUS, RECOVERY_RESUME,
     RECOVERY_WAIT,
+};
+pub use git_object_sharing::{
+    plan_git_object_sharing, GitObjectSharingError,
+    GitObjectSharingPlanRequestWire, GitObjectSharingPlanWire,
+    GIT_OBJECT_SHARING_ACTION_DELETE, GIT_OBJECT_SHARING_ACTION_FAIL,
+    GIT_OBJECT_SHARING_ACTION_NONE, GIT_OBJECT_SHARING_ACTION_WRITE,
+    GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
     derive_git_workspace_name, parse_git_branch_name,
