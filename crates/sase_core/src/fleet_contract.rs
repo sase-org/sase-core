@@ -4472,7 +4472,10 @@ fn queue_weight_for_record(
             );
         }
         if let Some(weight) = waiting.queue_weight {
-            if fleet_queue_weight_is_valid(weight, waiting.queue_weight_explicit) {
+            if fleet_queue_weight_is_valid(
+                weight,
+                waiting.queue_weight_explicit,
+            ) {
                 return (
                     Some(weight),
                     waiting.queue_weight_explicit,
@@ -8045,7 +8048,8 @@ mod tests {
     }
 
     #[test]
-    fn projection_accepts_explicit_zero_queue_weight_but_rejects_implicit_zero() {
+    fn projection_accepts_explicit_zero_queue_weight_but_rejects_implicit_zero()
+    {
         let explicit_locator = logical('a', "epic-launch-monitor");
         let explicit_exact = exact('a', "epic-launch-monitor", "run-1");
         let mut explicit_record = record_running();

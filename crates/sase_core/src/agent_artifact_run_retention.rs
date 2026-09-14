@@ -118,8 +118,11 @@ pub struct AgentArtifactRunRetentionResultWire {
 
 pub fn apply_agent_artifact_run_retention(
     request: &AgentArtifactRunRetentionRequestWire,
-) -> Result<AgentArtifactRunRetentionResultWire, AgentArtifactRunRetentionError> {
-    if request.schema_version != AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION {
+) -> Result<AgentArtifactRunRetentionResultWire, AgentArtifactRunRetentionError>
+{
+    if request.schema_version
+        != AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION
+    {
         return Err(AgentArtifactRunRetentionError::UnsupportedSchema {
             actual: request.schema_version,
             expected: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
@@ -131,12 +134,14 @@ pub fn apply_agent_artifact_run_retention(
             max: MAX_RUN_RETENTION_CANDIDATES,
         });
     }
-    let projects_root = canonicalize_existing(Path::new(&request.projects_root))
-        .ok_or_else(|| {
-            AgentArtifactRunRetentionError::InvalidProjectsRoot(
-                request.projects_root.clone(),
-            )
-        })?;
+    let projects_root = canonicalize_existing(Path::new(
+        &request.projects_root,
+    ))
+    .ok_or_else(|| {
+        AgentArtifactRunRetentionError::InvalidProjectsRoot(
+            request.projects_root.clone(),
+        )
+    })?;
 
     let mut result = AgentArtifactRunRetentionResultWire {
         schema_version: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
@@ -173,9 +178,10 @@ pub fn apply_agent_artifact_run_retention(
         {
             reasons.push("future_timestamp".to_string());
         }
-        if let Some(violation) =
-            path_safety_violation(&projects_root, Path::new(&candidate.artifact_dir))
-        {
+        if let Some(violation) = path_safety_violation(
+            &projects_root,
+            Path::new(&candidate.artifact_dir),
+        ) {
             reasons.push(violation.to_string());
         }
         reasons_by_index.push(dedupe(reasons));
@@ -187,19 +193,20 @@ pub fn apply_agent_artifact_run_retention(
     eligible.sort_by(|&a, &b| {
         let ca = &request.candidates[a];
         let cb = &request.candidates[b];
-        (&ca.timestamp, &ca.project, &ca.artifact_dir)
-            .cmp(&(&cb.timestamp, &cb.project, &cb.artifact_dir))
+        (&ca.timestamp, &ca.project, &ca.artifact_dir).cmp(&(
+            &cb.timestamp,
+            &cb.project,
+            &cb.artifact_dir,
+        ))
     });
 
-    let limit = request
-        .limit
-        .map(|n| n as usize)
-        .unwrap_or(eligible.len());
+    let limit = request.limit.map(|n| n as usize).unwrap_or(eligible.len());
     let selected_count = eligible.len().min(limit);
     let selected_set: BTreeSet<usize> =
         eligible[..selected_count].iter().copied().collect();
 
-    result.protected = reasons_by_index.iter().filter(|r| !r.is_empty()).count() as u64;
+    result.protected =
+        reasons_by_index.iter().filter(|r| !r.is_empty()).count() as u64;
     result.selected = selected_set.len() as u64;
     result.truncated = (eligible.len() - selected_set.len()) as u64;
 
@@ -279,7 +286,8 @@ pub fn apply_agent_artifact_run_retention(
         .collect();
     let mut shard_budget = request.empty_shard_removal_budget;
     for root in &request.empty_shard_roots {
-        let Some(canonical_root) = canonicalize_existing(Path::new(root)) else {
+        let Some(canonical_root) = canonicalize_existing(Path::new(root))
+        else {
             continue;
         };
         if path_safety_violation(&projects_root, &canonical_root).is_some() {
@@ -420,7 +428,10 @@ fn item_skip(
 
 /// Return why *candidate* cannot safely be mutated, if any: it must exist,
 /// canonicalize under *projects_root*, and have no symlink between the two.
-fn path_safety_violation(projects_root: &Path, candidate: &Path) -> Option<&'static str> {
+fn path_safety_violation(
+    projects_root: &Path,
+    candidate: &Path,
+) -> Option<&'static str> {
     let Some(canonical) = canonicalize_existing(candidate) else {
         return Some("missing");
     };
@@ -465,7 +476,8 @@ fn remove_run_dir(path: &Path) -> Result<u64, String> {
         return Err(format!("{}: not a directory", path.display()));
     }
     let size_bytes = tree_size(path);
-    fs::remove_dir_all(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    fs::remove_dir_all(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(size_bytes)
 }
 
@@ -507,7 +519,11 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn candidate(dir: &Path, project: &str, timestamp: &str) -> AgentArtifactRunCandidateWire {
+    fn candidate(
+        dir: &Path,
+        project: &str,
+        timestamp: &str,
+    ) -> AgentArtifactRunCandidateWire {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("done.json"), "{}").unwrap();
         AgentArtifactRunCandidateWire {
@@ -613,7 +629,8 @@ mod tests {
     fn apply_removes_selected_and_revalidates_active_marker() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("proj");
-        let stale = project_dir.join("artifacts/ace-run/202608/01/20260801000000");
+        let stale =
+            project_dir.join("artifacts/ace-run/202608/01/20260801000000");
         let reactivated =
             project_dir.join("artifacts/ace-run/202608/02/20260802000000");
         let mut request = base_request(temp.path());
@@ -649,7 +666,8 @@ mod tests {
         let outside_dir = outside.path().join("20260801000000");
         let mut request = base_request(temp.path());
         request.apply = true;
-        request.candidates = vec![candidate(&outside_dir, "proj", "20260801000000")];
+        request.candidates =
+            vec![candidate(&outside_dir, "proj", "20260801000000")];
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
         assert_eq!(result.removed_runs, 0);
@@ -668,12 +686,16 @@ mod tests {
 
         let mut request = base_request(temp.path());
         request.apply = true;
-        request.empty_shard_roots = vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 10;
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
         assert_eq!(result.removed_empty_shards, 3, "{:?}", result.shard_items);
-        assert!(result.shard_items.iter().all(|item| item.outcome == "removed"));
+        assert!(result
+            .shard_items
+            .iter()
+            .all(|item| item.outcome == "removed"));
         assert!(!workflow_dir.join("202704").exists());
         assert!(workflow_dir.exists());
     }
@@ -692,7 +714,8 @@ mod tests {
 
         let mut request = base_request(temp.path());
         request.apply = true;
-        request.empty_shard_roots = vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_watched_paths =
             vec![watched_month.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 10;
@@ -714,7 +737,8 @@ mod tests {
 
         let mut request = base_request(temp.path());
         request.apply = true;
-        request.empty_shard_roots = vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 2;
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();

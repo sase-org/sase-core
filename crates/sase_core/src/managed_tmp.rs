@@ -36,12 +36,14 @@ pub struct ManagedTmpReapRequestWire {
     pub pressure_min_available_bytes: Option<u64>,
     pub pressure_recovery_available_bytes: u64,
     pub pressure_min_age_seconds: f64,
+    #[serde(default)]
+    pub pressure_low_free_space_min_age_seconds: Option<f64>,
     pub pressure_min_entry_bytes: u64,
     pub pressure_reap_buckets: Vec<String>,
     pub filesystem_available_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedTmpReapResultWire {
     pub schema_version: u32,
     pub root: String,
@@ -56,6 +58,8 @@ pub struct ManagedTmpReapResultWire {
     pub pressure_root_size_bytes: u64,
     pub pressure_available_bytes: Option<u64>,
     pub pressure_recovery_available_bytes: u64,
+    #[serde(default)]
+    pub pressure_effective_min_age_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +96,7 @@ struct PressurePlan {
     trigger: Option<&'static str>,
     root_size: u64,
     available: Option<u64>,
+    free_space_floor_breached: bool,
     target_size: u64,
     recovery_available: u64,
 }
@@ -108,6 +113,7 @@ struct PressureReapResult {
     root_size: u64,
     available: Option<u64>,
     recovery_available: u64,
+    effective_min_age_seconds: Option<f64>,
 }
 
 pub fn reap_managed_tmpdir(
@@ -200,6 +206,7 @@ pub fn reap_managed_tmpdir(
         pressure_root_size_bytes: pressure.root_size,
         pressure_available_bytes: pressure.available,
         pressure_recovery_available_bytes: pressure.recovery_available,
+        pressure_effective_min_age_seconds: pressure.effective_min_age_seconds,
     })
 }
 
@@ -222,12 +229,15 @@ fn reap_pressure_candidates(
         };
     };
     if current_budget == 0 {
+        let effective_min_age_seconds =
+            pressure_effective_min_age_seconds(request, &plan);
         return PressureReapResult {
             capped: true,
             trigger: plan.trigger.map(str::to_string),
             root_size: plan.root_size,
             available: plan.available,
             recovery_available: plan.recovery_available,
+            effective_min_age_seconds: Some(effective_min_age_seconds),
             ..PressureReapResult::default()
         };
     }
@@ -237,7 +247,9 @@ fn reap_pressure_candidates(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let cutoff = request.now_epoch_seconds - request.pressure_min_age_seconds;
+    let effective_min_age_seconds =
+        pressure_effective_min_age_seconds(request, &plan);
+    let cutoff = request.now_epoch_seconds - effective_min_age_seconds;
     let mut candidates = Vec::new();
     let mut scanned = 0_u64;
     for entry in iter_children(root) {
@@ -336,6 +348,7 @@ fn reap_pressure_candidates(
         root_size: plan.root_size,
         available: plan.available,
         recovery_available: plan.recovery_available,
+        effective_min_age_seconds: Some(effective_min_age_seconds),
     }
 }
 
@@ -376,9 +389,27 @@ fn pressure_plan(
         trigger: Some(trigger),
         root_size,
         available,
+        free_space_floor_breached: free_pressure,
         target_size,
         recovery_available: request.pressure_recovery_available_bytes,
     })
+}
+
+fn pressure_effective_min_age_seconds(
+    request: &ManagedTmpReapRequestWire,
+    plan: &PressurePlan,
+) -> f64 {
+    if !plan.free_space_floor_breached {
+        return request.pressure_min_age_seconds;
+    }
+    request
+        .pressure_low_free_space_min_age_seconds
+        .map(|low_space_min_age| {
+            request
+                .pressure_min_age_seconds
+                .min(low_space_min_age.max(0.0))
+        })
+        .unwrap_or(request.pressure_min_age_seconds)
 }
 
 fn pressure_recovered(
@@ -630,6 +661,7 @@ mod tests {
             pressure_min_available_bytes: Some(32 * 1024),
             pressure_recovery_available_bytes: 48 * 1024,
             pressure_min_age_seconds: 12.0 * HOUR,
+            pressure_low_free_space_min_age_seconds: None,
             pressure_min_entry_bytes: 1024,
             pressure_reap_buckets: vec![
                 "build-targets".to_string(),
@@ -744,6 +776,163 @@ mod tests {
         assert!(!old_large.exists());
         assert_eq!(result.pressure_removed, 1);
         assert_eq!(result.pressure_trigger.as_deref(), Some("free_space"));
+        assert_eq!(
+            result.pressure_effective_min_age_seconds,
+            Some(12.0 * HOUR)
+        );
+    }
+
+    #[test]
+    fn low_free_space_age_reaps_recent_large_target_when_size_also_triggers() {
+        let temp = tempdir().unwrap();
+        let recent_large =
+            aged_dir(temp.path(), "cargo-targets/run-recent", 2.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_recovery_available_bytes = 16 * 1024;
+        req.pressure_low_free_space_min_age_seconds = Some(HOUR);
+        req.filesystem_available_bytes = Some(8 * 1024);
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!recent_large.exists());
+        assert_eq!(result.pressure_removed, 1);
+        assert_eq!(
+            result.pressure_trigger.as_deref(),
+            Some("size_and_free_space")
+        );
+        assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
+    }
+
+    #[test]
+    fn low_free_space_age_reaps_recent_large_target_under_free_space_trigger() {
+        let temp = tempdir().unwrap();
+        let recent_large =
+            aged_dir(temp.path(), "cargo-targets/run-recent", 2.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(64 * 1024);
+        req.pressure_target_bytes = 32 * 1024;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_recovery_available_bytes = 16 * 1024;
+        req.pressure_low_free_space_min_age_seconds = Some(HOUR);
+        req.filesystem_available_bytes = Some(8 * 1024);
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!recent_large.exists());
+        assert_eq!(result.pressure_removed, 1);
+        assert_eq!(result.pressure_trigger.as_deref(), Some("free_space"));
+        assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
+    }
+
+    #[test]
+    fn low_free_space_age_does_not_apply_to_size_only_pressure() {
+        let temp = tempdir().unwrap();
+        let recent_large =
+            aged_dir(temp.path(), "cargo-targets/run-recent", 2.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(1024);
+        req.pressure_low_free_space_min_age_seconds = Some(HOUR);
+        req.filesystem_available_bytes = Some(8 * 1024);
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(recent_large.exists());
+        assert_eq!(result.pressure_removed, 0);
+        assert_eq!(result.pressure_trigger.as_deref(), Some("size"));
+        assert_eq!(
+            result.pressure_effective_min_age_seconds,
+            Some(12.0 * HOUR)
+        );
+
+        set_mtime(&recent_large, NOW - DAY);
+        set_mtime(&recent_large.join("payload.bin"), NOW - DAY);
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!recent_large.exists());
+        assert_eq!(result.pressure_removed, 1);
+        assert_eq!(
+            result.pressure_effective_min_age_seconds,
+            Some(12.0 * HOUR)
+        );
+    }
+
+    #[test]
+    fn low_free_space_age_still_respects_fresh_descendant() {
+        let temp = tempdir().unwrap();
+        let target =
+            aged_dir(temp.path(), "cargo-targets/run-live", 2.0 * HOUR, 8192);
+        let fresh = aged_file(
+            temp.path(),
+            "cargo-targets/run-live/deep/object.o",
+            0.5 * HOUR,
+            1,
+        );
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_recovery_available_bytes = 16 * 1024;
+        req.pressure_low_free_space_min_age_seconds = Some(HOUR);
+        req.pressure_min_entry_bytes = 1;
+        req.filesystem_available_bytes = Some(8 * 1024);
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(target.exists());
+        assert!(fresh.exists());
+        assert_eq!(result.pressure_removed, 0);
+        assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
+    }
+
+    #[test]
+    fn absent_low_free_space_age_preserves_base_pressure_age() {
+        let temp = tempdir().unwrap();
+        let recent_large =
+            aged_dir(temp.path(), "cargo-targets/run-recent", 2.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_recovery_available_bytes = 16 * 1024;
+        req.filesystem_available_bytes = Some(8 * 1024);
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(recent_large.exists());
+        assert_eq!(result.pressure_removed, 0);
+        assert_eq!(
+            result.pressure_trigger.as_deref(),
+            Some("size_and_free_space")
+        );
+        assert_eq!(
+            result.pressure_effective_min_age_seconds,
+            Some(12.0 * HOUR)
+        );
+    }
+
+    #[test]
+    fn low_space_age_never_lengthens_base_pressure_age() {
+        let temp = tempdir().unwrap();
+        let two_hour_target =
+            aged_dir(temp.path(), "cargo-targets/two-hour", 2.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.pressure_max_bytes = Some(1024);
+        req.pressure_target_bytes = 0;
+        req.pressure_min_available_bytes = Some(10 * 1024);
+        req.pressure_low_free_space_min_age_seconds = Some(DAY);
+        req.filesystem_available_bytes = Some(8 * 1024);
+        req.pressure_min_age_seconds = HOUR;
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!two_hour_target.exists());
+        assert_eq!(result.pressure_removed, 1);
+        assert_eq!(result.pressure_effective_min_age_seconds, Some(HOUR));
     }
 
     #[test]

@@ -18329,7 +18329,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_agent_artifact_run_retention_wire_schema_version,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(py_apply_agent_artifact_run_retention, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_apply_agent_artifact_run_retention,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
