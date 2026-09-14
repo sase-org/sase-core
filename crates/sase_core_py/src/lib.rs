@@ -515,6 +515,8 @@
 //! - `decide_bead_action(request: dict) -> dict`
 //! - `validate_finalizer_bead_decision(context: dict, decision: dict) -> dict`
 //! - `validate_finalizer_assigned_bead_binding(context: dict, expected: dict | None) -> None`
+//! - `gate_decision_wire_schema_version() -> int`
+//! - `decide_gate_decision_acceptance(request: dict) -> dict`
 //! - `validate_task_type_spec(spec: dict) -> None`
 //! - `task_type_spec_digest(spec: dict) -> str`
 //! - `validate_task_type_field_values(spec: dict, values: dict[str, str]) -> list[dict]`
@@ -1172,6 +1174,10 @@ use sase_core::fleet_follow_promotion::{
 use sase_core::fleet_mutation::{
     self as core_fleet_mutation, FleetMutationIntentWire,
     FleetMutationRequestWire,
+};
+use sase_core::gate_decision::{
+    decide_gate_decision_acceptance_from_json as core_decide_gate_decision_acceptance_from_json,
+    GateDecisionError, GATE_DECISION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::gate_followup::{
     decide_gate_followup as core_decide_gate_followup,
@@ -6152,6 +6158,52 @@ fn py_validate_finalizer_assigned_bead_binding(
     };
     core_validate_finalizer_assigned_bead_binding(&context, expected.as_ref())
         .map_err(bead_action_error_to_pyerr)
+}
+
+fn gate_decision_error_to_pyerr(error: GateDecisionError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn gate_decision_result_to_py<'py, T>(
+    py: Python<'py>,
+    result: Result<T, GateDecisionError>,
+    operation: &str,
+) -> PyResult<PyObject>
+where
+    T: serde::Serialize,
+{
+    let decided = result.map_err(gate_decision_error_to_pyerr)?;
+    let value = serde_json::to_value(decided).map_err(|error| {
+        PyValueError::new_err(format!(
+            "internal gate-decision {operation} serialize error: {error}"
+        ))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the gate-decision-acceptance wire schema version.
+#[pyfunction]
+#[pyo3(name = "gate_decision_wire_schema_version")]
+fn py_gate_decision_wire_schema_version() -> u32 {
+    GATE_DECISION_WIRE_SCHEMA_VERSION
+}
+
+/// Decide one gate's decision acceptance: a fresh accept, an idempotent
+/// replay of an identical resubmission, or a prompt conflict rejection
+/// raised as a Python `ValueError` -- before any option command, archive,
+/// or launch work runs.
+#[pyfunction]
+#[pyo3(name = "decide_gate_decision_acceptance")]
+fn py_decide_gate_decision_acceptance<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    gate_decision_result_to_py(
+        py,
+        core_decide_gate_decision_acceptance_from_json(&value),
+        "acceptance",
+    )
 }
 
 fn task_type_spec_from_pydict(
@@ -17799,6 +17851,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_validate_finalizer_assigned_bead_binding,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_gate_decision_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_decide_gate_decision_acceptance, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_spec, m)?)?;
     m.add_function(wrap_pyfunction!(py_task_type_spec_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_field_values, m)?)?;
@@ -25228,6 +25282,93 @@ MENTORS:
                 Some(matching.bind(py).downcast::<PyDict>().unwrap()),
             )
             .unwrap();
+        });
+    }
+
+    #[test]
+    fn gate_decision_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "gate_decision_wire_schema_version",
+                "decide_gate_decision_acceptance",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(py_gate_decision_wire_schema_version(), 1);
+
+            let fresh_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "selected_option_ids": ["approve"],
+                    "input_identity": "sha256:input",
+                    "source": "cli",
+                    "accepted_at_unix": 1_726_000_000.0,
+                    "execution_owner": "attempt:1234",
+                }),
+            )
+            .unwrap();
+            let accepted = py_decide_gate_decision_acceptance(
+                py,
+                fresh_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let accepted = py_to_json_value(accepted.bind(py)).unwrap();
+            assert_eq!(accepted["status"], json!("accepted"));
+            let receipt = accepted["receipt"].clone();
+            assert_eq!(receipt["gate_id"], json!("gate-abc"));
+            assert!(!receipt["identity_fingerprint"]
+                .as_str()
+                .unwrap()
+                .is_empty());
+
+            let mut replay_value = json!({
+                "schema_version": 1,
+                "gate_id": "gate-abc",
+                "request_hash": "sha256:deadbeef",
+                "selected_option_ids": ["approve"],
+                "input_identity": "sha256:input",
+                "source": "ace",
+                "accepted_at_unix": 1_726_000_500.0,
+                "execution_owner": "attempt:5678",
+            });
+            replay_value["existing_receipt"] = receipt.clone();
+            let replay_request = json_value_to_py(py, &replay_value).unwrap();
+            let replayed = py_decide_gate_decision_acceptance(
+                py,
+                replay_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let replayed = py_to_json_value(replayed.bind(py)).unwrap();
+            assert_eq!(replayed["status"], json!("replayed"));
+            assert_eq!(
+                replayed["receipt"], receipt,
+                "replay returns the original receipt unmodified"
+            );
+
+            let mut conflict_value = json!({
+                "schema_version": 1,
+                "gate_id": "gate-abc",
+                "request_hash": "sha256:deadbeef",
+                "selected_option_ids": ["reject"],
+                "input_identity": "sha256:input",
+                "source": "cli",
+                "accepted_at_unix": 1_726_000_600.0,
+            });
+            conflict_value["existing_receipt"] = receipt;
+            let conflict_request =
+                json_value_to_py(py, &conflict_value).unwrap();
+            let error = py_decide_gate_decision_acceptance(
+                py,
+                conflict_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("gate_decision_conflict"));
         });
     }
 

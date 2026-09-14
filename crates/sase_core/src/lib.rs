@@ -51,6 +51,7 @@ pub mod fleet_contract;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod fleet_presentation;
+pub mod gate_decision;
 pub mod gate_followup;
 pub mod git_query;
 pub mod glossary;
