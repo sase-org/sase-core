@@ -73,20 +73,25 @@ pub fn apply_proc_runtime_retention(
             .filter(|row| is_active_status(&row.status))
             .map(|row| row.proc_id.clone())
             .collect::<BTreeSet<_>>();
-        let evaluation = CandidateEvaluation {
+        let context = CandidateEvaluationContext {
             runtime_root,
-            kind: CandidateKind::PrunedRow,
             retained_ids: &retained_ids,
             active_ids: &active_ids,
             apply: request.apply,
         };
 
         for proc_id in &request.pruned_proc_ids {
-            evaluate_candidate(&evaluation, proc_id, None, &mut result);
+            evaluate_candidate(
+                &context,
+                proc_id,
+                CandidateKind::PrunedRow,
+                None,
+                &mut result,
+            );
         }
 
         if request.sweep_orphans {
-            sweep_orphans(request, &evaluation, &mut result)?;
+            sweep_orphans(request, &context, &mut result)?;
         }
 
         Ok::<_, ProcStoreError>(result)
@@ -97,10 +102,10 @@ pub fn apply_proc_runtime_retention(
 
 fn sweep_orphans(
     request: &ProcRuntimeRetentionRequestWire,
-    evaluation: &CandidateEvaluation<'_>,
+    context: &CandidateEvaluationContext<'_>,
     result: &mut ProcRuntimeRetentionResultWire,
 ) -> Result<(), ProcStoreError> {
-    let mut paths = fs::read_dir(evaluation.runtime_root)
+    let mut paths = fs::read_dir(context.runtime_root)
         .map_err(|error| ProcStoreError::Store(error.to_string()))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -113,10 +118,10 @@ fn sweep_orphans(
         if selected_orphans >= request.max_orphan_removals {
             result.capped = paths[index..].iter().any(|candidate| {
                 orphan_would_select(
-                    evaluation.runtime_root,
+                    context.runtime_root,
                     candidate,
-                    evaluation.retained_ids,
-                    evaluation.active_ids,
+                    context.retained_ids,
+                    context.active_ids,
                     cutoff,
                 )
             });
@@ -128,14 +133,13 @@ fn sweep_orphans(
             .unwrap_or_default()
             .to_string();
         let before = result.selected;
-        let context = CandidateEvaluation {
-            runtime_root: evaluation.runtime_root,
-            kind: CandidateKind::Orphan { cutoff },
-            retained_ids: evaluation.retained_ids,
-            active_ids: evaluation.active_ids,
-            apply: evaluation.apply,
-        };
-        evaluate_candidate(&context, &proc_id, Some(path.clone()), result);
+        evaluate_candidate(
+            context,
+            &proc_id,
+            CandidateKind::Orphan { cutoff },
+            Some(path.clone()),
+            result,
+        );
         if result.selected > before {
             selected_orphans = selected_orphans.saturating_add(1);
         }
@@ -175,17 +179,17 @@ enum CandidateKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CandidateEvaluation<'a> {
+struct CandidateEvaluationContext<'a> {
     runtime_root: &'a Path,
-    kind: CandidateKind,
     retained_ids: &'a BTreeSet<String>,
     active_ids: &'a BTreeSet<String>,
     apply: bool,
 }
 
 fn evaluate_candidate(
-    context: &CandidateEvaluation<'_>,
+    context: &CandidateEvaluationContext<'_>,
     proc_id: &str,
+    kind: CandidateKind,
     observed_path: Option<PathBuf>,
     result: &mut ProcRuntimeRetentionResultWire,
 ) {
@@ -223,7 +227,7 @@ fn evaluate_candidate(
         result.push_skip(proc_id, path_string, "not_directory", 0);
         return;
     }
-    if let CandidateKind::Orphan { cutoff } = context.kind {
+    if let CandidateKind::Orphan { cutoff } = kind {
         if snapshot.latest_mtime >= cutoff {
             result.push_skip(
                 proc_id,
@@ -243,7 +247,7 @@ fn evaluate_candidate(
             proc_id: proc_id.to_string(),
             path: path_string,
             status: "would_remove".to_string(),
-            reason: reason_for(context.kind).to_string(),
+            reason: reason_for(kind).to_string(),
             size_bytes: snapshot.size_bytes,
         });
         return;
@@ -257,7 +261,7 @@ fn evaluate_candidate(
                 proc_id: proc_id.to_string(),
                 path: path_string,
                 status: "removed".to_string(),
-                reason: reason_for(context.kind).to_string(),
+                reason: reason_for(kind).to_string(),
                 size_bytes: snapshot.size_bytes,
             });
         }

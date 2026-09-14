@@ -1,4 +1,5 @@
 pub mod execution;
+pub mod force_reuse;
 pub mod planner;
 pub mod wire;
 
@@ -9,6 +10,11 @@ pub use execution::{
     release_workspace_from_content, save_dismissed_agents_index,
     save_dismissed_bundle_json, AgentCleanupArtifactDeleteResultWire,
     AgentCleanupBundleWriteResultWire, AgentCleanupWorkspaceReleaseResultWire,
+};
+pub use force_reuse::{
+    decide_force_reuse_stop_barrier, ForceReuseStopBarrierDecisionWire,
+    ForceReuseStopBarrierRequestWire, ForceReuseStopItemWire,
+    ForceReuseStopTargetWire, FORCE_REUSE_STOP_BARRIER_WIRE_SCHEMA_VERSION,
 };
 pub use planner::plan_agent_cleanup;
 pub use wire::{

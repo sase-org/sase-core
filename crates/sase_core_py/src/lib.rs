@@ -627,6 +627,7 @@ use sase_core::agent_clan_tribe::{
 };
 use sase_core::agent_cleanup::{
     cleanup_request_from_json_value,
+    decide_force_reuse_stop_barrier as core_decide_force_reuse_stop_barrier,
     delete_agent_artifact_markers as core_delete_agent_artifact_markers,
     mark_comment_agents_as_killed as core_mark_comment_agents_as_killed,
     mark_hook_agents_as_killed as core_mark_hook_agents_as_killed,
@@ -636,6 +637,7 @@ use sase_core::agent_cleanup::{
     save_dismissed_agents_index as core_save_dismissed_agents_index,
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
+    ForceReuseStopBarrierRequestWire,
 };
 use sase_core::agent_family::{
     resolve_agent_family_parent as core_resolve_agent_family_parent,
@@ -4257,6 +4259,33 @@ fn py_mark_recent_dismissed_agent_group_revived<'py>(
 #[pyo3(name = "agent_cleanup_wire_schema_version")]
 fn py_agent_cleanup_wire_schema_version() -> u32 {
     sase_core::AGENT_CLEANUP_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "force_reuse_stop_barrier_wire_schema_version")]
+fn py_force_reuse_stop_barrier_wire_schema_version() -> u32 {
+    sase_core::FORCE_REUSE_STOP_BARRIER_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "decide_force_reuse_stop_barrier")]
+fn py_decide_force_reuse_stop_barrier<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request_value = py_to_json_value(request.as_any())?;
+    let req: ForceReuseStopBarrierRequestWire =
+        serde_json::from_value(request_value).map_err(|e| {
+            PyValueError::new_err(format!(
+            "request is not a valid ForceReuseStopBarrierRequestWire dict: {e}"
+        ))
+        })?;
+    let decision = core_decide_force_reuse_stop_barrier(&req)
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&decision).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
 }
 
 #[pyfunction]
@@ -18025,6 +18054,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_agent_cleanup_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_force_reuse_stop_barrier_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_decide_force_reuse_stop_barrier, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_cleanup, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_ownership_batch_wire_schema_version,
@@ -28403,6 +28437,42 @@ MENTORS:
 
             let err = py_plan_agent_cleanup(py, &targets, request).unwrap_err();
             assert!(err.to_string().contains("schema mismatch"));
+        });
+    }
+
+    #[test]
+    fn force_reuse_stop_barrier_binding_round_trips_json_shape() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": sase_core::FORCE_REUSE_STOP_BARRIER_WIRE_SCHEMA_VERSION,
+                    "targets": [{
+                        "name": "worker",
+                        "artifacts_dir": "/tmp/worker",
+                        "pid": 1234,
+                        "was_live": true,
+                        "stop_status": "killed",
+                        "alive_after_stop": false,
+                        "detail": null
+                    }]
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result =
+                py_decide_force_reuse_stop_barrier(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(
+                value["schema_version"],
+                json!(sase_core::FORCE_REUSE_STOP_BARRIER_WIRE_SCHEMA_VERSION)
+            );
+            assert_eq!(value["proceed"], json!(true));
+            assert_eq!(value["stopped"][0]["name"], json!("worker"));
+            assert_eq!(value["unresolved"], json!([]));
         });
     }
 
