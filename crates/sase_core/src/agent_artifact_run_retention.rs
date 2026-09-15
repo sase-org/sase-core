@@ -3,10 +3,10 @@
 //! Protection facts (bead liveness, continuation ancestry, artifact-index
 //! references, scan markers) are gathered by callers from their own
 //! Rust-backed sources and passed in per candidate; this module owns the
-//! final classification, the canonical-root/symlink-ancestor safety check,
-//! fresh revalidation immediately before each deletion, and the bottom-up
-//! empty-shard walk. It never trusts a stale snapshot: every mutation is
-//! preceded by its own fresh filesystem read.
+//! final preview classification and the canonical-root/symlink-ancestor
+//! safety check. Mutation is intentionally retired: the apply entry point
+//! refuses every request because the caller cannot provide an authoritative,
+//! locked protection snapshot.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_ARTIFACT_RUN_RETENTION_BLOCKED_REASON: &str =
+    "authoritative_protection_unavailable";
 
 /// Runs scale with disk usage and retention backlog, not with any bounded
 /// graph, so this is deliberately generous — it only exists to fail closed
@@ -135,6 +137,19 @@ pub fn apply_agent_artifact_run_retention(
             expected: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
         });
     }
+    let mut result = AgentArtifactRunRetentionResultWire {
+        schema_version: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
+        apply: request.apply,
+        candidates: request.candidates.len() as u64,
+        ..Default::default()
+    };
+
+    if request.apply {
+        result.blocked_reason =
+            Some(AGENT_ARTIFACT_RUN_RETENTION_BLOCKED_REASON.to_string());
+        return Ok(result);
+    }
+
     if request.candidates.len() > MAX_RUN_RETENTION_CANDIDATES {
         return Err(AgentArtifactRunRetentionError::TooManyCandidates {
             actual: request.candidates.len(),
@@ -154,24 +169,6 @@ pub fn apply_agent_artifact_run_retention(
                 request.projects_root.clone(),
             )
         })?;
-
-    let mut result = AgentArtifactRunRetentionResultWire {
-        schema_version: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
-        apply: request.apply,
-        candidates: request.candidates.len() as u64,
-        ..Default::default()
-    };
-
-    // Preview (`apply: false`) still classifies best-effort so callers can
-    // show what *would* happen; only a real mutation pass refuses outright,
-    // per the "apply must refuse missing protection sources" contract.
-    if request.apply && !request.sources_unavailable.is_empty() {
-        result.blocked_reason = Some(format!(
-            "protection sources unavailable: {}",
-            request.sources_unavailable.join(", ")
-        ));
-        return Ok(result);
-    }
 
     let recent_months: BTreeSet<&str> =
         request.recent_months.iter().map(String::as_str).collect();
@@ -746,15 +743,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_refuses_when_sources_unavailable() {
+    fn apply_refuses_every_mutation_request_before_filesystem_walks() {
         let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("proj");
+        let stale =
+            project_dir.join("artifacts/ace-run/202608/01/20260801000000");
+        let workflow_dir = project_dir.join("artifacts/ace-run");
+        let empty_month = workflow_dir.join("202607");
         let mut request = base_request(temp.path());
         request.apply = true;
-        request.sources_unavailable = vec!["beads: unreachable".to_string()];
+        request.candidates = vec![candidate(&stale, "proj", "20260801000000")];
+        fs::create_dir_all(&empty_month).unwrap();
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_removal_budget = 10;
+
         let result = apply_agent_artifact_run_retention(&request).unwrap();
-        assert!(result.blocked_reason.is_some());
+        assert_eq!(
+            result.blocked_reason.as_deref(),
+            Some(AGENT_ARTIFACT_RUN_RETENTION_BLOCKED_REASON)
+        );
+        assert_eq!(result.candidates, 1);
         assert_eq!(result.selected, 0);
         assert_eq!(result.removed_runs, 0);
+        assert_eq!(result.bytes_reclaimed, 0);
+        assert_eq!(result.removed_empty_shards, 0);
+        assert!(result.run_items.is_empty());
+        assert!(result.shard_items.is_empty());
+        assert!(stale.exists());
+        assert!(empty_month.exists());
     }
 
     #[test]
@@ -821,37 +838,19 @@ mod tests {
     }
 
     #[test]
-    fn apply_removes_selected_and_revalidates_active_marker() {
+    fn preview_selects_terminal_runs_without_mutating() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("proj");
         let stale =
             project_dir.join("artifacts/ace-run/202608/01/20260801000000");
-        let reactivated =
-            project_dir.join("artifacts/ace-run/202608/02/20260802000000");
         let mut request = base_request(temp.path());
-        request.apply = true;
-        request.candidates = vec![
-            candidate(&stale, "proj", "20260801000000"),
-            candidate(&reactivated, "proj", "20260802000000"),
-        ];
-        // Simulate the run becoming active again after the plan snapshot
-        // was taken but before apply runs.
-        fs::write(reactivated.join("running.json"), "{}").unwrap();
+        request.candidates = vec![candidate(&stale, "proj", "20260801000000")];
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
-        assert_eq!(result.removed_runs, 1);
-        assert!(!stale.exists());
-        assert!(reactivated.exists());
-        let skipped = result
-            .run_items
-            .iter()
-            .find(|item| item.timestamp == "20260802000000")
-            .unwrap();
-        assert_eq!(skipped.outcome, "skipped");
-        assert_eq!(
-            skipped.detail.as_deref(),
-            Some("active_marker:running.json")
-        );
+        assert_eq!(result.selected, 1);
+        assert_eq!(result.removed_runs, 0);
+        assert!(stale.exists());
+        assert_eq!(result.run_items[0].outcome, "selected");
     }
 
     #[test]
@@ -860,7 +859,6 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let outside_dir = outside.path().join("20260801000000");
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.candidates =
             vec![candidate(&outside_dir, "proj", "20260801000000")];
 
@@ -888,7 +886,6 @@ mod tests {
         let alias_run = projects_root
             .join("alias/artifacts/ace-run/202601/01/20260101000000");
         let mut request = base_request(&projects_root);
-        request.apply = true;
         request.candidates = vec![AgentArtifactRunCandidateWire {
             artifact_dir: alias_run.to_string_lossy().into_owned(),
             project: "alias".to_string(),
@@ -906,13 +903,12 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_timestamp_protection_overrides_empty_candidate_reasons() {
+    fn preview_timestamp_protection_overrides_empty_candidate_reasons() {
         let temp = tempfile::tempdir().unwrap();
         let project_dir = temp.path().join("proj");
         let referenced =
             project_dir.join("artifacts/ace-run/202601/01/20260101000000");
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.protected_timestamps = vec!["20260101000000".to_string()];
         request.candidates =
             vec![candidate(&referenced, "proj", "20260101000000")];
@@ -927,26 +923,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_shard_walk_removes_bottom_up_across_three_levels() {
+    fn empty_shard_preview_reports_bottom_up_across_three_levels() {
         let temp = tempfile::tempdir().unwrap();
         let workflow_dir = temp.path().join("artifacts/ace-run");
         let leaf = workflow_dir.join("202704/01/20270401000000");
         fs::create_dir_all(&leaf).unwrap();
 
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.empty_shard_roots =
             vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 10;
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
-        assert_eq!(result.removed_empty_shards, 3, "{:?}", result.shard_items);
+        assert_eq!(result.removed_empty_shards, 0, "{:?}", result.shard_items);
         assert!(result
             .shard_items
             .iter()
-            .all(|item| item.outcome == "removed"));
-        assert!(!workflow_dir.join("202704").exists());
-        assert!(workflow_dir.exists());
+            .all(|item| item.outcome == "would_remove"));
+        assert!(workflow_dir.join("202704").exists());
+        assert!(leaf.exists());
     }
 
     #[test]
@@ -962,7 +957,6 @@ mod tests {
         fs::create_dir_all(&empty_month).unwrap();
 
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.empty_shard_roots =
             vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_watched_paths =
@@ -970,10 +964,14 @@ mod tests {
         request.empty_shard_removal_budget = 10;
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
-        assert_eq!(result.removed_empty_shards, 1);
+        assert_eq!(result.removed_empty_shards, 0);
         assert!(watched_month.exists());
         assert!(live_leaf.exists());
-        assert!(!empty_month.exists());
+        assert!(empty_month.exists());
+        assert!(result
+            .shard_items
+            .iter()
+            .any(|item| item.outcome == "would_remove"));
     }
 
     #[test]
@@ -983,7 +981,6 @@ mod tests {
         let referenced = workflow_dir.join("202601/01/20260101000000");
         fs::create_dir_all(&referenced).unwrap();
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.protected_dirs =
             vec![referenced.to_string_lossy().into_owned()];
         request.candidates = vec![AgentArtifactRunCandidateWire {
@@ -1014,13 +1011,20 @@ mod tests {
         fs::create_dir_all(workflow_dir.join("202603")).unwrap();
 
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.empty_shard_roots =
             vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 2;
 
         let result = apply_agent_artifact_run_retention(&request).unwrap();
-        assert_eq!(result.removed_empty_shards, 2);
+        assert_eq!(result.removed_empty_shards, 0);
+        assert_eq!(
+            result
+                .shard_items
+                .iter()
+                .filter(|item| item.outcome == "would_remove")
+                .count(),
+            2
+        );
         assert!(result
             .shard_items
             .iter()
@@ -1064,7 +1068,6 @@ mod tests {
         fs::create_dir_all(&unknown).unwrap();
 
         let mut request = base_request(temp.path());
-        request.apply = true;
         request.empty_shard_roots =
             vec![workflow_dir.to_string_lossy().into_owned()];
         request.empty_shard_removal_budget = 10;

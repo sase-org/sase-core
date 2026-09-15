@@ -85,6 +85,8 @@
 //! - `parse_merge_summary(subject: str, body: str) -> dict | None`
 //! - `disk_inventory_wire_schema_version() -> int`
 //! - `classify_disk_inventory(request: dict) -> dict`
+//! - `disk_cleanup_outcome_wire_schema_version() -> int`
+//! - `normalize_disk_cleanup_outcome(request: dict) -> dict`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
@@ -1127,6 +1129,11 @@ use sase_core::continuation::{
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
+use sase_core::disk_cleanup_outcome::{
+    normalize_disk_cleanup_outcome as core_normalize_disk_cleanup_outcome,
+    DiskCleanupOutcomeError, DiskCleanupOutcomeRequestWire,
+    DISK_CLEANUP_OUTCOME_WIRE_SCHEMA_VERSION,
+};
 use sase_core::disk_inventory::{
     classify_disk_inventory as core_classify_disk_inventory,
     DiskInventoryError, DiskInventoryRequestWire,
@@ -1993,6 +2000,12 @@ fn disk_inventory_error_to_pyerr(error: DiskInventoryError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+fn disk_cleanup_outcome_error_to_pyerr(
+    error: DiskCleanupOutcomeError,
+) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
 fn disk_pressure_error_to_pyerr(error: DiskPressureError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
@@ -2020,6 +2033,31 @@ fn py_classify_disk_inventory<'py>(
     let result = py
         .allow_threads(|| core_classify_disk_inventory(&request))
         .map_err(disk_inventory_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "disk_cleanup_outcome_wire_schema_version")]
+fn py_disk_cleanup_outcome_wire_schema_version() -> u32 {
+    DISK_CLEANUP_OUTCOME_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "normalize_disk_cleanup_outcome")]
+fn py_normalize_disk_cleanup_outcome<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: DiskCleanupOutcomeRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid DiskCleanupOutcomeRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_normalize_disk_cleanup_outcome(&request)
+        .map_err(disk_cleanup_outcome_error_to_pyerr)?;
     serialize_to_py(py, &result)
 }
 
@@ -18075,6 +18113,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_classify_disk_inventory, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_disk_cleanup_outcome_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_normalize_disk_cleanup_outcome, m)?)?;
     m.add_function(wrap_pyfunction!(py_disk_pressure_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_disk_pressure, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -19354,6 +19397,94 @@ mod tests {
         });
     }
 
+    #[test]
+    fn disk_cleanup_outcome_binding_preserves_partial_effects() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module
+                .getattr("disk_cleanup_outcome_wire_schema_version")
+                .is_ok());
+            assert!(module.getattr("normalize_disk_cleanup_outcome").is_ok());
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": DISK_CLEANUP_OUTCOME_WIRE_SCHEMA_VERSION,
+                    "owners": [
+                        {
+                            "owner": "workspace",
+                            "changed": true,
+                            "reclaimed_bytes": 1024,
+                            "exit_code": 0
+                        },
+                        {
+                            "owner": "proc",
+                            "exit_code": 2
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_normalize_disk_cleanup_outcome(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(result["status"], json!("failed"));
+            assert_eq!(result["changed"], json!(true));
+            assert_eq!(result["known_reclaimed_bytes"], json!(1024));
+            assert_eq!(result["problems"][0]["kind"], json!("nonzero_exit"));
+        });
+    }
+
+    #[test]
+    fn git_object_sharing_binding_preserves_existing_reuse() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let objects = temp.path().join("borrower/.git/objects");
+        let old = temp.path().join("old/.git/objects");
+        let primary = temp.path().join("primary/.git/objects");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&primary).unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module
+                .getattr("git_object_sharing_wire_schema_version")
+                .is_ok());
+            assert!(module.getattr("plan_git_object_sharing").is_ok());
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION,
+                    "operation": "install",
+                    "checkout_dir": temp.path().join("borrower").to_string_lossy(),
+                    "object_dir": objects.to_string_lossy(),
+                    "alternates_file": objects.join("info/alternates").to_string_lossy(),
+                    "primary_checkout_dir": temp.path().join("primary").to_string_lossy(),
+                    "primary_object_dir": primary.to_string_lossy(),
+                    "alternates": [old.to_string_lossy()],
+                    "config_enabled": true,
+                    "config_primary_objects": old.to_string_lossy(),
+                    "mutation_context": "existing_reuse"
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_plan_git_object_sharing(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(result["action"], json!("none"));
+            assert_eq!(result["status"], json!("preserved"));
+            assert_eq!(result["dependency_mutation"], json!(false));
+            assert_eq!(result["write_alternates"], JsonValue::Null);
+        });
+    }
+
     fn py_dict_keys(dict: &Bound<'_, PyDict>) -> Vec<String> {
         dict.keys()
             .iter()
@@ -20548,6 +20679,37 @@ COMMITS:
             let outcome = py_to_json_value(outcome.bind(py)).unwrap();
             assert_eq!(outcome["removed"], json!(1));
             assert!(!runtime_dir.exists());
+        });
+    }
+
+    #[test]
+    fn agent_artifact_run_retention_binding_refuses_apply_without_protection() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+
+        Python::with_gil(|py| {
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
+                    "projects_root": temp.path().to_string_lossy(),
+                    "apply": true
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let outcome =
+                py_apply_agent_artifact_run_retention(py, request).unwrap();
+            let outcome = py_to_json_value(outcome.bind(py)).unwrap();
+
+            assert_eq!(
+                outcome["blocked_reason"],
+                json!("authoritative_protection_unavailable")
+            );
+            assert_eq!(outcome["removed_runs"], json!(0));
+            assert_eq!(outcome["removed_empty_shards"], json!(0));
+            assert_eq!(outcome["bytes_reclaimed"], json!(0));
         });
     }
 

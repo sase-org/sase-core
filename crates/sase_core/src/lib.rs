@@ -40,6 +40,7 @@ pub mod commit_subject;
 pub mod config;
 pub mod content_layout;
 pub mod continuation;
+pub mod disk_cleanup_outcome;
 pub mod disk_inventory;
 pub mod disk_pressure;
 pub mod editor;
@@ -651,6 +652,14 @@ pub use continuation::{
     MonitorResultWire, MonitorTimeoutKindWire, RetainedLogMetadataWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
+pub use disk_cleanup_outcome::{
+    normalize_disk_cleanup_outcome, DiskCleanupOutcomeError,
+    DiskCleanupOutcomeProblemWire, DiskCleanupOutcomeRequestWire,
+    DiskCleanupOutcomeResultWire, DiskCleanupOwnerOutcomeWire,
+    DiskCleanupOwnerResultWire, CLEANUP_OUTCOME_STATUS_BLOCKED,
+    CLEANUP_OUTCOME_STATUS_FAILED, CLEANUP_OUTCOME_STATUS_INCOMPLETE,
+    CLEANUP_OUTCOME_STATUS_SUCCESS, DISK_CLEANUP_OUTCOME_WIRE_SCHEMA_VERSION,
+};
 pub use disk_inventory::{
     classify_disk_inventory, DiskInventoryError, DiskInventoryInputRowWire,
     DiskInventoryRequestWire, DiskInventoryResultWire, DiskInventoryRowWire,
@@ -988,6 +997,11 @@ pub use git_object_sharing::{
     GitObjectSharingPlanRequestWire, GitObjectSharingPlanWire,
     GIT_OBJECT_SHARING_ACTION_DELETE, GIT_OBJECT_SHARING_ACTION_FAIL,
     GIT_OBJECT_SHARING_ACTION_NONE, GIT_OBJECT_SHARING_ACTION_WRITE,
+    GIT_OBJECT_SHARING_CONTEXT_EXISTING_REUSE,
+    GIT_OBJECT_SHARING_CONTEXT_MAINTENANCE_COMPACT,
+    GIT_OBJECT_SHARING_CONTEXT_MAINTENANCE_DISSOCIATE,
+    GIT_OBJECT_SHARING_CONTEXT_MAINTENANCE_REPAIR,
+    GIT_OBJECT_SHARING_CONTEXT_NEW_CHECKOUT,
     GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION,
 };
 pub use git_query::{
