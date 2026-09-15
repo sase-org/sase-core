@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.30](https://github.com/sase-org/sase-core/compare/v0.34.29...v0.34.30) - 2026-09-15
+
+### Fixed
+
+- *(artifact-ref)* reject home source paths
+
 ## [0.34.28](https://github.com/sase-org/sase-core/compare/v0.34.27...v0.34.28) - 2026-09-14
 
 ### Fixed
