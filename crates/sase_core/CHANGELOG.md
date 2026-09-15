@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.32](https://github.com/sase-org/sase-core/compare/v0.34.31...v0.34.32) - 2026-09-15
+
+### Fixed
+
+- *(fleet)* suppress terminal family member rows
+
 ## [0.34.31](https://github.com/sase-org/sase-core/compare/v0.34.30...v0.34.31) - 2026-09-15
 
 ### Fixed
