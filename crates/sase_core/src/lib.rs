@@ -40,6 +40,7 @@ pub mod commit_subject;
 pub mod config;
 pub mod content_layout;
 pub mod continuation;
+pub mod disk_inventory;
 pub mod disk_pressure;
 pub mod editor;
 pub mod effort;
@@ -649,6 +650,12 @@ pub use continuation::{
     DiagnosticStageStatusWire, DiagnosticStageWire, MonitorOutcomeWire,
     MonitorResultWire, MonitorTimeoutKindWire, RetainedLogMetadataWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
+};
+pub use disk_inventory::{
+    classify_disk_inventory, DiskInventoryError, DiskInventoryInputRowWire,
+    DiskInventoryRequestWire, DiskInventoryResultWire, DiskInventoryRowWire,
+    DISK_INVENTORY_COVERAGE_COMPLETE, DISK_INVENTORY_COVERAGE_PARTIAL,
+    DISK_INVENTORY_COVERAGE_UNRESOLVED, DISK_INVENTORY_WIRE_SCHEMA_VERSION,
 };
 pub use disk_pressure::{
     classify_disk_pressure, DiskPressureError,

@@ -83,6 +83,8 @@
 //! - `classify_commit_types(commit: dict) -> list[str]`
 //! - `aggregate_commit_log(repos: list[tuple[str, list[dict]]], limit: int) -> list[dict]`
 //! - `parse_merge_summary(subject: str, body: str) -> dict | None`
+//! - `disk_inventory_wire_schema_version() -> int`
+//! - `classify_disk_inventory(request: dict) -> dict`
 //! - `read_project_lifecycle_from_content(content: str) -> dict`
 //! - `apply_project_lifecycle_update(content: str, state: str) -> str`
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
@@ -1123,6 +1125,11 @@ use sase_core::continuation::{
     DiagnosticManifestWire, LaunchRequesterContinuationWire, MonitorResultWire,
     CONTINUATION_WIRE_SCHEMA_VERSION,
 };
+use sase_core::disk_inventory::{
+    classify_disk_inventory as core_classify_disk_inventory,
+    DiskInventoryError, DiskInventoryRequestWire,
+    DISK_INVENTORY_WIRE_SCHEMA_VERSION,
+};
 use sase_core::disk_pressure::{
     classify_disk_pressure as core_classify_disk_pressure, DiskPressureError,
     DiskPressureRequestWire, DISK_PRESSURE_WIRE_SCHEMA_VERSION,
@@ -1944,8 +1951,38 @@ fn managed_tmp_reap_error_to_pyerr(error: ManagedTmpReapError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+fn disk_inventory_error_to_pyerr(error: DiskInventoryError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
 fn disk_pressure_error_to_pyerr(error: DiskPressureError) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "disk_inventory_wire_schema_version")]
+fn py_disk_inventory_wire_schema_version() -> u32 {
+    DISK_INVENTORY_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "classify_disk_inventory")]
+fn py_classify_disk_inventory<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: DiskInventoryRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid DiskInventoryRequestWire dict: {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_classify_disk_inventory(&request))
+        .map_err(disk_inventory_error_to_pyerr)?;
+    serialize_to_py(py, &result)
 }
 
 #[pyfunction]
@@ -17979,6 +18016,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_disk_inventory_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_classify_disk_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_disk_pressure_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_disk_pressure, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -19203,6 +19245,55 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn disk_inventory_binding_classifies_overlaps() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module
+                .getattr("disk_inventory_wire_schema_version")
+                .is_ok());
+            assert!(module.getattr("classify_disk_inventory").is_ok());
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": DISK_INVENTORY_WIRE_SCHEMA_VERSION,
+                    "rows": [
+                        {
+                            "section": "workspaces",
+                            "name": "root",
+                            "path": "/tmp/root",
+                            "size_bytes": 100,
+                            "owner": "workspace_cleanup_and_compact",
+                            "horizon": "cleanup TTL 14 day(s)",
+                        },
+                        {
+                            "section": "workspaces",
+                            "name": "primary",
+                            "path": "/tmp/root/primary",
+                            "size_bytes": 40,
+                            "owner": "workspace_git_object_source",
+                            "horizon": "shared Git object source",
+                        }
+                    ],
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_disk_inventory(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(result["logical_total_bytes"], 140);
+            assert_eq!(result["total_bytes"], 100);
+            assert_eq!(
+                result["rows"][1]["overlap_parent_path"].as_str(),
+                Some("/tmp/root")
+            );
+        });
     }
 
     fn py_dict_keys(dict: &Bound<'_, PyDict>) -> Vec<String> {
