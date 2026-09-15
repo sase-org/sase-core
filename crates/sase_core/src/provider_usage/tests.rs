@@ -1749,6 +1749,145 @@ fn usage_refresh_due_respects_cadence_backoff_and_explicit() {
 }
 
 #[test]
+fn usage_refresh_future_marker_does_not_delay_ordinary_due_reasons() {
+    let mut schedule = empty_refresh_schedule("codex", "ctx", 1);
+    schedule.due_at = Some(NOW + 4.0 * 24.0 * 60.0 * 60.0);
+    schedule.due_reason = Some("disable_expiry".to_string());
+
+    let cadence_due = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 301.0),
+        false,
+    );
+    assert!(cadence_due.due);
+    assert_eq!(cadence_due.reason, "cadence");
+
+    let never_observed =
+        evaluate_refresh_due(NOW, 300.0, false, Some(&schedule), None, false);
+    assert!(never_observed.due);
+    assert_eq!(never_observed.reason, "never_observed");
+
+    let reset_passed = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 10.0),
+        true,
+    );
+    assert!(reset_passed.due);
+    assert_eq!(reset_passed.reason, "reset_passed");
+}
+
+#[test]
+fn usage_refresh_future_marker_competes_with_fresh_deadline() {
+    let mut schedule = empty_refresh_schedule("codex", "ctx", 1);
+    schedule.due_reason = Some("disable_expiry".to_string());
+
+    schedule.due_at = Some(NOW + 60.0);
+    let marker_first = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 10.0),
+        false,
+    );
+    assert!(!marker_first.due);
+    assert_eq!(marker_first.reason, "scheduled");
+    assert_eq!(marker_first.next_at, Some(NOW + 60.0));
+
+    schedule.due_at = Some(NOW + 600.0);
+    let cadence_first = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 10.0),
+        false,
+    );
+    assert!(!cadence_first.due);
+    assert_eq!(cadence_first.reason, "fresh");
+    assert_eq!(cadence_first.next_at, Some(NOW + 290.0));
+
+    schedule.due_at = Some(NOW + 290.0);
+    let equal_deadline = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 10.0),
+        false,
+    );
+    assert!(!equal_deadline.due);
+    assert_eq!(equal_deadline.reason, "scheduled");
+    assert_eq!(equal_deadline.next_at, Some(NOW + 290.0));
+}
+
+#[test]
+fn usage_refresh_restrictions_outweigh_future_and_reached_markers() {
+    let mut schedule = empty_refresh_schedule("codex", "ctx", 1);
+    schedule.due_at = Some(NOW - 1.0);
+    schedule.due_reason = Some("disable_expiry".to_string());
+    schedule.retry_after_until = Some(NOW + 30.0);
+
+    let retry_after_automatic = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 400.0),
+        true,
+    );
+    assert!(!retry_after_automatic.due);
+    assert_eq!(retry_after_automatic.reason, "retry_after");
+    assert_eq!(retry_after_automatic.next_at, Some(NOW + 30.0));
+
+    let retry_after_explicit = evaluate_refresh_due(
+        NOW,
+        300.0,
+        true,
+        Some(&schedule),
+        Some(NOW - 400.0),
+        true,
+    );
+    assert!(!retry_after_explicit.due);
+    assert_eq!(retry_after_explicit.reason, "retry_after");
+
+    schedule.retry_after_until = None;
+    schedule.backoff_until = Some(NOW + 45.0);
+    let backoff = evaluate_refresh_due(
+        NOW,
+        300.0,
+        false,
+        Some(&schedule),
+        Some(NOW - 400.0),
+        true,
+    );
+    assert!(!backoff.due);
+    assert_eq!(backoff.reason, "backoff");
+    assert_eq!(backoff.next_at, Some(NOW + 45.0));
+
+    schedule.backoff_until = None;
+    schedule.due_at = Some(NOW + 60.0);
+    schedule.cooldown_until = Some(NOW + 20.0);
+    let cooldown = evaluate_refresh_due(
+        NOW,
+        300.0,
+        true,
+        Some(&schedule),
+        Some(NOW - 400.0),
+        true,
+    );
+    assert!(!cooldown.due);
+    assert_eq!(cooldown.reason, "cooldown");
+    assert_eq!(cooldown.next_at, Some(NOW + 20.0));
+}
+
+#[test]
 fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
     let temp = tempdir().unwrap();
     let due = evaluate_provider_usage_refresh_due(
@@ -1907,6 +2046,197 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
 }
 
 #[test]
+fn usage_refresh_future_disable_expiry_preserves_marker_and_recovers_cadence() {
+    let temp = tempdir().unwrap();
+    let provider = "codex";
+    let context_id = "ctx";
+    let generation = 1;
+    let reminder_at = NOW + 4.0 * 24.0 * 60.0 * 60.0;
+
+    let mut exhausted = named_window("default", 100.0, NOW - 1_000.0);
+    exhausted.vendor_state = UsageVendorState::Rejected;
+    exhausted.resets_at = Some(NOW - 10.0);
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            provider,
+            context_id,
+            generation,
+            NOW - 1_000.0,
+            UsageCompleteness::Complete,
+            vec![exhausted],
+        ),
+        NOW - 999.0,
+    )
+    .unwrap();
+    mark_provider_usage_refresh_due(
+        temp.path(),
+        ProviderUsageRefreshMarkDueRequestWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            reason: "disable_expiry".to_string(),
+            due_at: Some(reminder_at),
+        },
+        NOW - 900.0,
+    )
+    .unwrap();
+
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            provider,
+            context_id,
+            generation,
+            NOW,
+            UsageCompleteness::Complete,
+            vec![named_window("default", 7.0, NOW)],
+        ),
+        NOW + 1.0,
+    )
+    .unwrap();
+    let early_success = record_provider_usage_refresh_attempt(
+        temp.path(),
+        ProviderUsageRefreshAttemptWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            outcome: "ok".to_string(),
+            retry_after_seconds: None,
+            cadence_seconds: CADENCE,
+        },
+        NOW + 1.0,
+    )
+    .unwrap();
+    assert_eq!(early_success.due_at, Some(reminder_at));
+    assert_eq!(early_success.due_reason.as_deref(), Some("disable_expiry"));
+
+    let request = ProviderUsageRefreshAdmitRequestWire {
+        provider: provider.to_string(),
+        context_id: context_id.to_string(),
+        account_generation: generation,
+        operation_id: "op-cadence-1".to_string(),
+        ttl_seconds: 10.0,
+        cadence_seconds: CADENCE,
+        explicit: false,
+    };
+    let first_cadence = admit_provider_usage_refresh(
+        temp.path(),
+        request.clone(),
+        NOW + CADENCE,
+    )
+    .unwrap();
+    assert_eq!(
+        first_cadence.status,
+        ProviderUsageRefreshAdmissionStatus::Reserved
+    );
+
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            provider,
+            context_id,
+            generation,
+            NOW + CADENCE + 1.0,
+            UsageCompleteness::Complete,
+            vec![named_window("default", 6.0, NOW + CADENCE + 1.0)],
+        ),
+        NOW + CADENCE + 2.0,
+    )
+    .unwrap();
+    let second_success = record_provider_usage_refresh_attempt(
+        temp.path(),
+        ProviderUsageRefreshAttemptWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            outcome: "ok".to_string(),
+            retry_after_seconds: None,
+            cadence_seconds: CADENCE,
+        },
+        NOW + CADENCE + 2.0,
+    )
+    .unwrap();
+    assert_eq!(second_success.due_at, Some(reminder_at));
+    release_provider_usage_refresh(
+        temp.path(),
+        provider,
+        context_id,
+        generation,
+        &first_cadence.reservation.unwrap().lease_id,
+        NOW + CADENCE + 3.0,
+    )
+    .unwrap();
+
+    let second_cadence = admit_provider_usage_refresh(
+        temp.path(),
+        ProviderUsageRefreshAdmitRequestWire {
+            operation_id: "op-cadence-2".to_string(),
+            ..request.clone()
+        },
+        NOW + 2.0 * CADENCE + 2.0,
+    )
+    .unwrap();
+    assert_eq!(
+        second_cadence.status,
+        ProviderUsageRefreshAdmissionStatus::Reserved
+    );
+    record_provider_usage_refresh_attempt(
+        temp.path(),
+        ProviderUsageRefreshAttemptWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            outcome: "ok".to_string(),
+            retry_after_seconds: None,
+            cadence_seconds: CADENCE,
+        },
+        NOW + 2.0 * CADENCE + 3.0,
+    )
+    .unwrap();
+    release_provider_usage_refresh(
+        temp.path(),
+        provider,
+        context_id,
+        generation,
+        &second_cadence.reservation.unwrap().lease_id,
+        NOW + 2.0 * CADENCE + 4.0,
+    )
+    .unwrap();
+
+    let expiry_due = evaluate_provider_usage_refresh_due(
+        temp.path(),
+        ProviderUsageRefreshDueRequestWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            cadence_seconds: CADENCE,
+            explicit: false,
+        },
+        reminder_at,
+    )
+    .unwrap();
+    assert!(expiry_due.due);
+    assert_eq!(expiry_due.reason, "marked_due");
+
+    let consumed = record_provider_usage_refresh_attempt(
+        temp.path(),
+        ProviderUsageRefreshAttemptWire {
+            provider: provider.to_string(),
+            context_id: context_id.to_string(),
+            account_generation: generation,
+            outcome: "ok".to_string(),
+            retry_after_seconds: None,
+            cadence_seconds: CADENCE,
+        },
+        reminder_at + 1.0,
+    )
+    .unwrap();
+    assert_eq!(consumed.due_at, None);
+    assert_eq!(consumed.due_reason, None);
+}
+
+#[test]
 fn usage_refresh_mark_due_is_once_per_reason_and_survives_future_due() {
     let temp = tempdir().unwrap();
     let first = mark_provider_usage_refresh_due(
@@ -1949,6 +2279,19 @@ fn usage_refresh_mark_due_is_once_per_reason_and_survives_future_due() {
     )
     .unwrap();
     assert!(future.marked);
+    record_provider_usage_observation(
+        temp.path(),
+        usage_observation(
+            "synth",
+            "ctx",
+            1,
+            NOW,
+            UsageCompleteness::Complete,
+            vec![named_window("week", 12.5, NOW)],
+        ),
+        NOW + 1.0,
+    )
+    .unwrap();
     record_provider_usage_refresh_attempt(
         temp.path(),
         ProviderUsageRefreshAttemptWire {

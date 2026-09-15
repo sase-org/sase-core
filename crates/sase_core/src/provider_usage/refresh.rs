@@ -249,15 +249,6 @@ pub fn evaluate_refresh_due(
             next_at: None,
         };
     }
-    if let Some(due_at) = marked {
-        if now < due_at {
-            return RefreshDueDecision {
-                due: false,
-                reason: "scheduled",
-                next_at: Some(due_at),
-            };
-        }
-    }
     if reset_passed {
         return RefreshDueDecision {
             due: true,
@@ -278,6 +269,20 @@ pub fn evaluate_refresh_due(
                     due: true,
                     reason: "cadence",
                     next_at: None,
+                }
+            } else if let Some(due_at) = marked {
+                if due_at <= next {
+                    RefreshDueDecision {
+                        due: false,
+                        reason: "scheduled",
+                        next_at: Some(due_at),
+                    }
+                } else {
+                    RefreshDueDecision {
+                        due: false,
+                        reason: "fresh",
+                        next_at: Some(next),
+                    }
                 }
             } else {
                 RefreshDueDecision {
