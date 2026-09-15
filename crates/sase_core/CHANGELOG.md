@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.29](https://github.com/sase-org/sase-core/compare/v0.34.28...v0.34.29) - 2026-09-15
+
+### Fixed
+
+- *(fleet)* accept compatible capability summaries
+
 ## [0.34.28](https://github.com/sase-org/sase-core/compare/v0.34.27...v0.34.28) - 2026-09-14
 
 ### Fixed
