@@ -61,6 +61,12 @@ pub struct GatewayBuildWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayServiceVersionWire {
+    pub service: String,
+    pub package_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBindWire {
     pub address: String,
     pub is_loopback: bool,
@@ -321,6 +327,8 @@ pub struct FleetEnrollmentResponseWire {
 pub struct FleetHelloResponseWire {
     pub schema_version: u32,
     pub protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_version: Option<GatewayServiceVersionWire>,
     pub installation: InstallationIdentityRecordWire,
     pub machine_selector: String,
     pub capabilities: CapabilitySetWire,

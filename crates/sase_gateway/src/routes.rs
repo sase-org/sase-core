@@ -80,24 +80,25 @@ use crate::wire::{
     FleetProjectEligibilityRequestWire, FleetProjectEligibilityResponseWire,
     FleetResyncReasonWire, FleetSummaryResponseWire,
     FleetTokenRotateRequestWire, FleetTokenRotateResponseWire, GatewayBindWire,
-    GatewayBuildWire, HealthResponseWire, MobileAgentForkRequestWire,
-    MobileAgentImageLaunchRequestWire, MobileAgentKillRequestWire,
-    MobileAgentKillResultWire, MobileAgentLaunchResultWire,
-    MobileAgentListRequestWire, MobileAgentListResponseWire,
-    MobileAgentResumeOptionsResponseWire, MobileAgentRetryRequestWire,
-    MobileAgentRetryResultWire, MobileAgentTextLaunchRequestWire,
-    MobileBeadListRequestWire, MobileBeadListResponseWire,
-    MobileBeadShowRequestWire, MobileBeadShowResponseWire,
-    MobileChangeSpecTagListRequestWire, MobileChangeSpecTagListResponseWire,
-    MobilePatchTagListRequestWire, MobilePatchTagListResponseWire,
-    MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
-    MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
-    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-    NotificationStateMutationResponseWire, PairFinishRequestWire,
-    PairFinishResponseWire, PairStartRequestWire, PairStartResponseWire,
-    PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
-    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
-    SessionResponseWire, StoreCursorWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    GatewayBuildWire, GatewayServiceVersionWire, HealthResponseWire,
+    MobileAgentForkRequestWire, MobileAgentImageLaunchRequestWire,
+    MobileAgentKillRequestWire, MobileAgentKillResultWire,
+    MobileAgentLaunchResultWire, MobileAgentListRequestWire,
+    MobileAgentListResponseWire, MobileAgentResumeOptionsResponseWire,
+    MobileAgentRetryRequestWire, MobileAgentRetryResultWire,
+    MobileAgentTextLaunchRequestWire, MobileBeadListRequestWire,
+    MobileBeadListResponseWire, MobileBeadShowRequestWire,
+    MobileBeadShowResponseWire, MobileChangeSpecTagListRequestWire,
+    MobileChangeSpecTagListResponseWire, MobilePatchTagListRequestWire,
+    MobilePatchTagListResponseWire, MobileUpdateStartRequestWire,
+    MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
+    MobileUpdateStatusResponseWire, MobileXpromptCatalogRequestWire,
+    MobileXpromptCatalogResponseWire, NotificationStateMutationResponseWire,
+    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
+    PairStartResponseWire, PushSubscriptionDeleteResponseWire,
+    PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
+    PushSubscriptionRequestWire, SessionResponseWire, StoreCursorWire,
+    GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 128;
@@ -861,6 +862,10 @@ async fn fleet_hello(
     Ok(Json(FleetHelloResponseWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         protocol_version,
+        gateway_version: Some(GatewayServiceVersionWire {
+            service: "sase-gateway".to_string(),
+            package_version: env!("CARGO_PKG_VERSION").to_string(),
+        }),
         installation,
         machine_selector: state.machine_selector.clone(),
         capabilities: fleet_capabilities(&credential.scopes),
@@ -5887,6 +5892,13 @@ exit 4
         .await;
         assert_eq!(hello_status, StatusCode::OK);
         assert_eq!(hello["protocol_version"], 1);
+        assert_eq!(
+            hello["gateway_version"],
+            json!({
+                "service": "sase-gateway",
+                "package_version": env!("CARGO_PKG_VERSION")
+            })
+        );
         assert_eq!(
             hello["installation"]["installation_id"],
             bootstrap.pinned_installation_id

@@ -355,6 +355,7 @@
       "credential": "FleetCredentialRecordWire",
       "cursor": "StoreCursorWire",
       "freshness": "FleetSnapshotFreshnessWire",
+      "gateway_version": "GatewayServiceVersionWire|null; omitted by older gateways",
       "installation": "InstallationIdentityRecordWire",
       "machine_selector": "string",
       "protocol_version": "u32",
@@ -559,6 +560,10 @@
       "schema_version": "u32",
       "token": "string; returned once",
       "token_type": "bearer"
+    },
+    "GatewayServiceVersionWire": {
+      "package_version": "string",
+      "service": "sase-gateway"
     },
     "InstallationIdentityRecordWire": {
       "adopted_at_unix": "f64|null",

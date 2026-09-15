@@ -1176,6 +1176,10 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "host": "string[]; fleet gateway scopes",
                 "protocol": "string[]"
             },
+            "GatewayServiceVersionWire": {
+                "service": "sase-gateway",
+                "package_version": "string"
+            },
             "FleetBootstrapIssueRequestWire": {
                 "local_only": true,
                 "schema_version": "u32",
@@ -1666,6 +1670,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
             "FleetHelloResponseWire": {
                 "schema_version": "u32",
                 "protocol_version": "u32",
+                "gateway_version": "GatewayServiceVersionWire|null; omitted by older gateways",
                 "installation": "InstallationIdentityRecordWire",
                 "machine_selector": "string",
                 "capabilities": "CapabilitySetWire",
