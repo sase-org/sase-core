@@ -2913,8 +2913,7 @@ pub fn validate_resolved_agent_summary(
                 .to_string(),
         ));
     }
-    let normalized = summary.capabilities.normalized()?;
-    if normalized != summary.capabilities {
+    if !summary.capabilities.content_is_normalized()? {
         return Err(FleetContractError::Validation(
             "summary capabilities are not normalized".to_string(),
         ));
@@ -3625,6 +3624,13 @@ impl CapabilitySetWire {
             host: normalize_capabilities("host", &self.host)?,
             protocol: normalize_capabilities("protocol", &self.protocol)?,
         })
+    }
+
+    fn content_is_normalized(&self) -> Result<bool, FleetContractError> {
+        let normalized = self.normalized()?;
+        Ok(self.resource == normalized.resource
+            && self.host == normalized.host
+            && self.protocol == normalized.protocol)
     }
 }
 
@@ -7885,6 +7891,47 @@ mod tests {
     }
 
     #[test]
+    fn summary_accepts_readable_capability_schema_versions_but_rejects_unnormalized_content(
+    ) {
+        let mut summary = project_resolved_agent_summary(&projection_request(
+            logical('a', "caps"),
+            Some(exact('a', "caps", "run-1")),
+            1,
+            record_running(),
+        ))
+        .unwrap();
+
+        for version in [1, 2, FLEET_CONTRACT_SCHEMA_VERSION] {
+            summary.capabilities.schema_version = version;
+            assert_eq!(
+                validate_resolved_agent_summary(&summary).unwrap(),
+                summary
+            );
+        }
+
+        for version in [0, FLEET_CONTRACT_SCHEMA_VERSION + 1] {
+            summary.capabilities.schema_version = version;
+            let err = validate_resolved_agent_summary(&summary).unwrap_err();
+            assert!(err.to_string().contains("capability set schema_version"));
+        }
+
+        summary.capabilities.schema_version = 1;
+        summary.capabilities.resource =
+            vec!["stop".to_string(), "content.read".to_string()];
+        let err = validate_resolved_agent_summary(&summary).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("summary capabilities are not normalized"));
+
+        summary.capabilities.resource =
+            vec!["content.read".to_string(), "content.read".to_string()];
+        let err = validate_resolved_agent_summary(&summary).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("summary capabilities are not normalized"));
+    }
+
+    #[test]
     fn projection_carries_owner_presentation_facts_for_remote_rendering() {
         let locator = logical('a', "worker");
         let exact_locator = exact('a', "worker", "run-1");
@@ -8838,6 +8885,170 @@ mod tests {
         assert_eq!(counted.fleet.counts.occupied_runner_slots, 11);
         assert!(counted.fleet.partial);
         assert_eq!(counted.fleet.unknown_origins, vec![id('b')]);
+    }
+
+    #[test]
+    fn federation_catalog_accepts_readable_capability_schema_versions() {
+        let mut v1_row = project_resolved_agent_summary(&projection_request(
+            logical('b', "v1-caps"),
+            Some(exact('b', "v1-caps", "run-1")),
+            1,
+            record_running(),
+        ))
+        .unwrap();
+        v1_row.schema_version = 1;
+        v1_row.capabilities.schema_version = 1;
+        let mut v2_row = project_resolved_agent_summary(&projection_request(
+            logical('b', "v2-caps"),
+            Some(exact('b', "v2-caps", "run-1")),
+            2,
+            record_running(),
+        ))
+        .unwrap();
+        v2_row.schema_version = 2;
+        v2_row.capabilities.schema_version = 2;
+        let rows = vec![v1_row.clone(), v2_row.clone()];
+        let snapshot_id =
+            catalog_snapshot_id(FleetCatalogScopeWire::Presentation, &rows);
+        let response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 1,
+            "hosts": [{
+                "schema_version": 1,
+                "alias": "apollo",
+                "provider_ref": "apollo-provider",
+                "installation_id": id('b'),
+                "endpoint": "https://apollo.example.test",
+                "status": "ok",
+                "cached": false,
+                "age_seconds": null,
+                "payload": {
+                    "schema_version": 1,
+                    "cursor": {
+                        "schema_version": 1,
+                        "store_generation": "gen-apollo",
+                        "sequence": 12
+                    },
+                    "catalog_scope": "presentation",
+                    "catalog_snapshot_id": snapshot_id.clone(),
+                    "counts": authoritative_counts(2, 2, Some(2_000.0)),
+                    "freshness": "fresh",
+                    "page": {
+                        "schema_version": 1,
+                        "scope": "presentation",
+                        "snapshot_id": snapshot_id,
+                        "rows": rows,
+                        "limit": 50,
+                        "total_matching_rows": 2,
+                        "next_cursor": null,
+                        "has_more": false,
+                        "state": "finished"
+                    }
+                },
+                "error": null
+            }]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response: response.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(normalized.hosts[0].status, "ok");
+        assert_eq!(normalized.summaries.len(), 2);
+        assert_eq!(normalized.summaries[0].capabilities.schema_version, 1);
+        assert_eq!(normalized.summaries[1].capabilities.schema_version, 2);
+        assert!(!normalized
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "fleet_envelope_invalid"));
+
+        let counted = count_focus_and_fleet_from_federation(
+            &FocusFleetFederationCountsRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                local_summaries: Vec::new(),
+                followed_response: None,
+                fleet_response: Some(response),
+            },
+        )
+        .unwrap();
+        assert_eq!(counted.fleet.counts.running, 2);
+        assert!(counted.fleet.unknown_origins.is_empty());
+    }
+
+    #[test]
+    fn federation_catalog_rejects_unnormalized_readable_capability_content() {
+        let mut row = project_resolved_agent_summary(&projection_request(
+            logical('b', "bad-caps"),
+            Some(exact('b', "bad-caps", "run-1")),
+            1,
+            record_running(),
+        ))
+        .unwrap();
+        row.schema_version = 1;
+        row.capabilities.schema_version = 1;
+        row.capabilities.resource =
+            vec!["stop".to_string(), "content.read".to_string()];
+        let snapshot_id =
+            catalog_snapshot_id(FleetCatalogScopeWire::Presentation, &[]);
+        let response = json!({
+            "schema_version": 1,
+            "operation": "catalog",
+            "configured_hosts": 1,
+            "hosts": [{
+                "schema_version": 1,
+                "alias": "apollo",
+                "provider_ref": "apollo-provider",
+                "installation_id": id('b'),
+                "endpoint": "https://apollo.example.test",
+                "status": "ok",
+                "cached": false,
+                "age_seconds": null,
+                "payload": {
+                    "schema_version": 1,
+                    "cursor": {
+                        "schema_version": 1,
+                        "store_generation": "gen-apollo",
+                        "sequence": 12
+                    },
+                    "catalog_scope": "presentation",
+                    "catalog_snapshot_id": snapshot_id.clone(),
+                    "counts": authoritative_counts(1, 1, Some(2_000.0)),
+                    "freshness": "fresh",
+                    "page": {
+                        "schema_version": 1,
+                        "scope": "presentation",
+                        "snapshot_id": snapshot_id,
+                        "rows": [row],
+                        "limit": 50,
+                        "total_matching_rows": 1,
+                        "next_cursor": null,
+                        "has_more": false,
+                        "state": "finished"
+                    }
+                },
+                "error": null
+            }]
+        });
+
+        let normalized = normalize_fleet_federation_response(
+            &FleetFederationNormalizeRequestWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                response,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(normalized.hosts[0].status, "invalid");
+        assert!(normalized.summaries.is_empty());
+        assert!(normalized.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "fleet_envelope_invalid"
+                && diagnostic.alias.as_deref() == Some("apollo")
+        }));
     }
 
     #[test]
