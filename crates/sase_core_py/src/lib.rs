@@ -20205,6 +20205,50 @@ COMMITS:
     }
 
     #[test]
+    fn proc_runtime_retention_binding_requires_trustworthy_store_snapshot() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("procs.jsonl");
+        let runtime_root = temp.path().join("runtime");
+        let runtime_dir = runtime_root.join("0123456789ab");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::write(runtime_dir.join("request.json"), "{}").unwrap();
+        fs::write(&store, "not-json\n").unwrap();
+
+        Python::with_gil(|py| {
+            let request_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "store_path": store.to_string_lossy(),
+                    "runtime_root": runtime_root.to_string_lossy(),
+                    "now_epoch_seconds": 9_999_999_999.0,
+                    "orphan_horizon_seconds": 1.0,
+                    "max_orphan_removals": 10,
+                    "apply": true,
+                    "pruned_proc_ids": [],
+                    "sweep_orphans": true
+                }),
+            )
+            .unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let error =
+                py_apply_proc_runtime_retention(py, request).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("incomplete proc store snapshot"));
+            assert!(runtime_dir.exists());
+
+            fs::write(&store, "").unwrap();
+            let outcome = py_apply_proc_runtime_retention(py, request).unwrap();
+            let outcome = py_to_json_value(outcome.bind(py)).unwrap();
+            assert_eq!(outcome["removed"], json!(1));
+            assert!(!runtime_dir.exists());
+        });
+    }
+
+    #[test]
     fn commit_footer_bindings_convert_linked_payloads() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

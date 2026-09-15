@@ -443,7 +443,18 @@ pub(super) fn read_rows_unlocked(
         }
         Err(error) => return Err(error.to_string()),
     };
+    read_rows_from_file(file)
+}
 
+pub(super) fn read_existing_rows_unlocked(
+    path: &Path,
+) -> Result<(Vec<ProcWire>, ProcStoreStatsWire), String> {
+    read_rows_from_file(File::open(path).map_err(|error| error.to_string())?)
+}
+
+fn read_rows_from_file(
+    file: File,
+) -> Result<(Vec<ProcWire>, ProcStoreStatsWire), String> {
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
     let mut stats = ProcStoreStatsWire::default();
