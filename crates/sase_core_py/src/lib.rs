@@ -455,6 +455,8 @@
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict` (`issue["notes"]` is a list of note records)
 //! - `bead_note_edit(beads_dir: str, issue_id: str, note_id: str, text: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_note_remove(beads_dir: str, issue_id: str, note_id: str, author: str | None = None, now: str | None = None) -> dict`
+//! - `bead_target_routing_wire_schema_version() -> int`
+//! - `bead_route_targets(request: dict) -> dict`
 //! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None, observed_since: str | None = None) -> dict`
 //! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
 //! - `bead_snooze_cancel(beads_dir: str, issue_id: str, actor: str = "", now: str | None = None) -> dict`
@@ -1018,6 +1020,7 @@ use sase_core::bead::{
     repair_event_store_manifest as core_repair_event_store_manifest,
     resolution_migration_sql as core_bead_resolution_migration_sql,
     resolve_issue_id as core_bead_resolve_issue_id,
+    route_bead_targets as core_bead_route_targets,
     search_issues as core_bead_search_issues,
     set_bead_link_projection as core_bead_set_link_projection,
     show_issue as core_bead_show_issue,
@@ -1032,8 +1035,9 @@ use sase_core::bead::{
     update_issue as core_bead_update_issue,
     update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadPreclaimAssignmentWire, BeadResolutionWire, BeadUpdateFieldsWire,
-    IssueWire,
+    BeadPreclaimAssignmentWire, BeadResolutionWire,
+    BeadTargetRoutingRequestWire, BeadUpdateFieldsWire, IssueWire,
+    BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,
 };
 use sase_core::bead_action::{
     decide_bead_action_from_json as core_decide_bead_action_from_json,
@@ -5324,6 +5328,35 @@ fn py_bead_needs_task_type_migration(create_table_sql: Option<&str>) -> bool {
 #[pyo3(name = "bead_task_type_migration_sql")]
 fn py_bead_task_type_migration_sql() -> &'static str {
     core_bead_task_type_migration_sql()
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_target_routing_wire_schema_version")]
+fn py_bead_target_routing_wire_schema_version() -> u64 {
+    BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_route_targets")]
+fn py_bead_route_targets<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: BeadTargetRoutingRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid BeadTargetRoutingRequestWire dict: {error}"
+        ))
+    })?;
+    let value = serde_json::to_value(core_bead_route_targets(&request))
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "internal bead target-routing serialize error: {error}"
+            ))
+        })?;
+    json_value_to_py(py, &value)
 }
 
 #[pyfunction]
@@ -18232,6 +18265,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_needs_task_type_migration, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_task_type_migration_sql, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_target_routing_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_route_targets, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_event_store, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_read_legacy_jsonl, m)?)?;
@@ -19609,6 +19647,41 @@ COMMITS:
             assert!(py_parse_merge_summary(py, "Merge unknown shape", "")
                 .unwrap()
                 .is_none(py));
+        });
+    }
+
+    #[test]
+    fn bead_target_routing_binding_round_trips() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_route_targets").is_ok());
+            assert_eq!(py_bead_target_routing_wire_schema_version(), 1);
+
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "targets": ["bob-cli-1"],
+                    "candidate_stores": [{
+                        "store_key": "bob",
+                        "project_key": "gh_acme__bob-cli",
+                        "project_label": "bob-cli",
+                        "issue_ids": ["bob-cli-1"]
+                    }]
+                }),
+            )
+            .unwrap()
+            .into_bound(py);
+            let request = request.downcast::<PyDict>().unwrap();
+            let result = py_bead_route_targets(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(value["routes"][0]["resolved_id"], json!("bob-cli-1"));
+            assert_eq!(
+                value["routes"][0]["store"]["project_label"],
+                json!("bob-cli")
+            );
         });
     }
 

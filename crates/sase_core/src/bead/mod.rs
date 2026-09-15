@@ -11,6 +11,7 @@ pub mod history;
 pub mod jsonl;
 pub mod mutation;
 pub mod read;
+pub mod routing;
 pub mod schema;
 pub mod search;
 pub mod wire;
@@ -66,6 +67,12 @@ pub use read::{
     show_issue_detail, show_issue_detail_with_options, stats,
     BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
     BEAD_READ_WIRE_SCHEMA_VERSION,
+};
+pub use routing::{
+    route_bead_targets, BeadTargetRouteErrorWire, BeadTargetRouteWire,
+    BeadTargetRoutingOutcomeWire, BeadTargetRoutingRequestWire,
+    BeadTargetStoreDescriptorWire, BeadTargetStoreRouteWire,
+    BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,
 };
 pub use schema::{
     changespec_metadata_migration_sql, drop_flag_type_migration_sql,
