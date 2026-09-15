@@ -26,12 +26,22 @@ use super::wire::{
 const AXE: &str = "axe";
 const LUMBERJACKS: &str = "lumberjacks";
 const CHOPS: &str = "chops";
+const ROUTINES: &str = "routines";
+const JOBS: &str = "jobs";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourcePath {
+    layer: String,
+    key_path: Vec<String>,
+}
 
 /// One exact config path and the layer that supplied its effective value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AxeFieldProvenanceWire {
     pub key_path: Vec<String>,
     pub path: String,
+    pub source_key_path: Vec<String>,
+    pub source_path: String,
     pub layer: String,
 }
 
@@ -53,16 +63,16 @@ impl AxeEntrySelectorWire {
             ));
         }
         match self.kind.as_str() {
-            "lumberjack" if self.chop.is_none() => Ok(()),
-            "chop"
+            "lumberjack" | "routine" if self.chop.is_none() => Ok(()),
+            "chop" | "job"
                 if self.chop.as_ref().is_some_and(|name| !name.is_empty()) =>
             {
                 Ok(())
             }
-            "lumberjack" => Err(ConfigError::validation(
+            "lumberjack" | "routine" => Err(ConfigError::validation(
                 "lumberjack selector must not include a chop identity",
             )),
-            "chop" => Err(ConfigError::validation(
+            "chop" | "job" => Err(ConfigError::validation(
                 "chop selector requires a non-empty chop identity",
             )),
             other => Err(ConfigError::validation(format!(
@@ -92,6 +102,8 @@ pub struct AxeRawContributionWire {
     pub writable: bool,
     /// `absent`, `legacy_list`, or `keyed_map`.
     pub representation: String,
+    pub key_path: Vec<String>,
+    pub path: String,
     pub has_value: bool,
     pub value: Value,
 }
@@ -123,6 +135,8 @@ pub struct AxeConfigComposeRequestWire {
     pub require_descriptions: bool,
     #[serde(default)]
     pub require_description_shape: bool,
+    #[serde(default)]
+    pub routine_job_contract: bool,
 }
 
 /// Effective AXE config, exact provenance, entity inventory, and diagnostics.
@@ -130,7 +144,9 @@ pub struct AxeConfigComposeRequestWire {
 pub struct AxeConfigCompositionWire {
     pub schema_version: u32,
     pub effective_config: Value,
+    pub public_config: Value,
     pub provenance: Vec<AxeFieldProvenanceWire>,
+    pub public_provenance: Vec<AxeFieldProvenanceWire>,
     pub entries: Vec<AxeInventoryEntryWire>,
     pub diagnostics: Vec<ConfigDiagnosticWire>,
 }
@@ -185,7 +201,7 @@ pub struct AxeEntryMutationPlanWire {
     pub promoted_legacy_list: bool,
 }
 
-type ExactProvenance = BTreeMap<Vec<String>, String>;
+type ExactProvenance = BTreeMap<Vec<String>, SourcePath>;
 
 /// Compose all AXE layers with exact-key provenance and entity inventory.
 pub fn compose_axe_config(
@@ -197,12 +213,19 @@ pub fn compose_axe_config(
         request.require_description_shape,
     )?;
     let provenance = provenance_wire(&exact_provenance);
+    let (public_config, public_provenance) = if request.routine_job_contract {
+        public_projection(&effective_config, &provenance)
+    } else {
+        (effective_config.clone(), provenance.clone())
+    };
     let entries =
         build_inventory(&effective_config, &request.layers, &exact_provenance);
     Ok(AxeConfigCompositionWire {
         schema_version: CONFIG_WIRE_SCHEMA_VERSION,
         effective_config,
+        public_config,
         provenance,
+        public_provenance,
         entries,
         diagnostics,
     })
@@ -260,6 +283,7 @@ pub fn plan_axe_entry_mutation(
         layers: request.layers.clone(),
         require_descriptions: request.require_descriptions,
         require_description_shape: request.require_description_shape,
+        routine_job_contract: false,
     })?;
     if let Some(entry) = original
         .entries
@@ -299,6 +323,7 @@ pub fn plan_axe_entry_mutation(
         layers: candidate_layers,
         require_descriptions: request.require_descriptions,
         require_description_shape: request.require_description_shape,
+        routine_job_contract: false,
     })?;
     let after =
         selected_value(&candidate.effective_config, &request.selector).cloned();
@@ -340,25 +365,37 @@ fn mutate_target_contribution(
     selector: &AxeEntrySelectorWire,
     operations: &[AxeFieldOperationWire],
 ) -> Result<(String, bool, Vec<String>, Value), ConfigError> {
-    let lumberjacks = ensure_object(root, AXE, LUMBERJACKS)?;
-    if selector.kind == "lumberjack" {
-        let representation = if lumberjacks.contains_key(&selector.lumberjack) {
+    let routine_key = if selector.chop.is_some() {
+        routine_key_for_job_edit(root, selector)
+    } else {
+        routine_key_for_routine_edit(root, selector)
+    };
+    let jobs_key = jobs_key_for_edit(root, selector, routine_key);
+    let axe = ensure_map(root, AXE, AXE)?;
+    let routines_display = format!("{AXE}.{routine_key}");
+    let routines = ensure_map(axe, routine_key, &routines_display)?;
+    if selector.chop.is_none() {
+        let representation = if routines.contains_key(&selector.lumberjack) {
             "keyed_map"
         } else {
             "absent"
         };
-        let current = lumberjacks
+        let current = routines
             .get(&selector.lumberjack)
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
         let mut contribution = current;
         apply_operations(&mut contribution, operations)?;
-        lumberjacks.insert(
+        routines.insert(
             selector.lumberjack.clone(),
             Value::Object(contribution.clone()),
         );
-        let path = selector.key_path();
+        let path = vec![
+            AXE.to_string(),
+            routine_key.to_string(),
+            selector.lumberjack.clone(),
+        ];
         return Ok((
             representation.to_string(),
             false,
@@ -367,7 +404,7 @@ fn mutate_target_contribution(
         ));
     }
 
-    let lumberjack = lumberjacks
+    let lumberjack = routines
         .entry(selector.lumberjack.clone())
         .or_insert_with(|| Value::Object(Map::new()));
     if !lumberjack.is_object() {
@@ -379,9 +416,9 @@ fn mutate_target_contribution(
     let lumberjack = lumberjack
         .as_object_mut()
         .expect("checked lumberjack object");
-    let (representation, promoted) = match lumberjack.get_mut(CHOPS) {
+    let (representation, promoted) = match lumberjack.get_mut(jobs_key) {
         None => {
-            lumberjack.insert(CHOPS.to_string(), Value::Object(Map::new()));
+            lumberjack.insert(jobs_key.to_string(), Value::Object(Map::new()));
             ("absent".to_string(), false)
         }
         Some(raw_chops) if raw_chops.is_array() => {
@@ -402,7 +439,7 @@ fn mutate_target_contribution(
         }
     };
     let raw_chops = lumberjack
-        .get_mut(CHOPS)
+        .get_mut(jobs_key)
         .expect("chops inserted or already present");
     let chops = raw_chops.as_object_mut().expect("chops normalized to map");
     let chop_name = selector.chop.as_ref().expect("validated chop selector");
@@ -418,18 +455,114 @@ fn mutate_target_contribution(
     if promoted {
         let path = vec![
             AXE.to_string(),
-            LUMBERJACKS.to_string(),
+            routine_key.to_string(),
             selector.lumberjack.clone(),
-            CHOPS.to_string(),
+            jobs_key.to_string(),
         ];
         Ok((representation, true, path, raw_chops.clone()))
     } else {
-        Ok((
-            representation,
-            false,
-            selector.key_path(),
-            Value::Object(contribution),
-        ))
+        let path = vec![
+            AXE.to_string(),
+            routine_key.to_string(),
+            selector.lumberjack.clone(),
+            jobs_key.to_string(),
+            chop_name.clone(),
+        ];
+        Ok((representation, false, path, Value::Object(contribution)))
+    }
+}
+
+fn routine_key_for_routine_edit(
+    root: &Map<String, Value>,
+    selector: &AxeEntrySelectorWire,
+) -> &'static str {
+    let Some(axe) = root.get(AXE).and_then(Value::as_object) else {
+        return ROUTINES;
+    };
+    if axe
+        .get(LUMBERJACKS)
+        .and_then(Value::as_object)
+        .is_some_and(|items| items.contains_key(&selector.lumberjack))
+    {
+        LUMBERJACKS
+    } else {
+        ROUTINES
+    }
+}
+
+fn routine_key_for_job_edit(
+    root: &Map<String, Value>,
+    selector: &AxeEntrySelectorWire,
+) -> &'static str {
+    let Some(chop_name) = selector.chop.as_deref() else {
+        return routine_key_for_routine_edit(root, selector);
+    };
+    for routine_key in [LUMBERJACKS, ROUTINES] {
+        if routine_contains_job(
+            root,
+            routine_key,
+            &selector.lumberjack,
+            chop_name,
+        ) {
+            return routine_key;
+        }
+    }
+    ROUTINES
+}
+
+fn jobs_key_for_edit(
+    root: &Map<String, Value>,
+    selector: &AxeEntrySelectorWire,
+    routine_key: &str,
+) -> &'static str {
+    let Some(chop_name) = selector.chop.as_deref() else {
+        return JOBS;
+    };
+    let Some(routine) = root
+        .get(AXE)
+        .and_then(Value::as_object)
+        .and_then(|axe| axe.get(routine_key))
+        .and_then(Value::as_object)
+        .and_then(|routines| routines.get(&selector.lumberjack))
+    else {
+        return JOBS;
+    };
+    if collection_contains_job(routine.get(CHOPS), chop_name) {
+        CHOPS
+    } else {
+        JOBS
+    }
+}
+
+fn routine_contains_job(
+    root: &Map<String, Value>,
+    routine_key: &str,
+    routine_name: &str,
+    chop_name: &str,
+) -> bool {
+    let Some(routine) = root
+        .get(AXE)
+        .and_then(Value::as_object)
+        .and_then(|axe| axe.get(routine_key))
+        .and_then(Value::as_object)
+        .and_then(|routines| routines.get(routine_name))
+    else {
+        return false;
+    };
+    collection_contains_job(routine.get(CHOPS), chop_name)
+        || collection_contains_job(routine.get(JOBS), chop_name)
+}
+
+fn collection_contains_job(
+    collection: Option<&Value>,
+    chop_name: &str,
+) -> bool {
+    match collection {
+        Some(Value::Array(list)) => list
+            .iter()
+            .any(|item| chop_identity(item) == Some(chop_name)),
+        Some(Value::Object(map)) => map.contains_key(chop_name),
+        _ => false,
     }
 }
 
@@ -451,25 +584,17 @@ fn apply_operations(
     Ok(())
 }
 
-fn ensure_object<'a>(
+fn ensure_map<'a>(
     root: &'a mut Map<String, Value>,
-    parent: &str,
-    child: &str,
+    key: &str,
+    display: &str,
 ) -> Result<&'a mut Map<String, Value>, ConfigError> {
-    let parent_value = root
-        .entry(parent.to_string())
+    let value = root
+        .entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()));
-    let Some(parent_obj) = parent_value.as_object_mut() else {
-        return Err(ConfigError::validation(format!(
-            "cannot edit `{parent}` because it is not a mapping"
-        )));
-    };
-    let child_value = parent_obj
-        .entry(child.to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    child_value.as_object_mut().ok_or_else(|| {
+    value.as_object_mut().ok_or_else(|| {
         ConfigError::validation(format!(
-            "cannot edit `{parent}.{child}` because it is not a mapping"
+            "cannot edit `{display}` because it is not a mapping"
         ))
     })
 }
@@ -488,21 +613,6 @@ fn compose_values(
             continue;
         };
         let label = layer_label(layer);
-        let raw_request = AxeConfigValidationRequestWire {
-            schema_version: CHOP_ENGINE_SCHEMA_VERSION,
-            config: serde_json::json!({"axe": raw_axe}),
-            require_descriptions: false,
-            require_description_shape: false,
-            provenance: BTreeMap::from([(AXE.to_string(), label.clone())]),
-        };
-        diagnostics.extend(validate_axe_config(&raw_request).map_err(
-            |error| {
-                ConfigError::validation(format!(
-                    "AXE validation failed: {error}"
-                ))
-            },
-        )?);
-
         detect_cross_layer_list_duplicates(
             &merged,
             raw_axe,
@@ -510,25 +620,48 @@ fn compose_values(
             &label,
             &mut diagnostics,
         );
-        let mut normalized = serde_json::json!({"axe": raw_axe});
-        let replacement_paths = normalize_layer_chops(&mut normalized, layer);
-        for path in replacement_paths {
+        let normalized_layer =
+            normalize_layer_axe(raw_axe, &label, &mut diagnostics);
+        let raw_request = AxeConfigValidationRequestWire {
+            schema_version: CHOP_ENGINE_SCHEMA_VERSION,
+            config: normalized_layer.value.clone(),
+            require_descriptions: false,
+            require_description_shape: false,
+            provenance: BTreeMap::from([(AXE.to_string(), label.clone())]),
+        };
+        let mut layer_diagnostics =
+            validate_axe_config(&raw_request).map_err(|error| {
+                ConfigError::validation(format!(
+                    "AXE validation failed: {error}"
+                ))
+            })?;
+        remap_diagnostics_to_source_paths(
+            &mut layer_diagnostics,
+            &normalized_layer.sources,
+        );
+        diagnostics.extend(layer_diagnostics);
+
+        for path in replacement_paths_for_layer(
+            &normalized_layer.value,
+            ListStrategy::from_token(&layer.list_strategy),
+        ) {
             remove_value_at_path(&mut merged, &path);
             clear_provenance(&mut provenance, &path);
         }
         merged = merge_with_provenance(
             &merged,
-            &normalized,
+            &normalized_layer.value,
             &[],
             &label,
             ListStrategy::from_token(&layer.list_strategy),
+            &normalized_layer.sources,
             &mut provenance,
         );
     }
 
     let dotted_provenance = provenance
         .iter()
-        .map(|(path, layer)| (display_path(path), layer.clone()))
+        .map(|(path, source)| (display_path(path), source.layer.clone()))
         .collect();
     let final_request = AxeConfigValidationRequestWire {
         schema_version: CHOP_ENGINE_SCHEMA_VERSION,
@@ -553,33 +686,503 @@ fn layer_label(layer: &ConfigLayerInputWire) -> String {
     }
 }
 
-fn normalize_layer_chops(
-    value: &mut Value,
-    layer: &ConfigLayerInputWire,
+fn remap_diagnostics_to_source_paths(
+    diagnostics: &mut [ConfigDiagnosticWire],
+    sources: &BTreeMap<Vec<String>, Vec<String>>,
+) {
+    let display_sources: BTreeMap<String, String> = sources
+        .iter()
+        .map(|(path, source)| (display_path(path), display_path(source)))
+        .collect();
+    for diagnostic in diagnostics {
+        let Some(path) = diagnostic.path.as_ref() else {
+            continue;
+        };
+        if let Some(source_path) = display_sources.get(path) {
+            diagnostic.path = Some(source_path.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NormalizedNode {
+    value: Value,
+    sources: BTreeMap<Vec<String>, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NormalizeContext {
+    Axe,
+    Routines,
+    Routine,
+    Jobs,
+    Generic,
+}
+
+fn normalize_layer_axe(
+    raw_axe: &Value,
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> NormalizedNode {
+    let axe_path = vec![AXE.to_string()];
+    let axe = normalize_value(
+        raw_axe,
+        NormalizeContext::Axe,
+        &axe_path,
+        &axe_path,
+        layer,
+        diagnostics,
+    );
+    let mut root = Map::new();
+    root.insert(AXE.to_string(), axe.value);
+    let mut sources = axe.sources;
+    sources.insert(Vec::new(), Vec::new());
+    NormalizedNode {
+        value: Value::Object(root),
+        sources,
+    }
+}
+
+fn normalize_value(
+    value: &Value,
+    context: NormalizeContext,
+    norm_path: &[String],
+    source_path: &[String],
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> NormalizedNode {
+    match context {
+        NormalizeContext::Axe => normalize_object(
+            value,
+            norm_path,
+            source_path,
+            layer,
+            diagnostics,
+            axe_key_alias,
+            |key| {
+                if key == LUMBERJACKS {
+                    NormalizeContext::Routines
+                } else {
+                    NormalizeContext::Generic
+                }
+            },
+        ),
+        NormalizeContext::Routines => {
+            let Some(map) = value.as_object() else {
+                return copy_with_sources(value, norm_path, source_path);
+            };
+            let mut result = Map::new();
+            let mut sources = source_map(norm_path, source_path);
+            for (name, child) in map {
+                let child_norm = child_path(norm_path, name);
+                let child_source = child_path(source_path, name);
+                let node = normalize_value(
+                    child,
+                    NormalizeContext::Routine,
+                    &child_norm,
+                    &child_source,
+                    layer,
+                    diagnostics,
+                );
+                insert_normalized_child(
+                    &mut result,
+                    &mut sources,
+                    name.clone(),
+                    node,
+                    &child_norm,
+                    layer,
+                    diagnostics,
+                );
+            }
+            NormalizedNode {
+                value: Value::Object(result),
+                sources,
+            }
+        }
+        NormalizeContext::Routine => {
+            detect_unequal_synonym_lists(
+                value,
+                norm_path,
+                source_path,
+                layer,
+                diagnostics,
+            );
+            normalize_object(
+                value,
+                norm_path,
+                source_path,
+                layer,
+                diagnostics,
+                routine_key_alias,
+                |key| {
+                    if key == CHOPS {
+                        NormalizeContext::Jobs
+                    } else {
+                        NormalizeContext::Generic
+                    }
+                },
+            )
+        }
+        NormalizeContext::Jobs => {
+            normalize_jobs(value, norm_path, source_path, layer, diagnostics)
+        }
+        NormalizeContext::Generic => {
+            copy_with_sources(value, norm_path, source_path)
+        }
+    }
+}
+
+fn normalize_object(
+    value: &Value,
+    norm_path: &[String],
+    source_path: &[String],
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+    alias: fn(&str) -> &str,
+    context_for_key: fn(&str) -> NormalizeContext,
+) -> NormalizedNode {
+    let Some(map) = value.as_object() else {
+        return copy_with_sources(value, norm_path, source_path);
+    };
+    let mut result = Map::new();
+    let mut sources = source_map(norm_path, source_path);
+    for (key, child) in map {
+        let normalized_key = alias(key);
+        let child_norm = child_path(norm_path, normalized_key);
+        let child_source = child_path(source_path, key);
+        let node = normalize_value(
+            child,
+            context_for_key(normalized_key),
+            &child_norm,
+            &child_source,
+            layer,
+            diagnostics,
+        );
+        insert_normalized_child(
+            &mut result,
+            &mut sources,
+            normalized_key.to_string(),
+            node,
+            &child_norm,
+            layer,
+            diagnostics,
+        );
+    }
+    NormalizedNode {
+        value: Value::Object(result),
+        sources,
+    }
+}
+
+fn axe_key_alias(key: &str) -> &str {
+    match key {
+        ROUTINES => LUMBERJACKS,
+        "job_script_dirs" => "chop_script_dirs",
+        "routine_log_max_bytes" => "lumberjack_log_max_bytes",
+        "routine_log_temp_max_age_seconds" => {
+            "lumberjack_log_temp_max_age_seconds"
+        }
+        "routine_restart_backoff_max_seconds" => {
+            "lumberjack_restart_backoff_max_seconds"
+        }
+        "verbose_routine_diagnostics" => "verbose_lumberjack_diagnostics",
+        _ => key,
+    }
+}
+
+fn routine_key_alias(key: &str) -> &str {
+    match key {
+        JOBS => CHOPS,
+        "job_timeout" => "chop_timeout",
+        _ => key,
+    }
+}
+
+fn normalize_jobs(
+    value: &Value,
+    norm_path: &[String],
+    source_path: &[String],
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> NormalizedNode {
+    match value {
+        Value::Array(items) => {
+            let mut result = Map::new();
+            let mut sources = source_map(norm_path, source_path);
+            let mut identities = BTreeSet::new();
+            for (index, item) in items.iter().enumerate() {
+                let item_source = indexed_path(source_path, index);
+                let Some(identity) = chop_identity(item) else {
+                    let path = display_path(&item_source);
+                    diagnostics.push(ConfigDiagnosticWire {
+                        severity: "error".to_string(),
+                        code: "type_mismatch".to_string(),
+                        message: "list-form jobs must be strings or objects"
+                            .to_string(),
+                        path: Some(path),
+                        layer: Some(layer.to_string()),
+                    });
+                    continue;
+                };
+                if !identities.insert(identity.to_string()) {
+                    diagnostics.push(ConfigDiagnosticWire {
+                        severity: "error".to_string(),
+                        code: "duplicate_chop_identity".to_string(),
+                        message: format!(
+                            "duplicate chop identity `{identity}`"
+                        ),
+                        path: Some(display_path(&item_source)),
+                        layer: Some(layer.to_string()),
+                    });
+                    continue;
+                }
+                let config = match item {
+                    Value::String(_) => Value::Object(Map::new()),
+                    Value::Object(_) => item.clone(),
+                    _ => continue,
+                };
+                let item_norm = child_path(norm_path, identity);
+                let node = copy_with_sources(&config, &item_norm, &item_source);
+                insert_normalized_child(
+                    &mut result,
+                    &mut sources,
+                    identity.to_string(),
+                    node,
+                    &item_norm,
+                    layer,
+                    diagnostics,
+                );
+            }
+            NormalizedNode {
+                value: Value::Object(result),
+                sources,
+            }
+        }
+        Value::Object(map) => {
+            let mut result = Map::new();
+            let mut sources = source_map(norm_path, source_path);
+            for (name, child) in map {
+                let child_norm = child_path(norm_path, name);
+                let child_source = child_path(source_path, name);
+                let node = copy_with_sources(child, &child_norm, &child_source);
+                insert_normalized_child(
+                    &mut result,
+                    &mut sources,
+                    name.clone(),
+                    node,
+                    &child_norm,
+                    layer,
+                    diagnostics,
+                );
+            }
+            NormalizedNode {
+                value: Value::Object(result),
+                sources,
+            }
+        }
+        _ => copy_with_sources(value, norm_path, source_path),
+    }
+}
+
+fn detect_unequal_synonym_lists(
+    value: &Value,
+    norm_path: &[String],
+    source_path: &[String],
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    let (Some(legacy), Some(canonical)) = (map.get(CHOPS), map.get(JOBS))
+    else {
+        return;
+    };
+    if legacy.is_array() && canonical.is_array() && legacy != canonical {
+        diagnostics.push(ConfigDiagnosticWire {
+            severity: "error".to_string(),
+            code: "conflicting_axe_config_aliases".to_string(),
+            message: format!(
+                "conflicting synonym list values authored at `{}` and `{}`",
+                display_path(&child_path(source_path, CHOPS)),
+                display_path(&child_path(source_path, JOBS))
+            ),
+            path: Some(display_path(&child_path(norm_path, CHOPS))),
+            layer: Some(layer.to_string()),
+        });
+    }
+}
+
+fn insert_normalized_child(
+    result: &mut Map<String, Value>,
+    sources: &mut BTreeMap<Vec<String>, Vec<String>>,
+    key: String,
+    node: NormalizedNode,
+    path: &[String],
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) {
+    match result.remove(&key) {
+        Some(existing) => {
+            let merged = merge_same_layer_aliases(
+                existing,
+                node.value,
+                path,
+                sources,
+                &node.sources,
+                layer,
+                diagnostics,
+            );
+            for (source_path, source) in node.sources {
+                sources.entry(source_path).or_insert(source);
+            }
+            result.insert(key, merged);
+        }
+        None => {
+            sources.extend(node.sources);
+            result.insert(key, node.value);
+        }
+    }
+}
+
+fn merge_same_layer_aliases(
+    existing: Value,
+    incoming: Value,
+    path: &[String],
+    existing_sources: &BTreeMap<Vec<String>, Vec<String>>,
+    incoming_sources: &BTreeMap<Vec<String>, Vec<String>>,
+    layer: &str,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> Value {
+    match (existing, incoming) {
+        (Value::Object(mut left), Value::Object(right)) => {
+            for (key, right_value) in right {
+                let child = child_path(path, &key);
+                match left.remove(&key) {
+                    Some(left_value) => {
+                        let merged = merge_same_layer_aliases(
+                            left_value,
+                            right_value,
+                            &child,
+                            existing_sources,
+                            incoming_sources,
+                            layer,
+                            diagnostics,
+                        );
+                        left.insert(key, merged);
+                    }
+                    None => {
+                        left.insert(key, right_value);
+                    }
+                }
+            }
+            Value::Object(left)
+        }
+        (left, right) if left == right => left,
+        (left, _right) => {
+            let left_source = existing_sources
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_vec());
+            let right_source = incoming_sources
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_vec());
+            diagnostics.push(ConfigDiagnosticWire {
+                severity: "error".to_string(),
+                code: "conflicting_axe_config_aliases".to_string(),
+                message: format!(
+                    "conflicting values for `{}` authored at `{}` and `{}`",
+                    display_path(path),
+                    display_path(&left_source),
+                    display_path(&right_source),
+                ),
+                path: Some(display_path(path)),
+                layer: Some(layer.to_string()),
+            });
+            left
+        }
+    }
+}
+
+fn copy_with_sources(
+    value: &Value,
+    norm_path: &[String],
+    source_path: &[String],
+) -> NormalizedNode {
+    let mut sources = source_map(norm_path, source_path);
+    match value {
+        Value::Object(map) => {
+            let mut copied = Map::new();
+            for (key, child) in map {
+                let child_norm = child_path(norm_path, key);
+                let child_source = child_path(source_path, key);
+                let node = copy_with_sources(child, &child_norm, &child_source);
+                sources.extend(node.sources);
+                copied.insert(key.clone(), node.value);
+            }
+            NormalizedNode {
+                value: Value::Object(copied),
+                sources,
+            }
+        }
+        Value::Array(items) => {
+            let mut copied = Vec::with_capacity(items.len());
+            for (index, child) in items.iter().enumerate() {
+                let child_norm = indexed_path(norm_path, index);
+                let child_source = indexed_path(source_path, index);
+                let node = copy_with_sources(child, &child_norm, &child_source);
+                sources.extend(node.sources);
+                copied.push(node.value);
+            }
+            NormalizedNode {
+                value: Value::Array(copied),
+                sources,
+            }
+        }
+        _ => NormalizedNode {
+            value: value.clone(),
+            sources,
+        },
+    }
+}
+
+fn source_map(
+    norm_path: &[String],
+    source_path: &[String],
+) -> BTreeMap<Vec<String>, Vec<String>> {
+    BTreeMap::from([(norm_path.to_vec(), source_path.to_vec())])
+}
+
+fn child_path(path: &[String], child: &str) -> Vec<String> {
+    let mut result = path.to_vec();
+    result.push(child.to_string());
+    result
+}
+
+fn indexed_path(path: &[String], index: usize) -> Vec<String> {
+    let mut result = path.to_vec();
+    result.push(format!("[{index}]"));
+    result
+}
+
+fn replacement_paths_for_layer(
+    value: &Value,
+    strategy: ListStrategy,
 ) -> Vec<Vec<String>> {
     let mut replacements = Vec::new();
+    if strategy != ListStrategy::Replace {
+        return replacements;
+    }
     let Some(lumberjacks) = value
-        .get_mut(AXE)
-        .and_then(Value::as_object_mut)
-        .and_then(|axe| axe.get_mut(LUMBERJACKS))
-        .and_then(Value::as_object_mut)
+        .get(AXE)
+        .and_then(|axe| axe.get(LUMBERJACKS))
+        .and_then(Value::as_object)
     else {
         return replacements;
     };
     for (name, config) in lumberjacks {
-        let Some(config) = config.as_object_mut() else {
-            continue;
-        };
-        let Some(chops) = config.get_mut(CHOPS) else {
-            continue;
-        };
-        let Some(list) = chops.as_array() else {
-            continue;
-        };
-        *chops = Value::Object(normalize_chop_list(list));
-        if ListStrategy::from_token(&layer.list_strategy)
-            == ListStrategy::Replace
-        {
+        if config.get(CHOPS).is_some() {
             replacements.push(vec![
                 AXE.to_string(),
                 LUMBERJACKS.to_string(),
@@ -627,39 +1230,44 @@ fn detect_cross_layer_list_duplicates(
     if ListStrategy::from_token(&layer.list_strategy) == ListStrategy::Replace {
         return;
     }
-    let Some(raw_lumberjacks) =
-        raw_axe.get(LUMBERJACKS).and_then(Value::as_object)
-    else {
-        return;
-    };
-    for (lumberjack, raw_config) in raw_lumberjacks {
-        let Some(raw_list) = raw_config.get(CHOPS).and_then(Value::as_array)
+    for (routine_key, jobs_key) in [(LUMBERJACKS, CHOPS), (ROUTINES, JOBS)] {
+        let Some(raw_lumberjacks) =
+            raw_axe.get(routine_key).and_then(Value::as_object)
         else {
             continue;
         };
-        let existing = merged
-            .get(AXE)
-            .and_then(|axe| axe.get(LUMBERJACKS))
-            .and_then(|items| items.get(lumberjack))
-            .and_then(|config| config.get(CHOPS))
-            .and_then(Value::as_object);
-        let Some(existing) = existing else {
-            continue;
-        };
-        for (index, entry) in raw_list.iter().enumerate() {
-            let Some(identity) = chop_identity(entry) else {
+        for (lumberjack, raw_config) in raw_lumberjacks {
+            let Some(raw_list) =
+                raw_config.get(jobs_key).and_then(Value::as_array)
+            else {
                 continue;
             };
-            if existing.contains_key(identity) {
-                diagnostics.push(ConfigDiagnosticWire {
-                    severity: "error".to_string(),
-                    code: "duplicate_chop_identity".to_string(),
-                    message: format!("duplicate chop identity `{identity}`"),
-                    path: Some(format!(
-                        "axe.lumberjacks.{lumberjack}.chops[{index}]"
+            let existing = merged
+                .get(AXE)
+                .and_then(|axe| axe.get(LUMBERJACKS))
+                .and_then(|items| items.get(lumberjack))
+                .and_then(|config| config.get(CHOPS))
+                .and_then(Value::as_object);
+            let Some(existing) = existing else {
+                continue;
+            };
+            for (index, entry) in raw_list.iter().enumerate() {
+                let Some(identity) = chop_identity(entry) else {
+                    continue;
+                };
+                if existing.contains_key(identity) {
+                    diagnostics.push(ConfigDiagnosticWire {
+                        severity: "error".to_string(),
+                        code: "duplicate_chop_identity".to_string(),
+                        message: format!(
+                            "duplicate chop identity `{identity}`"
+                        ),
+                        path: Some(format!(
+                        "axe.{routine_key}.{lumberjack}.{jobs_key}[{index}]"
                     )),
-                    layer: Some(label.to_string()),
-                });
+                        layer: Some(label.to_string()),
+                    });
+                }
             }
         }
     }
@@ -671,12 +1279,13 @@ fn merge_with_provenance(
     path: &[String],
     layer: &str,
     strategy: ListStrategy,
+    source_paths: &BTreeMap<Vec<String>, Vec<String>>,
     provenance: &mut ExactProvenance,
 ) -> Value {
     match (base, over) {
         (Value::Object(base_map), Value::Object(over_map)) => {
             let mut result = base_map.clone();
-            provenance.insert(path.to_vec(), layer.to_string());
+            record_path_provenance(path, layer, source_paths, provenance);
             for (key, over_value) in over_map {
                 let mut child_path = path.to_vec();
                 child_path.push(key.clone());
@@ -687,6 +1296,7 @@ fn merge_with_provenance(
                         &child_path,
                         layer,
                         strategy,
+                        source_paths,
                         provenance,
                     ),
                     None => {
@@ -694,6 +1304,7 @@ fn merge_with_provenance(
                             over_value,
                             &child_path,
                             layer,
+                            source_paths,
                             provenance,
                         );
                         over_value.clone()
@@ -706,24 +1317,30 @@ fn merge_with_provenance(
         (Value::Array(base_list), Value::Array(over_list)) => {
             if strategy == ListStrategy::Replace {
                 clear_provenance(provenance, path);
-                record_provenance(over, path, layer, provenance);
+                record_provenance(over, path, layer, source_paths, provenance);
                 over.clone()
             } else {
-                provenance.insert(path.to_vec(), layer.to_string());
+                record_path_provenance(path, layer, source_paths, provenance);
                 let mut result = base_list.clone();
                 let offset = result.len();
                 result.extend(over_list.iter().cloned());
                 for (index, child) in over_list.iter().enumerate() {
                     let mut child_path = path.to_vec();
                     child_path.push(format!("[{}]", offset + index));
-                    record_provenance(child, &child_path, layer, provenance);
+                    record_provenance(
+                        child,
+                        &child_path,
+                        layer,
+                        source_paths,
+                        provenance,
+                    );
                 }
                 Value::Array(result)
             }
         }
         _ => {
             clear_provenance(provenance, path);
-            record_provenance(over, path, layer, provenance);
+            record_provenance(over, path, layer, source_paths, provenance);
             over.clone()
         }
     }
@@ -733,22 +1350,53 @@ fn record_provenance(
     value: &Value,
     path: &[String],
     layer: &str,
+    source_paths: &BTreeMap<Vec<String>, Vec<String>>,
     provenance: &mut ExactProvenance,
 ) {
-    provenance.insert(path.to_vec(), layer.to_string());
+    record_path_provenance(path, layer, source_paths, provenance);
     if let Value::Object(map) = value {
         for (key, child) in map {
             let mut child_path = path.to_vec();
             child_path.push(key.clone());
-            record_provenance(child, &child_path, layer, provenance);
+            record_provenance(
+                child,
+                &child_path,
+                layer,
+                source_paths,
+                provenance,
+            );
         }
     } else if let Value::Array(items) = value {
         for (index, child) in items.iter().enumerate() {
             let mut child_path = path.to_vec();
             child_path.push(format!("[{index}]"));
-            record_provenance(child, &child_path, layer, provenance);
+            record_provenance(
+                child,
+                &child_path,
+                layer,
+                source_paths,
+                provenance,
+            );
         }
     }
+}
+
+fn record_path_provenance(
+    path: &[String],
+    layer: &str,
+    source_paths: &BTreeMap<Vec<String>, Vec<String>>,
+    provenance: &mut ExactProvenance,
+) {
+    provenance.insert(
+        path.to_vec(),
+        SourcePath {
+            layer: layer.to_string(),
+            key_path: source_paths
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.to_vec()),
+        },
+    );
 }
 
 fn clear_provenance(provenance: &mut ExactProvenance, path: &[String]) {
@@ -790,12 +1438,133 @@ fn provenance_wire(
 ) -> Vec<AxeFieldProvenanceWire> {
     provenance
         .iter()
-        .map(|(path, layer)| AxeFieldProvenanceWire {
+        .map(|(path, source)| AxeFieldProvenanceWire {
             key_path: path.clone(),
             path: display_path(path),
-            layer: layer.clone(),
+            source_key_path: source.key_path.clone(),
+            source_path: display_path(&source.key_path),
+            layer: source.layer.clone(),
         })
         .collect()
+}
+
+fn public_projection(
+    effective_config: &Value,
+    provenance: &[AxeFieldProvenanceWire],
+) -> (Value, Vec<AxeFieldProvenanceWire>) {
+    (
+        public_project_root(effective_config),
+        provenance
+            .iter()
+            .map(|item| {
+                let key_path = public_key_path(&item.key_path);
+                AxeFieldProvenanceWire {
+                    path: display_path(&key_path),
+                    key_path,
+                    source_key_path: item.source_key_path.clone(),
+                    source_path: item.source_path.clone(),
+                    layer: item.layer.clone(),
+                }
+            })
+            .collect(),
+    )
+}
+
+fn public_project_root(value: &Value) -> Value {
+    let Some(root) = value.as_object() else {
+        return value.clone();
+    };
+    let mut projected = Map::new();
+    for (key, child) in root {
+        if key == AXE {
+            projected.insert(key.clone(), public_project_axe(child));
+        } else {
+            projected.insert(key.clone(), child.clone());
+        }
+    }
+    Value::Object(projected)
+}
+
+fn public_project_axe(value: &Value) -> Value {
+    let Some(axe) = value.as_object() else {
+        return value.clone();
+    };
+    let mut projected = Map::new();
+    for (key, child) in axe {
+        let public_key = public_axe_key(key);
+        let public_value = if key == LUMBERJACKS {
+            public_project_routines(child)
+        } else {
+            child.clone()
+        };
+        projected.insert(public_key.to_string(), public_value);
+    }
+    Value::Object(projected)
+}
+
+fn public_project_routines(value: &Value) -> Value {
+    let Some(routines) = value.as_object() else {
+        return value.clone();
+    };
+    let mut projected = Map::new();
+    for (name, routine) in routines {
+        projected.insert(name.clone(), public_project_routine(routine));
+    }
+    Value::Object(projected)
+}
+
+fn public_project_routine(value: &Value) -> Value {
+    let Some(routine) = value.as_object() else {
+        return value.clone();
+    };
+    let mut projected = Map::new();
+    for (key, child) in routine {
+        let public_key = public_routine_key(key);
+        projected.insert(public_key.to_string(), child.clone());
+    }
+    Value::Object(projected)
+}
+
+fn public_key_path(path: &[String]) -> Vec<String> {
+    if path.len() >= 2 && path[0] == AXE {
+        let mut public = Vec::with_capacity(path.len());
+        public.push(AXE.to_string());
+        public.push(public_axe_key(&path[1]).to_string());
+        if path.len() >= 4 && path[1] == LUMBERJACKS {
+            public.push(path[2].clone());
+            public.push(public_routine_key(&path[3]).to_string());
+            public.extend_from_slice(&path[4..]);
+        } else {
+            public.extend_from_slice(&path[2..]);
+        }
+        public
+    } else {
+        path.to_vec()
+    }
+}
+
+fn public_axe_key(key: &str) -> &str {
+    match key {
+        LUMBERJACKS => ROUTINES,
+        "chop_script_dirs" => "job_script_dirs",
+        "lumberjack_log_max_bytes" => "routine_log_max_bytes",
+        "lumberjack_log_temp_max_age_seconds" => {
+            "routine_log_temp_max_age_seconds"
+        }
+        "lumberjack_restart_backoff_max_seconds" => {
+            "routine_restart_backoff_max_seconds"
+        }
+        "verbose_lumberjack_diagnostics" => "verbose_routine_diagnostics",
+        _ => key,
+    }
+}
+
+fn public_routine_key(key: &str) -> &str {
+    match key {
+        CHOPS => JOBS,
+        "chop_timeout" => "job_timeout",
+        _ => key,
+    }
 }
 
 fn display_path(path: &[String]) -> String {
@@ -895,10 +1664,12 @@ fn entity_provenance(
     provenance
         .iter()
         .filter(|(path, _)| path.starts_with(prefix))
-        .map(|(path, layer)| AxeFieldProvenanceWire {
+        .map(|(path, source)| AxeFieldProvenanceWire {
             key_path: path.clone(),
             path: display_path(path),
-            layer: layer.clone(),
+            source_key_path: source.key_path.clone(),
+            source_path: display_path(&source.key_path),
+            layer: source.layer.clone(),
         })
         .collect()
 }
@@ -911,46 +1682,122 @@ fn writable_contributions(
         .iter()
         .filter(|layer| layer.writable)
         .map(|layer| {
-            let lumberjack = layer
-                .value
-                .get(AXE)
-                .and_then(|axe| axe.get(LUMBERJACKS))
-                .and_then(|items| items.get(&selector.lumberjack));
-            let (representation, value) =
-                if let Some(chop_name) = selector.chop.as_ref() {
-                    let chops = lumberjack.and_then(|item| item.get(CHOPS));
-                    match chops {
-                        Some(Value::Array(list)) => (
-                            "legacy_list",
-                            list.iter().find(|item| {
-                                chop_identity(item) == Some(chop_name)
-                            }),
-                        ),
-                        Some(Value::Object(map)) => {
-                            ("keyed_map", map.get(chop_name))
-                        }
-                        _ => ("absent", None),
-                    }
-                } else {
-                    (
-                        if lumberjack.is_some() {
-                            "keyed_map"
-                        } else {
-                            "absent"
-                        },
-                        lumberjack,
-                    )
-                };
+            let (representation, value, key_path) =
+                raw_contribution(layer, selector);
             AxeRawContributionWire {
                 layer: layer.name.clone(),
                 file: layer.path.clone(),
                 writable: layer.writable,
                 representation: representation.to_string(),
+                key_path: key_path.clone(),
+                path: display_path(&key_path),
                 has_value: value.is_some(),
                 value: value.cloned().unwrap_or(Value::Null),
             }
         })
         .collect()
+}
+
+fn raw_contribution<'a>(
+    layer: &'a ConfigLayerInputWire,
+    selector: &AxeEntrySelectorWire,
+) -> (&'static str, Option<&'a Value>, Vec<String>) {
+    let (routine, routine_path) =
+        raw_routine_value(layer, &selector.lumberjack);
+    let Some(chop_name) = selector.chop.as_ref() else {
+        let representation = if routine.is_some() {
+            "keyed_map"
+        } else {
+            "absent"
+        };
+        return (representation, routine, routine_path);
+    };
+    let Some(routine) = routine else {
+        return (
+            "absent",
+            None,
+            vec![
+                AXE.to_string(),
+                ROUTINES.to_string(),
+                selector.lumberjack.clone(),
+                JOBS.to_string(),
+                chop_name.clone(),
+            ],
+        );
+    };
+    for (jobs_key, public_jobs_key) in [(CHOPS, CHOPS), (JOBS, JOBS)] {
+        let Some(jobs) = routine.get(jobs_key) else {
+            continue;
+        };
+        let jobs_path = {
+            let mut path = routine_path.clone();
+            path.push(public_jobs_key.to_string());
+            path
+        };
+        match jobs {
+            Value::Array(list) => {
+                for (index, item) in list.iter().enumerate() {
+                    if chop_identity(item) == Some(chop_name) {
+                        return (
+                            "legacy_list",
+                            Some(item),
+                            indexed_path(&jobs_path, index),
+                        );
+                    }
+                }
+            }
+            Value::Object(map) => {
+                if let Some(value) = map.get(chop_name) {
+                    return (
+                        "keyed_map",
+                        Some(value),
+                        child_path(&jobs_path, chop_name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    (
+        "absent",
+        None,
+        vec![
+            AXE.to_string(),
+            ROUTINES.to_string(),
+            selector.lumberjack.clone(),
+            JOBS.to_string(),
+            chop_name.clone(),
+        ],
+    )
+}
+
+fn raw_routine_value<'a>(
+    layer: &'a ConfigLayerInputWire,
+    name: &str,
+) -> (Option<&'a Value>, Vec<String>) {
+    let axe = layer.value.get(AXE);
+    if let Some(value) = axe
+        .and_then(|axe| axe.get(LUMBERJACKS))
+        .and_then(|items| items.get(name))
+    {
+        return (
+            Some(value),
+            vec![AXE.to_string(), LUMBERJACKS.to_string(), name.to_string()],
+        );
+    }
+    if let Some(value) = axe
+        .and_then(|axe| axe.get(ROUTINES))
+        .and_then(|items| items.get(name))
+    {
+        return (
+            Some(value),
+            vec![AXE.to_string(), ROUTINES.to_string(), name.to_string()],
+        );
+    }
+    (
+        None,
+        vec![AXE.to_string(), ROUTINES.to_string(), name.to_string()],
+    )
 }
 
 fn generated_entries(
@@ -1003,6 +1850,8 @@ fn generated_entries(
                     Some(AxeFieldProvenanceWire {
                         path: display_path(&key_path),
                         key_path,
+                        source_key_path: item.source_key_path.clone(),
+                        source_path: item.source_path.clone(),
                         layer: item.layer.clone(),
                     })
                 })
@@ -1047,6 +1896,8 @@ fn replace_provenance_tree(
     provenance.push(AxeFieldProvenanceWire {
         key_path: path.to_vec(),
         path: display_path(path),
+        source_key_path: path.to_vec(),
+        source_path: display_path(path),
         layer: layer.to_string(),
     });
     if let Value::Object(map) = value {

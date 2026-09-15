@@ -772,6 +772,7 @@ fn axe_composition_retains_legacy_defaults_and_exact_key_provenance() {
         layers: axe_layers(),
         require_descriptions: false,
         require_description_shape: false,
+        routine_job_contract: false,
     })
     .unwrap();
     let chops =
@@ -830,6 +831,7 @@ fn axe_composition_overlays_wait_runners_with_exact_provenance() {
         layers,
         require_descriptions: false,
         require_description_shape: false,
+        routine_job_contract: false,
     })
     .unwrap();
 
@@ -841,6 +843,124 @@ fn axe_composition_overlays_wait_runners_with_exact_provenance() {
     assert!(result.provenance.iter().any(|item| {
         item.key_path == ["axe", "lumberjacks", "checks", "wait_runners"]
             && item.layer == "overlay:sase_work.yml:/tmp/sase_work.yml"
+    }));
+}
+
+#[test]
+fn axe_composition_accepts_public_routine_job_aliases_with_source_provenance() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user",
+            "path": "/tmp/sase.yml",
+            "writable": true,
+            "value": {"axe": {
+                "job_script_dirs": ["/opt/sase/jobs"],
+                "routine_log_max_bytes": 12345,
+                "routine_log_temp_max_age_seconds": 60,
+                "routine_restart_backoff_max_seconds": 9,
+                "verbose_routine_diagnostics": true,
+                "routines": {"checks.main": {
+                    "description": "Run public checks",
+                    "interval": 10,
+                    "job_timeout": "2m",
+                    "jobs": {"release.check": {
+                        "description": "Check release readiness",
+                        "script": "sase_job_release"
+                    }}
+                }}
+            }}
+        }
+    ]))
+    .unwrap();
+
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: true,
+        require_description_shape: true,
+        routine_job_contract: true,
+    })
+    .unwrap();
+
+    let axe = &result.effective_config["axe"];
+    assert_eq!(axe["chop_script_dirs"], json!(["/opt/sase/jobs"]));
+    assert_eq!(axe["lumberjack_log_max_bytes"], json!(12345));
+    assert_eq!(
+        axe["lumberjacks"]["checks.main"]["chop_timeout"],
+        json!("2m")
+    );
+    assert_eq!(
+        axe["lumberjacks"]["checks.main"]["chops"]["release.check"]["script"],
+        json!("sase_job_release")
+    );
+    assert_eq!(
+        result.public_config["axe"]["routines"]["checks.main"]["jobs"]
+            ["release.check"]["script"],
+        json!("sase_job_release")
+    );
+    assert!(result.provenance.iter().any(|item| {
+        item.path == "axe.lumberjacks.checks.main.chops.release.check.script"
+            && item.source_path
+                == "axe.routines.checks.main.jobs.release.check.script"
+            && item.layer == "user:/tmp/sase.yml"
+    }));
+    assert!(result.public_provenance.iter().any(|item| {
+        item.path == "axe.routines.checks.main.jobs.release.check.script"
+            && item.source_path
+                == "axe.routines.checks.main.jobs.release.check.script"
+    }));
+}
+
+#[test]
+fn axe_composition_merges_disjoint_same_layer_aliases_and_rejects_conflicts() {
+    let disjoint: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user",
+            "value": {"axe": {
+                "lumberjacks": {"legacy": {"description": "Legacy lane"}},
+                "routines": {"canonical": {"description": "Canonical lane"}}
+            }}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: disjoint,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+    assert!(result.diagnostics.is_empty());
+    assert!(result.effective_config["axe"]["lumberjacks"]
+        .as_object()
+        .unwrap()
+        .contains_key("legacy"));
+    assert!(result.effective_config["axe"]["lumberjacks"]
+        .as_object()
+        .unwrap()
+        .contains_key("canonical"));
+
+    let conflicting: Vec<ConfigLayerInputWire> =
+        serde_json::from_value(json!([
+            {
+                "name": "user",
+                "value": {"axe": {"lumberjacks": {"checks": {
+                    "chop_timeout": "30s",
+                    "job_timeout": "45s"
+                }}}}
+            }
+        ]))
+        .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: conflicting,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+    assert!(result.diagnostics.iter().any(|item| {
+        item.code == "conflicting_axe_config_aliases"
+            && item.message.contains("axe.lumberjacks.checks.chop_timeout")
+            && item.message.contains("axe.lumberjacks.checks.job_timeout")
     }));
 }
 
@@ -875,6 +995,49 @@ fn axe_sparse_mutation_keeps_inherited_fields_and_matches_candidate_composition(
     assert_eq!(
         plan.candidate_config,
         plan.candidate_composition.effective_config
+    );
+}
+
+#[test]
+fn axe_mutation_writes_new_entries_to_canonical_paths() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user",
+            "path": "/tmp/sase.yml",
+            "writable": true,
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks",
+                "chops": {"existing": {"description": "Existing"}}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let request: AxeEntryMutationRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": layers,
+        "target_layer": "user",
+        "selector": {"kind": "job", "lumberjack": "checks", "chop": "new.job"},
+        "operations": [
+            {"kind": "set", "key_path": ["description"], "value": "New job"}
+        ]
+    }))
+    .unwrap();
+
+    let plan = plan_axe_entry_mutation(&request).unwrap();
+
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec!["axe", "routines", "checks", "jobs", "new.job"]
+    );
+    assert_eq!(
+        plan.candidate_config["axe"]["lumberjacks"]["checks"]["chops"]
+            ["existing"]["description"],
+        json!("Existing")
+    );
+    assert_eq!(
+        plan.candidate_config["axe"]["lumberjacks"]["checks"]["chops"]
+            ["new.job"]["description"],
+        json!("New job")
     );
 }
 
@@ -928,6 +1091,7 @@ fn axe_inventory_marks_generated_instances_as_base_owned() {
         layers: layers.clone(),
         require_descriptions: false,
         require_description_shape: false,
+        routine_job_contract: false,
     })
     .unwrap();
     let generated = result
@@ -984,6 +1148,7 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
         layers,
         require_descriptions: false,
         require_description_shape: false,
+        routine_job_contract: false,
     })
     .unwrap();
     for code in [
@@ -1026,6 +1191,7 @@ fn axe_description_requirements_validate_only_the_merged_config() {
         layers,
         require_descriptions: true,
         require_description_shape: true,
+        routine_job_contract: false,
     })
     .unwrap();
 

@@ -17,16 +17,24 @@ const AXE_KEYS: &[&str] = &[
     "lumberjack_log_temp_max_age_seconds",
     "lumberjack_restart_backoff_max_seconds",
     "verbose_lumberjack_diagnostics",
+    "routine_log_max_bytes",
+    "routine_log_temp_max_age_seconds",
+    "routine_restart_backoff_max_seconds",
+    "verbose_routine_diagnostics",
     "query",
     "chop_script_dirs",
+    "job_script_dirs",
     "lumberjacks",
+    "routines",
 ];
 const LUMBERJACK_KEYS: &[&str] = &[
     "description",
     "interval",
     "chop_timeout",
+    "job_timeout",
     "wait_runners",
     "chops",
+    "jobs",
     "env",
 ];
 const CHOP_KEYS: &[&str] = &[
@@ -190,6 +198,9 @@ pub fn validate_axe_config(
         "lumberjack_log_max_bytes",
         "lumberjack_log_temp_max_age_seconds",
         "lumberjack_restart_backoff_max_seconds",
+        "routine_log_max_bytes",
+        "routine_log_temp_max_age_seconds",
+        "routine_restart_backoff_max_seconds",
     ] {
         if let Some(value) = axe.get(key) {
             validate_positive_integer(
@@ -210,6 +221,14 @@ pub fn validate_axe_config(
     );
     validate_optional_type(
         request,
+        axe.get("verbose_routine_diagnostics"),
+        &child_path(base, "verbose_routine_diagnostics"),
+        "boolean",
+        Value::is_boolean,
+        &mut diagnostics,
+    );
+    validate_optional_type(
+        request,
         axe.get("query"),
         &child_path(base, "query"),
         "string",
@@ -224,11 +243,27 @@ pub fn validate_axe_config(
             &mut diagnostics,
         );
     }
+    if let Some(value) = axe.get("job_script_dirs") {
+        validate_string_array(
+            request,
+            value,
+            &child_path(base, "job_script_dirs"),
+            &mut diagnostics,
+        );
+    }
     if let Some(value) = axe.get("lumberjacks") {
         validate_lumberjacks(
             request,
             value,
             &child_path(base, "lumberjacks"),
+            &mut diagnostics,
+        );
+    }
+    if let Some(value) = axe.get("routines") {
+        validate_lumberjacks(
+            request,
+            value,
+            &child_path(base, "routines"),
             &mut diagnostics,
         );
     }
@@ -308,11 +343,14 @@ fn validate_lumberjacks(
                 diagnostics,
             );
         }
-        if let Some(timeout) = config.get("chop_timeout") {
+        for timeout_key in ["chop_timeout", "job_timeout"] {
+            let Some(timeout) = config.get(timeout_key) else {
+                continue;
+            };
             validate_duration(
                 request,
                 timeout,
-                &child_path(&lumberjack_path, "chop_timeout"),
+                &child_path(&lumberjack_path, timeout_key),
                 diagnostics,
             );
         }
@@ -332,11 +370,14 @@ fn validate_lumberjacks(
                 diagnostics,
             );
         }
-        if let Some(chops) = config.get("chops") {
+        for chops_key in ["chops", "jobs"] {
+            let Some(chops) = config.get(chops_key) else {
+                continue;
+            };
             validate_chops(
                 request,
                 chops,
-                &child_path(&lumberjack_path, "chops"),
+                &child_path(&lumberjack_path, chops_key),
                 diagnostics,
             );
         }
