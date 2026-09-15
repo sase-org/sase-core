@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
-pub const GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const GIT_OBJECT_SHARING_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const GIT_OBJECT_SHARING_ACTION_NONE: &str = "none";
 pub const GIT_OBJECT_SHARING_ACTION_WRITE: &str = "write";
@@ -25,6 +25,8 @@ pub enum GitObjectSharingError {
     Schema { expected: u32, actual: u32 },
     #[error("unsupported git object sharing operation: {0}")]
     Operation(String),
+    #[error("unsupported git object sharing mutation context: {0}")]
+    MutationContext(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,10 @@ pub struct GitObjectSharingPlanRequestWire {
     pub config_enabled: bool,
     #[serde(default)]
     pub config_primary_objects: Option<String>,
+    #[serde(default)]
+    pub mutation_context: Option<String>,
+    #[serde(default)]
+    pub checkout_clean: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +64,7 @@ pub struct GitObjectSharingPlanWire {
     pub owned_alternates: Vec<String>,
     pub foreign_alternates: Vec<String>,
     pub write_alternates: Option<Vec<String>>,
+    pub dependency_mutation: bool,
     pub sase_owned: bool,
     pub detail: String,
 }
@@ -259,6 +266,7 @@ fn first_missing(
 fn plan_install(
     classified: ClassifiedAlternates,
 ) -> Result<GitObjectSharingPlanWire, GitObjectSharingError> {
+    validate_mutation_context(&classified.request)?;
     if classified.status == "unexpected"
         || (classified.status == "broken"
             && classified.owned_indexes.is_empty())
@@ -274,18 +282,31 @@ fn plan_install(
         ));
     }
     let lines = install_lines(&classified);
-    Ok(
-        classified.into_wire(
+    let dependency_mutation = lines != classified.raw;
+    if let Some(detail) =
+        existing_checkout_mutation_refusal(&classified, dependency_mutation)
+    {
+        return Ok(classified.into_wire(
+            GIT_OBJECT_SHARING_ACTION_FAIL,
+            None,
+            Some(detail),
+        ));
+    }
+    if dependency_mutation {
+        Ok(classified.into_wire(
             GIT_OBJECT_SHARING_ACTION_WRITE,
             Some(lines),
             None,
-        ),
-    )
+        ))
+    } else {
+        Ok(classified.into_wire(GIT_OBJECT_SHARING_ACTION_NONE, None, None))
+    }
 }
 
 fn plan_remove(
     classified: ClassifiedAlternates,
 ) -> Result<GitObjectSharingPlanWire, GitObjectSharingError> {
+    validate_mutation_context(&classified.request)?;
     if classified.owned_indexes.is_empty() {
         return Ok(classified.into_wire(
             GIT_OBJECT_SHARING_ACTION_NONE,
@@ -306,7 +327,38 @@ fn plan_remove(
     } else {
         GIT_OBJECT_SHARING_ACTION_WRITE
     };
-    Ok(classified.into_wire(action, Some(lines), None))
+    Ok(classified.into_wire_with_mutation(action, Some(lines), None, true))
+}
+
+fn validate_mutation_context(
+    request: &GitObjectSharingPlanRequestWire,
+) -> Result<(), GitObjectSharingError> {
+    match clean_option(&request.mutation_context) {
+        None
+        | Some("new_checkout")
+        | Some("existing_checkout")
+        | Some("repair") => Ok(()),
+        Some(other) => {
+            Err(GitObjectSharingError::MutationContext(other.to_string()))
+        }
+    }
+}
+
+fn existing_checkout_mutation_refusal(
+    classified: &ClassifiedAlternates,
+    dependency_mutation: bool,
+) -> Option<String> {
+    if clean_option(&classified.request.mutation_context)
+        != Some("existing_checkout")
+        || !dependency_mutation
+        || classified.request.checkout_clean == Some(true)
+    {
+        return None;
+    }
+    Some(
+        "refusing to rewrite an existing checkout's Git object dependency without a clean status"
+            .to_string(),
+    )
 }
 
 fn install_lines(classified: &ClassifiedAlternates) -> Vec<String> {
@@ -376,6 +428,22 @@ impl ClassifiedAlternates {
         write_alternates: Option<Vec<String>>,
         detail_override: Option<String>,
     ) -> GitObjectSharingPlanWire {
+        self.into_wire_with_mutation(
+            action,
+            write_alternates,
+            detail_override,
+            action != GIT_OBJECT_SHARING_ACTION_NONE
+                && action != GIT_OBJECT_SHARING_ACTION_FAIL,
+        )
+    }
+
+    fn into_wire_with_mutation(
+        self,
+        action: &str,
+        write_alternates: Option<Vec<String>>,
+        detail_override: Option<String>,
+        dependency_mutation: bool,
+    ) -> GitObjectSharingPlanWire {
         let owned_alternates = self
             .owned_indexes
             .iter()
@@ -399,6 +467,7 @@ impl ClassifiedAlternates {
             owned_alternates,
             foreign_alternates,
             write_alternates,
+            dependency_mutation,
             sase_owned: !self.owned_indexes.is_empty(),
             detail: detail_override.unwrap_or(self.detail),
         }
@@ -430,6 +499,8 @@ mod tests {
             alternates: Vec::new(),
             config_enabled: false,
             config_primary_objects: None,
+            mutation_context: None,
+            checkout_clean: None,
         }
     }
 
@@ -493,6 +564,7 @@ mod tests {
         let plan = plan_git_object_sharing(&req).unwrap();
 
         assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_WRITE);
+        assert!(plan.dependency_mutation);
         assert_eq!(
             plan.write_alternates.unwrap(),
             vec![
@@ -524,6 +596,7 @@ mod tests {
         let plan = plan_git_object_sharing(&req).unwrap();
 
         assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_WRITE);
+        assert!(plan.dependency_mutation);
         assert_eq!(
             plan.write_alternates.unwrap(),
             vec![foreign.to_string_lossy().into_owned()]
@@ -548,5 +621,75 @@ mod tests {
         assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_FAIL);
         assert_eq!(plan.status, "unexpected");
         assert!(plan.write_alternates.is_none());
+        assert!(!plan.dependency_mutation);
+    }
+
+    #[test]
+    fn install_noops_when_expected_dependency_is_unchanged() {
+        let temp = tempdir().unwrap();
+        let objects = temp.path().join("borrower/.git/objects");
+        let primary = temp.path().join("primary/.git/objects");
+        std::fs::create_dir_all(&primary).unwrap();
+        let mut req = request(&objects, &primary);
+        req.operation = "install".to_string();
+        req.alternates = vec![primary.to_string_lossy().into_owned()];
+
+        let plan = plan_git_object_sharing(&req).unwrap();
+
+        assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_NONE);
+        assert!(!plan.dependency_mutation);
+        assert!(plan.write_alternates.is_none());
+    }
+
+    #[test]
+    fn existing_checkout_dirty_repoint_is_refused() {
+        let temp = tempdir().unwrap();
+        let objects = temp.path().join("borrower/.git/objects");
+        let old = temp.path().join("old/.git/objects");
+        let primary = temp.path().join("primary/.git/objects");
+        for path in [&old, &primary] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let mut req = request(&objects, &primary);
+        req.operation = "install".to_string();
+        req.alternates = vec![old.to_string_lossy().into_owned()];
+        req.config_enabled = true;
+        req.config_primary_objects = Some(old.to_string_lossy().into_owned());
+        req.mutation_context = Some("existing_checkout".to_string());
+        req.checkout_clean = Some(false);
+
+        let plan = plan_git_object_sharing(&req).unwrap();
+
+        assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_FAIL);
+        assert_eq!(plan.status, "stale");
+        assert!(!plan.dependency_mutation);
+        assert!(plan.detail.contains("clean status"));
+    }
+
+    #[test]
+    fn existing_checkout_clean_repoint_is_allowed() {
+        let temp = tempdir().unwrap();
+        let objects = temp.path().join("borrower/.git/objects");
+        let old = temp.path().join("old/.git/objects");
+        let primary = temp.path().join("primary/.git/objects");
+        for path in [&old, &primary] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let mut req = request(&objects, &primary);
+        req.operation = "install".to_string();
+        req.alternates = vec![old.to_string_lossy().into_owned()];
+        req.config_enabled = true;
+        req.config_primary_objects = Some(old.to_string_lossy().into_owned());
+        req.mutation_context = Some("existing_checkout".to_string());
+        req.checkout_clean = Some(true);
+
+        let plan = plan_git_object_sharing(&req).unwrap();
+
+        assert_eq!(plan.action, GIT_OBJECT_SHARING_ACTION_WRITE);
+        assert!(plan.dependency_mutation);
+        assert_eq!(
+            plan.write_alternates.unwrap(),
+            vec![primary.to_string_lossy().into_owned()]
+        );
     }
 }
