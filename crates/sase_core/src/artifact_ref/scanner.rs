@@ -15,6 +15,7 @@ use super::{
     parse_artifact_ref_canonical,
 };
 use crate::artifact_link::{LINKS_BLOCK_END_MARKER, LINKS_BLOCK_START_MARKER};
+use crate::content_layout::{skill_reference_name, split_skill_reference_name};
 use crate::markdown_link_refs::scan_markdown_reference_links;
 
 const TRAILING_PUNCTUATION: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
@@ -132,6 +133,11 @@ pub fn scan_artifact_ref_document_links(
             }
             occupied.push((link.source_span.start, link.source_span.end));
         }
+        links.push(link);
+    }
+
+    for link in scan_explicit_xprompt_skill_refs(text, &occupied) {
+        occupied.push((link.source_span.start, link.source_span.end));
         links.push(link);
     }
 
@@ -473,6 +479,29 @@ fn markdown_link_to_document_target(
         };
     }
 
+    if let Some(reference) =
+        canonical_xprompt_skill_ref_from_document_text(&link.destination)
+    {
+        return ArtifactRefDocumentTargetWire {
+            schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
+            target_kind: ArtifactRefDocumentTargetKindWire::XpromptSkill,
+            text: text[link.source_span.start..link.source_span.end]
+                .to_string(),
+            target: reference,
+            well_formed: true,
+            source_span: link.source_span,
+            candidate_span: link.source_span,
+            target_span: link.destination_span.unwrap_or(link.label_span),
+            label_span: Some(link.label_span),
+            destination_span: link.destination_span,
+            reference_label: link.reference_label,
+            markdown_destination,
+            hosted_destination: None,
+            artifact_reference: None,
+            quoted: false,
+        };
+    }
+
     let target_kind = if is_url_target(&link.destination) {
         ArtifactRefDocumentTargetKindWire::Url
     } else {
@@ -667,6 +696,66 @@ fn scan_document_urls(
         ));
     }
     links
+}
+
+fn scan_explicit_xprompt_skill_refs(
+    text: &str,
+    occupied: &[(usize, usize)],
+) -> Vec<ArtifactRefDocumentTargetWire> {
+    let mut links = Vec::new();
+    for (start, character) in text.char_indices() {
+        if character != '#' || !has_allowed_left_context(text, start) {
+            continue;
+        }
+        let token_start = start + 1;
+        let end = scan_xprompt_reference_end(text, token_start);
+        if end <= token_start || overlaps(start, end, occupied) {
+            continue;
+        }
+        let Some(target) =
+            canonical_xprompt_skill_ref_token(&text[token_start..end])
+        else {
+            continue;
+        };
+        links.push(simple_document_link(
+            ArtifactRefDocumentTargetKindWire::XpromptSkill,
+            start,
+            end,
+            token_start,
+            text[start..end].to_string(),
+            target,
+        ));
+    }
+    links
+}
+
+fn scan_xprompt_reference_end(text: &str, start: usize) -> usize {
+    let mut end = start;
+    for (offset, character) in text[start..].char_indices() {
+        if !(character.is_ascii_alphanumeric()
+            || matches!(character, '_' | '-' | '.' | '/'))
+        {
+            break;
+        }
+        end = start + offset + character.len_utf8();
+    }
+    end
+}
+
+fn canonical_xprompt_skill_ref_from_document_text(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let token = trimmed.strip_prefix('#')?;
+    let end = scan_xprompt_reference_end(token, 0);
+    if end == 0 {
+        return None;
+    }
+    canonical_xprompt_skill_ref_token(&token[..end])
+}
+
+fn canonical_xprompt_skill_ref_token(token: &str) -> Option<String> {
+    let normalized = token.replace("__", "/");
+    let (project, skill_name) = split_skill_reference_name(&normalized)?;
+    Some(skill_reference_name(project, skill_name))
 }
 
 fn scan_url_end(text: &str, start: usize) -> usize {
@@ -1114,6 +1203,63 @@ mod tests {
             ArtifactRefDocumentTargetKindWire::FilePath
         );
         assert_eq!(links[1].target, "src/sase/pager/link_scan.py:12");
+    }
+
+    #[test]
+    fn document_scan_recognizes_explicit_xprompt_skill_references() {
+        let links = document_links(
+            "Use #skill/sase_plan, #sase/skill/demo, and #skill__sase_repo(arg).",
+        );
+
+        let targets = links
+            .iter()
+            .map(|link| {
+                (link.target_kind, link.text.as_str(), link.target.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            [
+                (
+                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    "#skill/sase_plan",
+                    "skill/sase_plan",
+                ),
+                (
+                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    "#sase/skill/demo",
+                    "sase/skill/demo",
+                ),
+                (
+                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    "#skill__sase_repo",
+                    "skill/sase_repo",
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn document_scan_uses_markdown_destination_for_skill_links() {
+        let links = document_links(
+            "[plan](#skill/sase_plan) [#skill/sase_repo](https://example.test)",
+        );
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(
+            links[0].target_kind,
+            ArtifactRefDocumentTargetKindWire::XpromptSkill
+        );
+        assert_eq!(links[0].target, "skill/sase_plan");
+        assert_eq!(
+            links[0].markdown_destination.as_deref(),
+            Some("#skill/sase_plan")
+        );
+        assert_eq!(
+            links[1].target_kind,
+            ArtifactRefDocumentTargetKindWire::Url
+        );
+        assert_eq!(links[1].target, "https://example.test");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use thiserror::Error;
 
@@ -14,10 +14,10 @@ use crate::{
         memory_note_issue, memory_reference_name,
         reserved_memory_namespace_issue, resolve_layout_candidates,
         sase_content_layout, skill_placement_issue, skill_reference_name,
-        CompatibleLayoutPathWire, MemorySourceWire, MemoryTierWire,
-        MemoryXpromptIssueWire, SkillPlacementIssueWire, SkillSourceWire,
-        XpromptSourceWire, MEMORY_NAMESPACE_SEGMENT, MEMORY_README_FILENAME,
-        SKILL_DIRECTORY_SEGMENT,
+        split_skill_reference_name, CompatibleLayoutPathWire, MemorySourceWire,
+        MemoryTierWire, MemoryXpromptIssueWire, SkillPlacementIssueWire,
+        SkillSourceWire, XpromptSourceWire, MEMORY_NAMESPACE_SEGMENT,
+        MEMORY_README_FILENAME, SKILL_DIRECTORY_SEGMENT,
     },
     list_project_records,
     snippet_catalog::{compose_snippet_catalog, is_valid_snippet_trigger},
@@ -33,6 +33,7 @@ use crate::{
 
 const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
 const SCHEMA_VERSION: u32 = 1;
+pub const XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION: u64 = 1;
 const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
@@ -54,12 +55,95 @@ pub enum XpromptCatalogLoadError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XpromptCatalogLoadOptions {
     pub root_dir: Option<PathBuf>,
+    pub package_xprompts_dir: Option<PathBuf>,
+    pub package_skills_dir: Option<PathBuf>,
+    pub default_xprompts_dir: Option<PathBuf>,
+    pub default_config_path: Option<PathBuf>,
+    pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_config_paths: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XpromptCatalogResourcePaths {
+    pub package_xprompts_dir: Option<PathBuf>,
+    pub package_skills_dir: Option<PathBuf>,
+    pub default_xprompts_dir: Option<PathBuf>,
+    pub default_config_path: Option<PathBuf>,
+    pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_config_paths: BTreeMap<String, PathBuf>,
 }
 
 impl XpromptCatalogLoadOptions {
     pub fn new(root_dir: Option<PathBuf>) -> Self {
-        Self { root_dir }
+        Self {
+            root_dir,
+            package_xprompts_dir: None,
+            package_skills_dir: None,
+            default_xprompts_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_skill_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+        }
     }
+
+    pub fn with_resource_paths(
+        mut self,
+        resource_paths: XpromptCatalogResourcePaths,
+    ) -> Self {
+        self.package_xprompts_dir = resource_paths.package_xprompts_dir;
+        self.package_skills_dir = resource_paths.package_skills_dir;
+        self.default_xprompts_dir = resource_paths.default_xprompts_dir;
+        self.default_config_path = resource_paths.default_config_path;
+        self.plugin_xprompt_dirs = resource_paths.plugin_xprompt_dirs;
+        self.plugin_skill_dirs = resource_paths.plugin_skill_dirs;
+        self.plugin_config_paths = resource_paths.plugin_config_paths;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpromptSkillDefinitionRequestWire {
+    #[serde(default = "xprompt_skill_definition_schema_version")]
+    pub schema_version: u64,
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpromptSkillDefinitionCandidateWire {
+    pub reference: String,
+    pub skill_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpromptSkillDefinitionResolutionWire {
+    pub schema_version: u64,
+    pub status: String,
+    pub authored_reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_path: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<XpromptSkillDefinitionCandidateWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
+fn xprompt_skill_definition_schema_version() -> u64 {
+    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,7 +257,9 @@ pub fn load_editor_xprompt_catalog(
     options: &XpromptCatalogLoadOptions,
 ) -> Result<EditorXpromptCatalogResponseWire, XpromptCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
-    let loader = CatalogLoader::new(root_dir);
+    let mut options = options.clone();
+    options.root_dir = root_dir;
+    let loader = CatalogLoader::new(&options);
     let canonical_project =
         loader.canonical_project(request.project.as_deref());
     let entries = filter_structured_sources(
@@ -233,7 +319,9 @@ pub fn load_editor_snippet_catalog(
     options: &XpromptCatalogLoadOptions,
 ) -> Result<EditorSnippetCatalogResponseWire, XpromptCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
-    let loader = CatalogLoader::new(root_dir);
+    let mut options = options.clone();
+    options.root_dir = root_dir;
+    let loader = CatalogLoader::new(&options);
     let mut entries_by_trigger =
         BTreeMap::<String, EditorSnippetEntryWire>::new();
 
@@ -307,6 +395,260 @@ pub fn load_editor_snippet_catalog(
         },
         entries,
     })
+}
+
+pub fn resolve_xprompt_skill_definition(
+    request: &XpromptSkillDefinitionRequestWire,
+    options: &XpromptCatalogLoadOptions,
+) -> XpromptSkillDefinitionResolutionWire {
+    let authored_reference = request.reference.trim().to_string();
+    let loader = CatalogLoader::new(options);
+    let applicable_project = loader
+        .canonical_project(request.project.as_deref())
+        .or_else(|| loader.root_project().map(str::to_string));
+    let parsed = match parse_skill_lookup_reference(&authored_reference) {
+        Some(parsed) => parsed,
+        None => {
+            return skill_definition_resolution(
+                "not_a_skill_candidate",
+                authored_reference,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                Some("not a supported skill reference".to_string()),
+            );
+        }
+    };
+
+    let sources = match parsed.project.as_deref() {
+        Some(project) => loader.skill_lookup_sources(Some(project)),
+        None => loader.skill_lookup_sources(applicable_project.as_deref()),
+    };
+    let sources = match sources {
+        Ok(sources) => sources,
+        Err(error) => {
+            return skill_definition_resolution(
+                "catalog_load_failure",
+                authored_reference,
+                parsed.canonical_reference,
+                Some(parsed.skill_name),
+                parsed.project,
+                None,
+                Vec::new(),
+                Some(error.to_string()),
+            );
+        }
+    };
+
+    if parsed.slash {
+        let mut candidates = sources
+            .iter()
+            .filter(|entry| {
+                entry.is_skill
+                    && entry.skill_name.as_deref()
+                        == Some(parsed.skill_name.as_str())
+            })
+            .map(|entry| loader.skill_definition_candidate(entry))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.reference.cmp(&right.reference));
+        candidates.dedup_by(|left, right| left.reference == right.reference);
+        if candidates.len() > 1 {
+            let refs = candidates
+                .iter()
+                .map(|candidate| format!("#{}", candidate.reference))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return skill_definition_resolution(
+                "ambiguous",
+                authored_reference,
+                None,
+                Some(parsed.skill_name.clone()),
+                None,
+                None,
+                candidates,
+                Some(format!(
+                    "/{} matches multiple skill definitions: {refs}",
+                    parsed.skill_name
+                )),
+            );
+        }
+        let Some(candidate) = candidates.into_iter().next() else {
+            return skill_definition_resolution(
+                "missing_skill",
+                authored_reference,
+                None,
+                Some(parsed.skill_name.clone()),
+                applicable_project,
+                None,
+                Vec::new(),
+                Some(format!("skill /{} not found", parsed.skill_name)),
+            );
+        };
+        return resolution_for_candidate(
+            authored_reference,
+            parsed.skill_name,
+            candidate,
+        );
+    }
+
+    let canonical_reference = parsed
+        .canonical_reference
+        .clone()
+        .expect("explicit skill references always have a canonical reference");
+    let candidate = sources
+        .iter()
+        .find(|entry| entry.is_skill && entry.name == canonical_reference)
+        .map(|entry| loader.skill_definition_candidate(entry));
+    let Some(candidate) = candidate else {
+        return skill_definition_resolution(
+            "missing_skill",
+            authored_reference,
+            Some(canonical_reference.clone()),
+            Some(parsed.skill_name),
+            parsed.project,
+            None,
+            Vec::new(),
+            Some(format!("skill #{} not found", canonical_reference)),
+        );
+    };
+    resolution_for_candidate(authored_reference, parsed.skill_name, candidate)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSkillLookupReference {
+    slash: bool,
+    canonical_reference: Option<String>,
+    project: Option<String>,
+    skill_name: String,
+}
+
+fn parse_skill_lookup_reference(
+    raw: &str,
+) -> Option<ParsedSkillLookupReference> {
+    if let Some(skill_name) = slash_skill_name(raw) {
+        return Some(ParsedSkillLookupReference {
+            slash: true,
+            canonical_reference: None,
+            project: None,
+            skill_name,
+        });
+    }
+    let token = explicit_xprompt_reference_token(raw)?;
+    let normalized = token.replace("__", "/");
+    let (project, skill_name) = split_skill_reference_name(&normalized)?;
+    let project = project.map(str::to_string);
+    Some(ParsedSkillLookupReference {
+        slash: false,
+        canonical_reference: Some(skill_reference_name(
+            project.as_deref(),
+            skill_name,
+        )),
+        project,
+        skill_name: skill_name.to_string(),
+    })
+}
+
+fn explicit_xprompt_reference_token(raw: &str) -> Option<&str> {
+    let rest = raw.trim().strip_prefix('#')?;
+    let end = rest
+        .char_indices()
+        .find_map(|(offset, character)| {
+            (character.is_whitespace()
+                || matches!(
+                    character,
+                    '(' | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                        | '"'
+                        | '\''
+                        | '`'
+                        | ','
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                ))
+            .then_some(offset)
+        })
+        .unwrap_or(rest.len());
+    let token = &rest[..end];
+    (!token.is_empty()).then_some(token)
+}
+
+fn slash_skill_name(raw: &str) -> Option<String> {
+    let skill = raw.trim().strip_prefix('/')?;
+    if skill.is_empty() || skill.contains('/') {
+        return None;
+    }
+    if !skill
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+    Some(skill.to_string())
+}
+
+fn resolution_for_candidate(
+    authored_reference: String,
+    skill_name: String,
+    candidate: XpromptSkillDefinitionCandidateWire,
+) -> XpromptSkillDefinitionResolutionWire {
+    let Some(definition_path) = candidate.definition_path.clone() else {
+        return skill_definition_resolution(
+            "missing_source",
+            authored_reference,
+            Some(candidate.reference.clone()),
+            Some(skill_name),
+            candidate.project.clone(),
+            None,
+            vec![candidate.clone()],
+            Some(format!(
+                "skill #{} has no local source file",
+                candidate.reference
+            )),
+        );
+    };
+    skill_definition_resolution(
+        "success",
+        authored_reference,
+        Some(candidate.reference.clone()),
+        Some(skill_name),
+        candidate.project.clone(),
+        Some(definition_path),
+        vec![candidate],
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn skill_definition_resolution(
+    status: &str,
+    authored_reference: String,
+    canonical_reference: Option<String>,
+    skill_name: Option<String>,
+    project: Option<String>,
+    definition_path: Option<String>,
+    candidates: Vec<XpromptSkillDefinitionCandidateWire>,
+    diagnostic: Option<String>,
+) -> XpromptSkillDefinitionResolutionWire {
+    XpromptSkillDefinitionResolutionWire {
+        schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+        status: status.to_string(),
+        authored_reference,
+        canonical_reference,
+        skill_name,
+        project,
+        definition_path,
+        candidates,
+        diagnostic,
+    }
 }
 
 fn filter_structured_sources(
@@ -655,38 +997,60 @@ struct CatalogLoader {
 }
 
 impl CatalogLoader {
-    fn new(root_dir: Option<PathBuf>) -> Self {
+    fn new(options: &XpromptCatalogLoadOptions) -> Self {
+        let root_dir = options.root_dir.clone();
         let home_dir = env::var_os("HOME").map(PathBuf::from);
         let package_root =
             env::var_os("SASE_XPROMPT_PACKAGE_DIR").map(PathBuf::from);
-        let package_xprompts_dir = env_path("SASE_XPROMPT_BUILTIN_DIR")
+        let package_xprompts_dir = options
+            .package_xprompts_dir
+            .clone()
+            .or_else(|| env_path("SASE_XPROMPT_BUILTIN_DIR"))
             .or_else(|| {
                 package_root.as_ref().map(|root| root.join("xprompts"))
             });
-        let package_skills_dir =
-            env_path("SASE_SKILL_BUILTIN_DIR").or_else(|| {
+        let package_skills_dir = options
+            .package_skills_dir
+            .clone()
+            .or_else(|| env_path("SASE_SKILL_BUILTIN_DIR"))
+            .or_else(|| {
                 package_root.as_ref().map(|root| {
                     root.join("xprompts").join(SKILL_DIRECTORY_SEGMENT)
                 })
             });
-        let default_xprompts_dir = env_path("SASE_XPROMPT_DEFAULT_DIR")
+        let default_xprompts_dir = options
+            .default_xprompts_dir
+            .clone()
+            .or_else(|| env_path("SASE_XPROMPT_DEFAULT_DIR"))
             .or_else(|| {
                 package_root
                     .as_ref()
                     .map(|root| root.join("default_xprompts"))
             });
-        let default_config_path =
-            env_path("SASE_DEFAULT_CONFIG_PATH").or_else(|| {
+        let default_config_path = options
+            .default_config_path
+            .clone()
+            .or_else(|| env_path("SASE_DEFAULT_CONFIG_PATH"))
+            .or_else(|| {
                 package_root
                     .as_ref()
                     .map(|root| root.join("default_config.yml"))
             });
-        let plugin_xprompt_dirs =
-            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV);
-        let plugin_skill_dirs =
-            plugin_path_map_from_env(SASE_SKILL_PLUGIN_DIRS_JSON_ENV);
-        let plugin_config_paths =
-            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV);
+        let plugin_xprompt_dirs = if options.plugin_xprompt_dirs.is_empty() {
+            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV)
+        } else {
+            options.plugin_xprompt_dirs.clone()
+        };
+        let plugin_skill_dirs = if options.plugin_skill_dirs.is_empty() {
+            plugin_path_map_from_env(SASE_SKILL_PLUGIN_DIRS_JSON_ENV)
+        } else {
+            options.plugin_skill_dirs.clone()
+        };
+        let plugin_config_paths = if options.plugin_config_paths.is_empty() {
+            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV)
+        } else {
+            options.plugin_config_paths.clone()
+        };
         let known_projects = known_projects(home_dir.as_deref());
         Self {
             root_dir,
@@ -831,6 +1195,67 @@ impl CatalogLoader {
                 ))
         });
         Ok(sources)
+    }
+
+    fn skill_lookup_sources(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Vec<StructuredSource>, XpromptCatalogLoadError> {
+        if let Some(project) = project {
+            return self.gather_structured_sources(Some(project)).map(
+                |sources| {
+                    sources
+                        .into_iter()
+                        .filter(|source| source.is_skill)
+                        .collect()
+                },
+            );
+        }
+
+        self.load_all_xprompts(None).map(|xprompts| {
+            xprompts
+                .into_iter()
+                .filter_map(|(name, xprompt)| {
+                    xprompt.is_skill.then(|| {
+                        let (bucket, project) = self.classify_source(
+                            xprompt.source_path.as_deref(),
+                            None,
+                        );
+                        let workflow = xprompt_to_workflow(&xprompt);
+                        StructuredSource {
+                            name,
+                            workflow,
+                            bucket,
+                            project,
+                            description: xprompt.description,
+                            is_skill: xprompt.is_skill,
+                            skill_name: xprompt.skill_name,
+                            memory_type: xprompt.memory_type,
+                            content: xprompt.content,
+                            definition_section: DefinitionSection::Xprompts,
+                        }
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn skill_definition_candidate(
+        &self,
+        entry: &StructuredSource,
+    ) -> XpromptSkillDefinitionCandidateWire {
+        XpromptSkillDefinitionCandidateWire {
+            reference: entry.name.clone(),
+            skill_name: entry.skill_name.clone().unwrap_or_else(|| {
+                entry
+                    .name
+                    .rsplit_once('/')
+                    .map_or(entry.name.as_str(), |(_, tail)| tail)
+                    .to_string()
+            }),
+            project: entry.project.clone(),
+            definition_path: self.definition_path(entry),
+        }
     }
 
     fn load_all_xprompts(
@@ -1725,10 +2150,18 @@ impl CatalogLoader {
     ) -> Option<PathBuf> {
         if let Some(rest) = source.strip_prefix("plugin:") {
             let (module, filename) = rest.split_once('/')?;
-            return self
+            let xprompt = self
                 .plugin_xprompt_dirs
                 .get(module)
                 .map(|dir| dir.join(filename));
+            if xprompt.as_ref().is_some_and(|path| path.is_file()) {
+                return xprompt;
+            }
+            return self
+                .plugin_skill_dirs
+                .get(module)
+                .map(|dir| dir.join(filename))
+                .or(xprompt);
         }
         if let Some(module) = source.strip_prefix("plugin_config:") {
             return self.plugin_config_paths.get(module).cloned();
@@ -2739,6 +3172,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolves_xprompt_skill_definition_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let skills = root.join("sase/skills");
+        fs::create_dir_all(&skills).unwrap();
+        let source = skills.join("sase_plan.md");
+        fs::write(
+            &source,
+            "---\nname: sase_plan\nskill: true\n---\nPlan body\n",
+        )
+        .unwrap();
+        let options = XpromptCatalogLoadOptions::new(Some(root.to_path_buf()));
+
+        let explicit = resolve_xprompt_skill_definition(
+            &XpromptSkillDefinitionRequestWire {
+                schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+                reference: "#skill/sase_plan".to_string(),
+                project: None,
+            },
+            &options,
+        );
+        assert_eq!(explicit.status, "success");
+        assert_eq!(
+            explicit.canonical_reference.as_deref(),
+            Some("skill/sase_plan")
+        );
+        assert_eq!(
+            explicit.definition_path.as_deref(),
+            Some(source.canonicalize().unwrap().to_str().unwrap())
+        );
+
+        let shorthand = resolve_xprompt_skill_definition(
+            &XpromptSkillDefinitionRequestWire {
+                schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+                reference: "#skill__sase_plan".to_string(),
+                project: None,
+            },
+            &options,
+        );
+        assert_eq!(shorthand.status, "success");
+        assert_eq!(
+            shorthand.canonical_reference.as_deref(),
+            Some("skill/sase_plan")
+        );
+
+        let slash = resolve_xprompt_skill_definition(
+            &XpromptSkillDefinitionRequestWire {
+                schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+                reference: "/sase_plan".to_string(),
+                project: None,
+            },
+            &options,
+        );
+        assert_eq!(slash.status, "success");
+        assert_eq!(slash.skill_name.as_deref(), Some("sase_plan"));
+
+        let missing = resolve_xprompt_skill_definition(
+            &XpromptSkillDefinitionRequestWire {
+                schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+                reference: "#skill/missing".to_string(),
+                project: None,
+            },
+            &options,
+        );
+        assert_eq!(missing.status, "missing_skill");
+        assert_eq!(
+            missing.canonical_reference.as_deref(),
+            Some("skill/missing")
+        );
+    }
+
     fn write_memory_note(root: &Path, name: &str, contents: &str) {
         let memory = root.join("sase/memory");
         fs::create_dir_all(&memory).unwrap();
@@ -3381,7 +3886,9 @@ mod tests {
         )
         .unwrap();
 
-        let loader = CatalogLoader::new(Some(root.to_path_buf()));
+        let loader = CatalogLoader::new(&XpromptCatalogLoadOptions::new(Some(
+            root.to_path_buf(),
+        )));
         let loaded = loader
             .load_xprompts_from_dir(&xprompts, None, false)
             .unwrap();

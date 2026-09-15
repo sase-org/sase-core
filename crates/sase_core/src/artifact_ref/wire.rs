@@ -8,7 +8,7 @@ pub const ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 5;
 pub const ARTIFACT_REF_LIST_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_CONTEXT_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_PATH_FILTER_WIRE_SCHEMA_VERSION: u64 = 1;
-pub const ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION: u64 = 2;
 pub const ARTIFACT_REF_TARGET_RESOLUTION_WIRE_SCHEMA_VERSION: u64 = 1;
 pub const LINK_LOCATION_WIRE_SCHEMA_VERSION: u64 = 1;
 
@@ -344,6 +344,7 @@ pub enum ArtifactRefDocumentTargetKindWire {
     ArtifactRef,
     Url,
     FilePath,
+    XpromptSkill,
 }
 
 impl ArtifactRefDocumentTargetKindWire {
@@ -352,6 +353,7 @@ impl ArtifactRefDocumentTargetKindWire {
             Self::ArtifactRef => "artifact_ref",
             Self::Url => "url",
             Self::FilePath => "file_path",
+            Self::XpromptSkill => "xprompt_skill",
         }
     }
 }

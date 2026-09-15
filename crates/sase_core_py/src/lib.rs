@@ -1544,9 +1544,12 @@ use sase_core::{
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
+    resolve_xprompt_skill_definition as core_resolve_xprompt_skill_definition,
     validate_snippet_trigger as core_validate_snippet_trigger, EditorPosition,
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
-    XpromptCatalogLoadOptions, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
+    XpromptCatalogLoadOptions, XpromptCatalogResourcePaths,
+    XpromptSkillDefinitionRequestWire, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
+    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
 };
 use sase_core::{
     runner_capacity_policy_schema_version as core_runner_capacity_policy_schema_version,
@@ -1559,6 +1562,7 @@ use serde::ser::{
     SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
     SerializeTupleVariant, Serializer,
 };
+use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 #[pyclass(name = "QueryCorpusHandle", module = "sase_core_rs")]
@@ -2417,6 +2421,78 @@ fn py_load_editor_snippet_catalog(
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PyXpromptCatalogOptions {
+    root_dir: Option<PathBuf>,
+    package_xprompts_dir: Option<PathBuf>,
+    package_skills_dir: Option<PathBuf>,
+    default_xprompts_dir: Option<PathBuf>,
+    default_config_path: Option<PathBuf>,
+    #[serde(default)]
+    plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    plugin_skill_dirs: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    plugin_config_paths: BTreeMap<String, PathBuf>,
+}
+
+fn xprompt_catalog_options_from_py(
+    options: Option<&Bound<'_, PyDict>>,
+) -> PyResult<XpromptCatalogLoadOptions> {
+    let raw = match options {
+        Some(options) => serde_json::from_value::<PyXpromptCatalogOptions>(
+            py_to_json_value(options.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "xprompt catalog options are invalid: {error}"
+            ))
+        })?,
+        None => PyXpromptCatalogOptions::default(),
+    };
+    let resource_paths = XpromptCatalogResourcePaths {
+        package_xprompts_dir: raw.package_xprompts_dir,
+        package_skills_dir: raw.package_skills_dir,
+        default_xprompts_dir: raw.default_xprompts_dir,
+        default_config_path: raw.default_config_path,
+        plugin_xprompt_dirs: raw.plugin_xprompt_dirs,
+        plugin_skill_dirs: raw.plugin_skill_dirs,
+        plugin_config_paths: raw.plugin_config_paths,
+    };
+    Ok(XpromptCatalogLoadOptions::new(raw.root_dir)
+        .with_resource_paths(resource_paths))
+}
+
+#[pyfunction]
+#[pyo3(name = "resolve_xprompt_skill_definition")]
+#[pyo3(signature = (request, options = None))]
+fn py_resolve_xprompt_skill_definition<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let request: XpromptSkillDefinitionRequestWire =
+        serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "request is not a valid XpromptSkillDefinitionRequestWire dict: {error}"
+                ))
+            },
+        )?;
+    let options = xprompt_catalog_options_from_py(options)?;
+    let resolution = core_resolve_xprompt_skill_definition(&request, &options);
+    let value = serde_json::to_value(resolution).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "xprompt_skill_definition_wire_schema_version")]
+fn py_xprompt_skill_definition_wire_schema_version() -> u64 {
+    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
 }
 
 #[pyfunction]
@@ -17904,6 +17980,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_xprompt_skill_definition, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_xprompt_skill_definition_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_shortcut_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_model_shortcut_edit, m)?)?;
@@ -24448,7 +24529,7 @@ MENTORS:
             .unwrap();
             let document_scan =
                 py_to_json_value(document_scan.bind(py)).unwrap();
-            assert_eq!(document_scan["schema_version"], json!(1));
+            assert_eq!(document_scan["schema_version"], json!(2));
             assert_eq!(
                 document_scan["links"][0]["target"],
                 json!("plan:202607/plan.md")
@@ -24504,7 +24585,7 @@ MENTORS:
                 1
             );
 
-            assert_eq!(py_artifact_ref_document_scan_wire_schema_version(), 1);
+            assert_eq!(py_artifact_ref_document_scan_wire_schema_version(), 2);
             assert_eq!(py_artifact_ref_link_location_wire_schema_version(), 1);
             let split =
                 py_artifact_ref_split_link_location(py, "src/app.py:12:5-40")

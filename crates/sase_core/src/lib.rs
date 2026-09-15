@@ -1425,5 +1425,9 @@ pub use workspace_lease::{
 };
 pub use xprompt_catalog::{
     load_editor_snippet_catalog, load_editor_xprompt_catalog,
-    XpromptCatalogLoadError, XpromptCatalogLoadOptions,
+    resolve_xprompt_skill_definition, XpromptCatalogLoadError,
+    XpromptCatalogLoadOptions, XpromptCatalogResourcePaths,
+    XpromptSkillDefinitionCandidateWire, XpromptSkillDefinitionRequestWire,
+    XpromptSkillDefinitionResolutionWire,
+    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
 };
