@@ -52,6 +52,7 @@ use sase_core::{
     editor_filter_model_alias_shortcut_entries,
     editor_hover_at_position_with_flags, editor_model_shortcut_context,
     editor_model_shortcut_edit, editor_plan_argument_colon_to_parentheses_edit,
+    editor_plan_argument_double_colon_to_parentheses_edit,
     editor_plan_model_alias_shortcut_edit,
     editor_typed_launch_directive_diagnostics,
     filter_model_completion_candidates, ArtifactRefContextWire,
@@ -249,6 +250,13 @@ struct OpenDocument {
     text: String,
     language_id: String,
     eligible: bool,
+    recent_paren_insertion: Option<RecentParenInsertion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecentParenInsertion {
+    opener_idx: usize,
+    closer_idx: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1146,6 +1154,16 @@ impl XpromptLspServer {
         position: Position,
         ch: &str,
     ) -> Option<Vec<TextEdit>> {
+        self.on_type_formatting_for_text_with_recent(text, position, ch, None)
+    }
+
+    fn on_type_formatting_for_text_with_recent(
+        &self,
+        text: String,
+        position: Position,
+        ch: &str,
+        recent_paren_insertion: Option<RecentParenInsertion>,
+    ) -> Option<Vec<TextEdit>> {
         if ch != "(" {
             return None;
         }
@@ -1171,6 +1189,39 @@ impl XpromptLspServer {
         let pre_insert_document = DocumentSnapshot::new(pre_insert_text);
         let pre_insert_position =
             pre_insert_document.byte_offset_to_position(opener_idx)?;
+        if let Some(edit) =
+            editor_plan_argument_double_colon_to_parentheses_edit(
+                &pre_insert_document,
+                pre_insert_position,
+            )
+        {
+            let delimiter = edit.new_text.strip_prefix("()")?;
+            let closer_end = if recent_paren_insertion.is_some_and(|recent| {
+                recent.opener_idx == opener_idx
+                    && recent.closer_idx == Some(after_opener_idx)
+            }) && text.as_bytes().get(after_opener_idx)
+                == Some(&b')')
+            {
+                after_opener_idx + 1
+            } else {
+                after_opener_idx
+            };
+            return Some(vec![
+                TextEdit {
+                    range: to_lsp_range(edit.range),
+                    new_text: String::new(),
+                },
+                TextEdit {
+                    range: to_lsp_range(
+                        document.byte_range_to_range(
+                            after_opener_idx,
+                            closer_end,
+                        )?,
+                    ),
+                    new_text: format!("){delimiter}"),
+                },
+            ]);
+        }
         let edit = editor_plan_argument_colon_to_parentheses_edit(
             &pre_insert_document,
             pre_insert_position,
@@ -1297,6 +1348,30 @@ impl XpromptLspServer {
             eligible: document_eligible(uri, &language_id, &config),
             language_id,
             text,
+            recent_paren_insertion: None,
+        }
+    }
+
+    fn changed_document(
+        &self,
+        uri: &Uri,
+        language_id: String,
+        text: String,
+        previous: Option<&OpenDocument>,
+    ) -> OpenDocument {
+        let config = self.current_config();
+        let recent_paren_insertion = previous.and_then(|document| {
+            detect_recent_paren_insertion(
+                &document.text,
+                &text,
+                document.recent_paren_insertion,
+            )
+        });
+        OpenDocument {
+            eligible: document_eligible(uri, &language_id, &config),
+            language_id,
+            text,
+            recent_paren_insertion,
         }
     }
 
@@ -1686,11 +1761,13 @@ impl LanguageServer for XpromptLspServer {
         };
         let uri = params.text_document.uri;
         let text = change.text;
-        let language_id = self
-            .document_for_uri(&uri)
-            .map(|document| document.language_id)
+        let previous = self.document_for_uri(&uri);
+        let language_id = previous
+            .as_ref()
+            .map(|document| document.language_id.clone())
             .unwrap_or_default();
-        let document = self.open_document(&uri, language_id, text);
+        let document =
+            self.changed_document(&uri, language_id, text, previous.as_ref());
         if let Ok(mut documents) = self.documents.write() {
             documents.insert(uri.to_string(), document.clone());
         }
@@ -1760,10 +1837,11 @@ impl LanguageServer for XpromptLspServer {
         if !document.eligible {
             return Ok(None);
         }
-        Ok(self.on_type_formatting_for_text(
+        Ok(self.on_type_formatting_for_text_with_recent(
             document.text,
             params.text_document_position.position,
             &params.ch,
+            document.recent_paren_insertion,
         ))
     }
 
@@ -3273,6 +3351,62 @@ fn zero_range() -> Range {
             line: 0,
             character: 0,
         },
+    }
+}
+
+fn detect_recent_paren_insertion(
+    previous: &str,
+    current: &str,
+    previous_recent: Option<RecentParenInsertion>,
+) -> Option<RecentParenInsertion> {
+    if current.len() <= previous.len() {
+        return None;
+    }
+    let previous_bytes = previous.as_bytes();
+    let current_bytes = current.as_bytes();
+    let mut prefix = 0usize;
+    while prefix < previous_bytes.len()
+        && prefix < current_bytes.len()
+        && previous_bytes[prefix] == current_bytes[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut previous_suffix = previous_bytes.len();
+    let mut current_suffix = current_bytes.len();
+    while previous_suffix > prefix
+        && current_suffix > prefix
+        && previous_bytes[previous_suffix - 1]
+            == current_bytes[current_suffix - 1]
+    {
+        previous_suffix -= 1;
+        current_suffix -= 1;
+    }
+    if previous_suffix != prefix
+        || !previous.is_char_boundary(prefix)
+        || !current.is_char_boundary(prefix)
+        || !current.is_char_boundary(current_suffix)
+    {
+        return None;
+    }
+
+    match &current[prefix..current_suffix] {
+        "(" => Some(RecentParenInsertion {
+            opener_idx: prefix,
+            closer_idx: None,
+        }),
+        "()" => Some(RecentParenInsertion {
+            opener_idx: prefix,
+            closer_idx: Some(prefix + 1),
+        }),
+        ")" => previous_recent.and_then(|recent| {
+            (recent.closer_idx.is_none() && prefix == recent.opener_idx + 1)
+                .then_some(RecentParenInsertion {
+                    opener_idx: recent.opener_idx,
+                    closer_idx: Some(prefix),
+                })
+        }),
+        _ => None,
     }
 }
 

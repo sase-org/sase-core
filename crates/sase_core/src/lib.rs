@@ -739,6 +739,7 @@ pub use editor::{
     named_args_skeleton as editor_named_args_skeleton,
     placeholder_input_names as editor_placeholder_input_names,
     plan_argument_colon_to_parentheses_edit as editor_plan_argument_colon_to_parentheses_edit,
+    plan_argument_double_colon_to_parentheses_edit as editor_plan_argument_double_colon_to_parentheses_edit,
     plan_model_alias_shortcut_edit as editor_plan_model_alias_shortcut_edit,
     queue_directive_diagnostics as editor_queue_directive_diagnostics,
     rank_and_filter_bead_entries as editor_rank_and_filter_bead_entries,

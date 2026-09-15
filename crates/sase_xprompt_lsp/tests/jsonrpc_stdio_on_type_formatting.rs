@@ -157,6 +157,170 @@ async fn stdio_jsonrpc_on_type_formatting_deletes_invocation_colon() {
     server_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn stdio_jsonrpc_on_type_formatting_moves_double_colon_delimiter() {
+    let (mut client_writer, server_stdin) = duplex(16384);
+    let (server_stdout, mut client_reader) = duplex(16384);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(client, Arc::new(NoopBridge))
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    read_response(&mut client_reader, 1).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+
+    let uri = "file:///tmp/sase_prompt_double_colon_on_type.md";
+    did_open(&mut client_writer, uri, "#foo::  ").await;
+    did_change(&mut client_writer, uri, 2, "#foo::  (").await;
+    let unpaired =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 2, 9, "(")
+            .await;
+    assert_eq!(
+        unpaired,
+        json!([
+            {
+                "range": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 8}
+                },
+                "newText": ""
+            },
+            {
+                "range": {
+                    "start": {"line": 0, "character": 9},
+                    "end": {"line": 0, "character": 9}
+                },
+                "newText": ")::  "
+            }
+        ])
+    );
+    assert_eq!(apply_text_edits("#foo::  (", &unpaired), "#foo()::  ");
+
+    did_change(&mut client_writer, uri, 3, "#foo::  ").await;
+    did_change(&mut client_writer, uri, 4, "#foo::  ()").await;
+    let paired =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 3, 9, "(")
+            .await;
+    assert_eq!(
+        paired,
+        json!([
+            {
+                "range": {
+                    "start": {"line": 0, "character": 4},
+                    "end": {"line": 0, "character": 8}
+                },
+                "newText": ""
+            },
+            {
+                "range": {
+                    "start": {"line": 0, "character": 9},
+                    "end": {"line": 0, "character": 10}
+                },
+                "newText": ")::  "
+            }
+        ])
+    );
+    assert_eq!(apply_text_edits("#foo::  ()", &paired), "#foo()::  ");
+
+    did_change(&mut client_writer, uri, 5, "#foo::  )").await;
+    did_change(&mut client_writer, uri, 6, "#foo::  ()").await;
+    let existing_suffix =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 4, 9, "(")
+            .await;
+    assert_eq!(
+        apply_text_edits("#foo::  ()", &existing_suffix),
+        "#foo()::  )"
+    );
+
+    did_change(&mut client_writer, uri, 7, "#foo:: body").await;
+    did_change(&mut client_writer, uri, 8, "#foo:: (body").await;
+    let suffix =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 5, 8, "(")
+            .await;
+    assert_eq!(apply_text_edits("#foo:: (body", &suffix), "#foo():: body");
+
+    did_change(&mut client_writer, uri, 9, "🙂\n#foo:: ").await;
+    did_change(&mut client_writer, uri, 10, "🙂\n#foo:: (").await;
+    let multiline = request_on_type_at(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        6,
+        1,
+        8,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits("🙂\n#foo:: (", &multiline),
+        "🙂\n#foo():: "
+    );
+
+    did_change(&mut client_writer, uri, 11, "%clan:: ").await;
+    did_change(&mut client_writer, uri, 12, "%clan:: (").await;
+    let directive =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 7, 9, "(")
+            .await;
+    assert_eq!(apply_text_edits("%clan:: (", &directive), "%clan():: ");
+
+    for (version, text, character) in [
+        (14, "#foo::\t(", 8),
+        (15, "#foo:::(", 8),
+        (16, "%if:: (", 7),
+        (17, "#foo(args):: (", 14),
+    ] {
+        did_change(&mut client_writer, uri, version, text).await;
+        assert_eq!(
+            request_on_type(
+                &mut client_writer,
+                &mut client_reader,
+                uri,
+                i64::from(version),
+                character,
+                "(",
+            )
+            .await,
+            Value::Null,
+            "{text}"
+        );
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response(&mut client_reader, 99).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
 async fn did_open(writer: &mut tokio::io::DuplexStream, uri: &str, text: &str) {
     write_message(
         writer,
@@ -204,6 +368,18 @@ async fn request_on_type(
     character: u32,
     ch: &str,
 ) -> Value {
+    request_on_type_at(writer, reader, uri, id, 0, character, ch).await
+}
+
+async fn request_on_type_at(
+    writer: &mut tokio::io::DuplexStream,
+    reader: &mut tokio::io::DuplexStream,
+    uri: &str,
+    id: i64,
+    line: u32,
+    character: u32,
+    ch: &str,
+) -> Value {
     write_message(
         writer,
         json!({
@@ -212,7 +388,7 @@ async fn request_on_type(
             "method": "textDocument/onTypeFormatting",
             "params": {
                 "textDocument": {"uri": uri},
-                "position": {"line": 0, "character": character},
+                "position": {"line": line, "character": character},
                 "ch": ch,
                 "options": {"tabSize": 2, "insertSpaces": true}
             }
@@ -254,6 +430,62 @@ fn labels(result: &Value) -> Vec<&str> {
         .iter()
         .map(|item| item["label"].as_str().expect("label"))
         .collect()
+}
+
+fn apply_text_edits(text: &str, edits: &Value) -> String {
+    let mut text = text.to_string();
+    let mut edits: Vec<(usize, usize, String)> = edits
+        .as_array()
+        .expect("edit array")
+        .iter()
+        .map(|edit| {
+            let range = &edit["range"];
+            (
+                offset_for_position(&text, &range["start"]),
+                offset_for_position(&text, &range["end"]),
+                edit["newText"].as_str().expect("newText").to_string(),
+            )
+        })
+        .collect();
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
+    for (start, end, new_text) in edits {
+        text.replace_range(start..end, &new_text);
+    }
+    text
+}
+
+fn offset_for_position(text: &str, position: &Value) -> usize {
+    let target_line = position["line"].as_u64().expect("line") as usize;
+    let target_character =
+        position["character"].as_u64().expect("character") as usize;
+    let mut line_start = 0usize;
+    for (line, segment) in text.split_inclusive('\n').enumerate() {
+        if line == target_line {
+            return line_start
+                + utf16_offset(
+                    segment.trim_end_matches('\n'),
+                    target_character,
+                );
+        }
+        line_start += segment.len();
+    }
+    if target_line == text.lines().count() {
+        return text.len();
+    }
+    panic!("position line out of bounds: {position:?}");
+}
+
+fn utf16_offset(line: &str, target_units: usize) -> usize {
+    let mut units = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if units == target_units {
+            return byte_idx;
+        }
+        units += ch.len_utf16();
+        assert!(units <= target_units, "position splits UTF-16 character");
+    }
+    assert_eq!(units, target_units, "position beyond line");
+    line.len()
 }
 
 async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {

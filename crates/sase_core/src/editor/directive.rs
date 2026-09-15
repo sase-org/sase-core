@@ -825,6 +825,47 @@ pub(crate) fn directive_argument_open_colon_at(
             .contains(&DirectiveSyntaxForm::Parenthesized)
 }
 
+pub(crate) fn directive_argument_open_double_colon_at(
+    text: &str,
+    colon_idx: usize,
+) -> bool {
+    if text.as_bytes().get(colon_idx..colon_idx + 2) != Some(b"::") {
+        return false;
+    }
+    let Some(line_start) = text[..colon_idx]
+        .rfind('\n')
+        .map_or(Some(0), |idx| idx.checked_add(1))
+    else {
+        return false;
+    };
+    let before_colon = &text[line_start..colon_idx];
+    let Some(percent_rel) = before_colon.rfind('%') else {
+        return false;
+    };
+    let percent_idx = line_start + percent_rel;
+    if !directive_left_boundary(text, percent_idx) {
+        return false;
+    }
+    let name = &text[percent_idx + 1..colon_idx];
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+    {
+        return false;
+    }
+    let Some(metadata) = directive_metadata(name) else {
+        return false;
+    };
+    metadata
+        .syntax_forms
+        .contains(&DirectiveSyntaxForm::Parenthesized)
+        && (metadata
+            .syntax_forms
+            .contains(&DirectiveSyntaxForm::DoubleColon)
+            || metadata.name == "clan")
+}
+
 fn directive_left_boundary(text: &str, percent_idx: usize) -> bool {
     if percent_idx == 0 {
         return true;
