@@ -852,6 +852,7 @@ fn build_snapshot_blocking(
                 .get(&record.artifact_dir)
                 .copied()
                 .unwrap_or(false),
+            family_member: tracked_parent_timestamp(record).is_some(),
         });
     }
     // Select the served set, then build details, content handles, summaries,
@@ -1135,6 +1136,15 @@ fn logical_locator_for_record(
         ])
         .map(|value| safe_identifier(value, "family")),
     }
+}
+
+fn tracked_parent_timestamp(record: &AgentArtifactRecordWire) -> Option<&str> {
+    record.agent_meta.as_ref().and_then(|value| {
+        first_non_empty([
+            value.parent_timestamp.as_deref(),
+            value.parent_agent_timestamp.as_deref(),
+        ])
+    })
 }
 
 fn exact_locator_for_record(
@@ -2021,6 +2031,118 @@ mod tests {
         write_json(&artifact.join("running.json"), json!({"pid": 0}));
     }
 
+    fn seed_done_family_agent(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        family: &str,
+        parent: Option<&str>,
+        finished_at: f64,
+    ) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        fs::create_dir_all(&artifact).unwrap();
+        fs::write(artifact.join("output.txt"), "done output").unwrap();
+        write_json(
+            &artifact.join("agent_meta.json"),
+            family_meta(name, family, parent),
+        );
+        write_json(
+            &artifact.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": finished_at,
+                "name": name,
+                "model": "gpt-5",
+                "llm_provider": "codex",
+                "output_path": "output.txt"
+            }),
+        );
+    }
+
+    fn seed_dead_family_agent(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        family: &str,
+        parent: Option<&str>,
+    ) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        fs::create_dir_all(&artifact).unwrap();
+        write_json(
+            &artifact.join("agent_meta.json"),
+            family_meta(name, family, parent),
+        );
+        write_json(&artifact.join("running.json"), json!({"pid": 0}));
+    }
+
+    fn seed_alive_family_agent(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        family: &str,
+        parent: Option<&str>,
+    ) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        fs::create_dir_all(&artifact).unwrap();
+        write_json(
+            &artifact.join("agent_meta.json"),
+            family_meta(name, family, parent),
+        );
+        write_json(
+            &artifact.join("running.json"),
+            json!({"pid": std::process::id()}),
+        );
+    }
+
+    fn seed_protected_family_agent(
+        projects: &Path,
+        timestamp: &str,
+        name: &str,
+        family: &str,
+        parent: Option<&str>,
+        marker: &str,
+    ) {
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(timestamp);
+        fs::create_dir_all(&artifact).unwrap();
+        write_json(
+            &artifact.join("agent_meta.json"),
+            family_meta(name, family, parent),
+        );
+        write_json(&artifact.join("running.json"), json!({"pid": 0}));
+        write_json(&artifact.join(marker), json!({}));
+    }
+
+    fn family_meta(
+        name: &str,
+        family: &str,
+        parent: Option<&str>,
+    ) -> serde_json::Value {
+        let mut meta = json!({
+            "name": name,
+            "agent_family": family
+        });
+        if let Some(parent) = parent {
+            meta["parent_timestamp"] = json!(parent);
+        }
+        meta
+    }
+
     /// Seed an alive agent whose owner-written prompt file spans several
     /// lines, the ordinary shape produced by every real agent launch.
     fn seed_agent_with_raw_prompt(
@@ -2625,6 +2747,154 @@ mod tests {
         assert!(third_history.page.rows.iter().any(|row| {
             row.labels.agent_label.as_deref() == Some("old-done")
         }));
+    }
+
+    #[tokio::test]
+    async fn orphan_terminal_family_members_are_hidden_from_presentation() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let missing_root_ts = (now - chrono::Duration::minutes(30))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        for index in 0..7 {
+            let timestamp = (now - chrono::Duration::minutes(index + 1))
+                .format("%Y%m%d%H%M%S")
+                .to_string();
+            seed_dead_family_agent(
+                &projects,
+                &timestamp,
+                &format!("lane--gate-{index}"),
+                "lane",
+                Some(&missing_root_ts),
+            );
+        }
+        let service = build_service(&home, &projects);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        assert!(
+            presentation.page.rows.is_empty(),
+            "orphan terminal members must not synthesize a family row: {:?}",
+            presentation.page.rows
+        );
+
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            history.page.total_matching_rows, 7,
+            "explicit history keeps terminal member records reachable"
+        );
+        assert!(history
+            .page
+            .rows
+            .iter()
+            .all(|row| { row.labels.family_label.as_deref() == Some("lane") }));
+    }
+
+    #[tokio::test]
+    async fn terminal_family_root_represents_completed_members() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let root_finished = now - chrono::Duration::minutes(10);
+        let member_finished = now - chrono::Duration::minutes(5);
+        let root_ts = root_finished.format("%Y%m%d%H%M%S").to_string();
+        let member_ts = member_finished.format("%Y%m%d%H%M%S").to_string();
+        seed_done_family_agent(
+            &projects,
+            &root_ts,
+            "lane",
+            "lane",
+            None,
+            root_finished.timestamp() as f64,
+        );
+        seed_done_family_agent(
+            &projects,
+            &member_ts,
+            "lane--gate",
+            "lane",
+            Some(&root_ts),
+            member_finished.timestamp() as f64,
+        );
+        let service = build_service(&home, &projects);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        assert_eq!(presentation.page.rows.len(), 1);
+        let row = &presentation.page.rows[0];
+        assert_eq!(row.labels.agent_label.as_deref(), Some("lane"));
+        assert_eq!(row.labels.family_label.as_deref(), Some("lane"));
+
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        let labels = history
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&Some("lane")));
+        assert!(labels.contains(&Some("lane--gate")));
+    }
+
+    #[tokio::test]
+    async fn active_and_protected_members_remain_visible_without_root() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let missing_root_ts = (now - chrono::Duration::minutes(30))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        seed_alive_family_agent(
+            &projects,
+            &(now - chrono::Duration::minutes(3))
+                .format("%Y%m%d%H%M%S")
+                .to_string(),
+            "lane--worker",
+            "lane",
+            Some(&missing_root_ts),
+        );
+        seed_protected_family_agent(
+            &projects,
+            &(now - chrono::Duration::minutes(2))
+                .format("%Y%m%d%H%M%S")
+                .to_string(),
+            "lane--waiting",
+            "lane",
+            Some(&missing_root_ts),
+            "waiting.json",
+        );
+        seed_protected_family_agent(
+            &projects,
+            &(now - chrono::Duration::minutes(1))
+                .format("%Y%m%d%H%M%S")
+                .to_string(),
+            "lane--question",
+            "lane",
+            Some(&missing_root_ts),
+            "pending_question.json",
+        );
+        let service = build_service(&home, &projects);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        let labels = presentation
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&Some("lane--worker")));
+        assert!(labels.contains(&Some("lane--waiting")));
+        assert!(labels.contains(&Some("lane--question")));
     }
 
     #[tokio::test]

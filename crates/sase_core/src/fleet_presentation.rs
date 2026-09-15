@@ -53,6 +53,13 @@ pub struct FleetPresentationCandidateWire {
     /// Whether this candidate's family root is a dismissed identity,
     /// resolved by the caller through the bounded core index lineage API.
     pub family_root_dismissed: bool,
+    /// Whether this candidate is a tracked family member rather than a
+    /// family root. The policy only uses this after liveness/protection
+    /// checks have classified the row as terminal-for-presentation: active,
+    /// unknown, waiting, and question-protected members remain visible so a
+    /// paginated client can still materialize the missing root.
+    #[serde(default)]
+    pub family_member: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -118,6 +125,10 @@ pub fn decide_fleet_presentation(
         // Liveness is definitively `Dead` or `NotProcess` and the record is
         // unprotected: it is terminal for presentation whether or not the
         // index already recorded it as done.
+        if candidate.family_member {
+            excluded.push(candidate.identity.clone());
+            continue;
+        }
         if candidate.family_root_dismissed {
             excluded.push(candidate.identity.clone());
             continue;
@@ -178,6 +189,25 @@ mod tests {
             protected,
             completion_time_unix,
             family_root_dismissed,
+            family_member: false,
+        }
+    }
+
+    fn family_member_candidate(
+        identity: &str,
+        liveness: OwnerLivenessWire,
+        protected: bool,
+        completion_time_unix: f64,
+    ) -> FleetPresentationCandidateWire {
+        FleetPresentationCandidateWire {
+            family_member: true,
+            ..candidate(
+                identity,
+                liveness,
+                protected,
+                completion_time_unix,
+                false,
+            )
         }
     }
 
@@ -306,6 +336,66 @@ mod tests {
         );
         assert!(decision.recent_terminal.is_empty());
         assert_eq!(decision.excluded, vec!["orphan"]);
+    }
+
+    #[test]
+    fn terminal_family_member_is_not_a_standalone_recent_row() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![
+                candidate(
+                    "root",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - DAY,
+                    false,
+                ),
+                family_member_candidate(
+                    "root--gate",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - (DAY / 2.0),
+                ),
+            ],
+        );
+        assert!(decision.current.is_empty());
+        assert_eq!(decision.recent_terminal, vec!["root"]);
+        assert_eq!(decision.excluded, vec!["root--gate"]);
+    }
+
+    #[test]
+    fn active_unknown_and_protected_family_members_remain_current() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![
+                family_member_candidate(
+                    "active-member",
+                    OwnerLivenessWire::Alive,
+                    false,
+                    now - DAY,
+                ),
+                family_member_candidate(
+                    "unknown-member",
+                    OwnerLivenessWire::Unknown,
+                    false,
+                    now - DAY,
+                ),
+                family_member_candidate(
+                    "waiting-member",
+                    OwnerLivenessWire::Dead,
+                    true,
+                    now - DAY,
+                ),
+            ],
+        );
+        assert_eq!(
+            decision.current,
+            vec!["active-member", "unknown-member", "waiting-member"]
+        );
+        assert!(decision.recent_terminal.is_empty());
+        assert!(decision.excluded.is_empty());
     }
 
     #[test]
