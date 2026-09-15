@@ -88,6 +88,9 @@ const SUFFIX_SEARCH_MAX_ENTRIES: usize = 20_000;
 
 /// Resolve *path*, an unqualified repo-relative source path named by a
 /// rendered document, in the repository that owns that document.
+///
+/// Home-directory syntax (`~` and `~/...`) is not repository-relative input;
+/// callers should pass those paths to their ordinary filesystem resolver.
 pub fn resolve_document_source_target(
     path: &str,
     owner: &ArtifactRefDocumentOwnerWire,
@@ -322,6 +325,11 @@ enum Probe {
 
 fn normalize_payload(path: &str) -> Result<PathBuf, ArtifactRefError> {
     validate_path_payload("source", path)?;
+    if path == "~" || path.starts_with("~/") {
+        return Err(ArtifactRefError::validation(
+            "source path must be repository-relative; home paths belong to the filesystem resolver",
+        ));
+    }
     let normalized: PathBuf = Path::new(path)
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
@@ -1238,6 +1246,56 @@ mod tests {
             resolve_document_source_target("../escape.rs", &owner(), &context)
                 .unwrap_err();
         assert_eq!(error.kind, "validation");
+    }
+
+    #[test]
+    fn home_payload_is_rejected_before_repository_probing() {
+        let temp = tempdir().unwrap();
+        let live = temp.path().join("repo");
+        fs::create_dir_all(live.join("~/.ssh")).unwrap();
+        fs::write(live.join("~/.ssh/config"), "decoy").unwrap();
+        let context = ArtifactRefContextWire {
+            repositories: vec![repo("core", &[&live])],
+            ..Default::default()
+        };
+
+        for path in ["~", "~/.ssh/config", "~/missing"] {
+            let error =
+                resolve_with_budget(path, &owner(), &context, 0).unwrap_err();
+            assert_eq!(error.kind, "validation", "{path}");
+        }
+    }
+
+    #[test]
+    fn explicitly_relative_literal_tilde_paths_still_resolve() {
+        let temp = tempdir().unwrap();
+        let live = temp.path().join("repo");
+        fs::create_dir_all(live.join("~")).unwrap();
+        fs::create_dir_all(live.join("docs/~")).unwrap();
+        fs::write(live.join("~/config"), "literal").unwrap();
+        fs::write(live.join("docs/~/config"), "nested").unwrap();
+        let context = ArtifactRefContextWire {
+            repositories: vec![repo("core", &[&live])],
+            ..Default::default()
+        };
+
+        let explicit =
+            resolve_document_source_target("./~/config", &owner(), &context)
+                .unwrap();
+        assert_eq!(explicit.status, "exact");
+        assert_eq!(
+            explicit.resolved_path.as_deref(),
+            Some(path_str(&live.join("~/config")).as_str())
+        );
+
+        let nested =
+            resolve_document_source_target("docs/~/config", &owner(), &context)
+                .unwrap();
+        assert_eq!(nested.status, "exact");
+        assert_eq!(
+            nested.resolved_path.as_deref(),
+            Some(path_str(&live.join("docs/~/config")).as_str())
+        );
     }
 
     #[test]

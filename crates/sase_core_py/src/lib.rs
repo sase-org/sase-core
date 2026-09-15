@@ -24592,6 +24592,18 @@ MENTORS:
             let denied = py_to_json_value(denied.bind(py)).unwrap();
             assert_eq!(denied["status"], json!("denied"));
             assert_eq!(denied["failure_category"], json!("denied_filtered"));
+
+            let home_error = py_artifact_ref_resolve_document_source_target(
+                py,
+                "~/.ssh/config",
+                owner,
+                context,
+            )
+            .unwrap_err();
+            assert!(home_error.is_instance_of::<PyValueError>(py));
+            assert!(home_error
+                .to_string()
+                .contains("home paths belong to the filesystem resolver"));
         });
     }
 
