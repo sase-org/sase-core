@@ -142,6 +142,8 @@
 //! - `classify_tailnet_health(request: dict) -> dict`
 //! - `classify_tailnet_discovery(request: dict) -> dict`
 //! - `reconcile_machine_enrollments(request: dict) -> dict`
+//! - `assess_machine_init_review(request: dict) -> dict`
+//! - `merge_machine_init_review(request: dict) -> dict`
 //! - `validate_agent_name(name: str) -> None`
 //! - `validate_agent_username(username: str) -> None`
 //! - `validate_owner_root(root: str) -> None`
@@ -1243,9 +1245,12 @@ use sase_core::machine_hood::{
     validate_machine_name as core_validate_machine_name,
 };
 use sase_core::machine_setup::{
+    assess_machine_init_review as core_assess_machine_init_review,
     classify_tailnet_discovery as core_classify_tailnet_discovery,
     classify_tailnet_health as core_classify_tailnet_health,
+    merge_machine_init_review as core_merge_machine_init_review,
     reconcile_machine_enrollments as core_reconcile_machine_enrollments,
+    MachineInitReviewAssessmentRequestWire, MachineInitReviewMergeRequestWire,
     MachineReconcileRequestWire, MachineSetupError,
     TailnetDiscoveryRequestWire, TailnetHealthRequestWire,
     MACHINE_SETUP_WIRE_SCHEMA_VERSION,
@@ -1943,6 +1948,38 @@ fn py_reconcile_machine_enrollments<'py>(
         "machine enrollment reconcile request",
     )?;
     let result = core_reconcile_machine_enrollments(&request)
+        .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "assess_machine_init_review")]
+fn py_assess_machine_init_review<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: MachineInitReviewAssessmentRequestWire =
+        provider_priority_dict_from_py(
+            request.as_any(),
+            "machine init review assessment request",
+        )?;
+    let result = core_assess_machine_init_review(&request)
+        .map_err(machine_setup_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "merge_machine_init_review")]
+fn py_merge_machine_init_review<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: MachineInitReviewMergeRequestWire =
+        provider_priority_dict_from_py(
+            request.as_any(),
+            "machine init review merge request",
+        )?;
+    let result = core_merge_machine_init_review(&request)
         .map_err(machine_setup_error_to_pyerr)?;
     serialize_to_py(py, &result)
 }
@@ -18016,6 +18053,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_tailnet_health, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_tailnet_discovery, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_machine_enrollments, m)?)?;
+    m.add_function(wrap_pyfunction!(py_assess_machine_init_review, m)?)?;
+    m.add_function(wrap_pyfunction!(py_merge_machine_init_review, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_disk_inventory_wire_schema_version,
         m
@@ -20708,6 +20747,8 @@ COMMITS:
                 "classify_tailnet_health",
                 "classify_tailnet_discovery",
                 "reconcile_machine_enrollments",
+                "assess_machine_init_review",
+                "merge_machine_init_review",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -20868,6 +20909,67 @@ COMMITS:
                 .unwrap();
             let reconcile = py_to_json_value(&reconcile).unwrap();
             assert_eq!(reconcile["items"][0]["status"], json!("repair"));
+
+            let merge = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "presented_candidates": [{
+                        "provider_ref": "builtin@https",
+                        "endpoint": "https://fleet.example.test",
+                        "installation_pin": format!(
+                            "sase_inst_v1_{}",
+                            "c".repeat(64)
+                        ),
+                        "display_name": "ignored"
+                    }]
+                }),
+            )
+            .unwrap();
+            let merge = module
+                .getattr("merge_machine_init_review")
+                .unwrap()
+                .call1((merge.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let merged = py_to_json_value(&merge).unwrap();
+            assert_eq!(merged["initial_review_completed"], json!(true));
+            assert_eq!(
+                merged["reviewed"][0]["endpoint"],
+                json!("https://fleet.example.test")
+            );
+
+            let assess = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "state": merged,
+                    "candidates": [{
+                        "provider_ref": "builtin@https",
+                        "endpoint": "https://fleet.example.test",
+                        "installation_pin": format!(
+                            "sase_inst_v1_{}",
+                            "c".repeat(64)
+                        )
+                    }, {
+                        "provider_ref": "builtin@https",
+                        "endpoint": "https://new.example.test",
+                        "installation_pin": ""
+                    }],
+                    "enrolled": []
+                }),
+            )
+            .unwrap();
+            let assess = module
+                .getattr("assess_machine_init_review")
+                .unwrap()
+                .call1((assess.bind(py).downcast::<PyDict>().unwrap(),))
+                .unwrap();
+            let assess = py_to_json_value(&assess).unwrap();
+            assert_eq!(assess["offer_enrollment"], json!(true));
+            assert_eq!(
+                assess["unreviewed_candidates"][0]["endpoint"],
+                json!("https://new.example.test")
+            );
 
             let bad_schema = json_value_to_py(
                 py,

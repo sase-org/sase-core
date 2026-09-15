@@ -7,6 +7,7 @@
 mod health;
 mod peers;
 mod reconcile;
+mod review;
 mod wire;
 
 #[cfg(test)]
@@ -17,17 +18,21 @@ use thiserror::Error;
 pub use health::classify_tailnet_health;
 pub use peers::classify_tailnet_discovery;
 pub use reconcile::reconcile_machine_enrollments;
+pub use review::{assess_machine_init_review, merge_machine_init_review};
 pub use wire::{
-    DiscoveryCandidateWire, EnrolledMachineWire, MachineReconcileRequestWire,
-    MachineReconcileResultWire, MachineSetupDiagnosticWire,
-    ReconciledCandidateWire, TailnetDiscoveryRequestWire,
-    TailnetDiscoveryResultWire, TailnetHealthObservationWire,
-    TailnetHealthRequestWire, TailnetHealthResultWire, TailnetPeerWire,
-    COMPATIBILITY_COMPATIBLE, COMPATIBILITY_INCOMPATIBLE,
-    COMPATIBILITY_UNKNOWN, ENDPOINT_SOURCE_DNS, ENDPOINT_SOURCE_OVERRIDE,
-    MACHINE_SETUP_WIRE_SCHEMA_VERSION, RECONCILE_STATUS_ENROLLED,
-    RECONCILE_STATUS_NEW, RECONCILE_STATUS_REPAIR, SASE_GATEWAY_HEALTH_SERVICE,
-    TAILNET_PROVIDER_REF,
+    DiscoveryCandidateWire, EnrolledMachineWire,
+    MachineInitReviewAssessmentRequestWire,
+    MachineInitReviewAssessmentResultWire, MachineInitReviewEntryWire,
+    MachineInitReviewMergeRequestWire, MachineInitReviewStateWire,
+    MachineReconcileRequestWire, MachineReconcileResultWire,
+    MachineSetupDiagnosticWire, ReconciledCandidateWire,
+    TailnetDiscoveryRequestWire, TailnetDiscoveryResultWire,
+    TailnetHealthObservationWire, TailnetHealthRequestWire,
+    TailnetHealthResultWire, TailnetPeerWire, COMPATIBILITY_COMPATIBLE,
+    COMPATIBILITY_INCOMPATIBLE, COMPATIBILITY_UNKNOWN, ENDPOINT_SOURCE_DNS,
+    ENDPOINT_SOURCE_OVERRIDE, MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+    RECONCILE_STATUS_ENROLLED, RECONCILE_STATUS_NEW, RECONCILE_STATUS_REPAIR,
+    SASE_GATEWAY_HEALTH_SERVICE, TAILNET_PROVIDER_REF,
 };
 
 /// Structural request failure for the machine-setup wire envelope.

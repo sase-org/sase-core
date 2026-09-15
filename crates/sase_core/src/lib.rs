@@ -1031,8 +1031,12 @@ pub use machine_hood::{
     validate_machine_name, MachineNameError,
 };
 pub use machine_setup::{
-    classify_tailnet_discovery, classify_tailnet_health,
+    assess_machine_init_review, classify_tailnet_discovery,
+    classify_tailnet_health, merge_machine_init_review,
     reconcile_machine_enrollments, DiscoveryCandidateWire, EnrolledMachineWire,
+    MachineInitReviewAssessmentRequestWire,
+    MachineInitReviewAssessmentResultWire, MachineInitReviewEntryWire,
+    MachineInitReviewMergeRequestWire, MachineInitReviewStateWire,
     MachineReconcileRequestWire, MachineReconcileResultWire,
     MachineSetupDiagnosticWire, MachineSetupError, ReconciledCandidateWire,
     TailnetDiscoveryRequestWire, TailnetDiscoveryResultWire,

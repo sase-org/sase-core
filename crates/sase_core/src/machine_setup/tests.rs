@@ -103,6 +103,30 @@ fn compatible_payload() -> Value {
     })
 }
 
+fn review_candidate(
+    endpoint: &str,
+    installation_pin: &str,
+) -> DiscoveryCandidateWire {
+    DiscoveryCandidateWire {
+        provider_ref: "builtin@https".to_string(),
+        endpoint: endpoint.to_string(),
+        display_name: "ignored display".to_string(),
+        machine_selector: "ignored-selector".to_string(),
+        installation_pin: installation_pin.to_string(),
+        detail: "ignored detail".to_string(),
+    }
+}
+
+fn review_state(
+    reviewed: Vec<MachineInitReviewEntryWire>,
+) -> MachineInitReviewStateWire {
+    MachineInitReviewStateWire {
+        schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+        initial_review_completed: true,
+        reviewed,
+    }
+}
+
 #[test]
 fn health_classifies_compatible_fleet_advertisement() {
     let result = classify_tailnet_health(&health_request(json!({
@@ -113,6 +137,187 @@ fn health_classifies_compatible_fleet_advertisement() {
     assert_eq!(result.compatibility, COMPATIBILITY_COMPATIBLE);
     assert!(result.diagnostic.is_none());
     assert!(result.reason.contains("fleet protocol v"));
+}
+
+#[test]
+fn review_assessment_requires_initial_review_without_completed_state() {
+    let result =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: None,
+            candidates: vec![],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(result.offer_enrollment);
+    assert!(result.initial_review_required);
+
+    let incomplete =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(MachineInitReviewStateWire {
+                schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+                initial_review_completed: false,
+                reviewed: vec![],
+            }),
+            candidates: vec![review_candidate(
+                "https://fleet.example.test",
+                "",
+            )],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(incomplete.offer_enrollment);
+    assert!(incomplete.initial_review_required);
+}
+
+#[test]
+fn review_merge_records_empty_and_deduplicated_completed_reviews() {
+    let empty = merge_machine_init_review(&MachineInitReviewMergeRequestWire {
+        schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+        existing_state: None,
+        presented_candidates: vec![],
+    })
+    .unwrap();
+    assert!(empty.initial_review_completed);
+    assert!(empty.reviewed.is_empty());
+
+    let pin_a = pin('a');
+    let merged =
+        merge_machine_init_review(&MachineInitReviewMergeRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            existing_state: None,
+            presented_candidates: vec![
+                review_candidate("https://fleet.example.test", ""),
+                review_candidate("https://fleet.example.test", &pin_a),
+                review_candidate("https://fleet.example.test", ""),
+            ],
+        })
+        .unwrap();
+    assert_eq!(merged.reviewed.len(), 1);
+    assert_eq!(merged.reviewed[0].installation_pin, pin_a);
+}
+
+#[test]
+fn review_assessment_ignores_display_order_and_duplicate_observations() {
+    let pin_a = pin('a');
+    let state = review_state(vec![MachineInitReviewEntryWire {
+        provider_ref: "builtin@https".to_string(),
+        endpoint: "https://old-name.example.test".to_string(),
+        installation_pin: pin_a.clone(),
+    }]);
+    let mut changed_display =
+        review_candidate("https://renamed.example.test", &pin_a);
+    changed_display.display_name = "a new friendly name".to_string();
+
+    let result =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(state),
+            candidates: vec![changed_display.clone(), changed_display],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(!result.offer_enrollment);
+    assert!(result.unreviewed_candidates.is_empty());
+}
+
+#[test]
+fn review_assessment_uses_endpoint_when_either_pin_is_absent() {
+    let state = review_state(vec![MachineInitReviewEntryWire {
+        provider_ref: "builtin@https".to_string(),
+        endpoint: "https://tailnet.example.test".to_string(),
+        installation_pin: String::new(),
+    }]);
+    let reviewed =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(state.clone()),
+            candidates: vec![review_candidate(
+                "https://tailnet.example.test",
+                "",
+            )],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(!reviewed.offer_enrollment);
+
+    let new_endpoint =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(state),
+            candidates: vec![review_candidate("https://new.example.test", "")],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(new_endpoint.offer_enrollment);
+    assert_eq!(new_endpoint.unreviewed_candidates.len(), 1);
+}
+
+#[test]
+fn review_assessment_treats_different_nonempty_pins_as_new_installations() {
+    let state = review_state(vec![MachineInitReviewEntryWire {
+        provider_ref: "builtin@https".to_string(),
+        endpoint: "https://fleet.example.test".to_string(),
+        installation_pin: pin('a'),
+    }]);
+    let result =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(state),
+            candidates: vec![review_candidate(
+                "https://fleet.example.test",
+                &pin('b'),
+            )],
+            enrolled: vec![],
+        })
+        .unwrap();
+    assert!(result.offer_enrollment);
+    assert_eq!(result.unreviewed_candidates.len(), 1);
+}
+
+#[test]
+fn review_assessment_excludes_enrolled_and_repair_candidates() {
+    let pin_a = pin('a');
+    let pin_b = pin('b');
+    let result =
+        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
+            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+            state: Some(review_state(vec![])),
+            candidates: vec![
+                review_candidate("https://apollo.example.test", &pin_a),
+                review_candidate("https://apollo.example.test", &pin_b),
+                review_candidate("https://fleet.example.test", ""),
+            ],
+            enrolled: vec![EnrolledMachineWire {
+                alias: "apollo".to_string(),
+                provider_ref: "builtin@https".to_string(),
+                endpoint: "https://apollo.example.test".to_string(),
+                pinned_installation_id: pin_a,
+            }],
+        })
+        .unwrap();
+    assert!(result.offer_enrollment);
+    assert_eq!(result.unreviewed_candidates.len(), 1);
+    assert_eq!(
+        result.unreviewed_candidates[0].endpoint,
+        "https://fleet.example.test"
+    );
+}
+
+#[test]
+fn review_state_rejects_unsupported_schema_version() {
+    let error = merge_machine_init_review(&MachineInitReviewMergeRequestWire {
+        schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+        existing_state: Some(MachineInitReviewStateWire {
+            schema_version: 9,
+            initial_review_completed: true,
+            reviewed: vec![],
+        }),
+        presented_candidates: vec![],
+    })
+    .unwrap_err();
+    assert!(matches!(error, MachineSetupError::Validation(_)));
 }
 
 #[test]

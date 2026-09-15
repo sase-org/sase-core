@@ -203,3 +203,60 @@ pub struct MachineReconcileResultWire {
     #[serde(default)]
     pub items: Vec<ReconciledCandidateWire>,
 }
+
+/// One compact local review acknowledgment for machine-init prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MachineInitReviewEntryWire {
+    #[serde(default)]
+    pub provider_ref: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub installation_pin: String,
+}
+
+/// Local machine-init review state persisted by Python.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInitReviewStateWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub initial_review_completed: bool,
+    #[serde(default)]
+    pub reviewed: Vec<MachineInitReviewEntryWire>,
+}
+
+/// Request envelope for deciding whether onboarding should offer machine init.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInitReviewAssessmentRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub state: Option<MachineInitReviewStateWire>,
+    #[serde(default)]
+    pub candidates: Vec<DiscoveryCandidateWire>,
+    #[serde(default)]
+    pub enrolled: Vec<EnrolledMachineWire>,
+}
+
+/// Machine-init onboarding review decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInitReviewAssessmentResultWire {
+    pub schema_version: u32,
+    pub offer_enrollment: bool,
+    pub initial_review_required: bool,
+    #[serde(default)]
+    pub unreviewed_candidates: Vec<DiscoveryCandidateWire>,
+    #[serde(default)]
+    pub normalized_state: Option<MachineInitReviewStateWire>,
+}
+
+/// Request envelope for merging one completed explicit review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineInitReviewMergeRequestWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub existing_state: Option<MachineInitReviewStateWire>,
+    #[serde(default)]
+    pub presented_candidates: Vec<DiscoveryCandidateWire>,
+}
