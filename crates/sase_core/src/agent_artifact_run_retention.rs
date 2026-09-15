@@ -10,12 +10,13 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION: u32 = 2;
 
 /// Runs scale with disk usage and retention backlog, not with any bounded
 /// graph, so this is deliberately generous — it only exists to fail closed
@@ -30,6 +31,8 @@ pub enum AgentArtifactRunRetentionError {
     UnsupportedSchema { actual: u32, expected: u32 },
     #[error("projects root {0} could not be resolved")]
     InvalidProjectsRoot(String),
+    #[error("projects root {path} is unsafe: {reason}")]
+    UnsafeProjectsRoot { path: String, reason: String },
     #[error(
         "agent artifact run retention received {actual} candidates, exceeding the \
          {max} bound"
@@ -63,6 +66,10 @@ pub struct AgentArtifactRunRetentionRequestWire {
     pub apply: bool,
     #[serde(default)]
     pub sources_unavailable: Vec<String>,
+    #[serde(default)]
+    pub protected_dirs: Vec<String>,
+    #[serde(default)]
+    pub protected_timestamps: Vec<String>,
     #[serde(default)]
     pub candidates: Vec<AgentArtifactRunCandidateWire>,
     #[serde(default)]
@@ -134,14 +141,19 @@ pub fn apply_agent_artifact_run_retention(
             max: MAX_RUN_RETENTION_CANDIDATES,
         });
     }
-    let projects_root = canonicalize_existing(Path::new(
-        &request.projects_root,
-    ))
-    .ok_or_else(|| {
-        AgentArtifactRunRetentionError::InvalidProjectsRoot(
-            request.projects_root.clone(),
-        )
-    })?;
+    let projects_root_input = Path::new(&request.projects_root);
+    if let Some(reason) = projects_root_safety_violation(projects_root_input) {
+        return Err(AgentArtifactRunRetentionError::UnsafeProjectsRoot {
+            path: request.projects_root.clone(),
+            reason: reason.to_string(),
+        });
+    }
+    let projects_root =
+        canonicalize_existing(projects_root_input).ok_or_else(|| {
+            AgentArtifactRunRetentionError::InvalidProjectsRoot(
+                request.projects_root.clone(),
+            )
+        })?;
 
     let mut result = AgentArtifactRunRetentionResultWire {
         schema_version: AGENT_ARTIFACT_RUN_RETENTION_WIRE_SCHEMA_VERSION,
@@ -163,11 +175,20 @@ pub fn apply_agent_artifact_run_retention(
 
     let recent_months: BTreeSet<&str> =
         request.recent_months.iter().map(String::as_str).collect();
+    let protected_dirs = canonical_protected_dirs(&request.protected_dirs);
+    let protected_timestamps: BTreeSet<&str> = request
+        .protected_timestamps
+        .iter()
+        .map(String::as_str)
+        .collect();
 
     let mut reasons_by_index: Vec<Vec<String>> =
         Vec::with_capacity(request.candidates.len());
     for candidate in &request.candidates {
         let mut reasons = candidate.protected_reasons.clone();
+        if protected_timestamps.contains(candidate.timestamp.as_str()) {
+            reasons.push("referenced_timestamp".to_string());
+        }
         if candidate.timestamp.len() >= 6
             && recent_months.contains(&candidate.timestamp[..6])
         {
@@ -178,10 +199,16 @@ pub fn apply_agent_artifact_run_retention(
         {
             reasons.push("future_timestamp".to_string());
         }
-        if let Some(violation) = path_safety_violation(
-            &projects_root,
-            Path::new(&candidate.artifact_dir),
-        ) {
+        if let Some(canonical_dir) =
+            canonicalize_existing(Path::new(&candidate.artifact_dir))
+        {
+            if protected_dirs.contains(&canonical_dir) {
+                reasons.push("referenced_dir".to_string());
+            }
+        }
+        if let Some(violation) =
+            run_candidate_safety_violation(&projects_root, candidate)
+        {
             reasons.push(violation.to_string());
         }
         reasons_by_index.push(dedupe(reasons));
@@ -245,7 +272,9 @@ pub fn apply_agent_artifact_run_retention(
         }
 
         let path = PathBuf::from(&candidate.artifact_dir);
-        if let Some(violation) = path_safety_violation(&projects_root, &path) {
+        if let Some(violation) =
+            run_candidate_safety_violation(&projects_root, candidate)
+        {
             result.run_items.push(item_skip(candidate, violation));
             continue;
         }
@@ -284,26 +313,48 @@ pub fn apply_agent_artifact_run_retention(
         .iter()
         .filter_map(|path| canonicalize_existing(Path::new(path)))
         .collect();
-    let mut shard_budget = request.empty_shard_removal_budget;
-    for root in &request.empty_shard_roots {
-        let Some(canonical_root) = canonicalize_existing(Path::new(root))
-        else {
-            continue;
-        };
-        if path_safety_violation(&projects_root, &canonical_root).is_some() {
+    let mut protected_run_dirs = protected_dirs;
+    for item in &result.run_items {
+        if item.outcome != "protected" && item.outcome != "skipped" {
             continue;
         }
-        let children = match fs::read_dir(&canonical_root) {
+        if let Some(canonical_dir) =
+            canonicalize_existing(Path::new(&item.artifact_dir))
+        {
+            if canonical_dir.starts_with(&projects_root) {
+                protected_run_dirs.insert(canonical_dir);
+            }
+        }
+    }
+    let mut shard_budget = request.empty_shard_removal_budget;
+    for root in &request.empty_shard_roots {
+        let root_path = Path::new(root);
+        let Some(canonical_root) = canonicalize_existing(root_path) else {
+            continue;
+        };
+        if existing_path_safety_violation(&projects_root, root_path).is_some() {
+            continue;
+        }
+        let children = match fs::read_dir(root_path) {
             Ok(entries) => entries
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
                 .collect::<Vec<_>>(),
-            Err(_) => continue,
+            Err(error) => {
+                result.shard_items.push(shard_outcome(
+                    root_path,
+                    "error",
+                    Some(error.to_string()),
+                ));
+                continue;
+            }
         };
         for child in children {
             prune_empty_tree(
+                &canonical_root,
                 &child,
                 &watched,
+                &protected_run_dirs,
                 request.apply,
                 &mut shard_budget,
                 &mut result.shard_items,
@@ -327,8 +378,10 @@ pub fn apply_agent_artifact_run_retention(
 /// call fails closed (an `OSError`, surfaced as an `error` outcome) if
 /// anything reappeared between the read and the removal.
 fn prune_empty_tree(
+    workflow_root: &Path,
     dir: &Path,
     watched: &BTreeSet<PathBuf>,
+    protected: &BTreeSet<PathBuf>,
     apply: bool,
     budget: &mut u32,
     out: &mut Vec<AgentArtifactEmptyShardResultWire>,
@@ -342,7 +395,10 @@ fn prune_empty_tree(
     let Some(canonical) = canonicalize_existing(dir) else {
         return false;
     };
-    if watched.contains(&canonical) {
+    if watched.contains(&canonical) || protected.contains(&canonical) {
+        return false;
+    }
+    if !is_eligible_empty_shard_path(workflow_root, &canonical) {
         return false;
     }
     let entries = match fs::read_dir(dir) {
@@ -363,7 +419,15 @@ fn prune_empty_tree(
             continue;
         };
         if file_type.is_dir() {
-            if !prune_empty_tree(&entry.path(), watched, apply, budget, out) {
+            if !prune_empty_tree(
+                workflow_root,
+                &entry.path(),
+                watched,
+                protected,
+                apply,
+                budget,
+                out,
+            ) {
                 all_removable = false;
             }
         } else {
@@ -375,10 +439,6 @@ fn prune_empty_tree(
     if !all_removable {
         return false;
     }
-    if !apply {
-        out.push(shard_outcome(dir, "would_remove", None));
-        return true;
-    }
     if *budget == 0 {
         out.push(shard_outcome(
             dir,
@@ -386,6 +446,11 @@ fn prune_empty_tree(
             Some("removal budget exhausted".to_string()),
         ));
         return false;
+    }
+    if !apply {
+        *budget -= 1;
+        out.push(shard_outcome(dir, "would_remove", None));
+        return true;
     }
     match fs::remove_dir(dir) {
         Ok(()) => {
@@ -427,31 +492,159 @@ fn item_skip(
 }
 
 /// Return why *candidate* cannot safely be mutated, if any: it must exist,
-/// canonicalize under *projects_root*, and have no symlink between the two.
-fn path_safety_violation(
+/// canonicalize under *projects_root*, have no symlink in the submitted path
+/// components, and resolve to the exact project/workflow/run location named
+/// by its wire identity.
+fn run_candidate_safety_violation(
     projects_root: &Path,
-    candidate: &Path,
+    candidate: &AgentArtifactRunCandidateWire,
 ) -> Option<&'static str> {
-    let Some(canonical) = canonicalize_existing(candidate) else {
+    let candidate_path = Path::new(&candidate.artifact_dir);
+    let violation =
+        existing_path_safety_violation(projects_root, candidate_path);
+    if violation.is_some() {
+        return violation;
+    }
+    let canonical = canonicalize_existing(candidate_path)?;
+    if !valid_project_component(&candidate.project)
+        || !valid_run_timestamp(&candidate.timestamp)
+    {
+        return Some("invalid_run_path");
+    }
+    let expected = projects_root
+        .join(&candidate.project)
+        .join("artifacts")
+        .join("ace-run")
+        .join(&candidate.timestamp[..6])
+        .join(&candidate.timestamp[6..8])
+        .join(&candidate.timestamp);
+    if canonical != expected {
+        return Some("invalid_run_path");
+    }
+    None
+}
+
+fn existing_path_safety_violation(
+    projects_root: &Path,
+    path: &Path,
+) -> Option<&'static str> {
+    let Some(canonical) = canonicalize_existing(path) else {
         return Some("missing");
     };
     if !canonical.starts_with(projects_root) {
         return Some("outside_projects_root");
     }
-    let mut current = canonical.as_path();
-    while let Some(parent) = current.parent() {
-        if parent == projects_root || !parent.starts_with(projects_root) {
-            break;
-        }
-        let is_symlink = fs::symlink_metadata(parent)
-            .map(|meta| meta.file_type().is_symlink())
-            .unwrap_or(true);
-        if is_symlink {
-            return Some("symlink_ancestor");
-        }
-        current = parent;
+    symlink_component_violation(projects_root, path)
+}
+
+fn projects_root_safety_violation(root: &Path) -> Option<&'static str> {
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return None;
+    };
+    if metadata.file_type().is_symlink() {
+        return Some("symlink_root");
     }
     None
+}
+
+fn symlink_component_violation(
+    projects_root: &Path,
+    path: &Path,
+) -> Option<&'static str> {
+    let lexical_root = absolutize_lexically(projects_root)?;
+    let lexical_path = absolutize_lexically(path)?;
+    let relative = lexical_path.strip_prefix(&lexical_root).ok()?;
+    let mut current = lexical_root;
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Some("invalid_path_component");
+        };
+        current.push(part);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(_) => return Some("missing"),
+        };
+        if metadata.file_type().is_symlink() {
+            return Some(if current == lexical_path {
+                "symlink"
+            } else {
+                "symlink_ancestor"
+            });
+        }
+    }
+    None
+}
+
+fn absolutize_lexically(path: &Path) -> Option<PathBuf> {
+    let mut out = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        std::env::current_dir().ok()?
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    Some(out)
+}
+
+fn canonical_protected_dirs(raw_dirs: &[String]) -> BTreeSet<PathBuf> {
+    raw_dirs
+        .iter()
+        .filter_map(|path| canonicalize_existing(Path::new(path)))
+        .collect()
+}
+
+fn valid_project_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.contains('/')
+        && !value.contains('\\')
+}
+
+fn valid_run_timestamp(value: &str) -> bool {
+    value.len() == 14 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_eligible_empty_shard_path(workflow_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(workflow_root) else {
+        return false;
+    };
+    let parts: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => {
+                Some(part.to_string_lossy().into_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    match parts.as_slice() {
+        [month] => is_month_shard_name(month),
+        [month, day] => is_month_shard_name(month) && is_day_shard_name(day),
+        [month, day, timestamp] => {
+            valid_run_timestamp(timestamp)
+                && timestamp.starts_with(month)
+                && &timestamp[6..8] == day.as_str()
+        }
+        _ => false,
+    }
+}
+
+fn is_month_shard_name(value: &str) -> bool {
+    value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_day_shard_name(value: &str) -> bool {
+    value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn fresh_active_marker_reason(path: &Path) -> Option<String> {
@@ -543,6 +736,8 @@ mod tests {
             limit: None,
             apply: false,
             sources_unavailable: Vec::new(),
+            protected_dirs: Vec::new(),
+            protected_timestamps: Vec::new(),
             candidates: Vec::new(),
             empty_shard_roots: Vec::new(),
             empty_shard_watched_paths: Vec::new(),
@@ -677,6 +872,60 @@ mod tests {
         assert_eq!(item.reasons, vec!["outside_projects_root".to_string()]);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_ancestor_before_canonicalizing_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let projects_root = temp.path().join("projects");
+        let real_run = projects_root
+            .join("demo/artifacts/ace-run/202601/01/20260101000000");
+        candidate(&real_run, "demo", "20260101000000");
+        std::os::unix::fs::symlink(
+            projects_root.join("demo"),
+            projects_root.join("alias"),
+        )
+        .unwrap();
+        let alias_run = projects_root
+            .join("alias/artifacts/ace-run/202601/01/20260101000000");
+        let mut request = base_request(&projects_root);
+        request.apply = true;
+        request.candidates = vec![AgentArtifactRunCandidateWire {
+            artifact_dir: alias_run.to_string_lossy().into_owned(),
+            project: "alias".to_string(),
+            timestamp: "20260101000000".to_string(),
+            protected_reasons: Vec::new(),
+        }];
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(result.removed_runs, 0);
+        assert!(real_run.exists());
+        let item = &result.run_items[0];
+        assert_eq!(item.outcome, "protected");
+        assert_eq!(item.reasons, vec!["symlink_ancestor".to_string()]);
+    }
+
+    #[test]
+    fn authoritative_timestamp_protection_overrides_empty_candidate_reasons() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join("proj");
+        let referenced =
+            project_dir.join("artifacts/ace-run/202601/01/20260101000000");
+        let mut request = base_request(temp.path());
+        request.apply = true;
+        request.protected_timestamps = vec!["20260101000000".to_string()];
+        request.candidates =
+            vec![candidate(&referenced, "proj", "20260101000000")];
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(result.removed_runs, 0);
+        assert!(referenced.exists());
+        let item = &result.run_items[0];
+        assert_eq!(item.outcome, "protected");
+        assert_eq!(item.reasons, vec!["referenced_timestamp".to_string()]);
+    }
+
     #[test]
     fn empty_shard_walk_removes_bottom_up_across_three_levels() {
         let temp = tempfile::tempdir().unwrap();
@@ -728,6 +977,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_shard_walk_preserves_protected_empty_run_and_parents() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().join("proj/artifacts/ace-run");
+        let referenced = workflow_dir.join("202601/01/20260101000000");
+        fs::create_dir_all(&referenced).unwrap();
+        let mut request = base_request(temp.path());
+        request.apply = true;
+        request.protected_dirs =
+            vec![referenced.to_string_lossy().into_owned()];
+        request.candidates = vec![AgentArtifactRunCandidateWire {
+            artifact_dir: referenced.to_string_lossy().into_owned(),
+            project: "proj".to_string(),
+            timestamp: "20260101000000".to_string(),
+            protected_reasons: Vec::new(),
+        }];
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_removal_budget = 10;
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(result.removed_runs, 0);
+        assert_eq!(result.removed_empty_shards, 0);
+        assert!(referenced.exists());
+        assert!(referenced.parent().unwrap().exists());
+        assert!(referenced.parent().unwrap().parent().unwrap().exists());
+    }
+
+    #[test]
     fn empty_shard_walk_respects_removal_budget() {
         let temp = tempfile::tempdir().unwrap();
         let workflow_dir = temp.path().join("artifacts/ace-run");
@@ -747,5 +1025,54 @@ mod tests {
             .shard_items
             .iter()
             .any(|item| item.outcome == "skipped"));
+    }
+
+    #[test]
+    fn empty_shard_preview_respects_apply_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().join("artifacts/ace-run");
+        fs::create_dir_all(workflow_dir.join("202601")).unwrap();
+        fs::create_dir_all(workflow_dir.join("202602")).unwrap();
+        fs::create_dir_all(workflow_dir.join("202603")).unwrap();
+
+        let mut request = base_request(temp.path());
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_removal_budget = 2;
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(
+            result
+                .shard_items
+                .iter()
+                .filter(|item| item.outcome == "would_remove")
+                .count(),
+            2
+        );
+        assert!(result
+            .shard_items
+            .iter()
+            .any(|item| item.outcome == "skipped"));
+    }
+
+    #[test]
+    fn empty_shard_walk_preserves_unknown_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().join("artifacts/ace-run");
+        let unknown = workflow_dir.join("manual");
+        fs::create_dir_all(&unknown).unwrap();
+
+        let mut request = base_request(temp.path());
+        request.apply = true;
+        request.empty_shard_roots =
+            vec![workflow_dir.to_string_lossy().into_owned()];
+        request.empty_shard_removal_budget = 10;
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(result.removed_empty_shards, 0);
+        assert!(result.shard_items.is_empty());
+        assert!(unknown.exists());
     }
 }
