@@ -12965,7 +12965,7 @@ fn py_validate_chop_result<'py>(
     result: &Bound<'py, PyDict>,
 ) -> PyResult<PyObject> {
     let result: ChopResultDocumentWire =
-        chop_request_from_pydict(result, "chop result")?;
+        chop_request_from_pydict(result, "job result")?;
     core_validate_chop_result(&result).map_err(chop_error_to_pyerr)?;
     chop_result_to_py(py, &result)
 }

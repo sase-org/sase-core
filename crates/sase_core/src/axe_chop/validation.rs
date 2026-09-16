@@ -31,7 +31,7 @@ pub fn parse_chop_result(
             "invalid_json",
             "$",
             format!(
-                "chop result is not valid JSON at line {}, column {}: {error}",
+                "job result is not valid JSON at line {}, column {}: {error}",
                 error.line(),
                 error.column()
             ),
@@ -43,7 +43,7 @@ pub fn parse_chop_result(
             ChopEngineError::new(
                 "invalid_result",
                 "$",
-                format!("chop result has an invalid field: {error}"),
+                format!("job result has an invalid field: {error}"),
             )
         })?;
     validate_chop_result(&result)?;
@@ -55,7 +55,7 @@ fn validate_result_value(value: &Value) -> Result<(), ChopEngineError> {
         ChopEngineError::new(
             "invalid_result",
             "$",
-            "chop result must be a JSON object",
+            "job result must be a JSON object",
         )
     })?;
     let version = object
@@ -115,7 +115,7 @@ pub fn validate_chop_result(
         return Err(ChopEngineError::new(
             "proposals_for_non_actionable_status",
             "$.proposed_launches",
-            "only an `ok` chop result may propose agent launches",
+            "only an `ok` job result may propose agent launches",
         ));
     }
 
@@ -485,7 +485,7 @@ fn validate_evidence_path(
         return Err(ChopEngineError::new(
             "invalid_evidence",
             path_label,
-            "evidence must be a relative path inside the chop run directory",
+            "evidence must be a relative path inside the job run directory",
         ));
     }
     Ok(())
@@ -514,7 +514,7 @@ pub fn validate_chop_proposal(
         return Err(ChopEngineError::new(
             "workflow_reference_forbidden",
             format!("{base}.prompt"),
-            "standalone `#!workflow` references are not allowed in chop proposals; put the work directly in the proposal prompt",
+            "standalone `#!workflow` references are not allowed in job proposals; put the work directly in the proposal prompt",
         ));
     }
     validate_token(
@@ -781,7 +781,7 @@ pub fn derive_chop_agent_name(
         return Err(ChopEngineError::new(
             "invalid_chop_name",
             "$.chop_name",
-            "chop name must contain at least one letter or digit",
+            "job name must contain at least one letter or digit",
         ));
     }
     let mut parts = vec!["chop".to_string(), chop];

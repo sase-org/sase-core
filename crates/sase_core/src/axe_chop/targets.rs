@@ -97,14 +97,14 @@ fn validate_request(
         return Err(ChopEngineError::new(
             "blank_value",
             "$.chop_name",
-            "chop name must not be blank",
+            "job name must not be blank",
         ));
     }
     if request.chop_name.contains('[') || request.chop_name.contains(']') {
         return Err(ChopEngineError::new(
             "invalid_chop_name",
             "$.chop_name",
-            "chop name must not contain target-instance brackets",
+            "job name must not contain target-instance brackets",
         ));
     }
     Ok(())
