@@ -136,6 +136,8 @@ pub fn agent_tribe_display_key(
 pub struct AgentTribeDisplayLayerWire {
     pub name: String,
     #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub value: Value,
@@ -158,6 +160,24 @@ pub struct AgentTribeDisplayDiagnosticWire {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTribeDisplayResolutionWire {
+    pub display_keys: BTreeMap<String, String>,
+    pub diagnostics: Vec<AgentTribeDisplayDiagnosticWire>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentTribeIdentityResolutionRequestWire {
+    pub tribe: String,
+    #[serde(default)]
+    pub layers: Vec<AgentTribeDisplayLayerWire>,
+    #[serde(default)]
+    pub stored_tribes: Vec<String>,
+    #[serde(default)]
+    pub current_tribe: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentTribeIdentityResolutionWire {
+    pub tribe: Option<String>,
     pub display_keys: BTreeMap<String, String>,
     pub diagnostics: Vec<AgentTribeDisplayDiagnosticWire>,
 }
@@ -204,11 +224,62 @@ pub fn resolve_agent_tribe_display_config(
             (None, None) => {}
         }
     }
+    diagnostics.extend(cross_layer_job_alias_diagnostics(&request.layers));
 
     AgentTribeDisplayResolutionWire {
         display_keys,
         diagnostics,
     }
+}
+
+pub fn resolve_agent_tribe_identity(
+    request: &AgentTribeIdentityResolutionRequestWire,
+) -> Result<AgentTribeIdentityResolutionWire, AgentTribeError> {
+    let validated = validate_tribe_name(&request.tribe)?;
+    let display_resolution = resolve_agent_tribe_display_config(
+        &AgentTribeDisplayResolutionRequestWire {
+            layers: request.layers.clone(),
+        },
+    );
+    if validated != PUBLIC_JOB_TRIBE {
+        return Ok(AgentTribeIdentityResolutionWire {
+            tribe: Some(validated.to_string()),
+            display_keys: display_resolution.display_keys,
+            diagnostics: Vec::new(),
+        });
+    }
+
+    if !display_resolution.diagnostics.is_empty() {
+        return Ok(AgentTribeIdentityResolutionWire {
+            tribe: None,
+            display_keys: display_resolution.display_keys,
+            diagnostics: display_resolution.diagnostics,
+        });
+    }
+
+    let stored_tribes: BTreeSet<&str> = request
+        .stored_tribes
+        .iter()
+        .filter_map(|tribe| validate_tribe_name(tribe).ok())
+        .collect();
+    let current_tribe = request
+        .current_tribe
+        .as_deref()
+        .and_then(|tribe| validate_tribe_name(tribe).ok());
+    let resolved = if current_tribe == Some(PUBLIC_JOB_TRIBE)
+        || (stored_tribes.contains(PUBLIC_JOB_TRIBE)
+            && current_tribe != Some(LEGACY_JOB_TRIBE))
+    {
+        PUBLIC_JOB_TRIBE
+    } else {
+        LEGACY_JOB_TRIBE
+    };
+
+    Ok(AgentTribeIdentityResolutionWire {
+        tribe: Some(resolved.to_string()),
+        display_keys: display_resolution.display_keys,
+        diagnostics: Vec::new(),
+    })
 }
 
 fn layer_tribes(
@@ -247,6 +318,78 @@ fn conflicting_job_alias_diagnostic(
         ),
         source_path: format!(
             "{source}:ace.tribes.{legacy},{source}:ace.tribes.{public}",
+            legacy = LEGACY_JOB_TRIBE,
+            public = PUBLIC_JOB_TRIBE,
+        ),
+    }
+}
+
+fn cross_layer_job_alias_diagnostics(
+    layers: &[AgentTribeDisplayLayerWire],
+) -> Vec<AgentTribeDisplayDiagnosticWire> {
+    let authored: Vec<(&AgentTribeDisplayLayerWire, &str)> = layers
+        .iter()
+        .filter(|layer| !is_builtin_layer(layer))
+        .flat_map(|layer| {
+            let keys: Vec<&str> = layer_tribes(layer)
+                .map(|tribes| {
+                    [LEGACY_JOB_TRIBE, PUBLIC_JOB_TRIBE]
+                        .into_iter()
+                        .filter(|key| tribes.contains_key(*key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            keys.into_iter().map(move |key| (layer, key))
+        })
+        .collect();
+    let legacy = authored
+        .iter()
+        .find(|(_, key)| *key == LEGACY_JOB_TRIBE)
+        .map(|(layer, _)| *layer);
+    let public = authored
+        .iter()
+        .find(|(_, key)| *key == PUBLIC_JOB_TRIBE)
+        .map(|(layer, _)| *layer);
+    match (legacy, public) {
+        (Some(legacy_layer), Some(public_layer))
+            if legacy_layer.name != public_layer.name =>
+        {
+            vec![cross_layer_job_alias_diagnostic(legacy_layer, public_layer)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn is_builtin_layer(layer: &AgentTribeDisplayLayerWire) -> bool {
+    layer.kind == "builtin" || layer.name == "default"
+}
+
+fn cross_layer_job_alias_diagnostic(
+    legacy_layer: &AgentTribeDisplayLayerWire,
+    public_layer: &AgentTribeDisplayLayerWire,
+) -> AgentTribeDisplayDiagnosticWire {
+    let legacy_source =
+        legacy_layer.path.as_deref().unwrap_or(&legacy_layer.name);
+    let public_source =
+        public_layer.path.as_deref().unwrap_or(&public_layer.name);
+    AgentTribeDisplayDiagnosticWire {
+        code: "agent_tribe_job_alias_collision".to_string(),
+        message: format!(
+            "ace.tribes.{legacy} and ace.tribes.{public} are authored in \
+             separate non-built-in layers ({legacy_layer} and {public_layer}); \
+             keep one spelling or make the historical {public} identity \
+             explicit before @job can be resolved unambiguously",
+            legacy = LEGACY_JOB_TRIBE,
+            public = PUBLIC_JOB_TRIBE,
+            legacy_layer = legacy_layer.name,
+            public_layer = public_layer.name,
+        ),
+        layer: format!("{},{}", legacy_layer.name, public_layer.name),
+        path: format!(
+            "ace.tribes.{LEGACY_JOB_TRIBE}|ace.tribes.{PUBLIC_JOB_TRIBE}"
+        ),
+        source_path: format!(
+            "{legacy_source}:ace.tribes.{legacy},{public_source}:ace.tribes.{public}",
             legacy = LEGACY_JOB_TRIBE,
             public = PUBLIC_JOB_TRIBE,
         ),
@@ -303,6 +446,7 @@ mod tests {
         let request = AgentTribeDisplayResolutionRequestWire {
             layers: vec![AgentTribeDisplayLayerWire {
                 name: "user".to_string(),
+                kind: "user".to_string(),
                 path: Some("/tmp/sase.yml".to_string()),
                 value: json!({
                     "ace": {
@@ -339,11 +483,13 @@ mod tests {
             layers: vec![
                 AgentTribeDisplayLayerWire {
                     name: "default".to_string(),
+                    kind: "builtin".to_string(),
                     path: None,
                     value: json!({"ace": {"tribes": {"job": {"icon": "J"}}}}),
                 },
                 AgentTribeDisplayLayerWire {
                     name: "user".to_string(),
+                    kind: "user".to_string(),
                     path: Some("/tmp/sase.yml".to_string()),
                     value: json!({"ace": {"tribes": {"chop": {"icon": "C"}}}}),
                 },
@@ -357,5 +503,65 @@ mod tests {
             result.display_keys.get("chop").map(String::as_str),
             Some("chop")
         );
+    }
+
+    #[test]
+    fn identity_resolution_preserves_current_stored_job_assignment() {
+        let result = resolve_agent_tribe_identity(
+            &AgentTribeIdentityResolutionRequestWire {
+                tribe: "job".to_string(),
+                layers: Vec::new(),
+                stored_tribes: vec!["job".to_string()],
+                current_tribe: Some("job".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.tribe.as_deref(), Some("job"));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn identity_resolution_keeps_builtin_job_canonicalization_without_history()
+    {
+        let result = resolve_agent_tribe_identity(
+            &AgentTribeIdentityResolutionRequestWire {
+                tribe: "job".to_string(),
+                layers: Vec::new(),
+                stored_tribes: Vec::new(),
+                current_tribe: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.tribe.as_deref(), Some("chop"));
+    }
+
+    #[test]
+    fn identity_resolution_rejects_source_ambiguous_job_aliases() {
+        let result = resolve_agent_tribe_identity(
+            &AgentTribeIdentityResolutionRequestWire {
+                tribe: "job".to_string(),
+                layers: vec![AgentTribeDisplayLayerWire {
+                    name: "user".to_string(),
+                    kind: "user".to_string(),
+                    path: Some("/tmp/sase.yml".to_string()),
+                    value: json!({
+                        "ace": {
+                            "tribes": {
+                                "chop": {"icon": "C"},
+                                "job": {"icon": "J"}
+                            }
+                        }
+                    }),
+                }],
+                stored_tribes: Vec::new(),
+                current_tribe: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.tribe, None);
+        assert_eq!(result.diagnostics.len(), 1);
     }
 }

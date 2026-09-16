@@ -160,6 +160,7 @@
 //! - `canonicalize_agent_tribe_metadata(data: dict) -> dict`
 //! - `agent_tribe_display_key(stored_tribe: str, configured_keys: list[str]) -> str`
 //! - `resolve_agent_tribe_display_config(request: dict) -> dict`
+//! - `resolve_agent_tribe_identity(request: dict) -> dict`
 //! - `commit_shas_equivalent(left: str, right: str) -> bool`
 //! - `normalize_agent_archive_name(name: str) -> str`
 //! - `normalize_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> str`
@@ -828,9 +829,11 @@ use sase_core::agent_tribe::{
     public_tribe_name as core_public_tribe_name,
     reserved_tribe_target_reason as core_reserved_tribe_target_reason,
     resolve_agent_tribe_display_config as core_resolve_agent_tribe_display_config,
+    resolve_agent_tribe_identity as core_resolve_agent_tribe_identity,
     validate_tribe_name as core_validate_tribe_name,
     AgentTribeDisplayResolutionRequestWire,
     AgentTribeError as AgentTribeDomainError,
+    AgentTribeIdentityResolutionRequestWire,
 };
 use sase_core::artifact_consumption::{
     read_artifact_consumption_log as core_read_artifact_consumption_log,
@@ -2334,6 +2337,24 @@ fn py_resolve_agent_tribe_display_config<'py>(
             ))
         })?;
     let result = core_resolve_agent_tribe_display_config(&request);
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "resolve_agent_tribe_identity")]
+fn py_resolve_agent_tribe_identity<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentTribeIdentityResolutionRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid agent tribe identity resolution request: {error}"
+            ))
+        })?;
+    let result = core_resolve_agent_tribe_identity(&request)
+        .map_err(agent_tribe_error_to_pyerr)?;
     serialize_to_py(py, &result)
 }
 
@@ -18503,6 +18524,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_resolve_agent_tribe_display_config,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_agent_tribe_identity, m)?)?;
     m.add_function(wrap_pyfunction!(py_commit_shas_equivalent, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_managed_origin_reconciliation_wire_schema_version,

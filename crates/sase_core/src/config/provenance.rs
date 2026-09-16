@@ -18,6 +18,10 @@ use super::wire::{
     ConfigLayerInputWire, ConfigSourceWire, ListStrategy,
     CONFIG_WIRE_SCHEMA_VERSION,
 };
+use crate::agent_tribe::{
+    resolve_agent_tribe_display_config, AgentTribeDisplayLayerWire,
+    AgentTribeDisplayResolutionRequestWire,
+};
 use serde_json::Map;
 use serde_json::Value;
 
@@ -32,6 +36,7 @@ pub fn build_inventory(
     );
 
     let mut diagnostics = merged.diagnostics;
+    diagnostics.extend(agent_tribe_alias_diagnostics(&request.layers));
     let sources = build_sources(request, &mut diagnostics);
 
     let writable_layers: Vec<String> = request
@@ -96,6 +101,35 @@ pub fn build_inventory(
         fields,
         diagnostics,
     })
+}
+
+fn agent_tribe_alias_diagnostics(
+    layers: &[ConfigLayerInputWire],
+) -> Vec<ConfigDiagnosticWire> {
+    let resolution = resolve_agent_tribe_display_config(
+        &AgentTribeDisplayResolutionRequestWire {
+            layers: layers
+                .iter()
+                .map(|layer| AgentTribeDisplayLayerWire {
+                    name: layer.name.clone(),
+                    kind: layer.kind.clone(),
+                    path: layer.path.clone(),
+                    value: layer.value.clone(),
+                })
+                .collect(),
+        },
+    );
+    resolution
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| ConfigDiagnosticWire {
+            severity: "error".to_string(),
+            code: diagnostic.code,
+            message: diagnostic.message,
+            path: Some(diagnostic.path),
+            layer: Some(diagnostic.layer),
+        })
+        .collect()
 }
 
 struct GeneralMergedConfig {
