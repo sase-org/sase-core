@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.41](https://github.com/sase-org/sase-core/compare/v0.34.40...v0.34.41) - 2026-09-16
+
+### Added
+
+- *(agent-hold)* add launch armer core support
+- *(procs)* add service proc wire metadata
+
 ## [0.34.40](https://github.com/sase-org/sase-core/compare/v0.34.39...v0.34.40) - 2026-09-16
 
 ### Fixed
