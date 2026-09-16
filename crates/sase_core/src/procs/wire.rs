@@ -7,6 +7,14 @@ pub const SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS: [u32; 3] =
     [1, 2, PROC_WIRE_SCHEMA_VERSION];
 pub const PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcServiceWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub mode: String,
+    pub source: String,
+}
+
 /// One durable background proc record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcWire {
@@ -79,6 +87,8 @@ pub struct ProcWire {
     pub result: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xprompt_proc: Option<XpromptProcMetaWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ProcServiceWire>,
 }
 
 /// Additive `%proc` launch metadata stored on a native proc-shell row.
@@ -169,6 +179,8 @@ pub struct ProcReserveWire {
     pub idle_timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xprompt_proc: Option<XpromptProcMetaWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ProcServiceWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

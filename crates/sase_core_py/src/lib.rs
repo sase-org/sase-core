@@ -121,6 +121,7 @@
 //! - `rewrite_prompt_stash(path: str, entries: list[dict]) -> dict`
 //! - `read_procs_snapshot(path: str) -> dict`
 //! - `append_proc(path: str, proc: dict, history_limit: int) -> dict`
+//! - `reserve_proc(path: str, request: dict, history_limit: int) -> dict`
 //! - `update_proc(path: str, update: dict) -> dict`
 //! - `prune_procs(path: str, history_limit: int) -> dict`
 //! - `proc_runtime_retention_wire_schema_version() -> int`
@@ -21301,6 +21302,52 @@ COMMITS:
             let pruned = py_prune_tasks(py, path, 0).unwrap();
             let pruned = py_to_json_value(pruned.bind(py)).unwrap();
             assert!(pruned["pruned_proc_ids"].as_array().unwrap().is_empty());
+
+            let reserve = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 3,
+                    "proc_id": "proc-service",
+                    "label": "Service proc",
+                    "kind": "detached",
+                    "argv": ["sleep", "1"],
+                    "cwd": "/tmp",
+                    "project": "sase",
+                    "workspace_num": 16,
+                    "session_id": null,
+                    "session_label": null,
+                    "origin": "test",
+                    "cl_name": null,
+                    "tags": ["service"],
+                    "created_at": "2026-07-25T12:00:10Z",
+                    "log_path": "/tmp/proc-service.log",
+                    "log_owner": "proc-store",
+                    "shell_name": "gateway",
+                    "shell_kind": "proc",
+                    "concurrency_keys": ["service:gateway"],
+                    "request_fingerprint": "service-fingerprint",
+                    "reserved_by": "agent-one",
+                    "timeout_seconds": null,
+                    "idle_timeout_seconds": null,
+                    "service": {
+                        "name": "gateway",
+                        "mode": "daemon",
+                        "source": "builtin"
+                    }
+                }),
+            )
+            .unwrap();
+            let reserve = reserve.bind(py).downcast::<PyDict>().unwrap();
+            let reserved = py_reserve_proc(py, path, reserve, 10).unwrap();
+            let reserved = py_to_json_value(reserved.bind(py)).unwrap();
+            assert_eq!(
+                reserved["proc"]["service"],
+                json!({
+                    "name": "gateway",
+                    "mode": "daemon",
+                    "source": "builtin"
+                })
+            );
         });
     }
 

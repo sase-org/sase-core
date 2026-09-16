@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -7,6 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, FixedOffset};
 
+use crate::service::{
+    is_service_proc_mode, is_service_proc_source, validate_service_proc_name,
+    SERVICE_PROC_MODE_ONESHOT, SERVICE_PROC_SOURCE_TRANSIENT,
+};
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, HeldStoreLock,
     LockMode, StoreLockError,
@@ -14,10 +19,11 @@ use crate::store_lock::{
 
 use super::wire::{
     ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,
-    ProcReserveOutcomeWire, ProcReserveWire, ProcSettlementWire,
-    ProcStopRequestWire, ProcStoreSnapshotWire, ProcStoreStatsWire,
-    ProcSupervisorClaimWire, ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire,
-    PROC_WIRE_SCHEMA_VERSION, SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
+    ProcReserveOutcomeWire, ProcReserveWire, ProcServiceWire,
+    ProcSettlementWire, ProcStopRequestWire, ProcStoreSnapshotWire,
+    ProcStoreStatsWire, ProcSupervisorClaimWire, ProcUpdateOutcomeWire,
+    ProcUpdateWire, ProcWire, PROC_WIRE_SCHEMA_VERSION,
+    SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };
 
 /// Every proc kind the store accepts on write.
@@ -25,6 +31,7 @@ const PROC_KINDS: [&str; 3] = ["command", "tui", "detached"];
 const PROC_LIFECYCLES: [&str; 2] = ["legacy", "proc-shell"];
 const STORE_LOG_OWNER: &str = "proc-store";
 const PROC_SHELL_LIFECYCLE: &str = "proc-shell";
+pub const SERVICE_PROC_HISTORY_LIMIT: usize = 20;
 
 const LOCK_TIMEOUT_ENV: &str = "SASE_PROC_STORE_LOCK_TIMEOUT";
 const LEGACY_LOCK_TIMEOUT_ENV: &str = "SASE_TASK_STORE_LOCK_TIMEOUT";
@@ -104,6 +111,7 @@ pub fn append_proc(
 ) -> ProcStoreResult<ProcAppendOutcomeWire> {
     let mut proc = proc.clone();
     normalize_and_validate_proc(&mut proc, ValidationMode::LegacyWrite)?;
+    validate_service_block_for_proc(&proc.proc_id, &mut proc.service)?;
     let lock = lock_with_timeout(
         path,
         LockMode::Exclusive,
@@ -134,7 +142,8 @@ pub fn reserve_proc(
     request: &ProcReserveWire,
     history_limit: i64,
 ) -> ProcStoreResult<ProcReserveOutcomeWire> {
-    validate_reserve_request(request)?;
+    let mut request = request.clone();
+    validate_reserve_request(&mut request)?;
     let lock = lock_with_timeout(
         path,
         LockMode::Exclusive,
@@ -143,7 +152,7 @@ pub fn reserve_proc(
     )?;
     let result: ProcStoreResult<ProcReserveOutcomeWire> = (|| {
         let (mut rows, stats) = read_rows_unlocked(path)?;
-        if let Some(proc) = find_idempotent_replay(&rows, request) {
+        if let Some(proc) = find_idempotent_replay(&rows, &request) {
             let snapshot = snapshot_from_rows(rows, stats);
             return Ok(ProcReserveOutcomeWire {
                 schema_version: PROC_WIRE_SCHEMA_VERSION,
@@ -155,8 +164,8 @@ pub fn reserve_proc(
                 pruned_log_proc_ids: Vec::new(),
             });
         }
-        reject_reserve_conflicts(&rows, request)?;
-        let proc = proc_from_reserve_request(request)?;
+        reject_reserve_conflicts(&rows, &request)?;
+        let proc = proc_from_reserve_request(&request)?;
         rows.push(proc.clone());
         let (kept, pruned_proc_ids, pruned_log_proc_ids) =
             apply_retention(rows, clamped_history_limit(history_limit));
@@ -530,18 +539,26 @@ fn apply_retention(
     rows: Vec<ProcWire>,
     history_limit: usize,
 ) -> (Vec<ProcWire>, Vec<String>, Vec<String>) {
-    let mut terminals: Vec<(usize, &ProcWire)> = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, proc)| is_terminal_status(&proc.status))
-        .collect();
-    terminals.sort_by(|(left_index, left), (right_index, right)| {
-        compare_proc_recency(*left_index, left, *right_index, right).reverse()
-    });
-
     let mut keep = vec![true; rows.len()];
-    for (index, _) in terminals.into_iter().skip(history_limit) {
-        keep[index] = false;
+    let mut generic_terminals = Vec::new();
+    let mut service_terminals: BTreeMap<String, Vec<(usize, &ProcWire)>> =
+        BTreeMap::new();
+    for (index, proc) in rows.iter().enumerate() {
+        if !is_terminal_status(&proc.status) {
+            continue;
+        }
+        if let Some(name) = named_service_proc_name(proc) {
+            service_terminals
+                .entry(name.to_string())
+                .or_default()
+                .push((index, proc));
+        } else {
+            generic_terminals.push((index, proc));
+        }
+    }
+    mark_retention_prunes(&mut keep, generic_terminals, history_limit);
+    for terminals in service_terminals.into_values() {
+        mark_retention_prunes(&mut keep, terminals, SERVICE_PROC_HISTORY_LIMIT);
     }
 
     let mut kept = Vec::with_capacity(rows.len());
@@ -560,11 +577,39 @@ fn apply_retention(
     (kept, pruned_proc_ids, pruned_log_proc_ids)
 }
 
+fn mark_retention_prunes(
+    keep: &mut [bool],
+    mut terminals: Vec<(usize, &ProcWire)>,
+    limit: usize,
+) {
+    terminals.sort_by(|(left_index, left), (right_index, right)| {
+        compare_proc_recency(*left_index, left, *right_index, right).reverse()
+    });
+    for (index, _) in terminals.into_iter().skip(limit) {
+        keep[index] = false;
+    }
+}
+
+fn named_service_proc_name(proc: &ProcWire) -> Option<&str> {
+    let service = proc.service.as_ref()?;
+    if service.source == SERVICE_PROC_SOURCE_TRANSIENT {
+        return None;
+    }
+    let name = service.name.as_deref()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 fn clamped_history_limit(history_limit: i64) -> usize {
     usize::try_from(history_limit.max(1)).unwrap_or(usize::MAX)
 }
 
-fn validate_reserve_request(request: &ProcReserveWire) -> ProcStoreResult<()> {
+fn validate_reserve_request(
+    request: &mut ProcReserveWire,
+) -> ProcStoreResult<()> {
     if request.schema_version != PROC_WIRE_SCHEMA_VERSION {
         return Err(ProcStoreError::InvalidProc {
             proc_id: request.proc_id.clone(),
@@ -608,7 +653,61 @@ fn validate_reserve_request(request: &ProcReserveWire) -> ProcStoreResult<()> {
             reason,
         },
     )?;
+    validate_service_block_for_proc(&request.proc_id, &mut request.service)?;
     Ok(())
+}
+
+fn validate_service_block_for_proc(
+    proc_id: &str,
+    service: &mut Option<ProcServiceWire>,
+) -> ProcStoreResult<()> {
+    let Some(service) = service else {
+        return Ok(());
+    };
+    service.mode = service.mode.trim().to_string();
+    service.source = service.source.trim().to_string();
+    normalize_optional_string(&mut service.name);
+    if !is_service_proc_mode(&service.mode) {
+        return Err(ProcStoreError::InvalidProc {
+            proc_id: proc_id.to_string(),
+            reason: format!("unknown service mode {:?}", service.mode),
+        });
+    }
+    if !is_service_proc_source(&service.source) {
+        return Err(ProcStoreError::InvalidProc {
+            proc_id: proc_id.to_string(),
+            reason: format!("unknown service source {:?}", service.source),
+        });
+    }
+    if service.source == SERVICE_PROC_SOURCE_TRANSIENT {
+        if service.mode != SERVICE_PROC_MODE_ONESHOT {
+            return Err(ProcStoreError::InvalidProc {
+                proc_id: proc_id.to_string(),
+                reason: "transient service procs must use oneshot mode"
+                    .to_string(),
+            });
+        }
+        if service.name.is_some() {
+            return Err(ProcStoreError::InvalidProc {
+                proc_id: proc_id.to_string(),
+                reason: "transient service procs must not have a name"
+                    .to_string(),
+            });
+        }
+        return Ok(());
+    }
+    let Some(name) = service.name.as_deref() else {
+        return Err(ProcStoreError::InvalidProc {
+            proc_id: proc_id.to_string(),
+            reason: "non-transient service procs must have a name".to_string(),
+        });
+    };
+    validate_service_proc_name(name).map_err(|reason| {
+        ProcStoreError::InvalidProc {
+            proc_id: proc_id.to_string(),
+            reason: format!("service.name {reason}"),
+        }
+    })
 }
 
 fn proc_from_reserve_request(
@@ -662,6 +761,7 @@ fn proc_from_reserve_request(
         finished_by: None,
         result: None,
         xprompt_proc: request.xprompt_proc.clone(),
+        service: request.service.clone(),
     };
     normalize_and_validate_proc(&mut proc, ValidationMode::ProcShellWrite)?;
     Ok(proc)
@@ -1343,7 +1443,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::procs::wire::XpromptProcMetaWire;
+    use crate::procs::wire::{ProcServiceWire, XpromptProcMetaWire};
 
     use super::*;
 
@@ -1398,6 +1498,7 @@ mod tests {
             finished_by: None,
             result: None,
             xprompt_proc: None,
+            service: None,
         }
     }
 
@@ -1431,7 +1532,24 @@ mod tests {
             timeout_seconds: Some(30),
             idle_timeout_seconds: Some(10),
             xprompt_proc: None,
+            service: None,
         }
+    }
+
+    fn service_block(
+        name: Option<&str>,
+        mode: &str,
+        source: &str,
+    ) -> ProcServiceWire {
+        ProcServiceWire {
+            name: name.map(ToString::to_string),
+            mode: mode.to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    fn timestamp(offset: usize) -> String {
+        format!("2026-07-25T12:{:02}:{:02}Z", offset / 60, offset % 60)
     }
 
     #[test]
@@ -1567,6 +1685,114 @@ mod tests {
     }
 
     #[test]
+    fn proc_without_service_block_serializes_without_service_key() {
+        let value = serde_json::to_value(proc(
+            "plain",
+            "pending",
+            "2026-07-25T12:00:00Z",
+        ))
+        .unwrap();
+
+        assert!(value.as_object().unwrap().get("service").is_none());
+    }
+
+    #[test]
+    fn reserve_copies_service_block_and_update_preserves_it() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut request = reserve_request("svc-proc", "gateway", "fp-service");
+        request.service =
+            Some(service_block(Some(" gateway "), " daemon ", " builtin "));
+
+        let reserved = reserve_proc(&path, &request, 10).unwrap().proc;
+
+        let service = reserved.service.as_ref().unwrap();
+        assert_eq!(service.name.as_deref(), Some("gateway"));
+        assert_eq!(service.mode, "daemon");
+        assert_eq!(service.source, "builtin");
+
+        let updated = update_proc(
+            &path,
+            &ProcUpdateWire {
+                proc_id: "svc-proc".to_string(),
+                label: Some("Updated label".to_string()),
+                ..ProcUpdateWire::default()
+            },
+        )
+        .unwrap()
+        .proc
+        .unwrap();
+        assert_eq!(updated.service, reserved.service);
+    }
+
+    #[test]
+    fn invalid_service_blocks_are_rejected_on_create() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut bad_mode = proc("bad-mode", "pending", "2026-07-25T12:00:00Z");
+        bad_mode.service =
+            Some(service_block(Some("gateway"), "future", "builtin"));
+        let error = append_proc(&path, &bad_mode, 10).unwrap_err();
+        assert!(matches!(
+            error,
+            ProcStoreError::InvalidProc { reason, .. }
+                if reason == "unknown service mode \"future\""
+        ));
+
+        let mut named_transient =
+            reserve_request("named-transient", "oneshot", "fp-named");
+        named_transient.service =
+            Some(service_block(Some("oneshot"), "oneshot", "transient"));
+        let error = reserve_proc(&path, &named_transient, 10).unwrap_err();
+        assert!(matches!(
+            error,
+            ProcStoreError::InvalidProc { reason, .. }
+                if reason == "transient service procs must not have a name"
+        ));
+
+        let mut missing_name =
+            reserve_request("missing-name", "gateway", "fp-missing");
+        missing_name.service = Some(service_block(None, "daemon", "user"));
+        let error = reserve_proc(&path, &missing_name, 10).unwrap_err();
+        assert!(matches!(
+            error,
+            ProcStoreError::InvalidProc { reason, .. }
+                if reason == "non-transient service procs must have a name"
+        ));
+    }
+
+    #[test]
+    fn unknown_service_values_load_and_remain_updatable() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut value = serde_json::to_value(proc(
+            "future-service",
+            "pending",
+            "2026-07-25T12:00:00Z",
+        ))
+        .unwrap();
+        value["service"] =
+            json!({"name": "gateway", "mode": "future", "source": "future"});
+        fs::write(&path, format!("{value}\n")).unwrap();
+
+        let snapshot = read_procs_snapshot(&path).unwrap();
+        assert_eq!(snapshot.procs[0].service.as_ref().unwrap().mode, "future");
+
+        let updated = update_proc(
+            &path,
+            &ProcUpdateWire {
+                proc_id: "future-service".to_string(),
+                label: Some("Still updatable".to_string()),
+                ..ProcUpdateWire::default()
+            },
+        )
+        .unwrap()
+        .proc
+        .unwrap();
+        assert_eq!(updated.service.as_ref().unwrap().source, "future");
+    }
+
+    #[test]
     fn retention_keeps_newest_terminal_rows_at_and_beyond_limit() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("procs.jsonl");
@@ -1592,6 +1818,92 @@ mod tests {
         assert_eq!(outcome.pruned_proc_ids, vec!["two"]);
         assert_eq!(outcome.snapshot.procs[0].proc_id, "three");
         assert!(prune_procs(&path, 0).unwrap().pruned_proc_ids.is_empty());
+    }
+
+    #[test]
+    fn retention_keeps_newest_terminal_rows_per_named_service() {
+        let mut rows = Vec::new();
+        for index in 0..30 {
+            let mut row = proc(
+                &format!("gateway-{index:02}"),
+                "success",
+                &timestamp(index),
+            );
+            row.service =
+                Some(service_block(Some("gateway"), "daemon", "builtin"));
+            rows.push(row);
+        }
+        for index in 0..30 {
+            let mut row = proc(
+                &format!("scheduler-{index:02}"),
+                "success",
+                &timestamp(index + 30),
+            );
+            row.service =
+                Some(service_block(Some("scheduler"), "daemon", "builtin"));
+            rows.push(row);
+        }
+        for index in 0..60 {
+            rows.push(proc(
+                &format!("generic-{index:02}"),
+                "success",
+                &timestamp(index + 60),
+            ));
+        }
+        for index in 0..60 {
+            let mut row = proc(
+                &format!("transient-{index:02}"),
+                "success",
+                &timestamp(index + 120),
+            );
+            row.service = Some(service_block(None, "oneshot", "transient"));
+            rows.push(row);
+        }
+        let mut active_service =
+            proc("gateway-active", "running", &timestamp(180));
+        active_service.service =
+            Some(service_block(Some("gateway"), "daemon", "builtin"));
+        rows.push(active_service);
+        rows.push(proc("generic-active", "running", &timestamp(181)));
+
+        let (kept, pruned_proc_ids, pruned_log_proc_ids) =
+            apply_retention(rows, 100);
+
+        let gateway = kept
+            .iter()
+            .filter(|row| {
+                row.service
+                    .as_ref()
+                    .and_then(|service| service.name.as_deref())
+                    == Some("gateway")
+                    && row.status == "success"
+            })
+            .count();
+        let scheduler = kept
+            .iter()
+            .filter(|row| {
+                row.service
+                    .as_ref()
+                    .and_then(|service| service.name.as_deref())
+                    == Some("scheduler")
+                    && row.status == "success"
+            })
+            .count();
+        let generic = kept
+            .iter()
+            .filter(|row| {
+                is_terminal_status(&row.status)
+                    && named_service_proc_name(row).is_none()
+            })
+            .count();
+
+        assert_eq!(gateway, SERVICE_PROC_HISTORY_LIMIT);
+        assert_eq!(scheduler, SERVICE_PROC_HISTORY_LIMIT);
+        assert_eq!(generic, 100);
+        assert!(kept.iter().any(|row| row.proc_id == "gateway-active"));
+        assert!(kept.iter().any(|row| row.proc_id == "generic-active"));
+        assert_eq!(pruned_proc_ids.len(), 40);
+        assert_eq!(pruned_log_proc_ids.len(), 40);
     }
 
     #[test]

@@ -98,6 +98,7 @@ pub mod runner_capacity;
 pub mod runner_limit_override;
 pub mod sections;
 mod serde_option;
+pub mod service;
 pub mod sidecar_publication;
 pub mod snippet_catalog;
 pub mod snippet_session;
@@ -1225,11 +1226,11 @@ pub use procs::{
     append_proc, begin_proc_settlement, claim_proc_supervisor, finish_proc,
     prune_procs, read_procs_snapshot, request_proc_stop, reserve_proc,
     update_proc, ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,
-    ProcReserveOutcomeWire, ProcReserveWire, ProcSettlementWire,
-    ProcStopRequestWire, ProcStoreError, ProcStoreSnapshotWire,
-    ProcStoreStatsWire, ProcSupervisorClaimWire, ProcUpdateOutcomeWire,
-    ProcUpdateWire, ProcWire, XpromptProcMetaWire, PROC_WIRE_SCHEMA_VERSION,
-    SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
+    ProcReserveOutcomeWire, ProcReserveWire, ProcServiceWire,
+    ProcSettlementWire, ProcStopRequestWire, ProcStoreError,
+    ProcStoreSnapshotWire, ProcStoreStatsWire, ProcSupervisorClaimWire,
+    ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire, XpromptProcMetaWire,
+    PROC_WIRE_SCHEMA_VERSION, SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };
 pub use project_spec::{
     active_project_spec_filename, apply_project_aliases_update,
@@ -1389,6 +1390,13 @@ pub use runner_limit_override::{
     set_runner_limit_override_until, RunnerLimitOverrideError,
     RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
     RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
+};
+pub use service::{
+    is_service_proc_mode, is_service_proc_source, validate_service_proc_name,
+    RESERVED_BUILTIN_SERVICE_PROCS, SERVICE_PROC_MODES,
+    SERVICE_PROC_MODE_DAEMON, SERVICE_PROC_MODE_ONESHOT, SERVICE_PROC_SOURCES,
+    SERVICE_PROC_SOURCE_BUILTIN, SERVICE_PROC_SOURCE_PLUGIN,
+    SERVICE_PROC_SOURCE_TRANSIENT, SERVICE_PROC_SOURCE_USER,
 };
 pub use sidecar_publication::{
     decide_sidecar_publication_after_push, SidecarPublicationDecisionWire,

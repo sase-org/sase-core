@@ -803,6 +803,7 @@ mod tests {
             finished_by: None,
             result: None,
             xprompt_proc: None,
+            service: None,
         }
     }
 
