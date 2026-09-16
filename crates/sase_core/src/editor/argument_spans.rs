@@ -15,6 +15,7 @@ use super::token::DocumentSnapshot;
 use super::wire::{
     DirectiveSyntaxForm, XpromptArgumentSource, XpromptArgumentSpan,
     XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
+    XpromptCallNameSpan,
 };
 use super::xprompt_args::{
     find_matching_paren_for_args, parse_xprompt_calls,
@@ -43,6 +44,55 @@ pub fn extract_xprompt_argument_spans_with_catalog(
     entries: &[XpromptAssistEntry],
 ) -> Vec<XpromptArgumentSpan> {
     extract_xprompt_argument_spans_inner(document, Some(entries))
+}
+
+/// Return xprompt invocation and directive name spans.
+pub fn extract_xprompt_call_name_spans(
+    document: &DocumentSnapshot,
+) -> Vec<XpromptCallNameSpan> {
+    let text = document.text();
+    let literal_ranges = prompt_literal_zone_ranges(text);
+    let mut spans = Vec::new();
+
+    for call in parse_xprompt_calls(text) {
+        let marker_start = xprompt_marker_start(text, &call);
+        if ranges_intersect_any(
+            (marker_start, call.name_span.1),
+            &literal_ranges,
+        ) {
+            continue;
+        }
+        push_name_span(
+            &mut spans,
+            call.name_span,
+            XpromptArgumentSource::Xprompt,
+            call.name,
+        );
+    }
+
+    for (call, call_name) in directive_calls(text, &literal_ranges) {
+        push_name_span(
+            &mut spans,
+            call.name_span,
+            XpromptArgumentSource::Directive,
+            call_name,
+        );
+    }
+
+    spans.retain(|span| {
+        !ranges_intersect_any((span.start, span.end), &literal_ranges)
+    });
+    spans.sort_by_key(|span| {
+        (
+            span.start,
+            span.end,
+            match span.source {
+                XpromptArgumentSource::Xprompt => 0u8,
+                XpromptArgumentSource::Directive => 1u8,
+            },
+        )
+    });
+    spans
 }
 
 fn extract_xprompt_argument_spans_inner(
@@ -438,6 +488,23 @@ fn push_commas_between_args(
     }
 }
 
+fn push_name_span(
+    out: &mut Vec<XpromptCallNameSpan>,
+    span: (usize, usize),
+    source: XpromptArgumentSource,
+    call_name: String,
+) {
+    if span.0 >= span.1 {
+        return;
+    }
+    out.push(XpromptCallNameSpan {
+        start: span.0,
+        end: span.1,
+        source,
+        call_name,
+    });
+}
+
 fn push_span(
     out: &mut Vec<XpromptArgumentSpan>,
     start: usize,
@@ -728,6 +795,50 @@ mod tests {
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "tail");
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "block");
+    }
+
+    #[test]
+    fn emits_name_spans_for_xprompts_directives_and_aliases() {
+        let text =
+            "#foo #bar:value #baz:: body\n%q(capacity=2)\n```\n#nope %wait\n```";
+        let spans =
+            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+        let actual = spans
+            .into_iter()
+            .map(|span| {
+                (
+                    text[span.start..span.end].to_string(),
+                    span.source,
+                    span.call_name,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "foo".to_string(),
+                    XpromptArgumentSource::Xprompt,
+                    "foo".to_string()
+                ),
+                (
+                    "bar".to_string(),
+                    XpromptArgumentSource::Xprompt,
+                    "bar".to_string()
+                ),
+                (
+                    "baz".to_string(),
+                    XpromptArgumentSource::Xprompt,
+                    "baz".to_string()
+                ),
+                (
+                    "q".to_string(),
+                    XpromptArgumentSource::Directive,
+                    "queue".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

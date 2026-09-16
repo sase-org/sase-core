@@ -6,17 +6,20 @@ use lsp_types::{
 };
 use sase_core::{
     editor_extract_xprompt_argument_spans,
-    editor_extract_xprompt_argument_spans_with_catalog, fenced_block_details,
+    editor_extract_xprompt_argument_spans_with_catalog,
+    editor_extract_xprompt_call_name_spans, fenced_block_details,
     prompt_literal_zone_ranges, scan_artifact_refs,
     scan_directive_owned_fences, ArtifactRefContextWire, ArtifactRefSpanWire,
-    CompiledGlossaryCatalog, DocumentSnapshot, XpromptArgumentSpanRole,
-    XpromptArgumentSpanValidity, XpromptAssistEntry,
+    CompiledGlossaryCatalog, DocumentSnapshot, XpromptArgumentSource,
+    XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
 
 const KIND_TOKEN_TYPE: u32 = 0;
 const PAYLOAD_TOKEN_TYPE: u32 = 1;
 const FRAGMENT_TOKEN_TYPE: u32 = 2;
 const GLOSSARY_TOKEN_TYPE: u32 = 3;
+const FUNCTION_TOKEN_TYPE: u32 = 4;
+const MACRO_TOKEN_TYPE: u32 = 5;
 const PARAMETER_TOKEN_TYPE: u32 = 6;
 const OPERATOR_TOKEN_TYPE: u32 = 7;
 const KEYWORD_TOKEN_TYPE: u32 = 8;
@@ -24,6 +27,7 @@ const DOCUMENT_ROLE_MODIFIER: u32 = 1 << 0;
 const DEPRECATED_MODIFIER: u32 = 1 << 1;
 const ARTIFACT_PRIORITY: u8 = 0;
 const CODE_PRIORITY: u8 = 0;
+const NAME_PRIORITY: u8 = 0;
 const GLOSSARY_PRIORITY: u8 = 1;
 const ARGUMENT_PRIORITY: u8 = 2;
 
@@ -70,6 +74,7 @@ pub(crate) fn document_semantic_tokens(
     if let Some(catalog) = glossary_catalog {
         raw_tokens.extend(raw_glossary_tokens(document, catalog));
     }
+    raw_tokens.extend(raw_xprompt_call_name_tokens(document));
     raw_tokens.extend(raw_xprompt_argument_tokens(document, argument_entries));
     encode_tokens(document, non_overlapping_tokens(raw_tokens))
 }
@@ -233,6 +238,24 @@ fn raw_xprompt_argument_tokens(
         .collect()
 }
 
+fn raw_xprompt_call_name_tokens(
+    document: &DocumentSnapshot,
+) -> Vec<RawSemanticToken> {
+    editor_extract_xprompt_call_name_spans(document)
+        .into_iter()
+        .map(|span| RawSemanticToken {
+            byte_start: span.start,
+            byte_end: span.end,
+            token_type: match span.source {
+                XpromptArgumentSource::Xprompt => FUNCTION_TOKEN_TYPE,
+                XpromptArgumentSource::Directive => MACRO_TOKEN_TYPE,
+            },
+            token_modifiers_bitset: 0,
+            priority: NAME_PRIORITY,
+        })
+        .collect()
+}
+
 fn argument_token_type(role: XpromptArgumentSpanRole) -> u32 {
     match role {
         XpromptArgumentSpanRole::ArgDelimiter
@@ -284,15 +307,31 @@ fn non_overlapping_tokens(
 
     let mut accepted: Vec<RawSemanticToken> = Vec::new();
     for token in tokens {
-        if accepted.iter().any(|existing| {
-            ranges_intersect(
-                (existing.byte_start, existing.byte_end),
-                (token.byte_start, token.byte_end),
-            )
-        }) {
-            continue;
+        let mut remaining = vec![(token.byte_start, token.byte_end)];
+        for existing in &accepted {
+            remaining = remaining
+                .into_iter()
+                .flat_map(|segment| {
+                    subtract_range(
+                        segment,
+                        (existing.byte_start, existing.byte_end),
+                    )
+                })
+                .collect();
+            if remaining.is_empty() {
+                break;
+            }
         }
-        accepted.push(token);
+        for (byte_start, byte_end) in remaining {
+            if byte_start >= byte_end {
+                continue;
+            }
+            accepted.push(RawSemanticToken {
+                byte_start,
+                byte_end,
+                ..token
+            });
+        }
     }
     accepted.sort_by(|left, right| {
         left.byte_start
@@ -301,6 +340,23 @@ fn non_overlapping_tokens(
             .then_with(|| left.token_type.cmp(&right.token_type))
     });
     accepted
+}
+
+fn subtract_range(
+    segment: (usize, usize),
+    blocker: (usize, usize),
+) -> Vec<(usize, usize)> {
+    if !ranges_intersect(segment, blocker) {
+        return vec![segment];
+    }
+    let mut pieces = Vec::new();
+    if segment.0 < blocker.0 {
+        pieces.push((segment.0, blocker.0.min(segment.1)));
+    }
+    if blocker.1 < segment.1 {
+        pieces.push((blocker.1.max(segment.0), segment.1));
+    }
+    pieces
 }
 
 fn encode_tokens(
@@ -319,6 +375,30 @@ fn encode_tokens(
 }
 
 fn push_token(
+    document: &DocumentSnapshot,
+    data: &mut Vec<SemanticToken>,
+    previous: &mut Option<(u32, u32)>,
+    token: RawSemanticToken,
+) {
+    for (byte_start, byte_end) in single_line_token_spans(
+        document.text(),
+        token.byte_start,
+        token.byte_end,
+    ) {
+        push_single_line_token(
+            document,
+            data,
+            previous,
+            RawSemanticToken {
+                byte_start,
+                byte_end,
+                ..token
+            },
+        );
+    }
+}
+
+fn push_single_line_token(
     document: &DocumentSnapshot,
     data: &mut Vec<SemanticToken>,
     previous: &mut Option<(u32, u32)>,
@@ -349,6 +429,39 @@ fn push_token(
         token_modifiers_bitset: token.token_modifiers_bitset,
     });
     *previous = Some((range.start.line, range.start.character));
+}
+
+fn single_line_token_spans(
+    text: &str,
+    byte_start: usize,
+    byte_end: usize,
+) -> Vec<(usize, usize)> {
+    if byte_start >= byte_end {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    let mut start = byte_start;
+    while start < byte_end {
+        let relative = &text[start..byte_end];
+        let line_end = relative
+            .find('\n')
+            .map(|offset| start + offset)
+            .unwrap_or(byte_end);
+        let mut piece_end = line_end;
+        if piece_end > start
+            && text.as_bytes().get(piece_end - 1) == Some(&b'\r')
+        {
+            piece_end -= 1;
+        }
+        if start < piece_end {
+            spans.push((start, piece_end));
+        }
+        if line_end == byte_end {
+            break;
+        }
+        start = line_end + 1;
+    }
+    spans
 }
 
 fn is_builtin_kind(kind: &str) -> bool {
@@ -459,6 +572,7 @@ mod tests {
         assert_eq!(
             absolute_semantic_tokens(&tokens.data),
             vec![
+                (0, 1, 3, FUNCTION_TOKEN_TYPE, 0),
                 (0, 4, 1, OPERATOR_TOKEN_TYPE, 0),
                 (0, 5, 4, PARAMETER_TOKEN_TYPE, 0),
                 (0, 9, 1, OPERATOR_TOKEN_TYPE, 0),
@@ -473,6 +587,56 @@ mod tests {
                 (0, 32, 4, KEYWORD_TOKEN_TYPE, 0),
                 (0, 36, 1, OPERATOR_TOKEN_TYPE, 0),
             ]
+        );
+    }
+
+    #[test]
+    fn name_tokens_cover_xprompts_directives_aliases_and_literal_zones() {
+        let document = DocumentSnapshot::new(
+            "#foo #bar:value #baz:: body\n%q(capacity=2)\n```\n#hidden %wait\n```",
+        );
+        let tokens = document_semantic_tokens(&document, None, None, None);
+
+        assert_eq!(
+            absolute_semantic_tokens(&tokens.data)
+                .into_iter()
+                .filter(|token| {
+                    token.3 == FUNCTION_TOKEN_TYPE
+                        || token.3 == MACRO_TOKEN_TYPE
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 1, 3, FUNCTION_TOKEN_TYPE, 0),
+                (0, 6, 3, FUNCTION_TOKEN_TYPE, 0),
+                (0, 17, 3, FUNCTION_TOKEN_TYPE, 0),
+                (1, 1, 1, MACRO_TOKEN_TYPE, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn multiline_argument_values_split_on_lines_with_utf16_ranges() {
+        let document = DocumentSnapshot::new(
+            "🙂 #foo(text=[[alpha\r\nbeta 🙂\r\ngamma]])",
+        );
+        let tokens = document_semantic_tokens(&document, None, None, None);
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(
+            absolute.contains(&(0, 4, 3, FUNCTION_TOKEN_TYPE, 0)),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(0, 13, 7, PAYLOAD_TOKEN_TYPE, 0)),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(1, 0, 7, PAYLOAD_TOKEN_TYPE, 0)),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(2, 0, 7, PAYLOAD_TOKEN_TYPE, 0)),
+            "{absolute:?}"
         );
     }
 
@@ -493,8 +657,9 @@ mod tests {
     }
 
     #[test]
-    fn argument_values_lose_to_nested_artifact_tokens() {
-        let document = DocumentSnapshot::new("#foo(path=@file:README.md)");
+    fn argument_values_preserve_pieces_around_nested_artifact_tokens() {
+        let document =
+            DocumentSnapshot::new("#foo(path=pre @file:README.md post)");
         let tokens = document_semantic_tokens(
             &document,
             Some(&ArtifactRefContextWire::default()),
@@ -503,14 +668,12 @@ mod tests {
         );
         let absolute = absolute_semantic_tokens(&tokens.data);
 
-        assert!(absolute.contains(&(0, 11, 4, KIND_TOKEN_TYPE, 0)));
-        assert!(absolute.contains(&(0, 16, 9, PAYLOAD_TOKEN_TYPE, 0)));
-        assert!(
-            !absolute.iter().any(|token| {
-                token.1 == 10 && token.2 == 15 && token.3 == PAYLOAD_TOKEN_TYPE
-            }),
-            "{absolute:?}"
-        );
+        assert!(absolute.contains(&(0, 15, 4, KIND_TOKEN_TYPE, 0)));
+        assert!(absolute.contains(&(0, 20, 9, PAYLOAD_TOKEN_TYPE, 0)));
+        assert!(absolute.contains(&(0, 10, 5, PAYLOAD_TOKEN_TYPE, 0)));
+        assert!(absolute.contains(&(0, 19, 1, PAYLOAD_TOKEN_TYPE, 0)));
+        assert!(absolute.contains(&(0, 29, 5, PAYLOAD_TOKEN_TYPE, 0)));
+        assert_no_token_overlaps(&absolute);
     }
 
     #[test]
@@ -544,6 +707,19 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn assert_no_token_overlaps(tokens: &[(u32, u32, u32, u32, u32)]) {
+        for pair in tokens.windows(2) {
+            let left = pair[0];
+            let right = pair[1];
+            if left.0 == right.0 {
+                assert!(
+                    left.1 + left.2 <= right.1,
+                    "overlapping tokens: {tokens:?}"
+                );
+            }
+        }
     }
 
     #[test]

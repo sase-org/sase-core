@@ -744,6 +744,7 @@ pub use editor::{
     extract_token_at_position as editor_extract_token_at_position,
     extract_xprompt_argument_spans as editor_extract_xprompt_argument_spans,
     extract_xprompt_argument_spans_with_catalog as editor_extract_xprompt_argument_spans_with_catalog,
+    extract_xprompt_call_name_spans as editor_extract_xprompt_call_name_spans,
     filter_explicit_model_shortcut_entries as editor_filter_explicit_model_shortcut_entries,
     filter_model_alias_shortcut_entries as editor_filter_model_alias_shortcut_entries,
     frontmatter_field_schema as editor_frontmatter_field_schema,

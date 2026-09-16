@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc};
+use std::{env, fs, sync::Arc};
 
 use lsp_types::Uri;
 use sase_core::{
@@ -16,6 +16,29 @@ use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tower_lsp_server::UriExt;
 use tower_lsp_server::{LspService, Server};
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = env::var_os(key);
+        env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            env::set_var(self.key, value);
+        } else {
+            env::remove_var(self.key);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct FixtureBridge {
@@ -180,6 +203,31 @@ impl HelperHostBridge for FixtureBridge {
             stats: EditorSnippetCatalogStatsWire { total_count: 1 },
         })
     }
+}
+
+fn write_semantic_artifact_catalog(path: &std::path::Path) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "default_project": "sase",
+            "projects": [
+                {
+                    "name": "sase",
+                    "key": "sase",
+                    "aliases": [],
+                    "context": {
+                        "schema_version": 1,
+                        "document_roots": [],
+                        "repositories": [],
+                        "projects": []
+                    }
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -453,9 +501,15 @@ async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
     let temp = tempfile::tempdir().unwrap();
     let definition_path = temp.path().join("foo.md");
     fs::write(&definition_path, "foo").unwrap();
+    let artifact_catalog_path = temp.path().join("artifact_catalog.json");
+    write_semantic_artifact_catalog(&artifact_catalog_path);
 
     let (mut client_writer, server_stdin) = duplex(8192);
     let (server_stdout, mut client_reader) = duplex(8192);
+    let _artifact_catalog_env = EnvVarGuard::set(
+        "SASE_XPROMPT_ARTIFACT_REF_CATALOG",
+        &artifact_catalog_path,
+    );
     let (service, socket) = LspService::new(|client| {
         XpromptLspServer::with_bridge(
             client,
@@ -523,11 +577,13 @@ async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
     let absolute =
         absolute_semantic_tokens_from_value(&semantic_result["data"]);
 
+    assert!(absolute.contains(&(0, 1, 3, 4, 0)), "{absolute:?}");
     assert!(absolute.contains(&(0, 5, 4, 6, 0)), "{absolute:?}");
     assert!(absolute.contains(&(0, 9, 1, 7, 0)), "{absolute:?}");
     assert!(absolute.contains(&(0, 10, 3, 1, 0)), "{absolute:?}");
     assert!(absolute.contains(&(0, 21, 1, 2, 0)), "{absolute:?}");
     assert!(absolute.contains(&(0, 32, 4, 8, 0)), "{absolute:?}");
+    assert_no_semantic_token_overlaps(&absolute);
 
     write_message(
         &mut client_writer,
@@ -539,7 +595,7 @@ async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
                     "uri": uri,
                     "version": 2
                 },
-                "contentChanges": [{"text": "```\n#foo(path=\"a\")\n```"}]
+                "contentChanges": [{"text": "#foo(path=\"a\", count=2"}]
             }
         }),
     )
@@ -554,15 +610,169 @@ async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
         }),
     )
     .await;
-    let fenced_result = read_response_result(&mut client_reader, 3).await;
+    let open_result = read_response_result(&mut client_reader, 3).await;
+    let open_absolute =
+        absolute_semantic_tokens_from_value(&open_result["data"]);
+    assert!(
+        open_absolute.contains(&(0, 1, 3, 4, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 4, 1, 7, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 5, 4, 6, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 21, 1, 2, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        !open_absolute.contains(&(0, 22, 1, 7, 0)),
+        "{open_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&open_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 3
+                },
+                "contentChanges": [{
+                    "text": "🙂 #foo(text=[[alpha\r\nbeta 🙂\r\ngamma]])\n%q(capacity=2)"
+                }]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let multiline_result = read_response_result(&mut client_reader, 4).await;
+    let multiline_absolute =
+        absolute_semantic_tokens_from_value(&multiline_result["data"]);
+    assert!(
+        multiline_absolute.contains(&(0, 4, 3, 4, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(0, 13, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(1, 0, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(2, 0, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(3, 1, 1, 5, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&multiline_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 4
+                },
+                "contentChanges": [{
+                    "text": "#foo(path=pre @file:README.md post)"
+                }]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let artifact_result = read_response_result(&mut client_reader, 5).await;
+    let artifact_absolute =
+        absolute_semantic_tokens_from_value(&artifact_result["data"]);
+    assert!(
+        artifact_absolute.contains(&(0, 15, 4, 0, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 20, 9, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 10, 5, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 19, 1, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 29, 5, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&artifact_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 5
+                },
+                "contentChanges": [{"text": "```\n#foo(path=\"a\")\n```"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let fenced_result = read_response_result(&mut client_reader, 6).await;
     assert_eq!(fenced_result["data"], json!([]));
 
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+        json!({"jsonrpc": "2.0", "id": 7, "method": "shutdown", "params": null}),
     )
     .await;
-    read_response_result(&mut client_reader, 4).await;
+    read_response_result(&mut client_reader, 7).await;
     write_message(
         &mut client_writer,
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
@@ -1590,4 +1800,17 @@ fn absolute_semantic_tokens_from_value(
             )
         })
         .collect()
+}
+
+fn assert_no_semantic_token_overlaps(tokens: &[(u32, u32, u32, u32, u32)]) {
+    for pair in tokens.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if left.0 == right.0 {
+            assert!(
+                left.1 + left.2 <= right.1,
+                "overlapping semantic tokens: {tokens:?}"
+            );
+        }
+    }
 }

@@ -389,6 +389,17 @@ pub enum XpromptArgumentSource {
     Directive,
 }
 
+/// Byte-addressed invocation or directive name span shared by editor frontends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpromptCallNameSpan {
+    pub start: usize,
+    pub end: usize,
+    pub source: XpromptArgumentSource,
+    /// Canonical call name. For directive aliases this may differ from the
+    /// authored bytes covered by `start..end`.
+    pub call_name: String,
+}
+
 /// Frontend-neutral role for one xprompt or directive argument span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

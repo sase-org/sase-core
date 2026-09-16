@@ -17,7 +17,9 @@ pub mod wire;
 mod xprompt_args;
 
 pub use argument_spans::{
-    extract_xprompt_argument_spans, extract_xprompt_argument_spans_with_catalog,
+    extract_xprompt_argument_spans,
+    extract_xprompt_argument_spans_with_catalog,
+    extract_xprompt_call_name_spans,
 };
 pub use argument_syntax_edit::{
     plan_argument_colon_to_parentheses_edit,
@@ -127,8 +129,8 @@ pub use wire::{
     VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
     VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger,
     XpromptArgumentSource, XpromptArgumentSpan, XpromptArgumentSpanRole,
-    XpromptArgumentSpanValidity, XpromptAssistEntry, XpromptInputHint,
-    AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
+    XpromptArgumentSpanValidity, XpromptAssistEntry, XpromptCallNameSpan,
+    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
     FINALIZER_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
