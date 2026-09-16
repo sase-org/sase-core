@@ -671,6 +671,18 @@ fn waiter_blockers(
                     None,
                     Some(eval.admission_limit),
                 ));
+            } else if eval.requested_weight == 0.0
+                && free_capacity <= 4.0 * ulp_at(eval.admission_limit.max(1.0))
+            {
+                blockers.push(blocker(
+                    "insufficient-capacity",
+                    "Zero-weight waiters still require free runner capacity before admission.",
+                    Some(eval.requested_weight),
+                    Some(free_capacity),
+                    None,
+                    None,
+                    Some(eval.admission_limit),
+                ));
             } else if !capacity_fits(
                 proposed.unwrap_or(f64::MAX),
                 eval.admission_limit,
@@ -1824,6 +1836,31 @@ mod tests {
             "insufficient-capacity"
         );
         assert_eq!(blocked.waiters[0].admission_limit, 1.0);
+
+        let drained = snapshot_with_flags(8.0, vec![waiter], &flags);
+        assert_eq!(
+            drained.first_eligible_artifact_dir.as_deref(),
+            Some("/tmp/waiter")
+        );
+        assert!(drained.waiters[0].eligible);
+    }
+
+    #[test]
+    fn zero_weight_capacity_budget_waiter_needs_free_capacity() {
+        let flags = capacity_budget_flags();
+        let occupied = running("occupied", Some(1.0));
+        let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.0));
+        waiter.queue_weight_explicit = true;
+        waiter.queue_capacity = Some(1);
+        waiter.queue_capacity_explicit = true;
+
+        let blocked =
+            snapshot_with_flags(8.0, vec![occupied, waiter.clone()], &flags);
+        assert!(blocked.first_eligible_artifact_dir.is_none());
+        assert_eq!(
+            blocked.waiters[0].blockers[0].code,
+            "insufficient-capacity"
+        );
 
         let drained = snapshot_with_flags(8.0, vec![waiter], &flags);
         assert_eq!(

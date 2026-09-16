@@ -238,6 +238,11 @@ pub fn reconcile_admission_journal(
         }
         if let Some(message) = &entry.message {
             state.message = Some(message.clone());
+        } else if matches!(
+            entry.phase,
+            LaunchUnitPhaseWire::Dispatching | LaunchUnitPhaseWire::Launched
+        ) {
+            state.message = None;
         }
         if let Some(dispatch_target) = &entry.dispatch_target {
             state.dispatch_target = Some(dispatch_target.clone());
@@ -1071,6 +1076,10 @@ mod tests {
             workspace: true,
             workspace_explicit: false,
             selected_project: Some("sase".to_string()),
+            queue_capacity: None,
+            wait_priority: None,
+            queue_weight: None,
+            queue_weight_explicit: false,
         });
         assert_eq!(dispatch_fingerprint("plan", "unit-1", &payload).len(), 64);
     }

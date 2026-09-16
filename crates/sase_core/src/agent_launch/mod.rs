@@ -48,8 +48,8 @@ use crate::fenced_code::{
 };
 use crate::prompt_literals::inline_code_ranges;
 use crate::queue_directive::{
-    collect_queue_fields_with_flags, QueueArgWire, QueueFieldsWire,
-    QueueOccurrenceWire,
+    collect_queue_fields_with_flags, format_queue_weight, QueueArgWire,
+    QueueFieldsWire, QueueOccurrenceWire,
 };
 use crate::xprompt_text_block::find_text_block_close_for_args;
 use chrono::{Duration, NaiveDateTime};
@@ -511,6 +511,23 @@ pub struct ProcUnitWire {
     pub workspace_explicit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_priority: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "skip_if_false")]
+    pub queue_weight_explicit: bool,
+}
+
+impl ProcUnitWire {
+    pub fn has_authored_queue_fields(&self) -> bool {
+        self.queue_capacity.is_some()
+            || self.wait_priority.is_some()
+            || self.queue_weight.is_some()
+            || self.queue_weight_explicit
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1456,24 +1473,20 @@ fn classify_typed_launch_unit(
     }
 
     if !queue_occurrences.is_empty() {
-        if proc_code.is_some() {
-            proc_forbidden_directives.push("%queue".to_string());
-        } else {
-            let collected = collect_queue_fields_with_flags(
-                &queue_occurrences,
-                enabled_feature_flags,
-            );
-            for error in collected.errors {
-                diagnostics.push(typed_unit_diagnostic(
-                    &error.code,
-                    &error.message,
-                    &logical_id,
-                    error.source_span,
-                ));
-            }
-            if let Some(fields) = collected.fields {
-                wait_queue = fields;
-            }
+        let collected = collect_queue_fields_with_flags(
+            &queue_occurrences,
+            enabled_feature_flags,
+        );
+        for error in collected.errors {
+            diagnostics.push(typed_unit_diagnostic(
+                &error.code,
+                &error.message,
+                &logical_id,
+                error.source_span,
+            ));
+        }
+        if let Some(fields) = collected.fields {
+            wait_queue = fields;
         }
     }
 
@@ -1560,6 +1573,11 @@ fn classify_typed_launch_unit(
             &logical_id,
             diagnostics,
         );
+        let proc_queue_weight = wait_queue.weight.or_else(|| {
+            (wait_queue.queue_capacity.is_some()
+                || wait_queue.priority.is_some())
+            .then_some(0.0)
+        });
         LaunchUnitPayloadWire::Proc(ProcUnitWire {
             code,
             shell_name,
@@ -1576,6 +1594,10 @@ fn classify_typed_launch_unit(
             workspace,
             workspace_explicit: proc_options.contains_key("workspace"),
             selected_project: unit_project,
+            queue_capacity: wait_queue.queue_capacity,
+            wait_priority: wait_queue.priority,
+            queue_weight: proc_queue_weight,
+            queue_weight_explicit: wait_queue.weight.is_some(),
         })
     } else {
         LaunchUnitPayloadWire::Agent(AgentUnitWire {
@@ -3021,11 +3043,14 @@ fn render_launch_approval_preview(
                 agent.prompt
             )),
             LaunchUnitPayloadWire::Proc(proc_unit) => lines.push(format!(
-                "{} proc shell={} project={} workspace={} waits={}{} code={}:{} preview={:?}",
+                "{} proc shell={} project={} workspace={}{} waits={}{} code={}:{} preview={:?}",
                 unit.logical_id,
                 proc_unit.shell_name.as_deref().unwrap_or("auto"),
                 proc_unit.selected_project.as_deref().unwrap_or("none"),
                 proc_unit.workspace,
+                proc_queue_preview(proc_unit)
+                    .map(|queue| format!(" queue={queue}"))
+                    .unwrap_or_default(),
                 waits,
                 condition,
                 proc_unit.code.language,
@@ -3035,6 +3060,32 @@ fn render_launch_approval_preview(
         }
     }
     lines
+}
+
+fn proc_queue_preview(proc_unit: &ProcUnitWire) -> Option<String> {
+    if !proc_unit.has_authored_queue_fields() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(capacity) = proc_unit.queue_capacity {
+        parts.push(format!("capacity={capacity}"));
+    }
+    if let Some(priority) = proc_unit.wait_priority {
+        parts.push(format!("priority={priority}"));
+    }
+    if let Some(weight) = proc_unit.queue_weight {
+        let suffix = if proc_unit.queue_weight_explicit {
+            ""
+        } else {
+            " implicit"
+        };
+        parts.push(format!("weight={}{}", format_queue_weight(weight), suffix));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("({})", parts.join(", ")))
+    }
 }
 
 fn wait_preview(wait: &WaitTargetWire) -> String {
@@ -7422,6 +7473,20 @@ Keep this comma, and the rest of the prose in the summary.";
         }
     }
 
+    fn proc_fields(
+        plan: &LaunchPlanWire,
+    ) -> (Option<u32>, Option<i32>, Option<f64>, bool) {
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Proc(proc_unit) => (
+                proc_unit.queue_capacity,
+                proc_unit.wait_priority,
+                proc_unit.queue_weight,
+                proc_unit.queue_weight_explicit,
+            ),
+            other => panic!("expected proc payload, got {other:?}"),
+        }
+    }
+
     #[test]
     fn typed_launch_parses_queue_spellings_and_round_trips() {
         for prompt in [
@@ -7476,7 +7541,7 @@ Keep this comma, and the rest of the prose in the summary.";
     }
 
     #[test]
-    fn typed_launch_rejects_wait_queue_keywords_and_proc_queue() {
+    fn typed_launch_rejects_wait_queue_keywords() {
         let runners = plan_queue_err("%wait(runners=5)\nDo work");
         assert!(runners.to_string().contains("%queue(capacity="));
         let capacity = plan_queue_err("%wait(capacity=5)\nDo work");
@@ -7489,14 +7554,54 @@ Keep this comma, and the rest of the prose in the summary.";
         assert!(plus.to_string().contains("%queue"));
         let empty = plan_queue_err("%q\nDo work");
         assert!(empty.to_string().contains("bare %q"));
-        let proc = plan_typed_launch_units_with_flags(
+    }
+
+    #[test]
+    fn typed_launch_proc_accepts_queue_spellings_and_authored_weight() {
+        for prompt in [
+            "%q:1\n%proc(\"just check\")",
+            "%queue:1\n%proc(\"just check\")",
+            "%q(1)\n%proc(\"just check\")",
             "%queue(capacity=1)\n%proc(\"just check\")",
-            Some("auto"),
-            Some("sase"),
-            &[],
-        )
-        .unwrap_err();
-        assert!(proc.to_string().contains("not valid on %proc"));
+        ] {
+            let plan = plan_queue(prompt);
+            let (capacity, priority, weight, weight_explicit) =
+                proc_fields(&plan);
+            assert_eq!(capacity, Some(1), "{prompt}");
+            assert_eq!(priority, None, "{prompt}");
+            assert_eq!(weight, Some(0.0), "{prompt}");
+            assert!(!weight_explicit, "{prompt}");
+            assert!(
+                plan.approval_preview[1]
+                    .contains("queue=(capacity=1, weight=0 implicit)"),
+                "{:?}",
+                plan.approval_preview
+            );
+        }
+
+        let plan =
+            plan_queue("%q(priority=20, weight=0.25)\n%proc(\"just check\")");
+        let (capacity, priority, weight, weight_explicit) = proc_fields(&plan);
+        assert_eq!(capacity, None);
+        assert_eq!(priority, Some(20));
+        assert_eq!(weight, Some(0.25));
+        assert!(weight_explicit);
+        assert!(plan.approval_preview[1]
+            .contains("queue=(priority=20, weight=0.25)"));
+
+        let value = serde_json::to_value(&plan.units[0].payload).unwrap();
+        assert_eq!(value["queue_weight"], serde_json::json!(0.25));
+        assert_eq!(value["queue_weight_explicit"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn typed_launch_proc_queue_changes_content_digest() {
+        let plain = plan_queue("%proc(\"just check\")");
+        let queued = plan_queue("%q:1\n%proc(\"just check\")");
+        let weighted = plan_queue("%q(1, weight=0.5)\n%proc(\"just check\")");
+
+        assert_ne!(plain.content_digest, queued.content_digest);
+        assert_ne!(queued.content_digest, weighted.content_digest);
     }
 
     #[test]
