@@ -10,8 +10,9 @@ use serde_json::{Map, Value};
 
 use super::axe::{
     display_path as display_config_path, normalize_config_key_path,
-    normalize_config_layer, public_key_path, public_project_root,
-    remove_value_at_path, replacement_paths_for_layer,
+    normalize_config_layer, plan_generic_axe_list_edit, public_key_path,
+    public_project_root, remove_value_at_path, replacement_paths_for_layer,
+    source_path_for_normalized_edit,
 };
 use super::merge::{
     canonicalize_value, deep_merge_objects, get_at_path, set_at_path,
@@ -67,27 +68,54 @@ pub fn plan_edit(
         &Value::Object(Map::new()),
         &mut target_normalization_diagnostics,
     );
-    let write_key_path = target_normalized
-        .sources
-        .get(&merge_key_path)
-        .cloned()
-        .unwrap_or_else(|| {
-            if request.routine_job_contract {
-                public_key_path(&merge_key_path)
-            } else {
-                requested_key_path.clone()
-            }
-        });
+    let write_key_path = source_path_for_normalized_edit(
+        &merge_key_path,
+        &requested_key_path,
+        &target_normalized.sources,
+        request.routine_job_contract,
+    );
 
-    let (op, new_value, has_value) = match request.op.kind.as_str() {
+    let (op, new_value, has_value, write_key_path) = match request
+        .op
+        .kind
+        .as_str()
+    {
         "set" => {
             let value = canonicalize_value(&request.op.value);
-            set_at_path(&mut target_obj, &write_key_path, value.clone())?;
-            ("set", value, true)
+            match plan_generic_axe_list_edit(
+                &mut target_obj,
+                &merge_key_path,
+                "set",
+                value.clone(),
+            )? {
+                Some(plan) => {
+                    (plan.op, plan.new_value, plan.has_value, plan.key_path)
+                }
+                None => {
+                    set_at_path(
+                        &mut target_obj,
+                        &write_key_path,
+                        value.clone(),
+                    )?;
+                    ("set".to_string(), value, true, write_key_path)
+                }
+            }
         }
         "unset" => {
-            unset_at_path(&mut target_obj, &write_key_path);
-            ("unset", Value::Null, false)
+            match plan_generic_axe_list_edit(
+                &mut target_obj,
+                &merge_key_path,
+                "unset",
+                Value::Null,
+            )? {
+                Some(plan) => {
+                    (plan.op, plan.new_value, plan.has_value, plan.key_path)
+                }
+                None => {
+                    unset_at_path(&mut target_obj, &write_key_path);
+                    ("unset".to_string(), Value::Null, false, write_key_path)
+                }
+            }
         }
         other => {
             return Err(ConfigError::validation(format!(
@@ -128,7 +156,7 @@ pub fn plan_edit(
         file: target.path.clone(),
         layer: target.name.clone(),
         key_path: write_key_path,
-        op: op.to_string(),
+        op,
         has_value,
         new_value,
     };
@@ -198,7 +226,8 @@ mod tests {
                                 "checks": {
                                     "type": "object",
                                     "properties": {
-                                        "interval": {"type": "integer"}
+                                        "interval": {"type": "integer"},
+                                        "job_timeout": {"type": "integer"}
                                     }
                                 }
                             }
@@ -287,5 +316,73 @@ mod tests {
         );
         assert_eq!(plan.effective_preview.before, Value::Null);
         assert_eq!(plan.effective_preview.after, json!(19));
+    }
+
+    #[test]
+    fn edit_plan_targets_existing_legacy_source_for_missing_public_leaf() {
+        let request = ConfigEditRequestWire {
+            schema: schema(),
+            layers: vec![layer(
+                "user",
+                json!({"axe": {"lumberjacks": {"checks": {"interval": 5}}}}),
+            )],
+            target_layer: "user".to_string(),
+            path: Some("axe.routines.checks.job_timeout".to_string()),
+            key_path: None,
+            op: ConfigEditOpWire {
+                kind: "set".to_string(),
+                value: json!(30),
+            },
+            deprecations: BTreeMap::new(),
+            unsupported: Vec::new(),
+            routine_job_contract: true,
+        };
+
+        let plan = plan_edit(&request).unwrap();
+
+        assert_eq!(
+            plan.write_plan.key_path,
+            vec!["axe", "lumberjacks", "checks", "chop_timeout"]
+        );
+        assert_eq!(
+            plan.candidate_config["axe"]["routines"]["checks"]["interval"],
+            json!(5)
+        );
+        assert_eq!(
+            plan.candidate_config["axe"]["routines"]["checks"]["job_timeout"],
+            json!(30)
+        );
+    }
+
+    #[test]
+    fn edit_plan_targets_existing_public_source_for_missing_public_leaf() {
+        let request = ConfigEditRequestWire {
+            schema: schema(),
+            layers: vec![layer(
+                "user",
+                json!({"axe": {"routines": {"checks": {"interval": 5}}}}),
+            )],
+            target_layer: "user".to_string(),
+            path: Some("axe.routines.checks.job_timeout".to_string()),
+            key_path: None,
+            op: ConfigEditOpWire {
+                kind: "set".to_string(),
+                value: json!(30),
+            },
+            deprecations: BTreeMap::new(),
+            unsupported: Vec::new(),
+            routine_job_contract: true,
+        };
+
+        let plan = plan_edit(&request).unwrap();
+
+        assert_eq!(
+            plan.write_plan.key_path,
+            vec!["axe", "routines", "checks", "job_timeout"]
+        );
+        assert_eq!(
+            plan.candidate_config["axe"]["routines"]["checks"]["job_timeout"],
+            json!(30)
+        );
     }
 }

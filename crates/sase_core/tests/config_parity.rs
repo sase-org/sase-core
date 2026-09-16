@@ -709,6 +709,107 @@ fn plan_edit_exact_key_path_preserves_dotted_mapping_keys() {
 }
 
 #[test]
+fn plan_edit_promotes_list_form_jobs_for_generic_public_edits() {
+    for routine_job_contract in [false, true] {
+        let request: ConfigEditRequestWire = serde_json::from_value(json!({
+            "schema": {"type": "object"},
+            "layers": [
+                {
+                    "name": "user",
+                    "path": "/tmp/sase.yml",
+                    "writable": true,
+                    "list_strategy": "replace",
+                    "value": {"axe": {"lumberjacks": {"checks": {
+                        "chops": [
+                            {"name": "hook", "script": "old-script"},
+                            {"name": "other", "enabled": true}
+                        ]
+                    }}}}
+                }
+            ],
+            "target_layer": "user",
+            "path": "axe.routines.checks.jobs.hook.script",
+            "op": {"kind": "set", "value": "new-script"},
+            "routine_job_contract": routine_job_contract
+        }))
+        .unwrap();
+
+        let plan = config_plan_edit(&request).unwrap();
+
+        assert_eq!(
+            plan.write_plan.key_path,
+            vec!["axe", "lumberjacks", "checks", "chops"]
+        );
+        assert_eq!(plan.write_plan.op, "set");
+        assert_eq!(plan.write_plan.new_value["hook"]["script"], "new-script");
+        assert_eq!(plan.write_plan.new_value["other"]["enabled"], true);
+        assert_eq!(plan.effective_preview.before, json!("old-script"));
+        assert_eq!(plan.effective_preview.after, json!("new-script"));
+        if routine_job_contract {
+            assert_eq!(
+                plan.candidate_config["axe"]["routines"]["checks"]["jobs"]
+                    ["hook"]["script"],
+                json!("new-script")
+            );
+        } else {
+            assert_eq!(
+                plan.candidate_config["axe"]["lumberjacks"]["checks"]["chops"]
+                    ["hook"]["script"],
+                json!("new-script")
+            );
+        }
+    }
+}
+
+#[test]
+fn plan_edit_promotes_list_form_jobs_with_exact_dotted_identities() {
+    let request: ConfigEditRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": [
+            {
+                "name": "user",
+                "path": "/tmp/sase.yml",
+                "writable": true,
+                "list_strategy": "replace",
+                "value": {"axe": {"lumberjacks": {"checks.main": {
+                    "chops": [
+                        {"name": "release.check", "script": "old-script"}
+                    ]
+                }}}}
+            }
+        ],
+        "target_layer": "user",
+        "key_path": [
+            "axe",
+            "routines",
+            "checks.main",
+            "jobs",
+            "release.check",
+            "script"
+        ],
+        "op": {"kind": "set", "value": "new-script"},
+        "routine_job_contract": true
+    }))
+    .unwrap();
+
+    let plan = config_plan_edit(&request).unwrap();
+
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec!["axe", "lumberjacks", "checks.main", "chops"]
+    );
+    assert_eq!(
+        plan.write_plan.new_value["release.check"]["script"],
+        json!("new-script")
+    );
+    assert_eq!(
+        plan.candidate_config["axe"]["routines"]["checks.main"]["jobs"]
+            ["release.check"]["script"],
+        json!("new-script")
+    );
+}
+
+#[test]
 fn plan_edit_rejects_missing_empty_and_contradictory_paths() {
     for path_fields in [
         json!({}),

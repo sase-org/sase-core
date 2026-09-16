@@ -716,6 +716,14 @@ pub(super) struct NormalizedConfigLayer {
     pub(super) sources: BTreeMap<Vec<String>, Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct GenericAxeWritePlan {
+    pub(super) key_path: Vec<String>,
+    pub(super) op: String,
+    pub(super) has_value: bool,
+    pub(super) new_value: Value,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormalizeContext {
     Axe,
@@ -821,6 +829,180 @@ pub(super) fn normalize_config_key_path(path: &[String]) -> Vec<String> {
         normalized.extend_from_slice(&path[3..]);
     }
     normalized
+}
+
+pub(super) fn source_path_for_normalized_edit(
+    normalized_path: &[String],
+    requested_path: &[String],
+    sources: &BTreeMap<Vec<String>, Vec<String>>,
+    routine_job_contract: bool,
+) -> Vec<String> {
+    if let Some(source) = sources.get(normalized_path) {
+        return source.clone();
+    }
+
+    let Some((normalized_prefix, source_prefix)) = sources
+        .iter()
+        .filter(|(path, _)| {
+            !path.is_empty() && normalized_path.starts_with(path.as_slice())
+        })
+        .max_by_key(|(path, _)| path.len())
+    else {
+        return fallback_public_or_requested_path(
+            normalized_path,
+            requested_path,
+            routine_job_contract,
+        );
+    };
+
+    let mut result = source_prefix.clone();
+    for index in normalized_prefix.len()..normalized_path.len() {
+        result.push(source_segment_for_normalized_path(
+            index,
+            normalized_path,
+            requested_path,
+            source_prefix,
+        ));
+    }
+    result
+}
+
+pub(super) fn plan_generic_axe_list_edit(
+    root: &mut Map<String, Value>,
+    normalized_path: &[String],
+    op_kind: &str,
+    value: Value,
+) -> Result<Option<GenericAxeWritePlan>, ConfigError> {
+    let Some((field_path, chop_name, routine_name)) =
+        split_job_field_path(normalized_path)
+    else {
+        return Ok(None);
+    };
+    if field_path.is_empty() {
+        return Ok(None);
+    }
+    if !target_has_list_job(root, routine_name, chop_name) {
+        return Ok(None);
+    }
+
+    let operation = AxeFieldOperationWire {
+        kind: op_kind.to_string(),
+        key_path: field_path.to_vec(),
+        value,
+    };
+    let selector = AxeEntrySelectorWire {
+        kind: "chop".to_string(),
+        lumberjack: routine_name.to_string(),
+        chop: Some(chop_name.to_string()),
+    };
+    let (_representation, _promoted, key_path, contribution) =
+        mutate_target_contribution(root, &selector, &[operation])?;
+    Ok(Some(GenericAxeWritePlan {
+        key_path,
+        op: "set".to_string(),
+        has_value: true,
+        new_value: contribution,
+    }))
+}
+
+fn fallback_public_or_requested_path(
+    normalized_path: &[String],
+    requested_path: &[String],
+    routine_job_contract: bool,
+) -> Vec<String> {
+    if routine_job_contract {
+        public_key_path(normalized_path)
+    } else {
+        requested_path.to_vec()
+    }
+}
+
+fn source_segment_for_normalized_path(
+    index: usize,
+    normalized_path: &[String],
+    requested_path: &[String],
+    source_prefix: &[String],
+) -> String {
+    let normalized = &normalized_path[index];
+    if normalized_path.first().map(String::as_str) != Some(AXE) {
+        return requested_segment_or_normalized(
+            index,
+            normalized_path,
+            requested_path,
+        );
+    }
+
+    if index == 1 {
+        return requested_segment_or_normalized(
+            index,
+            normalized_path,
+            requested_path,
+        );
+    }
+
+    if normalized_path.get(1).map(String::as_str) == Some(LUMBERJACKS)
+        && index == 3
+    {
+        if source_prefix.get(1).map(String::as_str) == Some(ROUTINES) {
+            return public_routine_key(normalized).to_string();
+        }
+        return normalized.clone();
+    }
+
+    requested_segment_or_normalized(index, normalized_path, requested_path)
+}
+
+fn requested_segment_or_normalized(
+    index: usize,
+    normalized_path: &[String],
+    requested_path: &[String],
+) -> String {
+    let Some(requested) = requested_path.get(index) else {
+        return normalized_path[index].clone();
+    };
+    if normalize_config_key_path(&requested_path[..=index]).as_slice()
+        == &normalized_path[..=index]
+    {
+        requested.clone()
+    } else {
+        normalized_path[index].clone()
+    }
+}
+
+fn split_job_field_path(path: &[String]) -> Option<(&[String], &str, &str)> {
+    if path.len() < 6
+        || path.first().map(String::as_str) != Some(AXE)
+        || path.get(1).map(String::as_str) != Some(LUMBERJACKS)
+        || path.get(3).map(String::as_str) != Some(CHOPS)
+    {
+        return None;
+    }
+    let routine = path.get(2)?;
+    let chop = path.get(4)?;
+    Some((&path[5..], chop.as_str(), routine.as_str()))
+}
+
+fn target_has_list_job(
+    root: &Map<String, Value>,
+    routine_name: &str,
+    chop_name: &str,
+) -> bool {
+    [LUMBERJACKS, ROUTINES].into_iter().any(|routine_key| {
+        [CHOPS, JOBS].into_iter().any(|jobs_key| {
+            root.get(AXE)
+                .and_then(Value::as_object)
+                .and_then(|axe| axe.get(routine_key))
+                .and_then(Value::as_object)
+                .and_then(|routines| routines.get(routine_name))
+                .and_then(|routine| routine.get(jobs_key))
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| chop_identity(item) == Some(chop_name))
+                })
+        })
+    })
 }
 
 fn normalize_value(
