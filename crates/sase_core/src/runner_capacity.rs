@@ -10,13 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_hold::{
+    hold_blocks_candidate, AgentHoldBlockWire, AgentHoldCandidateWire,
+    AgentHoldRecordWire,
+};
 use crate::queue_directive::{
     normalize_persisted_queue_capacity, queue_capacity_as_u32,
     queue_capacity_budget_enabled, queue_weight_is_valid,
     resolve_queue_capacity, DEFAULT_QUEUE_WEIGHT,
 };
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 4;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 5;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,6 +31,8 @@ pub struct RunnerCapacityRequestWire {
     pub effective_limit: f64,
     #[serde(default)]
     pub records: Vec<RunnerCapacityRecordWire>,
+    #[serde(default)]
+    pub holds: Vec<AgentHoldRecordWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<RunnerCapacityRecordWire>,
     #[serde(default)]
@@ -47,6 +53,16 @@ pub struct RunnerCapacityRecordWire {
     #[serde(default = "default_workflow_dir")]
     pub workflow_dir_name: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub workflow: Option<String>,
+    #[serde(default)]
+    pub clan: Option<String>,
+    #[serde(default)]
+    pub tribe: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<f64>,
     #[serde(default = "default_true")]
     pub has_agent_meta: bool,
     #[serde(default)]
@@ -140,6 +156,10 @@ pub struct RunnerCapacityBlockerWire {
     pub capacity_threshold: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_limit: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_expires_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -374,6 +394,7 @@ fn request_for_waiters(
         schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
         effective_limit: request.effective_limit,
         records,
+        holds: request.holds.clone(),
         candidate: None,
         now: request.now.clone(),
         deference_seconds_per_step: request.deference_seconds_per_step,
@@ -609,6 +630,7 @@ fn waiter_blockers(
     eval: WaiterEvaluation<'_>,
 ) -> Vec<RunnerCapacityBlockerWire> {
     let mut blockers = Vec::new();
+    blockers.extend(hold_barrier_blockers(eval.request, eval.record));
     if eval.fail_closed {
         blockers.push(blocker(
             "capacity-snapshot-invalid",
@@ -945,7 +967,8 @@ fn has_resource_blocker(blockers: &[RunnerCapacityBlockerWire]) -> bool {
     blockers.iter().any(|blocker| {
         matches!(
             blocker.code.as_str(),
-            "capacity-snapshot-invalid"
+            "hold-barrier"
+                | "capacity-snapshot-invalid"
                 | "invalid-request-weight"
                 | "invalid-capacity-limit"
                 | "weight-exceeds-limit"
@@ -954,6 +977,80 @@ fn has_resource_blocker(blockers: &[RunnerCapacityBlockerWire]) -> bool {
                 | "capacity-condition"
         )
     })
+}
+
+fn hold_barrier_blockers(
+    request: &RunnerCapacityRequestWire,
+    record: &RunnerCapacityRecordWire,
+) -> Vec<RunnerCapacityBlockerWire> {
+    if request.holds.is_empty() {
+        return Vec::new();
+    }
+    let candidate = hold_candidate(record);
+    let now = request.now.as_deref().and_then(epoch_seconds_from_rfc3339);
+    let mut blockers = Vec::new();
+    for hold in &request.holds {
+        let Ok(block) = hold_blocks_candidate(hold, &candidate) else {
+            continue;
+        };
+        if let Some(block) = block {
+            blockers.push(hold_barrier_blocker(&block, now));
+        }
+    }
+    blockers
+}
+
+fn hold_candidate(record: &RunnerCapacityRecordWire) -> AgentHoldCandidateWire {
+    AgentHoldCandidateWire {
+        project: record.project_name.clone(),
+        created_at: record.created_at.unwrap_or(1.0),
+        artifact_dirs: vec![record.artifact_dir.clone()],
+        agent_name: record.agent_name.clone(),
+        family: record.agent_family.clone(),
+        clan: record.clan.clone(),
+        workflow: record.workflow.clone(),
+        tribe: record.tribe.clone(),
+        armer_key: None,
+    }
+}
+
+fn hold_barrier_blocker(
+    block: &AgentHoldBlockWire,
+    now: Option<f64>,
+) -> RunnerCapacityBlockerWire {
+    let expires = format_hold_expires_in(block.expires_at, now);
+    let message =
+        format!("held by {} (expires in {expires})", block.armer.display);
+    let mut blocker =
+        blocker("hold-barrier", &message, None, None, None, None, None);
+    blocker.held_by = Some(block.armer.key.clone());
+    blocker.hold_expires_at = Some(block.expires_at);
+    blocker
+}
+
+fn epoch_seconds_from_rfc3339(value: &str) -> Option<f64> {
+    let parsed = DateTime::parse_from_rfc3339(value).ok()?;
+    Some(parsed.with_timezone(&Utc).timestamp_millis() as f64 / 1000.0)
+}
+
+fn format_hold_expires_in(expires_at: f64, now: Option<f64>) -> String {
+    let Some(now) = now else {
+        return format!("{expires_at:.0}s");
+    };
+    let seconds = (expires_at - now).max(0.0).ceil();
+    if seconds < 60.0 {
+        return format!("{seconds:.0}s");
+    }
+    let minutes = (seconds / 60.0).ceil();
+    if minutes < 60.0 {
+        return format!("{minutes:.0}m");
+    }
+    let hours = (minutes / 60.0).ceil();
+    if hours < 48.0 {
+        return format!("{hours:.0}h");
+    }
+    let days = (hours / 24.0).ceil();
+    format!("{days:.0}d")
 }
 
 fn waiter_capacity_shortfall(
@@ -1515,6 +1612,8 @@ fn blocker(
         occupied_capacity,
         capacity_threshold,
         admission_limit,
+        held_by: None,
+        hold_expires_at: None,
     }
 }
 
@@ -1529,6 +1628,10 @@ fn default_workflow_dir() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_hold::{
+        AgentHoldArmerKindWire, AgentHoldArmerWire, AgentHoldScopeWire,
+        AgentHoldSelectorsWire,
+    };
 
     fn rec(name: &str) -> RunnerCapacityRecordWire {
         RunnerCapacityRecordWire {
@@ -1536,6 +1639,11 @@ mod tests {
             project_name: "proj".to_string(),
             workflow_dir_name: "ace-run".to_string(),
             timestamp: name.to_string(),
+            agent_name: None,
+            workflow: None,
+            clan: None,
+            tribe: None,
+            created_at: None,
             has_agent_meta: true,
             has_done_marker: false,
             appears_as_agent: true,
@@ -1598,6 +1706,7 @@ mod tests {
             schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
             effective_limit,
             records,
+            holds: Vec::new(),
             candidate: None,
             now: Some("2026-09-10T00:01:00Z".to_string()),
             deference_seconds_per_step: 5,
@@ -1615,12 +1724,95 @@ mod tests {
             schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
             effective_limit,
             records,
+            holds: Vec::new(),
             candidate: Some(candidate),
             now: Some("2026-09-10T00:01:00Z".to_string()),
             deference_seconds_per_step: 5,
             deference_max_seconds: 60,
             feature_flags: Vec::new(),
         })
+    }
+
+    fn snapshot_with_holds(
+        effective_limit: f64,
+        records: Vec<RunnerCapacityRecordWire>,
+        holds: Vec<AgentHoldRecordWire>,
+    ) -> RunnerCapacitySnapshotWire {
+        runner_capacity_snapshot(&RunnerCapacityRequestWire {
+            schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
+            effective_limit,
+            records,
+            holds,
+            candidate: None,
+            now: Some("2026-09-10T00:01:00Z".to_string()),
+            deference_seconds_per_step: 5,
+            deference_max_seconds: 60,
+            feature_flags: Vec::new(),
+        })
+    }
+
+    fn snapshot_with_candidate_and_holds(
+        effective_limit: f64,
+        records: Vec<RunnerCapacityRecordWire>,
+        candidate: RunnerCapacityRecordWire,
+        holds: Vec<AgentHoldRecordWire>,
+    ) -> RunnerCapacitySnapshotWire {
+        runner_capacity_snapshot(&RunnerCapacityRequestWire {
+            schema_version: RUNNER_CAPACITY_POLICY_SCHEMA_VERSION,
+            effective_limit,
+            records,
+            holds,
+            candidate: Some(candidate),
+            now: Some("2026-09-10T00:01:00Z".to_string()),
+            deference_seconds_per_step: 5,
+            deference_max_seconds: 60,
+            feature_flags: Vec::new(),
+        })
+    }
+
+    fn epoch(value: &str) -> f64 {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+            .timestamp() as f64
+    }
+
+    fn hold(
+        key: &str,
+        selectors: AgentHoldSelectorsWire,
+    ) -> AgentHoldRecordWire {
+        AgentHoldRecordWire {
+            schema_version: crate::agent_hold::AGENT_HOLD_WIRE_SCHEMA_VERSION,
+            armer: AgentHoldArmerWire {
+                kind: AgentHoldArmerKindWire::Agent,
+                key: key.to_string(),
+                display: format!("{key} display"),
+                project: "proj".to_string(),
+                agent_name: Some("holder.agent--code".to_string()),
+                family: Some("holder.agent".to_string()),
+                clan: Some("holder-clan".to_string()),
+                proc_id: None,
+                pid: Some(123),
+                done_marker_path: None,
+            },
+            scope: AgentHoldScopeWire::Project {
+                project: "proj".to_string(),
+            },
+            selectors,
+            created_at: epoch("2026-09-10T00:00:00Z"),
+            expires_at: epoch("2026-09-10T00:03:00Z"),
+        }
+    }
+
+    fn identity_waiter(name: &str) -> RunnerCapacityRecordWire {
+        let mut record = waiting(name, "2026-09-10T00:00:30Z", Some(1.0));
+        record.agent_name = Some("target.agent--code".to_string());
+        record.agent_family = Some("target.agent".to_string());
+        record.workflow = Some("build".to_string());
+        record.clan = Some("blocked-clan".to_string());
+        record.tribe = Some("ops".to_string());
+        record.created_at = Some(epoch("2026-09-10T00:00:30Z"));
+        record
     }
 
     fn capacity_budget_flags() -> Vec<String> {
@@ -2575,5 +2767,166 @@ mod tests {
                 .unwrap();
         assert_eq!(decision.decision, "acquire_capacity");
         assert_eq!(decision.effective_weight, 1.0);
+    }
+
+    #[test]
+    fn hold_barrier_blocks_waiting_candidate_with_metadata() {
+        let hold = hold(
+            "agent:hold-a",
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent--code".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let result = snapshot_with_holds(
+            4.0,
+            vec![identity_waiter("waiter")],
+            vec![hold],
+        );
+        assert!(result.first_eligible_artifact_dir.is_none());
+        let waiter = waiter(&result, "waiter");
+        assert!(!waiter.eligible);
+        assert!(waiter.parked);
+        assert_eq!(waiter.blockers[0].code, "hold-barrier");
+        assert_eq!(
+            waiter.blockers[0].message,
+            "held by agent:hold-a display (expires in 2m)"
+        );
+        assert_eq!(waiter.blockers[0].held_by.as_deref(), Some("agent:hold-a"));
+        assert_eq!(
+            waiter.blockers[0].hold_expires_at,
+            Some(epoch("2026-09-10T00:03:00Z"))
+        );
+    }
+
+    #[test]
+    fn hold_barrier_blocks_queued_candidate_decision() {
+        let hold = hold(
+            "agent:hold-a",
+            AgentHoldSelectorsWire {
+                families: vec!["target.agent".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let candidate = identity_waiter("candidate");
+        let result = snapshot_with_candidate_and_holds(
+            4.0,
+            Vec::new(),
+            candidate,
+            vec![hold],
+        );
+        let decision = result.candidate_decision.as_ref().unwrap();
+        assert_eq!(decision.decision, "blocked");
+        assert_eq!(decision.blockers[0].code, "hold-barrier");
+        assert_eq!(
+            decision.blockers[0].held_by.as_deref(),
+            Some("agent:hold-a")
+        );
+    }
+
+    #[test]
+    fn running_candidate_is_not_reblocked_by_hold() {
+        let hold = hold(
+            "agent:hold-a",
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent--code".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let mut running = identity_waiter("candidate");
+        running.run_started_at = Some("2026-09-10T00:00:45Z".to_string());
+        running.slot_requested_at = None;
+        let result = snapshot_with_holds(4.0, vec![running], vec![hold]);
+        assert!(result.waiters.is_empty());
+        assert_eq!(result.occupied_lanes, 1);
+    }
+
+    #[test]
+    fn hold_barrier_honors_project_and_future_selectors() {
+        let mut wrong_project = hold(
+            "agent:hold-a",
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent--code".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        wrong_project.scope = AgentHoldScopeWire::Project {
+            project: "other".to_string(),
+        };
+        let wrong_project_result = snapshot_with_holds(
+            4.0,
+            vec![identity_waiter("waiter")],
+            vec![wrong_project],
+        );
+        assert!(waiter(&wrong_project_result, "waiter").eligible);
+
+        let future = hold(
+            "agent:hold-b",
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let mut older = identity_waiter("older");
+        older.created_at = Some(epoch("2026-09-09T23:59:00Z"));
+        let older_result =
+            snapshot_with_holds(4.0, vec![older], vec![future.clone()]);
+        assert!(waiter(&older_result, "older").eligible);
+
+        let newer_result = snapshot_with_holds(
+            4.0,
+            vec![identity_waiter("newer")],
+            vec![future],
+        );
+        assert_eq!(
+            waiter(&newer_result, "newer").blockers[0].code,
+            "hold-barrier"
+        );
+    }
+
+    #[test]
+    fn multiple_holds_release_independently() {
+        let by_name = hold(
+            "agent:hold-a",
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent--code".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let by_workflow = hold(
+            "agent:hold-b",
+            AgentHoldSelectorsWire {
+                workflows: vec!["build".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+        );
+        let both = snapshot_with_holds(
+            4.0,
+            vec![identity_waiter("waiter")],
+            vec![by_name.clone(), by_workflow.clone()],
+        );
+        assert_eq!(
+            waiter(&both, "waiter")
+                .blockers
+                .iter()
+                .filter(|blocker| blocker.code == "hold-barrier")
+                .count(),
+            2
+        );
+
+        let one_left = snapshot_with_holds(
+            4.0,
+            vec![identity_waiter("waiter")],
+            vec![by_workflow],
+        );
+        assert_eq!(waiter(&one_left, "waiter").blockers.len(), 1);
+        assert_eq!(
+            waiter(&one_left, "waiter").blockers[0].held_by.as_deref(),
+            Some("agent:hold-b")
+        );
+
+        let released =
+            snapshot_with_holds(4.0, vec![identity_waiter("waiter")], vec![]);
+        assert!(waiter(&released, "waiter").eligible);
     }
 }

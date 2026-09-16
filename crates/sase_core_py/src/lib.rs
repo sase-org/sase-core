@@ -31152,7 +31152,7 @@ MENTORS:
             )
             .is_err());
             assert!(py_parse_queue_capacity("true", None).is_err());
-            assert_eq!(py_runner_capacity_policy_schema_version(), 4);
+            assert_eq!(py_runner_capacity_policy_schema_version(), 5);
             let on_contract = py_directive_contract(
                 py,
                 Some(vec!["queue_capacity_budget".to_string()]),
@@ -31221,7 +31221,7 @@ MENTORS:
                 py_runner_capacity_snapshot(py, capacity_request.bind(py))
                     .unwrap();
             let capacity = py_to_json_value(capacity.bind(py)).unwrap();
-            assert_eq!(capacity["schema_version"], json!(4));
+            assert_eq!(capacity["schema_version"], json!(5));
             assert_eq!(capacity["occupied_capacity"], json!(0.75));
             assert_eq!(
                 capacity["first_eligible_artifact_dir"],
@@ -31277,6 +31277,51 @@ MENTORS:
             assert_eq!(
                 capacity["candidate_decision"]["explicit_weight_compatibility"],
                 json!("inherited-active-claim")
+            );
+            let held_capacity_request = json_value_to_py(
+                py,
+                &json!({
+                    "effective_limit": 1.0,
+                    "holds": [{
+                        "schema_version": 1,
+                        "armer": {
+                            "kind": "agent",
+                            "key": "agent:hold",
+                            "display": "Hold Agent",
+                            "project": "proj",
+                            "agent_name": "holder.agent--code",
+                            "family": "holder.agent",
+                            "pid": 123
+                        },
+                        "scope": {"kind": "project", "project": "proj"},
+                        "selectors": {"names": ["target.agent--code"]},
+                        "created_at": 1788998400.0,
+                        "expires_at": 1788998580.0
+                    }],
+                    "records": [{
+                        "artifact_dir": "/tmp/held",
+                        "project_name": "proj",
+                        "timestamp": "held",
+                        "agent_name": "target.agent--code",
+                        "created_at": 1788998430.0,
+                        "slot_requested_at": "2026-09-10T00:00:30Z"
+                    }],
+                    "now": "2026-09-10T00:01:00Z"
+                }),
+            )
+            .unwrap();
+            let held_capacity =
+                py_runner_capacity_snapshot(py, held_capacity_request.bind(py))
+                    .unwrap();
+            let held_capacity =
+                py_to_json_value(held_capacity.bind(py)).unwrap();
+            assert_eq!(
+                held_capacity["waiters"][0]["blockers"][0]["code"],
+                json!("hold-barrier")
+            );
+            assert_eq!(
+                held_capacity["waiters"][0]["blockers"][0]["held_by"],
+                json!("agent:hold")
             );
 
             let wait = contract
