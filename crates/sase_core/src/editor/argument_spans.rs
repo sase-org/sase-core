@@ -2,7 +2,9 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use crate::prompt_literal_zone_ranges;
+use crate::{
+    fenced_block_ranges, inline_code_ranges, prompt_literal_zone_ranges,
+};
 
 use super::diagnostics::{
     validate_xprompt_call_args, xprompt_arg_value_unresolvable,
@@ -51,7 +53,7 @@ pub fn extract_xprompt_call_name_spans(
     document: &DocumentSnapshot,
 ) -> Vec<XpromptCallNameSpan> {
     let text = document.text();
-    let literal_ranges = prompt_literal_zone_ranges(text);
+    let literal_ranges = argument_literal_ranges(text);
     let mut spans = Vec::new();
 
     for call in parse_xprompt_calls(text) {
@@ -100,7 +102,7 @@ fn extract_xprompt_argument_spans_inner(
     entries: Option<&[XpromptAssistEntry]>,
 ) -> Vec<XpromptArgumentSpan> {
     let text = document.text();
-    let literal_ranges = prompt_literal_zone_ranges(text);
+    let literal_ranges = argument_literal_ranges(text);
     let mut spans = Vec::new();
 
     for call in parse_xprompt_calls(text) {
@@ -563,6 +565,91 @@ fn parse_directive_call_at(
     parse_xprompt_like_call_at(text, marker_start, 1, false)
 }
 
+fn argument_literal_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = prompt_literal_zone_ranges(text);
+    let fenced_ranges = fenced_block_ranges(text);
+    let inline_ranges = inline_code_ranges(text, &fenced_ranges);
+    let protected_literal_ranges = fenced_ranges
+        .iter()
+        .chain(inline_ranges.iter())
+        .copied()
+        .collect::<Vec<_>>();
+
+    for call_range in code_directive_call_ranges_for_highlight(text) {
+        if ranges_intersect_any(call_range, &protected_literal_ranges) {
+            continue;
+        }
+        ranges = ranges
+            .into_iter()
+            .flat_map(|range| subtract_range(range, call_range))
+            .collect();
+    }
+
+    ranges
+}
+
+fn code_directive_call_ranges_for_highlight(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    for caps in directive_re().captures_iter(text) {
+        let Some(marker) = caps.name("marker") else {
+            continue;
+        };
+        let Some(name) = caps.name("name") else {
+            continue;
+        };
+        let canonical = canonical_directive_name(name.as_str())
+            .unwrap_or_else(|| name.as_str());
+        if !matches!(canonical, "if" | "proc") {
+            continue;
+        }
+        let Some(call) = parse_directive_call_at(text, marker.start()) else {
+            continue;
+        };
+        ranges.push((marker.start(), directive_call_end(text, &call)));
+    }
+    ranges
+}
+
+fn directive_call_end(text: &str, call: &ParsedXpromptCall) -> usize {
+    let suffix_start =
+        call_suffix_start(text, call, XpromptArgumentSource::Directive);
+    match call.syntax {
+        XpromptArgSyntax::None => call.name_span.1,
+        XpromptArgSyntax::Plus => suffix_start + 1,
+        XpromptArgSyntax::Parenthesized => {
+            find_matching_paren_for_args(text, suffix_start)
+                .map(|close| close + 1)
+                .unwrap_or_else(|| text.len())
+        }
+        XpromptArgSyntax::Colon | XpromptArgSyntax::DoubleColonText => call
+            .args
+            .last()
+            .map(|arg| arg.value_span.1)
+            .unwrap_or(suffix_start + 1),
+        XpromptArgSyntax::Malformed => call
+            .malformed_span
+            .map(|span| span.1)
+            .unwrap_or(call.name_span.1),
+    }
+}
+
+fn subtract_range(
+    range: (usize, usize),
+    remove: (usize, usize),
+) -> Vec<(usize, usize)> {
+    if !ranges_intersect(range, remove) {
+        return vec![range];
+    }
+    let mut pieces = Vec::new();
+    if range.0 < remove.0 {
+        pieces.push((range.0, remove.0.min(range.1)));
+    }
+    if remove.1 < range.1 {
+        pieces.push((remove.1.max(range.0), range.1));
+    }
+    pieces
+}
+
 fn xprompt_marker_start(text: &str, call: &ParsedXpromptCall) -> usize {
     if call.name_span.0 >= 2
         && text.get(call.name_span.0 - 2..call.name_span.0) == Some("#!")
@@ -965,6 +1052,47 @@ mod tests {
                     && span_text(text, span) == "a"),
             "{spans:?}"
         );
+    }
+
+    #[test]
+    fn highlights_static_if_directive_arguments_outside_literals() {
+        let text = "%if(should_run=false)";
+        let spans = spans(text);
+        let names =
+            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+
+        assert_eq!(
+            names
+                .iter()
+                .map(|span| (
+                    &text[span.start..span.end],
+                    span.source,
+                    span.call_name.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![("if", XpromptArgumentSource::Directive, "if")]
+        );
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, "(");
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "should_run");
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
+        assert_has(
+            text,
+            &spans,
+            XpromptArgumentSpanRole::ArgValueBool,
+            "false",
+        );
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, ")");
+    }
+
+    #[test]
+    fn still_skips_static_if_directives_inside_code_literals() {
+        let text = "```\n%if(should_run=false)\n```\n`%if(should_run=false)`";
+        let spans = spans(text);
+        let names =
+            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+
+        assert!(spans.is_empty(), "{spans:?}");
+        assert!(names.is_empty(), "{names:?}");
     }
 
     #[test]
