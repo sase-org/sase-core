@@ -16,6 +16,7 @@ pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_family;
 pub mod agent_group_archive;
+pub mod agent_hold;
 pub mod agent_identity;
 pub mod agent_launch;
 pub mod agent_name_template;
@@ -186,6 +187,16 @@ pub use agent_group_archive::{
     SavedAgentGroupPageWire, SavedAgentGroupRefWire,
     SavedAgentGroupSummaryWire, SavedAgentGroupWire,
     AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
+};
+pub use agent_hold::{
+    agent_hold_lock_path, agent_hold_state_path, arm_agent_hold_relative,
+    arm_agent_hold_until, hold_blocks_candidate, list_agent_holds,
+    release_agent_hold, AgentHoldArmerKindWire, AgentHoldArmerLivenessFactWire,
+    AgentHoldArmerWire, AgentHoldBlockArmerWire, AgentHoldBlockWire,
+    AgentHoldCandidateWire, AgentHoldError, AgentHoldLivenessFactsWire,
+    AgentHoldRecordWire, AgentHoldScopeWire, AgentHoldSelectorMatchWire,
+    AgentHoldSelectorsWire, AgentHoldSnapshotWire, AGENT_HOLD_LOCK_FILENAME,
+    AGENT_HOLD_STATE_FILENAME, AGENT_HOLD_WIRE_SCHEMA_VERSION,
 };
 pub use agent_identity::{
     agent_link_target, agent_local_hood, agent_name_ancestors,
