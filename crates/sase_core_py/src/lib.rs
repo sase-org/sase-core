@@ -344,6 +344,7 @@
 //! - `decide_gate_followup(request: dict) -> dict`
 //! - `axe_status_wire_schema_version() -> int`
 //! - `classify_axe_status(request: dict) -> dict`
+//! - `project_axe_status_public(snapshot: dict) -> dict`
 //! - `sase_content_layout(home_root: str, project_root: str | None = None, chezmoi_root: str | None = None, project: str | None = None) -> dict`
 //! - `continuation_wire_schema_version() -> int`
 //! - `continuation_validate_node(record: dict) -> dict`
@@ -1006,8 +1007,10 @@ use sase_core::axe_overrun::{
     ChopOverrunRequestWire, CHOP_OVERRUN_SCHEMA_VERSION,
 };
 use sase_core::axe_status::{
-    classify_axe_status as core_classify_axe_status, AxeStatusError,
-    AxeStatusRequestWire, AXE_STATUS_SCHEMA_VERSION,
+    classify_axe_status as core_classify_axe_status,
+    project_axe_status_public as core_project_axe_status_public,
+    AxeStatusError, AxeStatusRequestWire, AxeStatusSnapshotWire,
+    AXE_STATUS_SCHEMA_VERSION,
 };
 #[cfg(test)]
 use sase_core::bead::PhaseSizeWire;
@@ -12794,6 +12797,28 @@ fn py_classify_axe_status<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Project an internal AXE status snapshot to the public routine/job envelope.
+#[pyfunction]
+#[pyo3(name = "project_axe_status_public")]
+fn py_project_axe_status_public<'py>(
+    py: Python<'py>,
+    snapshot: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(snapshot.as_any())?;
+    let snapshot: AxeStatusSnapshotWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "snapshot is not a valid AxeStatusSnapshotWire dict: {error}"
+            ))
+        })?;
+    let projected =
+        py.allow_threads(|| core_project_axe_status_public(&snapshot));
+    let value = serde_json::to_value(projected).map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Axe chop engine bindings --------------------------------------------
 
 fn chop_error_to_pyerr(error: ChopEngineError) -> PyErr {
@@ -19302,6 +19327,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_decide_gate_followup, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_status_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_axe_status, m)?)?;
+    m.add_function(wrap_pyfunction!(py_project_axe_status_public, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_engine_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_result_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_chop_state_schema_version, m)?)?;
@@ -24973,6 +24999,50 @@ COMMITS:
                     "collection_error",
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn axe_status_public_projection_binding_preserves_user_values() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mut request_json = healthy_axe_status_request_json();
+            request_json["lumberjacks"][0]["name"] = json!("chop-watch");
+            request_json["lumberjacks"][0]["configured_chops"] =
+                json!(["chop-test"]);
+            request_json["lumberjacks"][0]["heartbeat_age_seconds"] =
+                json!(500);
+
+            let request_obj = json_value_to_py(py, &request_json).unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let snapshot = py_classify_axe_status(py, request).unwrap();
+            let snapshot = snapshot.bind(py).downcast::<PyDict>().unwrap();
+            let projected = py_project_axe_status_public(py, snapshot).unwrap();
+            let value = py_to_json_value(projected.bind(py)).unwrap();
+
+            assert_eq!(value["schema_version"], json!(2));
+            assert_eq!(value["routines"][0]["name"], json!("chop-watch"));
+            assert_eq!(
+                value["routines"][0]["routine_name"],
+                json!("chop-watch")
+            );
+            assert_eq!(
+                value["routines"][0]["configured_jobs"],
+                json!(["chop-test"])
+            );
+            assert_eq!(
+                value["issues"][0]["code"],
+                json!("routine_stale_heartbeat")
+            );
+            assert_eq!(value["issues"][0]["subject"], json!("chop-watch"));
+            assert_eq!(
+                value["issues"][0]["summary"],
+                json!(
+                    "Configured routine `chop-watch` has a stale heartbeat (500s; threshold 180s)."
+                )
+            );
+            assert!(!value.to_string().contains("job-watch"));
+            assert!(!value.to_string().contains("job-test"));
         });
     }
 

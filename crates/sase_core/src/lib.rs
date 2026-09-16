@@ -514,8 +514,8 @@ pub use axe_chop::{
     CHOP_STATE_SCHEMA_VERSION,
 };
 pub use axe_status::{
-    classify_axe_status, AxeDesiredStateValueWire, AxeDesiredStateWire,
-    AxeLifecycleEventKindWire, AxeLifecycleEventWire,
+    classify_axe_status, project_axe_status_public, AxeDesiredStateValueWire,
+    AxeDesiredStateWire, AxeLifecycleEventKindWire, AxeLifecycleEventWire,
     AxeLumberjackObservationWire, AxeLumberjackReportedStateWire,
     AxeLumberjackStateWire, AxeLumberjackStatusWire, AxeMaintenanceWire,
     AxeOrchestratorCoherenceWire, AxeOrchestratorObservationWire,
@@ -523,7 +523,8 @@ pub use axe_status::{
     AxeProcessObservationWire, AxeRunnerOccupancyWire,
     AxeStatusCollectionErrorWire, AxeStatusError, AxeStatusHealthWire,
     AxeStatusIssueSeverityWire, AxeStatusIssueWire, AxeStatusRequestWire,
-    AxeStatusSnapshotWire, AxeStatusStateWire, AXE_STATUS_SCHEMA_VERSION,
+    AxeStatusSnapshotWire, AxeStatusStateWire,
+    AXE_PUBLIC_STATUS_SCHEMA_VERSION, AXE_STATUS_SCHEMA_VERSION,
 };
 pub use bead::{
     add_bead_link, add_bead_references, add_dependency as bead_add_dependency,

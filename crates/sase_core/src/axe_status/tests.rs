@@ -577,3 +577,69 @@ fn serialization_pins_public_field_order_nulls_lists_and_enum_values() {
         serde_json::from_value(value).unwrap();
     assert_eq!(round_trip, snapshot);
 }
+
+#[test]
+fn public_projection_renames_only_owned_status_envelope_and_templates() {
+    let mut worker = healthy_lumberjack("chop-watch");
+    worker.configured_chops = vec!["chop-test".to_string()];
+    worker.heartbeat_age_seconds = Some(500);
+
+    let mut input = request();
+    input.orchestrator = running_orchestrator(100);
+    input.desired_state = Some(desired(AxeDesiredStateValueWire::Running));
+    input.lumberjacks = vec![worker];
+    let snapshot = classify_axe_status(&input).unwrap();
+    let projected = project_axe_status_public(&snapshot);
+    let value = serde_json::to_value(projected).unwrap();
+
+    assert_eq!(value["schema_version"], json!(2));
+    assert!(value.get("routines").is_some());
+    assert!(value.get("lumberjacks").is_none());
+    assert_eq!(value["routines"][0]["name"], json!("chop-watch"));
+    assert_eq!(value["routines"][0]["routine_name"], json!("chop-watch"));
+    assert_eq!(
+        value["routines"][0]["configured_jobs"],
+        json!(["chop-test"])
+    );
+    assert!(value["routines"][0].get("configured_chops").is_none());
+    assert_eq!(value["issues"][0]["code"], json!("routine_stale_heartbeat"));
+    assert_eq!(value["issues"][0]["subject"], json!("chop-watch"));
+    assert_eq!(
+        value["issues"][0]["summary"],
+        json!(
+            "Configured routine `chop-watch` has a stale heartbeat (500s; threshold 180s)."
+        )
+    );
+    assert!(!value.to_string().contains("job-watch"));
+    assert!(!value.to_string().contains("job-test"));
+}
+
+#[test]
+fn public_projection_preserves_collection_error_user_text() {
+    let mut input = request();
+    input.collection_error = Some(AxeStatusCollectionErrorWire {
+        code: "read_failed".to_string(),
+        message: "failed to read /tmp/lumberjacks/chop-watch.log".to_string(),
+    });
+    let snapshot = classify_axe_status(&input).unwrap();
+    let projected = project_axe_status_public(&snapshot);
+    let value = serde_json::to_value(projected).unwrap();
+
+    assert_eq!(
+        value["summary"],
+        json!(
+            "AXE status collection failed: failed to read /tmp/lumberjacks/chop-watch.log"
+        )
+    );
+    assert_eq!(
+        value["collection_error"]["message"],
+        json!("failed to read /tmp/lumberjacks/chop-watch.log")
+    );
+    assert_eq!(
+        value["issues"][0]["summary"],
+        json!(
+            "AXE status collection failed [read_failed]: failed to read /tmp/lumberjacks/chop-watch.log"
+        )
+    );
+    assert!(!value.to_string().contains("/tmp/routines/job-watch.log"));
+}

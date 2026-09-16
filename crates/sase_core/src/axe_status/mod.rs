@@ -5,9 +5,11 @@
 //! then derives one portable versioned snapshot for every frontend.
 
 mod classify;
+mod public;
 mod wire;
 
 pub use classify::classify_axe_status;
+pub use public::*;
 pub use wire::*;
 
 #[cfg(test)]
