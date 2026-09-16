@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.40](https://github.com/sase-org/sase-core/compare/v0.34.39...v0.34.40) - 2026-09-16
+
+### Fixed
+
+- *(axe-chop)* canonicalize live job validation and target wording
+
 ## [0.34.39](https://github.com/sase-org/sase-core/compare/v0.34.38...v0.34.39) - 2026-09-16
 
 ### Added
