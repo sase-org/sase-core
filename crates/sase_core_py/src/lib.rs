@@ -701,6 +701,7 @@ use sase_core::agent_launch::{
     decide_workspace_occupant_conflict as core_decide_workspace_occupant_conflict,
     dispatch_fingerprint as core_dispatch_fingerprint,
     evaluate_launch_condition as core_evaluate_launch_condition,
+    filter_conditional_launch_segments as core_filter_conditional_launch_segments,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     next_admission_actions as core_next_admission_actions,
     parse_proc_duration_seconds as core_parse_proc_duration_seconds,
@@ -16043,6 +16044,21 @@ fn py_plan_agent_launch_fanout<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Filter static `%if(should_run=...)` prompt segments before launch planning.
+#[pyfunction]
+#[pyo3(name = "filter_conditional_launch_segments")]
+fn py_filter_conditional_launch_segments<'py>(
+    py: Python<'py>,
+    prompt: &str,
+) -> PyResult<PyObject> {
+    let filter = core_filter_conditional_launch_segments(prompt)
+        .map_err(|err| PyValueError::new_err(format!("{err}")))?;
+    let value = serde_json::to_value(&filter).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Bind no-argument batch waits to a supplied predecessor launch identity.
 #[pyfunction]
 #[pyo3(name = "bind_batch_predecessor_waits")]
@@ -19250,6 +19266,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_spawn_prepared_agent_process, m)?)?;
     m.add_function(wrap_pyfunction!(py_allocate_launch_timestamp_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_launch_fanout, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_filter_conditional_launch_segments,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_bind_batch_predecessor_waits, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
     m.add_function(wrap_pyfunction!(

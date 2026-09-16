@@ -5391,7 +5391,13 @@ mod tests {
             .completion_for_text("%if".to_string(), Position::new(0, 3))
             .await
             .unwrap();
-        assert!(completion_items(disabled).is_empty());
+        let disabled_items = completion_items(disabled);
+        assert_snippet_item(
+            &disabled_items,
+            "%if(should_run=...)",
+            "%if(should_run=${1|true,false|})$0",
+        );
+        assert!(!disabled_items.iter().any(|item| item.label == "%if:: bash"));
 
         server.config.write().unwrap().typed_launch_units = true;
         let enabled = server

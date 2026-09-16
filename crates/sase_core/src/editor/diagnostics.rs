@@ -162,6 +162,10 @@ fn disabled_typed_launch_directive_diagnostics(
                 return None;
             }
             let name = captures.name("name")?.as_str();
+            if name == "if" && document.text()[marker.end()..].starts_with('(')
+            {
+                return None;
+            }
             document.byte_range_to_range(span.0, span.1).map(|range| {
                 EditorDiagnostic {
                     range,
@@ -1151,6 +1155,10 @@ mod tests {
         assert_eq!(
             diagnostic_count(&disabled, "typed_launch_units_disabled"),
             1
+        );
+        let static_if = DocumentSnapshot::new("%if(should_run=false)\nSkip");
+        assert!(
+            typed_launch_directive_diagnostics(&static_if, false).is_empty()
         );
 
         let missing = DocumentSnapshot::new("%if::\n\nReview");

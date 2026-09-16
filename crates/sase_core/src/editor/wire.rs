@@ -592,7 +592,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 /// Feature flag that gates a directive, if any.
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
-        "if" | "proc" => Some("typed_launch_units"),
+        "proc" => Some("typed_launch_units"),
         _ => None,
     }
 }
@@ -600,7 +600,7 @@ pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
 /// How a named directive binds its executable body.
 pub fn directive_body_kind(name: &str) -> DirectiveBodyKind {
     match name {
-        "if" => DirectiveBodyKind::FencedCode,
+        "if" => DirectiveBodyKind::OptionalFencedCode,
         "proc" => DirectiveBodyKind::OptionalFencedCode,
         _ => DirectiveBodyKind::None,
     }
@@ -609,7 +609,7 @@ pub fn directive_body_kind(name: &str) -> DirectiveBodyKind {
 /// One-line synopsis used by hover and completion documentation.
 pub fn directive_synopsis(metadata: &DirectiveMetadata) -> &'static str {
     match metadata.name {
-        "if" => "%if:: plus exactly one bash or python fence; attaches to the next launch unit",
+        "if" => "%if(should_run=true|false) omits disabled segments; %if:: gates admission when typed launch units are enabled",
         "proc" => "%proc(\"cmd\"), %proc(bash=|python=), or %proc:: plus one fence",
         _ => metadata.argument_hint,
     }
@@ -619,8 +619,8 @@ pub fn directive_synopsis(metadata: &DirectiveMetadata) -> &'static str {
 pub fn directive_examples(name: &str) -> &'static [&'static str] {
     match name {
         "if" => &[
-            "%if::\n\n```bash\ntest -f pyproject.toml\n```",
-            "%if::\n\n```python\nraise SystemExit(0)\n```",
+            "%if(should_run=true)",
+            "%if(should_run=false)",
         ],
         "proc" => &[
             "%proc(\"just check\")",
@@ -794,24 +794,38 @@ pub fn directive_snippet_recipes_with_flags(
                 "Select finalizer instances.",
             ),
         ],
-        "if" => vec![
-            recipe(
+        "if" => {
+            let mut recipes = vec![recipe(
+                "%if(should_run=...)",
+                "directive snippet",
+                "%if(should_run=${1|true,false|})$0",
+                "%if(should_run=$1)$0",
+                "%if(should_run=true)",
+                "Keep or omit this prompt segment before launch planning.",
+            )];
+            if enabled_feature_flags
+                .iter()
+                .any(|value| value == "typed_launch_units")
+            {
+                recipes.push(recipe(
                 "%if:: bash",
                 "typed launch unit snippet",
                 "%if::\n\n```bash\n${1:test -f pyproject.toml}\n```$0",
                 "%if::\n\n```bash\n$1\n```$0",
                 "%if::\n\n```bash\n\n```",
                 "Attach a bash guard to the next launch unit.",
-            ),
-            recipe(
+            ));
+                recipes.push(recipe(
                 "%if:: python",
                 "typed launch unit snippet",
                 "%if::\n\n```python\n${1:raise SystemExit(0)}\n```$0",
                 "%if::\n\n```python\n$1\n```$0",
                 "%if::\n\n```python\n\n```",
                 "Attach a Python guard to the next launch unit.",
-            ),
-        ],
+            ));
+            }
+            recipes
+        }
         "proc" => vec![
             recipe(
                 "%proc(\"...\")",

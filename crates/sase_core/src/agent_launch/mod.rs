@@ -2,6 +2,7 @@
 
 mod admission;
 mod condition;
+mod conditional;
 mod proc_runtime;
 
 pub use admission::{
@@ -23,6 +24,11 @@ pub use condition::{
     CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
     CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
     CONDITION_OUTPUT_CAP_BYTES,
+};
+pub use conditional::{
+    filter_conditional_launch_segments, ConditionalLaunchSegmentFilterWire,
+    ConditionalLaunchSegmentWire,
+    CONDITIONAL_LAUNCH_SEGMENT_FILTER_SCHEMA_VERSION,
 };
 pub use proc_runtime::{
     cleanup_proc_private_inputs, parse_proc_duration_seconds,
@@ -731,6 +737,8 @@ struct DirectiveOccurrence {
     end: usize,
     args: Vec<String>,
     is_bare: bool,
+    has_paren_form: bool,
+    paren_closed: bool,
     has_plus_suffix: bool,
     // True when a single colon argument came from a backtick literal
     // (`` %model:`literal@id` ``). Such values bypass the `@effort` split so any
@@ -835,8 +843,44 @@ pub fn plan_agent_launch_fanout(
     launch_kind: Option<&str>,
 ) -> Result<LaunchFanoutPlanWire, AgentLaunchFanoutPlanError> {
     let requested = launch_kind.unwrap_or("auto");
+    let filtered = filter_conditional_launch_segments(prompt)?;
+    if filtered.segments.is_empty() {
+        return Ok(empty_fanout_plan(match requested {
+            "auto" => "single",
+            other => other,
+        }));
+    }
+    let filtered_prompt = filtered
+        .segments
+        .iter()
+        .map(|segment| segment.prompt.as_str())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    let prompt = filtered_prompt.as_str();
     match requested {
-        "multi_prompt" => Ok(plan_multi_prompt_fanout(prompt)),
+        "multi_prompt" => Ok(LaunchFanoutPlanWire {
+            schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+            launch_kind: "multi_prompt".to_string(),
+            slots: filtered
+                .segments
+                .into_iter()
+                .enumerate()
+                .map(|(idx, segment)| LaunchFanoutSlotWire {
+                    wait_for_previous: has_wait_directive(&segment.prompt),
+                    prompt: segment.prompt,
+                    launch_kind: "multi_prompt".to_string(),
+                    slot_index: idx as u32,
+                    alt_id: None,
+                    timestamp: None,
+                    workflow_name: None,
+                    model: None,
+                    repeat_name: None,
+                    bead_id: None,
+                })
+                .collect(),
+            requires_sequential_naming_wait: true,
+            fanout_sleep_seconds: 0.0,
+        }),
         "alternatives" => plan_alternative_fanout(prompt),
         "model" => plan_model_fanout(prompt),
         "repeat" => Ok(plan_repeat_fanout(prompt)),
@@ -875,6 +919,16 @@ pub fn plan_agent_launch_fanout(
         other => Err(AgentLaunchFanoutPlanError::UnsupportedKind(
             other.to_string(),
         )),
+    }
+}
+
+fn empty_fanout_plan(launch_kind: &str) -> LaunchFanoutPlanWire {
+    LaunchFanoutPlanWire {
+        schema_version: AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        launch_kind: launch_kind.to_string(),
+        slots: Vec::new(),
+        requires_sequential_naming_wait: false,
+        fanout_sleep_seconds: 0.0,
     }
 }
 
@@ -3079,11 +3133,15 @@ fn split_multi_prompt_segments(prompt: &str) -> Vec<String> {
 }
 
 fn prompt_body_after_frontmatter(prompt: &str) -> &str {
+    &prompt[prompt_body_start_after_frontmatter(prompt)..]
+}
+
+fn prompt_body_start_after_frontmatter(prompt: &str) -> usize {
     let Some(first_line_end) = prompt.find('\n') else {
-        return prompt;
+        return 0;
     };
     if prompt[..first_line_end].trim() != "---" {
-        return prompt;
+        return 0;
     }
 
     let mut yaml_like = false;
@@ -3097,18 +3155,14 @@ fn prompt_body_after_frontmatter(prompt: &str) -> &str {
         };
         let content = &prompt[offset..content_end];
         if content.trim() == "---" {
-            return if yaml_like {
-                &prompt[line_end..]
-            } else {
-                prompt
-            };
+            return if yaml_like { line_end } else { 0 };
         }
         if content.contains(':') {
             yaml_like = true;
         }
         offset = line_end;
     }
-    prompt
+    0
 }
 
 fn push_nonempty_segment(out: &mut Vec<String>, segment: &str) {
@@ -3728,6 +3782,7 @@ fn directive_occurrences(
         let mut has_plus_suffix = false;
         let mut from_backtick_literal = false;
         let has_paren_form = caps.get(4).is_some();
+        let mut paren_closed = !has_paren_form;
         let colon_arg = caps.get(5);
         let has_plus_form = caps.get(6).is_some();
         let is_bare = !has_paren_form && colon_arg.is_none() && !has_plus_form;
@@ -3738,6 +3793,7 @@ fn directive_occurrences(
                 args =
                     parse_directive_args(&prompt[paren_start + 1..paren_end]);
                 end = paren_end + 1;
+                paren_closed = true;
             }
         } else if let Some(colon_arg) = colon_arg {
             from_backtick_literal = colon_arg.as_str().starts_with('`');
@@ -3755,6 +3811,8 @@ fn directive_occurrences(
             end,
             args,
             is_bare,
+            has_paren_form,
+            paren_closed,
             has_plus_suffix,
             from_backtick_literal,
         });
@@ -5242,7 +5300,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("%if requires %if::"));
+        assert!(err.to_string().contains("static omission"));
 
         let paren_err = plan_typed_launch_units(
             "%if(true)\nReview",
