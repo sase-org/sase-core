@@ -1486,14 +1486,21 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         ),
         queue_weight_invalid,
         queue_weight_error,
-        wait_priority_explicit: coerce_bool_truthy(
-            data.get("wait_priority_explicit"),
-        ),
+        wait_priority_explicit: wait_priority_explicit_from_object(data),
         queue_capacity_explicit,
         wait_runners: None,
         wait_runners_explicit: false,
         slot_requested_at: coerce_str(data.get("slot_requested_at")),
         eligible_since: coerce_str(data.get("eligible_since")),
+    }
+}
+
+fn wait_priority_explicit_from_object(
+    data: &Map<String, Value>,
+) -> Option<bool> {
+    match data.get("wait_priority_explicit") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(coerce_bool_truthy(Some(value))),
     }
 }
 

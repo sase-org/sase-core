@@ -877,7 +877,7 @@ pub struct WaitingMarkerWire {
     #[serde(default)]
     pub queue_weight_error: Option<String>,
     #[serde(default)]
-    pub wait_priority_explicit: bool,
+    pub wait_priority_explicit: Option<bool>,
     #[serde(default)]
     pub queue_capacity_explicit: bool,
     #[serde(default, skip_serializing)]

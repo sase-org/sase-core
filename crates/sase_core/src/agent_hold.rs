@@ -36,6 +36,7 @@ pub enum AgentHoldArmerKindWire {
     Agent,
     Proc,
     Cli,
+    Launch,
 }
 
 impl AgentHoldArmerKindWire {
@@ -44,6 +45,7 @@ impl AgentHoldArmerKindWire {
             Self::Agent => "agent",
             Self::Proc => "proc",
             Self::Cli => "cli",
+            Self::Launch => "launch",
         }
     }
 }
@@ -126,6 +128,10 @@ pub enum AgentHoldArmerLivenessFactWire {
         terminal: bool,
     },
     Cli {
+        pid_alive: bool,
+        done_marker_present: bool,
+    },
+    Launch {
         pid_alive: bool,
         done_marker_present: bool,
     },
@@ -291,12 +297,48 @@ pub fn arm_agent_hold_until(
         expires_at,
     };
     validate_and_normalize_record(&mut record)?;
+    validate_selectors_exclude_armer_kin(&record.armer, &record.selectors)?;
     let key = record.armer.key.clone();
     with_hold_lock(sase_home, "arm_agent_hold", || {
         let mut records = read_records_locked(sase_home, liveness, now)?;
         records.insert(key, record.clone());
         write_or_remove_state(&agent_hold_state_path(sase_home), &records)?;
         Ok(record)
+    })
+}
+
+pub fn rebind_agent_hold_armer(
+    sase_home: &Path,
+    old_key: &str,
+    new_armer: AgentHoldArmerWire,
+    liveness: &AgentHoldLivenessFactsWire,
+    now: f64,
+) -> Result<Option<AgentHoldRecordWire>, AgentHoldError> {
+    validate_timestamp("now", now)?;
+    let old_key = validate_plain_string("old_key", old_key)?;
+    with_hold_lock(sase_home, "rebind_agent_hold", || {
+        let mut records = read_records_locked(sase_home, liveness, now)?;
+        let Some(old_record) = records.get(&old_key).cloned() else {
+            return Ok(None);
+        };
+        let mut new_record = AgentHoldRecordWire {
+            schema_version: old_record.schema_version,
+            armer: new_armer,
+            scope: old_record.scope,
+            selectors: old_record.selectors,
+            created_at: old_record.created_at,
+            expires_at: old_record.expires_at,
+        };
+        validate_and_normalize_record(&mut new_record)?;
+        validate_selectors_exclude_armer_kin(
+            &new_record.armer,
+            &new_record.selectors,
+        )?;
+        let new_key = new_record.armer.key.clone();
+        records.remove(&old_key);
+        records.insert(new_key, new_record.clone());
+        write_or_remove_state(&agent_hold_state_path(sase_home), &records)?;
+        Ok(Some(new_record))
     })
 }
 
@@ -527,6 +569,13 @@ fn armer_is_alive(
                 pid_alive,
                 done_marker_present,
             },
+        )
+        | (
+            AgentHoldArmerKindWire::Launch,
+            AgentHoldArmerLivenessFactWire::Launch {
+                pid_alive,
+                done_marker_present,
+            },
         ) => *pid_alive && !*done_marker_present,
         (
             AgentHoldArmerKindWire::Proc,
@@ -558,7 +607,7 @@ fn validate_and_normalize_record(
     Ok(())
 }
 
-fn validate_and_normalize_armer(
+pub(crate) fn validate_and_normalize_armer(
     armer: &mut AgentHoldArmerWire,
 ) -> Result<(), AgentHoldError> {
     armer.key = validate_plain_string("armer.key", &armer.key)?;
@@ -604,6 +653,18 @@ fn validate_and_normalize_armer(
                 ));
             }
         }
+        AgentHoldArmerKindWire::Launch => {
+            if armer.pid.is_none() {
+                return Err(AgentHoldError::Validation(
+                    "launch armer requires pid".to_string(),
+                ));
+            }
+            if armer.done_marker_path.is_none() {
+                return Err(AgentHoldError::Validation(
+                    "launch armer requires done_marker_path".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -646,6 +707,36 @@ fn validate_and_normalize_selectors(
         return Err(AgentHoldError::Validation(
             "at least one hold selector is required".to_string(),
         ));
+    }
+    Ok(())
+}
+
+pub fn validate_selectors_exclude_armer_kin(
+    armer: &AgentHoldArmerWire,
+    selectors: &AgentHoldSelectorsWire,
+) -> Result<(), AgentHoldError> {
+    let armer_family = armer_family(armer);
+    for (kind, values) in [
+        ("names", selectors.names.as_slice()),
+        ("families", selectors.families.as_slice()),
+        ("clans", selectors.clans.as_slice()),
+        ("workflows", selectors.workflows.as_slice()),
+    ] {
+        for value in values {
+            let matches_own_identity = armer
+                .agent_name
+                .as_ref()
+                .is_some_and(|agent_name| value == agent_name)
+                || armer.clan.as_ref().is_some_and(|clan| value == clan)
+                || armer_family.as_ref().is_some_and(|family| {
+                    value == family || same_or_dotted_descendant(value, family)
+                });
+            if matches_own_identity {
+                return Err(AgentHoldError::Validation(format!(
+                    "hold selector {kind}={value:?} names the armer's own identity, family, or clan"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1043,6 +1134,21 @@ mod tests {
         }
     }
 
+    fn launch_armer(key: &str) -> AgentHoldArmerWire {
+        AgentHoldArmerWire {
+            kind: AgentHoldArmerKindWire::Launch,
+            key: key.to_string(),
+            display: "launch display".to_string(),
+            project: "sase".to_string(),
+            agent_name: Some("launcher.worker".to_string()),
+            family: Some("launcher.worker".to_string()),
+            clan: Some("builders".to_string()),
+            proc_id: None,
+            pid: Some(1234),
+            done_marker_path: Some("/tmp/receipt.json".to_string()),
+        }
+    }
+
     fn selectors() -> AgentHoldSelectorsWire {
         AgentHoldSelectorsWire {
             artifact_dirs: vec!["artifacts/old".to_string()],
@@ -1061,6 +1167,18 @@ mod tests {
             armers: BTreeMap::from([(
                 key.to_string(),
                 AgentHoldArmerLivenessFactWire::Agent {
+                    pid_alive: true,
+                    done_marker_present: false,
+                },
+            )]),
+        }
+    }
+
+    fn launch_liveness_alive(key: &str) -> AgentHoldLivenessFactsWire {
+        AgentHoldLivenessFactsWire {
+            armers: BTreeMap::from([(
+                key.to_string(),
+                AgentHoldArmerLivenessFactWire::Launch {
                     pid_alive: true,
                     done_marker_present: false,
                 },
@@ -1127,6 +1245,146 @@ mod tests {
             .unwrap()
             .holds
             .is_empty());
+    }
+
+    #[test]
+    fn rebind_keeps_timing_and_replaces_key_atomically() {
+        let temp = tempdir().unwrap();
+        let live = liveness_alive("old");
+        let record = arm_agent_hold_relative(
+            temp.path(),
+            armer("old"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            60.0,
+            &live,
+            NOW,
+        )
+        .unwrap();
+
+        let rebound = rebind_agent_hold_armer(
+            temp.path(),
+            "old",
+            armer("new"),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 5.0,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(rebound.created_at, record.created_at);
+        assert_eq!(rebound.expires_at, record.expires_at);
+        assert_eq!(rebound.armer.key, "new");
+        let mut candidate = candidate();
+        candidate.created_at = NOW + 2.0;
+        candidate.agent_name = Some("unrelated.agent".to_string());
+        candidate.artifact_dirs.clear();
+        candidate.clan = None;
+        candidate.workflow = None;
+        candidate.tribe = None;
+        assert!(hold_blocks_candidate(&rebound, &candidate)
+            .unwrap()
+            .is_some());
+
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 6.0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.holds.len(), 1);
+        assert_eq!(snapshot.holds[0].armer.key, "new");
+    }
+
+    #[test]
+    fn rebind_absent_key_writes_nothing_and_same_key_works() {
+        let temp = tempdir().unwrap();
+        let path = agent_hold_state_path(temp.path());
+        let missing = rebind_agent_hold_armer(
+            temp.path(),
+            "missing",
+            armer("new"),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+        assert!(missing.is_none());
+        assert!(!path.exists());
+
+        arm_agent_hold_relative(
+            temp.path(),
+            armer("same"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            60.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut replacement = armer("same");
+        replacement.display = "updated display".to_string();
+        let rebound = rebind_agent_hold_armer(
+            temp.path(),
+            "same",
+            replacement,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 1.0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rebound.armer.display, "updated display");
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 2.0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.holds.len(), 1);
+        assert_eq!(snapshot.holds[0].armer.display, "updated display");
+    }
+
+    #[test]
+    fn rebind_kin_invalid_new_armer_leaves_old_record() {
+        let temp = tempdir().unwrap();
+        arm_agent_hold_relative(
+            temp.path(),
+            armer("old"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+            60.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+        let mut invalid = armer("new");
+        invalid.agent_name = Some("target.agent".to_string());
+        invalid.family = Some("target.agent".to_string());
+        let err = rebind_agent_hold_armer(
+            temp.path(),
+            "old",
+            invalid,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 1.0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("armer's own identity"));
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 2.0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.holds.len(), 1);
+        assert_eq!(snapshot.holds[0].armer.key, "old");
     }
 
     #[test]
@@ -1225,6 +1483,206 @@ mod tests {
             .unwrap()
             .holds
             .is_empty());
+    }
+
+    #[test]
+    fn launch_armer_validation_and_liveness_pruning() {
+        let temp = tempdir().unwrap();
+        let mut missing_pid = launch_armer("launch");
+        missing_pid.pid = None;
+        assert!(arm_agent_hold_relative(
+            temp.path(),
+            missing_pid,
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("pid"));
+
+        let mut missing_marker = launch_armer("launch");
+        missing_marker.done_marker_path = None;
+        assert!(arm_agent_hold_relative(
+            temp.path(),
+            missing_marker,
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("done_marker_path"));
+
+        arm_agent_hold_relative(
+            temp.path(),
+            launch_armer("launch"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &launch_liveness_alive("launch"),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            list_agent_holds(
+                temp.path(),
+                &launch_liveness_alive("launch"),
+                NOW + 1.0
+            )
+            .unwrap()
+            .holds
+            .len(),
+            1
+        );
+        let dead_pid = AgentHoldLivenessFactsWire {
+            armers: BTreeMap::from([(
+                "launch".to_string(),
+                AgentHoldArmerLivenessFactWire::Launch {
+                    pid_alive: false,
+                    done_marker_present: false,
+                },
+            )]),
+        };
+        assert!(list_agent_holds(temp.path(), &dead_pid, NOW + 2.0)
+            .unwrap()
+            .holds
+            .is_empty());
+
+        arm_agent_hold_relative(
+            temp.path(),
+            launch_armer("launch"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &launch_liveness_alive("launch"),
+            NOW,
+        )
+        .unwrap();
+        let done = AgentHoldLivenessFactsWire {
+            armers: BTreeMap::from([(
+                "launch".to_string(),
+                AgentHoldArmerLivenessFactWire::Launch {
+                    pid_alive: true,
+                    done_marker_present: true,
+                },
+            )]),
+        };
+        assert!(list_agent_holds(temp.path(), &done, NOW + 2.0)
+            .unwrap()
+            .holds
+            .is_empty());
+    }
+
+    #[test]
+    fn launch_armer_ignores_agent_liveness_fact() {
+        let temp = tempdir().unwrap();
+        arm_agent_hold_relative(
+            temp.path(),
+            launch_armer("launch"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+        let wrong_kind = AgentHoldLivenessFactsWire {
+            armers: BTreeMap::from([(
+                "launch".to_string(),
+                AgentHoldArmerLivenessFactWire::Agent {
+                    pid_alive: false,
+                    done_marker_present: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            list_agent_holds(temp.path(), &wrong_kind, NOW + 1.0)
+                .unwrap()
+                .holds
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn arm_time_kin_rejection_covers_names_families_clans_and_workflows() {
+        let temp = tempdir().unwrap();
+        let cases = [
+            ("names", "holder.worker"),
+            ("names", "holder.worker.child"),
+            ("names", "builders"),
+            ("families", "holder.worker"),
+            ("families", "holder.worker.child"),
+            ("families", "builders"),
+            ("clans", "holder.worker"),
+            ("clans", "holder.worker.child"),
+            ("clans", "builders"),
+            ("workflows", "holder.worker"),
+            ("workflows", "holder.worker.child"),
+            ("workflows", "builders"),
+        ];
+        for (field, value) in cases {
+            let mut selectors = AgentHoldSelectorsWire::default();
+            match field {
+                "names" => selectors.names.push(value.to_string()),
+                "families" => selectors.families.push(value.to_string()),
+                "clans" => selectors.clans.push(value.to_string()),
+                "workflows" => selectors.workflows.push(value.to_string()),
+                _ => unreachable!(),
+            }
+            let err = arm_agent_hold_relative(
+                temp.path(),
+                armer("holder"),
+                AgentHoldScopeWire::Host,
+                selectors,
+                30.0,
+                &AgentHoldLivenessFactsWire::default(),
+                NOW,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("armer's own identity"),
+                "{field}={value}: {err}"
+            );
+        }
+
+        let record = arm_agent_hold_relative(
+            temp.path(),
+            armer("holder"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                families: vec!["holder".to_string()],
+                hoods: vec!["holder".to_string()],
+                tribes: vec!["builders".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+            30.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(record.selectors.families, vec!["holder".to_string()]);
+        assert_eq!(record.selectors.hoods, vec!["holder".to_string()]);
     }
 
     #[test]

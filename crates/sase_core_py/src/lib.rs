@@ -221,9 +221,12 @@
 //! - `agent_hold_wire_schema_version() -> int`
 //! - `agent_hold_arm_relative(sase_home: str, armer: dict, scope: dict, selectors: dict, duration_seconds: float, liveness: dict | None = None, now: float | None = None) -> dict`
 //! - `agent_hold_arm_until(sase_home: str, armer: dict, scope: dict, selectors: dict, expires_at: float, liveness: dict | None = None, now: float | None = None) -> dict`
+//! - `agent_hold_rebind(sase_home: str, old_key: str, new_armer: dict, liveness: dict | None = None, now: float | None = None) -> dict | None`
 //! - `agent_hold_release(sase_home: str, armer_key: str, liveness: dict | None = None, now: float | None = None) -> bool`
 //! - `agent_hold_list(sase_home: str, liveness: dict | None = None, now: float | None = None) -> dict`
 //! - `agent_hold_blocks_candidate(record: dict, candidate: dict) -> dict | None`
+//! - `launch_unit_hold_key(request_id: str, logical_id: str) -> str`
+//! - `launch_unit_hold_armer(unit: dict, request_id: str, project: str, pid: int, done_marker_path: str) -> dict`
 //! - `feature_flag_state_wire_schema_version() -> int`
 //! - `feature_flag_state_get(sase_home: str) -> dict`
 //! - `feature_flag_state_set(sase_home: str, flag: str, enabled: bool) -> dict`
@@ -697,6 +700,7 @@ use sase_core::agent_hold::{
     arm_agent_hold_until as core_arm_agent_hold_until,
     hold_blocks_candidate as core_hold_blocks_candidate,
     list_agent_holds as core_list_agent_holds,
+    rebind_agent_hold_armer as core_rebind_agent_hold_armer,
     release_agent_hold as core_release_agent_hold, AgentHoldArmerWire,
     AgentHoldCandidateWire, AgentHoldError as AgentHoldDomainError,
     AgentHoldLivenessFactsWire, AgentHoldRecordWire, AgentHoldScopeWire,
@@ -741,6 +745,8 @@ use sase_core::agent_launch::{
     dispatch_fingerprint as core_dispatch_fingerprint,
     evaluate_launch_condition as core_evaluate_launch_condition,
     filter_conditional_launch_segments as core_filter_conditional_launch_segments,
+    launch_unit_hold_armer as core_launch_unit_hold_armer,
+    launch_unit_hold_key as core_launch_unit_hold_key,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
     next_admission_actions_with_holds as core_next_admission_actions_with_holds,
     parse_proc_duration_seconds as core_parse_proc_duration_seconds,
@@ -13683,6 +13689,36 @@ fn py_agent_hold_arm_until<'py>(
 
 #[pyfunction]
 #[pyo3(
+    name = "agent_hold_rebind",
+    signature = (sase_home, old_key, new_armer, liveness = None, now = None)
+)]
+fn py_agent_hold_rebind<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    old_key: &str,
+    new_armer: &Bound<'py, PyDict>,
+    liveness: Option<&Bound<'py, PyDict>>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let new_armer: AgentHoldArmerWire =
+        agent_hold_dict_from_py(new_armer.as_any(), "agent hold armer")?;
+    let liveness = agent_hold_liveness_from_optional(liveness)?;
+    match core_rebind_agent_hold_armer(
+        &PathBuf::from(sase_home),
+        old_key,
+        new_armer,
+        &liveness,
+        effort_override_now(now)?,
+    )
+    .map_err(agent_hold_error_to_pyerr)?
+    {
+        Some(record) => agent_hold_wire_to_py(py, &record),
+        None => Ok(py.None()),
+    }
+}
+
+#[pyfunction]
+#[pyo3(
     name = "agent_hold_release",
     signature = (sase_home, armer_key, liveness = None, now = None)
 )]
@@ -16652,6 +16688,44 @@ fn py_plan_typed_launch_units<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "launch_unit_hold_key")]
+fn py_launch_unit_hold_key(
+    request_id: &str,
+    logical_id: &str,
+) -> PyResult<String> {
+    core_launch_unit_hold_key(request_id, logical_id)
+        .map_err(agent_hold_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "launch_unit_hold_armer")]
+fn py_launch_unit_hold_armer<'py>(
+    py: Python<'py>,
+    unit: &Bound<'py, PyAny>,
+    request_id: &str,
+    project: &str,
+    pid: u32,
+    done_marker_path: &str,
+) -> PyResult<PyObject> {
+    let unit: LaunchUnitWire = serde_json::from_value(py_to_json_value(unit)?)
+        .map_err(|err| {
+            PyValueError::new_err(format!("invalid launch unit: {err}"))
+        })?;
+    let armer = core_launch_unit_hold_armer(
+        &unit,
+        request_id,
+        project,
+        pid,
+        &PathBuf::from(done_marker_path),
+    )
+    .map_err(agent_hold_error_to_pyerr)?;
+    let value = serde_json::to_value(&armer).map_err(|err| {
+        PyRuntimeError::new_err(format!("internal serialize error: {err}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(name = "launch_admission_journal_schema_version")]
 fn py_launch_admission_journal_schema_version() -> u32 {
     LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION
@@ -19607,6 +19681,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_hold_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_arm_relative, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_arm_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_hold_rebind, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_release, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_blocks_candidate, m)?)?;
@@ -19919,6 +19994,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bind_batch_predecessor_waits, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
+    m.add_function(wrap_pyfunction!(py_launch_unit_hold_key, m)?)?;
+    m.add_function(wrap_pyfunction!(py_launch_unit_hold_armer, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_launch_admission_journal_schema_version,
         m
@@ -23809,6 +23886,132 @@ COMMITS:
                 Some(now + 4.0),
             )
             .unwrap());
+        });
+    }
+
+    #[test]
+    fn agent_hold_rebind_and_launch_hold_bindings_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            assert_eq!(
+                py_launch_unit_hold_key("request123", "unit-1").unwrap(),
+                "launch:request123/unit-1"
+            );
+            assert!(py_launch_unit_hold_key("request 123", "unit-1")
+                .unwrap_err()
+                .is_instance_of::<PyValueError>(py));
+
+            let unit_obj = json_value_to_py(
+                py,
+                &json!({
+                    "logical_id": "unit-1",
+                    "source_order": 1,
+                    "payload": {
+                        "kind": "agent",
+                        "prompt": "Review",
+                        "identity": "reviewer",
+                        "identity_explicit": true,
+                        "clan": "research"
+                    }
+                }),
+            )
+            .unwrap();
+            let launch_armer = py_launch_unit_hold_armer(
+                py,
+                unit_obj.bind(py),
+                "request123",
+                "sase",
+                4321,
+                "/tmp/receipt.json",
+            )
+            .unwrap();
+            let launch_armer_value =
+                py_to_json_value(launch_armer.bind(py)).unwrap();
+            assert_eq!(
+                launch_armer_value["key"],
+                json!("launch:request123/unit-1")
+            );
+            assert_eq!(launch_armer_value["kind"], json!("launch"));
+            assert_eq!(
+                launch_armer_value["agent_name"],
+                json!("research.reviewer")
+            );
+            assert_eq!(launch_armer_value["clan"], json!("research"));
+
+            let armer_obj = json_value_to_py(
+                py,
+                &json!({
+                    "kind": "agent",
+                    "key": "agent:old",
+                    "display": "Old hold",
+                    "project": "sase",
+                    "agent_name": "old.agent",
+                    "family": "old.agent",
+                    "pid": 1234
+                }),
+            )
+            .unwrap();
+            let armer = armer_obj.bind(py).downcast::<PyDict>().unwrap();
+            let scope_obj =
+                json_value_to_py(py, &json!({"kind": "host"})).unwrap();
+            let scope = scope_obj.bind(py).downcast::<PyDict>().unwrap();
+            let selectors_obj =
+                json_value_to_py(py, &json!({"future": true})).unwrap();
+            let selectors =
+                selectors_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            py_agent_hold_arm_relative(
+                py,
+                &home,
+                armer,
+                scope,
+                selectors,
+                60.0,
+                None,
+                Some(now),
+            )
+            .unwrap();
+            let new_armer_obj = json_value_to_py(
+                py,
+                &json!({
+                    "kind": "agent",
+                    "key": "agent:new",
+                    "display": "New hold",
+                    "project": "sase",
+                    "agent_name": "new.agent",
+                    "family": "new.agent",
+                    "pid": 5678
+                }),
+            )
+            .unwrap();
+            let new_armer =
+                new_armer_obj.bind(py).downcast::<PyDict>().unwrap();
+            let rebound = py_agent_hold_rebind(
+                py,
+                &home,
+                "agent:old",
+                new_armer,
+                None,
+                Some(now + 1.0),
+            )
+            .unwrap();
+            let rebound_value = py_to_json_value(rebound.bind(py)).unwrap();
+            assert_eq!(rebound_value["armer"]["key"], json!("agent:new"));
+            assert_eq!(rebound_value["created_at"], json!(now));
+
+            let absent = py_agent_hold_rebind(
+                py,
+                &home,
+                "agent:missing",
+                new_armer,
+                None,
+                Some(now + 2.0),
+            )
+            .unwrap();
+            assert!(absent.bind(py).is_none());
         });
     }
 

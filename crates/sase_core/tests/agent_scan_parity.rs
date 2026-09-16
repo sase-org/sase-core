@@ -1761,6 +1761,7 @@ fn waiting_marker_carries_runner_slot_fields() {
         .as_ref()
         .unwrap();
     assert_eq!(old_marker.wait_priority, None);
+    assert_eq!(old_marker.wait_priority_explicit, None);
 
     write_json(
         &waiting_path,
@@ -1793,12 +1794,28 @@ fn waiting_marker_carries_runner_slot_fields() {
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
     assert_eq!(waiting.queue_capacity, Some(3));
     assert_eq!(waiting.wait_priority, Some(5));
-    assert!(waiting.wait_priority_explicit);
+    assert_eq!(waiting.wait_priority_explicit, Some(true));
     assert!(waiting.queue_capacity_explicit);
     assert_eq!(
         waiting.slot_requested_at.as_deref(),
         Some("2026-07-12T19:20:00Z")
     );
+
+    write_json(
+        &waiting_path,
+        &json!({
+            "wait_priority": 5,
+            "wait_priority_explicit": false,
+        }),
+    );
+    let false_marker_snapshot =
+        scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
+    let false_marker = record_by_timestamp(&false_marker_snapshot, TS_WAITING)
+        .waiting
+        .as_ref()
+        .unwrap();
+    assert_eq!(false_marker.wait_priority, Some(5));
+    assert_eq!(false_marker.wait_priority_explicit, Some(false));
 }
 
 #[test]

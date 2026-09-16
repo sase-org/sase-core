@@ -3,6 +3,7 @@
 mod admission;
 mod condition;
 mod conditional;
+mod launch_hold;
 mod proc_runtime;
 
 pub use admission::{
@@ -31,6 +32,7 @@ pub use conditional::{
     ConditionalLaunchSegmentWire,
     CONDITIONAL_LAUNCH_SEGMENT_FILTER_SCHEMA_VERSION,
 };
+pub use launch_hold::{launch_unit_hold_armer, launch_unit_hold_key};
 pub use proc_runtime::{
     cleanup_proc_private_inputs, parse_proc_duration_seconds,
     prepare_proc_script, proc_script_argv, resolve_proc_execution_cwd,
@@ -2838,7 +2840,7 @@ fn validate_typed_wait_cycles(
         {
             diagnostics.push(typed_plan_diagnostic(
                 "hold-cycle",
-                "Typed launch holds and waits contain a cycle.",
+                "Typed launch holds and waits contain a cycle (a `future` hold fences every other unit in the plan).",
                 None,
             ));
             return;
@@ -2921,6 +2923,9 @@ fn unit_hold_facts(raw: &RawLaunchUnit) -> UnitHoldFacts {
 }
 
 fn hold_matches_unit(hold: &HoldFieldsWire, target: &UnitHoldFacts) -> bool {
+    if hold.future {
+        return true;
+    }
     hold.names.iter().any(|name| {
         target.identity.as_deref() == Some(name.as_str())
             || target.family.as_deref() == Some(name.as_str())
@@ -5743,6 +5748,66 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn typed_launch_future_hold_cycle_rejects_wait_on_sibling() {
+        let err = plan_typed_launch_units_with_flags(
+            "%hold(future)\n%wait(unit=unit-2)\nFirst\n---\nSecond",
+            Some("multi_prompt"),
+            Some("sase"),
+            &["agent_holds".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("future"), "{err}");
+        match err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "hold-cycle"));
+            }
+            other => panic!("expected typed launch diagnostic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_launch_future_hold_cycle_rejects_two_future_siblings() {
+        let err = plan_typed_launch_units_with_flags(
+            "%hold(future)\nFirst\n---\n%hold(future)\nSecond",
+            Some("multi_prompt"),
+            Some("sase"),
+            &["agent_holds".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("future"), "{err}");
+    }
+
+    #[test]
+    fn typed_launch_future_hold_without_cycle_is_allowed() {
+        let plan = plan_typed_launch_units_with_flags(
+            "%hold(future)\nFirst",
+            Some("multi_prompt"),
+            Some("sase"),
+            &["agent_holds".to_string()],
+        )
+        .unwrap();
+
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
+    }
+
+    #[test]
+    fn typed_launch_future_hold_cycle_ignores_kin_sibling() {
+        let plan = plan_typed_launch_units_with_flags(
+            "%id(parent, family=root)\n%hold(future)\n%wait(unit=unit-2)\nFirst\n---\n%id(child, family=root)\nSecond",
+            Some("multi_prompt"),
+            Some("sase"),
+            &["agent_holds".to_string()],
+        )
+        .unwrap();
+
+        assert!(plan.diagnostics.is_empty(), "{:?}", plan.diagnostics);
     }
 
     #[test]
