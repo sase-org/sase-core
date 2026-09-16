@@ -24,6 +24,7 @@ pub mod agent_ownership;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
+pub mod agent_tribe;
 pub mod artifact_consumption;
 pub mod artifact_file;
 pub mod artifact_link;
@@ -357,6 +358,15 @@ pub use agent_stats::{
     AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
     AgentXPromptStatsRowWire, AgentXPromptStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
+};
+pub use agent_tribe::{
+    agent_tribe_display_key, canonicalize_agent_tribe_metadata,
+    canonicalize_public_tribe_name, is_reserved_tribe_name,
+    parse_tribe_reference, public_tribe_name, reserved_tribe_target_reason,
+    resolve_agent_tribe_display_config, validate_tribe_name,
+    AgentTribeDisplayResolutionRequestWire, AgentTribeDisplayResolutionWire,
+    AgentTribeError, LEGACY_JOB_TRIBE, PUBLIC_JOB_TRIBE,
+    RESERVED_DEFAULT_TRIBE,
 };
 pub use artifact_consumption::{
     consumed_artifact_file_refs, read_artifact_consumption_log,

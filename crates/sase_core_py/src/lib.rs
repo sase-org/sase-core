@@ -151,6 +151,15 @@
 //! - `validate_owner_root(root: str) -> None`
 //! - `validate_agent_owner(username: str, machine_name: str) -> None`
 //! - `validate_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> None`
+//! - `validate_tribe_name(tribe: str) -> str`
+//! - `canonicalize_public_tribe_name(tribe: str) -> str`
+//! - `public_tribe_name(tribe: str) -> str`
+//! - `parse_tribe_reference(value: str) -> str | None`
+//! - `is_reserved_tribe_name(tribe: str) -> bool`
+//! - `reserved_tribe_target_reason(tribe: str) -> str`
+//! - `canonicalize_agent_tribe_metadata(data: dict) -> dict`
+//! - `agent_tribe_display_key(stored_tribe: str, configured_keys: list[str]) -> str`
+//! - `resolve_agent_tribe_display_config(request: dict) -> dict`
 //! - `commit_shas_equivalent(left: str, right: str) -> bool`
 //! - `normalize_agent_archive_name(name: str) -> str`
 //! - `normalize_owned_agent_name(name: str, username: str, machine_name: str, known_owner_roots: list[str] | None = None) -> str`
@@ -808,6 +817,19 @@ use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
     AgentRunStatsRequestWire,
+};
+use sase_core::agent_tribe::{
+    agent_tribe_display_key as core_agent_tribe_display_key,
+    canonicalize_agent_tribe_metadata as core_canonicalize_agent_tribe_metadata,
+    canonicalize_public_tribe_name as core_canonicalize_public_tribe_name,
+    is_reserved_tribe_name as core_is_reserved_tribe_name,
+    parse_tribe_reference as core_parse_tribe_reference,
+    public_tribe_name as core_public_tribe_name,
+    reserved_tribe_target_reason as core_reserved_tribe_target_reason,
+    resolve_agent_tribe_display_config as core_resolve_agent_tribe_display_config,
+    validate_tribe_name as core_validate_tribe_name,
+    AgentTribeDisplayResolutionRequestWire,
+    AgentTribeError as AgentTribeDomainError,
 };
 use sase_core::artifact_consumption::{
     read_artifact_consumption_log as core_read_artifact_consumption_log,
@@ -2224,6 +2246,92 @@ fn py_validate_owned_agent_name(
 #[pyo3(name = "validate_agent_owner")]
 fn py_validate_agent_owner(username: &str, machine_name: &str) -> PyResult<()> {
     explicit_owner(username, machine_name).map(|_| ())
+}
+
+fn agent_tribe_error_to_pyerr(error: AgentTribeDomainError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pyfunction]
+#[pyo3(name = "validate_tribe_name")]
+fn py_validate_tribe_name(tribe: &str) -> PyResult<String> {
+    core_validate_tribe_name(tribe)
+        .map(str::to_string)
+        .map_err(agent_tribe_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "canonicalize_public_tribe_name")]
+fn py_canonicalize_public_tribe_name(tribe: &str) -> PyResult<String> {
+    core_canonicalize_public_tribe_name(tribe)
+        .map_err(agent_tribe_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "public_tribe_name")]
+fn py_public_tribe_name(tribe: &str) -> String {
+    core_public_tribe_name(tribe)
+}
+
+#[pyfunction]
+#[pyo3(name = "parse_tribe_reference")]
+fn py_parse_tribe_reference(value: &str) -> PyResult<Option<String>> {
+    core_parse_tribe_reference(value).map_err(agent_tribe_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "is_reserved_tribe_name")]
+fn py_is_reserved_tribe_name(tribe: &str) -> bool {
+    core_is_reserved_tribe_name(tribe)
+}
+
+#[pyfunction]
+#[pyo3(name = "reserved_tribe_target_reason")]
+fn py_reserved_tribe_target_reason(tribe: &str) -> String {
+    core_reserved_tribe_target_reason(tribe)
+}
+
+#[pyfunction]
+#[pyo3(name = "canonicalize_agent_tribe_metadata")]
+fn py_canonicalize_agent_tribe_metadata<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(data.as_any())?;
+    let serde_json::Value::Object(map) = value else {
+        return Err(PyValueError::new_err(
+            "agent tribe metadata must be a JSON object",
+        ));
+    };
+    let result = core_canonicalize_agent_tribe_metadata(map);
+    json_value_to_py(py, &serde_json::Value::Object(result))
+}
+
+#[pyfunction]
+#[pyo3(name = "agent_tribe_display_key")]
+fn py_agent_tribe_display_key(
+    stored_tribe: &str,
+    configured_keys: Vec<String>,
+) -> PyResult<String> {
+    core_agent_tribe_display_key(stored_tribe, &configured_keys)
+        .map_err(agent_tribe_error_to_pyerr)
+}
+
+#[pyfunction]
+#[pyo3(name = "resolve_agent_tribe_display_config")]
+fn py_resolve_agent_tribe_display_config<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentTribeDisplayResolutionRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid agent tribe display resolution request: {error}"
+            ))
+        })?;
+    let result = core_resolve_agent_tribe_display_config(&request);
+    serialize_to_py(py, &result)
 }
 
 #[pyfunction]
@@ -18358,6 +18466,18 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_validate_owner_root, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_owner, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validate_tribe_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canonicalize_public_tribe_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_public_tribe_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_tribe_reference, m)?)?;
+    m.add_function(wrap_pyfunction!(py_is_reserved_tribe_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reserved_tribe_target_reason, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canonicalize_agent_tribe_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_tribe_display_key, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_resolve_agent_tribe_display_config,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_commit_shas_equivalent, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_managed_origin_reconciliation_wire_schema_version,
