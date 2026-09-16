@@ -167,6 +167,12 @@ pub struct ConfigInventoryRequestWire {
     pub deprecations: BTreeMap<String, String>,
     #[serde(default)]
     pub unsupported: Vec<String>,
+    /// Select the public routine/job projection for general effective views.
+    ///
+    /// Layer merge still normalizes accepted AXE aliases either way; this flag
+    /// only controls the view shape returned to public consumers.
+    #[serde(default)]
+    pub routine_job_contract: bool,
 }
 
 /// Per-layer summary in the inventory output.
@@ -247,6 +253,11 @@ pub struct ConfigEditRequestWire {
     pub deprecations: BTreeMap<String, String>,
     #[serde(default)]
     pub unsupported: Vec<String>,
+    /// Select the public routine/job projection for candidate and preview
+    /// effective views. Existing source paths are still preserved in the
+    /// write plan.
+    #[serde(default)]
+    pub routine_job_contract: bool,
 }
 
 impl ConfigEditRequestWire {

@@ -710,6 +710,12 @@ struct NormalizedNode {
     sources: BTreeMap<Vec<String>, Vec<String>>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct NormalizedConfigLayer {
+    pub(super) value: Value,
+    pub(super) sources: BTreeMap<Vec<String>, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormalizeContext {
     Axe,
@@ -741,6 +747,80 @@ fn normalize_layer_axe(
         value: Value::Object(root),
         sources,
     }
+}
+
+pub(super) fn normalize_config_layer(
+    layer: &ConfigLayerInputWire,
+    merged_so_far: &Value,
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> NormalizedConfigLayer {
+    let label = layer_label(layer);
+    if let Some(raw_axe) = layer.value.get(AXE) {
+        detect_cross_layer_list_duplicates(
+            merged_so_far,
+            raw_axe,
+            layer,
+            &label,
+            diagnostics,
+        );
+    }
+
+    let Some(root) = layer.value.as_object() else {
+        let node = copy_with_sources(&layer.value, &[], &[]);
+        return NormalizedConfigLayer {
+            value: node.value,
+            sources: node.sources,
+        };
+    };
+
+    let mut result = Map::new();
+    let mut sources = source_map(&[], &[]);
+    for (key, child) in root {
+        let norm_path = vec![key.clone()];
+        let source_path = vec![key.clone()];
+        let node = if key == AXE {
+            normalize_value(
+                child,
+                NormalizeContext::Axe,
+                &norm_path,
+                &source_path,
+                &label,
+                diagnostics,
+            )
+        } else {
+            copy_with_sources(child, &norm_path, &source_path)
+        };
+        sources.extend(node.sources);
+        result.insert(key.clone(), node.value);
+    }
+
+    NormalizedConfigLayer {
+        value: Value::Object(result),
+        sources,
+    }
+}
+
+pub(super) fn normalize_config_key_path(path: &[String]) -> Vec<String> {
+    if !matches!(path.first(), Some(root) if root == AXE) {
+        return path.to_vec();
+    }
+    let mut normalized = Vec::with_capacity(path.len());
+    normalized.push(AXE.to_string());
+    if let Some(key) = path.get(1) {
+        normalized.push(axe_key_alias(key).to_string());
+    }
+    if path.len() >= 3 {
+        normalized.push(path[2].clone());
+    }
+    if path.len() >= 4
+        && normalized.get(1).is_some_and(|key| key == LUMBERJACKS)
+    {
+        normalized.push(routine_key_alias(&path[3]).to_string());
+        normalized.extend_from_slice(&path[4..]);
+    } else if path.len() > 3 {
+        normalized.extend_from_slice(&path[3..]);
+    }
+    normalized
 }
 
 fn normalize_value(
@@ -1166,7 +1246,7 @@ fn indexed_path(path: &[String], index: usize) -> Vec<String> {
     result
 }
 
-fn replacement_paths_for_layer(
+pub(super) fn replacement_paths_for_layer(
     value: &Value,
     strategy: ListStrategy,
 ) -> Vec<Vec<String>> {
@@ -1403,7 +1483,7 @@ fn clear_provenance(provenance: &mut ExactProvenance, path: &[String]) {
     provenance.retain(|candidate, _| !candidate.starts_with(path));
 }
 
-fn remove_value_at_path(value: &mut Value, path: &[String]) {
+pub(super) fn remove_value_at_path(value: &mut Value, path: &[String]) {
     let Some((last, prefix)) = path.split_last() else {
         return;
     };
@@ -1470,7 +1550,7 @@ fn public_projection(
     )
 }
 
-fn public_project_root(value: &Value) -> Value {
+pub(super) fn public_project_root(value: &Value) -> Value {
     let Some(root) = value.as_object() else {
         return value.clone();
     };
@@ -1525,7 +1605,7 @@ fn public_project_routine(value: &Value) -> Value {
     Value::Object(projected)
 }
 
-fn public_key_path(path: &[String]) -> Vec<String> {
+pub(super) fn public_key_path(path: &[String]) -> Vec<String> {
     if path.len() >= 2 && path[0] == AXE {
         let mut public = Vec::with_capacity(path.len());
         public.push(AXE.to_string());
@@ -1567,7 +1647,7 @@ fn public_routine_key(key: &str) -> &str {
     }
 }
 
-fn display_path(path: &[String]) -> String {
+pub(super) fn display_path(path: &[String]) -> String {
     let mut display = String::new();
     for segment in path {
         if segment.starts_with('[') {

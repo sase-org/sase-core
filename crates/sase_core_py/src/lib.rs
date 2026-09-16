@@ -25043,6 +25043,100 @@ COMMITS:
     }
 
     #[test]
+    fn config_routine_job_projection_round_trips_through_python_bindings() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let schema = json!({
+                "type": "object",
+                "properties": {
+                    "axe": {
+                        "type": "object",
+                        "properties": {
+                            "routines": {
+                                "type": "object",
+                                "properties": {
+                                    "checks": {
+                                        "type": "object",
+                                        "properties": {
+                                            "interval": {"type": "integer"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            let layers = json!([
+                {
+                    "name": "defaults",
+                    "kind": "default",
+                    "path": "defaults.yml",
+                    "list_strategy": "replace",
+                    "writable": false,
+                    "value": {"axe": {"lumberjacks": {"checks": {"interval": 5}}}}
+                },
+                {
+                    "name": "user",
+                    "kind": "user",
+                    "path": "user.yml",
+                    "list_strategy": "replace",
+                    "writable": true,
+                    "value": {"axe": {"routines": {"checks": {"interval": 19}}}}
+                }
+            ]);
+            let inventory_req = json!({
+                "schema": schema.clone(),
+                "layers": layers.clone(),
+                "routine_job_contract": true
+            });
+            let inventory_obj = json_value_to_py(py, &inventory_req).unwrap();
+            let inventory_req =
+                inventory_obj.bind(py).downcast::<PyDict>().unwrap();
+            let inventory = py_config_inventory(py, inventory_req).unwrap();
+            let inventory = py_to_json_value(inventory.bind(py)).unwrap();
+            let interval = inventory["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["path"] == "axe.routines.checks.interval")
+                .unwrap();
+            assert_eq!(interval["effective_value"], json!(19));
+            assert_eq!(interval["contributions"][0]["raw_value"], json!(5));
+            assert_eq!(interval["contributions"][1]["raw_value"], json!(19));
+
+            let edit_req = json!({
+                "schema": schema,
+                "layers": [{
+                    "name": "user",
+                    "kind": "user",
+                    "path": "user.yml",
+                    "list_strategy": "replace",
+                    "writable": true,
+                    "value": {"axe": {"lumberjacks": {"checks": {"interval": 5}}}}
+                }],
+                "target_layer": "user",
+                "path": "axe.routines.checks.interval",
+                "op": {"kind": "set", "value": 19},
+                "routine_job_contract": true
+            });
+            let edit_obj = json_value_to_py(py, &edit_req).unwrap();
+            let edit_req = edit_obj.bind(py).downcast::<PyDict>().unwrap();
+            let plan = py_config_plan_edit(py, edit_req).unwrap();
+            let plan = py_to_json_value(plan.bind(py)).unwrap();
+            assert_eq!(
+                plan["write_plan"]["key_path"],
+                json!(["axe", "lumberjacks", "checks", "interval"])
+            );
+            assert_eq!(
+                plan["candidate_config"]["axe"]["routines"]["checks"]
+                    ["interval"],
+                json!(19)
+            );
+        });
+    }
+
+    #[test]
     fn axe_description_split_round_trips_through_python_binding() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

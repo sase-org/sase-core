@@ -359,6 +359,7 @@ fn inventory_diagnoses_glossary_outside_local_layer() {
         layers,
         deprecations: BTreeMap::new(),
         unsupported: Vec::new(),
+        routine_job_contract: false,
     };
     let inventory = config_inventory(&request).unwrap();
 
