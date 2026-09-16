@@ -552,6 +552,8 @@
 //! - `validate_finalizer_assigned_bead_binding(context: dict, expected: dict | None) -> None`
 //! - `gate_decision_wire_schema_version() -> int`
 //! - `decide_gate_decision_acceptance(request: dict) -> dict`
+//! - `gate_lifecycle_wire_schema_version() -> int`
+//! - `decide_gate_lifecycle(request: dict) -> dict`
 //! - `validate_task_type_spec(spec: dict) -> None`
 //! - `task_type_spec_digest(spec: dict) -> str`
 //! - `validate_task_type_field_values(spec: dict, values: dict[str, str]) -> list[dict]`
@@ -1263,7 +1265,9 @@ use sase_core::fleet_mutation::{
 };
 use sase_core::gate_decision::{
     decide_gate_decision_acceptance_from_json as core_decide_gate_decision_acceptance_from_json,
+    decide_gate_lifecycle_from_json as core_decide_gate_lifecycle_from_json,
     GateDecisionError, GATE_DECISION_WIRE_SCHEMA_VERSION,
+    GATE_LIFECYCLE_WIRE_SCHEMA_VERSION,
 };
 use sase_core::gate_followup::{
     decide_gate_followup as core_decide_gate_followup,
@@ -6718,6 +6722,33 @@ fn py_decide_gate_decision_acceptance<'py>(
         py,
         core_decide_gate_decision_acceptance_from_json(&value),
         "acceptance",
+    )
+}
+
+/// Return the gate-lifecycle wire schema version.
+#[pyfunction]
+#[pyo3(name = "gate_lifecycle_wire_schema_version")]
+fn py_gate_lifecycle_wire_schema_version() -> u32 {
+    GATE_LIFECYCLE_WIRE_SCHEMA_VERSION
+}
+
+/// Classify one gate's current lifecycle disposition (answered, cancelled,
+/// accepted with execution still incomplete, pending, or past its review
+/// deadline or reclaim grace window) from host-collected evidence. Raises a
+/// Python `ValueError` when a decision receipt is unreadable or names a
+/// different gate or request -- reported explicitly rather than silently
+/// treated as an unanswered gate eligible for cleanup.
+#[pyfunction]
+#[pyo3(name = "decide_gate_lifecycle")]
+fn py_decide_gate_lifecycle<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    gate_decision_result_to_py(
+        py,
+        core_decide_gate_lifecycle_from_json(&value),
+        "lifecycle",
     )
 }
 
@@ -18962,6 +18993,11 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_gate_decision_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_gate_decision_acceptance, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_gate_lifecycle_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_decide_gate_lifecycle, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_spec, m)?)?;
     m.add_function(wrap_pyfunction!(py_task_type_spec_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_task_type_field_values, m)?)?;
@@ -27342,6 +27378,137 @@ MENTORS:
             )
             .unwrap_err();
             assert!(error.to_string().contains("gate_decision_conflict"));
+        });
+    }
+
+    #[test]
+    fn gate_lifecycle_bindings_round_trip_json_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "gate_lifecycle_wire_schema_version",
+                "decide_gate_lifecycle",
+            ] {
+                assert!(module.getattr(name).is_ok(), "missing {name}");
+            }
+            assert_eq!(py_gate_lifecycle_wire_schema_version(), 1);
+
+            let answered_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 2_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": true,
+                }),
+            )
+            .unwrap();
+            let answered = py_decide_gate_lifecycle(
+                py,
+                answered_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let answered = py_to_json_value(answered.bind(py)).unwrap();
+            assert_eq!(answered["disposition"], json!("answered"));
+
+            let accepted_unfinished_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 1_000_000.0,
+                    "deadline_unix": 1_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": false,
+                    "receipt": {
+                        "schema_version": 1,
+                        "gate_id": "gate-abc",
+                        "request_hash": "sha256:deadbeef",
+                        "selected_option_ids": ["approve"],
+                        "input_identity": "sha256:input",
+                        "source": "cli",
+                        "accepted_at_unix": 1_726_000_000.0,
+                        "identity_fingerprint": "fingerprint",
+                    },
+                }),
+            )
+            .unwrap();
+            let accepted_unfinished = py_decide_gate_lifecycle(
+                py,
+                accepted_unfinished_request
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let accepted_unfinished =
+                py_to_json_value(accepted_unfinished.bind(py)).unwrap();
+            assert_eq!(
+                accepted_unfinished["disposition"],
+                json!("accepted_unfinished"),
+                "a verified receipt outranks the review deadline and grace window"
+            );
+
+            let mismatched_receipt_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 2_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": false,
+                    "receipt": {
+                        "schema_version": 1,
+                        "gate_id": "gate-someone-else",
+                        "request_hash": "sha256:deadbeef",
+                        "selected_option_ids": ["approve"],
+                        "input_identity": "sha256:input",
+                        "source": "cli",
+                        "accepted_at_unix": 1_726_000_000.0,
+                        "identity_fingerprint": "fingerprint",
+                    },
+                }),
+            )
+            .unwrap();
+            let error = py_decide_gate_lifecycle(
+                py,
+                mismatched_receipt_request
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("invalid_gate_decision_receipt"));
+
+            let expired_grace_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 10_000.0,
+                    "deadline_unix": 1_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": false,
+                }),
+            )
+            .unwrap();
+            let expired_grace = py_decide_gate_lifecycle(
+                py,
+                expired_grace_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let expired_grace =
+                py_to_json_value(expired_grace.bind(py)).unwrap();
+            assert_eq!(expired_grace["disposition"], json!("expired_grace"));
         });
     }
 

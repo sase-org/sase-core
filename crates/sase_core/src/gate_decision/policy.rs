@@ -14,8 +14,19 @@ use sha2::{Digest, Sha256};
 use super::wire::{
     GateDecisionAcceptanceOutcomeWire, GateDecisionAcceptanceRequestWire,
     GateDecisionError, GateDecisionOutcomeStatusWire, GateDecisionReceiptWire,
+    GateLifecycleDecisionWire, GateLifecycleRequestWire,
     GATE_DECISION_CODE_CONFLICT, GATE_DECISION_CODE_INVALID_REQUEST,
     GATE_DECISION_CODE_UNSUPPORTED_SCHEMA, GATE_DECISION_WIRE_SCHEMA_VERSION,
+    GATE_LIFECYCLE_CODE_INVALID_RECEIPT, GATE_LIFECYCLE_CODE_INVALID_REQUEST,
+    GATE_LIFECYCLE_CODE_UNSUPPORTED_SCHEMA,
+    GATE_LIFECYCLE_DISPOSITION_ACCEPTED_UNFINISHED,
+    GATE_LIFECYCLE_DISPOSITION_ANSWERED,
+    GATE_LIFECYCLE_DISPOSITION_CANCELLED_LOST,
+    GATE_LIFECYCLE_DISPOSITION_CANCELLED_STOPPED,
+    GATE_LIFECYCLE_DISPOSITION_CANCELLED_TIMEOUT,
+    GATE_LIFECYCLE_DISPOSITION_EXPIRED_GRACE,
+    GATE_LIFECYCLE_DISPOSITION_EXPIRED_REVIEW,
+    GATE_LIFECYCLE_DISPOSITION_PENDING, GATE_LIFECYCLE_WIRE_SCHEMA_VERSION,
 };
 
 fn validate_schema(actual: u32) -> Result<(), GateDecisionError> {
@@ -123,4 +134,125 @@ pub fn decide_gate_decision_acceptance_from_json(
             )
         })?;
     decide_gate_decision_acceptance(&request)
+}
+
+fn validate_lifecycle_schema(actual: u32) -> Result<(), GateDecisionError> {
+    if actual == GATE_LIFECYCLE_WIRE_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(GateDecisionError::new(
+            GATE_LIFECYCLE_CODE_UNSUPPORTED_SCHEMA,
+            format!(
+                "unsupported gate-lifecycle schema_version {actual}; expected {GATE_LIFECYCLE_WIRE_SCHEMA_VERSION}"
+            ),
+        ))
+    }
+}
+
+fn lifecycle_decision(
+    disposition: &str,
+    reason: &str,
+) -> GateLifecycleDecisionWire {
+    GateLifecycleDecisionWire {
+        schema_version: GATE_LIFECYCLE_WIRE_SCHEMA_VERSION,
+        disposition: disposition.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Classify one gate's current lifecycle disposition from host-collected
+/// evidence.
+///
+/// Precedence, highest first: a published response; a decision receipt that
+/// fails identity verification (reported explicitly, never silently treated
+/// as unanswered); a decision receipt that verifies (the gate is accepted,
+/// its execution may still be incomplete, and this outranks both the review
+/// deadline and the reclaim grace window); a recorded cancellation; then the
+/// review deadline and reclaim grace window. This operation performs no
+/// filesystem, clock, or process I/O.
+pub fn decide_gate_lifecycle(
+    request: &GateLifecycleRequestWire,
+) -> Result<GateLifecycleDecisionWire, GateDecisionError> {
+    validate_lifecycle_schema(request.schema_version)?;
+
+    if request.has_response {
+        return Ok(lifecycle_decision(
+            GATE_LIFECYCLE_DISPOSITION_ANSWERED,
+            "gate has a published response",
+        ));
+    }
+    if request.receipt_unreadable {
+        return Err(GateDecisionError::new(
+            GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
+            format!(
+                "gate {} has a decision receipt that could not be read",
+                request.gate_id
+            ),
+        ));
+    }
+    if let Some(receipt) = &request.receipt {
+        if receipt.gate_id != request.gate_id
+            || receipt.request_hash != request.request_hash
+        {
+            return Err(GateDecisionError::new(
+                GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
+                format!(
+                    "gate {} has a decision receipt naming a different gate or request",
+                    request.gate_id
+                ),
+            ));
+        }
+        return Ok(lifecycle_decision(
+            GATE_LIFECYCLE_DISPOSITION_ACCEPTED_UNFINISHED,
+            "gate decision is accepted; execution has not published a response yet",
+        ));
+    }
+    if let Some(reason) = &request.cancellation_reason {
+        let disposition = match reason.as_str() {
+            "timeout" => GATE_LIFECYCLE_DISPOSITION_CANCELLED_TIMEOUT,
+            "grace_expired" => GATE_LIFECYCLE_DISPOSITION_CANCELLED_LOST,
+            _ => GATE_LIFECYCLE_DISPOSITION_CANCELLED_STOPPED,
+        };
+        return Ok(lifecycle_decision(
+            disposition,
+            "gate has a recorded cancellation",
+        ));
+    }
+    let Some(deadline) = request.deadline_unix else {
+        return Ok(lifecycle_decision(
+            GATE_LIFECYCLE_DISPOSITION_PENDING,
+            "gate has no review deadline",
+        ));
+    };
+    if request.now_unix < deadline {
+        return Ok(lifecycle_decision(
+            GATE_LIFECYCLE_DISPOSITION_PENDING,
+            "gate review deadline has not passed",
+        ));
+    }
+    if request.now_unix < deadline + request.grace_seconds {
+        return Ok(lifecycle_decision(
+            GATE_LIFECYCLE_DISPOSITION_EXPIRED_REVIEW,
+            "gate review deadline passed; still inside the reclaim grace window",
+        ));
+    }
+    Ok(lifecycle_decision(
+        GATE_LIFECYCLE_DISPOSITION_EXPIRED_GRACE,
+        "gate review deadline and reclaim grace window both passed",
+    ))
+}
+
+/// Parse a JSON request and classify, rejecting a malformed payload before
+/// policy runs.
+pub fn decide_gate_lifecycle_from_json(
+    value: &JsonValue,
+) -> Result<GateLifecycleDecisionWire, GateDecisionError> {
+    let request: GateLifecycleRequestWire =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            GateDecisionError::new(
+                GATE_LIFECYCLE_CODE_INVALID_REQUEST,
+                format!("invalid gate-lifecycle request: {error}"),
+            )
+        })?;
+    decide_gate_lifecycle(&request)
 }
