@@ -1570,19 +1570,65 @@ fn strict_axe_validation_requires_lumberjack_and_chop_descriptions_when_enabled(
             .collect::<Vec<_>>(),
         vec![
             (
-                "axe.lumberjacks.list_lane.chops.bare_check.description",
-                "chop `bare_check` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
+                "axe.lumberjacks.list_lane.chops[0].description",
+                "job `bare_check` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
             ),
             (
                 "axe.lumberjacks.map_lane.chops.map_check.description",
-                "chop `map_check` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
+                "job `map_check` requires a non-empty `description`",
             ),
             (
                 "axe.lumberjacks.missing_lane.description",
-                "lumberjack `missing_lane` requires a non-empty `description`",
+                "routine `missing_lane` requires a non-empty `description`",
             ),
         ]
     );
+}
+
+#[test]
+fn strict_axe_validation_reports_canonical_routine_job_templates() {
+    let request: AxeConfigValidationRequestWire =
+        serde_json::from_value(json!({
+            "schema_version": 1,
+            "require_descriptions": true,
+            "config": {"axe": {"routines": {
+                "chop-watch": {
+                    "jobs": ["chop-test", "chop-test"]
+                }
+            }}}
+        }))
+        .unwrap();
+
+    let diagnostics = validate_axe_config(&request).unwrap();
+    let rendered = diagnostics
+        .iter()
+        .map(|item| {
+            (
+                item.code.as_str(),
+                item.path.as_deref().unwrap_or_default(),
+                item.message.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(rendered.contains(&(
+        "required_missing",
+        "axe.routines.chop-watch.description",
+        "routine `chop-watch` requires a non-empty `description`",
+    )));
+    assert!(rendered.contains(&(
+        "required_missing",
+        "axe.routines.chop-watch.jobs[0].description",
+        "job `chop-test` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form",
+    )));
+    assert!(rendered.contains(&(
+        "duplicate_chop_identity",
+        "axe.routines.chop-watch.jobs[1]",
+        "duplicate job identity `chop-test`",
+    )));
+    assert!(rendered
+        .iter()
+        .all(|(_, _, message)| !message.contains("lumberjack")
+            && !message.contains("chop identity")));
 }
 
 #[test]

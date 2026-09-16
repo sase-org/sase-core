@@ -286,7 +286,7 @@ fn validate_lumberjacks(
             request,
             "type_mismatch",
             path,
-            "lumberjacks must be an object keyed by name",
+            "routines must be an object keyed by name",
         ));
         return;
     };
@@ -297,7 +297,7 @@ fn validate_lumberjacks(
                 request,
                 "blank_value",
                 &lumberjack_path,
-                "lumberjack name must not be blank",
+                "routine name must not be blank",
             ));
         }
         let Some(config) = config.as_object() else {
@@ -305,7 +305,7 @@ fn validate_lumberjacks(
                 request,
                 "type_mismatch",
                 &lumberjack_path,
-                "lumberjack config must be an object",
+                "routine config must be an object",
             ));
             continue;
         };
@@ -329,7 +329,7 @@ fn validate_lumberjacks(
                     "required_missing",
                     &child_path(&lumberjack_path, "description"),
                     &format!(
-                        "lumberjack `{name}` requires a non-empty `description`"
+                        "routine `{name}` requires a non-empty `description`"
                     ),
                 ));
             }
@@ -408,12 +408,9 @@ fn validate_chops(
                             diagnostics.push(diagnostic(
                                 request,
                                 "required_missing",
-                                &child_path(
-                                    &child_path(path, name),
-                                    "description",
-                                ),
+                                &child_path(&chop_path, "description"),
                                 &format!(
-                                    "chop `{name}` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form"
+                                    "job `{name}` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form"
                                 ),
                             ));
                         }
@@ -434,7 +431,7 @@ fn validate_chops(
                                 request,
                                 "required_missing",
                                 &child_path(&chop_path, "name"),
-                                "list-form chop objects require a string `name`",
+                                "list-form job objects require a string `name`",
                             ));
                         }
                         validate_chop_config(
@@ -449,7 +446,7 @@ fn validate_chops(
                         request,
                         "type_mismatch",
                         &chop_path,
-                        "list-form chops must be strings or objects",
+                        "list-form jobs must be strings or objects",
                     )),
                 }
             }
@@ -462,7 +459,7 @@ fn validate_chops(
                         request,
                         "blank_value",
                         &chop_path,
-                        "chop identity must not be blank",
+                        "job identity must not be blank",
                     ));
                 }
                 let Some(config) = config.as_object() else {
@@ -470,7 +467,7 @@ fn validate_chops(
                         request,
                         "type_mismatch",
                         &chop_path,
-                        "map-form chop config must be an object",
+                        "map-form job config must be an object",
                     ));
                     continue;
                 };
@@ -487,7 +484,7 @@ fn validate_chops(
             request,
             "type_mismatch",
             path,
-            "chops must be a list or a map keyed by chop name",
+            "jobs must be a list or a map keyed by job name",
         )),
     }
 }
@@ -504,14 +501,14 @@ fn validate_identity(
             request,
             "blank_value",
             path,
-            "chop identity must not be blank",
+            "job identity must not be blank",
         ));
     } else if !identities.insert(name.to_string()) {
         diagnostics.push(diagnostic(
             request,
             "duplicate_chop_identity",
             path,
-            &format!("duplicate chop identity `{name}`"),
+            &format!("duplicate job identity `{name}`"),
         ));
     }
 }
@@ -530,7 +527,7 @@ fn validate_chop_config(
                 "agent_chop_removed",
                 &child_path(path, migration_key),
                 &format!(
-                    "`{migration_key}` agent chops are no longer supported; use a script that writes structured `proposed_launches`"
+                    "`{migration_key}` agent jobs are no longer supported; use a script that writes structured `proposed_launches`"
                 ),
             ));
         }
@@ -549,7 +546,7 @@ fn validate_chop_config(
                 "chop_identity_mismatch",
                 &child_path(path, "name"),
                 &format!(
-                    "map-form chop name `{actual}` does not match key `{expected}`"
+                    "map-form job name `{actual}` does not match key `{expected}`"
                 ),
             ));
         }
@@ -579,9 +576,7 @@ fn validate_chop_config(
                 request,
                 "required_missing",
                 &child_path(path, "description"),
-                &format!(
-                    "chop `{name}` requires a non-empty `description`; list-form string entries cannot carry one, so use the map form"
-                ),
+                &format!("job `{name}` requires a non-empty `description`"),
             ));
         }
         None => {}

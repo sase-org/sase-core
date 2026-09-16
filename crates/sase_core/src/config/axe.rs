@@ -59,7 +59,7 @@ impl AxeEntrySelectorWire {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.lumberjack.is_empty() {
             return Err(ConfigError::validation(
-                "lumberjack identity must not be empty",
+                "routine identity must not be empty",
             ));
         }
         match self.kind.as_str() {
@@ -70,10 +70,10 @@ impl AxeEntrySelectorWire {
                 Ok(())
             }
             "lumberjack" | "routine" => Err(ConfigError::validation(
-                "lumberjack selector must not include a chop identity",
+                "routine selector must not include a job identity",
             )),
             "chop" | "job" => Err(ConfigError::validation(
-                "chop selector requires a non-empty chop identity",
+                "job selector requires a non-empty job identity",
             )),
             other => Err(ConfigError::validation(format!(
                 "unknown AXE selector kind `{other}`"
@@ -294,9 +294,9 @@ pub fn plan_axe_entry_mutation(
             .base_selector
             .as_ref()
             .and_then(|selector| selector.chop.as_deref())
-            .unwrap_or("base chop");
+            .unwrap_or("base job");
         return Err(ConfigError::validation(format!(
-            "generated chop `{}` is not independently mutable; edit `{base}` instead",
+            "generated job `{}` is not independently mutable; edit `{base}` instead",
             request.selector.chop.as_deref().unwrap_or_default()
         )));
     }
@@ -409,7 +409,7 @@ fn mutate_target_contribution(
         .or_insert_with(|| Value::Object(Map::new()));
     if !lumberjack.is_object() {
         return Err(ConfigError::validation(format!(
-            "cannot edit lumberjack `{}` because its target contribution is not a mapping",
+            "cannot edit routine `{}` because its target contribution is not a mapping",
             selector.lumberjack
         )));
     }
@@ -433,7 +433,7 @@ fn mutate_target_contribution(
         }
         Some(_) => {
             return Err(ConfigError::validation(format!(
-                "cannot edit `{}` chops because the target contribution is neither a list nor a map",
+                "cannot edit `{}` jobs because the target contribution is neither a list nor a map",
                 selector.lumberjack
             )));
         }
@@ -670,11 +670,15 @@ fn compose_values(
         require_description_shape,
         provenance: dotted_provenance,
     };
-    diagnostics.extend(validate_axe_config(&final_request).map_err(
-        |error| {
+    let mut final_diagnostics =
+        validate_axe_config(&final_request).map_err(|error| {
             ConfigError::validation(format!("AXE validation failed: {error}"))
-        },
-    )?);
+        })?;
+    remap_diagnostics_to_effective_source_paths(
+        &mut final_diagnostics,
+        &provenance,
+    );
+    diagnostics.extend(final_diagnostics);
     dedupe_diagnostics(&mut diagnostics);
     Ok((merged, provenance, diagnostics))
 }
@@ -701,6 +705,39 @@ fn remap_diagnostics_to_source_paths(
         if let Some(source_path) = display_sources.get(path) {
             diagnostic.path = Some(source_path.clone());
         }
+    }
+}
+
+fn remap_diagnostics_to_effective_source_paths(
+    diagnostics: &mut [ConfigDiagnosticWire],
+    provenance: &ExactProvenance,
+) {
+    let display_sources = provenance
+        .iter()
+        .map(|(path, source)| {
+            (display_path(path), display_path(&source.key_path))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for diagnostic in diagnostics {
+        let Some(path) = diagnostic.path.as_ref() else {
+            continue;
+        };
+        let Some((normalized, source)) = display_sources
+            .iter()
+            .filter(|(normalized, _)| {
+                path.as_str() == normalized.as_str()
+                    || path.strip_prefix(normalized.as_str()).is_some_and(
+                        |suffix| {
+                            suffix.starts_with('.') || suffix.starts_with('[')
+                        },
+                    )
+            })
+            .max_by_key(|(normalized, _)| normalized.len())
+        else {
+            continue;
+        };
+        let suffix = &path[normalized.len()..];
+        diagnostic.path = Some(format!("{source}{suffix}"));
     }
 }
 
@@ -1190,9 +1227,7 @@ fn normalize_jobs(
                     diagnostics.push(ConfigDiagnosticWire {
                         severity: "error".to_string(),
                         code: "duplicate_chop_identity".to_string(),
-                        message: format!(
-                            "duplicate chop identity `{identity}`"
-                        ),
+                        message: format!("duplicate job identity `{identity}`"),
                         path: Some(display_path(&item_source)),
                         layer: Some(layer.to_string()),
                     });
@@ -1521,9 +1556,7 @@ fn detect_cross_layer_list_duplicates(
                     diagnostics.push(ConfigDiagnosticWire {
                         severity: "error".to_string(),
                         code: "duplicate_chop_identity".to_string(),
-                        message: format!(
-                            "duplicate chop identity `{identity}`"
-                        ),
+                        message: format!("duplicate job identity `{identity}`"),
                         path: Some(format!(
                         "axe.{routine_key}.{lumberjack}.{jobs_key}[{index}]"
                     )),

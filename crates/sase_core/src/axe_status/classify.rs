@@ -228,7 +228,7 @@ fn validate_request(
                 "duplicate_lumberjack",
                 format!("$.lumberjacks[{index}].name"),
                 format!(
-                    "lumberjack name `{}` appears more than once",
+                    "routine name `{}` appears more than once",
                     lumberjack.name
                 ),
             ));
@@ -307,28 +307,28 @@ fn validate_lumberjack(
     require_nonblank(
         &lumberjack.name,
         &format!("{path}.name"),
-        "lumberjack name",
+        "routine name",
     )?;
 
     if lumberjack.interval_seconds == Some(0) {
         return Err(AxeStatusError::new(
             "non_positive_interval",
             format!("{path}.interval_seconds"),
-            "lumberjack interval must be positive when present",
+            "routine interval must be positive when present",
         ));
     }
     if lumberjack.configured && lumberjack.interval_seconds.is_none() {
         return Err(AxeStatusError::new(
             "missing_interval",
             format!("{path}.interval_seconds"),
-            "configured lumberjack must have a positive interval",
+            "configured routine must have a positive interval",
         ));
     }
     for (chop_index, chop) in lumberjack.configured_chops.iter().enumerate() {
         require_nonblank(
             chop,
             &format!("{path}.configured_chops[{chop_index}]"),
-            "configured chop name",
+            "configured job name",
         )?;
     }
 
@@ -618,7 +618,7 @@ fn add_lumberjack_issues(
                 AxeStatusIssueSeverityWire::Warning,
                 &lumberjack.name,
                 format!(
-                    "Live unconfigured lumberjack `{}` is orphaned (PID {}).",
+                    "Live unconfigured routine `{}` is orphaned (PID {}).",
                     lumberjack.name,
                     lumberjack.recorded_pid.unwrap_or_default()
                 ),
@@ -633,7 +633,7 @@ fn add_lumberjack_issues(
                 AxeStatusIssueSeverityWire::Warning,
                 &lumberjack.name,
                 format!(
-                    "Lumberjack `{}` is live (PID {}) without a coherent orchestrator.",
+                    "Routine `{}` is live (PID {}) without a coherent orchestrator.",
                     lumberjack.name,
                     lumberjack.recorded_pid.unwrap_or_default()
                 ),
@@ -650,14 +650,14 @@ fn add_lumberjack_issues(
             AxeLumberjackStateWire::NotReporting => (
                 "lumberjack_not_reporting",
                 format!(
-                    "Configured lumberjack `{}` is not reporting status.",
+                    "Configured routine `{}` is not reporting status.",
                     lumberjack.name
                 ),
             ),
             AxeLumberjackStateWire::StaleProcess => (
                 "lumberjack_stale_process",
                 format!(
-                    "Configured lumberjack `{}` reports PID {}, but that process is not live.",
+                    "Configured routine `{}` reports PID {}, but that process is not live.",
                     lumberjack.name,
                     lumberjack.recorded_pid.unwrap_or_default()
                 ),
@@ -669,7 +669,7 @@ fn add_lumberjack_issues(
                     (
                         "lumberjack_stale_heartbeat",
                         format!(
-                            "Configured lumberjack `{}` has a stale heartbeat ({age}s; threshold {threshold}s).",
+                            "Configured routine `{}` has a stale heartbeat ({age}s; threshold {threshold}s).",
                             lumberjack.name
                         ),
                     )
@@ -677,7 +677,7 @@ fn add_lumberjack_issues(
                     (
                         "lumberjack_stale_heartbeat",
                         format!(
-                            "Configured lumberjack `{}` has not reported a heartbeat after {}s (threshold {threshold}s).",
+                            "Configured routine `{}` has not reported a heartbeat after {}s (threshold {threshold}s).",
                             lumberjack.name,
                             lumberjack.start_age_seconds.unwrap_or_default()
                         ),
@@ -687,7 +687,7 @@ fn add_lumberjack_issues(
             AxeLumberjackStateWire::Error => (
                 "lumberjack_error",
                 format!(
-                    "Configured lumberjack `{}` reports state `{}`.",
+                    "Configured routine `{}` reports state `{}`.",
                     lumberjack.name,
                     match lumberjack.reported_state {
                         Some(AxeLumberjackReportedStateWire::Stopped) =>

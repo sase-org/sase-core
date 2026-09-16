@@ -1267,6 +1267,58 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
 }
 
 #[test]
+fn axe_composition_remaps_required_diagnostics_to_authored_public_paths() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user", "path": "/tmp/sase.yml", "writable": true,
+            "value": {"axe": {"routines": {"chop-watch": {
+                "jobs": ["chop-test", "chop-test"]
+            }}}}
+        }
+    ]))
+    .unwrap();
+
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: true,
+        require_description_shape: false,
+        routine_job_contract: true,
+    })
+    .unwrap();
+    let rendered = result
+        .diagnostics
+        .iter()
+        .map(|item| {
+            (
+                item.code.as_str(),
+                item.path.as_deref().unwrap_or_default(),
+                item.message.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(rendered.contains(&(
+        "required_missing",
+        "axe.routines.chop-watch.description",
+        "routine `chop-watch` requires a non-empty `description`",
+    )));
+    assert!(rendered.contains(&(
+        "required_missing",
+        "axe.routines.chop-watch.jobs[0].description",
+        "job `chop-test` requires a non-empty `description`",
+    )));
+    assert!(rendered.contains(&(
+        "duplicate_chop_identity",
+        "axe.routines.chop-watch.jobs[1]",
+        "duplicate job identity `chop-test`",
+    )));
+    assert!(!rendered.iter().any(|(_, path, message)| {
+        path.starts_with("axe.lumberjacks")
+            || message.contains("lumberjack")
+            || message.contains("duplicate chop identity")
+    }));
+}
+
+#[test]
 fn axe_description_requirements_validate_only_the_merged_config() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
