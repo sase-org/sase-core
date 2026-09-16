@@ -9,6 +9,7 @@ use super::{
     LaunchUnitResultWire, WaitTargetWire,
 };
 use crate::agent_hold::AgentHoldBlockWire;
+use crate::hold_directive::format_hold_directive;
 use crate::queue_directive::{format_queue_directive, QueueFieldsWire};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -493,6 +494,10 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     }) {
         lines.push(directive);
     }
+    if let Some(directive) = agent.hold.as_ref().and_then(format_hold_directive)
+    {
+        lines.push(directive);
+    }
     if let Some(workspace) = agent.workspace_reference.as_deref() {
         if !workspace.is_empty() {
             lines.push(workspace.to_string());
@@ -658,6 +663,7 @@ mod tests {
                 wait_priority: None,
                 queue_weight: None,
                 queue_weight_explicit: false,
+                hold: None,
             }),
         }
     }
@@ -1223,6 +1229,7 @@ mod tests {
             wait_priority: None,
             queue_weight: None,
             queue_weight_explicit: false,
+            hold: None,
         });
         assert_eq!(dispatch_fingerprint("plan", "unit-1", &payload).len(), 64);
     }

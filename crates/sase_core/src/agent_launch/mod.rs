@@ -42,10 +42,15 @@ pub use proc_runtime::{
     PROC_PHASE_WAITING, XPROMPT_PROC_ORIGIN,
 };
 
+use crate::agent_identity::agent_name_in_hood;
 use crate::effort::split_model_effort;
 use crate::fenced_code::{
     fenced_block_ranges, language_from_info_string,
     scan_directive_owned_fences, CodeLanguage, CodeValue, CodeValueWire,
+};
+use crate::hold_directive::{
+    agent_holds_enabled, collect_hold_fields_with_flags, format_hold_directive,
+    HoldArgWire, HoldFieldsWire, HoldOccurrenceWire,
 };
 use crate::prompt_literals::inline_code_ranges;
 use crate::queue_directive::{
@@ -355,6 +360,8 @@ pub struct AgentUnitWire {
     /// unset so admission never treats leftover prompt text as routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<HoldFieldsWire>,
 }
 
 fn skip_if_false(value: &bool) -> bool {
@@ -520,6 +527,8 @@ pub struct ProcUnitWire {
     pub queue_weight: Option<f64>,
     #[serde(default, skip_serializing_if = "skip_if_false")]
     pub queue_weight_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<HoldFieldsWire>,
 }
 
 impl ProcUnitWire {
@@ -1196,6 +1205,9 @@ fn classify_typed_launch_unit(
     let mut finalizers = Vec::new();
     let mut wait_queue = QueueFieldsWire::default();
     let mut queue_occurrences = Vec::new();
+    let mut hold_occurrences = Vec::new();
+    let mut hold_fields: Option<HoldFieldsWire> = None;
+    let mut saw_repeat_directive = false;
     let mut proc_forbidden_directives = Vec::new();
 
     let scan = scan_directive_owned_fences(prompt);
@@ -1351,6 +1363,17 @@ fn classify_typed_launch_unit(
                 queue_occurrences
                     .push(queue_occurrence_from_directive(prompt, &directive));
             }
+            "hold" => {
+                if !agent_holds_enabled(enabled_feature_flags)
+                    && directive.is_bare
+                    && !directive.has_plus_suffix
+                {
+                    continue;
+                }
+                regions_to_remove.push((directive.start, directive.end));
+                hold_occurrences
+                    .push(hold_occurrence_from_directive(prompt, &directive));
+            }
             "id" => {
                 regions_to_remove.push((directive.start, directive.end));
                 if parsed_id.is_some() {
@@ -1468,6 +1491,7 @@ fn classify_typed_launch_unit(
             }
             "repeat" => {
                 regions_to_remove.push((directive.start, directive.end));
+                saw_repeat_directive = true;
             }
             _ => {}
         }
@@ -1489,6 +1513,22 @@ fn classify_typed_launch_unit(
         if let Some(fields) = collected.fields {
             wait_queue = fields;
         }
+    }
+
+    if !hold_occurrences.is_empty() {
+        let collected = collect_hold_fields_with_flags(
+            &hold_occurrences,
+            enabled_feature_flags,
+        );
+        for error in collected.errors {
+            diagnostics.push(typed_unit_diagnostic(
+                &error.code,
+                &error.message,
+                &logical_id,
+                error.source_span,
+            ));
+        }
+        hold_fields = collected.fields;
     }
 
     apply_parsed_identity(
@@ -1513,13 +1553,27 @@ fn classify_typed_launch_unit(
     if dispatch_target.is_some() {
         validate_dispatch_combinations(
             &logical_id,
-            proc_code.is_some(),
-            !raw_waits.is_empty(),
-            !queue_occurrences.is_empty(),
-            parsed_clan.is_some() || agent_clan.is_some(),
-            agent_family_parent.is_some(),
+            DispatchCombinationFacts {
+                is_proc: proc_code.is_some(),
+                has_waits: !raw_waits.is_empty(),
+                has_queue: !queue_occurrences.is_empty(),
+                has_hold: hold_fields.is_some(),
+                has_clan: parsed_clan.is_some() || agent_clan.is_some(),
+                has_family: agent_family_parent.is_some(),
+            },
             diagnostics,
         );
+    }
+
+    if hold_fields.is_some()
+        && (slot.launch_kind == "repeat" || saw_repeat_directive)
+    {
+        diagnostics.push(typed_unit_diagnostic(
+            "hold-with-repeat",
+            "%hold cannot be combined with %repeat; use `sase agent hold run` for repeated work under a hold.",
+            &logical_id,
+            None,
+        ));
     }
 
     let cleaned_prompt = strip_prompt_regions(prompt, &regions_to_remove)
@@ -1556,6 +1610,15 @@ fn classify_typed_launch_unit(
             ));
         }
         let shell_name = agent_identity.clone();
+        validate_hold_self(
+            hold_fields.as_ref(),
+            &logical_id,
+            shell_name.as_deref(),
+            agent_identity_explicit,
+            None,
+            None,
+            diagnostics,
+        );
         validate_proc_shell_name(
             shell_name.as_deref(),
             &logical_id,
@@ -1599,8 +1662,18 @@ fn classify_typed_launch_unit(
             wait_priority: wait_queue.priority,
             queue_weight: proc_queue_weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
+            hold: hold_fields.clone(),
         })
     } else {
+        validate_hold_self(
+            hold_fields.as_ref(),
+            &logical_id,
+            agent_identity.as_deref(),
+            agent_identity_explicit,
+            agent_family_parent.as_deref(),
+            agent_clan.as_deref(),
+            diagnostics,
+        );
         LaunchUnitPayloadWire::Agent(AgentUnitWire {
             prompt: cleaned_prompt,
             identity: agent_identity,
@@ -1629,6 +1702,7 @@ fn classify_typed_launch_unit(
             workspace_provider,
             workspace_reference,
             dispatch_target,
+            hold: hold_fields,
         })
     };
 
@@ -1791,6 +1865,74 @@ fn queue_occurrence_from_directive(
         source_span: [directive.start, directive.end],
         args,
         has_plus_suffix: directive.has_plus_suffix,
+    }
+}
+
+fn hold_occurrence_from_directive(
+    prompt: &str,
+    directive: &DirectiveOccurrence,
+) -> HoldOccurrenceWire {
+    let args = directive
+        .args
+        .iter()
+        .map(|arg| {
+            let (name, value_raw) = split_named_directive_arg(arg);
+            HoldArgWire {
+                name,
+                value: unquote_directive_arg_value(value_raw.trim()),
+            }
+        })
+        .filter(|arg| arg.name.is_some() || !arg.value.is_empty())
+        .collect();
+    HoldOccurrenceWire {
+        source: prompt[directive.start..directive.end].to_string(),
+        source_span: [directive.start, directive.end],
+        args,
+        has_plus_suffix: directive.has_plus_suffix,
+    }
+}
+
+fn validate_hold_self(
+    hold: Option<&HoldFieldsWire>,
+    logical_id: &str,
+    identity: Option<&str>,
+    identity_explicit: bool,
+    family: Option<&str>,
+    clan: Option<&str>,
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let Some(hold) = hold else {
+        return;
+    };
+    let mut own = BTreeSet::new();
+    if identity_explicit {
+        if let Some(identity) = identity {
+            own.insert(identity.to_string());
+            if let Ok(parsed) =
+                crate::agent_identity::parse_agent_family_name(identity)
+            {
+                own.insert(parsed.family_name);
+            }
+        }
+    }
+    if let Some(family) = family {
+        own.insert(family.to_string());
+    }
+    if let Some(clan) = clan {
+        own.insert(clan.to_string());
+    }
+    if own.is_empty() {
+        return;
+    }
+    if let Some(name) = hold.names.iter().find(|name| own.contains(*name)) {
+        diagnostics.push(typed_unit_diagnostic(
+            "hold-self",
+            &format!(
+                "%hold target {name:?} matches this launch unit's own identity, family, or clan."
+            ),
+            logical_id,
+            None,
+        ));
     }
 }
 
@@ -2687,6 +2829,130 @@ fn validate_typed_wait_cycles(
             return;
         }
     }
+    let mut graph_with_holds = graph;
+    add_hold_cycle_edges(raw_units, &index_by_id, &mut graph_with_holds);
+    let mut state = vec![0_u8; raw_units.len()];
+    for index in 0..raw_units.len() {
+        if state[index] == 0
+            && wait_cycle_visit(index, &graph_with_holds, &mut state).is_some()
+        {
+            diagnostics.push(typed_plan_diagnostic(
+                "hold-cycle",
+                "Typed launch holds and waits contain a cycle.",
+                None,
+            ));
+            return;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UnitHoldFacts {
+    identity: Option<String>,
+    family: Option<String>,
+    clan: Option<String>,
+    tribe: Option<String>,
+    workflow: Option<String>,
+}
+
+fn add_hold_cycle_edges(
+    raw_units: &[RawLaunchUnit],
+    index_by_id: &BTreeMap<String, usize>,
+    graph: &mut [Vec<usize>],
+) {
+    let facts: Vec<UnitHoldFacts> =
+        raw_units.iter().map(unit_hold_facts).collect();
+    for (holder_index, raw) in raw_units.iter().enumerate() {
+        let Some(hold) = unit_hold_fields(&raw.unit.payload) else {
+            continue;
+        };
+        let holder_facts = &facts[holder_index];
+        for (target_index, target_facts) in facts.iter().enumerate() {
+            if holder_index == target_index
+                || hold_kin_excluded(holder_facts, target_facts)
+            {
+                continue;
+            }
+            if hold_matches_unit(hold, target_facts) {
+                let holder_id = &raw.unit.logical_id;
+                if let Some(holder_graph_index) = index_by_id.get(holder_id) {
+                    graph[target_index].push(*holder_graph_index);
+                }
+            }
+        }
+    }
+}
+
+fn unit_hold_fields(
+    payload: &LaunchUnitPayloadWire,
+) -> Option<&HoldFieldsWire> {
+    match payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent.hold.as_ref(),
+        LaunchUnitPayloadWire::Proc(proc_unit) => proc_unit.hold.as_ref(),
+    }
+}
+
+fn unit_hold_facts(raw: &RawLaunchUnit) -> UnitHoldFacts {
+    match &raw.unit.payload {
+        LaunchUnitPayloadWire::Agent(agent) => {
+            let identity = agent.effective_identity();
+            let identity_ref = identity.as_deref();
+            let family = identity_ref
+                .and_then(|name| {
+                    crate::agent_identity::parse_agent_family_name(name).ok()
+                })
+                .map(|parsed| parsed.family_name);
+            UnitHoldFacts {
+                identity,
+                family,
+                clan: agent.clan.clone(),
+                tribe: agent.tribe.clone().or_else(|| agent.clan_tribe.clone()),
+                workflow: agent.workspace_reference.clone(),
+            }
+        }
+        LaunchUnitPayloadWire::Proc(proc_unit) => UnitHoldFacts {
+            identity: proc_unit.shell_name.clone(),
+            family: None,
+            clan: None,
+            tribe: None,
+            workflow: proc_unit.selected_project.clone(),
+        },
+    }
+}
+
+fn hold_matches_unit(hold: &HoldFieldsWire, target: &UnitHoldFacts) -> bool {
+    hold.names.iter().any(|name| {
+        target.identity.as_deref() == Some(name.as_str())
+            || target.family.as_deref() == Some(name.as_str())
+            || target.clan.as_deref() == Some(name.as_str())
+            || target.workflow.as_deref() == Some(name.as_str())
+    }) || hold
+        .tribes
+        .iter()
+        .any(|tribe| target.tribe.as_deref() == Some(tribe.as_str()))
+        || hold.hoods.iter().any(|hood| {
+            target.identity.as_deref().is_some_and(|name| {
+                agent_name_in_hood(name, hood).unwrap_or(false)
+            })
+        })
+}
+
+fn hold_kin_excluded(holder: &UnitHoldFacts, target: &UnitHoldFacts) -> bool {
+    if holder.identity.is_some() && holder.identity == target.identity {
+        return true;
+    }
+    if holder.clan.is_some() && holder.clan == target.clan {
+        return true;
+    }
+    match (holder.family.as_deref(), target.family.as_deref()) {
+        (Some(holder_family), Some(target_family)) => {
+            target_family == holder_family
+                || target_family
+                    .strip_prefix(holder_family)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        }
+        _ => false,
+    }
 }
 
 fn wait_cycle_visit(
@@ -2918,29 +3184,38 @@ fn parse_dispatch_target(
     Ok(target.to_string())
 }
 
-fn validate_dispatch_combinations(
-    logical_id: &str,
+#[derive(Debug, Clone, Copy)]
+struct DispatchCombinationFacts {
     is_proc: bool,
     has_waits: bool,
     has_queue: bool,
+    has_hold: bool,
     has_clan: bool,
     has_family: bool,
+}
+
+fn validate_dispatch_combinations(
+    logical_id: &str,
+    facts: DispatchCombinationFacts,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
     let mut forbidden = Vec::new();
-    if is_proc {
+    if facts.is_proc {
         forbidden.push("%proc");
     }
-    if has_waits {
+    if facts.has_waits {
         forbidden.push("%wait");
     }
-    if has_queue {
+    if facts.has_queue {
         forbidden.push("%queue");
     }
-    if has_clan {
+    if facts.has_hold {
+        forbidden.push("%hold");
+    }
+    if facts.has_clan {
         forbidden.push("%clan");
     }
-    if has_family {
+    if facts.has_family {
         forbidden.push("%id(..., family=...)");
     }
     if forbidden.is_empty() {
@@ -3030,7 +3305,7 @@ fn render_launch_approval_preview(
             .unwrap_or_default();
         match &unit.payload {
             LaunchUnitPayloadWire::Agent(agent) => lines.push(format!(
-                "{} agent identity={} model={} workspace={} machine={} waits={}{} prompt={:?}",
+                "{} agent identity={} model={} workspace={} machine={} waits={}{}{} prompt={:?}",
                 unit.logical_id,
                 agent
                     .effective_identity()
@@ -3041,10 +3316,11 @@ fn render_launch_approval_preview(
                 agent.dispatch_target.as_deref().unwrap_or("local"),
                 waits,
                 condition,
+                hold_preview(agent.hold.as_ref()),
                 agent.prompt
             )),
             LaunchUnitPayloadWire::Proc(proc_unit) => lines.push(format!(
-                "{} proc shell={} project={} workspace={}{} waits={}{} code={}:{} preview={:?}",
+                "{} proc shell={} project={} workspace={}{} waits={}{}{} code={}:{} preview={:?}",
                 unit.logical_id,
                 proc_unit.shell_name.as_deref().unwrap_or("auto"),
                 proc_unit.selected_project.as_deref().unwrap_or("none"),
@@ -3054,6 +3330,7 @@ fn render_launch_approval_preview(
                     .unwrap_or_default(),
                 waits,
                 condition,
+                hold_preview(proc_unit.hold.as_ref()),
                 proc_unit.code.language,
                 proc_unit.code.digest,
                 proc_unit.code.preview
@@ -3061,6 +3338,12 @@ fn render_launch_approval_preview(
         }
     }
     lines
+}
+
+fn hold_preview(hold: Option<&HoldFieldsWire>) -> String {
+    hold.and_then(format_hold_directive)
+        .map(|directive| format!(" hold={directive}"))
+        .unwrap_or_default()
 }
 
 fn proc_queue_preview(proc_unit: &ProcUnitWire) -> Option<String> {

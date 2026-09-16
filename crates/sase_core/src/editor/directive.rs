@@ -85,6 +85,28 @@ const FINAL_SUGGESTIONS: &[DirectiveSuggestedValue] =
             "Clear the configured finalizer selection for this launch",
     }];
 
+const HOLD_SELECTOR_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "pending",
+        documentation: "Freeze currently waiting or queued targets at arm time",
+    },
+    DirectiveSuggestedValue {
+        value: "future",
+        documentation: "Fence matching launches created after arm time",
+    },
+];
+
+const HOLD_SCOPE_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "project",
+        documentation: "Apply the hold within the selected project",
+    },
+    DirectiveSuggestedValue {
+        value: "host",
+        documentation: "Apply the hold across this host",
+    },
+];
+
 const WAIT_TIME_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "5m",
@@ -476,6 +498,41 @@ const QUEUE_BUDGET_KEYWORDS: &[DirectiveKeywordSpec] = &[
     },
 ];
 
+const HOLD_KEYWORDS: &[DirectiveKeywordSpec] = &[
+    DirectiveKeywordSpec {
+        name: "hood",
+        description: "Hold launches in this agent hood",
+        value_role: DirectiveValueRole::Hood,
+        repeatable: true,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "scope",
+        description: "Choose whether the hold applies to this project or host",
+        value_role: DirectiveValueRole::FreeText,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: HOLD_SCOPE_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "ttl",
+        description: "Maximum hold duration",
+        value_role: DirectiveValueRole::Duration,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: DURATION_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
+        name: "tribe",
+        description: "Hold launches assigned to this user-managed tribe",
+        value_role: DirectiveValueRole::Tribe,
+        repeatable: true,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+];
+
 const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
         name: "agent",
@@ -614,6 +671,20 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         dynamic_keyword_role: None,
     },
     QUEUE_DIRECTIVE_OFF,
+    DirectiveMetadata {
+        name: "hold",
+        alias: None,
+        description: "Hold selected pre-run agents until this launch settles",
+        argument_hint:
+            ":agent or (agent, pending, future, hood=, tribe=, ttl=, scope=)",
+        takes_argument: true,
+        allows_multiple: true,
+        syntax_forms: COLON_PAREN,
+        positional_role: Some(DirectiveValueRole::Agent),
+        positional_suggestions: HOLD_SELECTOR_SUGGESTIONS,
+        keywords: HOLD_KEYWORDS,
+        dynamic_keyword_role: None,
+    },
     DirectiveMetadata {
         name: "dispatch",
         alias: None,
@@ -1244,7 +1315,7 @@ fn keyword_candidate(
 pub(super) fn mixes_positional_and_keyword_clauses(
     metadata: &DirectiveMetadata,
 ) -> bool {
-    matches!(metadata.name, "wait" | "queue")
+    matches!(metadata.name, "wait" | "queue" | "hold")
 }
 
 pub(super) fn wait_queue_keyword_retired(
@@ -1803,6 +1874,7 @@ mod tests {
                 "clan",
                 "wait",
                 "queue",
+                "hold",
                 "dispatch",
                 "if",
                 "proc",
@@ -1897,6 +1969,54 @@ mod tests {
         assert!(!directive_is_hidden_from_name_completion_with_flags(
             "queue",
             &[]
+        ));
+
+        let hold = contract
+            .iter()
+            .find(|entry| entry.name == "hold")
+            .expect("hold contract");
+        assert_eq!(hold.alias, None);
+        assert_eq!(hold.feature_flag.as_deref(), Some("agent_holds"));
+        assert!(hold.allows_multiple);
+        assert_eq!(
+            hold.syntax_forms,
+            vec![
+                DirectiveSyntaxForm::Colon,
+                DirectiveSyntaxForm::Parenthesized
+            ]
+        );
+        assert_eq!(hold.positional_role, Some(DirectiveValueRole::Agent));
+        assert_eq!(
+            hold.positional_suggestions
+                .iter()
+                .map(|value| value.value.as_str())
+                .collect::<Vec<_>>(),
+            ["pending", "future"]
+        );
+        assert_eq!(
+            hold.keywords
+                .iter()
+                .map(|keyword| (keyword.name.as_str(), keyword.value_role))
+                .collect::<Vec<_>>(),
+            [
+                ("hood", DirectiveValueRole::Hood),
+                ("scope", DirectiveValueRole::FreeText),
+                ("ttl", DirectiveValueRole::Duration),
+                ("tribe", DirectiveValueRole::Tribe),
+            ]
+        );
+        assert!(hold
+            .keywords
+            .iter()
+            .find(|keyword| keyword.name == "hood")
+            .is_some_and(|keyword| keyword.repeatable));
+        assert!(directive_is_hidden_from_name_completion_with_flags(
+            "hold",
+            &[]
+        ));
+        assert!(!directive_is_hidden_from_name_completion_with_flags(
+            "hold",
+            &["agent_holds".to_string()]
         ));
         assert_eq!(
             wait.keywords

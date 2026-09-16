@@ -62,6 +62,7 @@ pub mod gate_followup;
 pub mod git_object_sharing;
 pub mod git_query;
 pub mod glossary;
+pub mod hold_directive;
 pub mod host_bridge;
 pub mod machine_hood;
 pub mod machine_setup;
@@ -1044,6 +1045,13 @@ pub use glossary::{
     GlossaryDiagnosticWire, GlossaryEntryWire, GlossaryError,
     GlossaryInputEntryWire, GlossarySegmentWire, GlossarySourceWire,
     GlossarySpanWire, GLOSSARY_WIRE_SCHEMA_VERSION,
+};
+pub use hold_directive::{
+    agent_holds_enabled, collect_hold_fields, collect_hold_fields_with_flags,
+    format_hold_directive, hold_directive_disabled_message,
+    hold_fields_to_selectors, HoldArgWire, HoldCollectResultWire,
+    HoldFieldsWire, HoldOccurrenceWire, HoldParseErrorWire, HoldScopeWire,
+    AGENT_HOLDS_FLAG,
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,

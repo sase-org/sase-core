@@ -469,6 +469,9 @@
 //! - `parse_queue_capacity(raw: str, enabled_feature_flags: list[str] | None = None) -> int`
 //! - `normalize_persisted_queue_capacity(queue_capacity: int | None, queue_capacity_explicit: bool, effective_weight: float, global_limit: float, capacity_budget: bool) -> dict`
 //! - `queue_directive_flag_key() -> str`
+//! - `collect_hold_fields(occurrences: list[dict], enabled_feature_flags: list[str] | None = None) -> dict`
+//! - `format_hold_directive(fields: dict) -> str | None`
+//! - `hold_fields_to_selectors(fields: dict, pending_artifact_dirs: list[str] | None = None) -> dict`
 //! - `runner_capacity_policy_schema_version() -> int`
 //! - `runner_capacity_snapshot(request: dict) -> dict`
 //! - `code_value_wire_schema_version() -> int`
@@ -1601,12 +1604,15 @@ use sase_core::wire::ChangeSpecWire;
 use sase_core::wire::{CommentWire, HookWire, MentorWire};
 use sase_core::CODE_VALUE_WIRE_SCHEMA_VERSION;
 use sase_core::{
+    collect_hold_fields_with_flags as core_collect_hold_fields_with_flags,
     collect_queue_fields_with_flags as core_collect_queue_fields_with_flags,
+    format_hold_directive as core_format_hold_directive,
     format_queue_directive as core_format_queue_directive,
+    hold_fields_to_selectors as core_hold_fields_to_selectors,
     normalize_persisted_queue_capacity as core_normalize_persisted_queue_capacity,
     parse_queue_capacity_with_flags as core_parse_queue_capacity_with_flags,
-    queue_directive_flag_key as core_queue_directive_flag_key, QueueFieldsWire,
-    QueueOccurrenceWire,
+    queue_directive_flag_key as core_queue_directive_flag_key, HoldFieldsWire,
+    HoldOccurrenceWire, QueueFieldsWire, QueueOccurrenceWire,
 };
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
@@ -16740,6 +16746,62 @@ fn py_format_queue_directive(
 }
 
 #[pyfunction]
+#[pyo3(name = "collect_hold_fields")]
+#[pyo3(signature = (occurrences, enabled_feature_flags = None))]
+fn py_collect_hold_fields<'py>(
+    py: Python<'py>,
+    occurrences: &Bound<'_, PyAny>,
+    enabled_feature_flags: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let occurrences: Vec<HoldOccurrenceWire> = serde_json::from_value(
+        py_to_json_value(occurrences)?,
+    )
+    .map_err(|err| {
+        PyValueError::new_err(format!("invalid hold occurrences: {err}"))
+    })?;
+    let flags = enabled_feature_flags.unwrap_or_default();
+    let result = core_collect_hold_fields_with_flags(&occurrences, &flags);
+    let value = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "format_hold_directive")]
+fn py_format_hold_directive(
+    fields: &Bound<'_, PyAny>,
+) -> PyResult<Option<String>> {
+    let fields: HoldFieldsWire =
+        serde_json::from_value(py_to_json_value(fields)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid hold fields: {err}"))
+        })?;
+    Ok(core_format_hold_directive(&fields))
+}
+
+#[pyfunction]
+#[pyo3(name = "hold_fields_to_selectors")]
+#[pyo3(signature = (fields, pending_artifact_dirs = None))]
+fn py_hold_fields_to_selectors<'py>(
+    py: Python<'py>,
+    fields: &Bound<'_, PyAny>,
+    pending_artifact_dirs: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let fields: HoldFieldsWire =
+        serde_json::from_value(py_to_json_value(fields)?).map_err(|err| {
+            PyValueError::new_err(format!("invalid hold fields: {err}"))
+        })?;
+    let pending_artifact_dirs = pending_artifact_dirs.unwrap_or_default();
+    let selectors =
+        core_hold_fields_to_selectors(&fields, &pending_artifact_dirs)
+            .map_err(|error| PyValueError::new_err(error.message))?;
+    let value = serde_json::to_value(&selectors).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(name = "parse_queue_capacity")]
 #[pyo3(signature = (raw, enabled_feature_flags = None))]
 fn py_parse_queue_capacity(
@@ -19388,6 +19450,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_directive_completion_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_collect_queue_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_format_queue_directive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_collect_hold_fields, m)?)?;
+    m.add_function(wrap_pyfunction!(py_format_hold_directive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_hold_fields_to_selectors, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_queue_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(py_queue_directive_flag_key, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -23384,6 +23449,82 @@ COMMITS:
             )
             .unwrap_err();
             assert!(error.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn hold_directive_bindings_collect_format_and_expand() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let occurrences_obj = json_value_to_py(
+                py,
+                &json!([
+                    {
+                        "source": "%hold:reviewer,planner",
+                        "source_span": [0, 22],
+                        "args": [{"value": "reviewer,planner"}],
+                        "has_plus_suffix": false
+                    },
+                    {
+                        "source": "%hold(pending, future, hood=sase-11l, ttl=5m, scope=host)",
+                        "source_span": [23, 84],
+                        "args": [
+                            {"value": "pending"},
+                            {"value": "future"},
+                            {"name": "hood", "value": "sase-11l"},
+                            {"name": "ttl", "value": "5m"},
+                            {"name": "scope", "value": "host"}
+                        ],
+                        "has_plus_suffix": false
+                    }
+                ]),
+            )
+            .unwrap();
+
+            let result = py_collect_hold_fields(
+                py,
+                occurrences_obj.bind(py),
+                Some(vec!["agent_holds".to_string()]),
+            )
+            .unwrap();
+            let result_value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result_value["errors"], json!([]));
+            assert_eq!(
+                result_value["fields"]["names"],
+                json!(["planner", "reviewer"])
+            );
+            assert_eq!(result_value["fields"]["pending"], json!(true));
+            assert_eq!(result_value["fields"]["future"], json!(true));
+            assert_eq!(result_value["fields"]["ttl_seconds"], json!(300));
+
+            let fields_obj =
+                json_value_to_py(py, &result_value["fields"]).unwrap();
+            let formatted =
+                py_format_hold_directive(fields_obj.bind(py)).unwrap();
+            assert_eq!(
+                formatted.as_deref(),
+                Some(
+                    "%hold(planner, reviewer, pending, future, hood=sase-11l, ttl=5m, scope=host)"
+                )
+            );
+
+            let selectors = py_hold_fields_to_selectors(
+                py,
+                fields_obj.bind(py),
+                Some(vec!["artifact/a".to_string(), "artifact/a".to_string()]),
+            )
+            .unwrap();
+            let selectors_value = py_to_json_value(selectors.bind(py)).unwrap();
+            assert_eq!(
+                selectors_value["names"],
+                json!(["planner", "reviewer"])
+            );
+            assert_eq!(
+                selectors_value["families"],
+                json!(["planner", "reviewer"])
+            );
+            assert_eq!(selectors_value["hoods"], json!(["sase-11l"]));
+            assert_eq!(selectors_value["artifact_dirs"], json!(["artifact/a"]));
         });
     }
 
@@ -31273,6 +31414,7 @@ MENTORS:
                     "clan",
                     "wait",
                     "queue",
+                    "hold",
                     "dispatch",
                     "if",
                     "proc",

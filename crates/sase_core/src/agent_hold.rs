@@ -778,7 +778,7 @@ fn normalize_family_vec(
     Ok(set.into_iter().collect())
 }
 
-fn normalize_hood_vec(
+pub(crate) fn normalize_hood_vec(
     label: &str,
     values: &[String],
 ) -> Result<Vec<String>, AgentHoldError> {

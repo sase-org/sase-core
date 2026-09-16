@@ -105,6 +105,7 @@ const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
 const QUEUE_CAPACITY_BUDGET_ENV: &str = "SASE_QUEUE_CAPACITY_BUDGET";
+const AGENT_HOLDS_ENV: &str = "SASE_AGENT_HOLDS";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerConfig {
@@ -136,6 +137,8 @@ struct ServerConfig {
     typed_launch_units: bool,
     /// Startup-resolved `queue_capacity_budget` sunset flag. Defaults on.
     queue_capacity_budget: bool,
+    /// Startup-resolved `agent_holds` beta flag. Defaults off.
+    agent_holds: bool,
 }
 
 impl Default for ServerConfig {
@@ -153,6 +156,7 @@ impl Default for ServerConfig {
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
             queue_capacity_budget: queue_capacity_budget_from_env(),
+            agent_holds: agent_holds_from_env(),
         }
     }
 }
@@ -499,6 +503,7 @@ impl XpromptLspServer {
                     &enabled_feature_flags(
                         config.typed_launch_units,
                         config.queue_capacity_budget,
+                        config.agent_holds,
                     ),
                     config.snippet_support,
                 ));
@@ -724,6 +729,7 @@ impl XpromptLspServer {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
                 config.queue_capacity_budget,
+                config.agent_holds,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -764,6 +770,7 @@ impl XpromptLspServer {
             enabled_feature_flags: enabled_feature_flags(
                 config.typed_launch_units,
                 config.queue_capacity_budget,
+                config.agent_holds,
             ),
             ..DirectiveCompletionInventories::default()
         };
@@ -898,6 +905,7 @@ impl XpromptLspServer {
             &enabled_feature_flags(
                 config.typed_launch_units,
                 config.queue_capacity_budget,
+                config.agent_holds,
             ),
         ) {
             return Some(lsp_hover(hover));
@@ -1508,6 +1516,7 @@ impl XpromptLspServer {
                     &enabled_feature_flags(
                         config.typed_launch_units,
                         config.queue_capacity_budget,
+                        config.agent_holds,
                     ),
                 )
             }
@@ -1986,6 +1995,7 @@ fn config_from_initialize(params: &InitializeParams) -> ServerConfig {
             .unwrap_or_else(typed_launch_units_from_env),
         queue_capacity_budget: queue_capacity_budget_from_initialize(params)
             .unwrap_or_else(queue_capacity_budget_from_env),
+        agent_holds: agent_holds_from_env(),
     }
 }
 
@@ -2025,6 +2035,14 @@ fn queue_capacity_budget_from_env() -> bool {
         .unwrap_or(true)
 }
 
+fn agent_holds_from_env() -> bool {
+    std::env::var(AGENT_HOLDS_ENV)
+        .ok()
+        .as_deref()
+        .map(env_flag_enabled)
+        .unwrap_or(false)
+}
+
 fn env_flag_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -2035,8 +2053,12 @@ fn env_flag_enabled(value: &str) -> bool {
 fn enabled_feature_flags(
     typed_launch_units: bool,
     queue_capacity_budget: bool,
+    agent_holds: bool,
 ) -> Vec<String> {
     let mut flags = Vec::new();
+    if agent_holds {
+        flags.push("agent_holds".to_string());
+    }
     if typed_launch_units {
         flags.push("typed_launch_units".to_string());
     }

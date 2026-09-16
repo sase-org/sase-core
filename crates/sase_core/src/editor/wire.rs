@@ -459,6 +459,7 @@ pub enum DirectiveValueRole {
     Clan,
     Family,
     Tribe,
+    Hood,
     Bead,
     PathOrExecutable,
     Bool,
@@ -646,6 +647,7 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 /// Feature flag that gates a directive, if any.
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
+        "hold" => Some("agent_holds"),
         "proc" => Some("typed_launch_units"),
         _ => None,
     }
@@ -691,6 +693,12 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
             "%queue(capacity=5)",
             "%q(p=20)",
             "%queue(capacity=5, priority=20)",
+        ],
+        "hold" => &[
+            "%hold:planner",
+            "%hold:@nightly",
+            "%hold(pending, future, ttl=90m)",
+            "%hold(hood=sase-11l, scope=host)",
         ],
         _ => &[],
     }
@@ -761,6 +769,25 @@ pub fn directive_snippet_recipes_with_flags(
                 ),
             ]
         }
+        "hold" => vec![
+            colon_recipe("hold", "agent"),
+            recipe(
+                "%hold(pending, future)",
+                "directive snippet",
+                "%hold(${1|pending,future|})$0",
+                "%hold($1)$0",
+                "%hold(pending)",
+                "Hold selected pre-run agents until this launch settles.",
+            ),
+            recipe(
+                "%hold(hood=..., ttl=...)",
+                "directive snippet",
+                "%hold(hood=${1:hood}, ttl=${2:90m})$0",
+                "%hold(hood=$1, ttl=$2)$0",
+                "%hold(hood=hood, ttl=90m)",
+                "Hold a hood with an explicit TTL.",
+            ),
+        ],
         "wait" => vec![
             colon_recipe("wait", "value"),
             recipe(
@@ -946,6 +973,7 @@ fn directive_metadata_supports_colon(name: &str) -> bool {
             | "clan"
             | "wait"
             | "queue"
+            | "hold"
             | "repeat"
             | "auto"
             | "final"
