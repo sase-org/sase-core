@@ -148,6 +148,8 @@ pub struct AgentHoldCandidateWire {
     #[serde(default)]
     pub agent_name: Option<String>,
     #[serde(default)]
+    pub proc_shell: Option<String>,
+    #[serde(default)]
     pub family: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
@@ -662,6 +664,10 @@ fn validate_and_normalize_candidate(
         "candidate.agent_name",
         candidate.agent_name.take(),
     )?;
+    candidate.proc_shell = normalize_optional_agent_name(
+        "candidate.proc_shell",
+        candidate.proc_shell.take(),
+    )?;
     candidate.family =
         normalize_optional_family("candidate.family", candidate.family.take())?;
     candidate.clan =
@@ -908,6 +914,14 @@ fn selector_matches(
     if let Some(agent_name) = &candidate.agent_name {
         push_exact_matches(&mut matches, "name", &selectors.names, agent_name);
     }
+    if let Some(proc_shell) = &candidate.proc_shell {
+        push_exact_matches(
+            &mut matches,
+            "proc_shell",
+            &selectors.names,
+            proc_shell,
+        );
+    }
     if let Some(family) = candidate_family(candidate).as_deref() {
         push_exact_matches(&mut matches, "family", &selectors.families, family);
     }
@@ -916,6 +930,16 @@ fn selector_matches(
     {
         for hood in &selectors.hoods {
             if agent_name_in_hood(agent_or_family, hood).unwrap_or(false) {
+                matches.push(AgentHoldSelectorMatchWire {
+                    kind: "hood".to_string(),
+                    value: hood.clone(),
+                });
+            }
+        }
+    }
+    if let Some(proc_shell) = &candidate.proc_shell {
+        for hood in &selectors.hoods {
+            if agent_name_in_hood(proc_shell, hood).unwrap_or(false) {
                 matches.push(AgentHoldSelectorMatchWire {
                     kind: "hood".to_string(),
                     value: hood.clone(),
@@ -1050,6 +1074,7 @@ mod tests {
             created_at: NOW + 5.0,
             artifact_dirs: vec!["artifacts/old".to_string()],
             agent_name: Some("target.agent--code".to_string()),
+            proc_shell: None,
             family: None,
             clan: Some("blocked-clan".to_string()),
             workflow: Some("wf".to_string()),
@@ -1377,6 +1402,44 @@ mod tests {
         record.selectors.hoods = vec!["fi".to_string()];
         hit.agent_name = Some("fi--code.f0--plan".to_string());
         assert!(hold_blocks_candidate(&record, &hit).unwrap().is_some());
+    }
+
+    #[test]
+    fn proc_shell_matches_name_and_hood_selectors_without_family_kin() {
+        let mut record = AgentHoldRecordWire {
+            schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
+            armer: armer("holder"),
+            scope: AgentHoldScopeWire::Host,
+            selectors: AgentHoldSelectorsWire {
+                names: vec!["build.check".to_string()],
+                hoods: vec!["build".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+            created_at: NOW,
+            expires_at: NOW + 60.0,
+        };
+        let mut target = candidate();
+        target.artifact_dirs.clear();
+        target.agent_name = None;
+        target.family = None;
+        target.clan = None;
+        target.workflow = None;
+        target.tribe = None;
+        target.proc_shell = Some("build.check".to_string());
+
+        let block = hold_blocks_candidate(&record, &target).unwrap().unwrap();
+        assert_eq!(
+            block
+                .matches
+                .iter()
+                .map(|m| m.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["proc_shell", "hood"]
+        );
+
+        record.selectors.names = vec!["other".to_string()];
+        record.selectors.hoods = vec!["other".to_string()];
+        assert!(hold_blocks_candidate(&record, &target).unwrap().is_none());
     }
 
     #[test]

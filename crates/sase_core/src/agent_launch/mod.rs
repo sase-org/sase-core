@@ -8,8 +8,9 @@ mod proc_runtime;
 pub use admission::{
     admission_unit_results, agent_unit_dispatch_prompt,
     agent_unit_dispatch_prompt_with_flags, dispatch_fingerprint,
-    next_admission_actions, reconcile_admission_journal, summarize_admission,
-    wait_target_key, LaunchAdmissionActionWire,
+    next_admission_actions, next_admission_actions_with_holds,
+    reconcile_admission_journal, summarize_admission, wait_target_key,
+    LaunchAdmissionActionWire, LaunchAdmissionHoldBlockWire,
     LaunchAdmissionJournalEntryWire, LaunchAdmissionSummaryWire,
     LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire,
     LaunchUnitPhaseWire, WaitedOutcomeWire,

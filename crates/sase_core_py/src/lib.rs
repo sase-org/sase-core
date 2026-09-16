@@ -184,6 +184,7 @@
 //! - `spawn_prepared_agent_process(prepared: dict, env: dict, claim_callback: Callable[[int], bool] | None = None) -> int`
 //! - `allocate_launch_timestamp_batch(count: int, base_timestamp: str, after_timestamp: str | None = None) -> list[str]`
 //! - `plan_agent_launch_fanout(prompt: str, launch_kind: str | None = None) -> dict`
+//! - `next_admission_actions(plan: dict, states: dict, wait_facts: list[dict], hold_blocks: list[dict] | None = None) -> list[dict]`
 //! - `bind_batch_predecessor_waits(prompt: str, predecessor: dict) -> dict`
 //! - `inline_code_ranges(text: str, masked_ranges: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]`
 //! - `model_shortcut_context(text: str, position: dict) -> dict | None`
@@ -733,7 +734,7 @@ use sase_core::agent_launch::{
     evaluate_launch_condition as core_evaluate_launch_condition,
     filter_conditional_launch_segments as core_filter_conditional_launch_segments,
     list_workspace_claims_from_content as core_list_workspace_claims_from_content,
-    next_admission_actions as core_next_admission_actions,
+    next_admission_actions_with_holds as core_next_admission_actions_with_holds,
     parse_proc_duration_seconds as core_parse_proc_duration_seconds,
     plan_agent_launch_fanout as core_plan_agent_launch_fanout,
     plan_claim_workspace_from_content as core_plan_claim_workspace_from_content,
@@ -752,11 +753,12 @@ use sase_core::agent_launch::{
     validate_standalone_proc_shell_name as core_validate_standalone_proc_shell_name,
     wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, AgentUnitWire, BatchPredecessorContextWire,
-    ConditionEvalRequestWire, LaunchAdmissionJournalEntryWire,
-    LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire, LaunchPlanWire,
-    LaunchUnitPayloadWire, LaunchUnitWire, OccupancyCallerWire,
-    OccupantRecordWire, ProcDispatchRequestWire, WaitTargetWire,
-    WaitedOutcomeWire, WorkspaceClaimRequestWire, WorkspaceClaimWire,
+    ConditionEvalRequestWire, LaunchAdmissionHoldBlockWire,
+    LaunchAdmissionJournalEntryWire, LaunchAdmissionUnitStateWire,
+    LaunchAdmissionWaitFactWire, LaunchPlanWire, LaunchUnitPayloadWire,
+    LaunchUnitWire, OccupancyCallerWire, OccupantRecordWire,
+    ProcDispatchRequestWire, WaitTargetWire, WaitedOutcomeWire,
+    WorkspaceClaimRequestWire, WorkspaceClaimWire,
     CONDITION_CONTEXT_SCHEMA_VERSION, CONDITION_DEFAULT_TIMEOUT_SECONDS,
     CONDITION_EVAL_WIRE_SCHEMA_VERSION, CONDITION_MAX_TIMEOUT_SECONDS,
     CONDITION_OUTPUT_CAP_BYTES, LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
@@ -16573,12 +16575,13 @@ fn py_reconcile_admission_journal<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "next_admission_actions")]
+#[pyo3(name = "next_admission_actions", signature = (plan, states, wait_facts, hold_blocks = None))]
 fn py_next_admission_actions<'py>(
     py: Python<'py>,
     plan: &Bound<'_, PyAny>,
     states: &Bound<'_, PyAny>,
     wait_facts: &Bound<'_, PyAny>,
+    hold_blocks: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let plan: LaunchPlanWire = serde_json::from_value(py_to_json_value(plan)?)
         .map_err(|err| {
@@ -16598,7 +16601,21 @@ fn py_next_admission_actions<'py>(
             "invalid launch admission wait facts: {err}"
         ))
     })?;
-    let actions = core_next_admission_actions(&plan, &states, &wait_facts);
+    let hold_blocks: Vec<LaunchAdmissionHoldBlockWire> = match hold_blocks {
+        Some(value) => serde_json::from_value(py_to_json_value(value)?)
+            .map_err(|err| {
+                PyValueError::new_err(format!(
+                    "invalid launch admission hold blocks: {err}"
+                ))
+            })?,
+        None => Vec::new(),
+    };
+    let actions = core_next_admission_actions_with_holds(
+        &plan,
+        &states,
+        &wait_facts,
+        &hold_blocks,
+    );
     let value = serde_json::to_value(&actions).map_err(|err| {
         PyValueError::new_err(format!("internal serialize error: {err}"))
     })?;
