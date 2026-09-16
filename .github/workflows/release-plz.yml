@@ -549,9 +549,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    # Merge reconcilers look up the current guarded release-plz PR at run time,
+    # so stale jobs carry no unique run output. Let the newest run evict a
+    # predecessor, including a hosted-runner queue entry that can otherwise own
+    # the branch-scoped group indefinitely.
     concurrency:
       group: release-plz-merge-${{ github.ref }}
-      cancel-in-progress: false
+      cancel-in-progress: true
     steps:
       - name: Resolve release PR
         id: resolve
