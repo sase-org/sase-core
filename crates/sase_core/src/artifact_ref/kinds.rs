@@ -138,6 +138,21 @@ fn registrations() -> Vec<KindRegistration> {
             diagnostic: None,
         },
         KindRegistration {
+            kind: "job",
+            display_name: "Job",
+            status: ArtifactRefKindStatusWire::Alias,
+            canonical: Some("chop"),
+            aliases: &[],
+            reserved: false,
+            argument_summary:
+                "job:<routine>/<job> (public alias of stored chop)",
+            offered_in_completion: true,
+            fragment_probe: ArtifactRefKindWire::Document {
+                role: "chop".to_string(),
+            },
+            diagnostic: None,
+        },
+        KindRegistration {
             kind: "commit",
             display_name: "Commit",
             status: ArtifactRefKindStatusWire::Alias,
@@ -313,12 +328,39 @@ mod tests {
     }
 
     #[test]
+    fn catalog_offers_public_job_alias_for_completion() {
+        let catalog = artifact_ref_kind_catalog();
+        let descriptor = catalog
+            .iter()
+            .find(|descriptor| descriptor.kind == "job")
+            .expect("missing job descriptor");
+        assert_eq!(descriptor.status, ArtifactRefKindStatusWire::Alias);
+        assert!(descriptor.offered_in_completion);
+        assert!(!descriptor.reserved);
+    }
+
+    #[test]
     fn commit_canonicalizes_to_stitch_without_a_diagnostic() {
         let resolved = canonical_artifact_ref_kind("commit");
         assert!(resolved.alias);
         assert_eq!(resolved.canonical, "stitch");
         assert_eq!(resolved.status, ArtifactRefKindStatusWire::Alias);
         assert!(resolved.diagnostic.is_none());
+    }
+
+    #[test]
+    fn job_canonicalizes_to_stored_chop_without_a_diagnostic() {
+        let resolved = canonical_artifact_ref_kind("job");
+        assert!(resolved.alias);
+        assert_eq!(resolved.canonical, "chop");
+        assert_eq!(resolved.status, ArtifactRefKindStatusWire::Alias);
+        assert!(resolved.diagnostic.is_none());
+
+        let parsed =
+            parse_artifact_ref_canonical("job:hooks/hook_checks").unwrap();
+        assert_eq!(parsed.reference.rendered, "chop:hooks/hook_checks");
+        assert_eq!(parsed.alias.as_deref(), Some("job"));
+        assert!(parsed.diagnostic.is_none());
     }
 
     #[test]
@@ -378,6 +420,7 @@ mod tests {
             "designs:guide.md#L12",
             "chat:202607/main.md#L12-L18",
             "commit:sase@0123456789abcdef0123456789abcdef01234567",
+            "job:hooks/hook_checks",
             "bug:sase#123",
             "file:default:52895d68931185056fd0e49f",
             "bead:sase-9z",

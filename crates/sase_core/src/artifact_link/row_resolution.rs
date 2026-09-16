@@ -306,6 +306,12 @@ mod tests {
             "plan"
         );
         assert_eq!(
+            parse_artifact_link_ref_parts("job:hooks/build")
+                .unwrap()
+                .kind,
+            "chop"
+        );
+        assert_eq!(
             parse_artifact_link_ref_parts("@plan:202608/a.md#why").unwrap(),
             ArtifactLinkRefPartsWire {
                 schema_version: ARTIFACT_ROW_RESOLUTION_WIRE_SCHEMA_VERSION,
@@ -478,7 +484,7 @@ mod tests {
             &candidates,
         )
         .is_none());
-        for kind in ["bug", "chat", "chop"] {
+        for kind in ["bug", "chat", "chop", "job"] {
             assert!(resolve_artifact_row_identity(
                 &query(kind, "anything", None),
                 &candidates,
