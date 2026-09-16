@@ -1000,6 +1000,12 @@ impl XpromptLspServer {
             self.artifact_ref_catalog(config.artifact_ref_catalog.as_deref());
         let glossary_catalog =
             self.glossary_catalog(config.glossary_catalog.as_deref());
+        let argument_entries =
+            if !self.catalog_cache.stale_or_missing(&config.catalog_key) {
+                self.catalog_cache.cached_entries(&config.catalog_key)
+            } else {
+                None
+            };
         let artifact_context = active_artifact_ref_context(
             &document,
             &config,
@@ -1016,6 +1022,7 @@ impl XpromptLspServer {
             &document,
             artifact_context,
             glossary_project.map(|project| project.catalog.as_ref()),
+            argument_entries.as_deref().map(Vec::as_slice),
         )
     }
 
@@ -7938,7 +7945,17 @@ mod tests {
                 .iter()
                 .map(|token_type| token_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["namespace", "string", "number", "type"]
+            vec![
+                "namespace",
+                "string",
+                "number",
+                "type",
+                "function",
+                "macro",
+                "parameter",
+                "operator",
+                "keyword"
+            ]
         );
         assert_eq!(
             options
@@ -7947,7 +7964,7 @@ mod tests {
                 .iter()
                 .map(|modifier| modifier.as_str())
                 .collect::<Vec<_>>(),
-            vec!["documentation"]
+            vec!["documentation", "deprecated"]
         );
         assert!(matches!(
             options.full,

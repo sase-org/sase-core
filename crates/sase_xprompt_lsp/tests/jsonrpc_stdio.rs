@@ -449,6 +449,129 @@ async fn stdio_jsonrpc_initialize_and_completion() {
 }
 
 #[tokio::test]
+async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    read_response_result(&mut client_reader, 1).await;
+
+    let uri = "file:///tmp/sase_prompt_semantic_tokens.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "#foo(path=\"a\", count=2, enabled=true)"
+                }
+            }
+        }),
+    )
+    .await;
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let semantic_result = read_response_result(&mut client_reader, 2).await;
+    let absolute =
+        absolute_semantic_tokens_from_value(&semantic_result["data"]);
+
+    assert!(absolute.contains(&(0, 5, 4, 6, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 9, 1, 7, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 10, 3, 1, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 21, 1, 2, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 32, 4, 8, 0)), "{absolute:?}");
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 2
+                },
+                "contentChanges": [{"text": "```\n#foo(path=\"a\")\n```"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let fenced_result = read_response_result(&mut client_reader, 3).await;
+    assert_eq!(fenced_result["data"], json!([]));
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response_result(&mut client_reader, 4).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn stdio_jsonrpc_unsupported_markdown_has_no_xprompt_behavior() {
     let temp = tempfile::tempdir().unwrap();
     let definition_path = temp.path().join("foo.md");
@@ -1425,4 +1548,46 @@ async fn read_message(reader: &mut tokio::io::DuplexStream) -> Value {
     let mut body = vec![0; length];
     reader.read_exact(&mut body).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+async fn read_response_result(
+    reader: &mut tokio::io::DuplexStream,
+    id: i64,
+) -> Value {
+    for _ in 0..16 {
+        let message = read_message(reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(id) {
+            return message["result"].clone();
+        }
+    }
+    panic!("missing response id {id}");
+}
+
+fn absolute_semantic_tokens_from_value(
+    data: &Value,
+) -> Vec<(u32, u32, u32, u32, u32)> {
+    let chunks = data.as_array().expect("semantic token data array");
+    assert_eq!(chunks.len() % 5, 0, "semantic token chunk length");
+    let mut line = 0u32;
+    let mut start = 0u32;
+    chunks
+        .chunks(5)
+        .map(|chunk| {
+            let delta_line = chunk[0].as_u64().unwrap() as u32;
+            let delta_start = chunk[1].as_u64().unwrap() as u32;
+            line += delta_line;
+            if delta_line == 0 {
+                start += delta_start;
+            } else {
+                start = delta_start;
+            }
+            (
+                line,
+                start,
+                chunk[2].as_u64().unwrap() as u32,
+                chunk[3].as_u64().unwrap() as u32,
+                chunk[4].as_u64().unwrap() as u32,
+            )
+        })
+        .collect()
 }

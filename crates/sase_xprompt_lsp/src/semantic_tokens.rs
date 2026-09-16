@@ -5,19 +5,27 @@ use lsp_types::{
     SemanticTokensLegend,
 };
 use sase_core::{
-    fenced_block_details, prompt_literal_zone_ranges, scan_artifact_refs,
+    editor_extract_xprompt_argument_spans,
+    editor_extract_xprompt_argument_spans_with_catalog, fenced_block_details,
+    prompt_literal_zone_ranges, scan_artifact_refs,
     scan_directive_owned_fences, ArtifactRefContextWire, ArtifactRefSpanWire,
-    CompiledGlossaryCatalog, DocumentSnapshot,
+    CompiledGlossaryCatalog, DocumentSnapshot, XpromptArgumentSpanRole,
+    XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
 
 const KIND_TOKEN_TYPE: u32 = 0;
 const PAYLOAD_TOKEN_TYPE: u32 = 1;
 const FRAGMENT_TOKEN_TYPE: u32 = 2;
 const GLOSSARY_TOKEN_TYPE: u32 = 3;
-const DOCUMENT_ROLE_MODIFIER: u32 = 1;
+const PARAMETER_TOKEN_TYPE: u32 = 6;
+const OPERATOR_TOKEN_TYPE: u32 = 7;
+const KEYWORD_TOKEN_TYPE: u32 = 8;
+const DOCUMENT_ROLE_MODIFIER: u32 = 1 << 0;
+const DEPRECATED_MODIFIER: u32 = 1 << 1;
 const ARTIFACT_PRIORITY: u8 = 0;
 const CODE_PRIORITY: u8 = 0;
 const GLOSSARY_PRIORITY: u8 = 1;
+const ARGUMENT_PRIORITY: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawSemanticToken {
@@ -35,8 +43,16 @@ pub(crate) fn legend() -> SemanticTokensLegend {
             SemanticTokenType::STRING,
             SemanticTokenType::NUMBER,
             SemanticTokenType::TYPE,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::MACRO,
+            SemanticTokenType::PARAMETER,
+            SemanticTokenType::OPERATOR,
+            SemanticTokenType::KEYWORD,
         ],
-        token_modifiers: vec![SemanticTokenModifier::DOCUMENTATION],
+        token_modifiers: vec![
+            SemanticTokenModifier::DOCUMENTATION,
+            SemanticTokenModifier::DEPRECATED,
+        ],
     }
 }
 
@@ -44,6 +60,7 @@ pub(crate) fn document_semantic_tokens(
     document: &DocumentSnapshot,
     artifact_context: Option<&ArtifactRefContextWire>,
     glossary_catalog: Option<&CompiledGlossaryCatalog>,
+    argument_entries: Option<&[XpromptAssistEntry]>,
 ) -> SemanticTokens {
     let mut raw_tokens = Vec::new();
     if let Some(context) = artifact_context {
@@ -53,6 +70,7 @@ pub(crate) fn document_semantic_tokens(
     if let Some(catalog) = glossary_catalog {
         raw_tokens.extend(raw_glossary_tokens(document, catalog));
     }
+    raw_tokens.extend(raw_xprompt_argument_tokens(document, argument_entries));
     encode_tokens(document, non_overlapping_tokens(raw_tokens))
 }
 
@@ -193,6 +211,50 @@ fn raw_glossary_tokens(
         .collect()
 }
 
+fn raw_xprompt_argument_tokens(
+    document: &DocumentSnapshot,
+    entries: Option<&[XpromptAssistEntry]>,
+) -> Vec<RawSemanticToken> {
+    let spans = if let Some(entries) = entries {
+        editor_extract_xprompt_argument_spans_with_catalog(document, entries)
+    } else {
+        editor_extract_xprompt_argument_spans(document)
+    };
+
+    spans
+        .into_iter()
+        .map(|span| RawSemanticToken {
+            byte_start: span.start,
+            byte_end: span.end,
+            token_type: argument_token_type(span.role),
+            token_modifiers_bitset: argument_token_modifiers(span.validity),
+            priority: ARGUMENT_PRIORITY,
+        })
+        .collect()
+}
+
+fn argument_token_type(role: XpromptArgumentSpanRole) -> u32 {
+    match role {
+        XpromptArgumentSpanRole::ArgDelimiter
+        | XpromptArgumentSpanRole::ArgAssign => OPERATOR_TOKEN_TYPE,
+        XpromptArgumentSpanRole::ArgKey => PARAMETER_TOKEN_TYPE,
+        XpromptArgumentSpanRole::ArgValue
+        | XpromptArgumentSpanRole::ArgValueString => PAYLOAD_TOKEN_TYPE,
+        XpromptArgumentSpanRole::ArgValueNumber => FRAGMENT_TOKEN_TYPE,
+        XpromptArgumentSpanRole::ArgValueBool => KEYWORD_TOKEN_TYPE,
+    }
+}
+
+fn argument_token_modifiers(validity: XpromptArgumentSpanValidity) -> u32 {
+    match validity {
+        XpromptArgumentSpanValidity::UnknownKey => DEPRECATED_MODIFIER,
+        XpromptArgumentSpanValidity::Ok
+        | XpromptArgumentSpanValidity::TypeMismatch
+        | XpromptArgumentSpanValidity::DuplicateKey
+        | XpromptArgumentSpanValidity::Unresolvable => 0,
+    }
+}
+
 fn push_raw_token(
     tokens: &mut Vec<RawSemanticToken>,
     span: ArtifactRefSpanWire,
@@ -304,7 +366,9 @@ fn span_len(token: &RawSemanticToken) -> usize {
 #[cfg(test)]
 mod tests {
     use lsp_types::SemanticToken;
-    use sase_core::{compile_glossary_catalog, GlossaryInputEntryWire};
+    use sase_core::{
+        compile_glossary_catalog, GlossaryInputEntryWire, XpromptInputHint,
+    };
 
     use super::*;
 
@@ -317,6 +381,171 @@ mod tests {
         }
     }
 
+    fn assist_entry(
+        name: &str,
+        inputs: Vec<XpromptInputHint>,
+    ) -> XpromptAssistEntry {
+        XpromptAssistEntry {
+            name: name.to_string(),
+            display_label: name.to_string(),
+            insertion: format!("#{name}"),
+            reference_prefix: "#".to_string(),
+            kind: None,
+            source_bucket: "test".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: None,
+            inputs,
+            content_preview: None,
+            description: None,
+            source_path_display: None,
+            definition_path: None,
+            definition_range: None,
+            is_skill: false,
+            skill_name: None,
+            memory_type: None,
+        }
+    }
+
+    fn input(name: &str, r#type: &str, position: u32) -> XpromptInputHint {
+        XpromptInputHint {
+            name: name.to_string(),
+            r#type: r#type.to_string(),
+            description: None,
+            required: true,
+            default_display: None,
+            position,
+            repeatable: false,
+        }
+    }
+
+    #[test]
+    fn legend_appends_argument_entries_without_reordering_existing_tokens() {
+        let legend = legend();
+
+        assert_eq!(
+            legend.token_types[..4]
+                .iter()
+                .map(|token_type| token_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["namespace", "string", "number", "type"]
+        );
+        assert_eq!(
+            legend
+                .token_types
+                .iter()
+                .map(|token_type| token_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "namespace",
+                "string",
+                "number",
+                "type",
+                "function",
+                "macro",
+                "parameter",
+                "operator",
+                "keyword"
+            ]
+        );
+    }
+
+    #[test]
+    fn argument_tokens_cover_structure_and_literal_values() {
+        let document =
+            DocumentSnapshot::new("#foo(path=\"a\", count=2, enabled=true)");
+        let tokens = document_semantic_tokens(&document, None, None, None);
+
+        assert_eq!(
+            absolute_semantic_tokens(&tokens.data),
+            vec![
+                (0, 4, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 5, 4, PARAMETER_TOKEN_TYPE, 0),
+                (0, 9, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 10, 3, PAYLOAD_TOKEN_TYPE, 0),
+                (0, 13, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 15, 5, PARAMETER_TOKEN_TYPE, 0),
+                (0, 20, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 21, 1, FRAGMENT_TOKEN_TYPE, 0),
+                (0, 22, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 24, 7, PARAMETER_TOKEN_TYPE, 0),
+                (0, 31, 1, OPERATOR_TOKEN_TYPE, 0),
+                (0, 32, 4, KEYWORD_TOKEN_TYPE, 0),
+                (0, 36, 1, OPERATOR_TOKEN_TYPE, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_argument_keys_get_deprecated_modifier_when_catalog_is_warm() {
+        let document = DocumentSnapshot::new("#foo(path=a, nope=b)");
+        let entries = vec![assist_entry("foo", vec![input("path", "path", 0)])];
+        let tokens =
+            document_semantic_tokens(&document, None, None, Some(&entries));
+
+        assert!(absolute_semantic_tokens(&tokens.data).contains(&(
+            0,
+            13,
+            4,
+            PARAMETER_TOKEN_TYPE,
+            DEPRECATED_MODIFIER,
+        )));
+    }
+
+    #[test]
+    fn argument_values_lose_to_nested_artifact_tokens() {
+        let document = DocumentSnapshot::new("#foo(path=@file:README.md)");
+        let tokens = document_semantic_tokens(
+            &document,
+            Some(&ArtifactRefContextWire::default()),
+            None,
+            None,
+        );
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(absolute.contains(&(0, 11, 4, KIND_TOKEN_TYPE, 0)));
+        assert!(absolute.contains(&(0, 16, 9, PAYLOAD_TOKEN_TYPE, 0)));
+        assert!(
+            !absolute.iter().any(|token| {
+                token.1 == 10 && token.2 == 15 && token.3 == PAYLOAD_TOKEN_TYPE
+            }),
+            "{absolute:?}"
+        );
+    }
+
+    #[test]
+    fn argument_tokens_skip_fenced_blocks() {
+        let document = DocumentSnapshot::new("```\n#foo(path=\"a\")\n```");
+        let tokens = document_semantic_tokens(&document, None, None, None);
+
+        assert!(tokens.data.is_empty());
+    }
+
+    fn absolute_semantic_tokens(
+        tokens: &[SemanticToken],
+    ) -> Vec<(u32, u32, u32, u32, u32)> {
+        let mut line = 0u32;
+        let mut start = 0u32;
+        tokens
+            .iter()
+            .map(|token| {
+                line += token.delta_line;
+                if token.delta_line == 0 {
+                    start += token.delta_start;
+                } else {
+                    start = token.delta_start;
+                }
+                (
+                    line,
+                    start,
+                    token.length,
+                    token.token_type,
+                    token.token_modifiers_bitset,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn glossary_tokens_split_wrapped_segments_and_keep_artifacts() {
         let document =
@@ -327,6 +556,7 @@ mod tests {
             &document,
             Some(&ArtifactRefContextWire::default()),
             Some(&catalog),
+            None,
         );
 
         assert_eq!(
