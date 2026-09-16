@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.36](https://github.com/sase-org/sase-core/compare/v0.34.35...v0.34.36) - 2026-09-16
+
+### Added
+
+- *(agent-tribes)* add context-aware identity resolution
+- *(axe)* add public status projection
+- *(agent-tribes)* add job alias core bindings
+- *(config)* share axe config normalization
+- *(agent-hold)* add durable hold store
+- add xprompt argument span grammar
+- *(agent-launch)* add static conditional segment filtering
+- plan double-colon argument edits
+- *(machine-setup)* add machine init review policy
+- *(disk)* add inventory classification contract
+
+### Fixed
+
+- *(editor)* preserve open argument spans
+- *(core)* enforce cleanup safety contracts
+
 ## [0.34.35](https://github.com/sase-org/sase-core/compare/v0.34.34...v0.34.35) - 2026-09-15
 
 ### Added
