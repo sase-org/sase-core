@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.36](https://github.com/sase-org/sase-core/compare/v0.34.35...v0.34.36) - 2026-09-16
+
+### Added
+
+- plan double-colon argument edits
+- *(machine-setup)* add machine init review policy
+- *(disk)* add inventory classification contract
+
+### Fixed
+
+- *(core)* enforce cleanup safety contracts
+
 ## [0.34.35](https://github.com/sase-org/sase-core/compare/v0.34.34...v0.34.35) - 2026-09-15
 
 ### Added
