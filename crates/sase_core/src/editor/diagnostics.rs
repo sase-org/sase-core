@@ -13,6 +13,7 @@ use crate::{
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
+use super::placeholder::extract_placeholder_spans;
 use super::token::DocumentSnapshot;
 use super::wire::{
     DiagnosticSeverity, EditorDiagnostic, XpromptAssistEntry, XpromptInputHint,
@@ -341,60 +342,95 @@ fn validate_call_args(
     call: &super::xprompt_args::ParsedXpromptCall,
     out: &mut Vec<EditorDiagnostic>,
 ) {
+    for validation in validate_xprompt_call_args(entry, call) {
+        push_diagnostic(
+            document,
+            out,
+            validation.span.0,
+            validation.span.1,
+            validation.code,
+            validation.message,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum XpromptArgValidationKind {
+    DuplicateKey,
+    UnknownKey,
+    TypeMismatch,
+    TooManyArgs,
+    MissingRequiredArg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct XpromptArgValidation {
+    pub(crate) kind: XpromptArgValidationKind,
+    pub(crate) arg_index: Option<usize>,
+    pub(crate) span: (usize, usize),
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+pub(crate) fn validate_xprompt_call_args(
+    entry: &XpromptAssistEntry,
+    call: &super::xprompt_args::ParsedXpromptCall,
+) -> Vec<XpromptArgValidation> {
+    let mut out = Vec::new();
     let mut supplied_inputs = HashSet::new();
     let mut seen_named_args = HashSet::new();
     let mut positional_index = 0usize;
 
-    for arg in &call.args {
+    for (arg_index, arg) in call.args.iter().enumerate() {
         if let Some(name) = &arg.name {
             if !seen_named_args.insert(name.value.clone()) {
-                push_diagnostic(
-                    document,
-                    out,
-                    name.span.0,
-                    name.span.1,
-                    "duplicate_xprompt_arg",
-                    format!("Duplicate xprompt argument `{}`", name.value),
-                );
+                out.push(XpromptArgValidation {
+                    kind: XpromptArgValidationKind::DuplicateKey,
+                    arg_index: Some(arg_index),
+                    span: name.span,
+                    code: "duplicate_xprompt_arg",
+                    message: format!(
+                        "Duplicate xprompt argument `{}`",
+                        name.value
+                    ),
+                });
                 continue;
             }
             let Some(input) =
                 entry.inputs.iter().find(|input| input.name == name.value)
             else {
-                push_diagnostic(
-                    document,
-                    out,
-                    name.span.0,
-                    name.span.1,
-                    "unknown_xprompt_arg",
-                    format!(
+                out.push(XpromptArgValidation {
+                    kind: XpromptArgValidationKind::UnknownKey,
+                    arg_index: Some(arg_index),
+                    span: name.span,
+                    code: "unknown_xprompt_arg",
+                    message: format!(
                         "Unknown argument `{}` for xprompt `{}`",
                         name.value, entry.name
                     ),
-                );
+                });
                 continue;
             };
             supplied_inputs.insert(input.name.clone());
-            validate_type(document, entry, input, arg, out);
+            validate_type(entry, input, arg_index, arg, &mut out);
         } else {
             let Some(input) = input_for_position(entry, positional_index)
             else {
-                push_diagnostic(
-                    document,
-                    out,
-                    arg.value_span.0,
-                    arg.value_span.1,
-                    "too_many_args",
-                    format!(
+                out.push(XpromptArgValidation {
+                    kind: XpromptArgValidationKind::TooManyArgs,
+                    arg_index: Some(arg_index),
+                    span: arg.value_span,
+                    code: "too_many_args",
+                    message: format!(
                         "Too many positional arguments for `{}`",
                         entry.name
                     ),
-                );
+                });
                 positional_index += 1;
                 continue;
             };
             supplied_inputs.insert(input.name.clone());
-            validate_type(document, entry, input, arg, out);
+            validate_type(entry, input, arg_index, arg, &mut out);
             positional_index += 1;
         }
     }
@@ -403,44 +439,46 @@ fn validate_call_args(
         if supplied_inputs.contains(&input.name) {
             continue;
         }
-        push_diagnostic(
-            document,
-            out,
-            call.name_span.0,
-            call.name_span.1,
-            "missing_required_arg",
-            format!(
+        out.push(XpromptArgValidation {
+            kind: XpromptArgValidationKind::MissingRequiredArg,
+            arg_index: None,
+            span: call.name_span,
+            code: "missing_required_arg",
+            message: format!(
                 "Missing required argument `{}` for xprompt `{}`",
                 input.name, entry.name
             ),
-        );
+        });
     }
+    out
 }
 
 fn validate_type(
-    document: &DocumentSnapshot,
     entry: &XpromptAssistEntry,
     input: &XpromptInputHint,
+    arg_index: usize,
     arg: &ParsedXpromptArg,
-    out: &mut Vec<EditorDiagnostic>,
+    out: &mut Vec<XpromptArgValidation>,
 ) {
     if arg.value == "null" || value_matches_input_type(&arg.value, input) {
         return;
     }
-    push_diagnostic(
-        document,
-        out,
-        arg.value_span.0,
-        arg.value_span.1,
-        "invalid_xprompt_arg_type",
-        format!(
+    out.push(XpromptArgValidation {
+        kind: XpromptArgValidationKind::TypeMismatch,
+        arg_index: Some(arg_index),
+        span: arg.value_span,
+        code: "invalid_xprompt_arg_type",
+        message: format!(
             "Argument `{}` for xprompt `{}` expects {}",
             input.name, entry.name, input.r#type
         ),
-    );
+    });
 }
 
 fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
+    if xprompt_arg_value_unresolvable(value) {
+        return true;
+    }
     match input.r#type.as_str() {
         "word" | "agent" => {
             !value.is_empty() && !value.chars().any(char::is_whitespace)
@@ -456,6 +494,17 @@ fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
         ),
         _ => true,
     }
+}
+
+pub(crate) fn xprompt_arg_value_unresolvable(value: &str) -> bool {
+    value.contains("{{")
+        || value.contains("{%")
+        || value.contains("{#")
+        || value.contains("$(")
+        || !scan_artifact_refs(value).is_empty()
+        || extract_placeholder_spans(&DocumentSnapshot::new(value))
+            .iter()
+            .any(|span| span.raw)
 }
 
 fn input_for_position(
@@ -852,6 +901,26 @@ mod tests {
                 memory_type: None,
             },
             XpromptAssistEntry {
+                name: "pr".to_string(),
+                display_label: "pr".to_string(),
+                insertion: "#pr".to_string(),
+                reference_prefix: "#".to_string(),
+                kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: vec![input("bug_id", "int", true, 0)],
+                content_preview: None,
+                description: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+                is_skill: false,
+                skill_name: None,
+                memory_type: None,
+            },
+            XpromptAssistEntry {
                 name: "ns/foo".to_string(),
                 display_label: "ns/foo".to_string(),
                 insertion: "#ns/foo".to_string(),
@@ -1219,6 +1288,23 @@ mod tests {
             diagnostic_count(&diagnostics, "conflicting_xprompt_arg"),
             0
         );
+    }
+
+    #[test]
+    fn unresolvable_values_do_not_report_type_mismatches() {
+        for text in [
+            "#pr(bug_id={{ number }})",
+            "#pr(bug_id=<bug id>)",
+            "#pr(bug_id=@bead:sase-123)",
+            "#pr(bug_id=$(cat bug-id))",
+        ] {
+            let diagnostics = diagnostics_for(text);
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                0,
+                "{text}: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]

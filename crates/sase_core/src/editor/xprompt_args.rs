@@ -322,7 +322,7 @@ fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut token_start = start;
     let mut saw_separator = false;
-    let mut scan = ArgScanner::default();
+    let mut scan = ArgClauseScanner::default();
     let mut i = start;
     while i < end {
         if scan.is_top_level() && text.as_bytes().get(i..i + 2) == Some(b"[[") {
@@ -334,7 +334,7 @@ fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
                 None => break,
             }
         }
-        scan.consume_quote(text, i);
+        scan.consume(text, i);
         if text.as_bytes()[i] == b',' && scan.is_top_level() {
             let trimmed = trim_span(text, token_start, i);
             spans.push(trimmed);
@@ -351,7 +351,7 @@ fn split_commas(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
 }
 
 fn find_top_level_equal(text: &str, start: usize, end: usize) -> Option<usize> {
-    let mut scan = ArgScanner::default();
+    let mut scan = ArgClauseScanner::default();
     let mut i = start;
     while i < end {
         if scan.is_top_level() && text.as_bytes().get(i..i + 2) == Some(b"[[") {
@@ -363,7 +363,7 @@ fn find_top_level_equal(text: &str, start: usize, end: usize) -> Option<usize> {
                 None => break,
             }
         }
-        scan.consume_quote(text, i);
+        scan.consume(text, i);
         if text.as_bytes()[i] == b'=' && scan.is_top_level() {
             return Some(i);
         }
@@ -379,7 +379,10 @@ pub(crate) fn find_matching_bracket_for_args(
     find_matching_delimiter_for_args(text, open_idx, b'[', b']')
 }
 
-fn find_matching_paren_for_args(text: &str, open_idx: usize) -> Option<usize> {
+pub(crate) fn find_matching_paren_for_args(
+    text: &str,
+    open_idx: usize,
+) -> Option<usize> {
     find_matching_delimiter_for_args(text, open_idx, b'(', b')')
 }
 
@@ -437,6 +440,48 @@ impl ArgScanner {
         match (self.quote, bytes[idx]) {
             (None, b'"' | b'\'') => self.quote = Some(bytes[idx]),
             (Some(quote), ch) if ch == quote => self.quote = None,
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct ArgClauseScanner {
+    quote: Option<u8>,
+    paren_depth: usize,
+    bracket_depth: usize,
+    brace_depth: usize,
+}
+
+impl ArgClauseScanner {
+    fn is_top_level(&self) -> bool {
+        self.quote.is_none()
+            && self.paren_depth == 0
+            && self.bracket_depth == 0
+            && self.brace_depth == 0
+    }
+
+    fn consume(&mut self, text: &str, idx: usize) {
+        let bytes = text.as_bytes();
+        match (self.quote, bytes[idx]) {
+            (None, b'"' | b'\'') => {
+                self.quote = Some(bytes[idx]);
+                return;
+            }
+            (Some(quote), ch) if ch == quote => {
+                self.quote = None;
+                return;
+            }
+            (Some(_), _) => return,
+            _ => {}
+        }
+        match bytes[idx] {
+            b'(' => self.paren_depth += 1,
+            b')' => self.paren_depth = self.paren_depth.saturating_sub(1),
+            b'[' => self.bracket_depth += 1,
+            b']' => self.bracket_depth = self.bracket_depth.saturating_sub(1),
+            b'{' => self.brace_depth += 1,
+            b'}' => self.brace_depth = self.brace_depth.saturating_sub(1),
             _ => {}
         }
     }

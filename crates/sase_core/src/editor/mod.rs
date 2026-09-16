@@ -1,3 +1,4 @@
+pub mod argument_spans;
 pub mod argument_syntax_edit;
 pub mod at_reference;
 pub mod completion;
@@ -15,6 +16,9 @@ pub mod token;
 pub mod wire;
 mod xprompt_args;
 
+pub use argument_spans::{
+    extract_xprompt_argument_spans, extract_xprompt_argument_spans_with_catalog,
+};
 pub use argument_syntax_edit::{
     plan_argument_colon_to_parentheses_edit,
     plan_argument_double_colon_to_parentheses_edit,
@@ -121,8 +125,10 @@ pub use wire::{
     FinalizerCatalogRequest, FinalizerCatalogResponse, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
     VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
-    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger, XpromptAssistEntry,
-    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
+    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger,
+    XpromptArgumentSource, XpromptArgumentSpan, XpromptArgumentSpanRole,
+    XpromptArgumentSpanValidity, XpromptAssistEntry, XpromptInputHint,
+    AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
     FINALIZER_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{

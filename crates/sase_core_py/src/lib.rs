@@ -441,6 +441,7 @@
 //! - `placeholder_completion(text: str, line: int, character: int, common:
 //!   Sequence[str] | None = None) -> dict | None`
 //! - `placeholder_spans(text: str) -> list[dict]`
+//! - `xprompt_argument_spans(text: str, entries: list[dict] | None = None) -> list[dict]`
 //! - `raw_placeholder_fields(text: str, context_width: int) -> list[dict]`
 //! - `substitute_raw_placeholders(text: str, values: dict[str, str]) -> str`
 //! - `placeholder_input_names(texts: list[str]) -> list[str]`
@@ -12408,6 +12409,37 @@ fn py_placeholder_spans(py: Python<'_>, text: &str) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+/// Return xprompt and directive argument spans as UTF-8 byte offsets.
+#[pyfunction]
+#[pyo3(name = "xprompt_argument_spans")]
+#[pyo3(signature = (text, entries = None))]
+fn py_xprompt_argument_spans(
+    py: Python<'_>,
+    text: &str,
+    entries: Option<Bound<'_, PyList>>,
+) -> PyResult<PyObject> {
+    let document = sase_core::DocumentSnapshot::new(text);
+    let spans = if let Some(entries) = entries {
+        let entries = serde_json::from_value::<Vec<sase_core::XpromptAssistEntry>>(
+            py_to_json_value(entries.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "entries is not a valid list of XpromptAssistEntry dicts: {error}"
+            ))
+        })?;
+        sase_core::editor_extract_xprompt_argument_spans_with_catalog(
+            &document, &entries,
+        )
+    } else {
+        sase_core::editor_extract_xprompt_argument_spans(&document)
+    };
+    let value = serde_json::to_value(&spans).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Return ordered summaries for the prompt's unique raw placeholders.
 #[pyfunction]
 #[pyo3(name = "raw_placeholder_fields")]
@@ -18901,6 +18933,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fuzzy_match, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(py_xprompt_argument_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_substitute_raw_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_input_names, m)?)?;

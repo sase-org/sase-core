@@ -381,6 +381,49 @@ pub struct XpromptAssistEntry {
     pub memory_type: Option<MemoryTierWire>,
 }
 
+/// Prompt surface that owns an argument span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XpromptArgumentSource {
+    Xprompt,
+    Directive,
+}
+
+/// Frontend-neutral role for one xprompt or directive argument span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XpromptArgumentSpanRole {
+    ArgDelimiter,
+    ArgKey,
+    ArgAssign,
+    ArgValue,
+    ArgValueString,
+    ArgValueNumber,
+    ArgValueBool,
+}
+
+/// Catalog-aware validity classification for an argument span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum XpromptArgumentSpanValidity {
+    Ok,
+    UnknownKey,
+    TypeMismatch,
+    DuplicateKey,
+    Unresolvable,
+}
+
+/// Byte-addressed argument span shared by editor frontends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpromptArgumentSpan {
+    pub start: usize,
+    pub end: usize,
+    pub role: XpromptArgumentSpanRole,
+    pub validity: XpromptArgumentSpanValidity,
+    pub source: XpromptArgumentSource,
+    pub call_name: String,
+}
+
 /// Allowed surface syntax for one directive. Classifiers must not advertise
 /// keywords in a form the runtime treats as positional-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
