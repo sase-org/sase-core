@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.37](https://github.com/sase-org/sase-core/compare/v0.34.36...v0.34.37) - 2026-09-16
+
+### Added
+
+- *(runner-capacity)* apply agent hold barriers
+
 ## [0.34.36](https://github.com/sase-org/sase-core/compare/v0.34.35...v0.34.36) - 2026-09-16
 
 ### Added
