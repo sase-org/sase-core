@@ -81,6 +81,7 @@ pub mod procs;
 pub mod project_spec;
 pub mod prompt_archive;
 pub mod prompt_artifact;
+pub mod prompt_history_filter;
 pub mod prompt_literals;
 mod prompt_rewrite;
 pub mod prompt_stash;
@@ -1246,6 +1247,14 @@ pub use prompt_archive::{
     prompt_archive_inventory, PromptArchiveDocumentWire,
     PromptArchiveInventoryRequestWire, PromptArchiveInventoryWire,
     PROMPT_ARCHIVE_INVENTORY_WIRE_SCHEMA_VERSION,
+};
+pub use prompt_history_filter::{
+    build_prompt_history_seed, compile_prompt_history_query,
+    encode_prompt_history_literal, match_prompt_history_rows,
+    CompiledPromptHistoryQueryWire, PromptHistoryMatchResultWire,
+    PromptHistoryProjectIdentityWire, PromptHistoryRowFactsWire,
+    PromptHistorySeedRequestWire, PromptHistorySeedWire,
+    PROMPT_HISTORY_FILTER_WIRE_SCHEMA_VERSION,
 };
 pub use prompt_literals::inline_code_ranges;
 pub use prompt_stash::{

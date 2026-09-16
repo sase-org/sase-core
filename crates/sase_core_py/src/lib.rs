@@ -92,6 +92,10 @@
 //! - `apply_project_aliases_update(content: str, aliases: list[str]) -> str`
 //! - `apply_project_name_update(content: str, name: str | None) -> str`
 //! - `list_project_records(projects_root: str, include_states: list[str], include_home: bool = False, projects_only: bool = False) -> list[dict]`
+//! - `compile_prompt_history_query(raw_query: str, catalog: list[dict]) -> dict`
+//! - `encode_prompt_history_literal(text: str) -> str`
+//! - `build_prompt_history_seed(request: dict, catalog: list[dict]) -> dict`
+//! - `match_prompt_history_rows(query: dict, rows: list[dict]) -> dict`
 //! - `read_notifications_snapshot(path: str, include_dismissed: bool, expire_due_snoozes: bool = False) -> dict`
 //! - `read_current_notifications_snapshot(path: str, include_dismissed: bool) -> dict`
 //! - `apply_notification_state_update(path: str, update: dict) -> dict`
@@ -1440,6 +1444,14 @@ use sase_core::prompt_artifact::{
     rewrite_prompt_artifact_links as core_rewrite_prompt_artifact_links,
     select_manifest_records as core_select_prompt_artifact_manifest_records,
     PromptArtifactRecord, PROMPT_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+};
+use sase_core::prompt_history_filter::{
+    build_prompt_history_seed as core_build_prompt_history_seed,
+    compile_prompt_history_query as core_compile_prompt_history_query,
+    encode_prompt_history_literal as core_encode_prompt_history_literal,
+    match_prompt_history_rows as core_match_prompt_history_rows,
+    CompiledPromptHistoryQueryWire, PromptHistoryProjectIdentityWire,
+    PromptHistoryRowFactsWire, PromptHistorySeedRequestWire,
 };
 use sase_core::prompt_stash::{
     append_prompt_stash as core_append_prompt_stash,
@@ -5451,6 +5463,89 @@ fn py_list_project_records<'py>(
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+// --- Prompt-history project filter bindings -------------------------------
+
+fn prompt_history_catalog_from_py(
+    catalog: &Bound<'_, PyList>,
+) -> PyResult<Vec<PromptHistoryProjectIdentityWire>> {
+    let value = py_to_json_value(catalog.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "catalog is not a valid list of project identity dicts: {e}"
+        ))
+    })
+}
+
+/// Compile one Ctrl+K prompt-history filter string into a `project:`
+/// constraint plus a literal text substring, resolved against *catalog*.
+#[pyfunction]
+#[pyo3(name = "compile_prompt_history_query")]
+fn py_compile_prompt_history_query<'py>(
+    py: Python<'py>,
+    raw_query: &str,
+    catalog: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let catalog = prompt_history_catalog_from_py(catalog)?;
+    let compiled = core_compile_prompt_history_query(raw_query, &catalog);
+    serialize_to_py(py, &compiled)
+}
+
+/// Encode arbitrary literal text so it always round-trips through
+/// `compile_prompt_history_query` as an unscoped substring, even when it
+/// starts with a `project:`-lookalike prefix.
+#[pyfunction]
+#[pyo3(name = "encode_prompt_history_literal")]
+fn py_encode_prompt_history_literal(text: &str) -> String {
+    core_encode_prompt_history_literal(text)
+}
+
+/// Build the initial Ctrl+K history query from the recognized leading
+/// workspace reference (if any) and the draft's remaining text.
+#[pyfunction]
+#[pyo3(name = "build_prompt_history_seed")]
+fn py_build_prompt_history_seed<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    catalog: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let request_value = py_to_json_value(request.as_any())?;
+    let request: PromptHistorySeedRequestWire =
+        serde_json::from_value(request_value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid PromptHistorySeedRequestWire dict: {e}"
+            ))
+        })?;
+    let catalog = prompt_history_catalog_from_py(catalog)?;
+    let seed = core_build_prompt_history_seed(&request, &catalog);
+    serialize_to_py(py, &seed)
+}
+
+/// Batch-match prepared prompt-history rows against one compiled query.
+#[pyfunction]
+#[pyo3(name = "match_prompt_history_rows")]
+fn py_match_prompt_history_rows<'py>(
+    py: Python<'py>,
+    query: &Bound<'py, PyDict>,
+    rows: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let query_value = py_to_json_value(query.as_any())?;
+    let query: CompiledPromptHistoryQueryWire =
+        serde_json::from_value(query_value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "query is not a valid CompiledPromptHistoryQueryWire dict: {e}"
+            ))
+        })?;
+    let rows_value = py_to_json_value(rows.as_any())?;
+    let rows: Vec<PromptHistoryRowFactsWire> =
+        serde_json::from_value(rows_value).map_err(|e| {
+            PyValueError::new_err(format!(
+            "rows is not a valid list of PromptHistoryRowFactsWire dicts: {e}"
+        ))
+        })?;
+    let result = core_match_prompt_history_rows(&query, &rows);
+    serialize_to_py(py, &result)
 }
 
 // --- Bead read bindings ---------------------------------------------------
@@ -18915,6 +19010,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_apply_project_aliases_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_apply_project_name_update, m)?)?;
     m.add_function(wrap_pyfunction!(py_list_project_records, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compile_prompt_history_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_encode_prompt_history_literal, m)?)?;
+    m.add_function(wrap_pyfunction!(py_build_prompt_history_seed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_match_prompt_history_rows, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_bead_needs_size_check_relax_migration,
         m
