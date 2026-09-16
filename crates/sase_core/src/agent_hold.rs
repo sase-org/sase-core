@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
-use crate::agent_identity::{agent_name_in_hood, parse_agent_family_name};
+use crate::agent_identity::{
+    agent_name_in_hood, historical_family_scope, parse_agent_family_name,
+};
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, LockMode,
     StoreLockError,
@@ -815,7 +817,7 @@ fn normalize_family(
             "{label} is not a valid family name: {error}"
         ))
     })?;
-    Ok(parsed.family_name)
+    Ok(historical_family_scope(&parsed.family_name))
 }
 
 fn scope_matches(
@@ -869,20 +871,17 @@ fn armer_kin_excluded(
 
 fn armer_family(armer: &AgentHoldArmerWire) -> Option<String> {
     armer.family.clone().or_else(|| {
-        armer.agent_name.as_deref().and_then(|name| {
-            parse_agent_family_name(name)
-                .ok()
-                .map(|parsed| parsed.family_name)
-        })
+        armer
+            .agent_name
+            .as_deref()
+            .and_then(|name| normalize_family("armer.agent_name", name).ok())
     })
 }
 
 fn candidate_family(candidate: &AgentHoldCandidateWire) -> Option<String> {
     candidate.family.clone().or_else(|| {
         candidate.agent_name.as_deref().and_then(|name| {
-            parse_agent_family_name(name)
-                .ok()
-                .map(|parsed| parsed.family_name)
+            normalize_family("candidate.agent_name", name).ok()
         })
     })
 }
@@ -938,7 +937,7 @@ fn selector_matches(
     if let Some(tribe) = &candidate.tribe {
         push_exact_matches(&mut matches, "tribe", &selectors.tribes, tribe);
     }
-    if selectors.future && candidate.created_at >= record.created_at {
+    if selectors.future && candidate.created_at > record.created_at {
         matches.push(AgentHoldSelectorMatchWire {
             kind: "future".to_string(),
             value: "true".to_string(),
@@ -1133,7 +1132,7 @@ mod tests {
                         "scope": {"kind": "host"},
                         "selectors": {"future": true},
                         "created_at": NOW - 20.0,
-                        "expires_at": NOW - 1.0
+                        "expires_at": NOW
                     },
                     "malformed": {"schema_version": AGENT_HOLD_WIRE_SCHEMA_VERSION},
                     "stale": valid
@@ -1201,6 +1200,23 @@ mod tests {
             .unwrap()
             .holds
             .is_empty());
+    }
+
+    #[test]
+    fn unreadable_store_path_is_treated_as_empty() {
+        let temp = tempdir().unwrap();
+        let path = agent_hold_state_path(temp.path());
+        fs::create_dir(&path).unwrap();
+
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+        )
+        .unwrap();
+
+        assert!(snapshot.holds.is_empty());
+        assert!(path.is_dir());
     }
 
     #[test]
@@ -1272,6 +1288,9 @@ mod tests {
         assert!(hold_blocks_candidate(&record, &before).unwrap().is_none());
 
         before.created_at = NOW;
+        assert!(hold_blocks_candidate(&record, &before).unwrap().is_none());
+
+        before.created_at = NOW + 0.001;
         assert!(hold_blocks_candidate(&record, &before).unwrap().is_some());
     }
 
@@ -1308,6 +1327,25 @@ mod tests {
         ];
         for case in cases {
             assert!(hold_blocks_candidate(&record, &case).unwrap().is_none());
+        }
+
+        let mut historical_record = record;
+        historical_record.armer.agent_name =
+            Some("fi--code.f0--plan".to_string());
+        historical_record.armer.family = None;
+        historical_record.armer.clan = None;
+        let historical_cases = ["fi.f0--code", "fi.f0.child--plan"];
+        for name in historical_cases {
+            let mut historical_candidate = candidate();
+            historical_candidate.agent_name = Some(name.to_string());
+            historical_candidate.family = None;
+            historical_candidate.clan = None;
+            assert!(hold_blocks_candidate(
+                &historical_record,
+                &historical_candidate
+            )
+            .unwrap()
+            .is_none());
         }
     }
 

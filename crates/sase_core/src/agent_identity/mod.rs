@@ -8,6 +8,8 @@
 mod identity;
 mod relationships;
 
+pub(crate) use identity::historical_family_scope;
+
 pub use identity::{
     agent_link_target, agent_link_target_with_owner_roots, agent_local_hood,
     agent_local_hood_with_owner_roots, agent_name_ancestors,

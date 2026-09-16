@@ -900,7 +900,7 @@ fn historical_hood_segment(segment: &str) -> &str {
     })
 }
 
-fn historical_family_scope(family_name: &str) -> String {
+pub(crate) fn historical_family_scope(family_name: &str) -> String {
     let (first, suffix) =
         family_name.split_once('.').unwrap_or((family_name, ""));
     let hood = historical_hood_segment(first);
