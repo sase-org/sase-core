@@ -17,7 +17,8 @@ use super::wire::{
     XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
 use super::xprompt_args::{
-    find_matching_paren_for_args, parse_xprompt_calls, ParsedXpromptCall,
+    find_matching_paren_for_args, parse_xprompt_calls,
+    parse_xprompt_like_call_at, top_level_commas_for_args, ParsedXpromptCall,
     XpromptArgSyntax,
 };
 
@@ -134,6 +135,9 @@ fn xprompt_semantics(
 
 fn directive_semantics(call: &ParsedXpromptCall) -> SpanSemantics {
     let mut semantics = SpanSemantics::default();
+    if call.is_open {
+        return semantics;
+    }
     let Some(canonical) = canonical_directive_name(&call.name) else {
         return semantics;
     };
@@ -262,10 +266,9 @@ fn emit_parenthesized_delimiters(
         source,
         call_name,
     );
-    let Some(close_idx) = find_matching_paren_for_args(text, open_idx) else {
-        return;
-    };
-    for comma in top_level_commas(text, open_idx + 1, close_idx) {
+    let close_idx = find_matching_paren_for_args(text, open_idx);
+    let body_end = close_idx.unwrap_or(text.len());
+    for comma in top_level_commas_for_args(text, open_idx + 1, body_end) {
         push_span(
             out,
             comma,
@@ -276,6 +279,9 @@ fn emit_parenthesized_delimiters(
             call_name,
         );
     }
+    let Some(close_idx) = close_idx else {
+        return;
+    };
     push_span(
         out,
         close_idx,
@@ -484,30 +490,10 @@ fn parse_directive_call_at(
     text: &str,
     marker_start: usize,
 ) -> Option<ParsedXpromptCall> {
-    let synthetic = format!("#{}", text.get(marker_start + 1..)?);
-    let mut call = parse_xprompt_calls(&synthetic).into_iter().next()?;
-    if call.name_span.0 != 1 {
+    if text.as_bytes().get(marker_start) != Some(&b'%') {
         return None;
     }
-    shift_call(&mut call, marker_start);
-    Some(call)
-}
-
-fn shift_call(call: &mut ParsedXpromptCall, offset: usize) {
-    call.name_span = shift_span(call.name_span, offset);
-    for arg in &mut call.args {
-        arg.value_span = shift_span(arg.value_span, offset);
-        if let Some(name) = &mut arg.name {
-            name.span = shift_span(name.span, offset);
-        }
-    }
-    if let Some(span) = call.malformed_span {
-        call.malformed_span = Some(shift_span(span, offset));
-    }
-}
-
-fn shift_span(span: (usize, usize), offset: usize) -> (usize, usize) {
-    (span.0 + offset, span.1 + offset)
+    parse_xprompt_like_call_at(text, marker_start, 1, false)
 }
 
 fn xprompt_marker_start(text: &str, call: &ParsedXpromptCall) -> usize {
@@ -600,85 +586,6 @@ fn is_string_literal(raw: &str) -> bool {
             | (Some(b'\''), Some(b'\''))
             | (Some(b'`'), Some(b'`'))
     )
-}
-
-fn top_level_commas(text: &str, start: usize, end: usize) -> Vec<usize> {
-    let mut commas = Vec::new();
-    let mut scanner = ClauseScanner::default();
-    let mut index = start;
-    while index < end {
-        if scanner.is_top_level()
-            && text.as_bytes().get(index..index + 2) == Some(b"[[")
-        {
-            if let Some(close) = find_text_block_close(text, index, end) {
-                index = close + 2;
-                continue;
-            }
-        }
-        scanner.consume(text, index);
-        if scanner.is_top_level() && text.as_bytes()[index] == b',' {
-            commas.push(index);
-        }
-        index += 1;
-    }
-    commas
-}
-
-fn find_text_block_close(
-    text: &str,
-    start: usize,
-    end: usize,
-) -> Option<usize> {
-    let mut index = start + 2;
-    while index + 1 < end {
-        if text.as_bytes().get(index..index + 2) == Some(b"]]") {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
-}
-
-#[derive(Default)]
-struct ClauseScanner {
-    quote: Option<u8>,
-    paren_depth: usize,
-    bracket_depth: usize,
-    brace_depth: usize,
-}
-
-impl ClauseScanner {
-    fn is_top_level(&self) -> bool {
-        self.quote.is_none()
-            && self.paren_depth == 0
-            && self.bracket_depth == 0
-            && self.brace_depth == 0
-    }
-
-    fn consume(&mut self, text: &str, idx: usize) {
-        let bytes = text.as_bytes();
-        match (self.quote, bytes[idx]) {
-            (None, b'"' | b'\'') => {
-                self.quote = Some(bytes[idx]);
-                return;
-            }
-            (Some(quote), ch) if ch == quote => {
-                self.quote = None;
-                return;
-            }
-            (Some(_), _) => return,
-            _ => {}
-        }
-        match bytes[idx] {
-            b'(' => self.paren_depth += 1,
-            b')' => self.paren_depth = self.paren_depth.saturating_sub(1),
-            b'[' => self.bracket_depth += 1,
-            b']' => self.bracket_depth = self.bracket_depth.saturating_sub(1),
-            b'{' => self.brace_depth += 1,
-            b'}' => self.brace_depth = self.brace_depth.saturating_sub(1),
-            _ => {}
-        }
-    }
 }
 
 fn ranges_intersect_any(
@@ -857,10 +764,81 @@ mod tests {
 
     #[test]
     fn marks_unterminated_calls_structurally() {
-        let text = "#foo(key=";
+        let text = "#foo(key=42, other=true";
+        let open_spans = spans(text);
+
+        assert_has(
+            text,
+            &open_spans,
+            XpromptArgumentSpanRole::ArgDelimiter,
+            "(",
+        );
+        assert_has(
+            text,
+            &open_spans,
+            XpromptArgumentSpanRole::ArgDelimiter,
+            ",",
+        );
+        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgKey, "key");
+        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgAssign, "=");
+        assert_has(
+            text,
+            &open_spans,
+            XpromptArgumentSpanRole::ArgValueNumber,
+            "42",
+        );
+        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgKey, "other");
+        assert_has(
+            text,
+            &open_spans,
+            XpromptArgumentSpanRole::ArgValueBool,
+            "true",
+        );
+
+        let empty_value = "#foo(key=";
+        let empty_spans = spans(empty_value);
+        assert_has(
+            empty_value,
+            &empty_spans,
+            XpromptArgumentSpanRole::ArgKey,
+            "key",
+        );
+        assert_has(
+            empty_value,
+            &empty_spans,
+            XpromptArgumentSpanRole::ArgAssign,
+            "=",
+        );
+        assert!(
+            !empty_spans
+                .iter()
+                .any(|span| span.role == XpromptArgumentSpanRole::ArgValue),
+            "{empty_spans:?}"
+        );
+    }
+
+    #[test]
+    fn unterminated_calls_preserve_utf8_and_multiline_text_blocks() {
+        let text = "é prefix #foo(café=[[one,\ntwo]], other=δ";
         let spans = spans(text);
 
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, "(");
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "café");
+        assert_has(
+            text,
+            &spans,
+            XpromptArgumentSpanRole::ArgValueString,
+            "[[one,\ntwo]]",
+        );
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, ",");
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "other");
+        assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "δ");
+        for span in spans {
+            assert!(
+                text.is_char_boundary(span.start)
+                    && text.is_char_boundary(span.end),
+                "{span:?}"
+            );
+        }
     }
 
     #[test]
@@ -930,6 +908,40 @@ mod tests {
     }
 
     #[test]
+    fn closed_calls_keep_validity_but_open_calls_stay_structural() {
+        let closed = catalog_spans("#typed(nope=1, count=nope)");
+        let closed_unknown = closed
+            .iter()
+            .find(|span| {
+                span_text("#typed(nope=1, count=nope)", span) == "nope"
+            })
+            .unwrap();
+        assert_eq!(
+            closed_unknown.validity,
+            XpromptArgumentSpanValidity::UnknownKey
+        );
+        let closed_mismatch = closed
+            .iter()
+            .find(|span| {
+                span.role == XpromptArgumentSpanRole::ArgValue
+                    && span_text("#typed(nope=1, count=nope)", span) == "nope"
+            })
+            .unwrap();
+        assert_eq!(
+            closed_mismatch.validity,
+            XpromptArgumentSpanValidity::TypeMismatch
+        );
+
+        let open_text = "#typed(nope=1, count=nope";
+        let open = catalog_spans(open_text);
+        assert_has(open_text, &open, XpromptArgumentSpanRole::ArgKey, "nope");
+        assert_has(open_text, &open, XpromptArgumentSpanRole::ArgKey, "count");
+        assert!(open
+            .iter()
+            .all(|span| span.validity == XpromptArgumentSpanValidity::Ok));
+    }
+
+    #[test]
     fn repeatable_tail_uses_shared_positional_binding() {
         let text = "#merge(planner, coder)";
         let spans = catalog_spans(text);
@@ -961,5 +973,54 @@ mod tests {
             duplicate.validity,
             XpromptArgumentSpanValidity::DuplicateKey
         );
+    }
+
+    #[test]
+    fn open_directive_arguments_are_structural_without_invalidity() {
+        let text = "%queue(capacity=2, priority=";
+        let directive_spans = spans(text);
+
+        assert_has(
+            text,
+            &directive_spans,
+            XpromptArgumentSpanRole::ArgDelimiter,
+            "(",
+        );
+        assert_has(
+            text,
+            &directive_spans,
+            XpromptArgumentSpanRole::ArgKey,
+            "capacity",
+        );
+        assert_has(
+            text,
+            &directive_spans,
+            XpromptArgumentSpanRole::ArgValueNumber,
+            "2",
+        );
+        assert_has(
+            text,
+            &directive_spans,
+            XpromptArgumentSpanRole::ArgDelimiter,
+            ",",
+        );
+        assert_has(
+            text,
+            &directive_spans,
+            XpromptArgumentSpanRole::ArgKey,
+            "priority",
+        );
+        assert!(directive_spans.iter().all(|span| {
+            span.source == XpromptArgumentSource::Directive
+                && span.validity == XpromptArgumentSpanValidity::Ok
+        }));
+
+        let unknown = "%id(nope=";
+        let unknown_spans = spans(unknown);
+        let key = unknown_spans
+            .iter()
+            .find(|span| span_text(unknown, span) == "nope")
+            .unwrap();
+        assert_eq!(key.validity, XpromptArgumentSpanValidity::Ok);
     }
 }

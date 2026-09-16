@@ -22583,6 +22583,43 @@ COMMITS:
     }
 
     #[test]
+    fn xprompt_argument_spans_binding_returns_open_structural_spans() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(py_xprompt_argument_spans, &module)
+                        .unwrap(),
+                )
+                .unwrap();
+
+            let source = "#foo(key=42, other=true";
+            let result = module
+                .getattr("xprompt_argument_spans")
+                .unwrap()
+                .call1((source,))
+                .unwrap();
+            let value = py_to_json_value(&result).unwrap();
+            let spans = value.as_array().unwrap();
+            let has = |role: &str, raw: &str| {
+                spans.iter().any(|span| {
+                    let start = span["start"].as_u64().unwrap() as usize;
+                    let end = span["end"].as_u64().unwrap() as usize;
+                    span["role"] == json!(role) && &source[start..end] == raw
+                })
+            };
+
+            assert!(has("arg_delimiter", "("), "{spans:?}");
+            assert!(has("arg_delimiter", ","), "{spans:?}");
+            assert!(has("arg_key", "key"), "{spans:?}");
+            assert!(has("arg_value_number", "42"), "{spans:?}");
+            assert!(has("arg_key", "other"), "{spans:?}");
+            assert!(has("arg_value_bool", "true"), "{spans:?}");
+        });
+    }
+
+    #[test]
     fn model_alias_shortcut_bindings_return_plain_dict_shapes() {
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
