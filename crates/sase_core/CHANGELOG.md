@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.44](https://github.com/sase-org/sase-core/compare/v0.34.43...v0.34.44) - 2026-09-17
+
+### Added
+
+- *(service)* add service_config_compose composer and PyO3 binding
+
 ## [0.34.43](https://github.com/sase-org/sase-core/compare/v0.34.42...v0.34.43) - 2026-09-17
 
 ### Fixed
