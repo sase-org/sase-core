@@ -8,13 +8,15 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-pub const REPOSITORY_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const REPOSITORY_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepositoryResolutionRequestWire {
     pub requested: String,
     #[serde(default)]
     pub candidates: Vec<RepositoryResolutionCandidateWire>,
+    #[serde(default)]
+    pub external_project: Option<RepositoryResolutionExternalProjectWire>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +28,14 @@ pub struct RepositoryResolutionCandidateWire {
     pub path: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default)]
+    pub remote_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepositoryResolutionExternalProjectWire {
+    #[serde(default)]
+    pub primary_path: Option<String>,
     #[serde(default)]
     pub remote_urls: Vec<String>,
 }
@@ -111,47 +121,71 @@ pub fn resolve_repository_reference(
         return resolution;
     }
 
-    let Some(identity) = requested_identity.clone() else {
-        return no_match(None, vec![]);
-    };
-
-    let mut matched_ids = BTreeSet::new();
     let mut diagnostics = Vec::new();
-    for candidate in &request.candidates {
-        for remote_url in &candidate.remote_urls {
-            let trimmed = remote_url.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match github_identity(trimmed) {
-                Some(candidate_identity)
-                    if candidate_identity.canonical == identity.canonical =>
-                {
-                    matched_ids.insert(candidate.id.clone());
+    if let Some(identity) = requested_identity.clone() {
+        let mut matched_ids = BTreeSet::new();
+        for candidate in &request.candidates {
+            for remote_url in &candidate.remote_urls {
+                let trimmed = remote_url.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                Some(_) => {}
-                None => diagnostics.push(RepositoryResolutionDiagnosticWire {
-                    candidate_id: candidate.id.clone(),
-                    remote_url: trimmed.to_string(),
-                    message:
-                        "remote does not contain a supported GitHub identity"
-                            .to_string(),
-                }),
+                match github_identity(trimmed) {
+                    Some(candidate_identity)
+                        if candidate_identity.canonical
+                            == identity.canonical =>
+                    {
+                        matched_ids.insert(candidate.id.clone());
+                    }
+                    Some(_) => {}
+                    None => {
+                        diagnostics.push(RepositoryResolutionDiagnosticWire {
+                            candidate_id: candidate.id.clone(),
+                            remote_url: trimmed.to_string(),
+                            message:
+                                "remote does not contain a supported GitHub identity"
+                                    .to_string(),
+                        });
+                    }
+                }
             }
+        }
+
+        let candidate_ids: Vec<String> = matched_ids.into_iter().collect();
+        match candidate_ids.len() {
+            0 => {}
+            1 => {
+                return matched(
+                    candidate_ids[0].clone(),
+                    "remote_identity",
+                    Some(identity),
+                    diagnostics,
+                );
+            }
+            _ => return ambiguous(candidate_ids, Some(identity), diagnostics),
         }
     }
 
-    let candidate_ids: Vec<String> = matched_ids.into_iter().collect();
-    match candidate_ids.len() {
-        0 => no_match(Some(identity), diagnostics),
-        1 => matched(
-            candidate_ids[0].clone(),
-            "remote_identity",
-            Some(identity),
-            diagnostics,
-        ),
-        _ => ambiguous(candidate_ids, Some(identity), diagnostics),
+    if let Some(external_project) = &request.external_project {
+        if let Some(resolution) = resolve_external_project_path(
+            external_project,
+            &request.candidates,
+            requested_identity.clone(),
+            diagnostics.clone(),
+        ) {
+            return resolution;
+        }
+        if let Some(resolution) = resolve_external_project_remote(
+            external_project,
+            &request.candidates,
+            requested_identity.clone(),
+            diagnostics.clone(),
+        ) {
+            return resolution;
+        }
     }
+
+    no_match(requested_identity, diagnostics)
 }
 
 fn resolve_exact_path(
@@ -195,6 +229,99 @@ fn resolve_exact_names(
         0 => None,
         1 => Some(matched(ids[0].clone(), reason, requested_identity, vec![])),
         _ => Some(ambiguous(ids, requested_identity, vec![])),
+    }
+}
+
+fn resolve_external_project_path(
+    external_project: &RepositoryResolutionExternalProjectWire,
+    candidates: &[RepositoryResolutionCandidateWire],
+    requested_identity: Option<RepositoryRemoteIdentityWire>,
+    diagnostics: Vec<RepositoryResolutionDiagnosticWire>,
+) -> Option<RepositoryResolutionWire> {
+    let source_path = external_project
+        .primary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let ids: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.kind == "linked"
+                && candidate.path.as_deref() == Some(source_path)
+        })
+        .map(|candidate| candidate.id.clone())
+        .collect();
+    match ids.len() {
+        0 => None,
+        1 => Some(matched(
+            ids[0].clone(),
+            "external_project_path",
+            requested_identity,
+            diagnostics,
+        )),
+        _ => Some(ambiguous(ids, requested_identity, diagnostics)),
+    }
+}
+
+fn resolve_external_project_remote(
+    external_project: &RepositoryResolutionExternalProjectWire,
+    candidates: &[RepositoryResolutionCandidateWire],
+    requested_identity: Option<RepositoryRemoteIdentityWire>,
+    mut diagnostics: Vec<RepositoryResolutionDiagnosticWire>,
+) -> Option<RepositoryResolutionWire> {
+    let project_identities: BTreeSet<String> = external_project
+        .remote_urls
+        .iter()
+        .filter_map(|remote_url| {
+            let trimmed = remote_url.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            github_identity(trimmed).map(|identity| identity.canonical)
+        })
+        .collect();
+    if project_identities.is_empty() {
+        return None;
+    }
+
+    let mut matched_ids = BTreeSet::new();
+    for candidate in candidates {
+        if candidate.kind != "linked" {
+            continue;
+        }
+        for remote_url in &candidate.remote_urls {
+            let trimmed = remote_url.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match github_identity(trimmed) {
+                Some(identity)
+                    if project_identities.contains(&identity.canonical) =>
+                {
+                    matched_ids.insert(candidate.id.clone());
+                }
+                Some(_) => {}
+                None => diagnostics.push(RepositoryResolutionDiagnosticWire {
+                    candidate_id: candidate.id.clone(),
+                    remote_url: trimmed.to_string(),
+                    message:
+                        "remote does not contain a supported GitHub identity"
+                            .to_string(),
+                }),
+            }
+        }
+    }
+
+    let candidate_ids: Vec<String> = matched_ids.into_iter().collect();
+    match candidate_ids.len() {
+        0 => None,
+        1 => Some(matched(
+            candidate_ids[0].clone(),
+            "external_project_remote",
+            requested_identity,
+            diagnostics,
+        )),
+        _ => Some(ambiguous(candidate_ids, requested_identity, diagnostics)),
     }
 }
 
@@ -444,6 +571,19 @@ mod tests {
         RepositoryResolutionRequestWire {
             requested: requested.to_string(),
             candidates,
+            external_project: None,
+        }
+    }
+
+    fn project_request(
+        requested: &str,
+        candidates: Vec<RepositoryResolutionCandidateWire>,
+        external_project: RepositoryResolutionExternalProjectWire,
+    ) -> RepositoryResolutionRequestWire {
+        RepositoryResolutionRequestWire {
+            requested: requested.to_string(),
+            candidates,
+            external_project: Some(external_project),
         }
     }
 
@@ -519,6 +659,149 @@ mod tests {
         assert_eq!(decision.status, RepositoryResolutionStatus::Matched);
         assert_eq!(decision.matched_id.as_deref(), Some("linked-core"));
         assert_eq!(decision.match_reason.as_deref(), Some("remote_identity"));
+    }
+
+    #[test]
+    fn external_project_path_resolves_linked_repo() {
+        let decision = resolve_repository_reference(&project_request(
+            "core-project",
+            vec![
+                candidate("linked-core", "sase-core", "linked", vec![]),
+                candidate("sidecar-core", "sase-core-side", "sidecar", vec![]),
+            ],
+            RepositoryResolutionExternalProjectWire {
+                primary_path: Some("/work/sase-core".to_string()),
+                remote_urls: vec![],
+            },
+        ));
+
+        assert_eq!(decision.status, RepositoryResolutionStatus::Matched);
+        assert_eq!(decision.matched_id.as_deref(), Some("linked-core"));
+        assert_eq!(
+            decision.match_reason.as_deref(),
+            Some("external_project_path")
+        );
+    }
+
+    #[test]
+    fn external_project_remote_resolves_linked_repo() {
+        let decision = resolve_repository_reference(&project_request(
+            "core-project",
+            vec![candidate(
+                "linked-core",
+                "sase-core",
+                "linked",
+                vec!["ssh://git@github.com/sase-org/sase-core.git"],
+            )],
+            RepositoryResolutionExternalProjectWire {
+                primary_path: Some("/elsewhere/sase-core".to_string()),
+                remote_urls: vec![
+                    "https://github.com/SASE-Org/SASE-Core.git".to_string()
+                ],
+            },
+        ));
+
+        assert_eq!(decision.status, RepositoryResolutionStatus::Matched);
+        assert_eq!(decision.matched_id.as_deref(), Some("linked-core"));
+        assert_eq!(
+            decision.match_reason.as_deref(),
+            Some("external_project_remote")
+        );
+    }
+
+    #[test]
+    fn external_project_path_precedes_remote_match() {
+        let decision = resolve_repository_reference(&project_request(
+            "core-project",
+            vec![
+                candidate(
+                    "path-match",
+                    "sase-core-path",
+                    "linked",
+                    vec!["git@github.com:other/sase-core.git"],
+                ),
+                candidate(
+                    "remote-match",
+                    "sase-core-remote",
+                    "linked",
+                    vec!["git@github.com:sase-org/sase-core.git"],
+                ),
+            ],
+            RepositoryResolutionExternalProjectWire {
+                primary_path: Some("/work/sase-core-path".to_string()),
+                remote_urls: vec![
+                    "git@github.com:sase-org/sase-core.git".to_string()
+                ],
+            },
+        ));
+
+        assert_eq!(decision.status, RepositoryResolutionStatus::Matched);
+        assert_eq!(decision.matched_id.as_deref(), Some("path-match"));
+        assert_eq!(
+            decision.match_reason.as_deref(),
+            Some("external_project_path")
+        );
+    }
+
+    #[test]
+    fn external_project_remote_requires_supported_full_identity() {
+        let decision = resolve_repository_reference(&project_request(
+            "core-project",
+            vec![
+                candidate(
+                    "same-basename",
+                    "sase-core",
+                    "linked",
+                    vec!["git@github.com:other/sase-core.git"],
+                ),
+                candidate(
+                    "unsupported-host",
+                    "sase-core-gitlab",
+                    "linked",
+                    vec!["git@gitlab.com:sase-org/sase-core.git"],
+                ),
+            ],
+            RepositoryResolutionExternalProjectWire {
+                primary_path: Some("/unmatched/source".to_string()),
+                remote_urls: vec![
+                    "https://github.com/sase-org/sase-core.git".to_string(),
+                    "https://gitlab.com/sase-org/sase-core.git".to_string(),
+                ],
+            },
+        ));
+
+        assert_eq!(decision.status, RepositoryResolutionStatus::NoMatch);
+        assert!(decision.matched_id.is_none());
+    }
+
+    #[test]
+    fn external_project_ambiguous_linked_matches_are_errors() {
+        let decision = resolve_repository_reference(&project_request(
+            "core-project",
+            vec![
+                candidate(
+                    "first",
+                    "core-a",
+                    "linked",
+                    vec!["https://github.com/sase-org/sase-core"],
+                ),
+                candidate(
+                    "second",
+                    "core-b",
+                    "linked",
+                    vec!["git@github.com:sase-org/sase-core.git"],
+                ),
+            ],
+            RepositoryResolutionExternalProjectWire {
+                primary_path: Some("/unmatched/source".to_string()),
+                remote_urls: vec![
+                    "git@github.com:sase-org/sase-core.git".to_string()
+                ],
+            },
+        ));
+
+        assert_eq!(decision.status, RepositoryResolutionStatus::Ambiguous);
+        assert_eq!(decision.candidate_ids, vec!["first", "second"]);
     }
 
     #[test]
