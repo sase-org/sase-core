@@ -126,6 +126,42 @@ fn named_window(
     }
 }
 
+fn claude_fable_window(
+    key: &str,
+    used_percent: f64,
+    observed_at: f64,
+) -> UsageWindowObservationWire {
+    UsageWindowObservationWire {
+        key: key.to_string(),
+        label: format!("Claude {key} allowance"),
+        used_percent,
+        resets_at: Some(NOW + WEEK_SECONDS),
+        duration_seconds: Some(WEEK_SECONDS),
+        period_start: Some(NOW),
+        applicability: if key == "weekly:claude-fable-5" {
+            UsageApplicabilityWire::Models {
+                model_ids: vec!["claude-fable-5".to_string()],
+            }
+        } else {
+            UsageApplicabilityWire::Unknown {
+                vendor_label: Some("seven_day_overage_included".to_string()),
+                vendor_id: Some("seven-day-overage-included".to_string()),
+            }
+        },
+        observed_at,
+        source: if key == "weekly:claude-fable-5" {
+            UsageSource::Probe
+        } else {
+            UsageSource::StreamEvent
+        },
+        vendor_state: if key == "weekly:claude-fable-5" {
+            UsageVendorState::Allowed
+        } else {
+            UsageVendorState::Unknown
+        },
+    }
+}
+
 fn valid_observation() -> ProviderUsageObservationWire {
     ProviderUsageObservationWire {
         schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
@@ -143,6 +179,30 @@ fn valid_observation() -> ProviderUsageObservationWire {
         account_mode: Some("subscription".to_string()),
         plan: None,
         windows: vec![valid_window()],
+    }
+}
+
+fn claude_usage_observation(
+    ordering_token: f64,
+    completeness: UsageCompleteness,
+    windows: Vec<UsageWindowObservationWire>,
+) -> ProviderUsageObservationWire {
+    ProviderUsageObservationWire {
+        schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
+        provider: "claude".to_string(),
+        context_id: "ctx-claude".to_string(),
+        account_generation: 1,
+        ordering_token,
+        received_at: ordering_token + 1.0,
+        source: UsageSource::Probe,
+        outcome: UsageCollectionOutcome::Ok,
+        reason_code: None,
+        diagnostic: None,
+        completeness,
+        authoritative_empty: false,
+        account_mode: Some("subscription".to_string()),
+        plan: Some("Max".to_string()),
+        windows,
     }
 }
 
@@ -853,6 +913,105 @@ fn vendor_drift_reason_code_is_accepted_and_unknown_codes_still_reject() {
 }
 
 #[test]
+fn claude_fable_alias_observation_canonicalizes_and_collapses() {
+    let observation = claude_usage_observation(
+        NOW - 10.0,
+        UsageCompleteness::Partial,
+        vec![
+            named_window("session", 10.0, NOW - 10.0),
+            named_window("weekly", 88.0, NOW - 10.0),
+            claude_fable_window(
+                "window:seven-day-overage-included",
+                82.0,
+                NOW - 10.0,
+            ),
+        ],
+    );
+    let validated = validate_usage_observation(observation, NOW).unwrap();
+    assert_eq!(
+        validated
+            .windows
+            .iter()
+            .map(|window| window.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session", "weekly", "weekly:claude-fable-5"]
+    );
+    let fable = validated
+        .windows
+        .iter()
+        .find(|window| window.key == "weekly:claude-fable-5")
+        .unwrap();
+    assert_eq!(fable.label, "Claude weekly Fable");
+    assert_eq!(fable.used_percent, 82.0);
+    assert_eq!(fable.resets_at, Some(NOW + WEEK_SECONDS));
+    assert_eq!(fable.source, UsageSource::StreamEvent);
+    assert_eq!(fable.vendor_state, UsageVendorState::Unknown);
+    assert_eq!(
+        fable.applicability,
+        UsageApplicabilityWire::Models {
+            model_ids: vec!["claude-fable-5".to_string()]
+        }
+    );
+
+    let alias_newer = validate_usage_observation(
+        claude_usage_observation(
+            NOW - 8.0,
+            UsageCompleteness::Partial,
+            vec![
+                claude_fable_window("weekly:claude-fable-5", 81.0, NOW - 8.0),
+                claude_fable_window(
+                    "window:seven-day-overage-included",
+                    83.0,
+                    NOW - 7.0,
+                ),
+            ],
+        ),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(alias_newer.windows.len(), 1);
+    assert_eq!(alias_newer.windows[0].key, "weekly:claude-fable-5");
+    assert_eq!(alias_newer.windows[0].used_percent, 83.0);
+
+    let canonical_tie = validate_usage_observation(
+        claude_usage_observation(
+            NOW - 6.0,
+            UsageCompleteness::Partial,
+            vec![
+                claude_fable_window(
+                    "window:seven-day-overage-included",
+                    84.0,
+                    NOW - 6.0,
+                ),
+                claude_fable_window("weekly:claude-fable-5", 80.0, NOW - 6.0),
+            ],
+        ),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(canonical_tie.windows.len(), 1);
+    assert_eq!(canonical_tie.windows[0].used_percent, 80.0);
+
+    let other = usage_observation(
+        "other",
+        "ctx-other",
+        1,
+        NOW - 5.0,
+        UsageCompleteness::Partial,
+        vec![claude_fable_window(
+            "window:seven-day-overage-included",
+            84.0,
+            NOW - 5.0,
+        )],
+    );
+    let validated = validate_usage_observation(other, NOW).unwrap();
+    assert_eq!(
+        validated.windows[0].key,
+        "window:seven-day-overage-included"
+    );
+}
+
+#[test]
 fn usage_store_merges_partial_updates_and_fences_tombstones() {
     let temp = tempdir().unwrap();
     let full = usage_observation(
@@ -952,6 +1111,333 @@ fn usage_store_merges_partial_updates_and_fences_tombstones() {
         snapshot.providers[0].last_full_observation_at,
         Some(NOW - 20.0)
     );
+}
+
+#[test]
+fn usage_store_unifies_claude_fable_probe_and_passive_windows() {
+    let temp = tempdir().unwrap();
+    let probe = claude_usage_observation(
+        NOW - 100.0,
+        UsageCompleteness::Complete,
+        vec![
+            named_window("session", 20.0, NOW - 100.0),
+            named_window("weekly", 88.0, NOW - 100.0),
+            claude_fable_window("weekly:claude-fable-5", 81.0, NOW - 100.0),
+        ],
+    );
+    record_provider_usage_observation(temp.path(), probe, NOW).unwrap();
+
+    let passive = claude_usage_observation(
+        NOW - 50.0,
+        UsageCompleteness::Partial,
+        vec![claude_fable_window(
+            "window:seven-day-overage-included",
+            82.0,
+            NOW - 50.0,
+        )],
+    );
+    record_provider_usage_observation(temp.path(), passive, NOW).unwrap();
+
+    let late_complete = claude_usage_observation(
+        NOW - 80.0,
+        UsageCompleteness::Complete,
+        vec![
+            named_window("session", 25.0, NOW - 80.0),
+            named_window("weekly", 89.0, NOW - 80.0),
+            claude_fable_window("weekly:claude-fable-5", 81.5, NOW - 80.0),
+        ],
+    );
+    record_provider_usage_observation(temp.path(), late_complete, NOW).unwrap();
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    let provider = &snapshot.providers[0];
+    assert_eq!(
+        provider
+            .windows
+            .iter()
+            .map(|window| window.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["session", "weekly", "weekly:claude-fable-5"]
+    );
+    let fable = provider
+        .windows
+        .iter()
+        .find(|window| window.key == "weekly:claude-fable-5")
+        .unwrap();
+    assert_eq!(fable.used_percent, 82.0);
+
+    let temp = tempdir().unwrap();
+    let passive = claude_usage_observation(
+        NOW - 90.0,
+        UsageCompleteness::Partial,
+        vec![claude_fable_window(
+            "window:seven-day-overage-included",
+            82.0,
+            NOW - 90.0,
+        )],
+    );
+    record_provider_usage_observation(temp.path(), passive, NOW).unwrap();
+    let newer_probe = claude_usage_observation(
+        NOW - 40.0,
+        UsageCompleteness::Complete,
+        vec![claude_fable_window(
+            "weekly:claude-fable-5",
+            83.0,
+            NOW - 40.0,
+        )],
+    );
+    record_provider_usage_observation(temp.path(), newer_probe, NOW).unwrap();
+    let stale_generation = ProviderUsageObservationWire {
+        account_generation: 0,
+        ..claude_usage_observation(
+            NOW - 10.0,
+            UsageCompleteness::Partial,
+            vec![claude_fable_window(
+                "window:seven-day-overage-included",
+                1.0,
+                NOW - 10.0,
+            )],
+        )
+    };
+    let stale =
+        record_provider_usage_observation(temp.path(), stale_generation, NOW)
+            .unwrap();
+    assert_eq!(stale.status, ProviderUsageStoreWriteStatus::StaleWriter);
+
+    let snapshot = load_provider_usage_store(
+        temp.path(),
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot;
+    assert_eq!(snapshot.providers[0].windows.len(), 1);
+    assert_eq!(
+        snapshot.providers[0].windows[0].key,
+        "weekly:claude-fable-5"
+    );
+    assert_eq!(snapshot.providers[0].windows[0].used_percent, 83.0);
+}
+
+fn write_raw_claude_store(
+    home: &std::path::Path,
+    windows: Vec<(&str, UsageWindowObservationWire, f64, f64)>,
+    tombstones: Value,
+) {
+    let last_attempt = claude_usage_observation(
+        NOW - 20.0,
+        UsageCompleteness::Complete,
+        windows
+            .iter()
+            .map(|(_, window, _, _)| window.clone())
+            .collect(),
+    );
+    let window_map = windows
+        .into_iter()
+        .map(|(key, window, ordering_token, received_at)| {
+            (
+                key.to_string(),
+                json!({
+                    "window": window,
+                    "ordering_token": ordering_token,
+                    "received_at": received_at,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let raw = json!({
+        "version": PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+        "providers": {
+            "claude": {
+                "version": PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+                "provider": "claude",
+                "context_id": "ctx-claude",
+                "account_generation": 1,
+                "last_attempt": last_attempt,
+                "last_attempt_ordering_token": NOW - 20.0,
+                "last_attempt_received_at": NOW - 19.0,
+                "last_full_observation_at": NOW - 20.0,
+                "last_full_ordering_token": NOW - 20.0,
+                "windows": window_map,
+                "tombstones": tombstones,
+            }
+        },
+        "reservations": {},
+        "schedules": {},
+    });
+    let path = provider_usage_state_path(home);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+}
+
+fn loaded_claude_windows(home: &std::path::Path) -> Vec<UsagePublicWindowWire> {
+    load_provider_usage_store(
+        home,
+        NOW,
+        DEFAULT_USAGE_CADENCE_SECONDS,
+        DEFAULT_USAGE_WARN_PERCENT,
+        DEFAULT_USAGE_CRITICAL_PERCENT,
+    )
+    .unwrap()
+    .snapshot
+    .providers
+    .into_iter()
+    .next()
+    .unwrap()
+    .windows
+}
+
+#[test]
+fn usage_store_recovers_legacy_claude_fable_cache_without_read_repair() {
+    let temp = tempdir().unwrap();
+    write_raw_claude_store(
+        temp.path(),
+        vec![(
+            "window:seven-day-overage-included",
+            claude_fable_window(
+                "window:seven-day-overage-included",
+                82.0,
+                NOW - 20.0,
+            ),
+            NOW - 20.0,
+            NOW - 19.0,
+        )],
+        json!({}),
+    );
+    let path = provider_usage_state_path(temp.path());
+    let before = fs::read(&path).unwrap();
+    let windows = loaded_claude_windows(temp.path());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].key, "weekly:claude-fable-5");
+    assert_eq!(windows[0].used_percent, 82.0);
+
+    record_provider_usage_observation(
+        temp.path(),
+        claude_usage_observation(
+            NOW - 5.0,
+            UsageCompleteness::Partial,
+            vec![claude_fable_window(
+                "weekly:claude-fable-5",
+                83.0,
+                NOW - 5.0,
+            )],
+        ),
+        NOW,
+    )
+    .unwrap();
+    let serialized =
+        fs::read_to_string(provider_usage_state_path(temp.path())).unwrap();
+    assert!(!serialized.contains("seven-day-overage-included"));
+
+    for (
+        name,
+        alias_order,
+        alias_received,
+        canonical_order,
+        canonical_received,
+        expected,
+    ) in [
+        (
+            "alias-newer",
+            NOW - 10.0,
+            NOW - 9.0,
+            NOW - 20.0,
+            NOW - 19.0,
+            82.0,
+        ),
+        (
+            "canonical-newer",
+            NOW - 20.0,
+            NOW - 19.0,
+            NOW - 10.0,
+            NOW - 9.0,
+            81.0,
+        ),
+        (
+            "canonical-tie",
+            NOW - 10.0,
+            NOW - 9.0,
+            NOW - 10.0,
+            NOW - 9.0,
+            81.0,
+        ),
+    ] {
+        let temp = tempdir().unwrap();
+        write_raw_claude_store(
+            temp.path(),
+            vec![
+                (
+                    "window:seven-day-overage-included",
+                    claude_fable_window(
+                        "window:seven-day-overage-included",
+                        82.0,
+                        NOW - 20.0,
+                    ),
+                    alias_order,
+                    alias_received,
+                ),
+                (
+                    "weekly:claude-fable-5",
+                    claude_fable_window(
+                        "weekly:claude-fable-5",
+                        81.0,
+                        NOW - 20.0,
+                    ),
+                    canonical_order,
+                    canonical_received,
+                ),
+            ],
+            json!({}),
+        );
+        let windows = loaded_claude_windows(temp.path());
+        assert_eq!(windows.len(), 1, "{name}");
+        assert_eq!(windows[0].key, "weekly:claude-fable-5", "{name}");
+        assert_eq!(windows[0].used_percent, expected, "{name}");
+    }
+
+    let temp = tempdir().unwrap();
+    write_raw_claude_store(
+        temp.path(),
+        vec![(
+            "weekly:claude-fable-5",
+            claude_fable_window("weekly:claude-fable-5", 81.0, NOW - 20.0),
+            NOW - 20.0,
+            NOW - 19.0,
+        )],
+        json!({"window:seven-day-overage-included": NOW - 5.0}),
+    );
+    let windows = loaded_claude_windows(temp.path());
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].key, "weekly:claude-fable-5");
+
+    let temp = tempdir().unwrap();
+    write_raw_claude_store(
+        temp.path(),
+        vec![(
+            "window:seven-day-overage-included",
+            claude_fable_window(
+                "window:seven-day-overage-included",
+                82.0,
+                NOW - 20.0,
+            ),
+            NOW - 20.0,
+            NOW - 19.0,
+        )],
+        json!({"weekly:claude-fable-5": NOW - 5.0}),
+    );
+    let windows = loaded_claude_windows(temp.path());
+    assert!(windows.is_empty());
 }
 
 #[test]

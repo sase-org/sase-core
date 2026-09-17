@@ -17,6 +17,7 @@ use super::refresh::{
 };
 use super::{
     collection_problem_is_attentive, collector_health_from_schedule,
+    compatibility::{self, UsageIdentityOrigin, CLAUDE_FABLE_CANONICAL_KEY},
     project_window, sanitize_diagnostic, summarize_filtered_windows,
     usage_window_applies, validate_ident, validate_now, validate_usage_cadence,
     validate_usage_observation, validate_usage_thresholds, window_attention,
@@ -1080,6 +1081,19 @@ fn stored_window_wins(
             && incoming.received_at > existing.received_at)
 }
 
+fn stored_window_candidate_wins(
+    incoming: &ProviderUsageStoredWindowWire,
+    incoming_origin: UsageIdentityOrigin,
+    existing: &ProviderUsageStoredWindowWire,
+    existing_origin: UsageIdentityOrigin,
+) -> bool {
+    stored_window_wins(incoming, existing)
+        || (incoming.ordering_token == existing.ordering_token
+            && incoming.received_at == existing.received_at
+            && incoming_origin == UsageIdentityOrigin::Canonical
+            && existing_origin != UsageIdentityOrigin::Canonical)
+}
+
 fn account_context_changed_record(
     provider: &str,
     context_id: &str,
@@ -1364,8 +1378,9 @@ fn validate_stored_provider_record(
             "provider usage record key does not match provider".to_string()
         );
     }
-    validate_usage_observation(record.last_attempt.clone(), now)
-        .map_err(|error| error.to_string())?;
+    record.last_attempt =
+        validate_usage_observation(record.last_attempt.clone(), now)
+            .map_err(|error| error.to_string())?;
     if record.last_attempt.provider != record.provider
         || record.last_attempt.context_id != record.context_id
         || record.last_attempt.account_generation != record.account_generation
@@ -1390,14 +1405,56 @@ fn validate_stored_provider_record(
             "provider usage record has more than {MAX_WINDOWS} windows"
         ));
     }
-    for (window_key, stored) in &record.windows {
-        if stored.window.key != *window_key {
+    normalize_stored_windows(record, now)?;
+    Ok(())
+}
+
+fn normalize_stored_windows(
+    record: &mut ProviderUsageStoredProviderWire,
+    now: f64,
+) -> Result<(), String> {
+    let raw_tombstones = std::mem::take(&mut record.tombstones);
+    for (window_key, token) in raw_tombstones {
+        validate_ident(
+            &format!("provider {} tombstone key", record.provider),
+            &window_key,
+            MAX_KEY_LEN,
+        )
+        .map_err(|error| error.to_string())?;
+        if !token.is_finite() || token <= 0.0 {
+            return Err(
+                "provider usage tombstone token must be finite and positive"
+                    .to_string(),
+            );
+        }
+        if compatibility::is_obsolete_alias_tombstone(
+            &record.provider,
+            &window_key,
+        ) {
+            continue;
+        }
+        record.tombstones.insert(window_key, token);
+    }
+
+    let raw_windows = std::mem::take(&mut record.windows);
+    if raw_windows.len() > MAX_WINDOWS {
+        return Err(format!(
+            "provider usage record has more than {MAX_WINDOWS} windows"
+        ));
+    }
+    let mut normalized: BTreeMap<
+        String,
+        (ProviderUsageStoredWindowWire, UsageIdentityOrigin),
+    > = BTreeMap::new();
+    for (window_key, mut stored) in raw_windows {
+        if stored.window.key != window_key {
             return Err(
                 "provider usage window key does not match map key".to_string()
             );
         }
-        super::validate_window(&record.provider, stored.window.clone(), now)
-            .map_err(|error| error.to_string())?;
+        stored.window =
+            super::validate_window(&record.provider, stored.window, now)
+                .map_err(|error| error.to_string())?;
         if !stored.ordering_token.is_finite()
             || stored.ordering_token <= 0.0
             || !stored.received_at.is_finite()
@@ -1408,21 +1465,36 @@ fn validate_stored_provider_record(
                     .to_string(),
             );
         }
-    }
-    for (window_key, token) in &record.tombstones {
-        validate_ident(
-            &format!("provider {} tombstone key", record.provider),
-            window_key,
-            MAX_KEY_LEN,
-        )
-        .map_err(|error| error.to_string())?;
-        if !token.is_finite() || *token <= 0.0 {
-            return Err(
-                "provider usage tombstone token must be finite and positive"
-                    .to_string(),
-            );
+        let origin = compatibility::normalize_window_identity(
+            &record.provider,
+            &mut stored.window,
+        );
+        if origin == UsageIdentityOrigin::Alias
+            && record
+                .tombstones
+                .get(CLAUDE_FABLE_CANONICAL_KEY)
+                .is_some_and(|token| stored.ordering_token <= *token)
+        {
+            continue;
+        }
+        let normalized_key = stored.window.key.clone();
+        match normalized.get(&normalized_key) {
+            Some((existing, existing_origin))
+                if !stored_window_candidate_wins(
+                    &stored,
+                    origin,
+                    existing,
+                    *existing_origin,
+                ) => {}
+            _ => {
+                normalized.insert(normalized_key, (stored, origin));
+            }
         }
     }
+    record.windows = normalized
+        .into_iter()
+        .map(|(key, (stored, _))| (key, stored))
+        .collect();
     record.tombstones.retain(|key, token| {
         !record.windows.contains_key(key)
             && *token

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod compatibility;
 mod grok;
 mod indicator;
 mod refresh;
@@ -603,6 +604,8 @@ pub fn validate_usage_observation(
         }
         windows.push(validated);
     }
+    let windows =
+        compatibility::normalize_observation_windows(&provider, windows)?;
     validate_outcome_inventory(
         &provider,
         observation.outcome,

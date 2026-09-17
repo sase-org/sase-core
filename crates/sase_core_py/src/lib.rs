@@ -32330,6 +32330,59 @@ MENTORS:
                 snapshot_value["providers"][0]["summary"]["remaining_percent"],
                 json!(6.0)
             );
+            let fable_observation = json!({
+                "schema_version": 1,
+                "provider": "claude",
+                "context_id": "ctx-claude",
+                "account_generation": 1,
+                "ordering_token": now - 10.0,
+                "received_at": now - 5.0,
+                "source": "stream_event",
+                "outcome": "ok",
+                "reason_code": null,
+                "diagnostic": null,
+                "completeness": "partial",
+                "account_mode": "subscription",
+                "plan": null,
+                "windows": [{
+                    "key": "window:seven-day-overage-included",
+                    "label": "Claude seven_day_overage_included",
+                    "used_percent": 82.0,
+                    "resets_at": now + 604800.0,
+                    "duration_seconds": null,
+                    "period_start": null,
+                    "applicability": {
+                        "kind": "unknown",
+                        "vendor_label": "seven_day_overage_included",
+                        "vendor_id": "seven-day-overage-included"
+                    },
+                    "observed_at": now - 10.0,
+                    "source": "stream_event",
+                    "vendor_state": "unknown"
+                }]
+            });
+            let fable_obj = json_value_to_py(py, &fable_observation).unwrap();
+            let fable_dict = fable_obj.bind(py).downcast::<PyDict>().unwrap();
+            let fable_validated =
+                py_provider_usage_validate_observation(py, fable_dict, now)
+                    .unwrap();
+            let fable_value =
+                py_to_json_value(fable_validated.bind(py)).unwrap();
+            assert_eq!(
+                fable_value["windows"][0]["key"],
+                json!("weekly:claude-fable-5")
+            );
+            assert_eq!(
+                fable_value["windows"][0]["label"],
+                json!("Claude weekly Fable")
+            );
+            assert_eq!(
+                fable_value["windows"][0]["applicability"],
+                json!({
+                    "kind": "models",
+                    "model_ids": ["claude-fable-5"]
+                })
+            );
             let invalid_indicator = json_value_to_py(
                 py,
                 &json!({
