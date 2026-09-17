@@ -37,6 +37,38 @@ resolve_pyo3_python() {
     return 1
 }
 
+configure_pyo3_python() {
+    resolve_pyo3_python
+
+    local libdir
+    libdir="$("$PYO3_PYTHON" - <<'PY'
+import pathlib
+import sysconfig
+
+if sysconfig.get_config_var("Py_ENABLE_SHARED"):
+    libdir = sysconfig.get_config_var("LIBDIR") or sysconfig.get_config_var("LIBPL")
+    if libdir and pathlib.Path(libdir).is_dir():
+        print(libdir)
+PY
+)"
+
+    if [[ -z "$libdir" ]]; then
+        return 0
+    fi
+
+    case ":${LD_LIBRARY_PATH:-}:" in
+        *":$libdir:"*) ;;
+        *) export LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        case ":${DYLD_LIBRARY_PATH:-}:" in
+            *":$libdir:"*) ;;
+            *) export DYLD_LIBRARY_PATH="$libdir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ;;
+        esac
+    fi
+}
+
 usage() {
     cat >&2 <<EOF
 usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy|test|all]
@@ -58,12 +90,12 @@ cmd_fmt() {
 }
 
 cmd_clippy() {
-    resolve_pyo3_python
+    configure_pyo3_python
     cargo clippy --workspace --all-targets -- -D warnings
 }
 
 cmd_test() {
-    resolve_pyo3_python
+    configure_pyo3_python
     cargo test --workspace
 }
 

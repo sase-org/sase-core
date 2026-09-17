@@ -21,6 +21,7 @@ pub mod agent_identity;
 pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_ownership;
+pub mod agent_publication_batches;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_stats;
@@ -289,6 +290,12 @@ pub use agent_ownership::{
     CLEANUP_OUTCOME_SELECTED, REGISTRY_MERGE_ACTION_NO_OP,
     REGISTRY_MERGE_ACTION_REMOVE, REGISTRY_MERGE_ACTION_UPSERT,
     RESERVATION_KIND_CLEANUP_IN_PROGRESS,
+};
+pub use agent_publication_batches::{
+    plan_agent_publication_batches, AgentPublicationBatchError,
+    AgentPublicationBatchPlanWire, AgentPublicationBatchWire,
+    AgentPublicationPathRecordWire,
+    AGENT_PUBLICATION_BATCH_WIRE_SCHEMA_VERSION,
 };
 pub use agent_runtime::{
     aggregate_clan_runtime, aggregate_clan_runtime_records,

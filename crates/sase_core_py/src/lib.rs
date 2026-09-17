@@ -76,6 +76,7 @@
 //! - `retryability_wire_schema_version() -> int`
 //! - `classify_failure_retryability(operation_kind: str, exit_status: int | None = None, stdout: str = "", stderr: str = "") -> dict`
 //! - `decide_sidecar_publication_after_push(returncode: int, stdout: str, stderr: str, attempt: int) -> dict`
+//! - `plan_agent_publication_batches(records: list[dict], budget_bytes: int) -> dict`
 //! - `vcs_log_wire_schema_version() -> int`
 //! - `parse_git_log(stdout: str) -> list[dict]`
 //! - `classify_commit_presence(commits: list[dict], ahead_ids: list[str], behind_ids: list[str]) -> list[dict]`
@@ -794,6 +795,10 @@ use sase_core::agent_name_template::{
 use sase_core::agent_ownership::{
     agent_ownership_batch_request_from_json_value,
     plan_agent_ownership_batch as core_plan_agent_ownership_batch,
+};
+use sase_core::agent_publication_batches::{
+    plan_agent_publication_batches as core_plan_agent_publication_batches,
+    AgentPublicationPathRecordWire,
 };
 use sase_core::agent_runtime::{
     aggregate_clan_runtime as core_aggregate_clan_runtime,
@@ -5230,6 +5235,28 @@ fn sidecar_publication_decision_to_py<'py>(
     dict.set_item("max_attempts", decision.max_attempts)?;
     dict.set_item("retryable", decision.retryable)?;
     Ok(dict)
+}
+
+/// Plan byte-bounded filesystem batches for full agent publication.
+#[pyfunction]
+#[pyo3(name = "plan_agent_publication_batches")]
+fn py_plan_agent_publication_batches<'py>(
+    py: Python<'py>,
+    records: &Bound<'_, PyList>,
+    budget_bytes: u64,
+) -> PyResult<PyObject> {
+    let records =
+        serde_json::from_value::<Vec<AgentPublicationPathRecordWire>>(
+            py_to_json_value(records.as_any())?,
+        )
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "records are not valid AgentPublicationPathRecordWire dicts: {error}"
+            ))
+        })?;
+    let plan = core_plan_agent_publication_batches(&records, budget_bytes)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &plan)
 }
 
 // --- vcs_log parser + aggregator bindings --------------------------------
@@ -19113,6 +19140,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_decide_sidecar_publication_after_push,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_plan_agent_publication_batches, m)?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_git_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_commit_presence, m)?)?;
@@ -29656,6 +29684,51 @@ MENTORS:
                     "attempt": 1,
                     "max_attempts": 3,
                     "retryable": true
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn agent_publication_batch_binding_returns_plain_dict() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            module
+                .add_function(
+                    wrap_pyfunction!(
+                        py_plan_agent_publication_batches,
+                        &module
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let records = PyList::empty_bound(py);
+            append_json(
+                py,
+                &records,
+                json!({"path": "a.txt", "size_bytes": 4}),
+            );
+            append_json(
+                py,
+                &records,
+                json!({"path": "b.txt", "size_bytes": 7}),
+            );
+            let value = module
+                .getattr("plan_agent_publication_batches")
+                .unwrap()
+                .call1((records, 10_u64))
+                .unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!({
+                    "schema_version": 1,
+                    "budget_bytes": 10,
+                    "total_size_bytes": 11,
+                    "batches": [
+                        {"paths": ["a.txt"], "size_bytes": 4},
+                        {"paths": ["b.txt"], "size_bytes": 7}
+                    ]
                 })
             );
         });
