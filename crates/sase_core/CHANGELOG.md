@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.42](https://github.com/sase-org/sase-core/compare/v0.34.41...v0.34.42) - 2026-09-17
+
+### Added
+
+- *(gate-decision)* add execution owner recovery policy
+
 ## [0.34.41](https://github.com/sase-org/sase-core/compare/v0.34.40...v0.34.41) - 2026-09-16
 
 ### Added
