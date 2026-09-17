@@ -344,11 +344,29 @@ fn execute_manifest(
             let command = &manifest.commands[index];
             writeln!(stderr, "sase_sudo_runner: running {}", command.id)
                 .map_err(internal_io)?;
-            let cached =
-                sudo_status(config, manifest, ["-n", "-v"], StdioMode::Null)?
-                    .success();
-            let result =
-                run_approved_command(config, manifest, index, cached, stderr)?;
+            let cached = match sudo_status(
+                config,
+                manifest,
+                ["-n", "-v"],
+                StdioMode::Null,
+            ) {
+                Ok(status) => status.success(),
+                Err(error) => {
+                    ledger.outcome = SudoLedgerOutcomeWire::RunnerError;
+                    ledger.diagnostic = Some(error.message);
+                    break;
+                }
+            };
+            let result = match run_approved_command(
+                config, manifest, index, cached, stderr,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    ledger.outcome = SudoLedgerOutcomeWire::RunnerError;
+                    ledger.diagnostic = Some(error.message);
+                    break;
+                }
+            };
             ledger.entries[index] = result.entry;
             match result.outcome {
                 CommandOutcome::Ok => {}
@@ -530,10 +548,9 @@ fn run_approved_command(
         command.arg("-n");
     }
     command
+        .current_dir(&manifest.cwd)
         .arg("-u")
         .arg(&manifest.run_as)
-        .arg("-D")
-        .arg(&manifest.cwd)
         .arg("--")
         .args(&command_wire.argv)
         .stdin(Stdio::null())
@@ -548,7 +565,10 @@ fn run_approved_command(
     let mut child = command.spawn().map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
-            format!("failed to start sudo command: {error}"),
+            format!(
+                "failed to start sudo command in cwd {}: {error}",
+                manifest.cwd
+            ),
         )
     })?;
     let stdout_reader = child.stdout.take().map(read_pipe_in_thread);
@@ -873,6 +893,38 @@ mod tests {
                 .collect()
         }
 
+        fn argv_calls(&self) -> Vec<Vec<String>> {
+            let content =
+                fs::read_to_string(self.sudo_path.with_extension("argv"))
+                    .unwrap_or_default();
+            let mut calls = Vec::new();
+            let mut current = Vec::new();
+            let mut in_call = false;
+            for line in content.lines() {
+                match line {
+                    "BEGIN" => {
+                        in_call = true;
+                        current.clear();
+                    }
+                    "END" if in_call => {
+                        calls.push(std::mem::take(&mut current));
+                        in_call = false;
+                    }
+                    _ if in_call => current.push(line.to_string()),
+                    _ => {}
+                }
+            }
+            calls
+        }
+
+        fn cwd_log(&self) -> Vec<String> {
+            fs::read_to_string(self.sudo_path.with_extension("cwd"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
         fn env_log(&self) -> String {
             fs::read_to_string(self.sudo_path.with_extension("env"))
                 .unwrap_or_default()
@@ -880,6 +932,10 @@ mod tests {
 
         fn touch(&self, suffix: &str) {
             fs::write(self.sudo_path.with_extension(suffix), "").unwrap();
+        }
+
+        fn write_marker(&self, suffix: &str, value: &str) {
+            fs::write(self.sudo_path.with_extension(suffix), value).unwrap();
         }
     }
 
@@ -920,6 +976,14 @@ mod tests {
         r#"#!/bin/sh
 set -eu
 base="$0"
+{
+  printf 'BEGIN\n'
+  for arg do
+    printf '%s\n' "$arg"
+  done
+  printf 'END\n'
+} >> "$base.argv"
+pwd >> "$base.cwd"
 printf '%s\n' "$*" >> "$base.calls"
 if [ "$#" -eq 1 ] && [ "$1" = "-k" ]; then
   printf 'cleanup\n' >> "$base.cleanups"
@@ -931,8 +995,21 @@ if [ "$#" -eq 1 ] && [ "$1" = "-v" ]; then
 fi
 if [ "$#" -eq 2 ] && [ "$1" = "-n" ] && [ "$2" = "-v" ]; then
   if [ -f "$base.probe_fail" ]; then exit 1; fi
+  if [ -f "$base.remove_cwd_on_probe" ]; then
+    cwd_to_remove="$(/usr/bin/cat "$base.remove_cwd_on_probe")"
+    /usr/bin/rmdir "$cwd_to_remove" 2>/dev/null || /usr/bin/rm -rf "$cwd_to_remove"
+  fi
   exit 0
 fi
+for arg do
+  if [ "$arg" = "--" ]; then
+    break
+  fi
+  if [ "$arg" = "-D" ] || [ "$arg" = "--chdir" ]; then
+    printf 'sudo: you are not permitted to use the -D option with simulated-command\n' >&2
+    exit 1
+  fi
+done
 /usr/bin/env | /usr/bin/sort > "$base.env"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--" ]; then
@@ -953,7 +1030,15 @@ case "$cmd" in
     exit 7
     ;;
   slow)
-    sleep 5
+    /bin/sleep 5
+    exit 0
+    ;;
+  read-file)
+    /usr/bin/cat "$2"
+    exit 0
+    ;;
+  /usr/bin/apt-get)
+    printf 'apt-get-simulated\n'
     exit 0
     ;;
   *)
@@ -1028,16 +1113,24 @@ esac
     #[test]
     fn successful_run_uses_expected_sudo_order_and_cleared_environment() {
         let fixture = Fixture::new(manifest());
+        let parent_cwd = std::env::current_dir().unwrap();
         let (result, stdout, stderr) = fixture.run();
         assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::env::current_dir().unwrap(), parent_cwd);
         let calls = fixture.calls();
         assert_eq!(calls[0], "-k");
         assert_eq!(calls[1], "-v");
         assert_eq!(calls[2], "-n -v");
-        assert_eq!(calls[3], "-n -u root -D /tmp -- ok");
+        assert_eq!(calls[3], "-n -u root -- ok");
         assert_eq!(calls[4], "-n -v");
-        assert_eq!(calls[5], "-n -u root -D /tmp -- ok");
+        assert_eq!(calls[5], "-n -u root -- ok");
         assert_eq!(calls[6], "-k");
+        let argv_calls = fixture.argv_calls();
+        assert_eq!(
+            argv_calls[3],
+            ["-n", "-u", "root", "--", "ok"].map(str::to_string)
+        );
+        assert_eq!(fixture.cwd_log()[3], "/tmp");
         let env_log = fixture.env_log();
         assert!(env_log.contains("APP_MODE=reviewed"));
         assert!(env_log.contains("LC_ALL=C"));
@@ -1047,6 +1140,87 @@ esac
         assert_eq!(ledger.entries[0].status, SudoLedgerEntryStatusWire::Ran);
         assert!(ledger.entries[0].output_tail.contains("stdout-ok"));
         assert!(stderr.contains("stdout-ok"));
+    }
+
+    #[test]
+    fn apt_get_shaped_command_uses_requested_cwd_without_sudo_chdir_option() {
+        let mut manifest = manifest();
+        manifest.cwd = "/".to_string();
+        manifest.commands = vec![SudoCommandWire {
+            id: "install".to_string(),
+            argv: vec![
+                "/usr/bin/apt-get".to_string(),
+                "install".to_string(),
+                "-y".to_string(),
+                "texlive-xetex".to_string(),
+            ],
+            why: "Install package".to_string(),
+            timeout_seconds: Some(1.0),
+            shell: false,
+        }];
+        let fixture = Fixture::new(manifest);
+        let (result, stdout, _) = fixture.run();
+        assert!(result.is_ok(), "{result:?}");
+        let argv_calls = fixture.argv_calls();
+        assert_eq!(
+            argv_calls[3],
+            [
+                "-n",
+                "-u",
+                "root",
+                "--",
+                "/usr/bin/apt-get",
+                "install",
+                "-y",
+                "texlive-xetex"
+            ]
+            .map(str::to_string)
+        );
+        assert!(!argv_calls[3][..3].iter().any(|arg| arg == "-D"));
+        assert_eq!(fixture.cwd_log()[3], "/");
+        let ledger = ledger(&stdout);
+        assert_eq!(ledger.outcome, SudoLedgerOutcomeWire::Completed);
+        assert_eq!(ledger.entries[0].status, SudoLedgerEntryStatusWire::Ran);
+        assert!(ledger.entries[0].output_tail.contains("apt-get-simulated"));
+    }
+
+    #[test]
+    fn command_literal_chdir_flag_after_boundary_is_allowed() {
+        let mut manifest = manifest();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv = vec!["ok".to_string(), "-D".to_string()];
+        let fixture = Fixture::new(manifest);
+        let (result, stdout, _) = fixture.run();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(
+            fixture.argv_calls()[3],
+            ["-n", "-u", "root", "--", "ok", "-D"].map(str::to_string)
+        );
+        assert_eq!(
+            ledger(&stdout).entries[0].status,
+            SudoLedgerEntryStatusWire::Ran
+        );
+    }
+
+    #[test]
+    fn command_runs_in_distinct_cwd_with_spaces_and_parent_cwd_is_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("working dir with spaces");
+        fs::create_dir(&cwd).unwrap();
+        fs::write(cwd.join("relative.txt"), "cwd payload\n").unwrap();
+        let mut manifest = manifest();
+        manifest.cwd = cwd.display().to_string();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv =
+            vec!["read-file".to_string(), "relative.txt".to_string()];
+        let fixture = Fixture::new(manifest);
+        let parent_cwd = std::env::current_dir().unwrap();
+        let (result, stdout, _) = fixture.run();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(std::env::current_dir().unwrap(), parent_cwd);
+        assert_eq!(fixture.cwd_log()[3], cwd.display().to_string());
+        let ledger = ledger(&stdout);
+        assert!(ledger.entries[0].output_tail.contains("cwd payload"));
     }
 
     #[test]
@@ -1082,7 +1256,7 @@ esac
         assert_eq!(ledger.entries[1].status, SudoLedgerEntryStatusWire::Ran);
         let calls = fixture.calls();
         assert_eq!(calls[2], "-n -v");
-        assert_eq!(calls[3], "-u root -D /tmp -- ok");
+        assert_eq!(calls[3], "-u root -- ok");
     }
 
     #[test]
@@ -1101,6 +1275,91 @@ esac
             .iter()
             .all(|entry| entry.status == SudoLedgerEntryStatusWire::Skipped));
         assert_eq!(fixture.calls(), vec!["-k", "-v", "-k"]);
+    }
+
+    #[test]
+    fn nonexistent_cwd_fails_before_dispatch_and_cleans_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let mut manifest = manifest();
+        manifest.cwd = missing.display().to_string();
+        manifest.commands.truncate(1);
+        let fixture = Fixture::new(manifest);
+        let (result, stdout, _) = fixture.run();
+        assert_eq!(
+            result.unwrap_err().exit_code(),
+            SUDO_RUNNER_RUNNER_ERROR_EXIT
+        );
+        let ledger = ledger(&stdout);
+        assert_eq!(ledger.outcome, SudoLedgerOutcomeWire::RunnerError);
+        assert!(ledger
+            .diagnostic
+            .as_deref()
+            .unwrap_or_default()
+            .contains("failed to start sudo command in cwd"));
+        assert_eq!(
+            ledger.entries[0].status,
+            SudoLedgerEntryStatusWire::Skipped
+        );
+        assert_eq!(fixture.calls(), vec!["-k", "-v", "-n -v", "-k"]);
+        assert!(fixture
+            .argv_calls()
+            .iter()
+            .all(|argv| !argv.iter().any(|arg| arg == "--")));
+    }
+
+    #[test]
+    fn cwd_removed_after_authentication_fails_before_dispatch_and_cleans_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("vanishing");
+        fs::create_dir(&cwd).unwrap();
+        let mut manifest = manifest();
+        manifest.cwd = cwd.display().to_string();
+        manifest.commands.truncate(1);
+        let fixture = Fixture::new(manifest);
+        fixture.write_marker("remove_cwd_on_probe", &cwd.display().to_string());
+        let (result, stdout, _) = fixture.run();
+        assert_eq!(
+            result.unwrap_err().exit_code(),
+            SUDO_RUNNER_RUNNER_ERROR_EXIT
+        );
+        assert!(!cwd.exists());
+        let ledger = ledger(&stdout);
+        assert_eq!(ledger.outcome, SudoLedgerOutcomeWire::RunnerError);
+        assert_eq!(
+            ledger.entries[0].status,
+            SudoLedgerEntryStatusWire::Skipped
+        );
+        assert_eq!(fixture.calls(), vec!["-k", "-v", "-n -v", "-k"]);
+    }
+
+    #[test]
+    fn permission_denied_cwd_fails_before_dispatch_when_supported() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("blocked");
+        fs::create_dir(&cwd).unwrap();
+        fs::set_permissions(&cwd, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut manifest = manifest();
+        manifest.cwd = cwd.display().to_string();
+        manifest.commands.truncate(1);
+        let fixture = Fixture::new(manifest);
+        let (result, stdout, _) = fixture.run();
+        fs::set_permissions(&cwd, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            result.unwrap_err().exit_code(),
+            SUDO_RUNNER_RUNNER_ERROR_EXIT
+        );
+        let ledger = ledger(&stdout);
+        assert_eq!(ledger.outcome, SudoLedgerOutcomeWire::RunnerError);
+        assert!(ledger
+            .diagnostic
+            .as_deref()
+            .unwrap_or_default()
+            .contains(&cwd.display().to_string()));
+        assert_eq!(fixture.calls(), vec!["-k", "-v", "-n -v", "-k"]);
     }
 
     #[test]
