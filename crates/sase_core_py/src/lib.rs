@@ -564,6 +564,7 @@
 //! - `validate_finalizer_assigned_bead_binding(context: dict, expected: dict | None) -> None`
 //! - `gate_decision_wire_schema_version() -> int`
 //! - `decide_gate_decision_acceptance(request: dict) -> dict`
+//! - `claim_gate_decision_execution(request: dict) -> dict`
 //! - `gate_lifecycle_wire_schema_version() -> int`
 //! - `decide_gate_lifecycle(request: dict) -> dict`
 //! - `validate_task_type_spec(spec: dict) -> None`
@@ -1280,6 +1281,7 @@ use sase_core::fleet_mutation::{
     FleetMutationRequestWire,
 };
 use sase_core::gate_decision::{
+    claim_gate_decision_execution_from_json as core_claim_gate_decision_execution_from_json,
     decide_gate_decision_acceptance_from_json as core_decide_gate_decision_acceptance_from_json,
     decide_gate_lifecycle_from_json as core_decide_gate_lifecycle_from_json,
     GateDecisionError, GATE_DECISION_WIRE_SCHEMA_VERSION,
@@ -6832,6 +6834,21 @@ fn py_decide_gate_decision_acceptance<'py>(
         py,
         core_decide_gate_decision_acceptance_from_json(&value),
         "acceptance",
+    )
+}
+
+/// Re-own one still-current accepted gate decision before execution starts.
+#[pyfunction]
+#[pyo3(name = "claim_gate_decision_execution")]
+fn py_claim_gate_decision_execution<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    gate_decision_result_to_py(
+        py,
+        core_claim_gate_decision_execution_from_json(&value),
+        "execution claim",
     )
 }
 
@@ -19246,6 +19263,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_gate_decision_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_gate_decision_acceptance, m)?)?;
+    m.add_function(wrap_pyfunction!(py_claim_gate_decision_execution, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_gate_lifecycle_wire_schema_version,
         m
@@ -27810,6 +27828,7 @@ MENTORS:
             for name in [
                 "gate_decision_wire_schema_version",
                 "decide_gate_decision_acceptance",
+                "claim_gate_decision_execution",
             ] {
                 assert!(module.getattr(name).is_ok(), "missing {name}");
             }
@@ -27823,6 +27842,7 @@ MENTORS:
                     "request_hash": "sha256:deadbeef",
                     "selected_option_ids": ["approve"],
                     "input_identity": "sha256:input",
+                    "acceptance_id": "acceptance-a",
                     "source": "cli",
                     "accepted_at_unix": 1_726_000_000.0,
                     "execution_owner": "attempt:1234",
@@ -27838,6 +27858,7 @@ MENTORS:
             assert_eq!(accepted["status"], json!("accepted"));
             let receipt = accepted["receipt"].clone();
             assert_eq!(receipt["gate_id"], json!("gate-abc"));
+            assert_eq!(receipt["acceptance_id"], json!("acceptance-a"));
             assert!(!receipt["identity_fingerprint"]
                 .as_str()
                 .unwrap()
@@ -27849,6 +27870,7 @@ MENTORS:
                 "request_hash": "sha256:deadbeef",
                 "selected_option_ids": ["approve"],
                 "input_identity": "sha256:input",
+                "acceptance_id": "acceptance-a-replay",
                 "source": "ace",
                 "accepted_at_unix": 1_726_000_500.0,
                 "execution_owner": "attempt:5678",
@@ -27876,7 +27898,7 @@ MENTORS:
                 "source": "cli",
                 "accepted_at_unix": 1_726_000_600.0,
             });
-            conflict_value["existing_receipt"] = receipt;
+            conflict_value["existing_receipt"] = receipt.clone();
             let conflict_request =
                 json_value_to_py(py, &conflict_value).unwrap();
             let error = py_decide_gate_decision_acceptance(
@@ -27885,6 +27907,72 @@ MENTORS:
             )
             .unwrap_err();
             assert!(error.to_string().contains("gate_decision_conflict"));
+
+            let mut supersede_value = json!({
+                "schema_version": 1,
+                "gate_id": "gate-abc",
+                "request_hash": "sha256:deadbeef",
+                "selected_option_ids": ["reject"],
+                "input_identity": "sha256:input",
+                "acceptance_id": "acceptance-b",
+                "source": "cli",
+                "accepted_at_unix": 1_726_000_700.0,
+                "execution_facts": {
+                    "current_failure": {
+                        "outcome_id": "outcome-1",
+                        "acceptance_id": "acceptance-a",
+                        "attempt_id": "attempt-1",
+                        "stage": "command",
+                        "code": "command_failed",
+                        "message": "option approve failed with exit status 1",
+                        "at_unix": 1_726_000_650.0,
+                        "error_record": "errors/outcome-1.json"
+                    }
+                }
+            });
+            supersede_value["existing_receipt"] = receipt.clone();
+            let supersede_request =
+                json_value_to_py(py, &supersede_value).unwrap();
+            let superseded = py_decide_gate_decision_acceptance(
+                py,
+                supersede_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let superseded = py_to_json_value(superseded.bind(py)).unwrap();
+            assert_eq!(superseded["status"], json!("superseded"));
+            assert_eq!(
+                superseded["receipt"]["acceptance_id"],
+                json!("acceptance-b")
+            );
+
+            let claim_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "acceptance_id": "acceptance-a",
+                    "receipt": receipt,
+                    "execution_owner": {
+                        "kind": "process",
+                        "host": "apollo",
+                        "pid": 9001,
+                        "started_at_unix": 1_726_000_710.0,
+                        "identity_token": "boot-b:9001"
+                    }
+                }),
+            )
+            .unwrap();
+            let claimed = py_claim_gate_decision_execution(
+                py,
+                claim_request.bind(py).downcast::<PyDict>().unwrap(),
+            )
+            .unwrap();
+            let claimed = py_to_json_value(claimed.bind(py)).unwrap();
+            assert_eq!(
+                claimed["receipt"]["execution_owner"]["kind"],
+                json!("process")
+            );
         });
     }
 
@@ -27960,6 +28048,61 @@ MENTORS:
                 json!("accepted_unfinished"),
                 "a verified receipt outranks the review deadline and grace window"
             );
+            assert_eq!(accepted_unfinished["can_cancel"], json!(false));
+            assert_eq!(accepted_unfinished["can_supersede"], json!(false));
+
+            let accepted_failed_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 1_000_000.0,
+                    "deadline_unix": 1_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": false,
+                    "receipt": {
+                        "schema_version": 1,
+                        "gate_id": "gate-abc",
+                        "request_hash": "sha256:deadbeef",
+                        "selected_option_ids": ["approve"],
+                        "input_identity": "sha256:input",
+                        "acceptance_id": "acceptance-a",
+                        "source": "cli",
+                        "accepted_at_unix": 1_726_000_000.0,
+                        "identity_fingerprint": "fingerprint",
+                    },
+                    "execution_facts": {
+                        "current_failure": {
+                            "outcome_id": "outcome-1",
+                            "acceptance_id": "acceptance-a",
+                            "attempt_id": "attempt-1",
+                            "stage": "terminal_prepare",
+                            "code": "archive_failed",
+                            "message": "archive preparation failed",
+                            "at_unix": 1_726_000_050.0,
+                            "error_record": "errors/outcome-1.json"
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+            let accepted_failed = py_decide_gate_lifecycle(
+                py,
+                accepted_failed_request
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let accepted_failed =
+                py_to_json_value(accepted_failed.bind(py)).unwrap();
+            assert_eq!(
+                accepted_failed["disposition"],
+                json!("accepted_failed")
+            );
+            assert_eq!(accepted_failed["can_cancel"], json!(true));
+            assert_eq!(accepted_failed["can_supersede"], json!(true));
 
             let mismatched_receipt_request = json_value_to_py(
                 py,

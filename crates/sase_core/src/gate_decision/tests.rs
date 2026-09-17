@@ -1,16 +1,23 @@
 use serde_json::json;
 
 use super::policy::{
+    claim_gate_decision_execution, claim_gate_decision_execution_from_json,
     decide_gate_decision_acceptance, decide_gate_decision_acceptance_from_json,
     decide_gate_lifecycle, decide_gate_lifecycle_from_json,
     gate_decision_identity_fingerprint,
 };
 use super::wire::{
-    GateDecisionAcceptanceRequestWire, GateDecisionOutcomeStatusWire,
-    GateDecisionReceiptWire, GateLifecycleRequestWire,
-    GATE_DECISION_CODE_CONFLICT, GATE_DECISION_CODE_UNSUPPORTED_SCHEMA,
-    GATE_DECISION_WIRE_SCHEMA_VERSION, GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
+    GateDecisionAcceptanceRequestWire, GateDecisionExecutionClaimRequestWire,
+    GateDecisionExecutionFactsWire, GateDecisionExecutionOwnerKindWire,
+    GateDecisionExecutionOwnerRecordWire, GateDecisionExecutionOwnerWire,
+    GateDecisionFailureOutcomeWire, GateDecisionFailureStageWire,
+    GateDecisionOutcomeStatusWire, GateDecisionReceiptWire,
+    GateLifecycleRequestWire, GATE_DECISION_CODE_CONFLICT,
+    GATE_DECISION_CODE_UNSUPPORTED_SCHEMA, GATE_DECISION_WIRE_SCHEMA_VERSION,
+    GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
     GATE_LIFECYCLE_CODE_UNSUPPORTED_SCHEMA,
+    GATE_LIFECYCLE_DISPOSITION_ACCEPTED_FAILED,
+    GATE_LIFECYCLE_DISPOSITION_ACCEPTED_OWNER_LOST,
     GATE_LIFECYCLE_DISPOSITION_ACCEPTED_UNFINISHED,
     GATE_LIFECYCLE_DISPOSITION_ANSWERED,
     GATE_LIFECYCLE_DISPOSITION_CANCELLED_LOST,
@@ -31,10 +38,29 @@ fn request(
         selected_option_ids: vec!["approve".to_string()],
         input_identity: "sha256:input".to_string(),
         feedback_identity: None,
+        acceptance_id: Some("acceptance-a".to_string()),
         source: "cli".to_string(),
         accepted_at_unix: 1_726_000_000.0,
-        execution_owner: Some("attempt:1234".to_string()),
+        execution_owner: Some(GateDecisionExecutionOwnerWire::LegacyProcId(
+            "attempt:1234".to_string(),
+        )),
         existing_receipt: existing,
+        execution_facts: None,
+    }
+}
+
+fn failure_outcome(
+    acceptance_id: Option<&str>,
+) -> GateDecisionFailureOutcomeWire {
+    GateDecisionFailureOutcomeWire {
+        outcome_id: "outcome-1".to_string(),
+        acceptance_id: acceptance_id.map(str::to_string),
+        attempt_id: "attempt-1".to_string(),
+        stage: GateDecisionFailureStageWire::Command,
+        code: "command_failed".to_string(),
+        message: "option approve failed with exit status 1".to_string(),
+        at_unix: 1_726_000_050.0,
+        error_record: "errors/outcome-1.json".to_string(),
     }
 }
 
@@ -62,7 +88,10 @@ fn replays_an_identical_resubmission_without_mutating_the_receipt() {
     let mut second_request = request(Some(first.clone()));
     second_request.source = "ace".to_string();
     second_request.accepted_at_unix += 5.0;
-    second_request.execution_owner = Some("attempt:9999".to_string());
+    second_request.execution_owner =
+        Some(GateDecisionExecutionOwnerWire::LegacyProcId(
+            "attempt:9999".to_string(),
+        ));
     let outcome = decide_gate_decision_acceptance(&second_request).unwrap();
     assert_eq!(outcome.status, GateDecisionOutcomeStatusWire::Replayed);
     assert_eq!(
@@ -100,6 +129,107 @@ fn rejects_a_conflicting_feedback_identity() {
     let first = decide_gate_decision_acceptance(&base).unwrap().receipt;
     let mut second_request = request(Some(first));
     second_request.feedback_identity = Some("sha256:feedback-b".to_string());
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
+}
+
+#[test]
+fn rejects_a_conflict_while_the_existing_owner_is_live() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        response_lock_held: true,
+        ..Default::default()
+    });
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
+}
+
+#[test]
+fn supersedes_a_conflict_after_a_current_failure_outcome() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.acceptance_id = Some("acceptance-b".to_string());
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        current_failure: Some(failure_outcome(Some("acceptance-a"))),
+        ..Default::default()
+    });
+    let outcome = decide_gate_decision_acceptance(&second_request).unwrap();
+    assert_eq!(outcome.status, GateDecisionOutcomeStatusWire::Superseded);
+    assert_eq!(
+        outcome.receipt.acceptance_id.as_deref(),
+        Some("acceptance-b")
+    );
+    assert_eq!(
+        outcome.receipt.selected_option_ids,
+        vec!["reject".to_string()]
+    );
+}
+
+#[test]
+fn stale_failure_outcomes_do_not_make_a_newer_receipt_supersedable() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        current_failure: Some(failure_outcome(Some("stale-acceptance"))),
+        ..Default::default()
+    });
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
+}
+
+#[test]
+fn supersedes_a_conflict_after_the_existing_process_owner_is_dead() {
+    let mut first_request = request(None);
+    first_request.execution_owner =
+        Some(GateDecisionExecutionOwnerWire::Structured(
+            GateDecisionExecutionOwnerRecordWire {
+                kind: GateDecisionExecutionOwnerKindWire::Process,
+                proc_id: None,
+                host: Some("apollo".to_string()),
+                pid: Some(4242),
+                started_at_unix: Some(1_725_999_000.0),
+                identity_token: Some("boot-a:4242".to_string()),
+            },
+        ));
+    let first = decide_gate_decision_acceptance(&first_request)
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.acceptance_id = Some("acceptance-b".to_string());
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        owner_host_matches: Some(true),
+        owner_from_previous_boot: Some(true),
+        owner_pid_running: Some(false),
+        owner_identity_matches: Some(false),
+        ..Default::default()
+    });
+    let outcome = decide_gate_decision_acceptance(&second_request).unwrap();
+    assert_eq!(outcome.status, GateDecisionOutcomeStatusWire::Superseded);
+}
+
+#[test]
+fn treats_an_unknown_existing_owner_as_live_for_conflicts() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        legacy_proc_status: Some("running".to_string()),
+        legacy_proc_supervisor_alive: None,
+        ..Default::default()
+    });
     let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
     assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
 }
@@ -151,6 +281,58 @@ fn decides_from_json_and_rejects_an_unsupported_schema_version() {
     assert_eq!(error.code, GATE_DECISION_CODE_UNSUPPORTED_SCHEMA);
 }
 
+#[test]
+fn execution_claim_reowns_the_current_receipt() {
+    let receipt = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let claim = GateDecisionExecutionClaimRequestWire {
+        schema_version: GATE_DECISION_WIRE_SCHEMA_VERSION,
+        gate_id: "gate-abc123".to_string(),
+        request_hash: "sha256:deadbeef".to_string(),
+        acceptance_id: Some("acceptance-a".to_string()),
+        receipt,
+        execution_owner: Some(GateDecisionExecutionOwnerWire::Structured(
+            GateDecisionExecutionOwnerRecordWire {
+                kind: GateDecisionExecutionOwnerKindWire::Process,
+                proc_id: None,
+                host: Some("apollo".to_string()),
+                pid: Some(9001),
+                started_at_unix: Some(1_726_000_010.0),
+                identity_token: Some("boot-b:9001".to_string()),
+            },
+        )),
+    };
+    let outcome = claim_gate_decision_execution(&claim).unwrap();
+    assert!(matches!(
+        outcome.receipt.execution_owner,
+        Some(GateDecisionExecutionOwnerWire::Structured(_))
+    ));
+}
+
+#[test]
+fn execution_claim_rejects_a_superseded_acceptance_id() {
+    let receipt = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let claim = json!({
+        "schema_version": GATE_DECISION_WIRE_SCHEMA_VERSION,
+        "gate_id": "gate-abc123",
+        "request_hash": "sha256:deadbeef",
+        "acceptance_id": "stale-acceptance",
+        "receipt": receipt,
+        "execution_owner": {
+            "kind": "process",
+            "host": "apollo",
+            "pid": 9001,
+            "started_at_unix": 1_726_000_010.0,
+            "identity_token": "boot-b:9001"
+        }
+    });
+    let error = claim_gate_decision_execution_from_json(&claim).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
+}
+
 fn lifecycle_receipt() -> GateDecisionReceiptWire {
     GateDecisionReceiptWire {
         schema_version: GATE_DECISION_WIRE_SCHEMA_VERSION,
@@ -159,6 +341,7 @@ fn lifecycle_receipt() -> GateDecisionReceiptWire {
         selected_option_ids: vec!["approve".to_string()],
         input_identity: "sha256:input".to_string(),
         feedback_identity: None,
+        acceptance_id: Some("acceptance-a".to_string()),
         source: "cli".to_string(),
         accepted_at_unix: 1_726_000_000.0,
         execution_owner: None,
@@ -178,6 +361,7 @@ fn lifecycle_request() -> GateLifecycleRequestWire {
         cancellation_reason: None,
         receipt: None,
         receipt_unreadable: false,
+        execution_facts: None,
     }
 }
 
@@ -229,6 +413,68 @@ fn a_verified_receipt_is_accepted_unfinished_even_past_the_grace_window() {
         decision.disposition,
         GATE_LIFECYCLE_DISPOSITION_ACCEPTED_UNFINISHED
     );
+    assert!(!decision.can_cancel);
+    assert!(!decision.can_supersede);
+}
+
+#[test]
+fn cancellation_outranks_a_verified_receipt() {
+    let mut request = lifecycle_request();
+    request.receipt = Some(lifecycle_receipt());
+    request.cancellation_reason =
+        Some("cancelled via sase gate cancel".to_string());
+    let decision = decide_gate_lifecycle(&request).unwrap();
+    assert_eq!(
+        decision.disposition,
+        GATE_LIFECYCLE_DISPOSITION_CANCELLED_STOPPED
+    );
+}
+
+#[test]
+fn a_current_failure_reports_accepted_failed_with_recovery_permissions() {
+    let mut request = lifecycle_request();
+    request.receipt = Some(lifecycle_receipt());
+    request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        current_failure: Some(failure_outcome(Some("acceptance-a"))),
+        ..Default::default()
+    });
+    let decision = decide_gate_lifecycle(&request).unwrap();
+    assert_eq!(
+        decision.disposition,
+        GATE_LIFECYCLE_DISPOSITION_ACCEPTED_FAILED
+    );
+    assert!(decision.can_cancel);
+    assert!(decision.can_supersede);
+}
+
+#[test]
+fn a_dead_owner_reports_accepted_owner_lost_with_recovery_permissions() {
+    let mut receipt = lifecycle_receipt();
+    receipt.execution_owner = Some(GateDecisionExecutionOwnerWire::Structured(
+        GateDecisionExecutionOwnerRecordWire {
+            kind: GateDecisionExecutionOwnerKindWire::Process,
+            proc_id: None,
+            host: Some("apollo".to_string()),
+            pid: Some(4242),
+            started_at_unix: Some(1_725_999_000.0),
+            identity_token: Some("boot-a:4242".to_string()),
+        },
+    ));
+    let mut request = lifecycle_request();
+    request.receipt = Some(receipt);
+    request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        owner_host_matches: Some(true),
+        owner_pid_running: Some(false),
+        owner_identity_matches: Some(false),
+        ..Default::default()
+    });
+    let decision = decide_gate_lifecycle(&request).unwrap();
+    assert_eq!(
+        decision.disposition,
+        GATE_LIFECYCLE_DISPOSITION_ACCEPTED_OWNER_LOST
+    );
+    assert!(decision.can_cancel);
+    assert!(decision.can_supersede);
 }
 
 #[test]
