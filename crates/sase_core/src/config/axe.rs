@@ -386,7 +386,9 @@ fn mutate_target_contribution(
             .cloned()
             .unwrap_or_default();
         let mut contribution = current;
-        apply_operations(&mut contribution, operations)?;
+        let source_operations =
+            source_operations_for_routine_edit(routine_key, operations);
+        apply_operations(&mut contribution, &source_operations)?;
         routines.insert(
             selector.lumberjack.clone(),
             Value::Object(contribution.clone()),
@@ -582,6 +584,24 @@ fn apply_operations(
         }
     }
     Ok(())
+}
+
+fn source_operations_for_routine_edit(
+    routine_key: &str,
+    operations: &[AxeFieldOperationWire],
+) -> Vec<AxeFieldOperationWire> {
+    operations
+        .iter()
+        .map(|operation| {
+            let mut operation = operation.clone();
+            if routine_key == LUMBERJACKS {
+                if let Some(first) = operation.key_path.first_mut() {
+                    *first = routine_key_alias(first).to_string();
+                }
+            }
+            operation
+        })
+        .collect()
 }
 
 fn ensure_map<'a>(
@@ -2241,4 +2261,73 @@ fn dedupe_diagnostics(diagnostics: &mut Vec<ConfigDiagnosticWire>) {
             .then_with(|| left.layer.cmp(&right.layer))
             .then_with(|| left.message.cmp(&right.message))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn layer(name: &str, value: Value) -> ConfigLayerInputWire {
+        ConfigLayerInputWire {
+            name: name.to_string(),
+            kind: "user".to_string(),
+            path: Some(format!("{name}.yml")),
+            value,
+            list_strategy: "replace".to_string(),
+            writable: true,
+            exists: Some(true),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn entry_mutation_targets_existing_legacy_timeout_source() {
+        let request = AxeEntryMutationRequestWire {
+            schema: json!({"type": "object"}),
+            layers: vec![layer(
+                "user",
+                json!({
+                    "axe": {
+                        "lumberjacks": {
+                            "checks": {
+                                "description": "Run checks",
+                                "interval": 10,
+                                "chop_timeout": "123s",
+                                "wait_runners": 1
+                            }
+                        }
+                    }
+                }),
+            )],
+            require_descriptions: true,
+            require_description_shape: true,
+            target_layer: "user".to_string(),
+            selector: AxeEntrySelectorWire {
+                kind: "lumberjack".to_string(),
+                lumberjack: "checks".to_string(),
+                chop: None,
+            },
+            operations: vec![AxeFieldOperationWire {
+                kind: "set".to_string(),
+                key_path: vec!["job_timeout".to_string()],
+                value: json!("234s"),
+            }],
+        };
+
+        let plan = plan_axe_entry_mutation(&request).unwrap();
+
+        assert!(plan.axe_diagnostics.is_empty());
+        assert_eq!(
+            plan.write_plan.key_path,
+            vec![
+                "axe".to_string(),
+                "lumberjacks".to_string(),
+                "checks".to_string()
+            ]
+        );
+        assert_eq!(plan.write_plan.new_value["chop_timeout"], json!("234s"));
+        assert!(plan.write_plan.new_value.get("job_timeout").is_none());
+        assert_eq!(plan.effective_preview.after["chop_timeout"], json!("234s"));
+    }
 }
