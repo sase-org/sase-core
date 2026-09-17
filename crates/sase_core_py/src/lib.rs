@@ -1569,6 +1569,10 @@ use sase_core::runner_limit_override::{
     RunnerLimitOverrideError as RunnerLimitOverrideDomainError,
 };
 use sase_core::scan_directive_owned_fences as core_scan_directive_owned_fences;
+use sase_core::service::config::{
+    compose_service_config as core_compose_service_config,
+    ServiceConfigComposeRequestWire,
+};
 use sase_core::sidecar_publication::{
     decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
     SidecarPublicationDecisionWire,
@@ -13389,6 +13393,28 @@ fn py_axe_config_compose<'py>(
     json_value_to_py(py, &json)
 }
 
+/// Compose the ordered `service.procs` layer stack into effective entries,
+/// per-entry availability, per-field provenance, and diagnostics.
+#[pyfunction]
+#[pyo3(name = "service_config_compose")]
+fn py_service_config_compose<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ServiceConfigComposeRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid service config composition request: {e}"
+            ))
+        })?;
+    let result = core_compose_service_config(&req);
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Plan an exact-key sparse AXE lumberjack/chop contribution mutation.
 #[pyfunction]
 #[pyo3(name = "axe_config_plan_entry")]
@@ -19688,6 +19714,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_effort_override_wire_schema_version,
         m
@@ -25906,6 +25933,68 @@ COMMITS:
                     ["interval"],
                 json!(19)
             );
+        });
+    }
+
+    #[test]
+    fn service_config_compose_binding_round_trips_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let request = json!({
+                "layers": [
+                    {
+                        "name": "default",
+                        "kind": "builtin",
+                        "path": null,
+                        "list_strategy": "concatenate",
+                        "writable": false,
+                        "value": {"service": {"procs": {
+                            "scheduler": {"builtin": "scheduler"},
+                            "gateway": {"builtin": "gateway", "enabled": false}
+                        }}}
+                    },
+                    {
+                        "name": "user",
+                        "kind": "user",
+                        "path": "/home/u/sase.yml",
+                        "list_strategy": "concatenate",
+                        "writable": true,
+                        "value": {"service": {"procs": {
+                            "gateway": {"enabled": true}
+                        }}}
+                    }
+                ]
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+
+            let result = py_service_config_compose(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+
+            assert_eq!(result["fatal"], json!(false));
+            let procs = result["procs"].as_array().unwrap();
+            assert_eq!(procs.len(), 2);
+            let gateway = procs
+                .iter()
+                .find(|entry| entry["name"] == "gateway")
+                .unwrap();
+            assert_eq!(gateway["enabled"], json!(true));
+            assert_eq!(gateway["enablement"]["explicit"], json!(true));
+            assert_eq!(
+                gateway["enablement"]["layer"],
+                json!("user:/home/u/sase.yml")
+            );
+            assert_eq!(
+                gateway["launcher"],
+                json!({"kind": "builtin", "builtin": "gateway"})
+            );
+            let scheduler = procs
+                .iter()
+                .find(|entry| entry["name"] == "scheduler")
+                .unwrap();
+            assert_eq!(scheduler["source"], json!("builtin"));
+            assert_eq!(scheduler["enabled"], json!(true));
+            assert_eq!(scheduler["available"], json!(true));
         });
     }
 

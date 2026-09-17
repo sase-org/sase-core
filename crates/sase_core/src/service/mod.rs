@@ -1,3 +1,5 @@
+pub mod config;
+
 pub const SERVICE_PROC_MODE_DAEMON: &str = "daemon";
 pub const SERVICE_PROC_MODE_ONESHOT: &str = "oneshot";
 pub const SERVICE_PROC_MODES: [&str; 2] =

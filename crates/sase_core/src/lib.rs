@@ -1392,6 +1392,12 @@ pub use runner_limit_override::{
     RunnerLimitOverrideWire, RUNNER_LIMIT_OVERRIDE_STATE_FILENAME,
     RUNNER_LIMIT_OVERRIDE_WIRE_SCHEMA_VERSION,
 };
+pub use service::config::{
+    compose_service_config, ServiceConfigComposeRequestWire,
+    ServiceConfigCompositionWire, ServiceEnablementSourceWire,
+    ServiceFieldProvenanceWire, ServiceLauncherWire, ServiceProcConfigWire,
+    SERVICE_CONFIG_WIRE_SCHEMA_VERSION,
+};
 pub use service::{
     is_service_proc_mode, is_service_proc_source, validate_service_proc_name,
     RESERVED_BUILTIN_SERVICE_PROCS, SERVICE_PROC_MODES,
