@@ -224,19 +224,22 @@ pub fn build_service_status(
         .iter()
         .map(|entry| {
             let observation = observations.get(&entry.name);
+            let stop = active_stop(
+                &request.boot_id,
+                request.state.stops.get(&entry.name),
+            );
             derive_configured_proc(
                 entry,
                 request.state.enablement.get(&entry.name),
-                request.state.stops.get(&entry.name),
+                stop,
                 observation.copied(),
             )
         })
         .collect();
-    let orphans = request
-        .procs
+    let orphans = observations
         .iter()
-        .filter(|observation| !configured_names.contains(&observation.name))
-        .map(derive_orphan_proc)
+        .filter(|(name, _)| !configured_names.contains(*name))
+        .map(|(_, observation)| derive_orphan_proc(observation))
         .collect();
 
     let mut snapshot = ServiceStatusSnapshotWire {
@@ -250,6 +253,13 @@ pub fn build_service_status(
     };
     snapshot.change_token = change_token(&snapshot)?;
     Ok(snapshot)
+}
+
+fn active_stop<'a>(
+    request_boot_id: &Option<String>,
+    stop: Option<&'a ServiceStopWire>,
+) -> Option<&'a ServiceStopWire> {
+    stop.filter(|item| item.boot_id.as_ref() == request_boot_id.as_ref())
 }
 
 pub fn write_service_status_snapshot(
@@ -879,6 +889,25 @@ mod tests {
         }
     }
 
+    fn observation(
+        name: &str,
+        pid: Option<u32>,
+        alive: bool,
+    ) -> ServiceProcObservationWire {
+        ServiceProcObservationWire {
+            name: name.to_string(),
+            pid,
+            alive,
+            proc_id: pid.map(|value| format!("proc-{value}")),
+            started_at: pid.map(|_| 10.0),
+            last_exit: None,
+            restart: None,
+            restarts: 0,
+            reported: None,
+            log_path: pid.map(|value| format!("/tmp/{name}-{value}.log")),
+        }
+    }
+
     #[test]
     fn enablement_resolution_summaries_match_sources() {
         let explicit_file = ServiceEnablementSourceWire {
@@ -1069,6 +1098,68 @@ mod tests {
     }
 
     #[test]
+    fn stops_are_scoped_to_the_request_boot_id() {
+        let mut state = ServiceStateWire::default();
+        state.stops.insert(
+            "scheduler".to_string(),
+            ServiceStopWire {
+                boot_id: Some("boot-a".to_string()),
+                stopped_at: 1.0,
+                stopped_by: "pytest".to_string(),
+                reason: Some("maintenance".to_string()),
+            },
+        );
+
+        let matching = build_service_status(&request_with_entry(
+            entry("scheduler"),
+            state.clone(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(matching.procs[0].desired, "stopped");
+        assert_eq!(matching.procs[0].state, "stopped");
+        assert_eq!(matching.procs[0].summary, "stopped until next boot");
+        assert_eq!(
+            matching.procs[0]
+                .stop
+                .as_ref()
+                .and_then(|stop| stop.boot_id.as_deref()),
+            Some("boot-a")
+        );
+
+        let mut mismatched_request =
+            request_with_entry(entry("scheduler"), state, None);
+        mismatched_request.boot_id = Some("boot-b".to_string());
+        let mismatched = build_service_status(&mismatched_request).unwrap();
+        assert_eq!(mismatched.procs[0].desired, "running");
+        assert_eq!(mismatched.procs[0].state, "stopped");
+        assert_eq!(mismatched.procs[0].summary, "stopped");
+        assert!(mismatched.procs[0].stop.is_none());
+
+        let mut absent_state = ServiceStateWire::default();
+        absent_state.stops.insert(
+            "scheduler".to_string(),
+            ServiceStopWire {
+                boot_id: None,
+                stopped_at: 2.0,
+                stopped_by: "pytest".to_string(),
+                reason: None,
+            },
+        );
+        let mut absent_request =
+            request_with_entry(entry("scheduler"), absent_state, None);
+        absent_request.boot_id = None;
+        let absent = build_service_status(&absent_request).unwrap();
+        assert_eq!(absent.procs[0].desired, "stopped");
+        assert_eq!(absent.procs[0].state, "stopped");
+        assert_eq!(absent.procs[0].summary, "stopped until next boot");
+        assert!(absent.procs[0]
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.boot_id.is_none()));
+    }
+
+    #[test]
     fn change_token_ignores_generation_and_heartbeat_churn() {
         let mut request = request_with_entry(
             entry("scheduler"),
@@ -1163,5 +1254,43 @@ mod tests {
         assert_eq!(snapshot.orphans[0].name, "legacy");
         assert_eq!(snapshot.orphans[0].state, "running");
         assert_eq!(snapshot.orphans[0].desired, "stopped");
+    }
+
+    #[test]
+    fn duplicate_observations_use_last_row_for_configured_and_orphan_procs() {
+        let mut request = request_with_entry(
+            entry("scheduler"),
+            ServiceStateWire::default(),
+            None,
+        );
+        request.procs = vec![
+            observation("z-orphan", Some(301), true),
+            observation("scheduler", Some(101), true),
+            observation("legacy", Some(201), true),
+            observation("scheduler", Some(102), true),
+            observation("legacy", Some(202), false),
+            observation("z-orphan", Some(302), true),
+        ];
+
+        let snapshot = build_service_status(&request).unwrap();
+
+        assert_eq!(snapshot.procs.len(), 1);
+        assert_eq!(snapshot.procs[0].name, "scheduler");
+        assert_eq!(snapshot.procs[0].pid, Some(102));
+        assert_eq!(snapshot.procs[0].proc_id.as_deref(), Some("proc-102"));
+        assert_eq!(snapshot.orphans.len(), 2);
+        assert_eq!(snapshot.orphans[0].name, "legacy");
+        assert_eq!(snapshot.orphans[0].pid, Some(202));
+        assert_eq!(snapshot.orphans[0].state, "stopped");
+        assert_eq!(snapshot.orphans[1].name, "z-orphan");
+        assert_eq!(snapshot.orphans[1].pid, Some(302));
+        assert_eq!(
+            snapshot.diagnostics,
+            vec![
+                "multiple observations for service proc `legacy`; using the last",
+                "multiple observations for service proc `scheduler`; using the last",
+                "multiple observations for service proc `z-orphan`; using the last",
+            ]
+        );
     }
 }

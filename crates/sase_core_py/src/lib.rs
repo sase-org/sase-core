@@ -26435,6 +26435,37 @@ COMMITS:
                 64
             );
 
+            let mut mismatched_stop_request = request.clone();
+            mismatched_stop_request["state"]["stops"] = json!({
+                "scheduler": {
+                    "boot_id": "boot-b",
+                    "stopped_at": 12.0,
+                    "stopped_by": "pytest"
+                }
+            });
+            mismatched_stop_request["procs"] = json!([]);
+            let mismatched_stop_snapshot = module
+                .getattr("service_status_build")
+                .unwrap()
+                .call1((
+                    json_value_to_py(py, &mismatched_stop_request).unwrap(),
+                ))
+                .unwrap();
+            let mismatched_stop_json =
+                py_to_json_value(&mismatched_stop_snapshot).unwrap();
+            assert_eq!(
+                mismatched_stop_json["procs"][0]["desired"],
+                json!("running")
+            );
+            assert_eq!(
+                mismatched_stop_json["procs"][0]["summary"],
+                json!("stopped")
+            );
+            assert!(
+                mismatched_stop_json["procs"][0].get("stop").is_none(),
+                "mismatched boot stop must not be emitted"
+            );
+
             let temp = tempfile::tempdir().unwrap();
             let path = temp.path().join("status.json");
             module
