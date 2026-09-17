@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.45](https://github.com/sase-org/sase-core/compare/v0.34.44...v0.34.45) - 2026-09-17
+
+### Added
+
+- *(agent-publication)* add bounded batch planner
+
 ## [0.34.44](https://github.com/sase-org/sase-core/compare/v0.34.43...v0.34.44) - 2026-09-17
 
 ### Added
