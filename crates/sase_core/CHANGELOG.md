@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.49](https://github.com/sase-org/sase-core/compare/v0.34.48...v0.34.49) - 2026-09-17
+
+### Fixed
+
+- *(service)* scope service status stops by boot
+
 ## [0.34.48](https://github.com/sase-org/sase-core/compare/v0.34.47...v0.34.48) - 2026-09-17
 
 ### Added
