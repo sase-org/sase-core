@@ -348,6 +348,10 @@
 //! - `parse_chop_duration(value: str) -> int`
 //! - `split_axe_description(text: str) -> tuple[str, str]`
 //! - `validate_axe_config(request: dict) -> list[dict]`
+//! - `service_config_compose(request: dict) -> dict`
+//! - `service_restart_decide(request: dict) -> dict`
+//! - `service_state_read(sase_home: str, boot_id: str | None = None) -> dict`
+//! - `service_state_mutate(sase_home: str, mutation: dict, boot_id: str | None = None, now: float | None = None) -> dict`
 //! - `chop_overrun_wire_schema_version() -> int`
 //! - `classify_chop_overrun(request: dict) -> dict`
 //! - `gate_followup_wire_schema_version() -> int`
@@ -1577,6 +1581,15 @@ use sase_core::scan_directive_owned_fences as core_scan_directive_owned_fences;
 use sase_core::service::config::{
     compose_service_config as core_compose_service_config,
     ServiceConfigComposeRequestWire,
+};
+use sase_core::service::restart::{
+    decide_service_restart as core_decide_service_restart,
+    ServiceRestartRequestWire,
+};
+use sase_core::service::state::{
+    mutate_service_state as core_mutate_service_state,
+    read_service_state as core_read_service_state,
+    ServiceStateError as ServiceStateDomainError, ServiceStateMutationWire,
 };
 use sase_core::sidecar_publication::{
     decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
@@ -13442,6 +13455,88 @@ fn py_service_config_compose<'py>(
     json_value_to_py(py, &json)
 }
 
+fn service_state_error_to_pyerr(err: ServiceStateDomainError) -> PyErr {
+    match err {
+        ServiceStateDomainError::Validation(_) => {
+            PyValueError::new_err(err.to_string())
+        }
+        ServiceStateDomainError::LockTimeout(_) => {
+            PyTimeoutError::new_err(err.to_string())
+        }
+        ServiceStateDomainError::NewerSchema { .. }
+        | ServiceStateDomainError::Io(_)
+        | ServiceStateDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+/// Decide whether a service proc should restart and advance restart history.
+#[pyfunction]
+#[pyo3(name = "service_restart_decide")]
+fn py_service_restart_decide<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: ServiceRestartRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid service restart request: {e}"
+            ))
+        })?;
+    let decision = core_decide_service_restart(&req)
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+    let json = serde_json::to_value(&decision).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Read the locked machine-local service state snapshot.
+#[pyfunction]
+#[pyo3(name = "service_state_read")]
+#[pyo3(signature = (sase_home, boot_id=None))]
+fn py_service_state_read<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    boot_id: Option<String>,
+) -> PyResult<PyObject> {
+    let snapshot = core_read_service_state(sase_home, boot_id.as_deref())
+        .map_err(service_state_error_to_pyerr)?;
+    let json = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Mutate the locked machine-local service state and return the new snapshot.
+#[pyfunction]
+#[pyo3(name = "service_state_mutate")]
+#[pyo3(signature = (sase_home, mutation, boot_id=None, now=None))]
+fn py_service_state_mutate<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    mutation: &Bound<'py, PyDict>,
+    boot_id: Option<String>,
+    now: Option<f64>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(mutation.as_any())?;
+    let mutation: ServiceStateMutationWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "mutation is not a valid service state mutation: {e}"
+            ))
+        })?;
+    let outcome =
+        core_mutate_service_state(sase_home, mutation, boot_id.as_deref(), now)
+            .map_err(service_state_error_to_pyerr)?;
+    let json = serde_json::to_value(&outcome).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Plan an exact-key sparse AXE lumberjack/chop contribution mutation.
 #[pyfunction]
 #[pyo3(name = "axe_config_plan_entry")]
@@ -19743,6 +19838,9 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_config_compose, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_restart_decide, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_state_read, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_state_mutate, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_effort_override_wire_schema_version,
         m
@@ -26023,6 +26121,93 @@ COMMITS:
             assert_eq!(scheduler["source"], json!("builtin"));
             assert_eq!(scheduler["enabled"], json!(true));
             assert_eq!(scheduler["available"], json!(true));
+        });
+    }
+
+    #[test]
+    fn service_restart_decide_binding_round_trips_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+
+            let request = json!({
+                "policy": "on-failure",
+                "success_exit_codes": [75],
+                "exit": {"signal": 9},
+                "history": {
+                    "started_at": 1.0,
+                    "backoff_seconds": 2.0,
+                    "consecutive_failures": 1,
+                    "recent_failures": [3.0],
+                    "alert_sent": false
+                },
+                "now": 4.0,
+                "tuning": {}
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let result = module
+                .getattr("service_restart_decide")
+                .unwrap()
+                .call1((request_obj,))
+                .unwrap();
+            let result = py_to_json_value(&result).unwrap();
+
+            assert_eq!(result["action"], json!("restart"));
+            assert_eq!(result["delay_seconds"], json!(4.0));
+            assert_eq!(
+                result["reason"],
+                json!("killed by SIGKILL; retrying in 4s")
+            );
+        });
+    }
+
+    #[test]
+    fn service_state_bindings_round_trip_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let mutation = json_value_to_py(
+                py,
+                &json!({
+                    "op": "set_enablement",
+                    "name": "scheduler",
+                    "enabled": true,
+                    "actor": "pytest"
+                }),
+            )
+            .unwrap();
+
+            let outcome = module
+                .getattr("service_state_mutate")
+                .unwrap()
+                .call1((
+                    temp.path().to_string_lossy().as_ref(),
+                    mutation,
+                    "boot-a",
+                    12.0,
+                ))
+                .unwrap();
+            let outcome = py_to_json_value(&outcome).unwrap();
+            assert_eq!(outcome["changed"], json!(true));
+            assert_eq!(
+                outcome["snapshot"]["state"]["enablement"]["scheduler"]
+                    ["enabled"],
+                json!(true)
+            );
+
+            let snapshot = module
+                .getattr("service_state_read")
+                .unwrap()
+                .call1((temp.path().to_string_lossy().as_ref(), "boot-a"))
+                .unwrap();
+            let snapshot = py_to_json_value(&snapshot).unwrap();
+            assert_eq!(
+                snapshot["state"]["enablement"]["scheduler"]["updated_by"],
+                json!("pytest")
+            );
         });
     }
 

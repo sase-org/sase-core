@@ -1405,6 +1405,25 @@ pub use service::config::{
     ServiceFieldProvenanceWire, ServiceLauncherWire, ServiceProcConfigWire,
     SERVICE_CONFIG_WIRE_SCHEMA_VERSION,
 };
+pub use service::restart::{
+    decide_service_restart, ServiceExitWire, ServiceRestartDecisionWire,
+    ServiceRestartError, ServiceRestartHistoryWire, ServiceRestartPolicyWire,
+    ServiceRestartRequestWire, ServiceRestartTuningWire,
+    SERVICE_RESTART_CRASH_LOOP_THRESHOLD,
+    SERVICE_RESTART_CRASH_LOOP_WINDOW_SECONDS,
+    SERVICE_RESTART_DECISION_WIRE_SCHEMA_VERSION,
+    SERVICE_RESTART_HEALTHY_RUN_SECONDS,
+    SERVICE_RESTART_INITIAL_BACKOFF_SECONDS,
+    SERVICE_RESTART_MAX_BACKOFF_SECONDS,
+};
+pub use service::state::{
+    mutate_service_state, read_service_state, service_state_path,
+    ServiceEnablementOverrideWire, ServiceHostRecordWire, ServiceMarkerWire,
+    ServiceStateError, ServiceStateMutationOutcomeWire,
+    ServiceStateMutationWire, ServiceStateSnapshotWire, ServiceStateWire,
+    ServiceStopWire, SERVICE_STATE_LOCK_TIMEOUT_ENV,
+    SERVICE_STATE_WIRE_SCHEMA_VERSION,
+};
 pub use service::{
     is_service_proc_mode, is_service_proc_source, validate_service_proc_name,
     RESERVED_BUILTIN_SERVICE_PROCS, SERVICE_PROC_MODES,
