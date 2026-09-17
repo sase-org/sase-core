@@ -1424,6 +1424,16 @@ pub use service::state::{
     ServiceStopWire, SERVICE_STATE_LOCK_TIMEOUT_ENV,
     SERVICE_STATE_WIRE_SCHEMA_VERSION,
 };
+pub use service::status::{
+    build_service_status, read_service_status_snapshot,
+    resolve_service_enablement, resolve_service_enablement_for_entry,
+    write_service_status_snapshot, ServiceEnablementWire,
+    ServiceProcLastExitWire, ServiceProcObservationWire,
+    ServiceProcReportedStatusWire, ServiceStatusError,
+    ServiceStatusHostRequestWire, ServiceStatusHostWire, ServiceStatusProcWire,
+    ServiceStatusRequestWire, ServiceStatusSnapshotWire,
+    SERVICE_STATUS_WIRE_SCHEMA_VERSION,
+};
 pub use service::{
     is_service_proc_mode, is_service_proc_source, validate_service_proc_name,
     RESERVED_BUILTIN_SERVICE_PROCS, SERVICE_PROC_MODES,

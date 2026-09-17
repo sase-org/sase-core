@@ -352,6 +352,10 @@
 //! - `service_restart_decide(request: dict) -> dict`
 //! - `service_state_read(sase_home: str, boot_id: str | None = None) -> dict`
 //! - `service_state_mutate(sase_home: str, mutation: dict, boot_id: str | None = None, now: float | None = None) -> dict`
+//! - `service_enablement_resolve(entry: dict, override: dict | None) -> dict`
+//! - `service_status_build(request: dict) -> dict`
+//! - `service_status_write(path: str, snapshot: dict) -> None`
+//! - `service_status_read(path: str) -> dict | None`
 //! - `chop_overrun_wire_schema_version() -> int`
 //! - `classify_chop_overrun(request: dict) -> dict`
 //! - `gate_followup_wire_schema_version() -> int`
@@ -1591,6 +1595,14 @@ use sase_core::service::state::{
     read_service_state as core_read_service_state,
     ServiceStateError as ServiceStateDomainError, ServiceStateMutationWire,
 };
+use sase_core::service::status::{
+    build_service_status as core_build_service_status,
+    read_service_status_snapshot as core_read_service_status_snapshot,
+    resolve_service_enablement_for_entry as core_resolve_service_enablement_for_entry,
+    write_service_status_snapshot as core_write_service_status_snapshot,
+    ServiceStatusError as ServiceStatusDomainError, ServiceStatusRequestWire,
+    ServiceStatusSnapshotWire,
+};
 use sase_core::sidecar_publication::{
     decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
     SidecarPublicationDecisionWire,
@@ -1681,6 +1693,7 @@ use sase_core::{
     runner_capacity_snapshot as core_runner_capacity_snapshot,
     RunnerCapacityRequestWire,
 };
+use sase_core::{ServiceEnablementOverrideWire, ServiceProcConfigWire};
 use serde::de::DeserializeOwned;
 use serde::ser::{
     self, Impossible, SerializeMap, SerializeSeq, SerializeStruct,
@@ -13537,6 +13550,113 @@ fn py_service_state_mutate<'py>(
     json_value_to_py(py, &json)
 }
 
+fn service_status_error_to_pyerr(err: ServiceStatusDomainError) -> PyErr {
+    match err {
+        ServiceStatusDomainError::Validation(_) => {
+            PyValueError::new_err(err.to_string())
+        }
+        ServiceStatusDomainError::NewerSchema { .. }
+        | ServiceStatusDomainError::Corrupt(_)
+        | ServiceStatusDomainError::Io(_)
+        | ServiceStatusDomainError::Json(_) => {
+            PyRuntimeError::new_err(err.to_string())
+        }
+    }
+}
+
+/// Resolve the effective enablement, provenance, and display summary.
+#[pyfunction]
+#[pyo3(name = "service_enablement_resolve")]
+#[pyo3(signature = (entry, override_value=None))]
+fn py_service_enablement_resolve<'py>(
+    py: Python<'py>,
+    entry: &Bound<'py, PyDict>,
+    override_value: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let entry_value = py_to_json_value(entry.as_any())?;
+    let entry: ServiceProcConfigWire = serde_json::from_value(entry_value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "entry is not a valid service proc config: {e}"
+            ))
+        })?;
+    let override_value = override_value
+        .map(|payload| {
+            let value = py_to_json_value(payload.as_any())?;
+            serde_json::from_value::<ServiceEnablementOverrideWire>(value)
+                .map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "override is not a valid service enablement override: {e}"
+                    ))
+                })
+        })
+        .transpose()?;
+    let result = core_resolve_service_enablement_for_entry(
+        &entry,
+        override_value.as_ref(),
+    );
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Build a schema-versioned service status snapshot.
+#[pyfunction]
+#[pyo3(name = "service_status_build")]
+fn py_service_status_build<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: ServiceStatusRequestWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid service status request: {e}"
+            ))
+        })?;
+    let snapshot = core_build_service_status(&request)
+        .map_err(service_status_error_to_pyerr)?;
+    let json = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+/// Atomically write a service status snapshot JSON file.
+#[pyfunction]
+#[pyo3(name = "service_status_write")]
+fn py_service_status_write<'py>(
+    path: &str,
+    snapshot: &Bound<'py, PyDict>,
+) -> PyResult<()> {
+    let value = py_to_json_value(snapshot.as_any())?;
+    let snapshot: ServiceStatusSnapshotWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "snapshot is not a valid service status snapshot: {e}"
+            ))
+        })?;
+    core_write_service_status_snapshot(path, &snapshot)
+        .map_err(service_status_error_to_pyerr)?;
+    Ok(())
+}
+
+/// Read a service status snapshot JSON file when one exists.
+#[pyfunction]
+#[pyo3(name = "service_status_read")]
+fn py_service_status_read<'py>(
+    py: Python<'py>,
+    path: &str,
+) -> PyResult<PyObject> {
+    let snapshot = core_read_service_status_snapshot(path)
+        .map_err(service_status_error_to_pyerr)?;
+    let json = serde_json::to_value(&snapshot).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 /// Plan an exact-key sparse AXE lumberjack/chop contribution mutation.
 #[pyfunction]
 #[pyo3(name = "axe_config_plan_entry")]
@@ -19841,6 +19961,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_service_restart_decide, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_state_read, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_state_mutate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_enablement_resolve, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_status_build, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_status_write, m)?)?;
+    m.add_function(wrap_pyfunction!(py_service_status_read, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_effort_override_wire_schema_version,
         m
@@ -26208,6 +26332,134 @@ COMMITS:
                 snapshot["state"]["enablement"]["scheduler"]["updated_by"],
                 json!("pytest")
             );
+        });
+    }
+
+    #[test]
+    fn service_status_bindings_round_trip_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+
+            let entry = json!({
+                "name": "scheduler",
+                "description": "Scheduler",
+                "available": true,
+                "unavailable_reasons": [],
+                "source": "builtin",
+                "declared_by": "default",
+                "enabled": true,
+                "enablement": {"explicit": false},
+                "mode": "daemon",
+                "launcher": {"kind": "builtin", "builtin": "scheduler"},
+                "env": {},
+                "restart": "on-failure",
+                "success_exit_codes": [],
+                "stop_signal": "SIGTERM",
+                "stop_timeout_seconds": 10.0,
+                "after": [],
+                "log_max_bytes": 4096,
+                "field_provenance": []
+            });
+            let override_value = json_value_to_py(
+                py,
+                &json!({
+                    "enabled": false,
+                    "updated_at": 10.0,
+                    "updated_by": "pytest"
+                }),
+            )
+            .unwrap();
+            let resolved = module
+                .getattr("service_enablement_resolve")
+                .unwrap()
+                .call1((json_value_to_py(py, &entry).unwrap(), override_value))
+                .unwrap();
+            let resolved = py_to_json_value(&resolved).unwrap();
+            assert_eq!(resolved["summary"], json!("disabled here"));
+
+            let request = json!({
+                "generated_at": 20.0,
+                "boot_id": "boot-a",
+                "host": {
+                    "record": {
+                        "pid": 42,
+                        "boot_id": "boot-a",
+                        "started_at": 1.0,
+                        "heartbeat_at": 19.0,
+                        "mode": "foreground",
+                        "sase_version": "0.test"
+                    },
+                    "lock_held": false,
+                    "pid_alive": true,
+                    "platform_unit": "sase.service",
+                    "stale_after_seconds": 15.0
+                },
+                "config": {
+                    "schema_version": 1,
+                    "fatal": false,
+                    "procs": [entry],
+                    "diagnostics": [],
+                    "ignored_layers": []
+                },
+                "state": {
+                    "schema_version": 1,
+                    "enablement": {},
+                    "stops": {},
+                    "markers": {},
+                    "host": null
+                },
+                "procs": [{
+                    "name": "scheduler",
+                    "pid": 123,
+                    "alive": true,
+                    "proc_id": "proc-1",
+                    "started_at": 11.0,
+                    "restarts": 0
+                }]
+            });
+            let snapshot = module
+                .getattr("service_status_build")
+                .unwrap()
+                .call1((json_value_to_py(py, &request).unwrap(),))
+                .unwrap();
+            let snapshot_json = py_to_json_value(&snapshot).unwrap();
+            assert_eq!(snapshot_json["procs"][0]["state"], json!("running"));
+            assert_eq!(
+                snapshot_json["procs"][0]["summary"],
+                json!("running · pid 123")
+            );
+            assert_eq!(
+                snapshot_json["change_token"].as_str().unwrap().len(),
+                64
+            );
+
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("status.json");
+            module
+                .getattr("service_status_write")
+                .unwrap()
+                .call1((path.to_string_lossy().as_ref(), snapshot))
+                .unwrap();
+            let read = module
+                .getattr("service_status_read")
+                .unwrap()
+                .call1((path.to_string_lossy().as_ref(),))
+                .unwrap();
+            let read = py_to_json_value(&read).unwrap();
+            assert_eq!(read["procs"][0]["name"], json!("scheduler"));
+
+            let missing = module
+                .getattr("service_status_read")
+                .unwrap()
+                .call1((temp
+                    .path()
+                    .join("missing.json")
+                    .to_string_lossy()
+                    .as_ref(),))
+                .unwrap();
+            assert!(missing.is_none());
         });
     }
 

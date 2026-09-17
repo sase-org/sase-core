@@ -1,6 +1,7 @@
 pub mod config;
 pub mod restart;
 pub mod state;
+pub mod status;
 
 pub const SERVICE_PROC_MODE_DAEMON: &str = "daemon";
 pub const SERVICE_PROC_MODE_ONESHOT: &str = "oneshot";
