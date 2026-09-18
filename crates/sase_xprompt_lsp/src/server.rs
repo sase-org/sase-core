@@ -2139,6 +2139,7 @@ fn needs_agent_entries(context: &sase_core::CompletionContext) -> bool {
             DirectiveValueRole::Agent
                 | DirectiveValueRole::Clan
                 | DirectiveValueRole::Family
+                | DirectiveValueRole::Hood
                 | DirectiveValueRole::Tribe
         )
     )
@@ -4688,6 +4689,7 @@ mod tests {
             "status": "ok",
             "entries": [
                 {"name": "planner", "kind": "agent"},
+                {"name": "sase-11l", "kind": "hood", "member_count": 2, "detail": "hood · 2 members"},
                 {"name": "builders", "kind": "clan", "member_count": 3, "detail": "clan · 3 members"},
                 {"name": "review", "kind": "family", "member_count": 2},
                 {"name": "@ops", "kind": "tribe", "member_count": 4}
@@ -4699,6 +4701,7 @@ mod tests {
             XpromptLspServer::with_bridge(client, Arc::new(bridge))
         });
         let server = service.inner();
+        server.config.write().unwrap().agent_holds = true;
 
         let clan = labels_at(server, "%id(worker, clan=").await;
         assert_eq!(clan, vec!["builders"]);
@@ -4706,6 +4709,8 @@ mod tests {
         assert_eq!(family, vec!["review"]);
         let tribe = labels_at(server, "%clan(research, tribe=").await;
         assert_eq!(tribe, vec!["@ops"]);
+        let hood = labels_at(server, "%hold(hood=s").await;
+        assert_eq!(hood, vec!["sase-11l"]);
         let bead = labels_at(server, "%id(worker, bead=").await;
         assert_eq!(bead, vec!["sase-a"]);
         assert_eq!(labels_at(server, "%wait(time=").await, vec!["5m", "1430"]);

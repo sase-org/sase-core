@@ -478,9 +478,11 @@ fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
     match kind {
         "keyword" => CompletionItemKind::KEYWORD,
         "bead" => CompletionItemKind::REFERENCE,
+        "hood" => CompletionItemKind::FOLDER,
         "tribe" => CompletionItemKind::ENUM_MEMBER,
         "clan" => CompletionItemKind::MODULE,
         "family" => CompletionItemKind::CLASS,
+        "proc" => CompletionItemKind::FUNCTION,
         _ => CompletionItemKind::VALUE,
     }
 }
@@ -489,10 +491,12 @@ fn agent_completion_sort_group(kind: &str) -> u8 {
     match kind {
         "keyword" => 0,
         "bead" => 0,
-        "tribe" => 1,
-        "clan" => 2,
-        "family" => 3,
-        _ => 4,
+        "hood" => 1,
+        "tribe" => 2,
+        "clan" => 3,
+        "family" => 4,
+        "proc" => 6,
+        _ => 5,
     }
 }
 
@@ -565,7 +569,9 @@ fn finalizer_label_description(kind: &str, detail: Option<&str>) -> String {
 
 fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
     let normalized = match kind {
-        "keyword" | "bead" | "tribe" | "clan" | "family" => kind,
+        "keyword" | "bead" | "hood" | "tribe" | "clan" | "family" | "proc" => {
+            kind
+        }
         "" => "value",
         _ => "agent",
     };
@@ -1228,10 +1234,12 @@ mod tests {
         };
         let candidates = [
             ("keyword", "time=", "wait duration"),
+            ("hood", "sase-11l", "hood · 2 members"),
             ("tribe", "@ops", "tribe · 2 agents"),
             ("clan", "builders", "clan · 3 members"),
             ("family", "review", "family · 2 members"),
             ("agent", "worker", "RUNNING · sase"),
+            ("proc", "build-shell", "proc · PENDING"),
         ]
         .into_iter()
         .map(|(kind, name, detail)| CompletionCandidate {
@@ -1262,20 +1270,31 @@ mod tests {
             items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![
                 Some(CompletionItemKind::KEYWORD),
+                Some(CompletionItemKind::FOLDER),
                 Some(CompletionItemKind::ENUM_MEMBER),
                 Some(CompletionItemKind::MODULE),
                 Some(CompletionItemKind::CLASS),
                 Some(CompletionItemKind::VALUE),
+                Some(CompletionItemKind::FUNCTION),
             ]
         );
         assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
-        assert_eq!(items[4].sort_text.as_deref(), Some("4:0004"));
+        assert_eq!(items[1].sort_text.as_deref(), Some("1:0001"));
+        assert_eq!(items[5].sort_text.as_deref(), Some("5:0005"));
+        assert_eq!(items[6].sort_text.as_deref(), Some("6:0006"));
         assert_eq!(
-            items[4]
+            items[5]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("agent · RUNNING · sase")
+        );
+        assert_eq!(
+            items[6]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("proc · PENDING")
         );
     }
 

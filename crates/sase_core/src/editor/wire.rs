@@ -263,8 +263,9 @@ pub struct AgentCompletionEntry {
     pub status: String,
     #[serde(default)]
     pub project: String,
-    /// `agent`, `family`, `clan`, or `tribe`. Missing values from older
-    /// helpers intentionally retain the historical plain-agent behavior.
+    /// `agent`, `family`, `clan`, `hood`, `tribe`, or `proc`. Missing values
+    /// from older helpers intentionally retain the historical plain-agent
+    /// behavior.
     #[serde(default)]
     pub kind: String,
     #[serde(default)]

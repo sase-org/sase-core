@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use std::sync::OnceLock;
 
+use crate::agent_identity::agent_name_ancestors;
 use crate::artifact_file::{
     artifact_file_is_vcs_backed, read_artifact_file_index,
 };
@@ -1356,6 +1357,24 @@ pub fn build_agent_completion_candidates(
     entries: &[AgentCompletionEntry],
     selected_values: &[String],
 ) -> CompletionList {
+    build_agent_completion_candidates_filtered(
+        token,
+        replacement_range,
+        entries,
+        selected_values,
+        &[],
+        false,
+    )
+}
+
+fn build_agent_completion_candidates_filtered(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+    excluded_kinds: &[&str],
+    prioritize_waiting: bool,
+) -> CompletionList {
     if token.contains('=') {
         return CompletionList {
             candidates: Vec::new(),
@@ -1371,10 +1390,21 @@ pub fn build_agent_completion_candidates(
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
     let mut ordered_entries = entries.iter().collect::<Vec<_>>();
-    ordered_entries
-        .sort_by_key(|entry| agent_kind_rank(agent_entry_kind(entry)));
+    ordered_entries.sort_by_key(|entry| {
+        (
+            if prioritize_waiting {
+                agent_status_rank(&entry.status)
+            } else {
+                0
+            },
+            agent_kind_rank(agent_entry_kind(entry)),
+        )
+    });
     for entry in ordered_entries {
         let kind = agent_entry_kind(entry);
+        if excluded_kinds.iter().any(|excluded| *excluded == kind) {
+            continue;
+        }
         let insertion = entry.name.trim();
         if insertion.is_empty()
             || selected.contains(insertion)
@@ -1479,11 +1509,77 @@ pub fn build_wait_completion_candidates_for_form_with_flags(
         }
     }
     candidates.extend(
-        build_agent_completion_candidates(
+        build_agent_completion_candidates_filtered(
             token,
             replacement_range,
             entries,
             selected_values,
+            &["proc"],
+            false,
+        )
+        .candidates,
+    );
+    CompletionList {
+        shared_extension: shared_extension(&candidates, token),
+        candidates,
+    }
+}
+
+fn build_hold_completion_candidates(
+    context: &CompletionContext,
+    inventories: &DirectiveCompletionInventories,
+    token: &str,
+    replacement: Option<EditorRange>,
+) -> CompletionList {
+    let Some(metadata) = directive_metadata_with_flags(
+        "hold",
+        &inventories.enabled_feature_flags,
+    ) else {
+        return CompletionList {
+            candidates: Vec::new(),
+            shared_extension: String::new(),
+        };
+    };
+    let syntax_form = context
+        .syntax_form()
+        .unwrap_or(DirectiveSyntaxForm::Parenthesized);
+    let mut candidates = Vec::new();
+    if !token.contains('=') && directive_allows_keywords(metadata, syntax_form)
+    {
+        candidates.extend(
+            build_filtered_directive_keyword_candidates(
+                metadata,
+                token,
+                context.selected_keywords(),
+                replacement,
+                &inventories.enabled_feature_flags,
+            )
+            .candidates,
+        );
+    }
+    candidates.extend(
+        build_directive_static_value_candidates(
+            metadata.positional_suggestions,
+            token,
+            replacement,
+        )
+        .candidates
+        .into_iter()
+        .filter(|candidate| {
+            !context
+                .selected_values
+                .iter()
+                .any(|selected| selected == &candidate.insertion)
+        }),
+    );
+    candidates.extend(
+        build_agent_completion_candidates_filtered(
+            token,
+            replacement,
+            &inventories.agents,
+            &context.selected_values,
+            &["hood"],
+            true,
         )
         .candidates,
     );
@@ -1675,6 +1771,14 @@ pub fn build_directive_clause_candidates(
             &inventories.enabled_feature_flags,
         );
     }
+    if name == "hold" {
+        return build_hold_completion_candidates(
+            context,
+            inventories,
+            token,
+            replacement,
+        );
+    }
     if name == "queue" {
         return build_queue_completion_candidates(
             context,
@@ -1766,6 +1870,12 @@ fn build_directive_value_candidates(
             replacement,
         ),
         Some(DirectiveValueRole::Agent) => build_agent_completion_candidates(
+            token,
+            replacement,
+            &inventories.agents,
+            &context.selected_values,
+        ),
+        Some(DirectiveValueRole::Hood) => build_hood_completion_candidates(
             token,
             replacement,
             &inventories.agents,
@@ -2154,7 +2264,9 @@ fn agent_entry_kind(entry: &AgentCompletionEntry) -> &str {
     match entry.kind.as_str() {
         "family" => "family",
         "clan" => "clan",
+        "hood" => "hood",
         "tribe" => "tribe",
+        "proc" => "proc",
         _ => "agent",
     }
 }
@@ -2162,10 +2274,21 @@ fn agent_entry_kind(entry: &AgentCompletionEntry) -> &str {
 fn agent_kind_rank(kind: &str) -> u8 {
     match kind {
         "keyword" => 0,
-        "tribe" => 1,
-        "clan" => 2,
-        "family" => 3,
-        _ => 4,
+        "hood" => 1,
+        "tribe" => 2,
+        "clan" => 3,
+        "family" => 4,
+        "agent" => 5,
+        "proc" => 6,
+        _ => 7,
+    }
+}
+
+fn agent_status_rank(status: &str) -> u8 {
+    match status.to_ascii_uppercase().as_str() {
+        "WAITING" => 0,
+        "QUEUED" => 1,
+        _ => 2,
     }
 }
 
@@ -2185,7 +2308,7 @@ fn agent_entry_detail(
     if !entry.detail.is_empty() {
         return Some(entry.detail.clone());
     }
-    if kind != "agent" {
+    if kind != "agent" && kind != "proc" {
         return (entry.member_count > 0).then(|| {
             let suffix = if entry.member_count == 1 {
                 "member"
@@ -2201,6 +2324,51 @@ fn agent_entry_detail(
         (true, false) => Some(entry.project.clone()),
         (true, true) => None,
     }
+}
+
+fn build_hood_completion_candidates(
+    token: &str,
+    replacement_range: Option<EditorRange>,
+    entries: &[AgentCompletionEntry],
+    selected_values: &[String],
+) -> CompletionList {
+    let mut hood_entries = Vec::new();
+    let mut explicit = BTreeSet::new();
+    let mut member_counts = BTreeMap::<String, usize>::new();
+    for entry in entries {
+        if agent_entry_kind(entry) == "hood" {
+            explicit.insert(entry.name.clone());
+            hood_entries.push(entry.clone());
+            continue;
+        }
+        if agent_entry_kind(entry) == "tribe" {
+            continue;
+        }
+        for hood in agent_name_ancestors(&entry.name).unwrap_or_default() {
+            *member_counts.entry(hood).or_insert(0) += 1;
+        }
+    }
+    for (hood, count) in member_counts {
+        if explicit.contains(&hood) {
+            continue;
+        }
+        hood_entries.push(AgentCompletionEntry {
+            name: hood,
+            status: String::new(),
+            project: String::new(),
+            kind: "hood".to_string(),
+            member_count: count,
+            detail: String::new(),
+            documentation: String::new(),
+        });
+    }
+    build_identity_target_candidates(
+        token,
+        replacement_range,
+        &hood_entries,
+        "hood",
+        selected_values,
+    )
 }
 
 pub fn build_snippet_completion_candidates(
@@ -5733,14 +5901,15 @@ mod tests {
             .unwrap();
         assert_eq!(old_entry.kind, "");
 
-        let entries = vec![
+        let agent_entries = vec![
             old_entry,
             agent_target("review", "agent", 1, "DONE · sase"),
             agent_target("review", "family", 3, "family · 3 members"),
             agent_target("builders", "clan", 2, "clan · 2 members"),
             agent_target("@reviewers", "tribe", 4, "tribe · 4 agents"),
         ];
-        let list = build_agent_completion_candidates("", None, &entries, &[]);
+        let list =
+            build_agent_completion_candidates("", None, &agent_entries, &[]);
         assert_eq!(
             list.candidates
                 .iter()
@@ -5758,11 +5927,15 @@ mod tests {
         );
 
         let bare_tribe =
-            build_agent_completion_candidates("rev", None, &entries, &[]);
+            build_agent_completion_candidates("rev", None, &agent_entries, &[]);
         assert_eq!(bare_tribe.candidates[0].insertion, "@reviewers");
         assert_eq!(bare_tribe.candidates[0].name, "reviewers");
-        let sigil_tribe =
-            build_agent_completion_candidates("@rev", None, &entries, &[]);
+        let sigil_tribe = build_agent_completion_candidates(
+            "@rev",
+            None,
+            &agent_entries,
+            &[],
+        );
         assert_eq!(sigil_tribe.candidates[0].insertion, "@reviewers");
         assert_eq!(sigil_tribe.candidates[0].name, "@reviewers");
     }
@@ -5837,6 +6010,133 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn hold_candidates_prioritize_waiting_targets_and_include_procs() {
+        let agent_entries = vec![
+            AgentCompletionEntry {
+                name: "coder".to_string(),
+                status: "QUEUED".to_string(),
+                project: "sase".to_string(),
+                kind: "agent".to_string(),
+                member_count: 0,
+                detail: String::new(),
+                documentation: String::new(),
+            },
+            AgentCompletionEntry {
+                name: "planner".to_string(),
+                status: "WAITING".to_string(),
+                project: "sase".to_string(),
+                kind: "agent".to_string(),
+                member_count: 0,
+                detail: String::new(),
+                documentation: String::new(),
+            },
+            agent_target("ship", "family", 2, "family · 2 members"),
+            agent_target("review", "clan", 3, "clan · 3 members"),
+            agent_target("@builders", "tribe", 4, "tribe · 4 agents"),
+            agent_target("sase-11l", "hood", 2, "hood · 2 members"),
+            AgentCompletionEntry {
+                name: "build-shell".to_string(),
+                status: "PENDING".to_string(),
+                project: "sase".to_string(),
+                kind: "proc".to_string(),
+                member_count: 0,
+                detail: "proc · PENDING".to_string(),
+                documentation: String::new(),
+            },
+        ];
+        let document = DocumentSnapshot::new("%hold(");
+        let context = classify_completion_context(
+            &document,
+            pos(document.text().len() as u32),
+            &entries(),
+        )
+        .expect("hold completion context");
+        let inventories = DirectiveCompletionInventories {
+            agents: agent_entries,
+            enabled_feature_flags: vec!["agent_holds".to_string()],
+            ..Default::default()
+        };
+
+        let list = build_directive_clause_candidates(&context, &inventories);
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| candidate.insertion.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "hood=",
+                "scope=",
+                "ttl=",
+                "tribe=",
+                "pending",
+                "future",
+                "planner",
+                "coder",
+                "@builders",
+                "review",
+                "ship",
+                "build-shell",
+            ]
+        );
+        let proc = list
+            .candidates
+            .iter()
+            .find(|candidate| candidate.insertion == "build-shell")
+            .expect("proc row");
+        assert_eq!(proc.kind, "proc");
+        assert_eq!(proc.detail.as_deref(), Some("proc · PENDING"));
+    }
+
+    #[test]
+    fn hood_value_candidates_include_explicit_and_derived_hoods() {
+        let agent_entries = vec![
+            agent_target("sase-11l", "hood", 2, "hood · 2 members"),
+            AgentCompletionEntry {
+                name: "sase-abc.1".to_string(),
+                status: "RUNNING".to_string(),
+                project: "sase".to_string(),
+                kind: "agent".to_string(),
+                member_count: 0,
+                detail: String::new(),
+                documentation: String::new(),
+            },
+        ];
+        let document = DocumentSnapshot::new("%hold(hood=s");
+        let context = classify_completion_context(
+            &document,
+            pos(document.text().len() as u32),
+            &entries(),
+        )
+        .expect("hold hood completion context");
+        let inventories = DirectiveCompletionInventories {
+            agents: agent_entries,
+            enabled_feature_flags: vec!["agent_holds".to_string()],
+            ..Default::default()
+        };
+
+        let list = build_directive_clause_candidates(&context, &inventories);
+
+        assert_eq!(
+            list.candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.kind.as_str(),
+                        candidate.insertion.as_str(),
+                        candidate.detail.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("hood", "sase-11l", Some("hood · 2 members")),
+                ("hood", "sase-abc", Some("hood · 1 member")),
+                ("hood", "sase-abc.1", Some("hood · 1 member")),
+            ]
         );
     }
 
