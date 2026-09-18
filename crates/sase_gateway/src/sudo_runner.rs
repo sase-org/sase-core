@@ -7,6 +7,11 @@ use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::collections::VecDeque;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
+
 use sase_core::{
     sudo_exec_started_from_json_value, sudo_manifest_from_json_slice,
     sudo_manifest_sha256, truncate_sudo_output_tail,
@@ -29,7 +34,11 @@ const PRODUCTION_SUDO: &str = "/usr/bin/sudo";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const KILL_GRACE: Duration = Duration::from_millis(250);
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
+const DRAIN_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const STARTED_SENTINEL_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTPUT_DRAIN_CHUNK: usize = 8192;
+const LEDGER_TAIL_POLICY_BYTES: usize = 8192;
 const SUDO_RUNNER_CAPABILITY_DETACHED_EXECUTION: &str = "detached_execution";
 const LEDGER_FILENAME: &str = "ledger.json";
 const LOG_FILENAME: &str = "output.log";
@@ -101,6 +110,9 @@ struct SudoRunnerConfig {
     tty_available: Option<bool>,
     harden_process: bool,
     started_sentinel_timeout: Duration,
+    detached_execution: Option<bool>,
+    process_identity_error: Option<String>,
+    started_publish_error: Option<String>,
 }
 
 impl SudoRunnerConfig {
@@ -111,6 +123,9 @@ impl SudoRunnerConfig {
             tty_available: None,
             harden_process: true,
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
+            detached_execution: None,
+            process_identity_error: None,
+            started_publish_error: None,
         }
     }
 
@@ -122,6 +137,9 @@ impl SudoRunnerConfig {
             tty_available: Some(true),
             harden_process: false,
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
+            detached_execution: None,
+            process_identity_error: None,
+            started_publish_error: None,
         }
     }
 }
@@ -176,7 +194,7 @@ fn run_sudo_runner_cli_with_io(
         }
     };
     match cli {
-        SudoRunnerCli::Capabilities => write_capabilities(stdout),
+        SudoRunnerCli::Capabilities => write_capabilities(config, stdout),
         SudoRunnerCli::Execute(cli) => {
             run_synchronous_manifest(cli, config, stdout, stderr)
         }
@@ -245,19 +263,53 @@ fn run_synchronous_manifest(
 }
 
 fn write_capabilities(
+    config: &SudoRunnerConfig,
     stdout: &mut dyn Write,
 ) -> Result<(), SudoRunnerCliError> {
-    let capabilities = serde_json::json!({
+    let capabilities = advertised_detached_capabilities(config);
+    let document = serde_json::json!({
         "schema_version": 1,
-        "capabilities": [SUDO_RUNNER_CAPABILITY_DETACHED_EXECUTION],
+        "capabilities": capabilities,
     });
-    serde_json::to_writer(&mut *stdout, &capabilities).map_err(|error| {
+    serde_json::to_writer(&mut *stdout, &document).map_err(|error| {
         cli_error(
             SudoRunnerExitStatus::RunnerError,
             format!("failed to serialize sudo runner capabilities: {error}"),
         )
     })?;
     writeln!(stdout).map_err(internal_io)
+}
+
+fn advertised_detached_capabilities(
+    config: &SudoRunnerConfig,
+) -> Vec<&'static str> {
+    if detached_execution_supported(config) {
+        vec![SUDO_RUNNER_CAPABILITY_DETACHED_EXECUTION]
+    } else {
+        Vec::new()
+    }
+}
+
+fn detached_execution_supported(config: &SudoRunnerConfig) -> bool {
+    if let Some(value) = config.detached_execution {
+        return value;
+    }
+    platform_detached_execution_supported()
+}
+
+fn platform_detached_execution_supported() -> bool {
+    cfg!(unix) && platform_process_identity_available()
+}
+
+fn platform_process_identity_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        process_identity_token(std::process::id()).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 enum ParseResult {
@@ -416,20 +468,18 @@ fn parse_sudo_runner_args(
             parent_uid,
             parent_gid,
         };
-        if internal_root_exec {
-            if cli.started_path.is_none() {
-                return ParseResult::Error(
-                    "--started-path is required for internal root executor"
-                        .to_string(),
-                );
-            }
-            return ParseResult::Cli(SudoRunnerCli::InternalRootExec(cli));
+        if cli.started_path.is_none() {
+            let mode = if internal_root_exec {
+                "executor"
+            } else {
+                "worker"
+            };
+            return ParseResult::Error(format!(
+                "--started-path is required for internal root {mode}"
+            ));
         }
-        if cli.started_path.is_some() {
-            return ParseResult::Error(
-                "--started-path is only valid for internal root executor"
-                    .to_string(),
-            );
+        if internal_root_exec {
+            return ParseResult::Cli(SudoRunnerCli::InternalRootExec(cli));
         }
         return ParseResult::Cli(SudoRunnerCli::InternalRootWorker(cli));
     }
@@ -647,14 +697,28 @@ fn run_detached_manifest(
     cli: SudoRunnerDetachCli,
     config: &SudoRunnerConfig,
     stdout: &mut dyn Write,
-    _stderr: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> Result<(), SudoRunnerCliError> {
     let paths = validate_handoff_paths(&cli.detach_dir, &cli.manifest_path)?;
     let (manifest, manifest_sha256) =
         load_verified_detach_manifest(&paths, &cli.expected_sha256)?;
 
+    if !detached_execution_supported(config) {
+        let ledger = skipped_ledger(
+            &manifest,
+            &manifest_sha256,
+            SudoLedgerOutcomeWire::RunnerError,
+            Some(
+                "detached sudo execution is unsupported on this platform"
+                    .to_string(),
+            ),
+        );
+        return finish_with_ledger(stdout, &ledger, &manifest);
+    }
+
     #[cfg(not(unix))]
     {
+        let _ = (config, stderr, paths);
         let ledger = skipped_ledger(
             &manifest,
             &manifest_sha256,
@@ -730,6 +794,7 @@ fn run_detached_manifest(
             &paths,
             &manifest,
             config.started_sentinel_timeout,
+            None,
         ) {
             Ok(handshake) => handshake,
             Err(error) => {
@@ -745,16 +810,14 @@ fn run_detached_manifest(
             }
         };
 
-        if !sudo_status(config, &manifest, ["-k"], StdioMode::Inherit)?
-            .success()
-        {
-            let ledger = skipped_ledger(
-                &manifest,
-                &manifest_sha256,
-                SudoLedgerOutcomeWire::RunnerError,
-                Some("sudo timestamp cleanup failed".to_string()),
-            );
-            return finish_with_ledger(stdout, &ledger, &manifest);
+        match sudo_status(config, &manifest, ["-k"], StdioMode::Inherit) {
+            Ok(status) if status.success() => {}
+            Ok(_) | Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "sase_sudo_runner: sudo timestamp cleanup failed after detached executor started"
+                );
+            }
         }
 
         serde_json::to_writer(&mut *stdout, &handshake).map_err(|error| {
@@ -785,6 +848,13 @@ fn run_internal_root_exec(
 
     #[cfg(unix)]
     {
+        if !detached_execution_supported(config) {
+            return Err(cli_error(
+                SudoRunnerExitStatus::RunnerError,
+                "detached sudo execution is unsupported on this platform"
+                    .to_string(),
+            ));
+        }
         let paths =
             validate_handoff_paths(&cli.detach_dir, &cli.manifest_path)?;
         let Some(started_path) = &cli.started_path else {
@@ -814,6 +884,8 @@ fn run_internal_root_exec(
             .arg(&manifest_sha256)
             .arg("--detach-dir")
             .arg(&paths.dir)
+            .arg("--started-path")
+            .arg(&paths.started_path)
             .arg("--parent-uid")
             .arg(cli.parent_uid.to_string())
             .arg("--parent-gid")
@@ -822,43 +894,35 @@ fn run_internal_root_exec(
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         configure_new_session(&mut command);
-        let child = command.spawn().map_err(|error| {
+        let mut child = command.spawn().map_err(|error| {
             cli_error(
                 SudoRunnerExitStatus::RunnerError,
                 format!("failed to spawn sudo root worker: {error}"),
             )
         })?;
-        let executor_pid = child.id();
-        let executor_identity = process_identity_token(executor_pid)?;
-        let handshake = SudoExecStartedWire {
-            schema_version: SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION,
-            kind: SUDO_EXEC_STARTED_KIND.to_string(),
-            manifest_sha256,
-            executor_pid,
-            executor_identity,
-            ledger_path: path_string(&paths.ledger_path)?,
-            log_path: path_string(&paths.log_path)?,
-            started_at: current_unix_time()?,
-        };
-        validate_sudo_exec_started(&handshake, Some(&manifest)).map_err(
-            |error| cli_error(SudoRunnerExitStatus::RunnerError, error.message),
-        )?;
-        write_atomic_json_for_user(
-            &paths.started_path,
-            &handshake,
+        if let Err(error) = publish_worker_started_handshake(
+            config,
+            &child,
+            &manifest,
+            &manifest_sha256,
+            &paths,
             cli.parent_uid,
             cli.parent_gid,
-        )
+        ) {
+            terminate_and_reap_worker(&mut child);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
 fn run_internal_root_worker(
     cli: SudoRunnerInternalCli,
-    _config: &SudoRunnerConfig,
+    config: &SudoRunnerConfig,
 ) -> Result<(), SudoRunnerCliError> {
     #[cfg(not(unix))]
     {
-        let _ = cli;
+        let _ = (cli, config);
         return Err(cli_error(
             SudoRunnerExitStatus::RunnerError,
             "detached sudo execution is unsupported on this platform"
@@ -870,8 +934,31 @@ fn run_internal_root_worker(
     {
         let paths =
             validate_handoff_paths(&cli.detach_dir, &cli.manifest_path)?;
+        let Some(started_path) = &cli.started_path else {
+            return Err(cli_error(
+                SudoRunnerExitStatus::InvalidInput,
+                "--started-path is required for internal root worker"
+                    .to_string(),
+            ));
+        };
+        if started_path != &paths.started_path {
+            return Err(cli_error(
+                SudoRunnerExitStatus::InvalidInput,
+                "internal started path must match the handoff directory"
+                    .to_string(),
+            ));
+        }
         let (manifest, manifest_sha256) =
             load_verified_detach_manifest(&paths, &cli.expected_sha256)?;
+        wait_for_started_handshake(
+            &paths,
+            &manifest,
+            config.started_sentinel_timeout,
+            Some(WorkerHandshakeExpectation {
+                pid: std::process::id(),
+                manifest_sha256: manifest_sha256.clone(),
+            }),
+        )?;
         match run_internal_root_worker_loaded(
             &manifest,
             &manifest_sha256,
@@ -1208,10 +1295,17 @@ fn spawn_internal_root_executor(
 }
 
 #[cfg(unix)]
+struct WorkerHandshakeExpectation {
+    pid: u32,
+    manifest_sha256: String,
+}
+
+#[cfg(unix)]
 fn wait_for_started_handshake(
     paths: &HandoffPaths,
     manifest: &SudoManifestWire,
     timeout: Duration,
+    expected: Option<WorkerHandshakeExpectation>,
 ) -> Result<SudoExecStartedWire, SudoRunnerCliError> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1248,6 +1342,9 @@ fn wait_for_started_handshake(
                         )
                     })?;
                 validate_handshake_paths(&handshake, paths)?;
+                if let Some(expected) = expected.as_ref() {
+                    validate_worker_started_handshake(&handshake, expected)?;
+                }
                 return Ok(handshake);
             }
             Ok(_) => {
@@ -1265,14 +1362,112 @@ fn wait_for_started_handshake(
             }
         }
         if Instant::now() >= deadline {
+            let message = if expected.is_some() {
+                "timed out waiting for sudo started handshake"
+            } else {
+                "timed out waiting for sudo root executor handshake"
+            };
             return Err(cli_error(
                 SudoRunnerExitStatus::RunnerError,
-                "timed out waiting for sudo root executor handshake"
-                    .to_string(),
+                message.to_string(),
             ));
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+#[cfg(unix)]
+fn validate_worker_started_handshake(
+    handshake: &SudoExecStartedWire,
+    expected: &WorkerHandshakeExpectation,
+) -> Result<(), SudoRunnerCliError> {
+    if handshake.executor_pid != expected.pid {
+        return Err(cli_error(
+            SudoRunnerExitStatus::RunnerError,
+            "sudo started handshake executor_pid does not match worker"
+                .to_string(),
+        ));
+    }
+    if !constant_time_eq(
+        handshake.manifest_sha256.as_bytes(),
+        expected.manifest_sha256.as_bytes(),
+    ) {
+        return Err(cli_error(
+            SudoRunnerExitStatus::RunnerError,
+            "sudo started handshake manifest digest does not match worker"
+                .to_string(),
+        ));
+    }
+    let identity = process_identity_token(expected.pid)?;
+    if handshake.executor_identity != identity {
+        return Err(cli_error(
+            SudoRunnerExitStatus::RunnerError,
+            "sudo started handshake executor identity does not match worker"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn publish_worker_started_handshake(
+    config: &SudoRunnerConfig,
+    child: &Child,
+    manifest: &SudoManifestWire,
+    manifest_sha256: &str,
+    paths: &HandoffPaths,
+    parent_uid: u32,
+    parent_gid: u32,
+) -> Result<(), SudoRunnerCliError> {
+    let executor_pid = child.id();
+    let executor_identity = derive_executor_identity(config, executor_pid)?;
+    if let Some(message) = &config.started_publish_error {
+        return Err(cli_error(
+            SudoRunnerExitStatus::RunnerError,
+            message.clone(),
+        ));
+    }
+    let handshake = SudoExecStartedWire {
+        schema_version: SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION,
+        kind: SUDO_EXEC_STARTED_KIND.to_string(),
+        manifest_sha256: manifest_sha256.to_string(),
+        executor_pid,
+        executor_identity,
+        ledger_path: path_string(&paths.ledger_path)?,
+        log_path: path_string(&paths.log_path)?,
+        started_at: current_unix_time()?,
+    };
+    validate_sudo_exec_started(&handshake, Some(manifest)).map_err(
+        |error| cli_error(SudoRunnerExitStatus::RunnerError, error.message),
+    )?;
+    write_atomic_json_for_user(
+        &paths.started_path,
+        &handshake,
+        parent_uid,
+        parent_gid,
+    )
+}
+
+#[cfg(unix)]
+fn derive_executor_identity(
+    config: &SudoRunnerConfig,
+    pid: u32,
+) -> Result<String, SudoRunnerCliError> {
+    if let Some(message) = &config.process_identity_error {
+        return Err(cli_error(
+            SudoRunnerExitStatus::RunnerError,
+            message.clone(),
+        ));
+    }
+    process_identity_token(pid)
+}
+
+#[cfg(unix)]
+fn terminate_and_reap_worker(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    terminate_child_group(child);
+    let _ = child.wait();
 }
 
 #[cfg(unix)]
@@ -1442,12 +1637,13 @@ fn run_internal_root_worker_loaded(
 ) -> Result<(), SudoRunnerCliError> {
     reject_existing_path(&paths.ledger_path, "ledger")?;
     reject_symlink_path(&paths.log_path, "log")?;
-    let mut log = open_log_file(&paths.log_path, parent_uid, parent_gid)?;
+    let log = open_log_file(&paths.log_path, parent_uid, parent_gid)?;
+    let log = Arc::new(Mutex::new(log));
     let ledger = execute_detached_worker_manifest(
         manifest,
         manifest_sha256,
         paths,
-        &mut log,
+        &log,
     );
     let ledger = match ledger {
         Ok(ledger) => ledger,
@@ -1473,7 +1669,7 @@ fn execute_detached_worker_manifest(
     manifest: &SudoManifestWire,
     manifest_sha256: &str,
     paths: &HandoffPaths,
-    log: &mut dyn Write,
+    log: &Arc<Mutex<File>>,
 ) -> Result<SudoLedgerWire, SudoRunnerCliError> {
     install_cancellation_handlers();
     let account = resolve_account(&manifest.run_as).map_err(|message| {
@@ -1501,8 +1697,10 @@ fn execute_detached_worker_manifest(
             break;
         }
         let command = &manifest.commands[index];
-        writeln!(log, "sase_sudo_runner: running {}", command.id)
-            .map_err(internal_io)?;
+        write_log_line(
+            log,
+            &format!("sase_sudo_runner: running {}", command.id),
+        )?;
         let result = run_direct_command(
             manifest,
             index,
@@ -1528,12 +1726,22 @@ fn execute_detached_worker_manifest(
 }
 
 #[cfg(unix)]
+fn write_log_line(
+    log: &Arc<Mutex<File>>,
+    line: &str,
+) -> Result<(), SudoRunnerCliError> {
+    let mut log = log.lock().unwrap_or_else(|error| error.into_inner());
+    writeln!(log, "{line}").map_err(internal_io)?;
+    log.flush().map_err(internal_io)
+}
+
+#[cfg(unix)]
 fn run_direct_command(
     manifest: &SudoManifestWire,
     index: usize,
     account: &ResolvedAccount,
     stop_path: &Path,
-    log: &mut dyn Write,
+    log: &Arc<Mutex<File>>,
 ) -> Result<CommandResult, SudoRunnerCliError> {
     let command_wire = &manifest.commands[index];
     let mut command = Command::new(&command_wire.argv[0]);
@@ -1571,24 +1779,35 @@ fn run_direct_command(
             ),
         )
     })?;
-    let stdout_reader = child.stdout.take().map(read_pipe_in_thread);
-    let stderr_reader = child.stderr.take().map(read_pipe_in_thread);
+    let output = Arc::new(SharedCommandOutput::new(
+        Arc::clone(log),
+        manifest.output_to_agent,
+    ));
+    let child_done = Arc::new(AtomicBool::new(false));
+    let stdout_reader = child.stdout.take().map(|reader| {
+        spawn_output_drainer(
+            reader,
+            Arc::clone(&output),
+            Arc::clone(&child_done),
+        )
+    });
+    let stderr_reader = child.stderr.take().map(|reader| {
+        spawn_output_drainer(
+            reader,
+            Arc::clone(&output),
+            Arc::clone(&child_done),
+        )
+    });
     let wait = wait_child_bounded_with_cancel(&mut child, timeout, || {
         CANCELLED.load(Ordering::SeqCst) || stop_path.exists()
     })?;
+    child_done.store(true, Ordering::SeqCst);
     let duration_seconds = started.elapsed().as_secs_f64();
-    let stdout_bytes = join_reader(stdout_reader)?;
-    let stderr_bytes = join_reader(stderr_reader)?;
-    if !stdout_bytes.is_empty() {
-        log.write_all(&stdout_bytes).map_err(internal_io)?;
-    }
-    if !stderr_bytes.is_empty() {
-        log.write_all(&stderr_bytes).map_err(internal_io)?;
-    }
-    let mut combined = Vec::new();
-    combined.extend_from_slice(&stdout_bytes);
-    combined.extend_from_slice(&stderr_bytes);
-    let output_tail = ledger_output(&combined, manifest.output_to_agent);
+    let join_deadline = Instant::now() + DRAIN_JOIN_TIMEOUT;
+    join_drainer(stdout_reader, join_deadline)?;
+    join_drainer(stderr_reader, join_deadline)?;
+    let output_tail =
+        ledger_output(&output.tail_bytes(), manifest.output_to_agent);
     let (status, exit_code, outcome) = match wait {
         WaitOutcome::Exited(status) if status.success() => (
             SudoLedgerEntryStatusWire::Ran,
@@ -1745,6 +1964,172 @@ fn join_reader(
                 format!("failed to read sudo output: {error}"),
             )
         })
+}
+
+#[cfg(unix)]
+struct BoundedByteTail {
+    max_bytes: usize,
+    data: VecDeque<u8>,
+}
+
+#[cfg(unix)]
+impl BoundedByteTail {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            data: VecDeque::new(),
+        }
+    }
+
+    fn extend(&mut self, chunk: &[u8]) {
+        if self.max_bytes == 0 || chunk.is_empty() {
+            return;
+        }
+        if chunk.len() >= self.max_bytes {
+            self.data.clear();
+            self.data
+                .extend(chunk[chunk.len() - self.max_bytes..].iter().copied());
+            return;
+        }
+        let overflow = self.data.len() + chunk.len();
+        if overflow > self.max_bytes {
+            let drop = overflow - self.max_bytes;
+            let _ = self.data.drain(..drop);
+        }
+        self.data.extend(chunk.iter().copied());
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        self.data.iter().copied().collect()
+    }
+}
+
+#[cfg(unix)]
+struct SharedCommandOutput {
+    log: Arc<Mutex<File>>,
+    tail: Mutex<BoundedByteTail>,
+}
+
+#[cfg(unix)]
+impl SharedCommandOutput {
+    fn new(log: Arc<Mutex<File>>, policy: SudoOutputPolicyWire) -> Self {
+        Self {
+            log,
+            tail: Mutex::new(BoundedByteTail::new(ledger_tail_bound(policy))),
+        }
+    }
+
+    fn write_chunk(&self, chunk: &[u8]) -> io::Result<()> {
+        {
+            let mut log =
+                self.log.lock().unwrap_or_else(|error| error.into_inner());
+            log.write_all(chunk)?;
+            log.flush()?;
+        }
+        let mut tail =
+            self.tail.lock().unwrap_or_else(|error| error.into_inner());
+        tail.extend(chunk);
+        Ok(())
+    }
+
+    fn tail_bytes(&self) -> Vec<u8> {
+        self.tail
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .snapshot()
+    }
+}
+
+fn ledger_tail_bound(policy: SudoOutputPolicyWire) -> usize {
+    match policy {
+        SudoOutputPolicyWire::None => 0,
+        SudoOutputPolicyWire::Tail => {
+            SUDO_MAX_OUTPUT_TAIL_BYTES.min(LEDGER_TAIL_POLICY_BYTES)
+        }
+        SudoOutputPolicyWire::Full => SUDO_MAX_OUTPUT_TAIL_BYTES,
+    }
+}
+
+#[cfg(unix)]
+fn spawn_output_drainer<R>(
+    mut reader: R,
+    output: Arc<SharedCommandOutput>,
+    child_done: Arc<AtomicBool>,
+) -> thread::JoinHandle<io::Result<()>>
+where
+    R: Read + std::os::unix::io::AsRawFd + Send + 'static,
+{
+    thread::spawn(move || {
+        set_nonblocking_fd(reader.as_raw_fd())?;
+        let mut buf = [0u8; OUTPUT_DRAIN_CHUNK];
+        let mut idle_since = None;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => return Ok(()),
+                Ok(n) => {
+                    idle_since = None;
+                    output.write_chunk(&buf[..n])?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if child_done.load(Ordering::SeqCst) {
+                        let started =
+                            *idle_since.get_or_insert_with(Instant::now);
+                        if started.elapsed() >= DRAIN_GRACE {
+                            return Ok(());
+                        }
+                    }
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn set_nonblocking_fd(fd: libc::c_int) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn join_drainer(
+    reader: Option<thread::JoinHandle<io::Result<()>>>,
+    deadline: Instant,
+) -> Result<(), SudoRunnerCliError> {
+    let Some(reader) = reader else {
+        return Ok(());
+    };
+    loop {
+        if reader.is_finished() {
+            return reader
+                .join()
+                .map_err(|_| {
+                    cli_error(
+                        SudoRunnerExitStatus::RunnerError,
+                        "sudo output reader thread panicked".to_string(),
+                    )
+                })?
+                .map_err(|error| {
+                    cli_error(
+                        SudoRunnerExitStatus::RunnerError,
+                        format!("failed to read sudo output: {error}"),
+                    )
+                });
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
 }
 
 #[cfg(unix)]
@@ -2145,20 +2530,12 @@ fn terminate_child_group(child: &mut Child) {
 }
 
 fn ledger_output(combined: &[u8], policy: SudoOutputPolicyWire) -> String {
-    if policy == SudoOutputPolicyWire::None {
+    let bound = ledger_tail_bound(policy);
+    if bound == 0 {
         return String::new();
     }
     let lossy = String::from_utf8_lossy(combined);
-    match policy {
-        SudoOutputPolicyWire::None => String::new(),
-        SudoOutputPolicyWire::Tail => truncate_sudo_output_tail(
-            &lossy,
-            SUDO_MAX_OUTPUT_TAIL_BYTES.min(8192),
-        ),
-        SudoOutputPolicyWire::Full => {
-            truncate_sudo_output_tail(&lossy, SUDO_MAX_OUTPUT_TAIL_BYTES)
-        }
-    }
+    truncate_sudo_output_tail(&lossy, bound)
 }
 
 fn tty_available(config: &SudoRunnerConfig) -> bool {
@@ -2449,6 +2826,12 @@ pwd >> "$base.cwd"
 printf '%s\n' "$*" >> "$base.calls"
 if [ "$#" -eq 1 ] && [ "$1" = "-k" ]; then
   printf 'cleanup\n' >> "$base.cleanups"
+  if [ -f "$base.final_k_fail" ]; then
+    count=$(/usr/bin/wc -l < "$base.cleanups")
+    if [ "$count" -ge 2 ]; then
+      exit 1
+    fi
+  fi
   exit 0
 fi
 if [ "$#" -eq 1 ] && [ "$1" = "-v" ]; then
@@ -2583,6 +2966,110 @@ mv "$tmp" "$started_path"
         sudo_manifest_sha256(manifest).unwrap()
     }
 
+    fn worker_cli_args(
+        manifest_path: &Path,
+        digest: String,
+        detach_dir: &Path,
+    ) -> [String; 13] {
+        [
+            "--internal-root-worker".to_string(),
+            "-m".to_string(),
+            manifest_path.display().to_string(),
+            "-e".to_string(),
+            digest,
+            "-d".to_string(),
+            detach_dir.display().to_string(),
+            "--started-path".to_string(),
+            detach_dir.join(STARTED_FILENAME).display().to_string(),
+            "--parent-uid".to_string(),
+            unsafe { libc::geteuid() }.to_string(),
+            "--parent-gid".to_string(),
+            unsafe { libc::getegid() }.to_string(),
+        ]
+    }
+
+    fn exec_cli_args(
+        manifest_path: &Path,
+        digest: String,
+        detach_dir: &Path,
+    ) -> [String; 13] {
+        [
+            "--internal-root-exec".to_string(),
+            "-m".to_string(),
+            manifest_path.display().to_string(),
+            "-e".to_string(),
+            digest,
+            "-d".to_string(),
+            detach_dir.display().to_string(),
+            "--started-path".to_string(),
+            detach_dir.join(STARTED_FILENAME).display().to_string(),
+            "--parent-uid".to_string(),
+            unsafe { libc::geteuid() }.to_string(),
+            "--parent-gid".to_string(),
+            unsafe { libc::getegid() }.to_string(),
+        ]
+    }
+
+    fn write_self_started(dir: &Path, digest: &str) -> SudoExecStartedWire {
+        let pid = std::process::id();
+        let handshake = SudoExecStartedWire {
+            schema_version: SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION,
+            kind: SUDO_EXEC_STARTED_KIND.to_string(),
+            manifest_sha256: digest.to_string(),
+            executor_pid: pid,
+            executor_identity: process_identity_token(pid).unwrap(),
+            ledger_path: dir.join(LEDGER_FILENAME).display().to_string(),
+            log_path: dir.join(LOG_FILENAME).display().to_string(),
+            started_at: current_unix_time().unwrap(),
+        };
+        validate_sudo_exec_started(&handshake, None).unwrap();
+        fs::write(
+            dir.join(STARTED_FILENAME),
+            format!("{}\n", serde_json::to_string(&handshake).unwrap()),
+        )
+        .unwrap();
+        handshake
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn waiting_worker_script() -> &'static str {
+        r#"#!/bin/sh
+set -eu
+detach_dir=""
+started_path=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --detach-dir)
+      detach_dir="$2"
+      shift 2
+      ;;
+    --started-path)
+      started_path="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf '%s\n' "$$" > "$detach_dir/worker.pid"
+printf 'waiting\n' > "$detach_dir/worker.state"
+while [ ! -f "$started_path" ]; do
+  sleep 0.05
+done
+printf 'started\n' > "$detach_dir/worker.state"
+printf 'ran\n' > "$detach_dir/worker.ran"
+"#
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
     #[test]
     fn help_succeeds_without_tty_or_sudo() {
         let mut stdout = Vec::new();
@@ -2608,6 +3095,7 @@ mv "$tmp" "$started_path"
         let mut stderr = Vec::new();
         let mut config = SudoRunnerConfig::production();
         config.tty_available = Some(false);
+        config.detached_execution = Some(true);
         let result = run_sudo_runner_cli_with_io(
             ["--capabilities".to_string()],
             &config,
@@ -2624,6 +3112,88 @@ mv "$tmp" "$started_path"
                 "capabilities": ["detached_execution"]
             })
         );
+    }
+
+    #[test]
+    fn capabilities_omit_detached_execution_when_identity_backend_is_absent() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut config = SudoRunnerConfig::production();
+        config.tty_available = Some(false);
+        config.detached_execution = Some(false);
+        let result = run_sudo_runner_cli_with_io(
+            ["--capabilities".to_string()],
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok());
+        assert!(stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "capabilities": []
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_identity_backend_advertises_detached_execution() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut config = SudoRunnerConfig::production();
+        config.tty_available = Some(false);
+        let result = run_sudo_runner_cli_with_io(
+            ["--capabilities".to_string()],
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok());
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            value["capabilities"],
+            serde_json::json!(["detached_execution"])
+        );
+        assert!(platform_process_identity_available());
+        assert!(detached_execution_supported(&config));
+    }
+
+    #[test]
+    fn detach_rejects_before_auth_when_capability_absent() {
+        let mut fixture = Fixture::new(manifest());
+        fixture.config.detached_execution = Some(false);
+        let (result, stdout, _) = fixture.run_detach();
+        assert_eq!(
+            result.unwrap_err().exit_code(),
+            SUDO_RUNNER_RUNNER_ERROR_EXIT
+        );
+        let ledger = ledger(&stdout);
+        assert_eq!(ledger.outcome, SudoLedgerOutcomeWire::RunnerError);
+        assert!(ledger
+            .diagnostic
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported"));
+        assert!(ledger
+            .entries
+            .iter()
+            .all(|entry| entry.status == SudoLedgerEntryStatusWire::Skipped));
+        sase_core::sudo_validate_ledger_json_value(
+            &serde_json::from_str(stdout.trim()).unwrap(),
+            Some(
+                &serde_json::from_slice(
+                    &fs::read(&fixture.manifest_path).unwrap(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(fixture.calls().is_empty());
+        assert!(!fixture.handoff_dir.join(STARTED_FILENAME).exists());
     }
 
     #[test]
@@ -3085,23 +3655,12 @@ mv "$tmp" "$started_path"
         }];
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
         let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
-            [
-                "--internal-root-worker".to_string(),
-                "-m".to_string(),
-                manifest_path.display().to_string(),
-                "-e".to_string(),
-                digest,
-                "-d".to_string(),
-                tmp.path().display().to_string(),
-                "--parent-uid".to_string(),
-                unsafe { libc::geteuid() }.to_string(),
-                "--parent-gid".to_string(),
-                unsafe { libc::getegid() }.to_string(),
-            ],
+            worker_cli_args(&manifest_path, digest, tmp.path()),
             &config,
             &mut stdout,
             &mut stderr,
@@ -3140,6 +3699,7 @@ mv "$tmp" "$started_path"
         }];
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
         let stop_path = tmp.path().join(STOP_FILENAME);
         let stop_thread = thread::spawn({
             let stop_path = stop_path.clone();
@@ -3152,19 +3712,7 @@ mv "$tmp" "$started_path"
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
-            [
-                "--internal-root-worker".to_string(),
-                "-m".to_string(),
-                manifest_path.display().to_string(),
-                "-e".to_string(),
-                digest,
-                "-d".to_string(),
-                tmp.path().display().to_string(),
-                "--parent-uid".to_string(),
-                unsafe { libc::geteuid() }.to_string(),
-                "--parent-gid".to_string(),
-                unsafe { libc::getegid() }.to_string(),
-            ],
+            worker_cli_args(&manifest_path, digest, tmp.path()),
             &config,
             &mut stdout,
             &mut stderr,
@@ -3190,23 +3738,12 @@ mv "$tmp" "$started_path"
         manifest.commands[0].argv = vec!["/bin/true".to_string()];
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
         let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
-            [
-                "--internal-root-worker".to_string(),
-                "-m".to_string(),
-                manifest_path.display().to_string(),
-                "-e".to_string(),
-                digest,
-                "-d".to_string(),
-                tmp.path().display().to_string(),
-                "--parent-uid".to_string(),
-                unsafe { libc::geteuid() }.to_string(),
-                "--parent-gid".to_string(),
-                unsafe { libc::getegid() }.to_string(),
-            ],
+            worker_cli_args(&manifest_path, digest, tmp.path()),
             &config,
             &mut stdout,
             &mut stderr,
@@ -3237,23 +3774,12 @@ mv "$tmp" "$started_path"
         let target = tmp.path().join("target-ledger.json");
         std::os::unix::fs::symlink(&target, tmp.path().join(LEDGER_FILENAME))
             .unwrap();
+        write_self_started(tmp.path(), &digest);
         let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let error = run_sudo_runner_cli_with_io(
-            [
-                "--internal-root-worker".to_string(),
-                "-m".to_string(),
-                manifest_path.display().to_string(),
-                "-e".to_string(),
-                digest,
-                "-d".to_string(),
-                tmp.path().display().to_string(),
-                "--parent-uid".to_string(),
-                unsafe { libc::geteuid() }.to_string(),
-                "--parent-gid".to_string(),
-                unsafe { libc::getegid() }.to_string(),
-            ],
+            worker_cli_args(&manifest_path, digest, tmp.path()),
             &config,
             &mut stdout,
             &mut stderr,
@@ -3277,19 +3803,7 @@ mv "$tmp" "$started_path"
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let error = run_sudo_runner_cli_with_io(
-            [
-                "--internal-root-worker".to_string(),
-                "-m".to_string(),
-                manifest_path.display().to_string(),
-                "-e".to_string(),
-                "a".repeat(64),
-                "-d".to_string(),
-                tmp.path().display().to_string(),
-                "--parent-uid".to_string(),
-                unsafe { libc::geteuid() }.to_string(),
-                "--parent-gid".to_string(),
-                unsafe { libc::getegid() }.to_string(),
-            ],
+            worker_cli_args(&manifest_path, "a".repeat(64), tmp.path()),
             &config,
             &mut stdout,
             &mut stderr,
@@ -3297,6 +3811,374 @@ mv "$tmp" "$started_path"
         .unwrap_err();
         assert_eq!(error.exit_code(), SUDO_RUNNER_INVALID_INPUT_EXIT);
         assert!(!tmp.path().join(LEDGER_FILENAME).exists());
+    }
+
+    #[test]
+    fn internal_worker_does_not_execute_before_valid_witness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ran_path = tmp.path().join("ran");
+        let command_path = tmp.path().join("touch-ran.sh");
+        write_executable(
+            &command_path,
+            &format!("#!/bin/sh\nprintf ran > '{}'\n", ran_path.display()),
+        );
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands = vec![SudoCommandWire {
+            id: "touch".to_string(),
+            argv: vec![command_path.display().to_string()],
+            why: "Record execution".to_string(),
+            timeout_seconds: Some(2.0),
+            shell: false,
+        }];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.started_sentinel_timeout = Duration::from_millis(200);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_sudo_runner_cli_with_io(
+            worker_cli_args(&manifest_path, digest.clone(), tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error.message().contains("timed out waiting"));
+        assert!(!ran_path.exists());
+        assert!(!tmp.path().join(LOG_FILENAME).exists());
+        assert!(!tmp.path().join(LEDGER_FILENAME).exists());
+
+        write_self_started(tmp.path(), &digest);
+        let result = run_sudo_runner_cli_with_io(
+            worker_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(ran_path.exists());
+    }
+
+    #[test]
+    fn internal_worker_rejects_mismatched_witness_without_executing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ran_path = tmp.path().join("ran");
+        let command_path = tmp.path().join("touch-ran.sh");
+        write_executable(
+            &command_path,
+            &format!("#!/bin/sh\nprintf ran > '{}'\n", ran_path.display()),
+        );
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands = vec![SudoCommandWire {
+            id: "touch".to_string(),
+            argv: vec![command_path.display().to_string()],
+            why: "Record execution".to_string(),
+            timeout_seconds: Some(2.0),
+            shell: false,
+        }];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let mut handshake = write_self_started(tmp.path(), &digest);
+        handshake.executor_pid =
+            handshake.executor_pid.saturating_sub(1).max(1);
+        if handshake.executor_pid == std::process::id() {
+            handshake.executor_pid = 1;
+        }
+        fs::write(
+            tmp.path().join(STARTED_FILENAME),
+            format!("{}\n", serde_json::to_string(&handshake).unwrap()),
+        )
+        .unwrap();
+        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_sudo_runner_cli_with_io(
+            worker_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error.message().contains("executor_pid"));
+        assert!(!ran_path.exists());
+        assert!(!tmp.path().join(LOG_FILENAME).exists());
+    }
+
+    #[test]
+    fn post_spawn_identity_failure_reaps_barred_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv = vec!["/bin/true".to_string()];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let worker_path = tmp.path().join("waiting-worker");
+        write_executable(&worker_path, waiting_worker_script());
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.runner_path = Some(worker_path);
+        config.detached_execution = Some(true);
+        config.process_identity_error =
+            Some("forced identity derivation failure".to_string());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_sudo_runner_cli_with_io(
+            exec_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error
+            .message()
+            .contains("forced identity derivation failure"));
+        assert!(!tmp.path().join(STARTED_FILENAME).exists());
+        assert!(!tmp.path().join("worker.ran").exists());
+        if let Ok(pid) = fs::read_to_string(tmp.path().join("worker.pid")) {
+            let pid: u32 = pid.trim().parse().unwrap();
+            assert!(!process_alive(pid), "barred worker {pid} still running");
+        }
+    }
+
+    #[test]
+    fn post_spawn_publish_failure_reaps_barred_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv = vec!["/bin/true".to_string()];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let worker_path = tmp.path().join("waiting-worker");
+        write_executable(&worker_path, waiting_worker_script());
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.runner_path = Some(worker_path);
+        config.detached_execution = Some(true);
+        config.started_publish_error =
+            Some("forced started handshake publish failure".to_string());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = run_sudo_runner_cli_with_io(
+            exec_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error
+            .message()
+            .contains("forced started handshake publish failure"));
+        assert!(!tmp.path().join(STARTED_FILENAME).exists());
+        assert!(!tmp.path().join("worker.ran").exists());
+        if let Ok(pid) = fs::read_to_string(tmp.path().join("worker.pid")) {
+            let pid: u32 = pid.trim().parse().unwrap();
+            assert!(!process_alive(pid), "barred worker {pid} still running");
+        }
+    }
+
+    #[test]
+    fn detached_timestamp_cleanup_failure_returns_started_handshake() {
+        let fixture = Fixture::new(manifest());
+        fixture.touch("final_k_fail");
+        let (result, stdout, stderr) = fixture.run_detach();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(stderr.contains(
+            "sudo timestamp cleanup failed after detached executor started"
+        ));
+        let handshake: SudoExecStartedWire =
+            serde_json::from_str(stdout.trim()).unwrap();
+        validate_sudo_exec_started(
+            &handshake,
+            Some(
+                &sudo_manifest_from_json_slice(
+                    &fs::read(&fixture.manifest_path).unwrap(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(fixture.handoff_dir.join(STARTED_FILENAME).exists());
+        assert_eq!(
+            serde_json::from_slice::<SudoExecStartedWire>(
+                &fs::read(fixture.handoff_dir.join(STARTED_FILENAME)).unwrap()
+            )
+            .unwrap()
+            .executor_pid,
+            handshake.executor_pid
+        );
+    }
+
+    #[test]
+    fn internal_worker_streams_output_before_command_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let command_path = tmp.path().join("slow-emit.sh");
+        write_executable(
+            &command_path,
+            "#!/bin/sh\nprintf 'early-output\\n'\nexec /bin/sleep 2\n",
+        );
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands = vec![SudoCommandWire {
+            id: "emit".to_string(),
+            argv: vec![command_path.display().to_string()],
+            why: "Emit then sleep".to_string(),
+            timeout_seconds: Some(5.0),
+            shell: false,
+        }];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
+        let log_path = tmp.path().join(LOG_FILENAME);
+        let worker = thread::spawn({
+            let manifest_path = manifest_path.clone();
+            let digest = digest.clone();
+            let dir = tmp.path().to_path_buf();
+            move || {
+                let config = SudoRunnerConfig::test(dir.join("unused-sudo"));
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                run_sudo_runner_cli_with_io(
+                    worker_cli_args(&manifest_path, digest, &dir),
+                    &config,
+                    &mut stdout,
+                    &mut stderr,
+                )
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if log_path.exists()
+                && fs::read_to_string(&log_path)
+                    .unwrap_or_default()
+                    .contains("early-output")
+            {
+                break;
+            }
+            assert!(
+                !worker.is_finished(),
+                "worker exited before live output was visible"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for live output.log"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !worker.is_finished(),
+            "output.log became visible only after command exit"
+        );
+        let result = worker.join().unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn internal_worker_keeps_bounded_ledger_tail_for_large_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let command_path = tmp.path().join("bulk.sh");
+        write_executable(
+            &command_path,
+            "#!/bin/sh\n\
+/usr/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'x'\n\
+/usr/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'y' >&2\n",
+        );
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.output_to_agent = SudoOutputPolicyWire::Tail;
+        manifest.commands = vec![SudoCommandWire {
+            id: "bulk".to_string(),
+            argv: vec![command_path.display().to_string()],
+            why: "Emit large stdout and stderr".to_string(),
+            timeout_seconds: Some(5.0),
+            shell: false,
+        }];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
+        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = run_sudo_runner_cli_with_io(
+            worker_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        let ledger: SudoLedgerWire = serde_json::from_slice(
+            &fs::read(tmp.path().join(LEDGER_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        validate_sudo_ledger(&ledger, Some(&manifest)).unwrap();
+        assert_eq!(ledger.entries[0].status, SudoLedgerEntryStatusWire::Ran);
+        assert!(
+            ledger.entries[0].output_tail.len() <= LEDGER_TAIL_POLICY_BYTES
+        );
+        let log_len =
+            fs::metadata(tmp.path().join(LOG_FILENAME)).unwrap().len();
+        assert!(
+            log_len > LEDGER_TAIL_POLICY_BYTES as u64 * 2,
+            "expected full output.log, got {log_len} bytes"
+        );
+    }
+
+    #[test]
+    fn internal_worker_timeout_completes_when_descendant_holds_pipe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let command_path = tmp.path().join("hold-pipe.sh");
+        write_executable(
+            &command_path,
+            "#!/bin/sh\nsetsid /bin/sleep 2 < /dev/null &\nprintf 'held\\n'\nexec /bin/sleep 30\n",
+        );
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands = vec![SudoCommandWire {
+            id: "hold".to_string(),
+            argv: vec![command_path.display().to_string()],
+            why: "Leave a descendant holding the pipe".to_string(),
+            timeout_seconds: Some(0.2),
+            shell: false,
+        }];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        write_self_started(tmp.path(), &digest);
+        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let started = Instant::now();
+        let result = run_sudo_runner_cli_with_io(
+            worker_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "timeout hung joining drainers: {:?}",
+            started.elapsed()
+        );
+        let ledger: SudoLedgerWire = serde_json::from_slice(
+            &fs::read(tmp.path().join(LEDGER_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ledger.entries[0].status, SudoLedgerEntryStatusWire::Failed);
+        assert_eq!(ledger.entries[0].exit_code, None);
+        let log = fs::read_to_string(tmp.path().join(LOG_FILENAME)).unwrap();
+        assert!(log.contains("held"));
     }
 
     #[test]

@@ -4345,25 +4345,25 @@ mod tests {
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=", "bead=", "proc=", "time=", "unit=", "@ops",
+                "agent=", "bead=", "hood=", "proc=", "time=", "unit=", "@ops",
                 "builders", "review"
             ]
         );
         assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-        assert_eq!(items[5].kind, Some(CompletionItemKind::ENUM_MEMBER));
-        assert_eq!(items[6].kind, Some(CompletionItemKind::MODULE));
-        assert_eq!(items[7].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[5].sort_text.as_deref(), Some("2:0005"));
+        assert_eq!(items[6].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[7].kind, Some(CompletionItemKind::MODULE));
+        assert_eq!(items[8].kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(items[6].sort_text.as_deref(), Some("2:0006"));
         assert_eq!(
-            items[6]
+            items[7]
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref()),
             Some("clan · 3 members")
         );
-        assert!(items[6].documentation.is_none());
+        assert!(items[7].documentation.is_none());
         let Some(Documentation::MarkupContent(review_doc)) =
-            items[7].documentation.as_ref()
+            items[8].documentation.as_ref()
         else {
             panic!("expected markdown documentation for review family entry");
         };
@@ -4680,7 +4680,7 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["agent=", "bead=", "proc=", "time=", "unit="]
+            vec!["agent=", "bead=", "hood=", "proc=", "time=", "unit="]
         );
 
         let mut mixed = bridge_with_catalog_entries(Vec::new());
@@ -4845,7 +4845,10 @@ mod tests {
         );
         assert_eq!(
             labels_at(server, "%wait(").await,
-            vec!["agent=", "bead=", "proc=", "time=", "unit=", "planner"]
+            vec![
+                "agent=", "bead=", "hood=", "proc=", "time=", "unit=",
+                "planner"
+            ]
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(labels_at(server, "%q(")
