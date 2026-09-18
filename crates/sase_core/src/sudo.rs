@@ -16,9 +16,12 @@ use thiserror::Error;
 pub const SUDO_MANIFEST_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_LEDGER_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_RISK_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const SUDO_EXEC_STARTED_KIND: &str = "sudo_exec_started";
 
 pub const SUDO_MANIFEST_MAX_BYTES: usize = 64 * 1024;
 pub const SUDO_LEDGER_MAX_BYTES: usize = 256 * 1024;
+pub const SUDO_EXEC_STARTED_MAX_BYTES: usize = 16 * 1024;
 pub const SUDO_MAX_COMMANDS: usize = 128;
 pub const SUDO_MAX_ARGV: usize = 64;
 pub const SUDO_MAX_ENV: usize = 64;
@@ -215,6 +218,19 @@ pub struct SudoLedgerEntryWire {
     pub exit_code: Option<i32>,
     pub duration_seconds: f64,
     pub output_tail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SudoExecStartedWire {
+    pub schema_version: u32,
+    pub kind: String,
+    pub manifest_sha256: String,
+    pub executor_pid: u32,
+    pub executor_identity: String,
+    pub ledger_path: String,
+    pub log_path: String,
+    pub started_at: f64,
 }
 
 pub fn sudo_manifest_from_json_value(
@@ -478,6 +494,90 @@ pub fn validate_sudo_ledger(
     Ok(ledger.clone())
 }
 
+pub fn sudo_exec_started_from_json_value(
+    value: &JsonValue,
+) -> Result<SudoExecStartedWire, SudoWireError> {
+    ensure_json_size(
+        "sudo exec started handshake",
+        value,
+        SUDO_EXEC_STARTED_MAX_BYTES,
+    )?;
+    let handshake: SudoExecStartedWire = serde_json::from_value(value.clone())
+        .map_err(|error| {
+            SudoWireError::json(format!(
+                "sudo exec started handshake JSON does not match wire contract: {error}"
+            ))
+        })?;
+    validate_sudo_exec_started(&handshake, None)
+}
+
+pub fn sudo_validate_exec_started_json_value(
+    handshake: &JsonValue,
+    manifest: Option<&JsonValue>,
+) -> Result<SudoExecStartedWire, SudoWireError> {
+    ensure_json_size(
+        "sudo exec started handshake",
+        handshake,
+        SUDO_EXEC_STARTED_MAX_BYTES,
+    )?;
+    let parsed_manifest =
+        manifest.map(sudo_manifest_from_json_value).transpose()?;
+    let handshake: SudoExecStartedWire =
+        serde_json::from_value(handshake.clone()).map_err(|error| {
+            SudoWireError::json(format!(
+                "sudo exec started handshake JSON does not match wire contract: {error}"
+            ))
+        })?;
+    validate_sudo_exec_started(&handshake, parsed_manifest.as_ref())
+}
+
+pub fn validate_sudo_exec_started(
+    handshake: &SudoExecStartedWire,
+    manifest: Option<&SudoManifestWire>,
+) -> Result<SudoExecStartedWire, SudoWireError> {
+    validate_schema(
+        "sudo exec started handshake",
+        handshake.schema_version,
+        SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION,
+    )?;
+    if handshake.kind != SUDO_EXEC_STARTED_KIND {
+        return Err(SudoWireError::validation(
+            "kind",
+            format!(
+                "sudo exec started kind must be {SUDO_EXEC_STARTED_KIND:?}"
+            ),
+        ));
+    }
+    validate_sha256("manifest_sha256", &handshake.manifest_sha256)?;
+    if let Some(manifest) = manifest {
+        let manifest = validate_sudo_manifest(manifest)?;
+        let expected = sudo_manifest_sha256(&manifest)?;
+        if handshake.manifest_sha256 != expected {
+            return Err(SudoWireError::digest_mismatch(
+                &expected,
+                &handshake.manifest_sha256,
+            ));
+        }
+    }
+    if handshake.executor_pid == 0 || handshake.executor_pid > i32::MAX as u32 {
+        return Err(SudoWireError::validation(
+            "executor_pid",
+            "sudo exec started executor_pid must be a positive platform PID",
+        ));
+    }
+    validate_process_identity(&handshake.executor_identity)?;
+    validate_absolute_path("ledger_path", &handshake.ledger_path)?;
+    validate_absolute_path("log_path", &handshake.log_path)?;
+    if handshake.ledger_path == handshake.log_path {
+        return Err(SudoWireError::validation(
+            "log_path",
+            "sudo exec started ledger_path and log_path must differ",
+        ));
+    }
+    validate_positive_timestamp("started_at", handshake.started_at)?;
+    Ok(handshake.clone())
+}
+
 pub fn truncate_sudo_output_tail(value: &str, max_bytes: usize) -> String {
     truncate_utf8_tail(value, max_bytes.min(SUDO_MAX_OUTPUT_TAIL_BYTES))
 }
@@ -736,6 +836,19 @@ fn validate_non_negative_seconds(
     Ok(())
 }
 
+fn validate_positive_timestamp(
+    target: impl Into<String>,
+    value: f64,
+) -> Result<(), SudoWireError> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(SudoWireError::validation(
+            target,
+            "sudo timestamp must be finite and positive",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_sha256(
     target: impl Into<String>,
     value: &str,
@@ -753,6 +866,36 @@ fn validate_sha256(
             "value must be a lowercase SHA-256 hex digest",
         ))
     }
+}
+
+fn validate_process_identity(value: &str) -> Result<(), SudoWireError> {
+    validate_non_empty_bounded(
+        "executor_identity",
+        value,
+        SUDO_MAX_LABEL_BYTES,
+    )?;
+    let Some((boot_id, ticks)) = value.split_once(':') else {
+        return Err(SudoWireError::validation(
+            "executor_identity",
+            "sudo exec started executor_identity must be <boot_id>:<start_ticks>",
+        ));
+    };
+    if boot_id.trim().is_empty() {
+        return Err(SudoWireError::validation(
+            "executor_identity",
+            "sudo exec started executor_identity boot id must not be empty",
+        ));
+    }
+    if ticks.is_empty()
+        || !ticks.bytes().all(|byte| byte.is_ascii_digit())
+        || ticks.parse::<u64>().is_err()
+    {
+        return Err(SudoWireError::validation(
+            "executor_identity",
+            "sudo exec started executor_identity start ticks must be numeric",
+        ));
+    }
+    Ok(())
 }
 
 fn reject_path_like(
@@ -1321,6 +1464,86 @@ mod tests {
             .contains("runner_error"));
         ledger.outcome = SudoLedgerOutcomeWire::RunnerError;
         validate_sudo_ledger(&ledger, None).unwrap();
+    }
+
+    fn handshake_value(manifest: &SudoManifestWire) -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "kind": "sudo_exec_started",
+            "manifest_sha256": sudo_manifest_sha256(manifest).unwrap(),
+            "executor_pid": 1234,
+            "executor_identity": "boot-a:5678",
+            "ledger_path": "/tmp/sase-sudo/ledger.json",
+            "log_path": "/tmp/sase-sudo/output.log",
+            "started_at": 1_800_000_000.25
+        })
+    }
+
+    #[test]
+    fn exec_started_validates_against_manifest_digest() {
+        let manifest = manifest();
+        let value = handshake_value(&manifest);
+        let handshake = sudo_validate_exec_started_json_value(
+            &value,
+            Some(&serde_json::to_value(&manifest).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(handshake.kind, SUDO_EXEC_STARTED_KIND);
+        assert_eq!(handshake.executor_pid, 1234);
+        assert_eq!(handshake.ledger_path, "/tmp/sase-sudo/ledger.json");
+    }
+
+    #[test]
+    fn exec_started_rejects_bad_kind_digest_pid_paths_identity_and_time() {
+        let manifest = manifest();
+        let manifest_json = serde_json::to_value(&manifest).unwrap();
+
+        let mut value = handshake_value(&manifest);
+        value["kind"] = json!("other");
+        assert!(sudo_validate_exec_started_json_value(
+            &value,
+            Some(&manifest_json)
+        )
+        .unwrap_err()
+        .message
+        .contains("kind"));
+
+        let mut value = handshake_value(&manifest);
+        value["manifest_sha256"] = json!("b".repeat(64));
+        assert_eq!(
+            sudo_validate_exec_started_json_value(&value, Some(&manifest_json))
+                .unwrap_err()
+                .code,
+            SudoErrorCodeWire::DigestMismatch
+        );
+
+        let mut value = handshake_value(&manifest);
+        value["executor_pid"] = json!(0);
+        assert!(sudo_exec_started_from_json_value(&value)
+            .unwrap_err()
+            .message
+            .contains("executor_pid"));
+
+        let mut value = handshake_value(&manifest);
+        value["ledger_path"] = json!("relative/ledger.json");
+        assert!(sudo_exec_started_from_json_value(&value)
+            .unwrap_err()
+            .message
+            .contains("absolute"));
+
+        let mut value = handshake_value(&manifest);
+        value["executor_identity"] = json!("boot-a:not-number");
+        assert!(sudo_exec_started_from_json_value(&value)
+            .unwrap_err()
+            .message
+            .contains("numeric"));
+
+        let mut value = handshake_value(&manifest);
+        value["started_at"] = json!(0.0);
+        assert!(sudo_exec_started_from_json_value(&value)
+            .unwrap_err()
+            .message
+            .contains("positive"));
     }
 
     #[test]

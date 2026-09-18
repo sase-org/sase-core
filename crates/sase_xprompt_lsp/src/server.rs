@@ -4375,7 +4375,7 @@ mod tests {
         assert_eq!(items[5].kind, Some(CompletionItemKind::ENUM_MEMBER));
         assert_eq!(items[6].kind, Some(CompletionItemKind::MODULE));
         assert_eq!(items[7].kind, Some(CompletionItemKind::CLASS));
-        assert_eq!(items[5].sort_text.as_deref(), Some("1:0005"));
+        assert_eq!(items[5].sort_text.as_deref(), Some("2:0005"));
         assert_eq!(
             items[6]
                 .label_details

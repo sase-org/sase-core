@@ -278,6 +278,7 @@
 //! - `sudo_manifest_sha256(manifest: dict) -> str`
 //! - `sudo_derive_risk_badges(manifest: dict) -> list[dict]`
 //! - `sudo_validate_ledger(ledger: dict, manifest: dict | None = None) -> dict`
+//! - `sudo_validate_handshake(handshake: dict, manifest: dict | None = None) -> dict`
 //! - `sudo_runner_main(args: list[str]) -> None`
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
 //! - `fleet_classify_cache_freshness(request: dict) -> dict`
@@ -16007,6 +16008,28 @@ fn py_sudo_validate_ledger<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "sudo_validate_handshake", signature = (handshake, manifest=None))]
+fn py_sudo_validate_handshake<'py>(
+    py: Python<'py>,
+    handshake: &Bound<'py, PyDict>,
+    manifest: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let handshake = py_to_json_value(handshake.as_any())?;
+    let manifest = manifest
+        .map(|value| py_to_json_value(value.as_any()))
+        .transpose()?;
+    let normalized = py
+        .allow_threads(|| {
+            sase_core::sudo_validate_exec_started_json_value(
+                &handshake,
+                manifest.as_ref(),
+            )
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &normalized)
+}
+
+#[pyfunction]
 #[pyo3(name = "sudo_runner_main")]
 fn py_sudo_runner_main(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     py.allow_threads(|| sase_gateway::run_sudo_runner_cli(args))
@@ -18448,6 +18471,10 @@ fn gateway_and_bootstrap_bindings_are_registered() {
             .getattr("sudo_validate_ledger")
             .unwrap()
             .is_callable());
+        assert!(module
+            .getattr("sudo_validate_handshake")
+            .unwrap()
+            .is_callable());
         assert!(module.getattr("sudo_runner_main").unwrap().is_callable());
     });
 }
@@ -18537,6 +18564,44 @@ fn sudo_bindings_validate_manifest_risk_ledger_and_help() {
                 .unwrap();
         let validated = py_to_json_value(validated.bind(py)).unwrap();
         assert_eq!(validated["entries"][1]["status"], json!("skipped"));
+
+        let handshake = json!({
+            "schema_version": 1,
+            "kind": "sudo_exec_started",
+            "manifest_sha256": digest,
+            "executor_pid": 4321,
+            "executor_identity": "boot-a:12345",
+            "ledger_path": "/tmp/sase-sudo/ledger.json",
+            "log_path": "/tmp/sase-sudo/output.log",
+            "started_at": 1_800_000_000.0
+        });
+        let handshake_obj =
+            json_value_to_py(py, &handshake).unwrap().into_bound(py);
+        let handshake_dict = handshake_obj.downcast::<PyDict>().unwrap();
+        let validated =
+            py_sudo_validate_handshake(py, handshake_dict, Some(manifest_dict))
+                .unwrap();
+        let validated = py_to_json_value(validated.bind(py)).unwrap();
+        assert_eq!(validated["executor_pid"], json!(4321));
+
+        let invalid_handshake = json!({
+            "schema_version": 1,
+            "kind": "sudo_exec_started",
+            "manifest_sha256": "b".repeat(64),
+            "executor_pid": 4321,
+            "executor_identity": "boot-a:12345",
+            "ledger_path": "/tmp/sase-sudo/ledger.json",
+            "log_path": "/tmp/sase-sudo/output.log",
+            "started_at": 1_800_000_000.0
+        });
+        let invalid_obj = json_value_to_py(py, &invalid_handshake)
+            .unwrap()
+            .into_bound(py);
+        let invalid_dict = invalid_obj.downcast::<PyDict>().unwrap();
+        let error =
+            py_sudo_validate_handshake(py, invalid_dict, Some(manifest_dict))
+                .unwrap_err();
+        assert!(error.to_string().contains("SHA-256 mismatch"));
 
         py_sudo_runner_main(py, vec!["--help".to_string()]).unwrap();
     });
@@ -20194,6 +20259,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sudo_manifest_sha256, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_derive_risk_badges, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_validate_ledger, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_validate_handshake, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_runner_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;

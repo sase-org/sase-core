@@ -1402,7 +1402,7 @@ fn build_agent_completion_candidates_filtered(
     });
     for entry in ordered_entries {
         let kind = agent_entry_kind(entry);
-        if excluded_kinds.iter().any(|excluded| *excluded == kind) {
+        if excluded_kinds.contains(&kind) {
             continue;
         }
         let insertion = entry.name.trim();
