@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.50](https://github.com/sase-org/sase-core/compare/v0.34.49...v0.34.50) - 2026-09-18
+
+### Added
+
+- *(gate-decision)* complete policy evidence contract
+
 ## [0.34.49](https://github.com/sase-org/sase-core/compare/v0.34.48...v0.34.49) - 2026-09-17
 
 ### Fixed
