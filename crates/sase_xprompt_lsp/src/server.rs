@@ -2133,6 +2133,11 @@ fn needs_agent_entries(context: &sase_core::CompletionContext) -> bool {
     {
         return true;
     }
+    if context.directive_name.as_deref() == Some("hold")
+        && context.kind == CompletionContextKind::DirectiveArgument
+    {
+        return true;
+    }
     matches!(
         context.value_role(),
         Some(
@@ -4403,6 +4408,51 @@ mod tests {
         };
         assert_eq!(edit.range.start, Position::new(0, 6));
         assert_eq!(edit.new_text, "@ops");
+    }
+
+    #[tokio::test]
+    async fn hold_completion_warms_agent_catalog_for_positional_targets() {
+        let mut bridge = bridge_with_catalog_entries(Vec::new());
+        bridge.agent_catalog_response =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "status": "ok",
+                "message": "",
+                "entries": [
+                    {"name": "planner", "status": "WAITING"},
+                    {"name": "coder", "status": "QUEUED"},
+                    {"name": "@builders", "kind": "tribe", "detail": "tribe"},
+                    {"name": "review", "kind": "clan", "detail": "clan"},
+                    {"name": "ship", "kind": "family", "detail": "family"},
+                    {"name": "build-shell", "kind": "proc", "status": "PENDING", "detail": "proc · PENDING"}
+                ]
+            }))
+            .unwrap();
+        let (service, _) = LspService::new(move |client| {
+            XpromptLspServer::with_bridge(client, Arc::new(bridge))
+        });
+        let server = service.inner();
+        server.config.write().unwrap().agent_holds = true;
+
+        let labels = labels_at(server, "%hold(").await;
+
+        assert_eq!(
+            labels,
+            vec![
+                "hood=",
+                "scope=",
+                "ttl=",
+                "tribe=",
+                "pending",
+                "future",
+                "planner",
+                "coder",
+                "@builders",
+                "review",
+                "ship",
+                "build-shell",
+            ]
+        );
     }
 
     #[tokio::test]
