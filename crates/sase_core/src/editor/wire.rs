@@ -648,7 +648,6 @@ impl From<&DirectiveMetadata> for DirectiveContractEntry {
 /// Feature flag that gates a directive, if any.
 pub fn directive_feature_flag(name: &str) -> Option<&'static str> {
     match name {
-        "hold" => Some("agent_holds"),
         "proc" => Some("typed_launch_units"),
         _ => None,
     }

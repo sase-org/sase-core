@@ -1984,7 +1984,7 @@ mod tests {
             .find(|entry| entry.name == "hold")
             .expect("hold contract");
         assert_eq!(hold.alias, None);
-        assert_eq!(hold.feature_flag.as_deref(), Some("agent_holds"));
+        assert_eq!(hold.feature_flag.as_deref(), None);
         assert!(hold.allows_multiple);
         assert_eq!(
             hold.syntax_forms,
@@ -2018,13 +2018,9 @@ mod tests {
             .iter()
             .find(|keyword| keyword.name == "hood")
             .is_some_and(|keyword| keyword.repeatable));
-        assert!(directive_is_hidden_from_name_completion_with_flags(
-            "hold",
-            &[]
-        ));
         assert!(!directive_is_hidden_from_name_completion_with_flags(
             "hold",
-            &["agent_holds".to_string()]
+            &[]
         ));
         assert_eq!(
             wait.keywords

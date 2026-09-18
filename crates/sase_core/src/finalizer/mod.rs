@@ -7,6 +7,7 @@
 
 pub mod digest;
 pub mod outcome;
+pub mod remaining;
 pub mod selection;
 pub mod submission;
 pub mod wire;
@@ -17,6 +18,16 @@ pub use digest::{
 };
 pub use outcome::{
     aggregate_finalizer_outcomes, validate_finalizer_instance_results,
+};
+pub use remaining::{
+    select_remaining_commit_obligations, ExecutedCommitObligationFactWire,
+    RemainingCommitObligationFactWire, RemainingCommitWorkOutcomeWire,
+    RemainingCommitWorkRequestWire, REPAIR_HANDOFF_CODE_HOST_IDENTITY_MISMATCH,
+    REPAIR_HANDOFF_CODE_IDENTITY_MISMATCH,
+    REPAIR_HANDOFF_CODE_MISSING_COMPLETED_PROOF,
+    REPAIR_HANDOFF_CODE_MISSING_DECISION,
+    REPAIR_HANDOFF_CODE_MISSING_HOST_IDENTITY,
+    REPAIR_HANDOFF_CODE_STALE_DIGEST,
 };
 pub use selection::{
     authenticate_finalizer_plan, finalizer_instance_spec_digest,

@@ -51,8 +51,8 @@ use crate::fenced_code::{
     scan_directive_owned_fences, CodeLanguage, CodeValue, CodeValueWire,
 };
 use crate::hold_directive::{
-    agent_holds_enabled, collect_hold_fields_with_flags, format_hold_directive,
-    HoldArgWire, HoldFieldsWire, HoldOccurrenceWire,
+    collect_hold_fields_with_flags, format_hold_directive, HoldArgWire,
+    HoldFieldsWire, HoldOccurrenceWire,
 };
 use crate::prompt_literals::inline_code_ranges;
 use crate::queue_directive::{
@@ -1366,12 +1366,6 @@ fn classify_typed_launch_unit(
                     .push(queue_occurrence_from_directive(prompt, &directive));
             }
             "hold" => {
-                if !agent_holds_enabled(enabled_feature_flags)
-                    && directive.is_bare
-                    && !directive.has_plus_suffix
-                {
-                    continue;
-                }
                 regions_to_remove.push((directive.start, directive.end));
                 hold_occurrences
                     .push(hold_occurrence_from_directive(prompt, &directive));
@@ -5756,7 +5750,7 @@ mod tests {
             "%hold(future)\n%wait(unit=unit-2)\nFirst\n---\nSecond",
             Some("multi_prompt"),
             Some("sase"),
-            &["agent_holds".to_string()],
+            &[],
         )
         .unwrap_err();
 
@@ -5777,7 +5771,7 @@ mod tests {
             "%hold(future)\nFirst\n---\n%hold(future)\nSecond",
             Some("multi_prompt"),
             Some("sase"),
-            &["agent_holds".to_string()],
+            &[],
         )
         .unwrap_err();
 
@@ -5790,7 +5784,7 @@ mod tests {
             "%hold(future)\nFirst",
             Some("multi_prompt"),
             Some("sase"),
-            &["agent_holds".to_string()],
+            &[],
         )
         .unwrap();
 
@@ -5803,7 +5797,7 @@ mod tests {
             "%id(parent, family=root)\n%hold(future)\n%wait(unit=unit-2)\nFirst\n---\n%id(child, family=root)\nSecond",
             Some("multi_prompt"),
             Some("sase"),
-            &["agent_holds".to_string()],
+            &[],
         )
         .unwrap();
 

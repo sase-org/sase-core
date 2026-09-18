@@ -12,14 +12,6 @@ use crate::agent_identity::parse_agent_family_name;
 use crate::agent_launch::parse_proc_duration_seconds;
 use crate::agent_tribe::canonicalize_public_tribe_name;
 
-pub const AGENT_HOLDS_FLAG: &str = "agent_holds";
-
-pub fn agent_holds_enabled(enabled_feature_flags: &[String]) -> bool {
-    enabled_feature_flags
-        .iter()
-        .any(|flag| flag == AGENT_HOLDS_FLAG)
-}
-
 /// One already-split hold argument. `name` is absent for positionals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -131,25 +123,13 @@ pub fn collect_hold_fields(
 
 pub fn collect_hold_fields_with_flags(
     occurrences: &[HoldOccurrenceWire],
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> HoldCollectResultWire {
-    let enabled = agent_holds_enabled(enabled_feature_flags);
     let mut fields = HoldFieldsWire::default();
     let mut errors = Vec::new();
 
     for occurrence in occurrences {
         let form = hold_form(&occurrence.source, occurrence.has_plus_suffix);
-        if !enabled {
-            if form == HoldForm::Bare {
-                continue;
-            }
-            errors.push(hold_error(
-                "hold-flag-disabled",
-                hold_directive_disabled_message(),
-                Some(occurrence.source_span),
-            ));
-            continue;
-        }
         match parse_hold_occurrence(occurrence, form) {
             Ok(part) => {
                 if let Err(error) =
@@ -179,10 +159,6 @@ pub fn collect_hold_fields_with_flags(
             errors,
         }
     }
-}
-
-pub fn hold_directive_disabled_message() -> &'static str {
-    "The %hold directive requires the agent_holds beta flag. Enable it with `sase flag enable agent_holds`."
 }
 
 pub fn format_hold_directive(fields: &HoldFieldsWire) -> Option<String> {
@@ -580,12 +556,8 @@ mod tests {
         }
     }
 
-    fn flags() -> Vec<String> {
-        vec![AGENT_HOLDS_FLAG.to_string()]
-    }
-
     fn collect_ok(occurrences: &[HoldOccurrenceWire]) -> HoldFieldsWire {
-        let result = collect_hold_fields_with_flags(occurrences, &flags());
+        let result = collect_hold_fields_with_flags(occurrences, &[]);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         result.fields.expect("fields")
     }
@@ -600,19 +572,10 @@ mod tests {
     }
 
     #[test]
-    fn flag_off_bare_is_inert_and_non_bare_errors() {
-        let bare = collect_hold_fields_with_flags(
-            &[occ("%hold", vec![positional("")])],
-            &[],
-        );
-        assert_eq!(bare.fields, None);
-        assert!(bare.errors.is_empty());
-
-        let errors = collect_err(
-            &[occ("%hold:planner", vec![positional("planner")])],
-            &[],
-        );
-        assert_eq!(errors[0].code, "hold-flag-disabled");
+    fn enabled_flags_are_not_required() {
+        let fields =
+            collect_ok(&[occ("%hold:planner", vec![positional("planner")])]);
+        assert_eq!(fields.names, vec!["planner"]);
     }
 
     #[test]
@@ -682,7 +645,7 @@ mod tests {
                 "unknown-hold-keyword",
             ),
         ] {
-            let errors = collect_err(&[occ(source, args)], &flags());
+            let errors = collect_err(&[occ(source, args)], &[]);
             assert_eq!(errors[0].code, code);
         }
     }
@@ -700,7 +663,7 @@ mod tests {
                     vec![positional("future"), named("ttl", "5m")],
                 ),
             ],
-            &flags(),
+            &[],
         );
         assert_eq!(errors[0].code, "duplicate-hold-field");
 
@@ -715,7 +678,7 @@ mod tests {
                     vec![positional("future"), named("scope", "host")],
                 ),
             ],
-            &flags(),
+            &[],
         );
         assert_eq!(errors[0].code, "duplicate-hold-field");
     }

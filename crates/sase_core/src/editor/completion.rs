@@ -6058,7 +6058,6 @@ mod tests {
         .expect("hold completion context");
         let inventories = DirectiveCompletionInventories {
             agents: agent_entries,
-            enabled_feature_flags: vec!["agent_holds".to_string()],
             ..Default::default()
         };
 

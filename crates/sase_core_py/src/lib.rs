@@ -566,6 +566,7 @@
 //! - `finalizer_context_digest(context: dict) -> str`
 //! - `validate_finalizer_context(plan: dict, context: dict) -> str`
 //! - `validate_finalizer_submission(plan: dict, context: dict, submission: dict) -> dict`
+//! - `select_remaining_commit_obligations(request: dict) -> dict`
 //! - `finalizer_json_digest(value: Any) -> str`
 //! - `aggregate_finalizer_outcomes(results: list[dict]) -> dict`
 //! - `bead_action_wire_schema_version() -> int`
@@ -1254,6 +1255,7 @@ use sase_core::finalizer::{
     finalizer_plan_digest as core_finalizer_plan_digest,
     finalizer_provider_spec_digest as core_finalizer_provider_spec_digest,
     resolve_finalizer_plan as core_resolve_finalizer_plan,
+    select_remaining_commit_obligations as core_select_remaining_commit_obligations,
     validate_finalizer_context as core_validate_finalizer_context,
     validate_finalizer_instance_spec as core_validate_finalizer_instance_spec,
     validate_finalizer_plan as core_validate_finalizer_plan,
@@ -1262,7 +1264,8 @@ use sase_core::finalizer::{
     FinalizerAssignedBeadWire, FinalizerContextWire, FinalizerError,
     FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
     FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderSpecWire,
-    FinalizerSubmissionEnvelopeWire, FINALIZER_WIRE_SCHEMA_VERSION,
+    FinalizerSubmissionEnvelopeWire, RemainingCommitWorkRequestWire,
+    FINALIZER_WIRE_SCHEMA_VERSION,
 };
 use sase_core::fleet_attention::{
     self as core_fleet_attention, FleetAttentionEntryWire,
@@ -6700,6 +6703,22 @@ fn py_validate_finalizer_context(
         finalizer_wire_from_pydict(context, "context")?;
     core_validate_finalizer_context(&plan, &context)
         .map_err(finalizer_error_to_pyerr)
+}
+
+/// Select remaining repository obligations after conflict repair.
+#[pyfunction]
+#[pyo3(name = "select_remaining_commit_obligations")]
+fn py_select_remaining_commit_obligations<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: RemainingCommitWorkRequestWire =
+        finalizer_wire_from_pydict(request, "remaining commit work request")?;
+    finalizer_result_to_py(
+        py,
+        Ok(core_select_remaining_commit_obligations(&request)),
+        "remaining commit work",
+    )
 }
 
 /// Validate a submission against a resolved plan/context and return a summary.
@@ -19623,6 +19642,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_finalizer_context_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_finalizer_submission, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_select_remaining_commit_obligations,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_action_wire_schema_version, m)?)?;
@@ -20490,6 +20513,85 @@ mod tests {
         value: JsonValue,
     ) {
         list.append(json_value_to_py(py, &value).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn remaining_commit_work_binding_selects_and_rejects() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let plan = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            let digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            let commit_sha = "a".repeat(40);
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "current_run_id": "run-1",
+                    "current_agent_id": "agent-1",
+                    "current_turn_nonce": "nonce-1",
+                    "current_plan_digest": plan,
+                    "declaration_run_id": "run-1",
+                    "declaration_agent_id": "agent-1",
+                    "declaration_turn_nonce": "nonce-1",
+                    "declaration_plan_digest": plan,
+                    "current_obligations": [
+                        {
+                            "obligation_id": "linked",
+                            "kind": "repository",
+                            "current_digest": digest,
+                            "submitted_digest": digest,
+                            "has_host_identity": true,
+                            "host_identity_matches": true,
+                            "has_valid_decision": true,
+                        }
+                    ],
+                    "executed_obligations": [
+                        {
+                            "obligation_id": "main",
+                            "completed": true,
+                            "commit_sha": commit_sha,
+                        }
+                    ],
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_select_remaining_commit_obligations(py, request).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["status"], "remaining");
+            assert_eq!(result["obligation_ids"], json!(["linked"]));
+
+            let rejected = json_value_to_py(
+                py,
+                &json!({
+                    "current_run_id": "run-1",
+                    "current_agent_id": "agent-1",
+                    "current_turn_nonce": "nonce-1",
+                    "current_plan_digest": plan,
+                    "declaration_run_id": "run-1",
+                    "declaration_agent_id": "agent-1",
+                    "declaration_turn_nonce": "other-turn",
+                    "declaration_plan_digest": plan,
+                    "current_obligations": [
+                        {
+                            "obligation_id": "linked",
+                            "kind": "repository",
+                            "has_host_identity": true,
+                            "host_identity_matches": true,
+                            "has_valid_decision": true,
+                        }
+                    ],
+                    "executed_obligations": [],
+                }),
+            )
+            .unwrap();
+            let rejected = rejected.bind(py).downcast::<PyDict>().unwrap();
+            let result =
+                py_select_remaining_commit_obligations(py, rejected).unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["status"], "rejected");
+            assert_eq!(result["code"], "repair_handoff_identity_mismatch");
+        });
     }
 
     #[test]
@@ -24102,12 +24204,9 @@ COMMITS:
             )
             .unwrap();
 
-            let result = py_collect_hold_fields(
-                py,
-                occurrences_obj.bind(py),
-                Some(vec!["agent_holds".to_string()]),
-            )
-            .unwrap();
+            let result =
+                py_collect_hold_fields(py, occurrences_obj.bind(py), None)
+                    .unwrap();
             let result_value = py_to_json_value(result.bind(py)).unwrap();
             assert_eq!(result_value["errors"], json!([]));
             assert_eq!(

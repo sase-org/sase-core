@@ -1057,11 +1057,9 @@ pub use glossary::{
     GlossarySpanWire, GLOSSARY_WIRE_SCHEMA_VERSION,
 };
 pub use hold_directive::{
-    agent_holds_enabled, collect_hold_fields, collect_hold_fields_with_flags,
-    format_hold_directive, hold_directive_disabled_message,
+    collect_hold_fields, collect_hold_fields_with_flags, format_hold_directive,
     hold_fields_to_selectors, HoldArgWire, HoldCollectResultWire,
     HoldFieldsWire, HoldOccurrenceWire, HoldParseErrorWire, HoldScopeWire,
-    AGENT_HOLDS_FLAG,
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,
