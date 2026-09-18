@@ -37,11 +37,14 @@ pub const FLEET_PRESENTATION_RECENT_TERMINAL_MAX_ROWS: usize = 200;
 pub struct FleetPresentationCandidateWire {
     pub schema_version: u32,
     pub identity: String,
-    /// Owner-resolved liveness. `Alive`/`Unknown` candidates are never
-    /// demoted or excluded.
+    /// Owner-resolved liveness. Undismissed `Alive`/`Unknown` candidates
+    /// stay current. `Dead`/`NotProcess` candidates take the bounded
+    /// terminal path even when `protected` is set.
     pub liveness: OwnerLivenessWire,
-    /// Whether a waiting marker or pending question protects this record
-    /// from demotion/exclusion regardless of liveness.
+    /// Whether a waiting marker or pending question protects this record.
+    /// Protection keeps only non-definitively-dead (`Alive`/`Unknown`)
+    /// candidates current; a protected `Dead`/`NotProcess` row retires
+    /// through the same bounded terminal path as any other dead leftover.
     pub protected: bool,
     /// Trustworthy completion time used to rank and bound the
     /// recent-terminal tier: `done.finished_at` when present, else a
@@ -52,14 +55,22 @@ pub struct FleetPresentationCandidateWire {
     pub completion_time_unix: f64,
     /// Whether this candidate's family root is a dismissed identity,
     /// resolved by the caller through the bounded core index lineage API.
+    /// A resolved owner dismissal excludes the candidate regardless of
+    /// protection or apparent liveness.
     pub family_root_dismissed: bool,
     /// Whether this candidate is a tracked family member rather than a
     /// family root. The policy only uses this after liveness/protection
-    /// checks have classified the row as terminal-for-presentation: active,
-    /// unknown, waiting, and question-protected members remain visible so a
-    /// paginated client can still materialize the missing root.
+    /// checks have classified the row as terminal-for-presentation: live
+    /// and unknown members remain visible so a paginated client can still
+    /// materialize the missing root.
     #[serde(default)]
     pub family_member: bool,
+    /// Owner observation that the recorded PID is live but is not this
+    /// agent (wrong command line or claim/marker mismatch). Such a row is
+    /// excluded from presentation and history rather than demoted into
+    /// the recent-terminal window.
+    #[serde(default)]
+    pub process_identity_mismatch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,8 +122,10 @@ pub fn decide_fleet_presentation(
             "completion_time_unix",
             candidate.completion_time_unix,
         )?;
-        if candidate.protected {
-            current.push(candidate.identity.clone());
+        if candidate.family_root_dismissed
+            || candidate.process_identity_mismatch
+        {
+            excluded.push(candidate.identity.clone());
             continue;
         }
         if matches!(
@@ -122,14 +135,10 @@ pub fn decide_fleet_presentation(
             current.push(candidate.identity.clone());
             continue;
         }
-        // Liveness is definitively `Dead` or `NotProcess` and the record is
-        // unprotected: it is terminal for presentation whether or not the
-        // index already recorded it as done.
+        // Liveness is definitively `Dead` or `NotProcess`. Protection does
+        // not keep the row current; it retires through the same bounded
+        // terminal path as any other dead active-tier leftover.
         if candidate.family_member {
-            excluded.push(candidate.identity.clone());
-            continue;
-        }
-        if candidate.family_root_dismissed {
             excluded.push(candidate.identity.clone());
             continue;
         }
@@ -190,6 +199,26 @@ mod tests {
             completion_time_unix,
             family_root_dismissed,
             family_member: false,
+            process_identity_mismatch: false,
+        }
+    }
+
+    fn mismatch_candidate(
+        identity: &str,
+        liveness: OwnerLivenessWire,
+        protected: bool,
+        completion_time_unix: f64,
+        family_root_dismissed: bool,
+    ) -> FleetPresentationCandidateWire {
+        FleetPresentationCandidateWire {
+            process_identity_mismatch: true,
+            ..candidate(
+                identity,
+                liveness,
+                protected,
+                completion_time_unix,
+                family_root_dismissed,
+            )
         }
     }
 
@@ -244,18 +273,89 @@ mod tests {
     }
 
     #[test]
-    fn protected_dead_row_stays_current_despite_liveness() {
+    fn protected_dead_row_takes_the_bounded_terminal_path() {
+        let now = 1_000_000.0;
         let decision = decide(
-            1_000_000.0,
-            vec![candidate(
-                "waiting-dead",
+            now,
+            vec![
+                candidate(
+                    "waiting-dead-recent",
+                    OwnerLivenessWire::Dead,
+                    true,
+                    now - DAY,
+                    false,
+                ),
+                candidate(
+                    "waiting-dead-old",
+                    OwnerLivenessWire::NotProcess,
+                    true,
+                    now - (8.0 * DAY),
+                    false,
+                ),
+            ],
+        );
+        assert!(decision.current.is_empty());
+        assert_eq!(decision.recent_terminal, vec!["waiting-dead-recent"]);
+        assert_eq!(decision.excluded, vec!["waiting-dead-old"]);
+    }
+
+    #[test]
+    fn dismissed_rows_are_excluded_regardless_of_protection_or_liveness() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![
+                candidate(
+                    "dismissed-protected",
+                    OwnerLivenessWire::Dead,
+                    true,
+                    now - DAY,
+                    true,
+                ),
+                candidate(
+                    "dismissed-alive",
+                    OwnerLivenessWire::Alive,
+                    false,
+                    now - DAY,
+                    true,
+                ),
+                candidate(
+                    "dismissed-unknown",
+                    OwnerLivenessWire::Unknown,
+                    false,
+                    now - DAY,
+                    true,
+                ),
+            ],
+        );
+        assert!(decision.current.is_empty());
+        assert!(decision.recent_terminal.is_empty());
+        assert_eq!(
+            decision.excluded,
+            vec![
+                "dismissed-protected",
+                "dismissed-alive",
+                "dismissed-unknown"
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_mismatch_is_excluded_even_when_apparently_alive() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![mismatch_candidate(
+                "recycled",
                 OwnerLivenessWire::Dead,
-                true,
-                0.0,
+                false,
+                now - DAY,
                 false,
             )],
         );
-        assert_eq!(decision.current, vec!["waiting-dead"]);
+        assert!(decision.current.is_empty());
+        assert!(decision.recent_terminal.is_empty());
+        assert_eq!(decision.excluded, vec!["recycled"]);
     }
 
     #[test]
@@ -365,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn active_unknown_and_protected_family_members_remain_current() {
+    fn live_and_unknown_family_members_remain_current() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
@@ -382,37 +482,114 @@ mod tests {
                     false,
                     now - DAY,
                 ),
-                family_member_candidate(
-                    "waiting-member",
-                    OwnerLivenessWire::Dead,
-                    true,
-                    now - DAY,
-                ),
             ],
         );
-        assert_eq!(
-            decision.current,
-            vec!["active-member", "unknown-member", "waiting-member"]
-        );
+        assert_eq!(decision.current, vec!["active-member", "unknown-member"]);
         assert!(decision.recent_terminal.is_empty());
         assert!(decision.excluded.is_empty());
     }
 
     #[test]
-    fn live_member_of_dismissed_family_is_never_excluded() {
+    fn dead_protected_family_member_is_not_a_standalone_row() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
-            vec![candidate(
-                "still-alive",
-                OwnerLivenessWire::Alive,
-                false,
-                now - DAY,
+            vec![family_member_candidate(
+                "waiting-member",
+                OwnerLivenessWire::Dead,
                 true,
+                now - DAY,
             )],
         );
-        assert_eq!(decision.current, vec!["still-alive"]);
-        assert!(decision.excluded.is_empty());
+        assert!(decision.current.is_empty());
+        assert!(decision.recent_terminal.is_empty());
+        assert_eq!(decision.excluded, vec!["waiting-member"]);
+    }
+
+    #[test]
+    fn served_set_puts_every_identity_in_exactly_one_bucket() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![
+                candidate("live", OwnerLivenessWire::Alive, false, now, false),
+                candidate(
+                    "unknown",
+                    OwnerLivenessWire::Unknown,
+                    false,
+                    now,
+                    false,
+                ),
+                candidate(
+                    "protected-live",
+                    OwnerLivenessWire::Alive,
+                    true,
+                    now,
+                    false,
+                ),
+                candidate(
+                    "dead-recent",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - DAY,
+                    false,
+                ),
+                candidate(
+                    "protected-dead",
+                    OwnerLivenessWire::Dead,
+                    true,
+                    now - DAY,
+                    false,
+                ),
+                candidate(
+                    "dead-old",
+                    OwnerLivenessWire::NotProcess,
+                    false,
+                    now - (8.0 * DAY),
+                    false,
+                ),
+                candidate(
+                    "dismissed",
+                    OwnerLivenessWire::Alive,
+                    false,
+                    now,
+                    true,
+                ),
+                mismatch_candidate(
+                    "recycled",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - DAY,
+                    false,
+                ),
+            ],
+        );
+        let mut seen = decision.current.clone();
+        seen.extend(decision.recent_terminal.iter().cloned());
+        seen.extend(decision.excluded.iter().cloned());
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![
+                "dead-old",
+                "dead-recent",
+                "dismissed",
+                "live",
+                "protected-dead",
+                "protected-live",
+                "recycled",
+                "unknown",
+            ]
+        );
+        assert_eq!(decision.current, vec!["live", "unknown", "protected-live"]);
+        assert_eq!(
+            decision.recent_terminal,
+            vec!["dead-recent", "protected-dead"]
+        );
+        assert_eq!(
+            decision.excluded,
+            vec!["dismissed", "recycled", "dead-old"]
+        );
     }
 
     #[test]

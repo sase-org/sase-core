@@ -1,13 +1,3 @@
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::fs;
-#[cfg(target_os = "linux")]
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-
-use crate::agent_launch::{
-    list_workspace_claims_from_content, WorkspaceClaimWire,
-};
 use crate::agent_runtime::{
     derive_active_intervals, is_real_monitor_member_record,
     is_runner_occupancy_record, merge_family_occupancy_intervals,
@@ -15,7 +5,11 @@ use crate::agent_runtime::{
     ActiveIntervalError, ClanRuntimeMemberWire, RunnerOccupancyContribution,
     WaitPolicy,
 };
-use crate::agent_scan::{AgentArtifactRecordWire, RunningMarkerWire};
+use crate::agent_scan::AgentArtifactRecordWire;
+use crate::host_liveness::{
+    FilesystemRecordIdentityProbe, HostProcessObservation, HostProcessProbe,
+    ProcHostProcessProbe, RecordIdentityMatch, RecordIdentityProbe,
+};
 
 use super::wire::{
     AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
@@ -39,11 +33,12 @@ where
 /// Current-host liveness proof for an open-ended runner record.
 ///
 /// A PID is necessary but not sufficient: it must still name a non-zombie
-/// SASE/Python process and remain attached to the record's home running marker
-/// or project workspace claim. The project-file cache is scoped to one query.
+/// SASE/Python process and remain attached to the record's home running
+/// marker or project workspace claim. Occupancy is conservative: a record
+/// without those claim shapes does not keep an open-ended lane live.
 #[derive(Debug, Default)]
 pub(super) struct HostRunnerLivenessProbe {
-    project_claims: RefCell<BTreeMap<PathBuf, Option<Vec<WorkspaceClaimWire>>>>,
+    identity: FilesystemRecordIdentityProbe,
 }
 
 impl RunnerLivenessProbe for HostRunnerLivenessProbe {
@@ -70,118 +65,14 @@ impl RunnerLivenessProbe for HostRunnerLivenessProbe {
             Some(pid) if pid > 1 && pid <= i64::from(i32::MAX) => pid,
             _ => return false,
         };
-        if !process_is_live_agent(pid as i32) {
+        if ProcHostProcessProbe.observe(pid as i32)
+            != HostProcessObservation::LiveAgent
+        {
             return false;
         }
-
-        if record.project_name == "home" {
-            return home_running_marker_matches(record, pid);
-        }
-        self.workspace_claim_matches(record, pid)
+        self.identity.match_identity(record, pid)
+            == RecordIdentityMatch::Matches
     }
-}
-
-impl HostRunnerLivenessProbe {
-    fn workspace_claim_matches(
-        &self,
-        record: &AgentArtifactRecordWire,
-        pid: i64,
-    ) -> bool {
-        let project_file = PathBuf::from(&record.project_file);
-        let mut cache = self.project_claims.borrow_mut();
-        let claims = cache.entry(project_file.clone()).or_insert_with(|| {
-            fs::read_to_string(&project_file)
-                .ok()
-                .map(|content| list_workspace_claims_from_content(&content))
-        });
-        let Some(claims) = claims.as_ref() else {
-            return false;
-        };
-        let workspace_num = record
-            .agent_meta
-            .as_ref()
-            .and_then(|meta| meta.workspace_num)
-            .and_then(|value| u32::try_from(value).ok());
-        claims.iter().any(|claim| {
-            let identity_matches = match claim.artifacts_timestamp.as_deref() {
-                Some(timestamp) => timestamp == record.timestamp,
-                None => workspace_num
-                    .is_some_and(|value| value == claim.workspace_num),
-            };
-            identity_matches && i64::from(claim.pid) == pid
-        })
-    }
-}
-
-fn home_running_marker_matches(
-    record: &AgentArtifactRecordWire,
-    pid: i64,
-) -> bool {
-    let path = Path::new(&record.artifact_dir).join("running.json");
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    serde_json::from_str::<RunningMarkerWire>(&content)
-        .ok()
-        .and_then(|marker| marker.pid)
-        == Some(pid)
-}
-
-fn process_is_live_agent(pid: i32) -> bool {
-    if !process_exists(pid) {
-        return false;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let proc_dir = PathBuf::from(format!("/proc/{pid}"));
-        match fs::read_to_string(proc_dir.join("status")) {
-            Ok(status) => {
-                if status.lines().any(|line| {
-                    line.strip_prefix("State:").is_some_and(|value| {
-                        value.trim_start().starts_with('Z')
-                    })
-                }) {
-                    return false;
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => return false,
-            Err(_) => {}
-        }
-
-        match fs::read(proc_dir.join("cmdline")) {
-            Ok(command) => {
-                if !command.windows(4).any(|part| part == b"sase")
-                    && !command.windows(6).any(|part| part == b"python")
-                {
-                    return false;
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => return false,
-            Err(_) => {}
-        }
-    }
-
-    true
-}
-
-#[cfg(unix)]
-fn process_exists(pid: i32) -> bool {
-    // SAFETY: signal 0 performs an existence/permission probe and does not
-    // deliver a signal. `pid` was validated as a positive process ID.
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
-}
-
-#[cfg(not(unix))]
-fn process_exists(_pid: i32) -> bool {
-    false
 }
 
 #[derive(Debug, Default)]
@@ -527,6 +418,8 @@ fn trend_slices(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serde_json::json;
     use tempfile::tempdir;
 

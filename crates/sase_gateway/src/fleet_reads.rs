@@ -61,6 +61,10 @@ use sase_core::{
         decide_fleet_presentation, FleetPresentationCandidateWire,
         FleetPresentationRequestWire,
     },
+    host_liveness::{
+        HostOwnerLivenessObserver, OwnerLivenessObserver,
+        OwnerProcessObservation,
+    },
     list_project_records, query_agent_artifact_index,
     resolve_family_dismissal_lineage,
 };
@@ -92,6 +96,7 @@ struct FleetReadServiceInner {
     history_cache: Mutex<Option<CachedFleetSnapshot>>,
     history_refresh_lock: AsyncMutex<()>,
     events: FleetInvalidationHub,
+    liveness: Arc<dyn OwnerLivenessObserver>,
 }
 
 impl std::fmt::Debug for FleetReadService {
@@ -114,6 +119,18 @@ impl FleetReadService {
         sase_home: impl Into<PathBuf>,
         refresh_timeout: Duration,
     ) -> Self {
+        Self::new_with_liveness(
+            sase_home,
+            refresh_timeout,
+            Arc::new(HostOwnerLivenessObserver::default()),
+        )
+    }
+
+    fn new_with_liveness(
+        sase_home: impl Into<PathBuf>,
+        refresh_timeout: Duration,
+        liveness: Arc<dyn OwnerLivenessObserver>,
+    ) -> Self {
         let sase_home = sase_home.into();
         Self {
             inner: Arc::new(FleetReadServiceInner {
@@ -129,6 +146,7 @@ impl FleetReadService {
                     FLEET_READ_DEFAULT_REPLAY_EVENTS,
                 )
                 .expect("default fleet replay capacity is valid"),
+                liveness,
             }),
         }
     }
@@ -477,6 +495,7 @@ impl FleetReadService {
                 .map(|snapshot| snapshot.refresh_count)
                 .unwrap_or(0),
             scope: FleetCatalogScopeWire::Presentation,
+            liveness: Arc::clone(&self.inner.liveness),
         };
         let result = tokio::time::timeout(
             self.inner.refresh_timeout,
@@ -554,6 +573,7 @@ impl FleetReadService {
                 .map(|snapshot| snapshot.refresh_count)
                 .unwrap_or(0),
             scope: FleetCatalogScopeWire::History,
+            liveness: Arc::clone(&self.inner.liveness),
         };
         let result = tokio::time::timeout(
             self.inner.refresh_timeout,
@@ -698,7 +718,6 @@ struct FleetContentSource {
     artifact_root: PathBuf,
 }
 
-#[derive(Debug)]
 struct BuildSnapshotRequest {
     sase_home: PathBuf,
     index_path: PathBuf,
@@ -706,6 +725,7 @@ struct BuildSnapshotRequest {
     cursor: StoreCursorWire,
     prior_refresh_count: u64,
     scope: FleetCatalogScopeWire,
+    liveness: Arc<dyn OwnerLivenessObserver>,
 }
 
 #[derive(Debug, Error)]
@@ -789,22 +809,27 @@ fn build_snapshot_blocking(
     let now_unix = current_unix_time();
     let project_labels = project_display_labels(&request.projects_root)?;
 
-    // Resolve owner liveness and obtain dismissal-lineage facts through the
-    // bounded core index API once per candidate, so both are computed a
-    // single time per record instead of being re-derived per read path.
-    // Liveness comes first: a definitively dead, unprotected record is
-    // terminal for presentation even while its markers still claim an active
-    // lifecycle, so the lineage lookup must honor that record's own dismissal.
-    let liveness_by_identity: BTreeMap<String, OwnerLivenessWire> = scan
-        .records
-        .iter()
-        .map(|record| {
-            (
-                record.artifact_dir.clone(),
-                owner_liveness_for_record(record),
-            )
-        })
-        .collect();
+    // Resolve owner liveness once per indexed record and reuse it for
+    // dismissal-lineage seeding, presentation candidates, and projected
+    // details. Dismissal is resolved for every candidate before selection
+    // and is not gated on liveness or protection.
+    let observation_by_identity: BTreeMap<String, OwnerProcessObservation> =
+        scan.records
+            .iter()
+            .map(|record| {
+                (
+                    record.artifact_dir.clone(),
+                    request.liveness.observe(record),
+                )
+            })
+            .collect();
+    let liveness_by_identity: BTreeMap<String, OwnerLivenessWire> =
+        observation_by_identity
+            .iter()
+            .map(|(identity, observation)| {
+                (identity.clone(), observation.liveness())
+            })
+            .collect();
     let lineage_candidates: Vec<FamilyDismissalLineageCandidateWire> = scan
         .records
         .iter()
@@ -813,14 +838,10 @@ fn build_snapshot_blocking(
             project_name: record.project_name.clone(),
             workflow_dir_name: record.workflow_dir_name.clone(),
             timestamp: record.timestamp.clone(),
-            seed_definitively_dead: record.waiting.is_none()
-                && record.pending_question.is_none()
-                && matches!(
-                    liveness_by_identity.get(&record.artifact_dir),
-                    Some(
-                        OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
-                    )
-                ),
+            seed_definitively_dead: matches!(
+                liveness_by_identity.get(&record.artifact_dir),
+                Some(OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess)
+            ),
         })
         .collect();
     let dismissed_by_identity: BTreeMap<String, bool> =
@@ -837,14 +858,14 @@ fn build_snapshot_blocking(
 
     let mut presentation_candidates = Vec::with_capacity(scan.records.len());
     for record in &scan.records {
-        let liveness = liveness_by_identity
+        let observation = observation_by_identity
             .get(&record.artifact_dir)
             .copied()
-            .unwrap_or(OwnerLivenessWire::Unknown);
+            .unwrap_or(OwnerProcessObservation::Unknown);
         presentation_candidates.push(FleetPresentationCandidateWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             identity: record.artifact_dir.clone(),
-            liveness,
+            liveness: observation.liveness(),
             protected: record.waiting.is_some()
                 || record.pending_question.is_some(),
             completion_time_unix: completion_time_for_record(record),
@@ -853,6 +874,7 @@ fn build_snapshot_blocking(
                 .copied()
                 .unwrap_or(false),
             family_member: tracked_parent_timestamp(record).is_some(),
+            process_identity_mismatch: observation.process_identity_mismatch(),
         });
     }
     // Select the served set, then build details, content handles, summaries,
@@ -978,12 +1000,7 @@ fn build_snapshot_blocking(
 fn history_candidate_is_served(
     candidate: &FleetPresentationCandidateWire,
 ) -> bool {
-    candidate.protected
-        || matches!(
-            candidate.liveness,
-            OwnerLivenessWire::Alive | OwnerLivenessWire::Unknown
-        )
-        || !candidate.family_root_dismissed
+    !candidate.family_root_dismissed && !candidate.process_identity_mismatch
 }
 
 struct ResolvedRecord {
@@ -1023,18 +1040,14 @@ fn resolve_record(
                 "completed" | "failed" | "cancelled" | "noop"
             )
         });
-    // A Dead/NotProcess active-tier record (not yet marked done, not
-    // protected by a waiting/question marker) is terminal for presentation:
-    // it keeps its recorded lifecycle/status but loses current-instance and
-    // action capabilities, the same as a genuinely completed record.
-    let protected =
-        record.waiting.is_some() || record.pending_question.is_some();
+    // A Dead/NotProcess record is terminal for presentation even when a
+    // waiting/question marker is still on disk: it keeps its recorded
+    // lifecycle/status but loses current-instance and action capabilities.
     let presentation_terminal = is_terminal
-        || (!protected
-            && matches!(
-                liveness,
-                OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
-            ));
+        || matches!(
+            liveness,
+            OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+        );
     let resource_caps = lifecycle_and_content_capabilities(
         row_kind,
         presentation_terminal,
@@ -1217,46 +1230,6 @@ fn lifecycle_and_content_capabilities(
         }
     }
     caps
-}
-
-fn owner_liveness_for_record(
-    record: &AgentArtifactRecordWire,
-) -> OwnerLivenessWire {
-    if record.done.is_some() {
-        return OwnerLivenessWire::Dead;
-    }
-    let Some(pid) = record
-        .running
-        .as_ref()
-        .and_then(|running| running.pid)
-        .or_else(|| record.agent_meta.as_ref().and_then(|meta| meta.pid))
-    else {
-        return OwnerLivenessWire::Unknown;
-    };
-    if pid <= 0 {
-        return OwnerLivenessWire::NotProcess;
-    }
-    if process_is_alive(pid) {
-        OwnerLivenessWire::Alive
-    } else {
-        OwnerLivenessWire::Dead
-    }
-}
-
-fn process_is_alive(pid: i64) -> bool {
-    #[cfg(unix)]
-    {
-        let pid = match libc::pid_t::try_from(pid) {
-            Ok(pid) => pid,
-            Err(_) => return false,
-        };
-        unsafe { libc::kill(pid, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
 }
 
 fn content_handles_for_record(
@@ -1904,6 +1877,7 @@ mod tests {
         FleetStatusBucketWire,
     };
     use serde_json::json;
+    use std::sync::Arc;
     use tempfile::{tempdir, TempDir};
 
     fn write_json(path: &Path, payload: serde_json::Value) {
@@ -1972,10 +1946,11 @@ mod tests {
                 "output_path": "output.txt"
             }),
         );
-        // Use this test process's own PID so `owner_liveness_for_record`
-        // resolves `Alive`: these fixtures represent ordinary current
-        // agents, and the presentation policy now treats a `NotProcess`
-        // active-tier record as terminal-for-presentation.
+        // Use this test process's own PID so the host liveness observer
+        // can resolve `Alive` for ordinary current agents. Records without
+        // a workspace-claim shape still pass the process classifier; a
+        // `NotProcess` or identity-mismatch active-tier record is no
+        // longer served as current.
         write_json(
             &artifact.join("running.json"),
             json!({"pid": std::process::id()}),
@@ -2103,6 +2078,19 @@ mod tests {
         write_json(
             &artifact.join("running.json"),
             json!({"pid": std::process::id()}),
+        );
+    }
+
+    fn seed_waiting_agent(projects: &Path, timestamp: &str, name: &str) {
+        seed_dead_agent(projects, timestamp, name, None);
+        write_json(
+            &projects
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join(timestamp)
+                .join("waiting.json"),
+            json!({}),
         );
     }
 
@@ -2892,9 +2880,139 @@ mod tests {
             .iter()
             .map(|row| row.labels.agent_label.as_deref())
             .collect::<Vec<_>>();
-        assert!(labels.contains(&Some("lane--worker")));
-        assert!(labels.contains(&Some("lane--waiting")));
-        assert!(labels.contains(&Some("lane--question")));
+        assert_eq!(labels, vec![Some("lane--worker")]);
+
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        let history_labels = history
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(history_labels.contains(&Some("lane--worker")));
+        assert!(history_labels.contains(&Some("lane--waiting")));
+        assert!(history_labels.contains(&Some("lane--question")));
+    }
+
+    #[tokio::test]
+    async fn owner_served_set_matches_visible_identity_set() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let live_ts = recent_timestamp(4);
+        let waiting_ts = recent_timestamp(3);
+        let dismissed_ts = recent_timestamp(2);
+        let recycled_ts = recent_timestamp(1);
+        seed_agent(&projects, &live_ts, "live", "live output");
+        seed_waiting_agent(&projects, &waiting_ts, "waiting-dead");
+        seed_dead_agent(&projects, &dismissed_ts, "dismissed", None);
+        seed_agent(&projects, &recycled_ts, "recycled", "recycled output");
+        let index = home.join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        sase_core::replace_agent_artifact_index_dismissed_agents(
+            &index,
+            &[sase_core::AgentCleanupIdentityWire {
+                agent_type: "run".to_string(),
+                cl_name: "unknown".to_string(),
+                raw_suffix: Some(dismissed_ts.clone()),
+            }],
+        )
+        .unwrap();
+
+        let observations = std::collections::BTreeMap::from([
+            ("live".to_string(), OwnerProcessObservation::Alive),
+            ("waiting-dead".to_string(), OwnerProcessObservation::Dead),
+            ("dismissed".to_string(), OwnerProcessObservation::Alive),
+            (
+                "recycled".to_string(),
+                OwnerProcessObservation::IdentityMismatch,
+            ),
+        ]);
+        let service = FleetReadService::new_with_liveness(
+            home,
+            SNAPSHOT_REFRESH_TIMEOUT,
+            Arc::new(move |record: &AgentArtifactRecordWire| {
+                let name = record
+                    .agent_meta
+                    .as_ref()
+                    .and_then(|meta| meta.name.clone())
+                    .unwrap_or_default();
+                observations
+                    .get(&name)
+                    .copied()
+                    .unwrap_or(OwnerProcessObservation::Unknown)
+            }),
+        );
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        let labels = presentation
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert!(
+            labels.contains(&"live"),
+            "catalog must serve the ordinary live identity: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"waiting-dead"),
+            "catalog must keep the recent dead protected row as terminal: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"dismissed"),
+            "catalog must not serve the dismissed identity: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"recycled"),
+            "catalog must not serve the recycled-PID identity: {labels:?}"
+        );
+        assert_eq!(labels.len(), 2, "unexpected extra identities: {labels:?}");
+        let waiting = presentation
+            .page
+            .rows
+            .iter()
+            .find(|row| {
+                row.labels.agent_label.as_deref() == Some("waiting-dead")
+            })
+            .unwrap();
+        assert_eq!(waiting.liveness, OwnerLivenessWire::Dead);
+
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        let history_labels = history
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>();
+        assert!(
+            history_labels.contains(&"live"),
+            "history keeps the live identity: {history_labels:?}"
+        );
+        assert!(
+            history_labels.contains(&"waiting-dead"),
+            "history keeps the recent dead leftover: {history_labels:?}"
+        );
+        assert!(
+            !history_labels.contains(&"dismissed"),
+            "history must not resurrect the dismissed identity: {history_labels:?}"
+        );
+        assert!(
+            !history_labels.contains(&"recycled"),
+            "history must not resurrect the recycled-PID identity: {history_labels:?}"
+        );
     }
 
     #[tokio::test]

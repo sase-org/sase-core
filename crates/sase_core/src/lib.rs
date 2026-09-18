@@ -65,6 +65,7 @@ pub mod git_query;
 pub mod glossary;
 pub mod hold_directive;
 pub mod host_bridge;
+pub mod host_liveness;
 pub mod machine_hood;
 pub mod machine_setup;
 pub mod managed_origin;
@@ -1084,6 +1085,14 @@ pub use host_bridge::{
     MobileXpromptCatalogResponseWire, MobileXpromptCatalogStatsWire,
     MobileXpromptInputWire, StaticHelperHostBridge,
     UnavailableHelperHostBridge,
+};
+pub use host_liveness::{
+    command_looks_like_agent, match_home_marker, match_project_claims,
+    observe_owner_process, owner_process_pid, status_is_zombie,
+    FilesystemRecordIdentityProbe, HostOwnerLivenessObserver,
+    HostProcessObservation, HostProcessProbe, OwnerLivenessObserver,
+    OwnerProcessObservation, ProcHostProcessProbe, RecordIdentityMatch,
+    RecordIdentityProbe,
 };
 pub use machine_hood::{
     machine_hood_of, qualify_machine_agent_name, strip_machine_agent_name,
