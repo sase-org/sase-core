@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(agent-scan)* add default-off Agents-list projection that hydrates only loader-projectable index rows
+
 ## [0.34.55](https://github.com/sase-org/sase-core/compare/v0.34.54...v0.34.55) - 2026-09-18
-
-### Fixed
-
-- *(fleet)* honor owner dismissal and strong host liveness in the served set
 
 ### Fixed
 

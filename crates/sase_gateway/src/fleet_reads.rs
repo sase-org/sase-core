@@ -779,6 +779,7 @@ fn build_snapshot_blocking(
             record_shape: AgentArtifactRecordShapeWire::Full,
             window_limit: Some(512),
             candidate_filter: None,
+            agents_list_projection: false,
         },
         FleetCatalogScopeWire::History => AgentArtifactIndexQueryWire {
             include_active: false,
@@ -792,6 +793,7 @@ fn build_snapshot_blocking(
             record_shape: AgentArtifactRecordShapeWire::Full,
             window_limit: None,
             candidate_filter: None,
+            agents_list_projection: false,
         },
     };
     let scan = query_agent_artifact_index(

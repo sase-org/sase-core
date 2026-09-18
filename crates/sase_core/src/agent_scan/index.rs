@@ -29,6 +29,7 @@ use crate::agent_runtime::{
 
 use super::context::{
     clan_key_from_meta, represented_clan_keys, resolve_clan_context,
+    ClanGenerationKey,
 };
 use super::scanner::{
     list_agent_artifact_dirs, project_allowed_by_filter,
@@ -44,7 +45,9 @@ use super::wire::{
     AgentOutputVariableOccurrenceWire, AgentOutputVariableValueGroupWire,
     DoneMarkerWire, OutputVariableValue, UsedXPromptWire,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    AGENT_SCAN_WIRE_SCHEMA_VERSION, DONE_WORKFLOW_DIR_NAMES,
+    DONE_WORKFLOW_DIR_PREFIXES, WORKFLOW_STATE_DIR_NAMES,
+    WORKFLOW_STATE_DIR_PREFIXES,
 };
 
 pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 31;
@@ -305,6 +308,13 @@ pub struct AgentArtifactIndexQueryWire {
     pub window_limit: Option<u32>,
     #[serde(default)]
     pub candidate_filter: Option<AgentArtifactCandidateFilterWire>,
+    /// When true, hydrate only records that can become Agents-list base
+    /// rows. Marker-only waiting/question records stay out of the JSON
+    /// decode window; their clan keys are still collected from scalar
+    /// columns. Default off so generic index callers keep their current
+    /// record sets.
+    #[serde(default)]
+    pub agents_list_projection: bool,
 }
 
 impl Default for AgentArtifactIndexQueryWire {
@@ -321,6 +331,7 @@ impl Default for AgentArtifactIndexQueryWire {
             record_shape: AgentArtifactRecordShapeWire::Full,
             window_limit: None,
             candidate_filter: None,
+            agents_list_projection: false,
         }
     }
 }
@@ -1279,6 +1290,7 @@ pub fn query_agent_artifact_index(
             source_reconcile_watermark_valid(&conn, projects_root)?;
     }
 
+    let mut projection_clan_keys = BTreeSet::new();
     let index_window = if should_use_windowed_candidate_query(&query) {
         Some(select_windowed_records(
             &conn,
@@ -1286,6 +1298,7 @@ pub fn query_agent_artifact_index(
             &mut stats,
             &mut by_dir,
             project_filter.as_ref(),
+            projection_clan_keys_sink(&query, &mut projection_clan_keys),
         )?)
     } else {
         if query.include_active {
@@ -1302,11 +1315,13 @@ pub fn query_agent_artifact_index(
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
                     candidate_filter: query.candidate_filter.clone(),
+                    agents_list_projection: query.agents_list_projection,
                 },
                 &mut stats,
                 &mut by_dir,
                 &options,
                 project_filter.as_ref(),
+                projection_clan_keys_sink(&query, &mut projection_clan_keys),
             )?;
         }
 
@@ -1324,11 +1339,13 @@ pub fn query_agent_artifact_index(
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
                     candidate_filter: query.candidate_filter.clone(),
+                    agents_list_projection: query.agents_list_projection,
                 },
                 &mut stats,
                 &mut by_dir,
                 &options,
                 project_filter.as_ref(),
+                projection_clan_keys_sink(&query, &mut projection_clan_keys),
             )?;
         }
 
@@ -1346,11 +1363,13 @@ pub fn query_agent_artifact_index(
                     freshness: query.freshness,
                     only_monitors: query.only_monitors,
                     candidate_filter: query.candidate_filter.clone(),
+                    agents_list_projection: query.agents_list_projection,
                 },
                 &mut stats,
                 &mut by_dir,
                 &options,
                 project_filter.as_ref(),
+                projection_clan_keys_sink(&query, &mut projection_clan_keys),
             )?;
         }
         None
@@ -1376,7 +1395,12 @@ pub fn query_agent_artifact_index(
             project_record_for_list(record);
         }
     }
-    let clan_context = select_clan_context(&conn, &records)?;
+    let clan_context = if query.agents_list_projection {
+        projection_clan_keys.extend(represented_clan_keys(&records));
+        select_clan_context_for_keys(&conn, projection_clan_keys)?
+    } else {
+        select_clan_context(&conn, &records)?
+    };
     let index_completeness = Some(AgentArtifactIndexCompletenessWire {
         complete_history: query.include_full_history && source_reconciled,
         source_reconciled,
@@ -2313,7 +2337,13 @@ fn select_clan_context(
     conn: &Connection,
     records: &[AgentArtifactRecordWire],
 ) -> Result<Vec<super::wire::AgentClanContextWire>, String> {
-    let keys = represented_clan_keys(records);
+    select_clan_context_for_keys(conn, represented_clan_keys(records))
+}
+
+fn select_clan_context_for_keys(
+    conn: &Connection,
+    keys: BTreeSet<ClanGenerationKey>,
+) -> Result<Vec<super::wire::AgentClanContextWire>, String> {
     if keys.is_empty() {
         return Ok(Vec::new());
     }
@@ -4280,12 +4310,16 @@ fn select_records(
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
     options: &AgentArtifactScanOptionsWire,
     project_filter: Option<&BTreeSet<String>>,
+    clan_keys: Option<&mut BTreeSet<ClanGenerationKey>>,
 ) -> Result<(), String> {
-    let pending = if query.candidate_filter.is_some() {
-        select_pending_rows_for_candidate_filter(conn, &query, by_dir)?
-    } else {
-        select_pending_rows_for_query(conn, &query, by_dir)?
-    };
+    let pending =
+        if query.candidate_filter.is_some() || query.agents_list_projection {
+            select_pending_rows_for_candidate_filter(
+                conn, &query, by_dir, clan_keys,
+            )?
+        } else {
+            select_pending_rows_for_query(conn, &query, by_dir)?
+        };
 
     let mut missing = Vec::new();
     for row in pending {
@@ -4406,10 +4440,11 @@ fn select_pending_rows_for_candidate_filter(
     conn: &Connection,
     query: &SelectRecordsQuery,
     by_dir: &BTreeMap<String, AgentArtifactRecordWire>,
+    mut clan_keys: Option<&mut BTreeSet<ClanGenerationKey>>,
 ) -> Result<Vec<PendingRow>, String> {
-    let Some(filter) = query.candidate_filter.as_ref() else {
+    if query.candidate_filter.is_none() && !query.agents_list_projection {
         return select_pending_rows_for_query(conn, query, by_dir);
-    };
+    }
     let candidates = select_candidate_rows(
         conn,
         query.where_sql.clone(),
@@ -4421,7 +4456,14 @@ fn select_pending_rows_for_candidate_filter(
         if by_dir.contains_key(&row.artifact_dir) {
             continue;
         }
-        if !candidate_filter_matches(&row, filter) {
+        if !candidate_matches_query_filter(
+            &row,
+            query.candidate_filter.as_ref(),
+        ) {
+            continue;
+        }
+        collect_candidate_clan_key(&row, clan_keys.as_deref_mut());
+        if !candidate_kept_for_hydration(&row, query.agents_list_projection) {
             continue;
         }
         artifact_dirs.push(row.artifact_dir);
@@ -4432,8 +4474,28 @@ fn select_pending_rows_for_candidate_filter(
             break;
         }
     }
-    if candidate_filter_uses_machine(filter) {
-        artifact_dirs = expand_machine_tree_relatives(conn, &artifact_dirs)?;
+    if query
+        .candidate_filter
+        .as_ref()
+        .is_some_and(candidate_filter_uses_machine)
+    {
+        let expanded = expand_machine_tree_relatives(conn, &artifact_dirs)?;
+        let extras: Vec<String> = expanded
+            .into_iter()
+            .filter(|dir| !artifact_dirs.iter().any(|selected| selected == dir))
+            .collect();
+        let extra_rows = select_candidate_rows_for_dirs(
+            conn,
+            &extras,
+            CandidateSelection::from_record_selection(query.selection),
+        )?;
+        for row in extra_rows {
+            collect_candidate_clan_key(&row, clan_keys.as_deref_mut());
+            if candidate_kept_for_hydration(&row, query.agents_list_projection)
+            {
+                artifact_dirs.push(row.artifact_dir);
+            }
+        }
     }
 
     select_pending_rows_by_artifact_dirs(conn, &artifact_dirs)
@@ -4545,6 +4607,7 @@ struct SelectRecordsQuery {
     freshness: AgentArtifactIndexFreshnessWire,
     only_monitors: bool,
     candidate_filter: Option<AgentArtifactCandidateFilterWire>,
+    agents_list_projection: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4574,6 +4637,12 @@ struct IndexedCandidateRow {
     llm_provider: Option<String>,
     source_machine: Option<String>,
     imported_owner_machine: Option<String>,
+    workflow_dir_name: String,
+    has_done_marker: bool,
+    has_running_marker: bool,
+    has_workflow_state: bool,
+    agent_clan: Option<String>,
+    agent_clan_generation: Option<String>,
     selection: CandidateSelection,
 }
 
@@ -4613,6 +4682,108 @@ impl IndexedCandidateRow {
     }
 }
 
+fn projection_clan_keys_sink<'a>(
+    query: &AgentArtifactIndexQueryWire,
+    keys: &'a mut BTreeSet<ClanGenerationKey>,
+) -> Option<&'a mut BTreeSet<ClanGenerationKey>> {
+    query.agents_list_projection.then_some(keys)
+}
+
+fn workflow_dir_supports_done_loader(name: &str) -> bool {
+    DONE_WORKFLOW_DIR_NAMES.contains(&name)
+        || DONE_WORKFLOW_DIR_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+fn workflow_dir_supports_workflow_loader(name: &str) -> bool {
+    WORKFLOW_STATE_DIR_NAMES.contains(&name)
+        || WORKFLOW_STATE_DIR_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+fn candidate_is_loader_projectable(row: &IndexedCandidateRow) -> bool {
+    if row.has_done_marker
+        && workflow_dir_supports_done_loader(&row.workflow_dir_name)
+    {
+        return true;
+    }
+    if row.has_running_marker
+        && row.project_name == "home"
+        && row.workflow_dir_name == "ace-run"
+    {
+        return true;
+    }
+    row.has_workflow_state
+        && workflow_dir_supports_workflow_loader(&row.workflow_dir_name)
+}
+
+fn candidate_kept_for_hydration(
+    row: &IndexedCandidateRow,
+    agents_list_projection: bool,
+) -> bool {
+    !agents_list_projection || candidate_is_loader_projectable(row)
+}
+
+fn clan_key_from_candidate(
+    row: &IndexedCandidateRow,
+) -> Option<ClanGenerationKey> {
+    let clan = row.agent_clan.as_deref()?.trim();
+    if clan.is_empty() {
+        return None;
+    }
+    let generation = row
+        .agent_clan_generation
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Some((clan.to_string(), generation))
+}
+
+fn collect_candidate_clan_key(
+    row: &IndexedCandidateRow,
+    keys: Option<&mut BTreeSet<ClanGenerationKey>>,
+) {
+    let Some(keys) = keys else {
+        return;
+    };
+    if let Some(key) = clan_key_from_candidate(row) {
+        keys.insert(key);
+    }
+}
+
+const CANDIDATE_ROW_COLUMNS: &str = "artifact_dir, project_name, agent_type, \
+     cl_name, model, llm_provider, source_machine, imported_owner_machine, \
+     workflow_dir_name, has_done_marker, has_running_marker, \
+     has_workflow_state, agent_clan, agent_clan_generation";
+
+fn indexed_candidate_row_from_sql(
+    row: &rusqlite::Row<'_>,
+    selection: CandidateSelection,
+) -> Result<IndexedCandidateRow, String> {
+    Ok(IndexedCandidateRow {
+        artifact_dir: row.get(0).map_err(|e| e.to_string())?,
+        project_name: row.get(1).map_err(|e| e.to_string())?,
+        agent_type: row.get(2).map_err(|e| e.to_string())?,
+        cl_name: row.get(3).map_err(|e| e.to_string())?,
+        model: row.get(4).map_err(|e| e.to_string())?,
+        llm_provider: row.get(5).map_err(|e| e.to_string())?,
+        source_machine: row.get(6).map_err(|e| e.to_string())?,
+        imported_owner_machine: row.get(7).map_err(|e| e.to_string())?,
+        workflow_dir_name: row.get(8).map_err(|e| e.to_string())?,
+        has_done_marker: row.get::<_, i64>(9).map_err(|e| e.to_string())? != 0,
+        has_running_marker: row.get::<_, i64>(10).map_err(|e| e.to_string())?
+            != 0,
+        has_workflow_state: row.get::<_, i64>(11).map_err(|e| e.to_string())?
+            != 0,
+        agent_clan: row.get(12).map_err(|e| e.to_string())?,
+        agent_clan_generation: row.get(13).map_err(|e| e.to_string())?,
+        selection,
+    })
+}
+
 fn should_use_windowed_candidate_query(
     query: &AgentArtifactIndexQueryWire,
 ) -> bool {
@@ -4638,6 +4809,7 @@ fn select_windowed_records(
     stats: &mut AgentArtifactScanStatsWire,
     by_dir: &mut BTreeMap<String, AgentArtifactRecordWire>,
     project_filter: Option<&BTreeSet<String>>,
+    mut clan_keys: Option<&mut BTreeSet<ClanGenerationKey>>,
 ) -> Result<AgentArtifactIndexWindowWire, String> {
     let requested_limit = query.window_limit.unwrap_or(1).max(1);
     let active_rows = select_candidate_rows(
@@ -4648,11 +4820,18 @@ fn select_windowed_records(
     let mut active_candidates = Vec::new();
     let mut active_dirs = BTreeSet::new();
     for row in active_rows {
-        if candidate_matches_query_filter(&row, query.candidate_filter.as_ref())
-        {
-            active_dirs.insert(row.artifact_dir.clone());
-            active_candidates.push(row);
+        if !candidate_matches_query_filter(
+            &row,
+            query.candidate_filter.as_ref(),
+        ) {
+            continue;
         }
+        collect_candidate_clan_key(&row, clan_keys.as_deref_mut());
+        if !candidate_kept_for_hydration(&row, query.agents_list_projection) {
+            continue;
+        }
+        active_dirs.insert(row.artifact_dir.clone());
+        active_candidates.push(row);
     }
 
     let completed_rows = select_candidate_rows(
@@ -4665,16 +4844,25 @@ fn select_windowed_records(
         if active_dirs.contains(&row.artifact_dir) {
             continue;
         }
-        if candidate_matches_query_filter(&row, query.candidate_filter.as_ref())
-        {
-            completed_candidates.push(row);
+        if !candidate_matches_query_filter(
+            &row,
+            query.candidate_filter.as_ref(),
+        ) {
+            continue;
         }
+        if !candidate_kept_for_hydration(&row, query.agents_list_projection) {
+            continue;
+        }
+        completed_candidates.push(row);
     }
 
     let completed_budget = requested_limit as usize;
     let mut selected = active_candidates.clone();
     selected
         .extend(completed_candidates.iter().take(completed_budget).cloned());
+    for row in selected.iter().skip(active_candidates.len()) {
+        collect_candidate_clan_key(row, clan_keys.as_deref_mut());
+    }
     if query
         .candidate_filter
         .as_ref()
@@ -4690,11 +4878,18 @@ fn select_windowed_records(
             .into_iter()
             .filter(|dir| !selected.iter().any(|row| &row.artifact_dir == dir))
             .collect();
-        selected.extend(select_candidate_rows_for_dirs(
+        let extra_rows = select_candidate_rows_for_dirs(
             conn,
             &extras,
             CandidateSelection::Visible,
-        )?);
+        )?;
+        for row in extra_rows {
+            collect_candidate_clan_key(&row, clan_keys.as_deref_mut());
+            if candidate_kept_for_hydration(&row, query.agents_list_projection)
+            {
+                selected.push(row);
+            }
+        }
     }
     let selected_candidate_count = selected.len() as u64;
     let has_more = completed_candidates.len() > completed_budget;
@@ -4724,25 +4919,13 @@ fn select_candidate_rows(
     selection: CandidateSelection,
 ) -> Result<Vec<IndexedCandidateRow>, String> {
     let sql = format!(
-        "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider, \
-         source_machine, imported_owner_machine \
-         FROM agent_artifacts {where_sql}"
+        "SELECT {CANDIDATE_ROW_COLUMNS} FROM agent_artifacts {where_sql}"
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        result.push(IndexedCandidateRow {
-            artifact_dir: row.get(0).map_err(|e| e.to_string())?,
-            project_name: row.get(1).map_err(|e| e.to_string())?,
-            agent_type: row.get(2).map_err(|e| e.to_string())?,
-            cl_name: row.get(3).map_err(|e| e.to_string())?,
-            model: row.get(4).map_err(|e| e.to_string())?,
-            llm_provider: row.get(5).map_err(|e| e.to_string())?,
-            source_machine: row.get(6).map_err(|e| e.to_string())?,
-            imported_owner_machine: row.get(7).map_err(|e| e.to_string())?,
-            selection,
-        });
+        result.push(indexed_candidate_row_from_sql(row, selection)?);
     }
     Ok(result)
 }
@@ -4760,28 +4943,15 @@ fn select_candidate_rows_for_dirs(
     for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
         let placeholders = placeholders(chunk.len());
         let sql = format!(
-            "SELECT artifact_dir, project_name, agent_type, cl_name, model, llm_provider, \
-             source_machine, imported_owner_machine \
-             FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
+            "SELECT {CANDIDATE_ROW_COLUMNS} FROM agent_artifacts \
+             WHERE artifact_dir IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut rows = stmt
             .query(params_from_iter(chunk.iter()))
             .map_err(|e| e.to_string())?;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            result.push(IndexedCandidateRow {
-                artifact_dir: row.get(0).map_err(|e| e.to_string())?,
-                project_name: row.get(1).map_err(|e| e.to_string())?,
-                agent_type: row.get(2).map_err(|e| e.to_string())?,
-                cl_name: row.get(3).map_err(|e| e.to_string())?,
-                model: row.get(4).map_err(|e| e.to_string())?,
-                llm_provider: row.get(5).map_err(|e| e.to_string())?,
-                source_machine: row.get(6).map_err(|e| e.to_string())?,
-                imported_owner_machine: row
-                    .get(7)
-                    .map_err(|e| e.to_string())?,
-                selection,
-            });
+            result.push(indexed_candidate_row_from_sql(row, selection)?);
         }
     }
     Ok(result)
@@ -6540,6 +6710,36 @@ mod tests {
         }
     }
 
+    fn projection_windowed_query(limit: u32) -> AgentArtifactIndexQueryWire {
+        AgentArtifactIndexQueryWire {
+            agents_list_projection: true,
+            ..windowed_index_query(limit)
+        }
+    }
+
+    fn projection_full_history_query() -> AgentArtifactIndexQueryWire {
+        AgentArtifactIndexQueryWire {
+            include_active: false,
+            include_recent_completed: false,
+            include_full_history: true,
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+            record_shape: AgentArtifactRecordShapeWire::List,
+            agents_list_projection: true,
+            ..AgentArtifactIndexQueryWire::default()
+        }
+    }
+
+    fn rebuild_index(tmp: &Path, projects: &Path) -> PathBuf {
+        let index = tmp.join("agent_artifact_index.sqlite");
+        rebuild_agent_artifact_index(
+            &index,
+            projects,
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        index
+    }
+
     #[test]
     fn rebuild_indexes_scanner_equivalent_records() {
         let tmp = tempdir().unwrap();
@@ -6585,6 +6785,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6635,6 +6836,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::List,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -6700,6 +6902,331 @@ mod tests {
         assert_eq!(window.completed_candidate_count, 2);
         assert!(window.has_more);
         assert!(window.truncated);
+    }
+
+    #[test]
+    fn agents_list_projection_defaults_off() {
+        assert!(!AgentArtifactIndexQueryWire::default().agents_list_projection);
+    }
+
+    #[test]
+    fn agents_list_projection_skips_marker_only_active_records() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let waiting = artifact(&projects, "20260828090000");
+        write_json(
+            &waiting.join("agent_meta.json"),
+            json!({"name": "waiting-only", "agent_clan": "diet-clan"}),
+        );
+        write_json(&waiting.join("waiting.json"), json!({"cl_name": "wait"}));
+        let question = artifact(&projects, "20260828090100");
+        write_json(
+            &question.join("agent_meta.json"),
+            json!({"name": "question-only"}),
+        );
+        write_json(
+            &question.join("pending_question.json"),
+            json!({"session_id": "q"}),
+        );
+        let done = artifact(&projects, "20260828090200");
+        write_json(&done.join("agent_meta.json"), json!({"name": "done"}));
+        write_json(
+            &done.join("done.json"),
+            json!({"outcome": "completed", "name": "done"}),
+        );
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let defaulted = query_agent_artifact_index(
+            &index,
+            &projects,
+            windowed_index_query(10),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let default_ts: BTreeSet<&str> = defaulted
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert!(default_ts.contains("20260828090000"));
+        assert!(default_ts.contains("20260828090100"));
+        assert!(default_ts.contains("20260828090200"));
+
+        let projected = query_agent_artifact_index(
+            &index,
+            &projects,
+            projection_windowed_query(10),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(projected.records.len(), 1);
+        assert_eq!(projected.records[0].timestamp, "20260828090200");
+        assert_eq!(projected.stats.record_json_decoded, 1);
+        let window = projected.index_window.unwrap();
+        assert_eq!(window.active_candidate_count, 0);
+        assert_eq!(window.completed_candidate_count, 1);
+        assert_eq!(window.returned_record_count, 1);
+    }
+
+    #[test]
+    fn agents_list_projection_keeps_home_running_and_workflow_records() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let home_running =
+            artifact_for_project(&projects, "home", "20260828100000");
+        write_json(
+            &home_running.join("agent_meta.json"),
+            json!({"name": "home-run", "pid": 42}),
+        );
+        write_json(&home_running.join("running.json"), json!({"pid": 42}));
+        let workflow = projects
+            .join("proj")
+            .join("artifacts")
+            .join("workflow-feature")
+            .join("20260828100100");
+        write_json(
+            &workflow.join("agent_meta.json"),
+            json!({"name": "wf", "workflow_name": "feature"}),
+        );
+        write_json(
+            &workflow.join("workflow_state.json"),
+            json!({
+                "workflow_name": "feature",
+                "status": "running",
+                "pid": 7,
+                "steps": []
+            }),
+        );
+        let waiting = artifact(&projects, "20260828100200");
+        write_json(&waiting.join("agent_meta.json"), json!({"name": "wait"}));
+        write_json(&waiting.join("waiting.json"), json!({}));
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            projection_windowed_query(10),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert_eq!(
+            timestamps,
+            BTreeSet::from(["20260828100000", "20260828100100"])
+        );
+        assert_eq!(snapshot.stats.record_json_decoded, 2);
+    }
+
+    #[test]
+    fn agents_list_projection_keeps_noop_done_and_skips_hidden() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let noop = artifact(&projects, "20260828110000");
+        write_json(&noop.join("agent_meta.json"), json!({"name": "noop"}));
+        write_json(
+            &noop.join("done.json"),
+            json!({"outcome": "noop", "name": "noop"}),
+        );
+        let hidden = artifact(&projects, "20260828110100");
+        write_json(
+            &hidden.join("agent_meta.json"),
+            json!({"name": "hidden", "hidden": true}),
+        );
+        write_json(
+            &hidden.join("done.json"),
+            json!({"outcome": "completed", "name": "hidden", "hidden": true}),
+        );
+        let visible = artifact(&projects, "20260828110200");
+        write_json(
+            &visible.join("agent_meta.json"),
+            json!({"name": "visible"}),
+        );
+        write_json(
+            &visible.join("done.json"),
+            json!({"outcome": "completed", "name": "visible"}),
+        );
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            projection_windowed_query(10),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert!(timestamps.contains("20260828110000"));
+        assert!(timestamps.contains("20260828110200"));
+        assert!(!timestamps.contains("20260828110100"));
+    }
+
+    #[test]
+    fn agents_list_projection_derives_clan_context_from_waiting_only_scalars() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let waiting = artifact(&projects, "20260828120000");
+        write_json(
+            &waiting.join("agent_meta.json"),
+            json!({
+                "name": "waiting-context",
+                "agent_clan": "running-clan",
+                "agent_clan_generation": "g1",
+                "clan_tribe": "chop",
+                "clan_summary": "Waiting supplies context"
+            }),
+        );
+        write_json(&waiting.join("waiting.json"), json!({"cl_name": "run"}));
+        let done = artifact(&projects, "20260828120100");
+        write_json(
+            &done.join("agent_meta.json"),
+            json!({
+                "name": "done-member",
+                "agent_clan": "running-clan",
+                "agent_clan_generation": "g1"
+            }),
+        );
+        write_json(
+            &done.join("done.json"),
+            json!({"outcome": "completed", "name": "done-member"}),
+        );
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            projection_windowed_query(10),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260828120100");
+        assert_eq!(snapshot.stats.record_json_decoded, 1);
+        assert_eq!(snapshot.clan_context.len(), 1);
+        assert_eq!(snapshot.clan_context[0].agent_clan, "running-clan");
+        assert_eq!(
+            snapshot.clan_context[0].agent_clan_generation.as_deref(),
+            Some("g1")
+        );
+        assert_eq!(
+            snapshot.clan_context[0].clan_tribe.as_deref(),
+            Some("chop")
+        );
+        assert_eq!(
+            snapshot.clan_context[0].clan_summary.as_deref(),
+            Some("Waiting supplies context")
+        );
+    }
+
+    #[test]
+    fn agents_list_projection_preserves_family_relative_projectable_extras() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let parent = artifact(&projects, "20260828130000");
+        write_json(
+            &parent.join("agent_meta.json"),
+            json!({
+                "name": "parent",
+                "agent_family": "crew",
+                "source_machine": "athena"
+            }),
+        );
+        write_json(
+            &parent.join("done.json"),
+            json!({"outcome": "completed", "name": "parent"}),
+        );
+        let child = artifact(&projects, "20260828130100");
+        write_json(
+            &child.join("agent_meta.json"),
+            json!({
+                "name": "child",
+                "agent_family": "crew",
+                "source_machine": "apollo"
+            }),
+        );
+        write_json(
+            &child.join("done.json"),
+            json!({"outcome": "completed", "name": "child"}),
+        );
+        let waiting_relative = artifact(&projects, "20260828130200");
+        write_json(
+            &waiting_relative.join("agent_meta.json"),
+            json!({
+                "name": "waiting-relative",
+                "agent_family": "crew",
+                "source_machine": "apollo"
+            }),
+        );
+        write_json(&waiting_relative.join("waiting.json"), json!({}));
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: true,
+                include_full_history: false,
+                freshness: AgentArtifactIndexFreshnessWire::Cached,
+                record_shape: AgentArtifactRecordShapeWire::List,
+                window_limit: Some(10),
+                agents_list_projection: true,
+                candidate_filter: Some(
+                    AgentArtifactCandidateFilterWire::Equals {
+                        field: AgentArtifactCandidateFieldWire::Machine,
+                        value: "athena".to_string(),
+                    },
+                ),
+                ..AgentArtifactIndexQueryWire::default()
+            },
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let timestamps: BTreeSet<&str> = snapshot
+            .records
+            .iter()
+            .map(|record| record.timestamp.as_str())
+            .collect();
+        assert!(timestamps.contains("20260828130000"));
+        assert!(timestamps.contains("20260828130100"));
+        assert!(!timestamps.contains("20260828130200"));
+    }
+
+    #[test]
+    fn agents_list_projection_full_history_skips_non_projectable_records() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let waiting = artifact(&projects, "20260828140000");
+        write_json(
+            &waiting.join("agent_meta.json"),
+            json!({"name": "waiting"}),
+        );
+        write_json(&waiting.join("waiting.json"), json!({}));
+        let done = artifact(&projects, "20260828140100");
+        write_json(&done.join("agent_meta.json"), json!({"name": "done"}));
+        write_json(
+            &done.join("done.json"),
+            json!({"outcome": "completed", "name": "done"}),
+        );
+
+        let index = rebuild_index(tmp.path(), &projects);
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            projection_full_history_query(),
+            AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].timestamp, "20260828140100");
+        assert_eq!(snapshot.stats.record_json_decoded, 1);
     }
 
     #[test]
@@ -7014,6 +7541,7 @@ mod tests {
                         },
                     ],
                 }),
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7569,6 +8097,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7670,6 +8199,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -7813,6 +8343,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::List,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -9623,6 +10154,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -9672,6 +10204,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -9727,6 +10260,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -9774,6 +10308,7 @@ mod tests {
             legacy.freshness,
             AgentArtifactIndexFreshnessWire::Revalidate
         );
+        assert!(!legacy.agents_list_projection);
     }
 
     #[test]
@@ -9818,6 +10353,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -9986,6 +10522,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10013,6 +10550,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10103,6 +10641,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10374,6 +10913,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10428,6 +10968,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10449,6 +10990,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10551,6 +11093,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire {
                 only_projects: vec!["proj".to_string()],
@@ -10594,6 +11137,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10672,6 +11216,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10732,6 +11277,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10779,6 +11325,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10838,6 +11385,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -10896,6 +11444,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11167,6 +11716,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11188,6 +11738,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11209,6 +11760,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11230,6 +11782,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11343,6 +11896,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11482,6 +12036,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11596,6 +12151,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11617,6 +12173,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11682,6 +12239,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11737,6 +12295,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11797,6 +12356,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -11817,6 +12377,7 @@ mod tests {
             record_shape: AgentArtifactRecordShapeWire::Full,
             window_limit: None,
             candidate_filter: None,
+            agents_list_projection: false,
         }
     }
 
@@ -12038,6 +12599,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12084,6 +12646,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12114,6 +12677,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12164,6 +12728,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12225,6 +12790,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12253,6 +12819,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12306,6 +12873,7 @@ mod tests {
                 record_shape: AgentArtifactRecordShapeWire::Full,
                 window_limit: None,
                 candidate_filter: None,
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
@@ -12391,6 +12959,7 @@ mod tests {
             record_shape: AgentArtifactRecordShapeWire::Full,
             window_limit: None,
             candidate_filter: None,
+            agents_list_projection: false,
         }
     }
 
@@ -12593,6 +13162,7 @@ mod tests {
                         value: "keep".to_string(),
                     },
                 ),
+                agents_list_projection: false,
             },
             AgentArtifactScanOptionsWire::default(),
         )
