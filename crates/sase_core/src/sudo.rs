@@ -17,11 +17,15 @@ pub const SUDO_MANIFEST_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_LEDGER_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_RISK_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const SUDO_ATTEMPT_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const SUDO_SETTLEMENT_AUTHORIZATION_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const SUDO_EXEC_STARTED_KIND: &str = "sudo_exec_started";
 
 pub const SUDO_MANIFEST_MAX_BYTES: usize = 64 * 1024;
 pub const SUDO_LEDGER_MAX_BYTES: usize = 256 * 1024;
 pub const SUDO_EXEC_STARTED_MAX_BYTES: usize = 16 * 1024;
+pub const SUDO_ATTEMPT_MAX_BYTES: usize = 64 * 1024;
+pub const SUDO_SETTLEMENT_AUTHORIZATION_MAX_BYTES: usize = 128 * 1024;
 pub const SUDO_MAX_COMMANDS: usize = 128;
 pub const SUDO_MAX_ARGV: usize = 64;
 pub const SUDO_MAX_ENV: usize = 64;
@@ -231,6 +235,95 @@ pub struct SudoExecStartedWire {
     pub ledger_path: String,
     pub log_path: String,
     pub started_at: f64,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SudoAttemptTargetKindWire {
+    Local,
+    Remote,
+    #[default]
+    Unknown,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SudoAttemptStartupStateWire {
+    Legacy,
+    Reserved,
+    Authenticating,
+    Starting,
+    Started,
+    Settling,
+    Settled,
+    Terminal,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SudoExecutorLivenessWire {
+    Live,
+    Dead,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SudoAttemptWire {
+    pub schema_version: u32,
+    pub gate_id: String,
+    #[serde(default)]
+    pub selected_command_ids: Vec<String>,
+    pub manifest_sha256: String,
+    pub handoff_dir: String,
+    #[serde(default)]
+    pub handshake: Option<SudoExecStartedWire>,
+    #[serde(default)]
+    pub finalize_proc_id: Option<String>,
+    #[serde(default)]
+    pub target_kind: SudoAttemptTargetKindWire,
+    #[serde(default)]
+    pub target_host: Option<String>,
+    #[serde(default)]
+    pub startup_state: SudoAttemptStartupStateWire,
+    #[serde(default)]
+    pub operation_payload_digest: Option<String>,
+    #[serde(default)]
+    pub authorization_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SudoExecutorFactsWire {
+    #[serde(default)]
+    pub finalize_proc_live: Option<bool>,
+    #[serde(default)]
+    pub executor_pid_live: Option<bool>,
+    #[serde(default)]
+    pub executor_identity_matches: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SudoExecutorLivenessDecisionWire {
+    pub schema_version: u32,
+    pub classification: SudoExecutorLivenessWire,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SudoSettlementAuthorizationWire {
+    pub schema_version: u32,
+    pub authorized: bool,
+    pub status: String,
+    pub authorization_id: String,
+    pub gate_id: String,
+    pub selected_command_ids: Vec<String>,
+    pub manifest_sha256: String,
+    pub ledger_outcome: SudoLedgerOutcomeWire,
 }
 
 pub fn sudo_manifest_from_json_value(
@@ -578,8 +671,357 @@ pub fn validate_sudo_exec_started(
     Ok(handshake.clone())
 }
 
+pub fn sudo_attempt_from_json_value(
+    value: &JsonValue,
+) -> Result<SudoAttemptWire, SudoWireError> {
+    ensure_json_size("sudo attempt", value, SUDO_ATTEMPT_MAX_BYTES)?;
+    let mut attempt: SudoAttemptWire = serde_json::from_value(value.clone())
+        .map_err(|error| {
+            SudoWireError::json(format!(
+                "sudo attempt JSON does not match wire contract: {error}"
+            ))
+        })?;
+    let object = value.as_object().ok_or_else(|| {
+        SudoWireError::validation("attempt", "sudo attempt must be an object")
+    })?;
+    if !object.contains_key("target_kind")
+        || !object.contains_key("startup_state")
+    {
+        attempt.startup_state = SudoAttemptStartupStateWire::Unknown;
+        if !object.contains_key("target_kind") {
+            attempt.target_kind = SudoAttemptTargetKindWire::Unknown;
+        }
+    }
+    validate_sudo_attempt(&attempt)
+}
+
+pub fn validate_sudo_attempt(
+    attempt: &SudoAttemptWire,
+) -> Result<SudoAttemptWire, SudoWireError> {
+    validate_schema(
+        "sudo attempt",
+        attempt.schema_version,
+        SUDO_ATTEMPT_WIRE_SCHEMA_VERSION,
+    )?;
+    validate_non_empty_bounded("gate_id", &attempt.gate_id, SUDO_MAX_ID_BYTES)?;
+    validate_sha256("manifest_sha256", &attempt.manifest_sha256)?;
+    validate_absolute_path("handoff_dir", &attempt.handoff_dir)?;
+    if attempt.selected_command_ids.is_empty() {
+        return Err(SudoWireError::validation(
+            "selected_command_ids",
+            "sudo attempt requires at least one selected command id",
+        ));
+    }
+    if attempt.selected_command_ids.len() > SUDO_MAX_COMMANDS {
+        return Err(SudoWireError::validation(
+            "selected_command_ids",
+            format!(
+                "sudo attempt selected_command_ids exceeds {SUDO_MAX_COMMANDS} entries"
+            ),
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for (index, id) in attempt.selected_command_ids.iter().enumerate() {
+        validate_non_empty_bounded(
+            format!("selected_command_ids[{index}]"),
+            id,
+            SUDO_MAX_ID_BYTES,
+        )?;
+        reject_path_like(format!("selected_command_ids[{index}]"), id)?;
+        if !ids.insert(id.clone()) {
+            return Err(SudoWireError::validation(
+                format!("selected_command_ids[{index}]"),
+                format!("duplicate sudo selected command id {id:?}"),
+            ));
+        }
+    }
+    if let Some(handshake) = &attempt.handshake {
+        validate_sudo_exec_started(handshake, None)?;
+        if handshake.manifest_sha256 != attempt.manifest_sha256 {
+            return Err(SudoWireError::validation(
+                "handshake.manifest_sha256",
+                "sudo attempt handshake digest does not match attempt",
+            ));
+        }
+    }
+    if let Some(proc_id) = &attempt.finalize_proc_id {
+        validate_non_empty_bounded(
+            "finalize_proc_id",
+            proc_id,
+            SUDO_MAX_LABEL_BYTES,
+        )?;
+    }
+    match attempt.target_kind {
+        SudoAttemptTargetKindWire::Remote => {
+            let host = attempt.target_host.as_deref().ok_or_else(|| {
+                SudoWireError::validation(
+                    "target_host",
+                    "remote sudo attempts require target_host",
+                )
+            })?;
+            validate_non_empty_bounded(
+                "target_host",
+                host,
+                SUDO_MAX_LABEL_BYTES,
+            )?;
+        }
+        SudoAttemptTargetKindWire::Local
+        | SudoAttemptTargetKindWire::Unknown => {
+            if let Some(host) = &attempt.target_host {
+                validate_bounded("target_host", host, SUDO_MAX_LABEL_BYTES)?;
+            }
+        }
+    }
+    if let Some(digest) = &attempt.operation_payload_digest {
+        validate_sha256("operation_payload_digest", digest)?;
+    }
+    if let Some(authorization_id) = &attempt.authorization_id {
+        validate_sha256("authorization_id", authorization_id)?;
+    }
+    Ok(attempt.clone())
+}
+
+pub fn classify_sudo_executor_liveness(
+    attempt: &SudoAttemptWire,
+    facts: &SudoExecutorFactsWire,
+) -> Result<SudoExecutorLivenessDecisionWire, SudoWireError> {
+    let attempt = validate_sudo_attempt(attempt)?;
+    if facts.finalize_proc_live == Some(true) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Live,
+            "finalize proc is live",
+        ));
+    }
+    if matches!(attempt.startup_state, SudoAttemptStartupStateWire::Settled) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Dead,
+            "attempt is already settled",
+        ));
+    }
+    if matches!(attempt.startup_state, SudoAttemptStartupStateWire::Terminal) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Dead,
+            "attempt ended before a durable executor owned it",
+        ));
+    }
+    if matches!(attempt.target_kind, SudoAttemptTargetKindWire::Remote) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Unknown,
+            "remote executor liveness is durable but not locally provable",
+        ));
+    }
+    if matches!(attempt.target_kind, SudoAttemptTargetKindWire::Unknown) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Unknown,
+            "attempt target is unknown",
+        ));
+    }
+    if matches!(
+        attempt.startup_state,
+        SudoAttemptStartupStateWire::Reserved
+            | SudoAttemptStartupStateWire::Authenticating
+            | SudoAttemptStartupStateWire::Starting
+            | SudoAttemptStartupStateWire::Unknown
+    ) {
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Unknown,
+            "attempt startup has not reached a terminal proof",
+        ));
+    }
+    if attempt.handshake.is_none() {
+        if matches!(attempt.startup_state, SudoAttemptStartupStateWire::Legacy)
+        {
+            return Ok(sudo_liveness_decision(
+                SudoExecutorLivenessWire::Dead,
+                "legacy local attempt has no executor witness",
+            ));
+        }
+        return Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Unknown,
+            "started attempt is missing executor witness",
+        ));
+    }
+    match (facts.executor_pid_live, facts.executor_identity_matches) {
+        (Some(true), Some(true)) => Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Live,
+            "executor process identity still matches",
+        )),
+        (Some(false), _) | (_, Some(false)) => Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Dead,
+            "executor process identity is not live",
+        )),
+        _ => Ok(sudo_liveness_decision(
+            SudoExecutorLivenessWire::Unknown,
+            "executor process facts are incomplete",
+        )),
+    }
+}
+
+pub fn authorize_sudo_settlement_json_value(
+    value: &JsonValue,
+) -> Result<SudoSettlementAuthorizationWire, SudoWireError> {
+    ensure_json_size(
+        "sudo settlement authorization",
+        value,
+        SUDO_SETTLEMENT_AUTHORIZATION_MAX_BYTES,
+    )?;
+    let object = value.as_object().ok_or_else(|| {
+        SudoWireError::validation(
+            "authorization",
+            "sudo settlement authorization request must be an object",
+        )
+    })?;
+    let attempt_value = object.get("attempt").ok_or_else(|| {
+        SudoWireError::validation("attempt", "sudo attempt is required")
+    })?;
+    let attempt = sudo_attempt_from_json_value(attempt_value)?;
+    let ledger_value = object.get("ledger").ok_or_else(|| {
+        SudoWireError::validation("ledger", "terminal sudo ledger is required")
+    })?;
+    let ledger = sudo_ledger_from_json_value(ledger_value)?;
+    if ledger.manifest_sha256 != attempt.manifest_sha256 {
+        return Err(SudoWireError::validation(
+            "ledger.manifest_sha256",
+            "sudo ledger digest does not match attempt",
+        ));
+    }
+    if ledger.request_id != attempt.gate_id {
+        return Err(SudoWireError::validation(
+            "ledger.request_id",
+            "sudo ledger request id does not match attempt",
+        ));
+    }
+    if !matches!(
+        ledger.outcome,
+        SudoLedgerOutcomeWire::Completed | SudoLedgerOutcomeWire::RunnerError
+    ) {
+        return Err(SudoWireError::validation(
+            "ledger.outcome",
+            "sudo settlement requires a terminal execution ledger",
+        ));
+    }
+    let ledger_ids: Vec<String> = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    if ledger_ids != attempt.selected_command_ids {
+        return Err(SudoWireError::validation(
+            "ledger.entries",
+            "sudo ledger command ids do not match the persisted attempt",
+        ));
+    }
+    let handshake = object.get("handshake");
+    match (&attempt.handshake, handshake) {
+        (Some(recorded), Some(value)) => {
+            let supplied = sudo_exec_started_from_json_value(value)?;
+            if supplied != *recorded {
+                return Err(SudoWireError::validation(
+                    "handshake",
+                    "sudo settlement handshake does not match attempt",
+                ));
+            }
+        }
+        (Some(_), None) => {
+            return Err(SudoWireError::validation(
+                "handshake",
+                "sudo settlement is missing the recorded handshake",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(SudoWireError::validation(
+                "handshake",
+                "sudo settlement supplied a handshake for an attempt without one",
+            ));
+        }
+        (None, None) => {}
+    }
+    if let Some(expected) = &attempt.operation_payload_digest {
+        let actual = object
+            .get("operation_payload_digest")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| {
+                SudoWireError::validation(
+                    "operation_payload_digest",
+                    "sudo settlement operation payload digest is required",
+                )
+            })?;
+        if actual != expected {
+            return Err(SudoWireError::validation(
+                "operation_payload_digest",
+                "sudo settlement operation payload digest does not match attempt",
+            ));
+        }
+    }
+    let mut authorization_identity = JsonMap::new();
+    let mut identity_attempt = attempt.clone();
+    identity_attempt.authorization_id = None;
+    authorization_identity.insert(
+        "attempt".to_string(),
+        serde_json::to_value(&identity_attempt).map_err(|error| {
+            SudoWireError::json(format!(
+                "unable to serialize sudo attempt for authorization: {error}"
+            ))
+        })?,
+    );
+    authorization_identity.insert("ledger".to_string(), ledger_value.clone());
+    if let Some(handshake) = handshake {
+        authorization_identity
+            .insert("handshake".to_string(), handshake.clone());
+    }
+    if let Some(operation_payload_digest) = object
+        .get("operation_payload_digest")
+        .and_then(JsonValue::as_str)
+    {
+        authorization_identity.insert(
+            "operation_payload_digest".to_string(),
+            JsonValue::String(operation_payload_digest.to_string()),
+        );
+    }
+    let authorization_id =
+        sudo_json_sha256(&JsonValue::Object(authorization_identity))?;
+    let status = if attempt.authorization_id.as_deref()
+        == Some(authorization_id.as_str())
+    {
+        "replayed"
+    } else {
+        "authorized"
+    };
+    Ok(SudoSettlementAuthorizationWire {
+        schema_version: SUDO_SETTLEMENT_AUTHORIZATION_WIRE_SCHEMA_VERSION,
+        authorized: true,
+        status: status.to_string(),
+        authorization_id,
+        gate_id: attempt.gate_id,
+        selected_command_ids: attempt.selected_command_ids,
+        manifest_sha256: attempt.manifest_sha256,
+        ledger_outcome: ledger.outcome,
+    })
+}
+
 pub fn truncate_sudo_output_tail(value: &str, max_bytes: usize) -> String {
     truncate_utf8_tail(value, max_bytes.min(SUDO_MAX_OUTPUT_TAIL_BYTES))
+}
+
+fn sudo_liveness_decision(
+    classification: SudoExecutorLivenessWire,
+    reason: impl Into<String>,
+) -> SudoExecutorLivenessDecisionWire {
+    SudoExecutorLivenessDecisionWire {
+        schema_version: SUDO_ATTEMPT_WIRE_SCHEMA_VERSION,
+        classification,
+        reason: reason.into(),
+    }
+}
+
+fn sudo_json_sha256(value: &JsonValue) -> Result<String, SudoWireError> {
+    let bytes =
+        serde_json::to_vec(&canonical_json_value(value)).map_err(|error| {
+            SudoWireError::json(format!(
+                "unable to encode canonical sudo authorization JSON: {error}"
+            ))
+        })?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn validate_schema(
@@ -1544,6 +1986,178 @@ mod tests {
             .unwrap_err()
             .message
             .contains("positive"));
+    }
+
+    fn attempt_value(
+        manifest: &SudoManifestWire,
+        startup_state: &str,
+        target_kind: &str,
+    ) -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "gate_id": manifest.request_id,
+            "selected_command_ids": ["one", "two"],
+            "manifest_sha256": sudo_manifest_sha256(manifest).unwrap(),
+            "handoff_dir": "/tmp/sase-sudo/req-1",
+            "handshake": handshake_value(manifest),
+            "finalize_proc_id": "proc-1",
+            "target_kind": target_kind,
+            "target_host": if target_kind == "remote" { json!("apollo") } else { JsonValue::Null },
+            "startup_state": startup_state,
+            "operation_payload_digest": "c".repeat(64),
+            "authorization_id": null
+        })
+    }
+
+    fn ledger_value(manifest: &SudoManifestWire) -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "request_id": manifest.request_id,
+            "manifest_sha256": sudo_manifest_sha256(manifest).unwrap(),
+            "outcome": "completed",
+            "entries": [
+                {
+                    "id": "one",
+                    "status": "ran",
+                    "exit_code": 0,
+                    "duration_seconds": 0.1,
+                    "output_tail": ""
+                },
+                {
+                    "id": "two",
+                    "status": "ran",
+                    "exit_code": 0,
+                    "duration_seconds": 0.1,
+                    "output_tail": ""
+                }
+            ],
+            "diagnostic": null
+        })
+    }
+
+    #[test]
+    fn attempt_liveness_treats_legacy_missing_fields_as_unknown() {
+        let manifest = manifest();
+        let mut value = attempt_value(&manifest, "started", "local");
+        let object = value.as_object_mut().unwrap();
+        object.remove("target_kind");
+        object.remove("target_host");
+        object.remove("startup_state");
+        object.remove("handshake");
+        let attempt = sudo_attempt_from_json_value(&value).unwrap();
+        assert_eq!(attempt.target_kind, SudoAttemptTargetKindWire::Unknown);
+        assert_eq!(attempt.startup_state, SudoAttemptStartupStateWire::Unknown);
+
+        let decision = classify_sudo_executor_liveness(
+            &attempt,
+            &SudoExecutorFactsWire {
+                finalize_proc_live: Some(false),
+                executor_pid_live: Some(false),
+                executor_identity_matches: Some(false),
+            },
+        )
+        .unwrap();
+        assert_eq!(decision.classification, SudoExecutorLivenessWire::Unknown);
+    }
+
+    #[test]
+    fn attempt_liveness_keeps_remote_and_starting_attempts_unknown() {
+        let manifest = manifest();
+        let remote = sudo_attempt_from_json_value(&attempt_value(
+            &manifest, "started", "remote",
+        ))
+        .unwrap();
+        let facts = SudoExecutorFactsWire {
+            finalize_proc_live: Some(false),
+            executor_pid_live: Some(false),
+            executor_identity_matches: Some(false),
+        };
+        let decision =
+            classify_sudo_executor_liveness(&remote, &facts).unwrap();
+        assert_eq!(decision.classification, SudoExecutorLivenessWire::Unknown);
+
+        let starting = sudo_attempt_from_json_value(&attempt_value(
+            &manifest, "starting", "local",
+        ))
+        .unwrap();
+        let decision =
+            classify_sudo_executor_liveness(&starting, &facts).unwrap();
+        assert_eq!(decision.classification, SudoExecutorLivenessWire::Unknown);
+    }
+
+    #[test]
+    fn attempt_liveness_classifies_local_started_from_host_facts() {
+        let manifest = manifest();
+        let attempt = sudo_attempt_from_json_value(&attempt_value(
+            &manifest, "started", "local",
+        ))
+        .unwrap();
+        let live = classify_sudo_executor_liveness(
+            &attempt,
+            &SudoExecutorFactsWire {
+                finalize_proc_live: Some(false),
+                executor_pid_live: Some(true),
+                executor_identity_matches: Some(true),
+            },
+        )
+        .unwrap();
+        assert_eq!(live.classification, SudoExecutorLivenessWire::Live);
+
+        let dead = classify_sudo_executor_liveness(
+            &attempt,
+            &SudoExecutorFactsWire {
+                finalize_proc_live: Some(false),
+                executor_pid_live: Some(false),
+                executor_identity_matches: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(dead.classification, SudoExecutorLivenessWire::Dead);
+    }
+
+    #[test]
+    fn settlement_authorization_matches_attempt_and_replays_exact_digest() {
+        let manifest = manifest();
+        let attempt = attempt_value(&manifest, "started", "local");
+        let request = json!({
+            "attempt": attempt,
+            "handshake": handshake_value(&manifest),
+            "ledger": ledger_value(&manifest),
+            "operation_payload_digest": "c".repeat(64)
+        });
+        let authorized =
+            authorize_sudo_settlement_json_value(&request).unwrap();
+        assert!(authorized.authorized);
+        assert_eq!(authorized.status, "authorized");
+
+        let mut replay = request;
+        replay["attempt"]["authorization_id"] =
+            json!(authorized.authorization_id.clone());
+        let replayed = authorize_sudo_settlement_json_value(&replay).unwrap();
+        assert_eq!(replayed.status, "replayed");
+        assert_eq!(replayed.authorization_id, authorized.authorization_id);
+    }
+
+    #[test]
+    fn settlement_authorization_rejects_mismatched_digest_and_commands() {
+        let manifest = manifest();
+        let mut request = json!({
+            "attempt": attempt_value(&manifest, "started", "local"),
+            "handshake": handshake_value(&manifest),
+            "ledger": ledger_value(&manifest),
+            "operation_payload_digest": "d".repeat(64)
+        });
+        assert!(authorize_sudo_settlement_json_value(&request)
+            .unwrap_err()
+            .message
+            .contains("operation payload digest"));
+
+        request["operation_payload_digest"] = json!("c".repeat(64));
+        request["ledger"]["entries"][0]["id"] = json!("other");
+        assert!(authorize_sudo_settlement_json_value(&request)
+            .unwrap_err()
+            .message
+            .contains("command ids"));
     }
 
     #[test]

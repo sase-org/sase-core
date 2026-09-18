@@ -16087,6 +16087,49 @@ fn py_sudo_validate_handshake<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "sudo_classify_attempt_liveness")]
+fn py_sudo_classify_attempt_liveness<'py>(
+    py: Python<'py>,
+    attempt: &Bound<'py, PyDict>,
+    facts: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let attempt = py_to_json_value(attempt.as_any())?;
+    let facts = py_to_json_value(facts.as_any())?;
+    let decision = py
+        .allow_threads(|| {
+            let attempt = sase_core::sudo_attempt_from_json_value(&attempt)?;
+            let facts: sase_core::SudoExecutorFactsWire =
+                serde_json::from_value(facts).map_err(|error| {
+                    sase_core::SudoWireError {
+                        code: sase_core::SudoErrorCodeWire::Json,
+                        message: format!(
+                            "sudo executor facts JSON does not match wire contract: {error}"
+                        ),
+                        target: Some("facts".to_string()),
+                    }
+                })?;
+            sase_core::classify_sudo_executor_liveness(&attempt, &facts)
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &decision)
+}
+
+#[pyfunction]
+#[pyo3(name = "sudo_authorize_settlement")]
+fn py_sudo_authorize_settlement<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let authorization = py
+        .allow_threads(|| {
+            sase_core::authorize_sudo_settlement_json_value(&value)
+        })
+        .map_err(sudo_error_to_pyerr)?;
+    sudo_wire_to_py(py, &authorization)
+}
+
+#[pyfunction]
 #[pyo3(name = "sudo_runner_main")]
 fn py_sudo_runner_main(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     py.allow_threads(|| sase_gateway::run_sudo_runner_cli(args))
@@ -20322,6 +20365,8 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_sudo_derive_risk_badges, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_validate_ledger, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_validate_handshake, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_classify_attempt_liveness, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sudo_authorize_settlement, m)?)?;
     m.add_function(wrap_pyfunction!(py_sudo_runner_main, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_runtime_duration, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_classify_cache_freshness, m)?)?;
