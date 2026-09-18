@@ -808,6 +808,14 @@ pub fn directive_snippet_recipes_with_flags(
                 "Wait for a prompt-owned proc by ID or shell name.",
             ),
             recipe(
+                "%wait(hood=...)",
+                "directive snippet",
+                "%wait(hood=${1:hood})$0",
+                "%wait(hood=$1)$0",
+                "%wait(hood=hood)",
+                "Wait for current members of a hood before launching.",
+            ),
+            recipe(
                 "%wait(time=...)",
                 "directive snippet",
                 "%wait(time=${1:5m})$0",

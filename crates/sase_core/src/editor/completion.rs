@@ -5977,7 +5977,7 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=", "bead=", "proc=", "time=", "unit=", "@ops",
+                "agent=", "bead=", "hood=", "proc=", "time=", "unit=", "@ops",
                 "builders", "review", "worker"
             ]
         );
@@ -5992,7 +5992,8 @@ mod tests {
                 .map(|candidate| candidate.insertion.as_str())
                 .collect::<Vec<_>>(),
             vec![
-                "agent=", "bead=", "proc=", "unit=", "@ops", "review", "worker"
+                "agent=", "bead=", "hood=", "proc=", "unit=", "@ops", "review",
+                "worker"
             ]
         );
 
@@ -6106,16 +6107,15 @@ mod tests {
                 documentation: String::new(),
             },
         ];
-        let document = DocumentSnapshot::new("%hold(hood=s");
+        let document = DocumentSnapshot::new("%wait(hood=s");
         let context = classify_completion_context(
             &document,
             pos(document.text().len() as u32),
             &entries(),
         )
-        .expect("hold hood completion context");
+        .expect("wait hood completion context");
         let inventories = DirectiveCompletionInventories {
             agents: agent_entries,
-            enabled_feature_flags: vec!["agent_holds".to_string()],
             ..Default::default()
         };
 

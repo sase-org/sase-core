@@ -551,6 +551,14 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
+        name: "hood",
+        description: "Wait for current members of this agent hood",
+        value_role: DirectiveValueRole::Hood,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
         name: "proc",
         description: "Wait for a proc ID or shell name",
         value_role: DirectiveValueRole::FreeText,
@@ -661,7 +669,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         name: "wait",
         alias: Some("w"),
         description: "Wait for another agent/workflow and/or a time floor",
-        argument_hint: ":agent or (agent, bead=, time=)",
+        argument_hint: ":agent or (agent, bead=, hood=, time=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN_BARE,
@@ -1895,7 +1903,7 @@ mod tests {
                 .iter()
                 .map(|keyword| keyword.name.as_str())
                 .collect::<Vec<_>>(),
-            ["agent", "bead", "proc", "time", "unit"]
+            ["agent", "bead", "hood", "proc", "time", "unit"]
         );
         assert!(wait
             .syntax_forms
@@ -2484,7 +2492,10 @@ mod tests {
         let candidates = directive_argument_candidates("wait").candidates;
         let values: Vec<&str> =
             candidates.iter().map(|c| c.insertion.as_str()).collect();
-        assert_eq!(values, ["agent=", "bead=", "proc=", "time=", "unit="]);
+        assert_eq!(
+            values,
+            ["agent=", "bead=", "hood=", "proc=", "time=", "unit="]
+        );
         assert!(directive_argument_candidates("time").candidates.is_empty());
     }
 
@@ -2877,8 +2888,8 @@ mod tests {
         assert_eq!(
             at_end("%wait("),
             [
-                "agent=", "bead=", "proc=", "time=", "unit=", "builders",
-                "planner"
+                "agent=", "bead=", "hood=", "proc=", "time=", "unit=",
+                "builders", "planner"
             ]
         );
         assert_eq!(at_end("%wait:"), ["builders", "planner"]);
@@ -2923,8 +2934,8 @@ mod tests {
         assert_eq!(
             queue_insertions("%wait("),
             [
-                "agent=", "bead=", "proc=", "time=", "unit=", "builders",
-                "planner"
+                "agent=", "bead=", "hood=", "proc=", "time=", "unit=",
+                "builders", "planner"
             ]
         );
         assert_eq!(at_end("%id(worker, clan="), ["builders"]);

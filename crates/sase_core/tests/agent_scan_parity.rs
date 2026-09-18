@@ -433,6 +433,7 @@ fn build_waiting(root: &Path) {
             "name": "waiter",
             "wait_for": ["upstream"],
             "wait_for_beads": ["sase-87.2"],
+            "wait_for_hoods": ["sase-11l"],
             "wait_duration": 600.0,
             "wait_priority": 4,
         }),
@@ -1721,6 +1722,7 @@ fn waiting_marker_decode_error_does_not_crash() {
     let meta = rec.agent_meta.as_ref().unwrap();
     assert_eq!(meta.wait_for, vec!["upstream".to_string()]);
     assert_eq!(meta.wait_for_beads, vec!["sase-87.2".to_string()]);
+    assert_eq!(meta.wait_for_hoods, vec!["sase-11l".to_string()]);
     assert_eq!(meta.wait_duration, Some(600.0));
     assert_eq!(meta.wait_priority, Some(4));
 
@@ -1746,6 +1748,7 @@ fn waiting_marker_carries_runner_slot_fields() {
         &json!({
             "waiting_for": ["upstream"],
             "wait_for_beads": ["sase-87.2", "sase-87.3"],
+            "wait_for_hoods": ["sase-11l"],
             "wait_duration": 600.0,
             "wait_until": "2026-07-12T19:30:00Z",
             "wait_runners": 3,
@@ -1768,6 +1771,7 @@ fn waiting_marker_carries_runner_slot_fields() {
         &json!({
             "waiting_for": ["upstream"],
             "wait_for_beads": ["sase-87.2", "sase-87.3"],
+            "wait_for_hoods": ["sase-11l"],
             "wait_duration": 600.0,
             "wait_until": "2026-07-12T19:30:00Z",
             "wait_runners": 3,
@@ -1790,6 +1794,7 @@ fn waiting_marker_carries_runner_slot_fields() {
         waiting.wait_for_beads,
         vec!["sase-87.2".to_string(), "sase-87.3".to_string()]
     );
+    assert_eq!(waiting.wait_for_hoods, vec!["sase-11l".to_string()]);
     assert_eq!(waiting.wait_duration, Some(600.0));
     assert_eq!(waiting.wait_until.as_deref(), Some("2026-07-12T19:30:00Z"));
     assert_eq!(waiting.queue_capacity, Some(3));
