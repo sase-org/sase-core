@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.54](https://github.com/sase-org/sase-core/compare/v0.34.53...v0.34.54) - 2026-09-18
+
+### Added
+
+- *(sudo)* add completion authorization core contracts
+
 ## [0.34.53](https://github.com/sase-org/sase-core/compare/v0.34.52...v0.34.53) - 2026-09-18
 
 ### Added
