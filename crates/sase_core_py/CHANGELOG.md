@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.52](https://github.com/sase-org/sase-core/compare/v0.34.51...v0.34.52) - 2026-09-18
+
+### Added
+
+- *(sudo)* add detached runner execution
+
 ## [0.34.51](https://github.com/sase-org/sase-core/compare/v0.34.50...v0.34.51) - 2026-09-18
 
 ### Fixed
