@@ -1,12 +1,10 @@
 //! Review-state policy for suppressing repeated machine-init prompts.
 
-use super::reconcile::reconcile_machine_enrollments;
 use super::wire::{
     DiscoveryCandidateWire, MachineInitReviewAssessmentRequestWire,
     MachineInitReviewAssessmentResultWire, MachineInitReviewEntryWire,
     MachineInitReviewMergeRequestWire, MachineInitReviewStateWire,
-    MachineReconcileRequestWire, MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-    RECONCILE_STATUS_NEW,
+    MACHINE_SETUP_WIRE_SCHEMA_VERSION,
 };
 use super::MachineSetupError;
 
@@ -20,8 +18,8 @@ pub fn assess_machine_init_review(
         Some(state) => Some(normalize_state(state)?),
         None => None,
     };
-    let state = match normalized_state.as_ref() {
-        Some(state) if state.initial_review_completed => state,
+    match normalized_state.as_ref() {
+        Some(state) if state.initial_review_completed => {}
         _ => {
             return Ok(MachineInitReviewAssessmentResultWire {
                 schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
@@ -31,33 +29,13 @@ pub fn assess_machine_init_review(
                 normalized_state,
             });
         }
-    };
-
-    let reconciled =
-        reconcile_machine_enrollments(&MachineReconcileRequestWire {
-            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-            candidates: request.candidates.clone(),
-            enrolled: request.enrolled.clone(),
-        })?;
-    let mut unreviewed_candidates = Vec::new();
-    for item in reconciled.items {
-        if item.status != RECONCILE_STATUS_NEW {
-            continue;
-        }
-        if !state
-            .reviewed
-            .iter()
-            .any(|entry| entry_matches_candidate(entry, &item.candidate))
-        {
-            push_unique_candidate(&mut unreviewed_candidates, item.candidate);
-        }
     }
 
     Ok(MachineInitReviewAssessmentResultWire {
         schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-        offer_enrollment: !unreviewed_candidates.is_empty(),
+        offer_enrollment: false,
         initial_review_required: false,
-        unreviewed_candidates,
+        unreviewed_candidates: Vec::new(),
         normalized_state,
     })
 }
@@ -175,33 +153,4 @@ fn merge_entry(
         }
     }
     entries.push(incoming);
-}
-
-fn entry_matches_candidate(
-    entry: &MachineInitReviewEntryWire,
-    candidate: &DiscoveryCandidateWire,
-) -> bool {
-    if !entry.installation_pin.is_empty()
-        && !candidate.installation_pin.is_empty()
-    {
-        return entry.installation_pin == candidate.installation_pin;
-    }
-    !entry.provider_ref.is_empty()
-        && !entry.endpoint.is_empty()
-        && entry.provider_ref == candidate.provider_ref
-        && entry.endpoint == candidate.endpoint
-}
-
-fn push_unique_candidate(
-    candidates: &mut Vec<DiscoveryCandidateWire>,
-    candidate: DiscoveryCandidateWire,
-) {
-    if candidates.iter().any(|existing| {
-        existing.provider_ref == candidate.provider_ref
-            && existing.endpoint == candidate.endpoint
-            && existing.installation_pin == candidate.installation_pin
-    }) {
-        return;
-    }
-    candidates.push(candidate);
 }

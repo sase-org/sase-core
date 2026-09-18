@@ -199,50 +199,57 @@ fn review_merge_records_empty_and_deduplicated_completed_reviews() {
 }
 
 #[test]
-fn review_assessment_ignores_display_order_and_duplicate_observations() {
+fn review_assessment_treats_completed_initial_review_as_terminal() {
     let pin_a = pin('a');
+    let pin_b = pin('b');
     let state = review_state(vec![MachineInitReviewEntryWire {
         provider_ref: "builtin@https".to_string(),
-        endpoint: "https://old-name.example.test".to_string(),
+        endpoint: "https://fleet.example.test".to_string(),
         installation_pin: pin_a.clone(),
     }]);
-    let mut changed_display =
-        review_candidate("https://renamed.example.test", &pin_a);
-    changed_display.display_name = "a new friendly name".to_string();
 
     let result =
         assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
             schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
             state: Some(state),
-            candidates: vec![changed_display.clone(), changed_display],
-            enrolled: vec![],
+            candidates: vec![
+                review_candidate("https://fleet.example.test", &pin_a),
+                review_candidate("https://new.example.test", &pin_b),
+            ],
+            enrolled: vec![EnrolledMachineWire {
+                alias: "apollo".to_string(),
+                provider_ref: "builtin@https".to_string(),
+                endpoint: "https://apollo.example.test".to_string(),
+                pinned_installation_id: pin('c'),
+            }],
         })
         .unwrap();
+
     assert!(!result.offer_enrollment);
+    assert!(!result.initial_review_required);
     assert!(result.unreviewed_candidates.is_empty());
 }
 
 #[test]
-fn review_assessment_uses_endpoint_when_either_pin_is_absent() {
-    let state = review_state(vec![MachineInitReviewEntryWire {
-        provider_ref: "builtin@https".to_string(),
-        endpoint: "https://tailnet.example.test".to_string(),
-        installation_pin: String::new(),
-    }]);
-    let reviewed =
-        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
-            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-            state: Some(state.clone()),
-            candidates: vec![review_candidate(
-                "https://tailnet.example.test",
-                "",
-            )],
-            enrolled: vec![],
-        })
-        .unwrap();
-    assert!(!reviewed.offer_enrollment);
+fn review_assessment_normalizes_completed_review_without_reconciling() {
+    let state = MachineInitReviewStateWire {
+        schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
+        initial_review_completed: true,
+        reviewed: vec![
+            MachineInitReviewEntryWire {
+                provider_ref: " builtin@https ".to_string(),
+                endpoint: " https://fleet.example.test ".to_string(),
+                installation_pin: String::new(),
+            },
+            MachineInitReviewEntryWire {
+                provider_ref: "builtin@https".to_string(),
+                endpoint: "https://fleet.example.test".to_string(),
+                installation_pin: pin('a'),
+            },
+        ],
+    };
 
-    let new_endpoint =
+    let result =
         assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
             schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
             state: Some(state),
@@ -250,59 +257,16 @@ fn review_assessment_uses_endpoint_when_either_pin_is_absent() {
             enrolled: vec![],
         })
         .unwrap();
-    assert!(new_endpoint.offer_enrollment);
-    assert_eq!(new_endpoint.unreviewed_candidates.len(), 1);
-}
 
-#[test]
-fn review_assessment_treats_different_nonempty_pins_as_new_installations() {
-    let state = review_state(vec![MachineInitReviewEntryWire {
-        provider_ref: "builtin@https".to_string(),
-        endpoint: "https://fleet.example.test".to_string(),
-        installation_pin: pin('a'),
-    }]);
-    let result =
-        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
-            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-            state: Some(state),
-            candidates: vec![review_candidate(
-                "https://fleet.example.test",
-                &pin('b'),
-            )],
-            enrolled: vec![],
-        })
-        .unwrap();
-    assert!(result.offer_enrollment);
-    assert_eq!(result.unreviewed_candidates.len(), 1);
-}
-
-#[test]
-fn review_assessment_excludes_enrolled_and_repair_candidates() {
-    let pin_a = pin('a');
-    let pin_b = pin('b');
-    let result =
-        assess_machine_init_review(&MachineInitReviewAssessmentRequestWire {
-            schema_version: MACHINE_SETUP_WIRE_SCHEMA_VERSION,
-            state: Some(review_state(vec![])),
-            candidates: vec![
-                review_candidate("https://apollo.example.test", &pin_a),
-                review_candidate("https://apollo.example.test", &pin_b),
-                review_candidate("https://fleet.example.test", ""),
-            ],
-            enrolled: vec![EnrolledMachineWire {
-                alias: "apollo".to_string(),
-                provider_ref: "builtin@https".to_string(),
-                endpoint: "https://apollo.example.test".to_string(),
-                pinned_installation_id: pin_a,
-            }],
-        })
-        .unwrap();
-    assert!(result.offer_enrollment);
-    assert_eq!(result.unreviewed_candidates.len(), 1);
+    assert!(!result.offer_enrollment);
+    assert!(result.unreviewed_candidates.is_empty());
+    let normalized = result.normalized_state.unwrap();
+    assert_eq!(normalized.reviewed.len(), 1);
     assert_eq!(
-        result.unreviewed_candidates[0].endpoint,
+        normalized.reviewed[0].endpoint,
         "https://fleet.example.test"
     );
+    assert_eq!(normalized.reviewed[0].installation_pin, pin('a'));
 }
 
 #[test]

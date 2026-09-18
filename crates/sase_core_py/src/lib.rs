@@ -22231,11 +22231,9 @@ COMMITS:
                 .call1((assess.bind(py).downcast::<PyDict>().unwrap(),))
                 .unwrap();
             let assess = py_to_json_value(&assess).unwrap();
-            assert_eq!(assess["offer_enrollment"], json!(true));
-            assert_eq!(
-                assess["unreviewed_candidates"][0]["endpoint"],
-                json!("https://new.example.test")
-            );
+            assert_eq!(assess["offer_enrollment"], json!(false));
+            assert_eq!(assess["initial_review_required"], json!(false));
+            assert_eq!(assess["unreviewed_candidates"], json!([]));
 
             let bad_schema = json_value_to_py(
                 py,
