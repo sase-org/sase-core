@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.53](https://github.com/sase-org/sase-core/compare/v0.34.52...v0.34.53) - 2026-09-18
+
+### Added
+
+- *(finalizer)* select remaining declared repos after repair
+- *(bead)* add atomic bulk link-projection mutation
+- *(wait)* add hood directive contract
+- *(sudo)* preserve detached runner ownership and live output
+
 ### Added
 
 - *(bead)* add atomic bulk link-projection mutation
