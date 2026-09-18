@@ -13,8 +13,8 @@ use super::wire::{
     GateDecisionFailureOutcomeWire, GateDecisionFailureStageWire,
     GateDecisionOutcomeStatusWire, GateDecisionReceiptWire,
     GateLifecycleRequestWire, GATE_DECISION_CODE_CONFLICT,
-    GATE_DECISION_CODE_UNSUPPORTED_SCHEMA, GATE_DECISION_WIRE_SCHEMA_VERSION,
-    GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
+    GATE_DECISION_CODE_INVALID_REQUEST, GATE_DECISION_CODE_UNSUPPORTED_SCHEMA,
+    GATE_DECISION_WIRE_SCHEMA_VERSION, GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
     GATE_LIFECYCLE_CODE_UNSUPPORTED_SCHEMA,
     GATE_LIFECYCLE_DISPOSITION_ACCEPTED_FAILED,
     GATE_LIFECYCLE_DISPOSITION_ACCEPTED_OWNER_LOST,
@@ -105,7 +105,7 @@ fn rejects_a_conflicting_selection_before_any_execution() {
     let first = decide_gate_decision_acceptance(&request(None))
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.selected_option_ids = vec!["reject".to_string()];
     let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
     assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
@@ -116,7 +116,7 @@ fn rejects_a_conflicting_input_identity() {
     let first = decide_gate_decision_acceptance(&request(None))
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.input_identity = "sha256:different".to_string();
     let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
     assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
@@ -127,7 +127,7 @@ fn rejects_a_conflicting_feedback_identity() {
     let mut base = request(None);
     base.feedback_identity = Some("sha256:feedback-a".to_string());
     let first = decide_gate_decision_acceptance(&base).unwrap().receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.feedback_identity = Some("sha256:feedback-b".to_string());
     let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
     assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
@@ -138,7 +138,7 @@ fn rejects_a_conflict_while_the_existing_owner_is_live() {
     let first = decide_gate_decision_acceptance(&request(None))
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.selected_option_ids = vec!["reject".to_string()];
     second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
         response_lock_held: true,
@@ -153,7 +153,7 @@ fn supersedes_a_conflict_after_a_current_failure_outcome() {
     let first = decide_gate_decision_acceptance(&request(None))
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.selected_option_ids = vec!["reject".to_string()];
     second_request.acceptance_id = Some("acceptance-b".to_string());
     second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
@@ -162,6 +162,15 @@ fn supersedes_a_conflict_after_a_current_failure_outcome() {
     });
     let outcome = decide_gate_decision_acceptance(&second_request).unwrap();
     assert_eq!(outcome.status, GateDecisionOutcomeStatusWire::Superseded);
+    assert_eq!(outcome.superseded_receipt.as_ref(), Some(&first));
+    assert!(!outcome.owner_lost);
+    assert_eq!(
+        outcome
+            .failure
+            .as_ref()
+            .map(|failure| failure.outcome_id.as_str()),
+        Some("outcome-1")
+    );
     assert_eq!(
         outcome.receipt.acceptance_id.as_deref(),
         Some("acceptance-b")
@@ -177,7 +186,7 @@ fn stale_failure_outcomes_do_not_make_a_newer_receipt_supersedable() {
     let first = decide_gate_decision_acceptance(&request(None))
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.selected_option_ids = vec!["reject".to_string()];
     second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
         current_failure: Some(failure_outcome(Some("stale-acceptance"))),
@@ -204,7 +213,7 @@ fn supersedes_a_conflict_after_the_existing_process_owner_is_dead() {
     let first = decide_gate_decision_acceptance(&first_request)
         .unwrap()
         .receipt;
-    let mut second_request = request(Some(first));
+    let mut second_request = request(Some(first.clone()));
     second_request.selected_option_ids = vec!["reject".to_string()];
     second_request.acceptance_id = Some("acceptance-b".to_string());
     second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
@@ -216,6 +225,17 @@ fn supersedes_a_conflict_after_the_existing_process_owner_is_dead() {
     });
     let outcome = decide_gate_decision_acceptance(&second_request).unwrap();
     assert_eq!(outcome.status, GateDecisionOutcomeStatusWire::Superseded);
+    assert_eq!(outcome.superseded_receipt.as_ref(), Some(&first));
+    assert!(outcome.owner_lost);
+    assert_eq!(outcome.owner_liveness.as_deref(), Some("dead"));
+    let owner_loss = outcome.owner_loss.as_ref().unwrap();
+    assert_eq!(owner_loss.acceptance_id, "acceptance-a");
+    assert_eq!(owner_loss.owner_liveness, "dead");
+    assert_eq!(
+        owner_loss.owner.as_ref().unwrap().host.as_deref(),
+        Some("apollo")
+    );
+    assert_eq!(owner_loss.owner.as_ref().unwrap().pid, Some(4242));
 }
 
 #[test]
@@ -232,6 +252,69 @@ fn treats_an_unknown_existing_owner_as_live_for_conflicts() {
     });
     let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
     assert_eq!(error.code, GATE_DECISION_CODE_CONFLICT);
+    assert_eq!(error.owner_liveness.as_deref(), Some("unknown"));
+    assert!(error.message.contains("existing owner liveness is unknown"));
+    assert!(error.message.contains("owner proc_id attempt:1234"));
+}
+
+#[test]
+fn minting_without_acceptance_id_is_invalid() {
+    let mut request = request(None);
+    request.acceptance_id = None;
+    let error = decide_gate_decision_acceptance(&request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_INVALID_REQUEST);
+    assert!(error.message.contains("acceptance_id"));
+}
+
+#[test]
+fn an_existing_receipt_without_acceptance_id_is_invalid() {
+    let mut existing = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    existing.acceptance_id = None;
+    let mut second_request = request(Some(existing));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_INVALID_REQUEST);
+    assert!(error.message.contains("existing gate-decision receipt"));
+}
+
+#[test]
+fn malformed_current_failure_outcome_is_rejected() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.acceptance_id = Some("acceptance-b".to_string());
+    let mut failure = failure_outcome(Some("acceptance-a"));
+    failure.code.clear();
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        current_failure: Some(failure),
+        ..Default::default()
+    });
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_INVALID_REQUEST);
+    assert!(error.message.contains("current_failure.code"));
+}
+
+#[test]
+fn post_response_failure_is_not_valid_as_current_failure() {
+    let first = decide_gate_decision_acceptance(&request(None))
+        .unwrap()
+        .receipt;
+    let mut second_request = request(Some(first));
+    second_request.selected_option_ids = vec!["reject".to_string()];
+    second_request.acceptance_id = Some("acceptance-b".to_string());
+    let mut failure = failure_outcome(Some("acceptance-a"));
+    failure.stage = GateDecisionFailureStageWire::SideEffects;
+    second_request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        current_failure: Some(failure),
+        ..Default::default()
+    });
+    let error = decide_gate_decision_acceptance(&second_request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_INVALID_REQUEST);
+    assert!(error.message.contains("pre-response failure"));
 }
 
 #[test]
@@ -262,6 +345,7 @@ fn decides_from_json_and_rejects_an_unsupported_schema_version() {
         "request_hash": "sha256:abc",
         "selected_option_ids": ["approve"],
         "input_identity": "sha256:in",
+        "acceptance_id": "acceptance-json",
         "source": "mobile",
         "accepted_at_unix": 1.0,
     });
@@ -376,6 +460,27 @@ fn a_published_response_always_wins() {
 }
 
 #[test]
+fn a_post_response_failure_is_echoed_without_changing_answered_disposition() {
+    let mut failure = failure_outcome(Some("acceptance-a"));
+    failure.stage = GateDecisionFailureStageWire::FollowUp;
+    let mut request = lifecycle_request();
+    request.has_response = true;
+    request.receipt = Some(lifecycle_receipt());
+    request.execution_facts = Some(GateDecisionExecutionFactsWire {
+        post_response_failure: Some(failure),
+        ..Default::default()
+    });
+    let decision = decide_gate_lifecycle(&request).unwrap();
+    assert_eq!(decision.disposition, GATE_LIFECYCLE_DISPOSITION_ANSWERED);
+    assert!(!decision.can_cancel);
+    assert!(!decision.cancel_permitted);
+    assert_eq!(
+        decision.failure.as_ref().map(|failure| failure.stage),
+        Some(GateDecisionFailureStageWire::FollowUp)
+    );
+}
+
+#[test]
 fn an_unreadable_receipt_is_reported_explicitly() {
     let mut request = lifecycle_request();
     request.receipt_unreadable = true;
@@ -404,6 +509,17 @@ fn a_receipt_naming_a_different_request_hash_is_reported_explicitly() {
 }
 
 #[test]
+fn a_receipt_without_acceptance_id_is_rejected_before_lifecycle_policy() {
+    let mut request = lifecycle_request();
+    let mut receipt = lifecycle_receipt();
+    receipt.acceptance_id = None;
+    request.receipt = Some(receipt);
+    let error = decide_gate_lifecycle(&request).unwrap_err();
+    assert_eq!(error.code, GATE_DECISION_CODE_INVALID_REQUEST);
+    assert!(error.message.contains("gate lifecycle receipt"));
+}
+
+#[test]
 fn a_verified_receipt_is_accepted_unfinished_even_past_the_grace_window() {
     let mut request = lifecycle_request();
     request.receipt = Some(lifecycle_receipt());
@@ -415,6 +531,7 @@ fn a_verified_receipt_is_accepted_unfinished_even_past_the_grace_window() {
     );
     assert!(!decision.can_cancel);
     assert!(!decision.can_supersede);
+    assert_eq!(decision.owner_liveness.as_deref(), Some("unknown"));
 }
 
 #[test]
@@ -445,6 +562,15 @@ fn a_current_failure_reports_accepted_failed_with_recovery_permissions() {
     );
     assert!(decision.can_cancel);
     assert!(decision.can_supersede);
+    assert!(decision.cancel_permitted);
+    assert!(decision.supersede_permitted);
+    assert_eq!(
+        decision
+            .failure
+            .as_ref()
+            .map(|failure| failure.outcome_id.as_str()),
+        Some("outcome-1")
+    );
 }
 
 #[test]
@@ -475,6 +601,10 @@ fn a_dead_owner_reports_accepted_owner_lost_with_recovery_permissions() {
     );
     assert!(decision.can_cancel);
     assert!(decision.can_supersede);
+    assert_eq!(decision.owner_liveness.as_deref(), Some("dead"));
+    let owner_loss = decision.owner_loss.as_ref().unwrap();
+    assert_eq!(owner_loss.acceptance_id, "acceptance-a");
+    assert_eq!(owner_loss.owner.as_ref().unwrap().pid, Some(4242));
 }
 
 #[test]

@@ -21,6 +21,10 @@ pub const GATE_DECISION_CODE_UNSUPPORTED_SCHEMA: &str =
 pub struct GateDecisionError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_liveness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Box<GateDecisionOwnerSummaryWire>>,
 }
 
 impl GateDecisionError {
@@ -28,11 +32,23 @@ impl GateDecisionError {
         Self {
             code: code.to_string(),
             message: message.into(),
+            owner_liveness: None,
+            owner: None,
         }
+    }
+
+    pub fn with_owner_diagnostics(
+        mut self,
+        owner_liveness: impl Into<String>,
+        owner: Option<GateDecisionOwnerSummaryWire>,
+    ) -> Self {
+        self.owner_liveness = Some(owner_liveness.into());
+        self.owner = owner.map(Box::new);
+        self
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateDecisionExecutionOwnerKindWire {
     Proc,
@@ -65,6 +81,29 @@ pub struct GateDecisionExecutionOwnerRecordWire {
 pub enum GateDecisionExecutionOwnerWire {
     LegacyProcId(String),
     Structured(GateDecisionExecutionOwnerRecordWire),
+}
+
+/// Redacted owner evidence safe to show in conflicts and lifecycle outputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateDecisionOwnerSummaryWire {
+    pub kind: GateDecisionExecutionOwnerKindWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proc_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateDecisionOwnerLossWire {
+    pub acceptance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<GateDecisionOwnerSummaryWire>,
+    pub owner_liveness: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +156,8 @@ pub struct GateDecisionExecutionFactsWire {
     pub legacy_proc_supervisor_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_failure: Option<GateDecisionFailureOutcomeWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_response_failure: Option<GateDecisionFailureOutcomeWire>,
 }
 
 /// The durable receipt for one accepted gate decision.
@@ -186,6 +227,16 @@ pub enum GateDecisionOutcomeStatusWire {
 pub struct GateDecisionAcceptanceOutcomeWire {
     pub status: GateDecisionOutcomeStatusWire,
     pub receipt: GateDecisionReceiptWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_receipt: Option<GateDecisionReceiptWire>,
+    #[serde(default)]
+    pub owner_lost: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_loss: Option<GateDecisionOwnerLossWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_liveness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GateDecisionFailureOutcomeWire>,
 }
 
 /// Claim execution of the currently accepted receipt before appending an
@@ -266,7 +317,7 @@ pub struct GateLifecycleRequestWire {
 }
 
 /// Deterministic verdict for one gate's current lifecycle disposition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateLifecycleDecisionWire {
     pub schema_version: u32,
@@ -274,4 +325,12 @@ pub struct GateLifecycleDecisionWire {
     pub reason: String,
     pub can_cancel: bool,
     pub can_supersede: bool,
+    pub cancel_permitted: bool,
+    pub supersede_permitted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_liveness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_loss: Option<GateDecisionOwnerLossWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<GateDecisionFailureOutcomeWire>,
 }

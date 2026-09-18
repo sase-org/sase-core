@@ -25,6 +25,7 @@ pub use wire::{
     GateDecisionExecutionOwnerKindWire, GateDecisionExecutionOwnerRecordWire,
     GateDecisionExecutionOwnerWire, GateDecisionFailureOutcomeWire,
     GateDecisionFailureStageWire, GateDecisionOutcomeStatusWire,
+    GateDecisionOwnerLossWire, GateDecisionOwnerSummaryWire,
     GateDecisionReceiptWire, GateLifecycleDecisionWire,
     GateLifecycleRequestWire, GATE_DECISION_CODE_CONFLICT,
     GATE_DECISION_CODE_INVALID_REQUEST, GATE_DECISION_CODE_UNSUPPORTED_SCHEMA,

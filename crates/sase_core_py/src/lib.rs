@@ -28480,6 +28480,7 @@ MENTORS:
                 "request_hash": "sha256:deadbeef",
                 "selected_option_ids": ["reject"],
                 "input_identity": "sha256:input",
+                "acceptance_id": "acceptance-conflict",
                 "source": "cli",
                 "accepted_at_unix": 1_726_000_600.0,
             });
@@ -28529,6 +28530,12 @@ MENTORS:
                 superseded["receipt"]["acceptance_id"],
                 json!("acceptance-b")
             );
+            assert_eq!(
+                superseded["superseded_receipt"]["acceptance_id"],
+                json!("acceptance-a")
+            );
+            assert_eq!(superseded["owner_lost"], json!(false));
+            assert_eq!(superseded["failure"]["outcome_id"], json!("outcome-1"));
 
             let claim_request = json_value_to_py(
                 py,
@@ -28595,6 +28602,61 @@ MENTORS:
             let answered = py_to_json_value(answered.bind(py)).unwrap();
             assert_eq!(answered["disposition"], json!("answered"));
 
+            let answered_with_post_response_failure_request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "gate_id": "gate-abc",
+                    "request_hash": "sha256:deadbeef",
+                    "now_unix": 2_000.0,
+                    "grace_seconds": 300.0,
+                    "has_response": true,
+                    "receipt": {
+                        "schema_version": 1,
+                        "gate_id": "gate-abc",
+                        "request_hash": "sha256:deadbeef",
+                        "selected_option_ids": ["approve"],
+                        "input_identity": "sha256:input",
+                        "acceptance_id": "acceptance-a",
+                        "source": "cli",
+                        "accepted_at_unix": 1_726_000_000.0,
+                        "identity_fingerprint": "fingerprint",
+                    },
+                    "execution_facts": {
+                        "post_response_failure": {
+                            "outcome_id": "outcome-follow-up",
+                            "acceptance_id": "acceptance-a",
+                            "attempt_id": "attempt-1",
+                            "stage": "follow_up",
+                            "code": "follow_up_failed",
+                            "message": "follow-up failed",
+                            "at_unix": 1_726_000_050.0,
+                            "error_record": "errors/outcome-follow-up.json"
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+            let answered_with_post_response_failure = py_decide_gate_lifecycle(
+                py,
+                answered_with_post_response_failure_request
+                    .bind(py)
+                    .downcast::<PyDict>()
+                    .unwrap(),
+            )
+            .unwrap();
+            let answered_with_post_response_failure =
+                py_to_json_value(answered_with_post_response_failure.bind(py))
+                    .unwrap();
+            assert_eq!(
+                answered_with_post_response_failure["disposition"],
+                json!("answered")
+            );
+            assert_eq!(
+                answered_with_post_response_failure["failure"]["stage"],
+                json!("follow_up")
+            );
+
             let accepted_unfinished_request = json_value_to_py(
                 py,
                 &json!({
@@ -28611,6 +28673,7 @@ MENTORS:
                         "request_hash": "sha256:deadbeef",
                         "selected_option_ids": ["approve"],
                         "input_identity": "sha256:input",
+                        "acceptance_id": "acceptance-a",
                         "source": "cli",
                         "accepted_at_unix": 1_726_000_000.0,
                         "identity_fingerprint": "fingerprint",
@@ -28635,6 +28698,7 @@ MENTORS:
             );
             assert_eq!(accepted_unfinished["can_cancel"], json!(false));
             assert_eq!(accepted_unfinished["can_supersede"], json!(false));
+            assert_eq!(accepted_unfinished["owner_liveness"], json!("unknown"));
 
             let accepted_failed_request = json_value_to_py(
                 py,

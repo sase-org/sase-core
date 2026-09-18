@@ -16,12 +16,13 @@ use super::wire::{
     GateDecisionError, GateDecisionExecutionClaimOutcomeWire,
     GateDecisionExecutionClaimRequestWire, GateDecisionExecutionFactsWire,
     GateDecisionExecutionOwnerKindWire, GateDecisionExecutionOwnerWire,
-    GateDecisionFailureOutcomeWire, GateDecisionOutcomeStatusWire,
-    GateDecisionReceiptWire, GateLifecycleDecisionWire,
-    GateLifecycleRequestWire, GATE_DECISION_CODE_CONFLICT,
-    GATE_DECISION_CODE_INVALID_REQUEST, GATE_DECISION_CODE_UNSUPPORTED_SCHEMA,
-    GATE_DECISION_WIRE_SCHEMA_VERSION, GATE_LIFECYCLE_CODE_INVALID_RECEIPT,
-    GATE_LIFECYCLE_CODE_INVALID_REQUEST,
+    GateDecisionFailureOutcomeWire, GateDecisionFailureStageWire,
+    GateDecisionOutcomeStatusWire, GateDecisionOwnerLossWire,
+    GateDecisionOwnerSummaryWire, GateDecisionReceiptWire,
+    GateLifecycleDecisionWire, GateLifecycleRequestWire,
+    GATE_DECISION_CODE_CONFLICT, GATE_DECISION_CODE_INVALID_REQUEST,
+    GATE_DECISION_CODE_UNSUPPORTED_SCHEMA, GATE_DECISION_WIRE_SCHEMA_VERSION,
+    GATE_LIFECYCLE_CODE_INVALID_RECEIPT, GATE_LIFECYCLE_CODE_INVALID_REQUEST,
     GATE_LIFECYCLE_CODE_UNSUPPORTED_SCHEMA,
     GATE_LIFECYCLE_DISPOSITION_ACCEPTED_FAILED,
     GATE_LIFECYCLE_DISPOSITION_ACCEPTED_OWNER_LOST,
@@ -93,15 +94,103 @@ fn mint_receipt(
     }
 }
 
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn require_acceptance_id<'a>(
+    value: Option<&'a String>,
+    context: &str,
+) -> Result<&'a str, GateDecisionError> {
+    nonempty(value.map(String::as_str)).ok_or_else(|| {
+        GateDecisionError::new(
+            GATE_DECISION_CODE_INVALID_REQUEST,
+            format!("{context} requires a nonempty acceptance_id"),
+        )
+    })
+}
+
+fn validate_receipt_acceptance_id(
+    receipt: &GateDecisionReceiptWire,
+    context: &str,
+) -> Result<(), GateDecisionError> {
+    require_acceptance_id(receipt.acceptance_id.as_ref(), context).map(|_| ())
+}
+
+fn validate_failure_outcome(
+    failure: &GateDecisionFailureOutcomeWire,
+    field_name: &str,
+) -> Result<(), GateDecisionError> {
+    for (name, value) in [
+        ("outcome_id", failure.outcome_id.as_str()),
+        (
+            "acceptance_id",
+            failure.acceptance_id.as_deref().unwrap_or(""),
+        ),
+        ("attempt_id", failure.attempt_id.as_str()),
+        ("code", failure.code.as_str()),
+        ("message", failure.message.as_str()),
+        ("error_record", failure.error_record.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(GateDecisionError::new(
+                GATE_DECISION_CODE_INVALID_REQUEST,
+                format!("{field_name}.{name} must be nonempty"),
+            ));
+        }
+    }
+    if !failure.at_unix.is_finite() {
+        return Err(GateDecisionError::new(
+            GATE_DECISION_CODE_INVALID_REQUEST,
+            format!("{field_name}.at_unix must be finite"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_facts(
+    facts: Option<&GateDecisionExecutionFactsWire>,
+) -> Result<(), GateDecisionError> {
+    let Some(facts) = facts else {
+        return Ok(());
+    };
+    if let Some(failure) = &facts.current_failure {
+        validate_failure_outcome(failure, "execution_facts.current_failure")?;
+        if matches!(
+            failure.stage,
+            GateDecisionFailureStageWire::SideEffects
+                | GateDecisionFailureStageWire::FollowUp
+        ) {
+            return Err(GateDecisionError::new(
+                GATE_DECISION_CODE_INVALID_REQUEST,
+                "execution_facts.current_failure must be a pre-response failure",
+            ));
+        }
+    }
+    if let Some(failure) = &facts.post_response_failure {
+        validate_failure_outcome(
+            failure,
+            "execution_facts.post_response_failure",
+        )?;
+        if !matches!(
+            failure.stage,
+            GateDecisionFailureStageWire::SideEffects
+                | GateDecisionFailureStageWire::FollowUp
+        ) {
+            return Err(GateDecisionError::new(
+                GATE_DECISION_CODE_INVALID_REQUEST,
+                "execution_facts.post_response_failure must be a post-response failure",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn failure_matches_receipt(
     receipt: &GateDecisionReceiptWire,
     failure: &GateDecisionFailureOutcomeWire,
 ) -> bool {
-    match (&receipt.acceptance_id, &failure.acceptance_id) {
-        (Some(receipt_id), Some(failure_id)) => receipt_id == failure_id,
-        (Some(_), None) | (None, Some(_)) => false,
-        (None, None) => true,
-    }
+    receipt.acceptance_id.as_ref() == failure.acceptance_id.as_ref()
 }
 
 fn current_failure_for_receipt<'a>(
@@ -112,11 +201,97 @@ fn current_failure_for_receipt<'a>(
     failure_matches_receipt(receipt, failure).then_some(failure)
 }
 
+fn post_response_failure_for_receipt<'a>(
+    receipt: &GateDecisionReceiptWire,
+    facts: Option<&'a GateDecisionExecutionFactsWire>,
+) -> Option<&'a GateDecisionFailureOutcomeWire> {
+    let failure =
+        facts.and_then(|facts| facts.post_response_failure.as_ref())?;
+    failure_matches_receipt(receipt, failure).then_some(failure)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecutionOwnerLiveness {
     Live,
     Dead,
     Unknown,
+}
+
+impl ExecutionOwnerLiveness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Dead => "dead",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn owner_summary(
+    owner: Option<&GateDecisionExecutionOwnerWire>,
+) -> Option<GateDecisionOwnerSummaryWire> {
+    match owner? {
+        GateDecisionExecutionOwnerWire::LegacyProcId(proc_id) => {
+            Some(GateDecisionOwnerSummaryWire {
+                kind: GateDecisionExecutionOwnerKindWire::Proc,
+                proc_id: Some(proc_id.clone()),
+                host: None,
+                pid: None,
+            })
+        }
+        GateDecisionExecutionOwnerWire::Structured(owner) => {
+            Some(GateDecisionOwnerSummaryWire {
+                kind: owner.kind,
+                proc_id: owner.proc_id.clone(),
+                host: owner.host.clone(),
+                pid: owner.pid,
+            })
+        }
+    }
+}
+
+fn owner_loss(
+    receipt: &GateDecisionReceiptWire,
+    liveness: ExecutionOwnerLiveness,
+) -> Option<GateDecisionOwnerLossWire> {
+    if liveness != ExecutionOwnerLiveness::Dead {
+        return None;
+    }
+    let acceptance_id = nonempty(receipt.acceptance_id.as_deref())?;
+    Some(GateDecisionOwnerLossWire {
+        acceptance_id: acceptance_id.to_string(),
+        owner: owner_summary(receipt.execution_owner.as_ref()),
+        owner_liveness: liveness.as_str().to_string(),
+        reason: "gate decision execution owner is no longer live".to_string(),
+    })
+}
+
+fn conflict_message(
+    request: &GateDecisionAcceptanceRequestWire,
+    fingerprint: &str,
+    existing: &GateDecisionReceiptWire,
+    liveness: ExecutionOwnerLiveness,
+) -> String {
+    let mut message = format!(
+        "gate {} already has an accepted decision with a different selection or input; \
+         requested fingerprint {fingerprint} does not match accepted fingerprint {}; \
+         existing owner liveness is {}",
+        request.gate_id,
+        existing.identity_fingerprint,
+        liveness.as_str(),
+    );
+    if let Some(owner) = owner_summary(existing.execution_owner.as_ref()) {
+        if let Some(proc_id) = owner.proc_id {
+            message.push_str(&format!(", owner proc_id {proc_id}"));
+        }
+        if let Some(host) = owner.host {
+            message.push_str(&format!(", owner host {host}"));
+        }
+        if let Some(pid) = owner.pid {
+            message.push_str(&format!(", owner pid {pid}"));
+        }
+    }
+    message
 }
 
 fn execution_owner_liveness(
@@ -195,6 +370,11 @@ pub fn decide_gate_decision_acceptance(
     request: &GateDecisionAcceptanceRequestWire,
 ) -> Result<GateDecisionAcceptanceOutcomeWire, GateDecisionError> {
     validate_schema(request.schema_version)?;
+    require_acceptance_id(
+        request.acceptance_id.as_ref(),
+        "gate-decision acceptance request",
+    )?;
+    validate_execution_facts(request.execution_facts.as_ref())?;
     let fingerprint = gate_decision_identity_fingerprint(
         &request.request_hash,
         &request.selected_option_ids,
@@ -202,34 +382,54 @@ pub fn decide_gate_decision_acceptance(
         request.feedback_identity.as_deref(),
     );
     if let Some(existing) = &request.existing_receipt {
+        validate_receipt_acceptance_id(
+            existing,
+            "existing gate-decision receipt",
+        )?;
         if existing.identity_fingerprint == fingerprint {
             return Ok(GateDecisionAcceptanceOutcomeWire {
                 status: GateDecisionOutcomeStatusWire::Replayed,
                 receipt: existing.clone(),
+                superseded_receipt: None,
+                owner_lost: false,
+                owner_loss: None,
+                owner_liveness: None,
+                failure: None,
             });
         }
         let facts = request.execution_facts.as_ref();
-        if current_failure_for_receipt(existing, facts).is_some()
-            || execution_owner_liveness(existing, facts)
-                == ExecutionOwnerLiveness::Dead
+        let current_failure = current_failure_for_receipt(existing, facts);
+        let liveness = execution_owner_liveness(existing, facts);
+        if current_failure.is_some() || liveness == ExecutionOwnerLiveness::Dead
         {
+            let owner_loss = owner_loss(existing, liveness);
             return Ok(GateDecisionAcceptanceOutcomeWire {
                 status: GateDecisionOutcomeStatusWire::Superseded,
                 receipt: mint_receipt(request, fingerprint),
+                superseded_receipt: Some(existing.clone()),
+                owner_lost: owner_loss.is_some(),
+                owner_loss,
+                owner_liveness: Some(liveness.as_str().to_string()),
+                failure: current_failure.cloned(),
             });
         }
         return Err(GateDecisionError::new(
             GATE_DECISION_CODE_CONFLICT,
-            format!(
-                "gate {} already has an accepted decision with a different selection or input; \
-                 requested fingerprint {fingerprint} does not match accepted fingerprint {}",
-                request.gate_id, existing.identity_fingerprint
-            ),
+            conflict_message(request, &fingerprint, existing, liveness),
+        )
+        .with_owner_diagnostics(
+            liveness.as_str(),
+            owner_summary(existing.execution_owner.as_ref()),
         ));
     }
     Ok(GateDecisionAcceptanceOutcomeWire {
         status: GateDecisionOutcomeStatusWire::Accepted,
         receipt: mint_receipt(request, fingerprint),
+        superseded_receipt: None,
+        owner_lost: false,
+        owner_loss: None,
+        owner_liveness: None,
+        failure: None,
     })
 }
 
@@ -258,7 +458,12 @@ pub fn claim_gate_decision_execution(
     request: &GateDecisionExecutionClaimRequestWire,
 ) -> Result<GateDecisionExecutionClaimOutcomeWire, GateDecisionError> {
     validate_schema(request.schema_version)?;
+    require_acceptance_id(
+        request.acceptance_id.as_ref(),
+        "gate-decision execution claim",
+    )?;
     let receipt = &request.receipt;
+    validate_receipt_acceptance_id(receipt, "claimed gate-decision receipt")?;
     if receipt.gate_id != request.gate_id
         || receipt.request_hash != request.request_hash
         || request.acceptance_id.as_ref().is_some_and(|expected| {
@@ -310,7 +515,15 @@ fn lifecycle_decision(
     disposition: &str,
     reason: &str,
 ) -> GateLifecycleDecisionWire {
-    lifecycle_decision_with_permissions(disposition, reason, false, false)
+    lifecycle_decision_with_evidence(
+        disposition,
+        reason,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 fn lifecycle_decision_with_permissions(
@@ -319,12 +532,37 @@ fn lifecycle_decision_with_permissions(
     can_cancel: bool,
     can_supersede: bool,
 ) -> GateLifecycleDecisionWire {
+    lifecycle_decision_with_evidence(
+        disposition,
+        reason,
+        can_cancel,
+        can_supersede,
+        None,
+        None,
+        None,
+    )
+}
+
+fn lifecycle_decision_with_evidence(
+    disposition: &str,
+    reason: &str,
+    cancel_permitted: bool,
+    supersede_permitted: bool,
+    owner_liveness: Option<String>,
+    owner_loss: Option<GateDecisionOwnerLossWire>,
+    failure: Option<GateDecisionFailureOutcomeWire>,
+) -> GateLifecycleDecisionWire {
     GateLifecycleDecisionWire {
         schema_version: GATE_LIFECYCLE_WIRE_SCHEMA_VERSION,
         disposition: disposition.to_string(),
         reason: reason.to_string(),
-        can_cancel,
-        can_supersede,
+        can_cancel: cancel_permitted,
+        can_supersede: supersede_permitted,
+        cancel_permitted,
+        supersede_permitted,
+        owner_liveness,
+        owner_loss,
+        failure,
     }
 }
 
@@ -340,11 +578,34 @@ pub fn decide_gate_lifecycle(
     request: &GateLifecycleRequestWire,
 ) -> Result<GateLifecycleDecisionWire, GateDecisionError> {
     validate_lifecycle_schema(request.schema_version)?;
+    validate_execution_facts(request.execution_facts.as_ref())?;
 
     if request.has_response {
-        return Ok(lifecycle_decision(
+        let failure = request
+            .receipt
+            .as_ref()
+            .and_then(|receipt| {
+                if receipt.gate_id == request.gate_id
+                    && receipt.request_hash == request.request_hash
+                    && nonempty(receipt.acceptance_id.as_deref()).is_some()
+                {
+                    post_response_failure_for_receipt(
+                        receipt,
+                        request.execution_facts.as_ref(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .cloned();
+        return Ok(lifecycle_decision_with_evidence(
             GATE_LIFECYCLE_DISPOSITION_ANSWERED,
             "gate has a published response",
+            false,
+            false,
+            None,
+            None,
+            failure,
         ));
     }
     if request.receipt_unreadable {
@@ -368,6 +629,7 @@ pub fn decide_gate_lifecycle(
                 ),
             ));
         }
+        validate_receipt_acceptance_id(receipt, "gate lifecycle receipt")?;
         Some(receipt)
     } else {
         None
@@ -385,50 +647,70 @@ pub fn decide_gate_lifecycle(
     }
     if let Some(receipt) = verified_receipt {
         let facts = request.execution_facts.as_ref();
-        if current_failure_for_receipt(receipt, facts).is_some() {
-            return Ok(lifecycle_decision_with_permissions(
+        if let Some(failure) = current_failure_for_receipt(receipt, facts) {
+            let liveness = execution_owner_liveness(receipt, facts);
+            return Ok(lifecycle_decision_with_evidence(
                 GATE_LIFECYCLE_DISPOSITION_ACCEPTED_FAILED,
                 "gate decision execution failed after acceptance",
                 true,
                 true,
+                Some(liveness.as_str().to_string()),
+                owner_loss(receipt, liveness),
+                Some(failure.clone()),
             ));
         }
-        if execution_owner_liveness(receipt, facts)
-            == ExecutionOwnerLiveness::Dead
-        {
-            return Ok(lifecycle_decision_with_permissions(
+        let liveness = execution_owner_liveness(receipt, facts);
+        if liveness == ExecutionOwnerLiveness::Dead {
+            let owner_loss = owner_loss(receipt, liveness);
+            return Ok(lifecycle_decision_with_evidence(
                 GATE_LIFECYCLE_DISPOSITION_ACCEPTED_OWNER_LOST,
                 "gate decision execution owner is no longer live",
                 true,
                 true,
+                Some(liveness.as_str().to_string()),
+                owner_loss,
+                None,
             ));
         }
-        return Ok(lifecycle_decision(
+        return Ok(lifecycle_decision_with_evidence(
             GATE_LIFECYCLE_DISPOSITION_ACCEPTED_UNFINISHED,
             "gate decision is accepted; execution has not published a response yet",
+            false,
+            false,
+            Some(liveness.as_str().to_string()),
+            None,
+            None,
         ));
     }
     let Some(deadline) = request.deadline_unix else {
-        return Ok(lifecycle_decision(
+        return Ok(lifecycle_decision_with_permissions(
             GATE_LIFECYCLE_DISPOSITION_PENDING,
             "gate has no review deadline",
+            true,
+            false,
         ));
     };
     if request.now_unix < deadline {
-        return Ok(lifecycle_decision(
+        return Ok(lifecycle_decision_with_permissions(
             GATE_LIFECYCLE_DISPOSITION_PENDING,
             "gate review deadline has not passed",
+            true,
+            false,
         ));
     }
     if request.now_unix < deadline + request.grace_seconds {
-        return Ok(lifecycle_decision(
+        return Ok(lifecycle_decision_with_permissions(
             GATE_LIFECYCLE_DISPOSITION_EXPIRED_REVIEW,
             "gate review deadline passed; still inside the reclaim grace window",
+            true,
+            false,
         ));
     }
-    Ok(lifecycle_decision(
+    Ok(lifecycle_decision_with_permissions(
         GATE_LIFECYCLE_DISPOSITION_EXPIRED_GRACE,
         "gate review deadline and reclaim grace window both passed",
+        true,
+        false,
     ))
 }
 
