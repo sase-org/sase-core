@@ -497,6 +497,7 @@
 //! - `directive_completion_candidates(context: dict, inventories: dict | None = None) -> dict`
 //! - `bead_add_link(beads_dir: str, issue_id: str, target_ref: str, relation: str, description: str, origin: str = "manual", direction: str = "out", uses: int = 1, now: str | None = None, operation_id: str | None = None) -> dict`
 //! - `bead_set_link_projection(beads_dir: str, issue_id: str, target_ref: str, relation: str, direction: str, present: bool, operation_id: str, description: str | None = None, origin: str | None = None, uses: int = 1, now: str | None = None) -> dict`
+//! - `bead_set_link_projections(beads_dir: str, requests: list[dict]) -> dict`
 //! - `bead_remove_link(beads_dir: str, issue_id: str, target_ref: str, relation: str | None = None, direction: str = "out", now: str | None = None, operation_id: str | None = None) -> dict`
 //! - `bead_append_note(beads_dir: str, issue_id: str, entry: str, author: str | None = None, now: str | None = None) -> dict` (`issue["notes"]` is a list of note records)
 //! - `bead_note_edit(beads_dir: str, issue_id: str, note_id: str, text: str, author: str | None = None, now: str | None = None) -> dict`
@@ -1108,6 +1109,7 @@ use sase_core::bead::{
     route_bead_targets as core_bead_route_targets,
     search_issues as core_bead_search_issues,
     set_bead_link_projection as core_bead_set_link_projection,
+    set_bead_link_projections as core_bead_set_link_projections,
     show_issue as core_bead_show_issue,
     show_issue_detail_with_options as core_bead_show_issue_detail,
     size_check_relax_migration_sql as core_bead_size_check_relax_migration_sql,
@@ -1120,9 +1122,9 @@ use sase_core::bead::{
     update_issue as core_bead_update_issue,
     update_issues as core_bead_update_issues, BeadCreateRequestWire, BeadError,
     BeadEventStoreManifestWire, BeadEventStreamWire,
-    BeadPreclaimAssignmentWire, BeadResolutionWire,
-    BeadTargetRoutingRequestWire, BeadUpdateFieldsWire, IssueWire,
-    BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,
+    BeadLinkProjectionRequestWire, BeadPreclaimAssignmentWire,
+    BeadResolutionWire, BeadTargetRoutingRequestWire, BeadUpdateFieldsWire,
+    IssueWire, BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,
 };
 use sase_core::bead_action::{
     decide_bead_action_from_json as core_decide_bead_action_from_json,
@@ -10095,6 +10097,23 @@ fn py_bead_set_link_projection<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_set_link_projections")]
+fn py_bead_set_link_projections<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    requests: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let requests = bead_link_projection_requests_from_py_list(requests)?;
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_set_link_projections(&beads_dir, &requests)
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_remove_link")]
 #[pyo3(signature = (beads_dir, issue_id, target_ref, relation=None, direction="out", now=None, operation_id=None))]
 #[allow(clippy::too_many_arguments)]
@@ -10490,6 +10509,25 @@ fn artifact_ref_file_rows_from_py_list(
             )
         })
         .collect()
+}
+
+fn bead_link_projection_requests_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<BeadLinkProjectionRequestWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let request: BeadLinkProjectionRequestWire = serde_json::from_value(
+            value,
+        )
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "requests[{idx}] is not a valid BeadLinkProjectionRequestWire dict: {e}"
+            ))
+        })?;
+        values.push(request);
+    }
+    Ok(values)
 }
 
 fn bead_create_request_from_pydict(
@@ -19883,6 +19921,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_remove_many, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_add_link, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_set_link_projection, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_set_link_projections, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_link, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_add, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_dep_remove, m)?)?;
@@ -30989,6 +31028,167 @@ MENTORS:
                 value["issue"]["task_type_fields"]["evidence"],
                 "failed then passed"
             );
+        });
+    }
+
+    #[test]
+    fn bead_set_link_projections_binding_is_registered_and_projects_batch() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("bead_set_link_projection").is_ok());
+            assert!(module.getattr("bead_set_link_projections").is_ok());
+
+            let requests = PyList::empty_bound(py);
+            append_json(
+                py,
+                &requests,
+                json!({
+                    "issue_id": issue.id,
+                    "target_ref": "plan:202609/a.md",
+                    "relation": "related",
+                    "direction": "out",
+                    "present": true,
+                    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "description": "present edge",
+                    "origin": "manual",
+                    "uses": 1,
+                    "now": "2026-01-01T00:01:00Z"
+                }),
+            );
+            append_json(
+                py,
+                &requests,
+                json!({
+                    "issue_id": issue.id,
+                    "target_ref": "plan:202609/a.md",
+                    "relation": "related",
+                    "direction": "out",
+                    "present": false,
+                    "operation_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "now": "2026-01-01T00:02:00Z"
+                }),
+            );
+            let result = py_bead_set_link_projections(
+                py,
+                beads_dir.to_str().unwrap(),
+                &requests,
+            )
+            .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value["operation"], json!("link_project"));
+            assert_eq!(value["changed"], json!(true));
+            assert_eq!(value["issue_ids"], json!([issue.id]));
+        });
+    }
+
+    #[test]
+    fn bead_set_link_projections_binding_rejects_invalid_request_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let requests = PyList::empty_bound(py);
+            append_json(py, &requests, json!("not-a-dict"));
+            let error =
+                py_bead_set_link_projections(py, "/tmp/beads", &requests)
+                    .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert!(error.to_string().contains(
+                "requests[0] is not a valid BeadLinkProjectionRequestWire dict"
+            ));
+
+            let requests = PyList::empty_bound(py);
+            append_json(
+                py,
+                &requests,
+                json!({
+                    "issue_id": "sase-1",
+                    "target_ref": "plan:202609/a.md",
+                    "relation": "related",
+                    "direction": "sideways",
+                    "present": true,
+                    "operation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }),
+            );
+            let error =
+                py_bead_set_link_projections(py, "/tmp/beads", &requests)
+                    .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            let message = error.to_string();
+            assert!(
+                message.contains("requests[0] is not a valid BeadLinkProjectionRequestWire dict"),
+                "{message}"
+            );
+            assert!(
+                message.contains("sideways")
+                    || message.contains("unknown variant"),
+                "{message}"
+            );
+        });
+    }
+
+    #[test]
+    fn bead_set_link_projections_binding_surfaces_core_validation() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+        let beads_dir = temp.path().join("beads");
+        let issue = core_bead_create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Plan".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                now: Some("2026-01-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .issue
+        .unwrap();
+
+        Python::with_gil(|py| {
+            let requests = PyList::empty_bound(py);
+            append_json(
+                py,
+                &requests,
+                json!({
+                    "issue_id": issue.id,
+                    "target_ref": "plan:202609/a.md",
+                    "relation": "related",
+                    "direction": "out",
+                    "present": true,
+                    "operation_id": "not-a-hex-operation-id",
+                    "description": "present edge",
+                    "origin": "manual",
+                    "now": "2026-01-01T00:01:00Z"
+                }),
+            );
+            let error = py_bead_set_link_projections(
+                py,
+                beads_dir.to_str().unwrap(),
+                &requests,
+            )
+            .unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
+            assert!(error.to_string().contains(
+                "artifact link operation_id must be 32 lowercase hexadecimal characters"
+            ));
         });
     }
 
