@@ -6,7 +6,7 @@
 //! unprivileged gateway runner and Python bindings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -273,6 +273,17 @@ pub enum SudoExecutorLivenessWire {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SudoRemoteHandoffWire {
+    pub directory: String,
+    pub handshake: String,
+    pub ledger: String,
+    pub log: String,
+    pub manifest: String,
+    pub stop: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SudoAttemptWire {
     pub schema_version: u32,
@@ -295,6 +306,8 @@ pub struct SudoAttemptWire {
     pub operation_payload_digest: Option<String>,
     #[serde(default)]
     pub authorization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_handoff: Option<SudoRemoteHandoffWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -778,7 +791,58 @@ pub fn validate_sudo_attempt(
     if let Some(authorization_id) = &attempt.authorization_id {
         validate_sha256("authorization_id", authorization_id)?;
     }
+    if let Some(remote_handoff) = &attempt.remote_handoff {
+        validate_sudo_remote_handoff(attempt, remote_handoff)?;
+    }
     Ok(attempt.clone())
+}
+
+fn validate_sudo_remote_handoff(
+    attempt: &SudoAttemptWire,
+    remote_handoff: &SudoRemoteHandoffWire,
+) -> Result<(), SudoWireError> {
+    if !matches!(attempt.target_kind, SudoAttemptTargetKindWire::Remote) {
+        return Err(SudoWireError::validation(
+            "remote_handoff",
+            "sudo remote handoff metadata requires target_kind remote",
+        ));
+    }
+    let host = attempt.target_host.as_deref().ok_or_else(|| {
+        SudoWireError::validation(
+            "target_host",
+            "sudo remote handoff metadata requires target_host",
+        )
+    })?;
+    validate_non_empty_bounded("target_host", host, SUDO_MAX_LABEL_BYTES)?;
+    validate_safe_absolute_path(
+        "remote_handoff.directory",
+        &remote_handoff.directory,
+    )?;
+    let files = [
+        ("remote_handoff.handshake", &remote_handoff.handshake),
+        ("remote_handoff.ledger", &remote_handoff.ledger),
+        ("remote_handoff.log", &remote_handoff.log),
+        ("remote_handoff.manifest", &remote_handoff.manifest),
+        ("remote_handoff.stop", &remote_handoff.stop),
+    ];
+    let mut unique = BTreeSet::new();
+    unique.insert(remote_handoff.directory.clone());
+    for (target, path) in files {
+        validate_safe_absolute_path(target, path)?;
+        if !path_is_within(&remote_handoff.directory, path) {
+            return Err(SudoWireError::validation(
+                target,
+                "sudo remote handoff path must be inside the remote directory",
+            ));
+        }
+        if !unique.insert((*path).clone()) {
+            return Err(SudoWireError::validation(
+                target,
+                "sudo remote handoff paths must be unique",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn classify_sudo_executor_liveness(
@@ -1213,6 +1277,37 @@ fn validate_absolute_path(
         ));
     }
     Ok(())
+}
+
+fn validate_safe_absolute_path(
+    target: impl Into<String>,
+    value: &str,
+) -> Result<(), SudoWireError> {
+    let target = target.into();
+    validate_absolute_path(&target, value)?;
+    if value.contains('\0') || value.ends_with('/') {
+        return Err(SudoWireError::validation(
+            target,
+            "sudo path must be a safe absolute path",
+        ));
+    }
+    for component in Path::new(value).components() {
+        match component {
+            Component::RootDir | Component::Normal(_) => {}
+            _ => {
+                return Err(SudoWireError::validation(
+                    target,
+                    "sudo path must not contain relative or special components",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_is_within(directory: &str, child: &str) -> bool {
+    let prefix = format!("{directory}/");
+    child.starts_with(&prefix) && child.len() > prefix.len()
 }
 
 fn validate_non_empty_bounded(
@@ -2009,6 +2104,17 @@ mod tests {
         })
     }
 
+    fn remote_handoff_value() -> JsonValue {
+        json!({
+            "directory": "/tmp/sase-sudo/req-1",
+            "handshake": "/tmp/sase-sudo/req-1/handshake.json",
+            "ledger": "/tmp/sase-sudo/req-1/ledger.json",
+            "log": "/tmp/sase-sudo/req-1/output.log",
+            "manifest": "/tmp/sase-sudo/req-1/manifest.json",
+            "stop": "/tmp/sase-sudo/req-1/stop"
+        })
+    }
+
     fn ledger_value(manifest: &SudoManifestWire) -> JsonValue {
         json!({
             "schema_version": 1,
@@ -2113,6 +2219,84 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dead.classification, SudoExecutorLivenessWire::Dead);
+    }
+
+    #[test]
+    fn attempt_accepts_legacy_records_without_remote_handoff() {
+        let manifest = manifest();
+        let value = attempt_value(&manifest, "started", "local");
+        let attempt = sudo_attempt_from_json_value(&value).unwrap();
+        assert!(attempt.remote_handoff.is_none());
+        let serialized = serde_json::to_value(&attempt).unwrap();
+        assert!(serialized.get("remote_handoff").is_none());
+    }
+
+    #[test]
+    fn attempt_accepts_valid_remote_handoff_metadata() {
+        let manifest = manifest();
+        let mut value = attempt_value(&manifest, "started", "remote");
+        value["remote_handoff"] = remote_handoff_value();
+        let attempt = sudo_attempt_from_json_value(&value).unwrap();
+        let handoff = attempt.remote_handoff.expect("remote handoff");
+        assert_eq!(handoff.directory, "/tmp/sase-sudo/req-1");
+        assert_eq!(handoff.ledger, "/tmp/sase-sudo/req-1/ledger.json");
+        assert_eq!(attempt.target_host.as_deref(), Some("apollo"));
+    }
+
+    #[test]
+    fn attempt_rejects_malformed_remote_handoff_metadata() {
+        let manifest = manifest();
+
+        let mut local = attempt_value(&manifest, "started", "local");
+        local["remote_handoff"] = remote_handoff_value();
+        assert!(sudo_attempt_from_json_value(&local)
+            .unwrap_err()
+            .message
+            .contains("target_kind remote"));
+
+        let mut missing_host = attempt_value(&manifest, "started", "remote");
+        missing_host["target_host"] = JsonValue::Null;
+        missing_host["remote_handoff"] = remote_handoff_value();
+        assert!(sudo_attempt_from_json_value(&missing_host)
+            .unwrap_err()
+            .message
+            .contains("target_host"));
+
+        let mut relative = attempt_value(&manifest, "started", "remote");
+        let mut handoff = remote_handoff_value();
+        handoff["log"] = json!("output.log");
+        relative["remote_handoff"] = handoff;
+        assert!(sudo_attempt_from_json_value(&relative)
+            .unwrap_err()
+            .message
+            .contains("absolute"));
+
+        let mut escaped = attempt_value(&manifest, "started", "remote");
+        let mut handoff = remote_handoff_value();
+        handoff["stop"] = json!("/tmp/sase-sudo/req-1/../stop");
+        escaped["remote_handoff"] = handoff;
+        assert!(sudo_attempt_from_json_value(&escaped)
+            .unwrap_err()
+            .message
+            .contains("relative"));
+
+        let mut outside = attempt_value(&manifest, "started", "remote");
+        let mut handoff = remote_handoff_value();
+        handoff["manifest"] = json!("/tmp/other/manifest.json");
+        outside["remote_handoff"] = handoff;
+        assert!(sudo_attempt_from_json_value(&outside)
+            .unwrap_err()
+            .message
+            .contains("inside the remote directory"));
+
+        let mut duplicate = attempt_value(&manifest, "started", "remote");
+        let mut handoff = remote_handoff_value();
+        handoff["stop"] = json!("/tmp/sase-sudo/req-1/ledger.json");
+        duplicate["remote_handoff"] = handoff;
+        assert!(sudo_attempt_from_json_value(&duplicate)
+            .unwrap_err()
+            .message
+            .contains("unique"));
     }
 
     #[test]

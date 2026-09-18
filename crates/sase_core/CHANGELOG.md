@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(sudo)* retain optional remote handoff metadata on version-1 attempts
 - *(agent-scan)* add default-off Agents-list projection that hydrates only loader-projectable index rows
 
 ## [0.34.55](https://github.com/sase-org/sase-core/compare/v0.34.54...v0.34.55) - 2026-09-18

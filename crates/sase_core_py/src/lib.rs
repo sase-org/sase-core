@@ -18703,6 +18703,77 @@ fn sudo_bindings_validate_manifest_risk_ledger_and_help() {
                 .unwrap_err();
         assert!(error.to_string().contains("SHA-256 mismatch"));
 
+        let facts = json!({
+            "finalize_proc_live": false,
+            "executor_pid_live": false,
+            "executor_identity_matches": false
+        });
+        let facts_obj = json_value_to_py(py, &facts).unwrap().into_bound(py);
+        let facts_dict = facts_obj.downcast::<PyDict>().unwrap();
+
+        let legacy_attempt = json!({
+            "schema_version": 1,
+            "gate_id": "sudo-bindings",
+            "selected_command_ids": ["pkg", "ssh"],
+            "manifest_sha256": digest,
+            "handoff_dir": "/tmp/sase-sudo/req-1",
+            "handshake": handshake.clone(),
+            "finalize_proc_id": "proc-1",
+            "target_kind": "local",
+            "startup_state": "started"
+        });
+        let legacy_obj = json_value_to_py(py, &legacy_attempt)
+            .unwrap()
+            .into_bound(py);
+        let legacy_dict = legacy_obj.downcast::<PyDict>().unwrap();
+        let legacy_decision =
+            py_sudo_classify_attempt_liveness(py, legacy_dict, facts_dict)
+                .unwrap();
+        let legacy_decision =
+            py_to_json_value(legacy_decision.bind(py)).unwrap();
+        assert_eq!(legacy_decision["classification"], json!("dead"));
+
+        let remote_attempt = json!({
+            "schema_version": 1,
+            "gate_id": "sudo-bindings",
+            "selected_command_ids": ["pkg", "ssh"],
+            "manifest_sha256": digest,
+            "handoff_dir": "/tmp/sase-sudo/req-1",
+            "handshake": handshake.clone(),
+            "finalize_proc_id": "proc-1",
+            "target_kind": "remote",
+            "target_host": "apollo",
+            "startup_state": "started",
+            "remote_handoff": {
+                "directory": "/tmp/sase-sudo/req-1",
+                "handshake": "/tmp/sase-sudo/req-1/handshake.json",
+                "ledger": "/tmp/sase-sudo/req-1/ledger.json",
+                "log": "/tmp/sase-sudo/req-1/output.log",
+                "manifest": "/tmp/sase-sudo/req-1/manifest.json",
+                "stop": "/tmp/sase-sudo/req-1/stop"
+            }
+        });
+        let remote_obj = json_value_to_py(py, &remote_attempt)
+            .unwrap()
+            .into_bound(py);
+        let remote_dict = remote_obj.downcast::<PyDict>().unwrap();
+        let remote_decision =
+            py_sudo_classify_attempt_liveness(py, remote_dict, facts_dict)
+                .unwrap();
+        let remote_decision =
+            py_to_json_value(remote_decision.bind(py)).unwrap();
+        assert_eq!(remote_decision["classification"], json!("unknown"));
+
+        let mut malformed = remote_attempt;
+        malformed["remote_handoff"]["log"] = json!("relative.log");
+        let malformed_obj =
+            json_value_to_py(py, &malformed).unwrap().into_bound(py);
+        let malformed_dict = malformed_obj.downcast::<PyDict>().unwrap();
+        let malformed_error =
+            py_sudo_classify_attempt_liveness(py, malformed_dict, facts_dict)
+                .unwrap_err();
+        assert!(malformed_error.to_string().contains("absolute"));
+
         py_sudo_runner_main(py, vec!["--help".to_string()]).unwrap();
     });
 }
