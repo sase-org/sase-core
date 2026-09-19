@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.64](https://github.com/sase-org/sase-core/compare/v0.34.63...v0.34.64) - 2026-09-19
+
+### Added
+
+- *(gateway)* advertise fleet_contract_schema_version independently of capabilities
+
 ## [0.34.63](https://github.com/sase-org/sase-core/compare/v0.34.62...v0.34.63) - 2026-09-19
 
 ### Added
