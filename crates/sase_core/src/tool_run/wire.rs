@@ -781,6 +781,8 @@ pub struct ToolRunFinishRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_before: Option<ToolFingerprintWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint_after: Option<ToolFingerprintWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutated_input: Option<bool>,

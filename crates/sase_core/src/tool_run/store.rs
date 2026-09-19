@@ -16,10 +16,11 @@ use rusqlite::{
 use crate::store_lock::{acquire_store_lock, LockMode, StoreLockError};
 
 use super::catalog::{extra_args_digest, normalize_tool_definition};
+use super::fingerprint::{canonicalize_tool_fingerprint, fingerprint_digest};
 use super::wire::{
-    ToolAttemptWire, ToolEvidenceCompletenessWire, ToolLivenessObservationWire,
-    ToolLoadSampleWire, ToolRunAppendRequestWire, ToolRunAppendResultWire,
-    ToolRunBeginRequestWire, ToolRunBeginResultWire,
+    ToolAttemptWire, ToolEvidenceCompletenessWire, ToolFingerprintWire,
+    ToolLivenessObservationWire, ToolLoadSampleWire, ToolRunAppendRequestWire,
+    ToolRunAppendResultWire, ToolRunBeginRequestWire, ToolRunBeginResultWire,
     ToolRunDeletionCandidateWire, ToolRunEventKindWire, ToolRunEventWire,
     ToolRunExecutorWire, ToolRunFinishRequestWire, ToolRunFinishResultWire,
     ToolRunListRequestWire, ToolRunListResultWire, ToolRunLogMetadataWire,
@@ -344,23 +345,44 @@ pub fn finish(
                 params![request.run_id, duration_ms],
             )?;
         }
-        if let Some(fingerprint) = &request.fingerprint_after {
-            tx.execute(
-                "UPDATE runs SET fingerprint_after_json = ?2 WHERE run_id = ?1",
-                params![
-                    request.run_id,
-                    serde_json::to_string(fingerprint).map_err(|error| {
-                        ToolRunError::store(error.to_string())
-                    })?
-                ],
-            )?;
-        }
-        if let Some(mutated) = request.mutated_input {
+        let fingerprint_before = persist_optional_fingerprint(
+            &tx,
+            &request.run_id,
+            "fingerprint_before_json",
+            request.fingerprint_before.as_ref(),
+        )?;
+        let fingerprint_after = persist_optional_fingerprint(
+            &tx,
+            &request.run_id,
+            "fingerprint_after_json",
+            request.fingerprint_after.as_ref(),
+        )?;
+        let stored = load_run(&tx, &request.run_id)?.ok_or_else(|| {
+            ToolRunError::NotFound {
+                run_id: request.run_id.clone(),
+            }
+        })?;
+        let before = fingerprint_before.or(stored.fingerprint_before);
+        let after = fingerprint_after.or(stored.fingerprint_after);
+        let mutated = request.mutated_input.or_else(|| {
+            mutated_input_from_fingerprints(before.as_ref(), after.as_ref())
+        });
+        if let Some(mutated) = mutated {
             tx.execute(
                 "UPDATE runs SET mutated_input = ?2 WHERE run_id = ?1",
                 params![request.run_id, i64::from(mutated)],
             )?;
         }
+        let evidence =
+            evidence_from_fingerprints(before.as_ref(), after.as_ref());
+        tx.execute(
+            "UPDATE runs SET evidence_json = ?2 WHERE run_id = ?1",
+            params![
+                request.run_id,
+                serde_json::to_string(&evidence)
+                    .map_err(|error| ToolRunError::store(error.to_string()))?
+            ],
+        )?;
         touch_write_meta(&tx, now)?;
         let run = load_run(&tx, &request.run_id)?.ok_or_else(|| {
             ToolRunError::NotFound {
@@ -1266,6 +1288,86 @@ fn canonical_event(event: &ToolRunEventWire) -> ToolRunEventWire {
     cloned
 }
 
+fn persist_optional_fingerprint(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    column: &str,
+    fingerprint: Option<&ToolFingerprintWire>,
+) -> Result<Option<ToolFingerprintWire>, ToolRunError> {
+    let Some(fingerprint) = fingerprint else {
+        return Ok(None);
+    };
+    let canonical = canonicalize_tool_fingerprint(fingerprint.clone())?;
+    let json = serde_json::to_string(&canonical.fingerprint)
+        .map_err(|error| ToolRunError::store(error.to_string()))?;
+    match column {
+        "fingerprint_before_json" => {
+            tx.execute(
+                "UPDATE runs SET fingerprint_before_json = ?2 WHERE run_id = ?1",
+                params![run_id, json],
+            )?;
+        }
+        "fingerprint_after_json" => {
+            tx.execute(
+                "UPDATE runs SET fingerprint_after_json = ?2 WHERE run_id = ?1",
+                params![run_id, json],
+            )?;
+        }
+        other => {
+            return Err(ToolRunError::store(format!(
+                "unknown fingerprint column {other}"
+            )));
+        }
+    }
+    Ok(Some(canonical.fingerprint))
+}
+
+fn mutated_input_from_fingerprints(
+    before: Option<&ToolFingerprintWire>,
+    after: Option<&ToolFingerprintWire>,
+) -> Option<bool> {
+    let before = before?;
+    let after = after?;
+    if !before.completeness.complete || !after.completeness.complete {
+        return None;
+    }
+    let left = fingerprint_digest(before).ok()?;
+    let right = fingerprint_digest(after).ok()?;
+    Some(left != right)
+}
+
+fn evidence_from_fingerprints(
+    before: Option<&ToolFingerprintWire>,
+    after: Option<&ToolFingerprintWire>,
+) -> ToolEvidenceCompletenessWire {
+    let mut missing = Vec::new();
+    match before {
+        None => missing.push("fingerprint_before not observed".to_string()),
+        Some(fingerprint) if !fingerprint.completeness.complete => {
+            missing.extend(fingerprint.completeness.missing.iter().cloned());
+        }
+        Some(_) => {}
+    }
+    match after {
+        None => missing.push("fingerprint_after not observed".to_string()),
+        Some(fingerprint) if !fingerprint.completeness.complete => {
+            missing.extend(fingerprint.completeness.missing.iter().cloned());
+        }
+        Some(_) => {}
+    }
+    if missing.is_empty() {
+        ToolEvidenceCompletenessWire {
+            complete: true,
+            missing: Vec::new(),
+        }
+    } else {
+        ToolEvidenceCompletenessWire {
+            complete: false,
+            missing,
+        }
+    }
+}
+
 fn load_run(
     conn: &Connection,
     run_id: &str,
@@ -1928,6 +2030,7 @@ mod tests {
                     child_pgid: Some(99),
                     duration_ms: (state != ToolRunStateWire::Lost)
                         .then_some(12),
+                    fingerprint_before: None,
                     fingerprint_after: None,
                     mutated_input: None,
                     now_ts: Some(20),
@@ -1967,6 +2070,7 @@ mod tests {
                 child_pid: None,
                 child_pgid: None,
                 duration_ms: Some(1),
+                fingerprint_before: None,
                 fingerprint_after: None,
                 mutated_input: None,
                 now_ts: Some(2),
@@ -1989,6 +2093,7 @@ mod tests {
                 child_pid: None,
                 child_pgid: None,
                 duration_ms: Some(1),
+                fingerprint_before: None,
                 fingerprint_after: None,
                 mutated_input: None,
                 now_ts: Some(3),
@@ -2162,6 +2267,7 @@ mod tests {
                 child_pid: None,
                 child_pgid: None,
                 duration_ms: Some(5),
+                fingerprint_before: None,
                 fingerprint_after: None,
                 mutated_input: None,
                 now_ts: Some(3),
@@ -2331,6 +2437,121 @@ mod tests {
         let fingerprint = crate::tool_run::unknown_evidence("not observed");
         assert!(!fingerprint.completeness.complete);
         assert!(fingerprint.project_identity.is_none());
+    }
+
+    #[test]
+    fn finish_stores_canonical_fingerprints_and_mutated_input() {
+        use crate::tool_run::wire::{
+            ToolDirtyPathWire, ToolEvidenceCompletenessWire,
+            ToolRepoFingerprintWire,
+        };
+
+        let (_temp, path) = store();
+        let started = begin_named(&path, 10);
+        let mut before = crate::tool_run::unknown_evidence("unused");
+        before.project_identity = Some("sase".into());
+        before.completeness = ToolEvidenceCompletenessWire {
+            complete: true,
+            missing: Vec::new(),
+        };
+        before.diagnostics.clear();
+        before.repos = vec![ToolRepoFingerprintWire {
+            identity: "sase".into(),
+            head: Some("aaa".into()),
+            index_tree: Some("bbb".into()),
+            dirty_paths: vec![ToolDirtyPathWire {
+                path: "z.py".into(),
+                status: "modified".into(),
+                kind: "file".into(),
+                mode: Some("100644".into()),
+                content_hash: Some("1".into()),
+                incomplete: None,
+            }],
+            incomplete: None,
+        }];
+        let mut after = before.clone();
+        after.repos[0].dirty_paths[0].content_hash = Some("2".into());
+        let finished = finish(
+            &path,
+            ToolRunFinishRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: started.run.run_id.clone(),
+                event_id: None,
+                state: ToolRunStateWire::Succeeded,
+                exit_code: Some(0),
+                signal: None,
+                interruption_reason: None,
+                lost_reason: None,
+                child_pid: None,
+                child_pgid: None,
+                duration_ms: Some(12),
+                fingerprint_before: Some(before),
+                fingerprint_after: Some(after),
+                mutated_input: None,
+                now_ts: Some(22),
+                diagnostics: Vec::new(),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(finished.run.mutated_input, Some(true));
+        assert!(finished.run.evidence_completeness.complete);
+        let shown = show_run(
+            &path,
+            ToolRunShowRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: started.run.run_id,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let run = shown.run.expect("run");
+        assert_eq!(run.fingerprint_before.unwrap().repos[0].identity, "sase");
+        assert_eq!(
+            run.fingerprint_after.unwrap().repos[0].dirty_paths[0]
+                .content_hash
+                .as_deref(),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn incomplete_fingerprints_do_not_guess_mutated_input() {
+        let (_temp, path) = store();
+        let started = begin_named(&path, 10);
+        let before = crate::tool_run::unknown_evidence("probe timeout");
+        let after = crate::tool_run::unknown_evidence("probe timeout");
+        let finished = finish(
+            &path,
+            ToolRunFinishRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: started.run.run_id,
+                event_id: None,
+                state: ToolRunStateWire::Succeeded,
+                exit_code: Some(0),
+                signal: None,
+                interruption_reason: None,
+                lost_reason: None,
+                child_pid: None,
+                child_pgid: None,
+                duration_ms: Some(3),
+                fingerprint_before: Some(before),
+                fingerprint_after: Some(after),
+                mutated_input: None,
+                now_ts: Some(13),
+                diagnostics: Vec::new(),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(finished.run.mutated_input.is_none());
+        assert!(!finished.run.evidence_completeness.complete);
+        assert!(finished
+            .run
+            .evidence_completeness
+            .missing
+            .iter()
+            .any(|item| item.contains("probe timeout")));
     }
 
     #[test]
