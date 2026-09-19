@@ -904,6 +904,8 @@ fn build_snapshot_blocking(
             .map(|candidate| candidate.identity.clone())
             .collect(),
     };
+    let presentation_context =
+        PresentationContext::from_records(&scan.records, &served);
 
     let mut details = Vec::new();
     let mut content_by_handle = BTreeMap::new();
@@ -927,6 +929,7 @@ fn build_snapshot_blocking(
             liveness,
             now_unix,
             &project_labels,
+            &presentation_context.facts_for_record(&record),
         ) {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -1010,14 +1013,128 @@ struct ResolvedRecord {
     content_sources: Vec<FleetContentSource>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PresentationRecordFacts {
+    timestamp: String,
+    family_id: Option<String>,
+    parent_timestamp: Option<String>,
+    agent_clan: Option<String>,
+    agent_clan_generation: Option<String>,
+    clan_tribe: Option<String>,
+    tribe: Option<String>,
+    started_at_unix: Option<f64>,
+    run_started_at_unix: Option<f64>,
+    display_status: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct PresentationContext {
+    by_timestamp: BTreeMap<String, PresentationRecordFacts>,
+    root_by_family_id: BTreeMap<String, PresentationRecordFacts>,
+    clan_tribe_by_key: BTreeMap<String, String>,
+}
+
+impl PresentationContext {
+    fn from_records(
+        records: &[AgentArtifactRecordWire],
+        served: &BTreeSet<String>,
+    ) -> Self {
+        let mut context = Self::default();
+        for record in records {
+            if !served.contains(&record.artifact_dir) {
+                continue;
+            }
+            let facts = direct_presentation_facts_for_record(record);
+            if let Some(key) = clan_context_key(
+                facts.agent_clan.as_deref(),
+                facts.agent_clan_generation.as_deref(),
+            ) {
+                if let Some(clan_tribe) = &facts.clan_tribe {
+                    context
+                        .clan_tribe_by_key
+                        .entry(key)
+                        .or_insert_with(|| clan_tribe.clone());
+                }
+            }
+            if facts.parent_timestamp.is_none() {
+                if let Some(family_id) = &facts.family_id {
+                    context
+                        .root_by_family_id
+                        .entry(family_id.clone())
+                        .or_insert_with(|| facts.clone());
+                }
+            }
+            context
+                .by_timestamp
+                .insert(record.timestamp.clone(), facts.clone());
+        }
+        context
+    }
+
+    fn facts_for_record(
+        &self,
+        record: &AgentArtifactRecordWire,
+    ) -> PresentationRecordFacts {
+        let mut facts = direct_presentation_facts_for_record(record);
+        let parent = facts
+            .parent_timestamp
+            .as_ref()
+            .and_then(|timestamp| self.by_timestamp.get(timestamp))
+            .cloned();
+        let family_root = facts
+            .family_id
+            .as_ref()
+            .and_then(|family_id| self.root_by_family_id.get(family_id))
+            .cloned()
+            .or_else(|| parent.clone());
+        let related = parent.as_ref().or(family_root.as_ref());
+
+        if facts.family_id.is_none() {
+            facts.family_id = related.and_then(|value| value.family_id.clone());
+        }
+        if facts.parent_timestamp.is_none() {
+            if let Some(root) = family_root.as_ref().filter(|root| {
+                root.timestamp != record.timestamp && root.family_id.is_some()
+            }) {
+                facts.parent_timestamp = Some(root.timestamp.clone());
+            }
+        }
+        if facts.tribe.is_none() {
+            facts.tribe = related.and_then(|value| value.tribe.clone());
+        }
+        if facts.clan_tribe.is_none() {
+            facts.clan_tribe = related
+                .and_then(|value| value.clan_tribe.clone())
+                .or_else(|| {
+                    clan_context_key(
+                        facts.agent_clan.as_deref(),
+                        facts.agent_clan_generation.as_deref(),
+                    )
+                    .and_then(|key| self.clan_tribe_by_key.get(&key).cloned())
+                });
+        }
+        if let Some(root_start) =
+            family_root.as_ref().and_then(|value| value.started_at_unix)
+        {
+            facts.started_at_unix = Some(root_start);
+        }
+        facts
+    }
+}
+
 fn resolve_record(
     installation_id: &str,
     record: &AgentArtifactRecordWire,
     liveness: OwnerLivenessWire,
     build_unix: f64,
     project_labels: &BTreeMap<String, String>,
+    presentation: &PresentationRecordFacts,
 ) -> Result<ResolvedRecord, FleetReadError> {
-    let logical_locator = logical_locator_for_record(installation_id, record);
+    let mut logical_locator =
+        logical_locator_for_record(installation_id, record);
+    if let Some(family_id) = &presentation.family_id {
+        logical_locator.family_id = Some(family_id.clone());
+    }
     let logical_key =
         logical_locator_key(&logical_locator).map_err(FleetReadError::from)?;
     let row_revision = ResourceRevisionWire {
@@ -1078,8 +1195,12 @@ fn resolve_record(
                 },
                 freshness: ObservationFreshnessWire::Fresh,
                 observed_at_unix: build_unix,
-                started_at_unix: started_at_unix_for_record(record),
+                display_status: presentation.display_status.clone(),
+                started_at_unix: presentation.started_at_unix,
+                run_started_at_unix: presentation.run_started_at_unix,
                 stopped_at_unix: stopped_at_unix_for_record(record),
+                family_id: presentation.family_id.clone(),
+                parent_timestamp: presentation.parent_timestamp.clone(),
                 workspace_num: workspace_num_for_record(record),
                 project_label: project_labels
                     .get(&record.project_name)
@@ -1088,8 +1209,8 @@ fn resolve_record(
                 agent_clan: meta.and_then(|value| value.agent_clan.clone()),
                 agent_clan_generation: meta
                     .and_then(|value| value.agent_clan_generation.clone()),
-                clan_tribe: meta.and_then(|value| value.clan_tribe.clone()),
-                tribe: meta.and_then(|value| value.tribe.clone()),
+                clan_tribe: presentation.clan_tribe.clone(),
+                tribe: presentation.tribe.clone(),
                 row_kind,
                 current_instance: !presentation_terminal
                     && row_kind == FleetRowKindWire::AgentShell,
@@ -1144,13 +1265,37 @@ fn logical_locator_for_record(
             .unwrap_or("agent"),
             "agent",
         ),
-        family_id: first_non_empty([
-            meta.and_then(|value| value.agent_family.as_deref()),
-            family_shell(meta, record.done.as_ref())
-                .and_then(|value| value.label.as_deref()),
-        ])
-        .map(|value| safe_identifier(value, "family")),
+        family_id: family_id_for_record(record),
     }
+}
+
+fn direct_presentation_facts_for_record(
+    record: &AgentArtifactRecordWire,
+) -> PresentationRecordFacts {
+    let meta = record.agent_meta.as_ref();
+    PresentationRecordFacts {
+        timestamp: record.timestamp.clone(),
+        family_id: family_id_for_record(record),
+        parent_timestamp: tracked_parent_timestamp(record).map(str::to_string),
+        agent_clan: meta.and_then(|value| value.agent_clan.clone()),
+        agent_clan_generation: meta
+            .and_then(|value| value.agent_clan_generation.clone()),
+        clan_tribe: meta.and_then(|value| value.clan_tribe.clone()),
+        tribe: meta.and_then(|value| value.tribe.clone()),
+        started_at_unix: started_at_unix_for_record(record),
+        run_started_at_unix: run_started_at_unix_for_record(record),
+        display_status: Some(display_status_for_record(record)),
+    }
+}
+
+fn family_id_for_record(record: &AgentArtifactRecordWire) -> Option<String> {
+    let meta = record.agent_meta.as_ref();
+    first_non_empty([
+        meta.and_then(|value| value.agent_family.as_deref()),
+        family_shell(meta, record.done.as_ref())
+            .and_then(|value| value.label.as_deref()),
+    ])
+    .map(|value| safe_identifier(value, "family"))
 }
 
 fn tracked_parent_timestamp(record: &AgentArtifactRecordWire) -> Option<&str> {
@@ -1548,24 +1693,69 @@ fn project_display_labels(
         .collect())
 }
 
+fn display_status_for_record(record: &AgentArtifactRecordWire) -> String {
+    if let Some(done) = &record.done {
+        if done.repeat_stopped {
+            return "STOPPED".to_string();
+        }
+        if let Some(status) = first_non_empty([done.status_label.as_deref()]) {
+            return status.to_string();
+        }
+        if done
+            .error
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || done.outcome.as_deref().is_some_and(|value| {
+                value.starts_with("failed") || value == "failed"
+            })
+        {
+            return "FAILED".to_string();
+        }
+        return "DONE".to_string();
+    }
+    if record.pending_question.is_some() {
+        return "QUESTION".to_string();
+    }
+    if record.waiting.is_some() {
+        return "WAITING".to_string();
+    }
+    if record.workflow_state.as_ref().is_some_and(|state| {
+        state.appears_as_agent && state.status.eq_ignore_ascii_case("starting")
+    }) {
+        return "STARTING".to_string();
+    }
+    if record.running.is_some()
+        || record.workflow_state.as_ref().is_some_and(|state| {
+            state.appears_as_agent
+                && matches!(
+                    state.status.to_ascii_lowercase().as_str(),
+                    "running" | "waiting" | "queued"
+                )
+        })
+    {
+        return "RUNNING".to_string();
+    }
+    "UNKNOWN".to_string()
+}
+
 fn started_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
     record
-        .agent_meta
+        .workflow_state
         .as_ref()
-        .and_then(|meta| {
-            meta.run_started_at
-                .as_deref()
-                .or(meta.wait_completed_at.as_deref())
-                .and_then(parse_rfc3339_unix)
-        })
-        .or_else(|| {
-            record
-                .workflow_state
-                .as_ref()
-                .and_then(|state| state.start_time.as_deref())
-                .and_then(parse_rfc3339_unix)
-        })
+        .and_then(|state| state.start_time.as_deref())
+        .and_then(parse_rfc3339_unix)
         .or_else(|| parse_record_timestamp(&record.timestamp))
+}
+
+fn run_started_at_unix_for_record(
+    record: &AgentArtifactRecordWire,
+) -> Option<f64> {
+    record.agent_meta.as_ref().and_then(|meta| {
+        meta.run_started_at
+            .as_deref()
+            .or(meta.wait_completed_at.as_deref())
+            .and_then(parse_rfc3339_unix)
+    })
 }
 
 fn stopped_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
@@ -1679,6 +1869,15 @@ fn first_non_empty<'a>(
         .flatten()
         .map(str::trim)
         .find(|value| !value.is_empty())
+}
+
+fn clan_context_key(
+    agent_clan: Option<&str>,
+    agent_clan_generation: Option<&str>,
+) -> Option<String> {
+    let clan = first_non_empty([agent_clan])?;
+    let generation = first_non_empty([agent_clan_generation]).unwrap_or("");
+    Some(format!("{clan}\0{generation}"))
 }
 
 #[derive(Clone)]
@@ -2832,6 +3031,100 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&Some("lane")));
         assert!(labels.contains(&Some("lane--gate")));
+    }
+
+    #[tokio::test]
+    async fn history_rows_inherit_owner_presentation_facts_from_family_root() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let root_finished = now - chrono::Duration::minutes(10);
+        let child_finished = now - chrono::Duration::minutes(4);
+        let child_started = now - chrono::Duration::minutes(6);
+        let root_ts = root_finished.format("%Y%m%d%H%M%S").to_string();
+        let child_ts = child_finished.format("%Y%m%d%H%M%S").to_string();
+        let root_artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(&root_ts);
+        fs::create_dir_all(&root_artifact).unwrap();
+        fs::write(root_artifact.join("output.txt"), "root output").unwrap();
+        write_json(
+            &root_artifact.join("agent_meta.json"),
+            json!({
+                "name": "lane",
+                "agent_family": "lane",
+                "tribe": "review",
+                "clan_tribe": "parity",
+                "agent_clan": "fleet",
+                "agent_clan_generation": "202609"
+            }),
+        );
+        write_json(
+            &root_artifact.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": root_finished.timestamp() as f64,
+                "name": "lane",
+                "status_label": "ROOT-DONE",
+                "output_path": "output.txt"
+            }),
+        );
+        let child_artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(&child_ts);
+        fs::create_dir_all(&child_artifact).unwrap();
+        fs::write(child_artifact.join("output.txt"), "child output").unwrap();
+        write_json(
+            &child_artifact.join("agent_meta.json"),
+            json!({
+                "name": "lane--code",
+                "parent_timestamp": root_ts.clone(),
+                "run_started_at": child_started.to_rfc3339()
+            }),
+        );
+        write_json(
+            &child_artifact.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": child_finished.timestamp() as f64,
+                "name": "lane--code",
+                "status_label": "CHILD-DONE",
+                "output_path": "output.txt"
+            }),
+        );
+        let service = build_service(&home, &projects);
+
+        let history = service
+            .catalog(history_catalog_query(10, None))
+            .await
+            .unwrap();
+        let child = history
+            .page
+            .rows
+            .iter()
+            .find(|row| row.labels.agent_label.as_deref() == Some("lane--code"))
+            .expect("history child row");
+
+        assert_eq!(child.status, "CHILD-DONE");
+        assert_eq!(
+            child.family_role,
+            sase_core::fleet_contract::FleetFamilyRoleWire::HistoricalShell
+        );
+        assert_eq!(child.logical_locator.family_id.as_deref(), Some("lane"));
+        assert_eq!(child.parent_timestamp.as_deref(), Some(root_ts.as_str()));
+        assert_eq!(child.tribe.as_deref(), Some("review"));
+        assert_eq!(child.clan_tribe.as_deref(), Some("parity"));
+        assert_eq!(child.started_at_unix, parse_record_timestamp(&root_ts));
+        assert_eq!(
+            child.run_started_at_unix,
+            parse_rfc3339_unix(&child_started.to_rfc3339())
+        );
     }
 
     #[tokio::test]

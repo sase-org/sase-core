@@ -751,6 +751,7 @@ mod tests {
             intent: None,
             observed_at_unix: 1000.0,
             started_at_unix: None,
+            run_started_at_unix: None,
             stopped_at_unix: None,
             workspace_num: None,
             agent_clan: None,

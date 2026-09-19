@@ -38,7 +38,7 @@ use crate::store_lock::{
 };
 
 /// Schema version shared by the fleet contract surface.
-pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 3;
+pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 4;
 const FLEET_CONTRACT_MIN_READABLE_SCHEMA_VERSION: u32 = 1;
 /// Current fleet protocol version advertised by gateways and required by
 /// viewers. Discovery compatibility is derived from this constant.
@@ -455,9 +455,17 @@ pub struct OwnerResolutionFactsWire {
     pub freshness: ObservationFreshnessWire,
     pub observed_at_unix: f64,
     #[serde(default)]
+    pub display_status: Option<String>,
+    #[serde(default)]
     pub started_at_unix: Option<f64>,
     #[serde(default)]
+    pub run_started_at_unix: Option<f64>,
+    #[serde(default)]
     pub stopped_at_unix: Option<f64>,
+    #[serde(default)]
+    pub family_id: Option<String>,
+    #[serde(default)]
+    pub parent_timestamp: Option<String>,
     #[serde(default)]
     pub workspace_num: Option<u32>,
     #[serde(default)]
@@ -538,6 +546,8 @@ pub struct ResolvedAgentSummaryWire {
     pub observed_at_unix: f64,
     #[serde(default)]
     pub started_at_unix: Option<f64>,
+    #[serde(default)]
+    pub run_started_at_unix: Option<f64>,
     #[serde(default)]
     pub stopped_at_unix: Option<f64>,
     #[serde(default)]
@@ -1897,7 +1907,7 @@ pub fn project_resolved_agent_summary(
     validate_projection_request(request)?;
     let facts = normalized_owner_facts(&request.owner_facts)?;
     let logical_locator =
-        current_logical_locator_schema(&request.logical_locator);
+        owner_resolved_logical_locator(&request.logical_locator, &facts);
     let exact_locator = facts
         .exact_locator
         .as_ref()
@@ -1906,7 +1916,10 @@ pub fn project_resolved_agent_summary(
     let exact_key = exact_locator.as_ref().map(instance_key_unchecked);
     let lifecycle = lifecycle_for_record(&request.record);
     reject_inconsistent_projection(&request.record, &facts, lifecycle)?;
-    let status = status_for_record(&request.record);
+    let status = facts
+        .display_status
+        .clone()
+        .unwrap_or_else(|| status_for_record(&request.record));
     let meta = request.record.agent_meta.as_ref();
     let done = request.record.done.as_ref();
     let running = request.record.running.as_ref();
@@ -1921,12 +1934,14 @@ pub fn project_resolved_agent_summary(
     let family = meta
         .and_then(|value| value.family_shell.as_ref())
         .or_else(|| done.and_then(|value| value.family_shell.as_ref()));
-    let parent_timestamp = meta.and_then(|value| {
-        first_non_empty([
-            value.parent_timestamp.as_deref(),
-            value.parent_agent_timestamp.as_deref(),
-        ])
-        .map(str::to_string)
+    let parent_timestamp = facts.parent_timestamp.clone().or_else(|| {
+        meta.and_then(|value| {
+            first_non_empty([
+                value.parent_timestamp.as_deref(),
+                value.parent_agent_timestamp.as_deref(),
+            ])
+            .map(str::to_string)
+        })
     });
     let family_role = family_role_for_projection(
         facts.row_kind,
@@ -1976,6 +1991,7 @@ pub fn project_resolved_agent_summary(
         intent: intent_for_record(&request.record),
         observed_at_unix: facts.observed_at_unix,
         started_at_unix: facts.started_at_unix,
+        run_started_at_unix: facts.run_started_at_unix,
         stopped_at_unix: facts.stopped_at_unix,
         workspace_num: facts.workspace_num,
         agent_clan: facts.agent_clan.clone(),
@@ -2034,6 +2050,17 @@ fn current_logical_locator_schema(
         agent_id: logical.agent_id.clone(),
         family_id: logical.family_id.clone(),
     }
+}
+
+fn owner_resolved_logical_locator(
+    logical: &LogicalAgentLocatorWire,
+    facts: &OwnerResolutionFactsWire,
+) -> LogicalAgentLocatorWire {
+    let mut logical = current_logical_locator_schema(logical);
+    if let Some(family_id) = &facts.family_id {
+        logical.family_id = Some(family_id.clone());
+    }
+    logical
 }
 
 fn current_instance_locator_schema(
@@ -2839,6 +2866,9 @@ pub fn validate_resolved_agent_summary(
     if let Some(started_at) = summary.started_at_unix {
         validate_timestamp("started_at_unix", started_at)?;
     }
+    if let Some(run_started_at) = summary.run_started_at_unix {
+        validate_timestamp("run_started_at_unix", run_started_at)?;
+    }
     if let Some(stopped_at) = summary.stopped_at_unix {
         validate_timestamp("stopped_at_unix", stopped_at)?;
     }
@@ -2852,6 +2882,19 @@ pub fn validate_resolved_agent_summary(
             ));
         }
     }
+    if let (Some(run_started_at), Some(stopped_at)) =
+        (summary.run_started_at_unix, summary.stopped_at_unix)
+    {
+        if stopped_at < run_started_at {
+            return Err(FleetContractError::Validation(
+                "summary stopped_at_unix must be greater than or equal to run_started_at_unix"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(parent_timestamp) = &summary.parent_timestamp {
+        validate_identifier("parent_timestamp", parent_timestamp)?;
+    }
     validate_label("project_name", &summary.project_name, MAX_LABEL_BYTES)?;
     validate_label(
         "labels.project_label",
@@ -2859,6 +2902,7 @@ pub fn validate_resolved_agent_summary(
         MAX_LABEL_BYTES,
     )?;
     for (field, value) in [
+        ("status", Some(summary.status.as_str())),
         ("model", summary.model.as_deref()),
         ("provider", summary.provider.as_deref()),
         ("intent", summary.intent.as_deref()),
@@ -4078,7 +4122,9 @@ fn validate_projection_request(
     )?;
     request.logical_locator.validate()?;
     let facts = normalized_owner_facts(&request.owner_facts)?;
-    let logical_key = logical_key_unchecked(&request.logical_locator);
+    let logical_locator =
+        owner_resolved_logical_locator(&request.logical_locator, &facts);
+    let logical_key = logical_key_unchecked(&logical_locator);
     facts.row_revision.validate()?;
     if facts.row_revision.logical_key != logical_key {
         return Err(FleetContractError::Validation(
@@ -4086,7 +4132,7 @@ fn validate_projection_request(
         ));
     }
     if let Some(exact) = &facts.exact_locator {
-        if exact.logical != request.logical_locator {
+        if exact.logical != logical_locator {
             return Err(FleetContractError::Validation(
                 "owner facts exact locator belongs to a different logical identity"
                     .to_string(),
@@ -4118,10 +4164,30 @@ fn normalized_owner_facts(
     if let Some(started_at) = facts.started_at_unix {
         validate_timestamp("started_at_unix", started_at)?;
     }
+    if let Some(run_started_at) = facts.run_started_at_unix {
+        validate_timestamp("run_started_at_unix", run_started_at)?;
+    }
     if let Some(stopped_at) = facts.stopped_at_unix {
         validate_timestamp("stopped_at_unix", stopped_at)?;
     }
+    if let (Some(run_started_at), Some(stopped_at)) =
+        (facts.run_started_at_unix, facts.stopped_at_unix)
+    {
+        if stopped_at < run_started_at {
+            return Err(FleetContractError::Validation(
+                "owner facts stopped_at_unix must be greater than or equal to run_started_at_unix"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(family_id) = &facts.family_id {
+        validate_identifier("family_id", family_id)?;
+    }
+    if let Some(parent_timestamp) = &facts.parent_timestamp {
+        validate_identifier("parent_timestamp", parent_timestamp)?;
+    }
     for (field, value) in [
+        ("display_status", facts.display_status.as_deref()),
         ("project_label", facts.project_label.as_deref()),
         ("agent_clan", facts.agent_clan.as_deref()),
         (
@@ -4148,14 +4214,30 @@ fn normalized_owner_facts(
         .dedup_by(|left, right| left.kind == right.kind && left.id == right.id);
     Ok(OwnerResolutionFactsWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
-        exact_locator: facts.exact_locator.clone(),
+        exact_locator: facts
+            .exact_locator
+            .as_ref()
+            .map(current_instance_locator_schema),
         row_revision: facts.row_revision.clone(),
         liveness: facts.liveness,
         connection_health: facts.connection_health,
         freshness: facts.freshness,
         observed_at_unix: facts.observed_at_unix,
+        display_status: facts
+            .display_status
+            .as_ref()
+            .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
         started_at_unix: facts.started_at_unix,
+        run_started_at_unix: facts.run_started_at_unix,
         stopped_at_unix: facts.stopped_at_unix,
+        family_id: facts
+            .family_id
+            .as_ref()
+            .map(|value| value.trim().to_string()),
+        parent_timestamp: facts
+            .parent_timestamp
+            .as_ref()
+            .map(|value| value.trim().to_string()),
         workspace_num: facts.workspace_num,
         project_label: facts
             .project_label
@@ -7570,8 +7652,12 @@ mod tests {
                 connection_health: ConnectionHealthWire::Online,
                 freshness: ObservationFreshnessWire::Fresh,
                 observed_at_unix: 1000.0,
+                display_status: None,
                 started_at_unix: None,
+                run_started_at_unix: None,
                 stopped_at_unix: None,
+                family_id: None,
+                parent_timestamp: None,
                 workspace_num: None,
                 project_label: None,
                 agent_clan: None,
@@ -7941,7 +8027,9 @@ mod tests {
             1,
             record_running(),
         );
+        request.owner_facts.display_status = Some("OWNER-RUNNING".to_string());
         request.owner_facts.started_at_unix = Some(100.25);
+        request.owner_facts.run_started_at_unix = Some(101.75);
         request.owner_facts.stopped_at_unix = Some(125.5);
         request.owner_facts.workspace_num = Some(17);
         request.owner_facts.project_label = Some("sase".to_string());
@@ -7954,7 +8042,9 @@ mod tests {
         let summary = project_resolved_agent_summary(&request).unwrap();
 
         assert_eq!(summary.labels.project_label, "sase");
+        assert_eq!(summary.status, "OWNER-RUNNING");
         assert_eq!(summary.started_at_unix, Some(100.25));
+        assert_eq!(summary.run_started_at_unix, Some(101.75));
         assert_eq!(summary.stopped_at_unix, Some(125.5));
         assert_eq!(summary.workspace_num, Some(17));
         assert_eq!(summary.agent_clan.as_deref(), Some("fleet"));
@@ -7965,6 +8055,73 @@ mod tests {
         let mut invalid = summary;
         invalid.stopped_at_unix = Some(99.0);
         assert!(validate_resolved_agent_summary(&invalid).is_err());
+    }
+
+    #[test]
+    fn projection_applies_owner_resolved_lineage_and_normalizes_locator_schemas(
+    ) {
+        let mut locator = logical('a', "historical");
+        locator.family_id = None;
+        let mut resolved_locator = locator.clone();
+        resolved_locator.schema_version = 1;
+        resolved_locator.project.schema_version = 1;
+        resolved_locator.project.origin.schema_version = 1;
+        resolved_locator.family_id = Some("family-resolved".to_string());
+        let exact_locator = AgentInstanceLocatorWire {
+            schema_version: 1,
+            logical: resolved_locator.clone(),
+            shell_id: "shell-1".to_string(),
+            run_id: "run-1".to_string(),
+            attempt_id: "attempt-1".to_string(),
+        };
+        let mut record = record_running();
+        record.running = None;
+        record.done = Some(DoneMarkerWire {
+            outcome: Some("completed".to_string()),
+            status_label: Some("DONE".to_string()),
+            ..DoneMarkerWire::default()
+        });
+        record.has_done_marker = true;
+        if let Some(meta) = record.agent_meta.as_mut() {
+            meta.agent_family = None;
+            meta.parent_timestamp = None;
+            meta.tribe = None;
+            meta.clan_tribe = None;
+        }
+        let mut request = projection_request(locator, None, 1, record);
+        request.owner_facts.exact_locator = Some(exact_locator);
+        request.owner_facts.family_id = Some("family-resolved".to_string());
+        request.owner_facts.parent_timestamp =
+            Some("20260906115900".to_string());
+        request.owner_facts.tribe = Some("review".to_string());
+        request.owner_facts.clan_tribe = Some("parity".to_string());
+        request.owner_facts.liveness = OwnerLivenessWire::Dead;
+        request.owner_facts.capabilities = caps(&[]);
+        request.owner_facts.occupied_runner_slot = false;
+        request.owner_facts.row_revision = revision(
+            &LogicalAgentLocatorWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                project: current_project_locator_schema(
+                    &resolved_locator.project,
+                ),
+                agent_id: resolved_locator.agent_id.clone(),
+                family_id: Some("family-resolved".to_string()),
+            },
+            1,
+        );
+
+        let summary = project_resolved_agent_summary(&request).unwrap();
+
+        assert_eq!(summary.logical_locator.schema_version, 4);
+        assert_eq!(
+            summary.logical_locator.family_id.as_deref(),
+            Some("family-resolved")
+        );
+        assert_eq!(summary.exact_locator.as_ref().unwrap().schema_version, 4);
+        assert_eq!(summary.parent_timestamp.as_deref(), Some("20260906115900"));
+        assert_eq!(summary.family_role, FleetFamilyRoleWire::HistoricalShell);
+        assert_eq!(summary.tribe.as_deref(), Some("review"));
+        assert_eq!(summary.clan_tribe.as_deref(), Some("parity"));
     }
 
     #[test]
@@ -8056,14 +8213,16 @@ mod tests {
 
         let mut old_value = serde_json::to_value(&summary).unwrap();
         let object = old_value.as_object_mut().unwrap();
-        object.insert("schema_version".to_string(), json!(2));
+        object.insert("schema_version".to_string(), json!(3));
         object.remove("queue_capacity");
         object.remove("queue_capacity_explicit");
+        object.remove("run_started_at_unix");
         let old_summary: ResolvedAgentSummaryWire =
             serde_json::from_value(old_value).unwrap();
 
         assert_eq!(old_summary.queue_capacity, None);
         assert!(!old_summary.queue_capacity_explicit);
+        assert_eq!(old_summary.run_started_at_unix, None);
         assert_eq!(
             validate_resolved_agent_summary(&old_summary).unwrap(),
             old_summary

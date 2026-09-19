@@ -18113,6 +18113,7 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
                 "freshness": "fresh",
                 "observed_at_unix": 10.0,
                 "started_at_unix": 8.5,
+                "run_started_at_unix": 9.25,
                 "stopped_at_unix": null,
                 "workspace_num": 17,
                 "project_label": "sase",
@@ -18147,6 +18148,7 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
         assert_eq!(summary_value["lifecycle"], json!("running"));
         assert_eq!(summary_value["labels"]["project_label"], json!("sase"));
         assert_eq!(summary_value["started_at_unix"], json!(8.5));
+        assert_eq!(summary_value["run_started_at_unix"], json!(9.25));
         assert_eq!(summary_value["workspace_num"], json!(17));
         assert_eq!(summary_value["agent_clan"], json!("fleet"));
         assert_eq!(summary_value["agent_clan_generation"], json!("20260913"));
