@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.66](https://github.com/sase-org/sase-core/compare/v0.34.65...v0.34.66) - 2026-09-19
+
+### Added
+
+- *(tool-run)* persist canonical before/after fingerprints on finish
+
 ## [0.34.65](https://github.com/sase-org/sase-core/compare/v0.34.64...v0.34.65) - 2026-09-19
 
 ### Added
