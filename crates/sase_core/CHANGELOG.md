@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.65](https://github.com/sase-org/sase-core/compare/v0.34.64...v0.34.65) - 2026-09-19
+
+### Added
+
+- *(fleet)* share family-shell classifier and assemble catalog in core
+
 ## [0.34.64](https://github.com/sase-org/sase-core/compare/v0.34.63...v0.34.64) - 2026-09-19
 
 ### Added
