@@ -62,6 +62,8 @@ pub struct RunnerCapacityRecordWire {
     #[serde(default)]
     pub tribe: Option<String>,
     #[serde(default)]
+    pub tribes: Vec<String>,
+    #[serde(default)]
     pub created_at: Option<f64>,
     #[serde(default = "default_true")]
     pub has_agent_meta: bool,
@@ -1011,6 +1013,7 @@ fn hold_candidate(record: &RunnerCapacityRecordWire) -> AgentHoldCandidateWire {
         clan: record.clan.clone(),
         workflow: record.workflow.clone(),
         tribe: record.tribe.clone(),
+        tribes: record.tribes.clone(),
         armer_key: None,
     }
 }
@@ -1644,6 +1647,7 @@ mod tests {
             workflow: None,
             clan: None,
             tribe: None,
+            tribes: Vec::new(),
             created_at: None,
             has_agent_meta: true,
             has_done_marker: false,

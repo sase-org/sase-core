@@ -10,7 +10,11 @@ use std::collections::BTreeSet;
 use crate::agent_hold::{normalize_hood_vec, AgentHoldSelectorsWire};
 use crate::agent_identity::parse_agent_family_name;
 use crate::agent_launch::parse_proc_duration_seconds;
-use crate::agent_tribe::canonicalize_public_tribe_name;
+use crate::agent_tribe::{
+    canonicalize_public_tribe_name, resolve_agent_tribe_identity,
+    validate_tribe_name, AgentTribeDisplayLayerWire,
+    AgentTribeIdentityResolutionRequestWire,
+};
 
 /// One already-split hold argument. `name` is absent for positionals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -190,9 +194,37 @@ pub fn format_hold_directive(fields: &HoldFieldsWire) -> Option<String> {
     Some(format!("%hold({})", parts.join(", ")))
 }
 
+/// Optional stored/config evidence for expanding public tribe names.
+///
+/// An empty identity keeps the context-free `job -> chop` automation alias.
+/// Callers that have assignment or config evidence must supply it so an
+/// independently stored `job` tribe is not silently equated with `chop`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoldSelectorIdentityWire {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stored_tribes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<AgentTribeDisplayLayerWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tribe: Option<String>,
+}
+
 pub fn hold_fields_to_selectors(
     fields: &HoldFieldsWire,
     pending_artifact_dirs: &[String],
+) -> Result<AgentHoldSelectorsWire, HoldParseErrorWire> {
+    hold_fields_to_selectors_with_identity(
+        fields,
+        pending_artifact_dirs,
+        &HoldSelectorIdentityWire::default(),
+    )
+}
+
+pub fn hold_fields_to_selectors_with_identity(
+    fields: &HoldFieldsWire,
+    pending_artifact_dirs: &[String],
+    identity: &HoldSelectorIdentityWire,
 ) -> Result<AgentHoldSelectorsWire, HoldParseErrorWire> {
     let mut selectors = AgentHoldSelectorsWire::default();
     if fields.pending {
@@ -209,12 +241,70 @@ pub fn hold_fields_to_selectors(
         }
         parse_agent_family_name(name).ok().map(|_| name.clone())
     }));
-    selectors.tribes = sorted_dedup(fields.tribes.iter().cloned());
+    let mut tribes = Vec::new();
+    for tribe in &fields.tribes {
+        tribes.push(resolve_hold_selector_tribe(tribe, identity)?);
+    }
+    selectors.tribes = sorted_dedup(tribes);
     selectors.hoods = normalize_hood_vec("selectors.hoods", &fields.hoods)
         .map_err(|error| {
             hold_error("invalid-hold-hood", &format!("{error}"), None)
         })?;
     Ok(selectors)
+}
+
+fn resolve_hold_selector_tribe(
+    value: &str,
+    identity: &HoldSelectorIdentityWire,
+) -> Result<String, HoldParseErrorWire> {
+    let stripped = value.strip_prefix('@').unwrap_or(value).trim();
+    if identity.stored_tribes.is_empty()
+        && identity.layers.is_empty()
+        && identity.current_tribe.is_none()
+    {
+        return canonicalize_public_tribe_name(stripped).map_err(|error| {
+            hold_error(
+                "invalid-hold-tribe",
+                &format!("hold tribe selector is not valid: {error}"),
+                None,
+            )
+        });
+    }
+    let resolved = resolve_agent_tribe_identity(
+        &AgentTribeIdentityResolutionRequestWire {
+            tribe: stripped.to_string(),
+            layers: identity.layers.clone(),
+            stored_tribes: identity.stored_tribes.clone(),
+            current_tribe: identity.current_tribe.clone(),
+        },
+    )
+    .map_err(|error| {
+        hold_error(
+            "invalid-hold-tribe",
+            &format!("hold tribe selector is not valid: {error}"),
+            None,
+        )
+    })?;
+    resolved.tribe.ok_or_else(|| {
+        let detail = resolved
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        hold_error(
+            "invalid-hold-tribe",
+            &format!(
+                "hold tribe selector {stripped:?} is ambiguous{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            ),
+            None,
+        )
+    })
 }
 
 fn parse_hold_occurrence(
@@ -402,13 +492,16 @@ fn parse_tribe_value(
     value: &str,
     span: Option<[usize; 2]>,
 ) -> Result<String, HoldParseErrorWire> {
-    canonicalize_public_tribe_name(value).map_err(|error| {
-        hold_error(
-            "invalid-hold-tribe",
-            &format!("%hold tribe selector is not valid: {error}"),
-            span,
-        )
-    })
+    let stripped = value.strip_prefix('@').unwrap_or(value);
+    validate_tribe_name(stripped)
+        .map(str::to_string)
+        .map_err(|error| {
+            hold_error(
+                "invalid-hold-tribe",
+                &format!("%hold tribe selector is not valid: {error}"),
+                span,
+            )
+        })
 }
 
 fn normalize_sets(fields: &mut HoldFieldsWire) {
@@ -596,7 +689,7 @@ mod tests {
             occ("%hold:@job", vec![positional("@job")]),
         ]);
         assert_eq!(fields.names, vec!["planner", "reviewer"]);
-        assert_eq!(fields.tribes, vec!["chop", "nightly"]);
+        assert_eq!(fields.tribes, vec!["job", "nightly"]);
         assert_eq!(fields.hoods, vec!["sase-11l"]);
         assert!(fields.pending);
         assert!(fields.future);
@@ -610,7 +703,7 @@ mod tests {
             vec![
                 positional("planner"),
                 positional("reviewer"),
-                positional("@chop"),
+                positional("@job"),
                 positional("@nightly"),
                 positional("pending"),
                 positional("future"),
@@ -706,5 +799,29 @@ mod tests {
         assert_eq!(selectors.families, vec!["builder"]);
         assert_eq!(selectors.artifact_dirs, vec!["/tmp/a"]);
         assert!(selectors.future);
+    }
+
+    #[test]
+    fn expands_job_to_chop_without_stored_job_identity() {
+        let fields = collect_ok(&[occ("%hold:@job", vec![positional("@job")])]);
+        assert_eq!(fields.tribes, vec!["job"]);
+        let selectors =
+            hold_fields_to_selectors(&fields, &[]).expect("selectors");
+        assert_eq!(selectors.tribes, vec!["chop"]);
+    }
+
+    #[test]
+    fn keeps_independently_stored_job_tribe() {
+        let fields = collect_ok(&[occ("%hold:@job", vec![positional("@job")])]);
+        let selectors = hold_fields_to_selectors_with_identity(
+            &fields,
+            &[],
+            &HoldSelectorIdentityWire {
+                stored_tribes: vec!["job".to_string()],
+                ..HoldSelectorIdentityWire::default()
+            },
+        )
+        .expect("selectors");
+        assert_eq!(selectors.tribes, vec!["job"]);
     }
 }

@@ -1059,8 +1059,9 @@ pub use glossary::{
 };
 pub use hold_directive::{
     collect_hold_fields, collect_hold_fields_with_flags, format_hold_directive,
-    hold_fields_to_selectors, HoldArgWire, HoldCollectResultWire,
-    HoldFieldsWire, HoldOccurrenceWire, HoldParseErrorWire, HoldScopeWire,
+    hold_fields_to_selectors, hold_fields_to_selectors_with_identity,
+    HoldArgWire, HoldCollectResultWire, HoldFieldsWire, HoldOccurrenceWire,
+    HoldParseErrorWire, HoldScopeWire, HoldSelectorIdentityWire,
 };
 pub use host_bridge::{
     split_command_words, CommandHelperHostBridge, DynHelperHostBridge,

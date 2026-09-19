@@ -491,7 +491,7 @@
 //! - `queue_directive_flag_key() -> str`
 //! - `collect_hold_fields(occurrences: list[dict], enabled_feature_flags: list[str] | None = None) -> dict`
 //! - `format_hold_directive(fields: dict) -> str | None`
-//! - `hold_fields_to_selectors(fields: dict, pending_artifact_dirs: list[str] | None = None) -> dict`
+//! - `hold_fields_to_selectors(fields: dict, pending_artifact_dirs: list[str] | None = None, identity: dict | None = None) -> dict`
 //! - `runner_capacity_policy_schema_version() -> int`
 //! - `runner_capacity_snapshot(request: dict) -> dict`
 //! - `code_value_wire_schema_version() -> int`
@@ -1671,11 +1671,12 @@ use sase_core::{
     collect_queue_fields_with_flags as core_collect_queue_fields_with_flags,
     format_hold_directive as core_format_hold_directive,
     format_queue_directive as core_format_queue_directive,
-    hold_fields_to_selectors as core_hold_fields_to_selectors,
+    hold_fields_to_selectors_with_identity as core_hold_fields_to_selectors_with_identity,
     normalize_persisted_queue_capacity as core_normalize_persisted_queue_capacity,
     parse_queue_capacity_with_flags as core_parse_queue_capacity_with_flags,
     queue_directive_flag_key as core_queue_directive_flag_key, HoldFieldsWire,
-    HoldOccurrenceWire, QueueFieldsWire, QueueOccurrenceWire,
+    HoldOccurrenceWire, HoldSelectorIdentityWire, QueueFieldsWire,
+    QueueOccurrenceWire,
 };
 use sase_core::{
     compose_snippet_catalog as core_compose_snippet_catalog,
@@ -17400,20 +17401,33 @@ fn py_format_hold_directive(
 
 #[pyfunction]
 #[pyo3(name = "hold_fields_to_selectors")]
-#[pyo3(signature = (fields, pending_artifact_dirs = None))]
+#[pyo3(signature = (fields, pending_artifact_dirs = None, identity = None))]
 fn py_hold_fields_to_selectors<'py>(
     py: Python<'py>,
     fields: &Bound<'_, PyAny>,
     pending_artifact_dirs: Option<Vec<String>>,
+    identity: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyObject> {
     let fields: HoldFieldsWire =
         serde_json::from_value(py_to_json_value(fields)?).map_err(|err| {
             PyValueError::new_err(format!("invalid hold fields: {err}"))
         })?;
+    let identity: HoldSelectorIdentityWire = match identity {
+        Some(payload) => serde_json::from_value(py_to_json_value(payload)?)
+            .map_err(|err| {
+                PyValueError::new_err(format!(
+                    "invalid hold selector identity: {err}"
+                ))
+            })?,
+        None => HoldSelectorIdentityWire::default(),
+    };
     let pending_artifact_dirs = pending_artifact_dirs.unwrap_or_default();
-    let selectors =
-        core_hold_fields_to_selectors(&fields, &pending_artifact_dirs)
-            .map_err(|error| PyValueError::new_err(error.message))?;
+    let selectors = core_hold_fields_to_selectors_with_identity(
+        &fields,
+        &pending_artifact_dirs,
+        &identity,
+    )
+    .map_err(|error| PyValueError::new_err(error.message))?;
     let value = serde_json::to_value(&selectors).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -24420,6 +24434,7 @@ COMMITS:
                 py,
                 fields_obj.bind(py),
                 Some(vec!["artifact/a".to_string(), "artifact/a".to_string()]),
+                None,
             )
             .unwrap();
             let selectors_value = py_to_json_value(selectors.bind(py)).unwrap();

@@ -164,6 +164,8 @@ pub struct AgentHoldCandidateWire {
     #[serde(default)]
     pub tribe: Option<String>,
     #[serde(default)]
+    pub tribes: Vec<String>,
+    #[serde(default)]
     pub armer_key: Option<String>,
 }
 
@@ -769,6 +771,8 @@ fn validate_and_normalize_candidate(
     )?;
     candidate.tribe =
         normalize_optional_plain("candidate.tribe", candidate.tribe.take())?;
+    candidate.tribes =
+        normalize_plain_vec("candidate.tribes", &candidate.tribes)?;
     candidate.armer_key = normalize_optional_plain(
         "candidate.armer_key",
         candidate.armer_key.take(),
@@ -1049,9 +1053,18 @@ fn selector_matches(
             workflow,
         );
     }
+    let mut candidate_tribes = candidate.tribes.clone();
     if let Some(tribe) = &candidate.tribe {
-        push_exact_matches(&mut matches, "tribe", &selectors.tribes, tribe);
+        if !candidate_tribes.iter().any(|value| value == tribe) {
+            candidate_tribes.push(tribe.clone());
+        }
     }
+    push_intersection_matches(
+        &mut matches,
+        "tribe",
+        &selectors.tribes,
+        &candidate_tribes,
+    );
     if selectors.future && candidate.created_at > record.created_at {
         matches.push(AgentHoldSelectorMatchWire {
             kind: "future".to_string(),
@@ -1197,6 +1210,7 @@ mod tests {
             clan: Some("blocked-clan".to_string()),
             workflow: Some("wf".to_string()),
             tribe: Some("tribe-a".to_string()),
+            tribes: vec!["tribe-a".to_string()],
             armer_key: None,
         }
     }
@@ -1746,6 +1760,38 @@ mod tests {
         assert!(hold_blocks_candidate(&host_record, &other_project)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn predicate_matches_membership_tribes_without_primary_tribe() {
+        let record = AgentHoldRecordWire {
+            schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
+            armer: armer("holder"),
+            scope: AgentHoldScopeWire::Host,
+            selectors: AgentHoldSelectorsWire {
+                tribes: vec!["epic".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+            created_at: NOW,
+            expires_at: NOW + 60.0,
+        };
+        let mut candidate = candidate();
+        candidate.artifact_dirs.clear();
+        candidate.agent_name = Some("other.agent".to_string());
+        candidate.clan = None;
+        candidate.workflow = None;
+        candidate.tribe = None;
+        candidate.tribes = vec!["ops".to_string(), "epic".to_string()];
+        let block =
+            hold_blocks_candidate(&record, &candidate).unwrap().unwrap();
+        assert_eq!(
+            block
+                .matches
+                .iter()
+                .map(|item| (item.kind.as_str(), item.value.as_str()))
+                .collect::<Vec<_>>(),
+            [("tribe", "epic")]
+        );
     }
 
     #[test]

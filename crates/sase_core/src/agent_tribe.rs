@@ -132,7 +132,7 @@ pub fn agent_tribe_display_key(
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTribeDisplayLayerWire {
     pub name: String,
     #[serde(default)]
