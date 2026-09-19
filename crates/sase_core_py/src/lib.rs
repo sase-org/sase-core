@@ -534,6 +534,20 @@
 //! - `telemetry_query_range(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_prune(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
 //! - `telemetry_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_wire_schema_version() -> int`
+//! - `tool_run_normalize_definition(definition: dict) -> dict`
+//! - `tool_run_canonicalize_fingerprint(fingerprint: dict) -> dict`
+//! - `tool_run_unknown_evidence(reason: str) -> dict`
+//! - `tool_run_begin(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_append_event(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_finish(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_reconcile(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_list(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_show(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_summary(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_retention_preview(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_retention_apply(store_path: str, request: dict, busy_timeout_ms: int = 250) -> dict`
+//! - `tool_run_store_stats(store_path: str, busy_timeout_ms: int = 250) -> dict`
 //! - `perf_logs_query(request: dict) -> dict`
 //! - `agent_stats_query_runs(index_path: str, request: dict) -> dict` (run,
 //!   runtime, project, and Patch work rollups)
@@ -1661,6 +1675,23 @@ use sase_core::telemetry::{
     store_stats as core_telemetry_store_stats, TelemetryCleanupRequestWire,
     TelemetryInstantQueryWire, TelemetryPruneRequestWire,
     TelemetryRangeQueryWire, TelemetryRecordBatchWire,
+};
+use sase_core::tool_run::{
+    append_event as core_tool_run_append_event, begin as core_tool_run_begin,
+    canonicalize_tool_fingerprint as core_tool_run_canonicalize_fingerprint,
+    finish as core_tool_run_finish, list_runs as core_tool_run_list,
+    normalize_tool_definition as core_tool_run_normalize_definition,
+    reconcile as core_tool_run_reconcile,
+    retention_apply as core_tool_run_retention_apply,
+    retention_preview as core_tool_run_retention_preview,
+    show_run as core_tool_run_show, store_stats as core_tool_run_store_stats,
+    summarize as core_tool_run_summary,
+    unknown_evidence as core_tool_run_unknown_evidence, ToolDefinitionWire,
+    ToolFingerprintWire, ToolRunAppendRequestWire, ToolRunBeginRequestWire,
+    ToolRunFinishRequestWire, ToolRunListRequestWire,
+    ToolRunReconcileRequestWire, ToolRunRetentionRequestWire,
+    ToolRunShowRequestWire, ToolRunSummaryRequestWire,
+    TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,
@@ -19331,6 +19362,305 @@ fn py_telemetry_store_stats<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(name = "tool_run_wire_schema_version")]
+fn py_tool_run_wire_schema_version() -> u32 {
+    TOOL_RUN_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "tool_run_normalize_definition")]
+fn py_tool_run_normalize_definition<'py>(
+    py: Python<'py>,
+    definition: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let definition: ToolDefinitionWire =
+        telemetry_request_from_pydict(definition, "ToolDefinitionWire")?;
+    let result = py
+        .allow_threads(|| core_tool_run_normalize_definition(definition))
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "tool_run_canonicalize_fingerprint")]
+fn py_tool_run_canonicalize_fingerprint<'py>(
+    py: Python<'py>,
+    fingerprint: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let fingerprint: ToolFingerprintWire =
+        telemetry_request_from_pydict(fingerprint, "ToolFingerprintWire")?;
+    let result = py
+        .allow_threads(|| core_tool_run_canonicalize_fingerprint(fingerprint))
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "tool_run_unknown_evidence")]
+fn py_tool_run_unknown_evidence<'py>(
+    py: Python<'py>,
+    reason: &str,
+) -> PyResult<PyObject> {
+    telemetry_result_to_py(py, &core_tool_run_unknown_evidence(reason))
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_begin",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_begin<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunBeginRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunBeginRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_begin(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_append_event",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_append_event<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunAppendRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunAppendRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_append_event(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_finish",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_finish<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunFinishRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunFinishRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_finish(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_reconcile",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_reconcile<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunReconcileRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunReconcileRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_reconcile(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_list",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_list<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunListRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunListRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_list(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_show",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_show<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunShowRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunShowRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_show(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_summary",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_summary<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunSummaryRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunSummaryRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_summary(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_retention_preview",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_retention_preview<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunRetentionRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunRetentionRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_retention_preview(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_retention_apply",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_retention_apply<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunRetentionRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunRetentionRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_retention_apply(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_store_stats",
+    signature = (store_path, busy_timeout_ms=250)
+)]
+fn py_tool_run_store_stats<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_store_stats(
+                &path,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
 /// Aggregate run-backed Statistics views over a caller-supplied time range.
 #[pyfunction]
 #[pyo3(name = "agent_stats_query_runs")]
@@ -20777,6 +21107,20 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_query_range, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_prune, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_store_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_normalize_definition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_canonicalize_fingerprint, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_unknown_evidence, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_begin, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_append_event, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_finish, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_reconcile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_show, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_retention_preview, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_retention_apply, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_store_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_perf_logs_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_activity, m)?)?;
@@ -33011,6 +33355,122 @@ MENTORS:
             assert_eq!(stats["raw_sample_count"], json!(0));
             assert_eq!(stats["rollup_5m_count"], json!(1));
             assert_eq!(stats["last_write_by_subsystem"]["agent"], json!(100));
+        });
+    }
+
+    #[test]
+    fn tool_run_bindings_round_trip_python_dicts() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let temp = tempdir().unwrap();
+            let path = temp.path().join("tools").join("runs.sqlite");
+            assert_eq!(py_tool_run_wire_schema_version(), 1);
+            let definition_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                }),
+            )
+            .unwrap();
+            let definition =
+                definition_obj.bind(py).downcast::<PyDict>().unwrap();
+            let normalized =
+                py_tool_run_normalize_definition(py, definition).unwrap();
+            let normalized = py_to_json_value(normalized.bind(py)).unwrap();
+            let digest = normalized["digest"].as_str().unwrap().to_string();
+            let begin_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "tool_name": "check",
+                    "definition": {
+                        "schema_version": 1,
+                        "name": "check",
+                        "argv": ["just", "check"],
+                        "description": "check",
+                        "stages": "run_silent",
+                        "inputs": ["Justfile"],
+                        "env": [],
+                        "args": "deny",
+                        "fingerprint": {"repos": [], "toolchain": {}}
+                    },
+                    "display_argv": ["just", "check"],
+                    "project": "sase",
+                    "now_ts": 10,
+                    "commit_running": true
+                }),
+            )
+            .unwrap();
+            let begin_request =
+                begin_obj.bind(py).downcast::<PyDict>().unwrap();
+            let started = py_tool_run_begin(
+                py,
+                path.to_str().unwrap(),
+                begin_request,
+                1_000,
+            )
+            .unwrap();
+            let started = py_to_json_value(started.bind(py)).unwrap();
+            assert_eq!(started["run"]["state"], json!("running"));
+            let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+            let finish_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "state": "succeeded",
+                    "exit_code": 0,
+                    "duration_ms": 12,
+                    "now_ts": 20
+                }),
+            )
+            .unwrap();
+            let finish_request =
+                finish_obj.bind(py).downcast::<PyDict>().unwrap();
+            let finished = py_tool_run_finish(
+                py,
+                path.to_str().unwrap(),
+                finish_request,
+                1_000,
+            )
+            .unwrap();
+            let finished = py_to_json_value(finished.bind(py)).unwrap();
+            assert_eq!(finished["run"]["state"], json!("succeeded"));
+            let stats =
+                py_tool_run_store_stats(py, path.to_str().unwrap(), 1_000)
+                    .unwrap();
+            let stats = py_to_json_value(stats.bind(py)).unwrap();
+            assert_eq!(stats["run_count"], json!(1));
+            let summary_obj = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "project": "sase",
+                    "tool_name": "check",
+                    "definition_digest": digest,
+                    "now_ts": 20
+                }),
+            )
+            .unwrap();
+            let summary_request =
+                summary_obj.bind(py).downcast::<PyDict>().unwrap();
+            let summary = py_tool_run_summary(
+                py,
+                path.to_str().unwrap(),
+                summary_request,
+                1_000,
+            )
+            .unwrap();
+            let summary = py_to_json_value(summary.bind(py)).unwrap();
+            assert_eq!(summary["typical_duration_ms"], json!(12));
         });
     }
 

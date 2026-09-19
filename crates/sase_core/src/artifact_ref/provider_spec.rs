@@ -24,7 +24,8 @@ use super::wire::ArtifactRefError;
 // core carrying it is installed — see plans/202608/artifacts_tab_icons.md (D2).
 pub const ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION: u64 = 1;
 
-const RESERVED_KINDS: &[&str] = &["stitch", "patch", "bead", "agent", "file"];
+const RESERVED_KINDS: &[&str] =
+    &["stitch", "patch", "bead", "agent", "file", "tool"];
 pub(crate) const PROPERTY_TYPES: &[&str] = &[
     "string",
     "enum",
@@ -298,6 +299,10 @@ mod tests {
     fn rejects_reserved_kind_and_bad_identifiers() {
         let mut spec = valid_spec();
         spec.reference.kind = "stitch".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.kind = "tool".to_string();
         assert!(validate_artifact_ref_provider_spec(&spec).is_err());
 
         let mut spec = valid_spec();

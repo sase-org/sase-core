@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "check",
+  "argv": ["just", "check"],
+  "description": "Repository check",
+  "stages": "run_silent",
+  "inputs": ["Justfile", "src/**/*.py"],
+  "env": ["SASE_PYTEST_WORKERS"],
+  "args": "deny",
+  "fingerprint": {
+    "repos": ["sase"],
+    "toolchain": {
+      "python": ["python", "--version"]
+    }
+  },
+  "diagnostics": []
+}

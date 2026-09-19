@@ -113,6 +113,7 @@ pub mod suffix;
 pub mod task_type;
 pub mod telemetry;
 pub mod text_tail;
+pub mod tool_run;
 pub mod vcs_log;
 pub mod wire;
 pub mod workspace_lease;
@@ -1552,6 +1553,34 @@ pub use telemetry::{
     TELEMETRY_WIRE_SCHEMA_VERSION,
 };
 pub use text_tail::{tail_text_by_lines_and_chars, TextTailWire};
+pub use tool_run::{
+    append_event as tool_run_append_event, begin as tool_run_begin,
+    canonicalize_tool_fingerprint, finish as tool_run_finish,
+    list_runs as tool_run_list, normalize_tool_definition,
+    reconcile as tool_run_reconcile,
+    retention_apply as tool_run_retention_apply,
+    retention_preview as tool_run_retention_preview, show_run as tool_run_show,
+    store_stats as tool_run_store_stats, summarize as tool_run_summary,
+    unknown_evidence as tool_run_unknown_evidence, ToolArgsPolicyWire,
+    ToolAttemptWire, ToolDefinitionNormalizeResultWire, ToolDefinitionWire,
+    ToolDirtyPathWire, ToolEvidenceCompletenessWire,
+    ToolFingerprintCanonicalizeResultWire, ToolFingerprintSpecWire,
+    ToolFingerprintWire, ToolInputFingerprintWire, ToolInputMatchWire,
+    ToolLivenessObservationWire, ToolLoadSampleWire, ToolRepoFingerprintWire,
+    ToolRunAppendRequestWire, ToolRunAppendResultWire, ToolRunBeginRequestWire,
+    ToolRunBeginResultWire, ToolRunDeletionCandidateWire, ToolRunError,
+    ToolRunEventKindWire, ToolRunEventWire, ToolRunExecutorWire,
+    ToolRunFinishRequestWire, ToolRunFinishResultWire, ToolRunListRequestWire,
+    ToolRunListResultWire, ToolRunLivenessFactWire, ToolRunLogMetadataWire,
+    ToolRunReconcileRequestWire, ToolRunReconcileResultWire,
+    ToolRunRetentionPolicyWire, ToolRunRetentionRequestWire,
+    ToolRunRetentionResultWire, ToolRunShowRequestWire, ToolRunShowResultWire,
+    ToolRunSourceWire, ToolRunStateWire, ToolRunStoreStatsWire,
+    ToolRunSummaryRequestWire, ToolRunSummaryResultWire, ToolRunWire,
+    ToolStageWire, ToolStagesWire, ToolToolchainProbeWire,
+    TOOL_RUN_DEFAULT_BUSY_TIMEOUT, TOOL_RUN_LOST_REASON_RUNNER_EXITED,
+    TOOL_RUN_MAX_BUSY_TIMEOUT, TOOL_RUN_WIRE_SCHEMA_VERSION,
+};
 pub use vcs_log::{
     aggregate_commit_log, classify_commit_origin, classify_commit_types,
     classify_commit_types_for_commit, parse_git_log, AggregatedCommitWire,

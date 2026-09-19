@@ -138,6 +138,20 @@ fn registrations() -> Vec<KindRegistration> {
             diagnostic: None,
         },
         KindRegistration {
+            kind: "tool",
+            display_name: "Tool",
+            status: ArtifactRefKindStatusWire::Live,
+            canonical: None,
+            aliases: &[],
+            reserved: true,
+            argument_summary: "tool:<run-id>",
+            offered_in_completion: false,
+            fragment_probe: ArtifactRefKindWire::Bead,
+            diagnostic: Some(
+                "tool references are reserved for the ToolRun ledger and have no public artifact projection",
+            ),
+        },
+        KindRegistration {
             kind: "job",
             display_name: "Job",
             status: ArtifactRefKindStatusWire::Alias,
@@ -381,6 +395,29 @@ mod tests {
         assert!(!resolved.alias);
         assert_eq!(resolved.canonical, "designs");
         assert_eq!(resolved.status, ArtifactRefKindStatusWire::Live);
+    }
+
+    #[test]
+    fn tool_kind_is_reserved_and_absent_from_completion() {
+        let catalog = artifact_ref_kind_catalog();
+        let descriptor = catalog
+            .iter()
+            .find(|descriptor| descriptor.kind == "tool")
+            .expect("missing tool descriptor");
+        assert!(descriptor.reserved);
+        assert!(!descriptor.offered_in_completion);
+        assert_eq!(descriptor.status, ArtifactRefKindStatusWire::Live);
+        assert!(!descriptor.accepts_fragment);
+
+        let resolved = canonical_artifact_ref_kind("tool");
+        assert!(!resolved.alias);
+        assert_eq!(resolved.canonical, "tool");
+        assert_eq!(
+            resolved.diagnostic.as_deref(),
+            Some(
+                "tool references are reserved for the ToolRun ledger and have no public artifact projection"
+            )
+        );
     }
 
     #[test]

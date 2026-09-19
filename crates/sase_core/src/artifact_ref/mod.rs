@@ -340,6 +340,12 @@ pub fn resolve_artifact_ref(
     match (&reference.kind, &reference.payload) {
         (
             ArtifactRefKindWire::Document { role },
+            ArtifactRefPayloadWire::Document { .. },
+        ) if role == "tool" => {
+            Ok(reserved_unresolved_kind_resolution("tool", rendered))
+        }
+        (
+            ArtifactRefKindWire::Document { role },
             ArtifactRefPayloadWire::Document { path },
         ) => resolve_document(role, path, rendered, context),
         (ArtifactRefKindWire::Chat, ArtifactRefPayloadWire::Chat { path }) => {
@@ -395,6 +401,17 @@ fn unresolved_kind_resolution(
     let mut resolved = resolution("unknown_kind", rendered);
     resolved.diagnostic = Some(format!(
         "{kind} references resolve through the provider registry, not this crate"
+    ));
+    resolved
+}
+
+fn reserved_unresolved_kind_resolution(
+    kind: &str,
+    rendered: String,
+) -> ArtifactRefResolutionWire {
+    let mut resolved = resolution("unknown_kind", rendered);
+    resolved.diagnostic = Some(format!(
+        "{kind} references are reserved for the ToolRun ledger and have no public artifact projection"
     ));
     resolved
 }
@@ -1195,15 +1212,16 @@ fn validate_kind(kind: &str) -> Result<(), ArtifactRefError> {
 /// Their Markdown renderings are regenerated wholesale, so a line anchor would
 /// silently drift to unrelated content after the next refresh.
 fn kind_rejects_fragments(kind: &ArtifactRefKindWire) -> bool {
-    matches!(
-        kind,
+    match kind {
         ArtifactRefKindWire::Commit
-            | ArtifactRefKindWire::Bug
-            | ArtifactRefKindWire::Bead
-            | ArtifactRefKindWire::Agent
-            | ArtifactRefKindWire::Stitch
-            | ArtifactRefKindWire::Patch
-    )
+        | ArtifactRefKindWire::Bug
+        | ArtifactRefKindWire::Bead
+        | ArtifactRefKindWire::Agent
+        | ArtifactRefKindWire::Stitch
+        | ArtifactRefKindWire::Patch => true,
+        ArtifactRefKindWire::Document { role } if role == "tool" => true,
+        _ => false,
+    }
 }
 
 /// Validate a bead id lexically, with no bead-store reads.
@@ -2142,6 +2160,19 @@ mod tests {
             .unwrap()
             .status,
             "unknown_kind"
+        );
+        let tool = resolve_artifact_ref(
+            &parse_artifact_ref("tool:0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(tool.status, "unknown_kind");
+        assert_eq!(
+            tool.diagnostic.as_deref(),
+            Some(
+                "tool references are reserved for the ToolRun ledger and have no public artifact projection"
+            )
         );
         assert_eq!(
             resolve_artifact_ref(
