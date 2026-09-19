@@ -10,6 +10,8 @@
 //! the gateway); it never touches artifact files and never itself resolves
 //! liveness or dismissal lineage.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::fleet_contract::{
@@ -58,13 +60,20 @@ pub struct FleetPresentationCandidateWire {
     /// A resolved owner dismissal excludes the candidate regardless of
     /// protection or apparent liveness.
     pub family_root_dismissed: bool,
-    /// Whether this candidate is a tracked family member rather than a
-    /// family root. The policy only uses this after liveness/protection
-    /// checks have classified the row as terminal-for-presentation: live
-    /// and unknown members remain visible so a paginated client can still
-    /// materialize the missing root.
+    /// Whether this candidate is a concrete family shell rather than a
+    /// family root. Live and unknown members stay current. Pending
+    /// (protected) dead members stay current. Other dead members of a
+    /// currently presented family are served in the bounded terminal
+    /// window so the viewer can nest them; orphan dead members stay
+    /// excluded.
     #[serde(default)]
     pub family_member: bool,
+    /// Grouping key for "currently presented family". A family is
+    /// presented when a root or a live/unknown/pending member is already
+    /// current, or a non-member terminal of the same key is inside the
+    /// recent window.
+    #[serde(default)]
+    pub family_key: Option<String>,
     /// Owner observation that the recorded PID is live but is not this
     /// agent (wrong command line or claim/marker mismatch). Such a row is
     /// excluded from presentation and history rather than demoted into
@@ -106,6 +115,7 @@ pub fn decide_fleet_presentation(
     let mut terminal_candidates: Vec<&FleetPresentationCandidateWire> =
         Vec::new();
     let mut excluded = Vec::new();
+    let mut presented_families = BTreeSet::new();
 
     for candidate in &request.candidates {
         validate_schema(
@@ -132,24 +142,48 @@ pub fn decide_fleet_presentation(
             candidate.liveness,
             OwnerLivenessWire::Alive | OwnerLivenessWire::Unknown
         ) {
+            mark_presented_family(&mut presented_families, candidate);
             current.push(candidate.identity.clone());
             continue;
         }
-        // Liveness is definitively `Dead` or `NotProcess`. Protection does
-        // not keep the row current; it retires through the same bounded
-        // terminal path as any other dead active-tier leftover.
-        if candidate.family_member {
-            excluded.push(candidate.identity.clone());
+        // Liveness is definitively `Dead` or `NotProcess`. A pending
+        // family shell whose creator PID is dead is not obsolete: keep
+        // it current. Standalone protected leftovers still take the
+        // bounded terminal path.
+        if candidate.family_member && candidate.protected {
+            mark_presented_family(&mut presented_families, candidate);
+            current.push(candidate.identity.clone());
             continue;
         }
         terminal_candidates.push(candidate);
+    }
+
+    for candidate in &terminal_candidates {
+        if candidate.family_member {
+            continue;
+        }
+        let age = request.now_unix - candidate.completion_time_unix;
+        if age <= FLEET_PRESENTATION_RECENT_TERMINAL_WINDOW_SECONDS {
+            mark_presented_family(&mut presented_families, candidate);
+        }
+    }
+
+    let mut ranked: Vec<&FleetPresentationCandidateWire> = Vec::new();
+    for candidate in terminal_candidates {
+        if candidate.family_member
+            && !family_is_presented(&presented_families, candidate)
+        {
+            excluded.push(candidate.identity.clone());
+            continue;
+        }
+        ranked.push(candidate);
     }
 
     // Rank by trustworthy completion time, newest first, with a stable
     // identity tie-breaker; then apply one combined age/count bound so dead
     // active leftovers cannot evade the window that already-terminal
     // records are held to.
-    terminal_candidates.sort_by(|left, right| {
+    ranked.sort_by(|left, right| {
         right
             .completion_time_unix
             .partial_cmp(&left.completion_time_unix)
@@ -158,7 +192,7 @@ pub fn decide_fleet_presentation(
     });
 
     let mut recent_terminal = Vec::new();
-    for (rank, candidate) in terminal_candidates.into_iter().enumerate() {
+    for (rank, candidate) in ranked.into_iter().enumerate() {
         let age = request.now_unix - candidate.completion_time_unix;
         let within_window =
             age <= FLEET_PRESENTATION_RECENT_TERMINAL_WINDOW_SECONDS;
@@ -176,6 +210,29 @@ pub fn decide_fleet_presentation(
         recent_terminal,
         excluded,
     })
+}
+
+fn mark_presented_family(
+    presented: &mut BTreeSet<String>,
+    candidate: &FleetPresentationCandidateWire,
+) {
+    if let Some(key) = candidate
+        .family_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        presented.insert(key.to_string());
+    }
+}
+
+fn family_is_presented(
+    presented: &BTreeSet<String>,
+    candidate: &FleetPresentationCandidateWire,
+) -> bool {
+    candidate
+        .family_key
+        .as_deref()
+        .is_some_and(|key| !key.is_empty() && presented.contains(key))
 }
 
 #[cfg(test)]
@@ -199,6 +256,7 @@ mod tests {
             completion_time_unix,
             family_root_dismissed,
             family_member: false,
+            family_key: None,
             process_identity_mismatch: false,
         }
     }
@@ -230,6 +288,7 @@ mod tests {
     ) -> FleetPresentationCandidateWire {
         FleetPresentationCandidateWire {
             family_member: true,
+            family_key: Some("lane".to_string()),
             ..candidate(
                 identity,
                 liveness,
@@ -439,18 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn terminal_family_member_is_not_a_standalone_recent_row() {
+    fn terminal_family_member_of_visible_family_is_served_for_nesting() {
         let now = 1_000_000.0;
+        let mut root =
+            candidate("root", OwnerLivenessWire::Dead, false, now - DAY, false);
+        root.family_key = Some("lane".to_string());
         let decision = decide(
             now,
             vec![
-                candidate(
-                    "root",
-                    OwnerLivenessWire::Dead,
-                    false,
-                    now - DAY,
-                    false,
-                ),
+                root,
                 family_member_candidate(
                     "root--gate",
                     OwnerLivenessWire::Dead,
@@ -460,8 +516,8 @@ mod tests {
             ],
         );
         assert!(decision.current.is_empty());
-        assert_eq!(decision.recent_terminal, vec!["root"]);
-        assert_eq!(decision.excluded, vec!["root--gate"]);
+        assert_eq!(decision.recent_terminal, vec!["root--gate", "root"]);
+        assert!(decision.excluded.is_empty());
     }
 
     #[test]
@@ -490,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_protected_family_member_is_not_a_standalone_row() {
+    fn pending_dead_creator_family_member_stays_current() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
@@ -501,9 +557,26 @@ mod tests {
                 now - DAY,
             )],
         );
+        assert_eq!(decision.current, vec!["waiting-member"]);
+        assert!(decision.recent_terminal.is_empty());
+        assert!(decision.excluded.is_empty());
+    }
+
+    #[test]
+    fn orphan_terminal_family_member_stays_excluded() {
+        let now = 1_000_000.0;
+        let decision = decide(
+            now,
+            vec![family_member_candidate(
+                "orphan--gate",
+                OwnerLivenessWire::Dead,
+                false,
+                now - DAY,
+            )],
+        );
         assert!(decision.current.is_empty());
         assert!(decision.recent_terminal.is_empty());
-        assert_eq!(decision.excluded, vec!["waiting-member"]);
+        assert_eq!(decision.excluded, vec!["orphan--gate"]);
     }
 
     #[test]

@@ -8,17 +8,19 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::{NaiveDateTime, Utc};
+use chrono::Utc;
 use sase_core::{
     agent_scan::{
         AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
         AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
-        AgentArtifactScanOptionsWire, AgentMetaWire, DoneMarkerWire,
-        FamilyDismissalLineageCandidateWire, FamilyShellWire,
+        AgentArtifactScanOptionsWire, FamilyDismissalLineageCandidateWire,
     },
     fleet_attention::{
         FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
         FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
+    },
+    fleet_catalog::{
+        row_kind_for_record, select_fleet_presentation, PresentationRecordFacts,
     },
     fleet_contract::{
         classify_cache_freshness, classify_cursor_replay, count_logical_agents,
@@ -53,13 +55,10 @@ use sase_core::{
         ResourceRevisionWire, StoreCursorWire, FLEET_CONTRACT_SCHEMA_VERSION,
         FLEET_INITIAL_CURSOR_GENERATION, FLEET_READ_DEFAULT_REPLAY_EVENTS,
     },
+    fleet_family::{family_id_for_record, family_shell},
     fleet_mutation::{
         FLEET_MUTATION_CAPABILITY_FORK, FLEET_MUTATION_CAPABILITY_RETRY,
         FLEET_MUTATION_CAPABILITY_STOP,
-    },
-    fleet_presentation::{
-        decide_fleet_presentation, FleetPresentationCandidateWire,
-        FleetPresentationRequestWire,
     },
     host_liveness::{
         HostOwnerLivenessObserver, OwnerLivenessObserver,
@@ -858,54 +857,20 @@ fn build_snapshot_blocking(
         .map(|result| (result.identity, result.family_root_dismissed))
         .collect();
 
-    let mut presentation_candidates = Vec::with_capacity(scan.records.len());
-    for record in &scan.records {
-        let observation = observation_by_identity
-            .get(&record.artifact_dir)
-            .copied()
-            .unwrap_or(OwnerProcessObservation::Unknown);
-        presentation_candidates.push(FleetPresentationCandidateWire {
-            schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
-            identity: record.artifact_dir.clone(),
-            liveness: observation.liveness(),
-            protected: record.waiting.is_some()
-                || record.pending_question.is_some(),
-            completion_time_unix: completion_time_for_record(record),
-            family_root_dismissed: dismissed_by_identity
-                .get(&record.artifact_dir)
-                .copied()
-                .unwrap_or(false),
-            family_member: tracked_parent_timestamp(record).is_some(),
-            process_identity_mismatch: observation.process_identity_mismatch(),
-        });
-    }
     // Select the served set, then build details, content handles, summaries,
     // and counts only from that set. Presentation remains bounded; explicit
     // history keeps the same safety filters without the terminal age/count
     // window.
-    let served: BTreeSet<String> = match request.scope {
-        FleetCatalogScopeWire::Presentation => {
-            let decision =
-                decide_fleet_presentation(&FleetPresentationRequestWire {
-                    schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
-                    now_unix,
-                    candidates: presentation_candidates,
-                })
-                .map_err(FleetReadError::from)?;
-            decision
-                .current
-                .into_iter()
-                .chain(decision.recent_terminal)
-                .collect()
-        }
-        FleetCatalogScopeWire::History => presentation_candidates
-            .iter()
-            .filter(|candidate| history_candidate_is_served(candidate))
-            .map(|candidate| candidate.identity.clone())
-            .collect(),
-    };
-    let presentation_context =
-        PresentationContext::from_records(&scan.records, &served);
+    let selection = select_fleet_presentation(
+        &scan.records,
+        &observation_by_identity,
+        &dismissed_by_identity,
+        now_unix,
+        request.scope,
+    )
+    .map_err(FleetReadError::from)?;
+    let served = selection.served;
+    let presentation_context = selection.context;
 
     let mut details = Vec::new();
     let mut content_by_handle = BTreeMap::new();
@@ -1002,124 +967,9 @@ fn build_snapshot_blocking(
     })
 }
 
-fn history_candidate_is_served(
-    candidate: &FleetPresentationCandidateWire,
-) -> bool {
-    !candidate.family_root_dismissed && !candidate.process_identity_mismatch
-}
-
 struct ResolvedRecord {
     detail: ResolvedAgentDetailWire,
     content_sources: Vec<FleetContentSource>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct PresentationRecordFacts {
-    timestamp: String,
-    family_id: Option<String>,
-    parent_timestamp: Option<String>,
-    agent_clan: Option<String>,
-    agent_clan_generation: Option<String>,
-    clan_tribe: Option<String>,
-    tribe: Option<String>,
-    started_at_unix: Option<f64>,
-    run_started_at_unix: Option<f64>,
-    display_status: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct PresentationContext {
-    by_timestamp: BTreeMap<String, PresentationRecordFacts>,
-    root_by_family_id: BTreeMap<String, PresentationRecordFacts>,
-    clan_tribe_by_key: BTreeMap<String, String>,
-}
-
-impl PresentationContext {
-    fn from_records(
-        records: &[AgentArtifactRecordWire],
-        served: &BTreeSet<String>,
-    ) -> Self {
-        let mut context = Self::default();
-        for record in records {
-            if !served.contains(&record.artifact_dir) {
-                continue;
-            }
-            let facts = direct_presentation_facts_for_record(record);
-            if let Some(key) = clan_context_key(
-                facts.agent_clan.as_deref(),
-                facts.agent_clan_generation.as_deref(),
-            ) {
-                if let Some(clan_tribe) = &facts.clan_tribe {
-                    context
-                        .clan_tribe_by_key
-                        .entry(key)
-                        .or_insert_with(|| clan_tribe.clone());
-                }
-            }
-            if facts.parent_timestamp.is_none() {
-                if let Some(family_id) = &facts.family_id {
-                    context
-                        .root_by_family_id
-                        .entry(family_id.clone())
-                        .or_insert_with(|| facts.clone());
-                }
-            }
-            context
-                .by_timestamp
-                .insert(record.timestamp.clone(), facts.clone());
-        }
-        context
-    }
-
-    fn facts_for_record(
-        &self,
-        record: &AgentArtifactRecordWire,
-    ) -> PresentationRecordFacts {
-        let mut facts = direct_presentation_facts_for_record(record);
-        let parent = facts
-            .parent_timestamp
-            .as_ref()
-            .and_then(|timestamp| self.by_timestamp.get(timestamp))
-            .cloned();
-        let family_root = facts
-            .family_id
-            .as_ref()
-            .and_then(|family_id| self.root_by_family_id.get(family_id))
-            .cloned()
-            .or_else(|| parent.clone());
-        let related = parent.as_ref().or(family_root.as_ref());
-
-        if facts.family_id.is_none() {
-            facts.family_id = related.and_then(|value| value.family_id.clone());
-        }
-        if facts.parent_timestamp.is_none() {
-            if let Some(root) = family_root.as_ref().filter(|root| {
-                root.timestamp != record.timestamp && root.family_id.is_some()
-            }) {
-                facts.parent_timestamp = Some(root.timestamp.clone());
-            }
-        }
-        if facts.tribe.is_none() {
-            facts.tribe = related.and_then(|value| value.tribe.clone());
-        }
-        if facts.clan_tribe.is_none() {
-            facts.clan_tribe = related
-                .and_then(|value| value.clan_tribe.clone())
-                .or_else(|| {
-                    clan_context_key(
-                        facts.agent_clan.as_deref(),
-                        facts.agent_clan_generation.as_deref(),
-                    )
-                    .and_then(|key| self.clan_tribe_by_key.get(&key).cloned())
-                });
-        }
-        if let Some(root_start) =
-            family_root.as_ref().and_then(|value| value.started_at_unix)
-        {
-            facts.started_at_unix = Some(root_start);
-        }
-        facts
-    }
 }
 
 fn resolve_record(
@@ -1265,46 +1115,9 @@ fn logical_locator_for_record(
             .unwrap_or("agent"),
             "agent",
         ),
-        family_id: family_id_for_record(record),
+        family_id: family_id_for_record(record)
+            .map(|value| safe_identifier(&value, "family")),
     }
-}
-
-fn direct_presentation_facts_for_record(
-    record: &AgentArtifactRecordWire,
-) -> PresentationRecordFacts {
-    let meta = record.agent_meta.as_ref();
-    PresentationRecordFacts {
-        timestamp: record.timestamp.clone(),
-        family_id: family_id_for_record(record),
-        parent_timestamp: tracked_parent_timestamp(record).map(str::to_string),
-        agent_clan: meta.and_then(|value| value.agent_clan.clone()),
-        agent_clan_generation: meta
-            .and_then(|value| value.agent_clan_generation.clone()),
-        clan_tribe: meta.and_then(|value| value.clan_tribe.clone()),
-        tribe: meta.and_then(|value| value.tribe.clone()),
-        started_at_unix: started_at_unix_for_record(record),
-        run_started_at_unix: run_started_at_unix_for_record(record),
-        display_status: Some(display_status_for_record(record)),
-    }
-}
-
-fn family_id_for_record(record: &AgentArtifactRecordWire) -> Option<String> {
-    let meta = record.agent_meta.as_ref();
-    first_non_empty([
-        meta.and_then(|value| value.agent_family.as_deref()),
-        family_shell(meta, record.done.as_ref())
-            .and_then(|value| value.label.as_deref()),
-    ])
-    .map(|value| safe_identifier(value, "family"))
-}
-
-fn tracked_parent_timestamp(record: &AgentArtifactRecordWire) -> Option<&str> {
-    record.agent_meta.as_ref().and_then(|value| {
-        first_non_empty([
-            value.parent_timestamp.as_deref(),
-            value.parent_agent_timestamp.as_deref(),
-        ])
-    })
 }
 
 fn exact_locator_for_record(
@@ -1324,28 +1137,6 @@ fn exact_locator_for_record(
         run_id: safe_identifier(&record.timestamp, "run"),
         attempt_id: safe_identifier(&attempt, "attempt"),
     }
-}
-
-fn row_kind_for_record(record: &AgentArtifactRecordWire) -> FleetRowKindWire {
-    let meta = record.agent_meta.as_ref();
-    if meta.and_then(|value| value.proc_id.as_ref()).is_some() {
-        return FleetRowKindWire::Proc;
-    }
-    match family_shell(meta, record.done.as_ref())
-        .map(|shell| shell.kind.as_str())
-    {
-        Some("monitor") => FleetRowKindWire::Monitor,
-        Some("gate") => FleetRowKindWire::Gate,
-        _ => FleetRowKindWire::AgentShell,
-    }
-}
-
-fn family_shell<'a>(
-    meta: Option<&'a AgentMetaWire>,
-    done: Option<&'a DoneMarkerWire>,
-) -> Option<&'a FamilyShellWire> {
-    meta.and_then(|value| value.family_shell.as_ref())
-        .or_else(|| done.and_then(|value| value.family_shell.as_ref()))
 }
 
 fn lifecycle_and_content_capabilities(
@@ -1693,71 +1484,6 @@ fn project_display_labels(
         .collect())
 }
 
-fn display_status_for_record(record: &AgentArtifactRecordWire) -> String {
-    if let Some(done) = &record.done {
-        if done.repeat_stopped {
-            return "STOPPED".to_string();
-        }
-        if let Some(status) = first_non_empty([done.status_label.as_deref()]) {
-            return status.to_string();
-        }
-        if done
-            .error
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || done.outcome.as_deref().is_some_and(|value| {
-                value.starts_with("failed") || value == "failed"
-            })
-        {
-            return "FAILED".to_string();
-        }
-        return "DONE".to_string();
-    }
-    if record.pending_question.is_some() {
-        return "QUESTION".to_string();
-    }
-    if record.waiting.is_some() {
-        return "WAITING".to_string();
-    }
-    if record.workflow_state.as_ref().is_some_and(|state| {
-        state.appears_as_agent && state.status.eq_ignore_ascii_case("starting")
-    }) {
-        return "STARTING".to_string();
-    }
-    if record.running.is_some()
-        || record.workflow_state.as_ref().is_some_and(|state| {
-            state.appears_as_agent
-                && matches!(
-                    state.status.to_ascii_lowercase().as_str(),
-                    "running" | "waiting" | "queued"
-                )
-        })
-    {
-        return "RUNNING".to_string();
-    }
-    "UNKNOWN".to_string()
-}
-
-fn started_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
-    record
-        .workflow_state
-        .as_ref()
-        .and_then(|state| state.start_time.as_deref())
-        .and_then(parse_rfc3339_unix)
-        .or_else(|| parse_record_timestamp(&record.timestamp))
-}
-
-fn run_started_at_unix_for_record(
-    record: &AgentArtifactRecordWire,
-) -> Option<f64> {
-    record.agent_meta.as_ref().and_then(|meta| {
-        meta.run_started_at
-            .as_deref()
-            .or(meta.wait_completed_at.as_deref())
-            .and_then(parse_rfc3339_unix)
-    })
-}
-
 fn stopped_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
     record
         .done
@@ -1802,22 +1528,10 @@ fn observation_freshness_for_age(
     Ok(decision.freshness)
 }
 
-/// Trustworthy completion time for presentation ranking/bounding:
-/// `done.finished_at` when present, else the record's own timestamp parsed
-/// to unix seconds. `record.timestamp` is always present and always in the
-/// compact `%Y%m%d%H%M%S` artifact-directory format, so it is a safe final
-/// fallback even when `done` is absent (a demoted dead-active record).
-fn completion_time_for_record(record: &AgentArtifactRecordWire) -> f64 {
-    if let Some(finished_at) =
-        record.done.as_ref().and_then(|done| done.finished_at)
-    {
-        return finished_at;
-    }
-    parse_record_timestamp(&record.timestamp).unwrap_or_else(current_unix_time)
-}
-
+#[cfg(test)]
 fn parse_record_timestamp(value: &str) -> Option<f64> {
-    let parsed = NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
+    let parsed =
+        chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
     Some(parsed.and_utc().timestamp() as f64)
 }
 
@@ -1869,15 +1583,6 @@ fn first_non_empty<'a>(
         .flatten()
         .map(str::trim)
         .find(|value| !value.is_empty())
-}
-
-fn clan_context_key(
-    agent_clan: Option<&str>,
-    agent_clan_generation: Option<&str>,
-) -> Option<String> {
-    let clan = first_non_empty([agent_clan])?;
-    let generation = first_non_empty([agent_clan_generation]).unwrap_or("");
-    Some(format!("{clan}\0{generation}"))
 }
 
 #[derive(Clone)]
@@ -3014,10 +2719,25 @@ mod tests {
         let service = build_service(&home, &projects);
 
         let presentation = service.catalog(catalog_query()).await.unwrap();
-        assert_eq!(presentation.page.rows.len(), 1);
-        let row = &presentation.page.rows[0];
-        assert_eq!(row.labels.agent_label.as_deref(), Some("lane"));
-        assert_eq!(row.labels.family_label.as_deref(), Some("lane"));
+        let labels = presentation
+            .page
+            .rows
+            .iter()
+            .map(|row| row.labels.agent_label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&Some("lane")), "{labels:?}");
+        assert!(labels.contains(&Some("lane--gate")), "{labels:?}");
+        let member = presentation
+            .page
+            .rows
+            .iter()
+            .find(|row| row.labels.agent_label.as_deref() == Some("lane--gate"))
+            .unwrap();
+        assert_ne!(
+            member.family_role,
+            sase_core::fleet_contract::FleetFamilyRoleWire::Root
+        );
+        assert_eq!(member.parent_timestamp.as_deref(), Some(root_ts.as_str()));
 
         let history = service
             .catalog(history_catalog_query(10, None))
@@ -3031,6 +2751,54 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&Some("lane")));
         assert!(labels.contains(&Some("lane--gate")));
+    }
+
+    #[tokio::test]
+    async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let root_ts = (now - chrono::Duration::minutes(4))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        let plan_ts = (now - chrono::Duration::minutes(3))
+            .format("%Y%m%d%H%M%S")
+            .to_string();
+        seed_alive_family_agent(&projects, &root_ts, "lane", "lane", None);
+        let plan_artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join(&plan_ts);
+        fs::create_dir_all(&plan_artifact).unwrap();
+        write_json(
+            &plan_artifact.join("agent_meta.json"),
+            json!({
+                "name": "lane--plan",
+                "agent_family": "lane",
+                "agent_family_role": "gate",
+                "gate_id": "gate-1",
+                "gate_state": "pending"
+            }),
+        );
+        write_json(&plan_artifact.join("running.json"), json!({"pid": 0}));
+        let service = build_service(&home, &projects);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        let plan = presentation
+            .page
+            .rows
+            .iter()
+            .find(|row| row.labels.agent_label.as_deref() == Some("lane--plan"))
+            .expect("plan shell served for nesting");
+        assert_ne!(
+            plan.family_role,
+            sase_core::fleet_contract::FleetFamilyRoleWire::Root
+        );
+        assert_eq!(plan.parent_timestamp.as_deref(), Some(root_ts.as_str()));
+        assert_eq!(plan.logical_locator.family_id.as_deref(), Some("lane"));
     }
 
     #[tokio::test]
@@ -3175,7 +2943,9 @@ mod tests {
             .iter()
             .map(|row| row.labels.agent_label.as_deref())
             .collect::<Vec<_>>();
-        assert_eq!(labels, vec![Some("lane--worker")]);
+        assert!(labels.contains(&Some("lane--worker")), "{labels:?}");
+        assert!(labels.contains(&Some("lane--waiting")), "{labels:?}");
+        assert!(labels.contains(&Some("lane--question")), "{labels:?}");
 
         let history = service
             .catalog(history_catalog_query(10, None))

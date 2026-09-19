@@ -1298,6 +1298,10 @@ use sase_core::fleet_attention::{
     FleetAttentionNoticeLedgerEntryWire, FleetAttentionNotificationRowWire,
     FleetAttentionRequestWire,
 };
+use sase_core::fleet_catalog::{
+    assemble_fleet_catalog as core_assemble_fleet_catalog,
+    AssembleFleetCatalogRequestWire,
+};
 use sase_core::fleet_contract::{
     self as core_fleet_contract, AgentInstanceLocatorWire,
     CacheFreshnessRequestWire, CapabilitySetWire, ConnectionPlanWire,
@@ -15770,6 +15774,20 @@ fn py_fleet_decide_launch_replay<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "assemble_fleet_catalog")]
+fn py_assemble_fleet_catalog<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: AssembleFleetCatalogRequestWire =
+        fleet_wire_from_pydict(request, "assemble fleet catalog request")?;
+    let result = py
+        .allow_threads(|| core_assemble_fleet_catalog(&request))
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
 #[pyo3(name = "fleet_validate_connection_plan")]
 fn py_fleet_validate_connection_plan<'py>(
     py: Python<'py>,
@@ -20900,6 +20918,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_launch_payload_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_launch_request, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_decide_launch_replay, m)?)?;
+    m.add_function(wrap_pyfunction!(py_assemble_fleet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_validate_connection_plan, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_mutation_payload_fingerprint,

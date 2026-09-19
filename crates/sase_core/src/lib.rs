@@ -55,7 +55,9 @@ pub mod feature_flag_state;
 pub mod fenced_code;
 pub mod finalizer;
 pub mod fleet_attention;
+pub mod fleet_catalog;
 pub mod fleet_contract;
+pub mod fleet_family;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod fleet_presentation;
@@ -919,6 +921,11 @@ pub use fleet_attention::{
     FLEET_ATTENTION_CAPABILITY_APPROVE_GATE, FLEET_ATTENTION_DEFAULT_PAGE_ROWS,
     FLEET_ATTENTION_MAX_PAGE_ROWS,
 };
+pub use fleet_catalog::{
+    assemble_fleet_catalog, row_kind_for_record, select_fleet_presentation,
+    AssembleFleetCatalogRequestWire, AssembleFleetCatalogResponseWire,
+    FleetPresentationSelection, PresentationContext, PresentationRecordFacts,
+};
 pub use fleet_contract::{
     accumulate_fleet_catalog_page, classify_cursor_replay,
     count_focus_and_fleet, count_focus_and_fleet_from_federation,
@@ -1002,6 +1009,11 @@ pub use fleet_contract::{
     FLEET_READ_MAX_FILTER_BYTES, FLEET_READ_MAX_PAGE_ROWS,
     FLEET_READ_MAX_PROJECT_IDS, FLEET_READ_MAX_QUERY_BYTES,
     FLEET_READ_MAX_REPLAY_EVENTS,
+};
+pub use fleet_family::{
+    concrete_family_shell_kind, family_id_for_record, family_key_for_record,
+    family_shell, record_is_concrete_family_shell, tracked_parent_timestamp,
+    ConcreteFamilyShellKind,
 };
 pub use fleet_follow_promotion::{
     followed_batch_family_promotions, FollowedBatchFamilyPromotionRequestWire,

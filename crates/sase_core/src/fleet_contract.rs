@@ -1951,7 +1951,10 @@ pub fn project_resolved_agent_summary(
         facts.row_kind,
         lifecycle,
         facts.liveness,
-        parent_timestamp.is_some(),
+        parent_timestamp.is_some()
+            || crate::fleet_family::record_is_concrete_family_shell(
+                &request.record,
+            ),
     );
     let project_label = facts
         .project_label
@@ -8480,6 +8483,22 @@ mod tests {
         let member = project_resolved_agent_summary(&member_request).unwrap();
         assert_eq!(member.family_role, FleetFamilyRoleWire::Member);
         assert_eq!(member.parent_timestamp, Some("20260906110000".to_string()));
+
+        // A live --plan shell with family_id and no parent_timestamp is a
+        // nested member, never a root.
+        let mut plan_record = record_running();
+        plan_record.agent_meta.as_mut().unwrap().name =
+            Some("0n--plan".to_string());
+        plan_record.agent_meta.as_mut().unwrap().parent_timestamp = None;
+        let plan_request = projection_request(
+            logical('a', "plan"),
+            Some(exact('a', "plan", "run-1")),
+            1,
+            plan_record,
+        );
+        let plan = project_resolved_agent_summary(&plan_request).unwrap();
+        assert_eq!(plan.family_role, FleetFamilyRoleWire::Member);
+        assert_eq!(plan.parent_timestamp, None);
 
         // A genuinely completed record is a historical shell.
         let done = summary_done('a', "done", 1, 1000.0);
