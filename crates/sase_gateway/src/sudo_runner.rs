@@ -2207,6 +2207,29 @@ fn configure_new_session(command: &mut Command) {
 }
 
 #[cfg(unix)]
+#[cfg(any(test, target_vendor = "apple"))]
+fn gid_to_c_int_for_initgroups(gid: libc::gid_t) -> io::Result<libc::c_int> {
+    libc::c_int::try_from(gid).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "sudo run_as primary group id {gid} does not fit initgroups base group type"
+            ),
+        )
+    })
+}
+
+#[cfg(all(unix, target_vendor = "apple"))]
+fn initgroups_base_group(gid: libc::gid_t) -> io::Result<libc::c_int> {
+    gid_to_c_int_for_initgroups(gid)
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn initgroups_base_group(gid: libc::gid_t) -> io::Result<libc::gid_t> {
+    Ok(gid)
+}
+
+#[cfg(unix)]
 fn configure_process_group_and_account(
     command: &mut Command,
     account: &ResolvedAccount,
@@ -2222,7 +2245,8 @@ fn configure_process_group_and_account(
                 return Err(io::Error::last_os_error());
             }
             if libc::geteuid() == 0 {
-                if libc::initgroups(name.as_ptr(), gid) != 0 {
+                let initgroups_gid = initgroups_base_group(gid)?;
+                if libc::initgroups(name.as_ptr(), initgroups_gid) != 0 {
                     return Err(io::Error::last_os_error());
                 }
                 if libc::setgid(gid) != 0 {
@@ -4200,6 +4224,26 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             ]),
             ParseResult::Cli(_)
         ));
+    }
+
+    #[test]
+    fn initgroups_base_group_accepts_current_platform_gid() {
+        assert_eq!(initgroups_base_group(0).unwrap() as i64, 0);
+    }
+
+    #[test]
+    fn initgroups_c_int_conversion_rejects_too_large_gid() {
+        let too_large = libc::c_int::MAX as u64 + 1;
+        let Ok(gid) = libc::gid_t::try_from(too_large) else {
+            return;
+        };
+
+        let error = gid_to_c_int_for_initgroups(gid).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("does not fit initgroups base group type"));
     }
 
     #[test]
