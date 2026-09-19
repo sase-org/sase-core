@@ -17,6 +17,7 @@ pub mod agent_cleanup;
 pub mod agent_family;
 pub mod agent_group_archive;
 pub mod agent_hold;
+pub mod agent_hold_deadlock;
 pub mod agent_identity;
 pub mod agent_launch;
 pub mod agent_name_template;
@@ -208,6 +209,10 @@ pub use agent_hold::{
     AgentHoldSelectorMatchWire, AgentHoldSelectorsWire, AgentHoldSnapshotWire,
     AGENT_HOLD_LOCK_FILENAME, AGENT_HOLD_PRUNE_FILENAME,
     AGENT_HOLD_STATE_FILENAME, AGENT_HOLD_WIRE_SCHEMA_VERSION,
+};
+pub use agent_hold_deadlock::{
+    hold_deadlock_reaches_candidate, HoldDeadlockCandidateWire,
+    HoldDeadlockWaitNodeWire,
 };
 pub use agent_identity::{
     agent_link_target, agent_local_hood, agent_name_ancestors,

@@ -227,6 +227,7 @@
 //! - `agent_hold_list(sase_home: str, liveness: dict | None = None, now: float | None = None) -> dict`
 //! - `agent_hold_blocks_candidate(record: dict, candidate: dict) -> dict | None`
 //! - `agent_hold_summarize_capture(scope: dict, identities: list[dict], armer: dict | None = None) -> dict`
+//! - `agent_hold_deadlock_reaches(start_artifact_dir: str, candidate: dict, nodes: list[dict]) -> bool`
 //! - `launch_unit_hold_key(request_id: str, logical_id: str) -> str`
 //! - `launch_unit_hold_armer(unit: dict, request_id: str, project: str, pid: int, done_marker_path: str) -> dict`
 //! - `feature_flag_state_wire_schema_version() -> int`
@@ -723,6 +724,10 @@ use sase_core::agent_hold::{
     AgentHoldCaptureSummaryWire, AgentHoldError as AgentHoldDomainError,
     AgentHoldLivenessFactsWire, AgentHoldRecordWire, AgentHoldScopeWire,
     AgentHoldSelectorsWire,
+};
+use sase_core::agent_hold_deadlock::{
+    hold_deadlock_reaches_candidate as core_hold_deadlock_reaches_candidate,
+    HoldDeadlockCandidateWire, HoldDeadlockWaitNodeWire,
 };
 use sase_core::agent_identity::{
     agent_link_target as core_agent_link_target,
@@ -14180,6 +14185,30 @@ fn py_agent_hold_summarize_capture<'py>(
     agent_hold_wire_to_py(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(name = "agent_hold_deadlock_reaches")]
+fn py_agent_hold_deadlock_reaches(
+    start_artifact_dir: &str,
+    candidate: &Bound<'_, PyDict>,
+    nodes: &Bound<'_, PyList>,
+) -> PyResult<bool> {
+    let candidate: HoldDeadlockCandidateWire =
+        agent_hold_dict_from_py(candidate.as_any(), "hold deadlock candidate")?;
+    let nodes: Vec<HoldDeadlockWaitNodeWire> = serde_json::from_value(
+        py_to_json_value(nodes.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "hold deadlock wait nodes are not a valid list: {error}"
+        ))
+    })?;
+    Ok(core_hold_deadlock_reaches_candidate(
+        start_artifact_dir,
+        &candidate,
+        &nodes,
+    ))
+}
+
 // --- Temporary maximum-running-agents override -----------------------
 
 fn runner_limit_override_error_to_pyerr(
@@ -20364,6 +20393,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_hold_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_blocks_candidate, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_summarize_capture, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_hold_deadlock_reaches, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_runner_limit_override_wire_schema_version,
         m
@@ -24886,6 +24916,55 @@ COMMITS:
             assert_eq!(snapshot_value["holds"].as_array().unwrap().len(), 0);
             assert_eq!(snapshot_value["pruned"].as_array().unwrap().len(), 1);
             assert_eq!(snapshot_value["pruned"][0]["reason"], json!("expiry"));
+        });
+    }
+
+    #[test]
+    fn agent_hold_deadlock_reaches_walks_every_wait_branch() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let candidate_obj = json_value_to_py(
+                py,
+                &json!({
+                    "artifact_dir": "/a/20260910120000",
+                    "agent_name": "candidate.agent",
+                    "timestamp": "20260910120000"
+                }),
+            )
+            .unwrap();
+            let candidate =
+                candidate_obj.bind(py).downcast::<PyDict>().unwrap();
+            let nodes_obj = json_value_to_py(
+                py,
+                &json!([
+                    {
+                        "artifact_dir": "/a/20260910120001",
+                        "agent_name": "armer.agent",
+                        "timestamp": "20260910120001",
+                        "waiting_for": ["safe.agent", "bridge.agent"]
+                    },
+                    {
+                        "artifact_dir": "/a/20260910120002",
+                        "agent_name": "safe.agent",
+                        "timestamp": "20260910120002",
+                        "waiting_for": ["unrelated.agent"]
+                    },
+                    {
+                        "artifact_dir": "/a/20260910120003",
+                        "agent_name": "bridge.agent",
+                        "timestamp": "20260910120003",
+                        "waiting_for": ["candidate.agent"]
+                    }
+                ]),
+            )
+            .unwrap();
+            let nodes = nodes_obj.bind(py).downcast::<PyList>().unwrap();
+            assert!(py_agent_hold_deadlock_reaches(
+                "/a/20260910120001",
+                candidate,
+                nodes,
+            )
+            .unwrap());
         });
     }
 
