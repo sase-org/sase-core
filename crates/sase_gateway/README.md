@@ -98,6 +98,20 @@ The Rust gateway does not parse xprompt arguments itself.
 
 ## Sudo Runner
 
+`sase_sudo_runner` has two supported hosts:
+
+- Native Rust binary (`sase_sudo_runner`): detached hops relaunch the same
+  executable with `--internal-root-exec` and `--internal-root-worker`.
+- PyO3 console script (`sase_core_rs.sudo_runner:main`): detached hops
+  relaunch through the active interpreter as
+  `<sys.executable> -I -m sase_core_rs.sudo_runner` plus the same internal
+  mode arguments. Isolated mode (`-I`) is required so a lookalike package
+  cannot be imported from the reviewed working directory, `PYTHONPATH`, or
+  the user site.
+
+The launcher program and prefix are host configuration, not CLI options or
+reviewed-manifest data.
+
 `sase_sudo_runner --manifest PATH --expected-sha256 SHA256` reads one reviewed sudo manifest, validates and canonicalizes
 it through `sase_core::sudo`, compares the canonical lowercase SHA-256 to the expected digest, and then emits exactly one
 JSON execution ledger on stdout for execution outcomes. Progress and command output go to stderr/the inherited terminal

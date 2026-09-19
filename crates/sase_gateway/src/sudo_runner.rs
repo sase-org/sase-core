@@ -1,3 +1,21 @@
+//! Reviewed sudo runner.
+//!
+//! Two hosting modes are supported:
+//!
+//! - Native `sase_sudo_runner` binary: detached hops relaunch
+//!   `std::env::current_exe()` with no extra prefix, so sudo runs
+//!   `<current_exe> --internal-root-exec ...` and the root executor later
+//!   spawns `<current_exe> --internal-root-worker ...`.
+//! - PyO3 console script (`sase_core_rs.sudo_runner`): detached hops
+//!   relaunch through the active interpreter as
+//!   `<sys.executable> -I -m sase_core_rs.sudo_runner` plus the same
+//!   internal mode arguments. Isolated mode (`-I`) is required so a
+//!   lookalike `sase_core_rs` package cannot be imported from the reviewed
+//!   working directory, `PYTHONPATH`, or the user site.
+//!
+//! The launcher program and prefix are host configuration, not
+//! reviewed-manifest data and not public CLI options.
+
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +49,12 @@ pub const SUDO_RUNNER_INVALID_INPUT_EXIT: i32 = 13;
 pub const SUDO_RUNNER_RUNNER_ERROR_EXIT: i32 = 14;
 
 const PRODUCTION_SUDO: &str = "/usr/bin/sudo";
+/// Isolated-module prefix used when the PyO3 console runner relaunches
+/// through the active interpreter. Not a public CLI option.
+pub const PYTHON_HOSTED_SUDO_RUNNER_PREFIX: &[&str] =
+    &["-I", "-m", "sase_core_rs.sudo_runner"];
+const INTERNAL_ROOT_EXEC_FLAG: &str = "--internal-root-exec";
+const INTERNAL_ROOT_WORKER_FLAG: &str = "--internal-root-worker";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const KILL_GRACE: Duration = Duration::from_millis(250);
@@ -95,18 +119,110 @@ impl std::fmt::Display for SudoRunnerCliError {
 
 impl std::error::Error for SudoRunnerCliError {}
 
+/// Run the reviewed sudo-runner CLI as the native Rust binary.
+///
+/// Detached execution relaunches this process via `std::env::current_exe()`
+/// with an empty prefix: `sudo ... -- <current_exe> --internal-root-exec
+/// ...`, then `<current_exe> --internal-root-worker ...`.
 pub fn run_sudo_runner_cli(
     args: impl IntoIterator<Item = String>,
 ) -> Result<(), SudoRunnerCliError> {
-    let config = SudoRunnerConfig::production();
+    run_sudo_runner_cli_with_config(args, SudoRunnerConfig::production())
+}
+
+/// Run the reviewed sudo-runner CLI when hosted by the `sase-core-rs` PyO3
+/// module.
+///
+/// `python_executable` must be the absolute path of the active interpreter
+/// (`sys.executable`). Detached hops relaunch as
+/// `<python_executable> -I -m sase_core_rs.sudo_runner` followed by the
+/// private internal mode argument. Isolated mode is required so a lookalike
+/// package in the reviewed working directory, `PYTHONPATH`, or the user site
+/// cannot be imported.
+pub fn run_python_hosted_sudo_runner_cli(
+    python_executable: impl AsRef<Path>,
+    args: impl IntoIterator<Item = String>,
+) -> Result<(), SudoRunnerCliError> {
+    let mut config = SudoRunnerConfig::production();
+    config.launcher = Some(SudoRunnerLauncher::python_hosted(
+        python_executable.as_ref(),
+    )?);
+    run_sudo_runner_cli_with_config(args, config)
+}
+
+fn run_sudo_runner_cli_with_config(
+    args: impl IntoIterator<Item = String>,
+    config: SudoRunnerConfig,
+) -> Result<(), SudoRunnerCliError> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     run_sudo_runner_cli_with_io(args, &config, &mut stdout, &mut stderr)
 }
 
+/// Executable plus fixed prefix used to relaunch the runner across privilege
+/// transitions. Tests inject a full launcher rather than a bare path so a
+/// Python-hosted prefix cannot silently fall back to `current_exe()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SudoRunnerLauncher {
+    program: PathBuf,
+    prefix: Vec<String>,
+}
+
+impl SudoRunnerLauncher {
+    fn native() -> Result<Self, SudoRunnerCliError> {
+        Ok(Self {
+            program: std::env::current_exe().map_err(|error| {
+                cli_error(
+                    SudoRunnerExitStatus::RunnerError,
+                    format!(
+                        "failed to resolve sudo runner executable: {error}"
+                    ),
+                )
+            })?,
+            prefix: Vec::new(),
+        })
+    }
+
+    fn python_hosted(
+        python_executable: &Path,
+    ) -> Result<Self, SudoRunnerCliError> {
+        if python_executable.as_os_str().is_empty()
+            || !python_executable.is_absolute()
+        {
+            return Err(cli_error(
+                SudoRunnerExitStatus::RunnerError,
+                format!(
+                    "Python sudo runner host executable must be an absolute path: {}",
+                    python_executable.display()
+                ),
+            ));
+        }
+        Ok(Self {
+            program: python_executable.to_path_buf(),
+            prefix: PYTHON_HOSTED_SUDO_RUNNER_PREFIX
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+        })
+    }
+
+    fn append_invocation(&self, command: &mut Command, mode: &str) {
+        command.arg(&self.program);
+        command.args(&self.prefix);
+        command.arg(mode);
+    }
+
+    fn command_for_internal_mode(&self, mode: &str) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(&self.prefix);
+        command.arg(mode);
+        command
+    }
+}
+
 struct SudoRunnerConfig {
     sudo_path: PathBuf,
-    runner_path: Option<PathBuf>,
+    launcher: Option<SudoRunnerLauncher>,
     tty_available: Option<bool>,
     harden_process: bool,
     started_sentinel_timeout: Duration,
@@ -119,7 +235,7 @@ impl SudoRunnerConfig {
     fn production() -> Self {
         Self {
             sudo_path: PathBuf::from(PRODUCTION_SUDO),
-            runner_path: None,
+            launcher: None,
             tty_available: None,
             harden_process: true,
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
@@ -133,7 +249,7 @@ impl SudoRunnerConfig {
     fn test(sudo_path: PathBuf) -> Self {
         Self {
             sudo_path,
-            runner_path: None,
+            launcher: None,
             tty_available: Some(true),
             harden_process: false,
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
@@ -361,10 +477,10 @@ fn parse_sudo_runner_args(
                 expected_sha256 = Some(value);
             }
             "--help" | "-h" => return ParseResult::Help,
-            "--internal-root-exec" => {
+            INTERNAL_ROOT_EXEC_FLAG => {
                 internal_root_exec = true;
             }
-            "--internal-root-worker" => {
+            INTERNAL_ROOT_WORKER_FLAG => {
                 internal_root_worker = true;
             }
             "--parent-gid" => {
@@ -874,10 +990,10 @@ fn run_internal_root_exec(
         let (manifest, manifest_sha256) =
             load_verified_detach_manifest(&paths, &cli.expected_sha256)?;
         reject_existing_path(&paths.started_path, "started handshake")?;
-        let runner_path = runner_executable_path(config)?;
-        let mut command = Command::new(&runner_path);
+        let launcher = runner_launcher(config)?;
+        let mut command =
+            launcher.command_for_internal_mode(INTERNAL_ROOT_WORKER_FLAG);
         command
-            .arg("--internal-root-worker")
             .arg("--manifest")
             .arg(&paths.manifest_path)
             .arg("--expected-sha256")
@@ -1252,17 +1368,13 @@ fn spawn_internal_root_executor(
     paths: &HandoffPaths,
 ) -> Result<(), SudoRunnerCliError> {
     reject_existing_path(&paths.started_path, "started handshake")?;
-    let runner_path = runner_executable_path(config)?;
+    let launcher = runner_launcher(config)?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     let mut command = sudo_command(config, manifest);
+    command.arg("-n").arg("-u").arg("root").arg("--");
+    launcher.append_invocation(&mut command, INTERNAL_ROOT_EXEC_FLAG);
     command
-        .arg("-n")
-        .arg("-u")
-        .arg("root")
-        .arg("--")
-        .arg(runner_path)
-        .arg("--internal-root-exec")
         .arg("--manifest")
         .arg(&paths.manifest_path)
         .arg("--expected-sha256")
@@ -1487,18 +1599,13 @@ fn validate_handshake_paths(
     Ok(())
 }
 
-fn runner_executable_path(
+fn runner_launcher(
     config: &SudoRunnerConfig,
-) -> Result<PathBuf, SudoRunnerCliError> {
-    if let Some(path) = &config.runner_path {
-        return Ok(path.clone());
+) -> Result<SudoRunnerLauncher, SudoRunnerCliError> {
+    match &config.launcher {
+        Some(launcher) => Ok(launcher.clone()),
+        None => SudoRunnerLauncher::native(),
     }
-    std::env::current_exe().map_err(|error| {
-        cli_error(
-            SudoRunnerExitStatus::RunnerError,
-            format!("failed to resolve sudo runner executable: {error}"),
-        )
-    })
 }
 
 fn path_string(path: &Path) -> Result<String, SudoRunnerCliError> {
@@ -2691,7 +2798,10 @@ mod tests {
                 .unwrap();
             let digest = sudo_manifest_sha256(&manifest).unwrap();
             let mut config = SudoRunnerConfig::test(sudo_path.clone());
-            config.runner_path = Some(executor_path.clone());
+            config.launcher = Some(SudoRunnerLauncher {
+                program: executor_path.clone(),
+                prefix: Vec::new(),
+            });
             Self {
                 handoff_dir: tmp.path().to_path_buf(),
                 _tmp: tmp,
@@ -2799,6 +2909,38 @@ mod tests {
 
         fn write_marker(&self, suffix: &str, value: &str) {
             fs::write(self.sudo_path.with_extension(suffix), value).unwrap();
+        }
+
+        fn runner_program(&self) -> &Path {
+            &self
+                .config
+                .launcher
+                .as_ref()
+                .expect("fixture injects a launcher")
+                .program
+        }
+
+        fn with_python_hosted_launcher(&mut self) {
+            let launcher = self
+                .config
+                .launcher
+                .as_mut()
+                .expect("fixture injects a launcher");
+            launcher.prefix = PYTHON_HOSTED_SUDO_RUNNER_PREFIX
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect();
+        }
+
+        fn exec_relaunch_argv(&self) -> Vec<String> {
+            let call = self
+                .argv_calls()
+                .into_iter()
+                .find(|argv| {
+                    argv.iter().any(|arg| arg == INTERNAL_ROOT_EXEC_FLAG)
+                })
+                .expect("missing --internal-root-exec sudo invocation");
+            argv_after_separator(&call).to_vec()
         }
     }
 
@@ -3063,6 +3205,13 @@ mv "$tmp" "$started_path"
     fn waiting_worker_script() -> &'static str {
         r#"#!/bin/sh
 set -eu
+{
+  printf 'BEGIN\n'
+  for arg do
+    printf '%s\n' "$arg"
+  done
+  printf 'END\n'
+} >> "$0.argv"
 detach_dir=""
 started_path=""
 while [ "$#" -gt 0 ]; do
@@ -3092,6 +3241,40 @@ printf 'ran\n' > "$detach_dir/worker.ran"
 
     fn process_alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn argv_after_separator(call: &[String]) -> &[String] {
+        let index = call
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("sudo invocation missing --");
+        &call[index + 1..]
+    }
+
+    fn recorded_argv(path: &Path) -> Vec<String> {
+        let content =
+            fs::read_to_string(path.with_extension("argv")).unwrap_or_default();
+        let mut current = Vec::new();
+        let mut in_call = false;
+        for line in content.lines() {
+            match line {
+                "BEGIN" => {
+                    in_call = true;
+                    current.clear();
+                }
+                "END" if in_call => return current,
+                _ if in_call => current.push(line.to_string()),
+                _ => {}
+            }
+        }
+        current
+    }
+
+    fn python_hosted_prefix() -> Vec<String> {
+        PYTHON_HOSTED_SUDO_RUNNER_PREFIX
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
     }
 
     #[test]
@@ -3485,6 +3668,7 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         assert_eq!(fixture.calls().first().map(String::as_str), Some("-k"));
         assert_eq!(fixture.calls().get(1).map(String::as_str), Some("-v"));
         assert_eq!(fixture.calls().last().map(String::as_str), Some("-k"));
+        assert!(!fixture.handoff_dir.join(STARTED_FILENAME).exists());
     }
 
     #[test]
@@ -3526,6 +3710,147 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             .iter()
             .any(|call| call.contains("--internal-root-exec")));
         assert_eq!(fixture.calls().last().map(String::as_str), Some("-k"));
+        let relaunch = fixture.exec_relaunch_argv();
+        assert_eq!(
+            relaunch.first().map(String::as_str),
+            Some(fixture.runner_program().to_str().unwrap())
+        );
+        assert_eq!(
+            relaunch.get(1).map(String::as_str),
+            Some(INTERNAL_ROOT_EXEC_FLAG)
+        );
+    }
+
+    #[test]
+    fn native_launcher_places_internal_modes_directly_after_executable() {
+        let fixture = Fixture::new(manifest());
+        let (result, _, _) = fixture.run_detach();
+        assert!(result.is_ok(), "{result:?}");
+        let relaunch = fixture.exec_relaunch_argv();
+        assert_eq!(
+            &relaunch[..2],
+            &[
+                fixture.runner_program().display().to_string(),
+                INTERNAL_ROOT_EXEC_FLAG.to_string(),
+            ]
+        );
+
+        let (worker_argv, result) = run_waiting_worker_exec(Vec::new());
+        assert!(
+            !worker_argv.is_empty(),
+            "worker did not record argv: {result:?}"
+        );
+        assert_eq!(
+            worker_argv.first().map(String::as_str),
+            Some(INTERNAL_ROOT_WORKER_FLAG)
+        );
+    }
+
+    #[test]
+    fn python_hosted_launcher_preserves_isolated_module_prefix() {
+        let mut fixture = Fixture::new(manifest());
+        fixture.with_python_hosted_launcher();
+        let (result, stdout, _) = fixture.run_detach();
+        assert!(result.is_ok(), "{result:?}");
+        let handshake: SudoExecStartedWire =
+            serde_json::from_str(stdout.trim()).unwrap();
+        validate_sudo_exec_started(
+            &handshake,
+            Some(
+                &sudo_manifest_from_json_slice(
+                    &fs::read(&fixture.manifest_path).unwrap(),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let relaunch = fixture.exec_relaunch_argv();
+        let program = fixture.runner_program().display().to_string();
+        let mut expected = vec![program];
+        expected.extend(python_hosted_prefix());
+        expected.push(INTERNAL_ROOT_EXEC_FLAG.to_string());
+        assert_eq!(&relaunch[..expected.len()], expected.as_slice());
+
+        let (worker_argv, result) =
+            run_waiting_worker_exec(python_hosted_prefix());
+        assert!(
+            worker_argv.len() >= 4,
+            "worker did not record Python-hosted argv: {result:?}"
+        );
+        let mut expected_worker = python_hosted_prefix();
+        expected_worker.push(INTERNAL_ROOT_WORKER_FLAG.to_string());
+        assert_eq!(
+            &worker_argv[..expected_worker.len()],
+            expected_worker.as_slice()
+        );
+    }
+
+    #[test]
+    fn python_hosted_entry_rejects_non_absolute_interpreter() {
+        let error =
+            run_python_hosted_sudo_runner_cli("python", ["--help".to_string()])
+                .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error.message().contains("absolute path"));
+
+        let error =
+            run_python_hosted_sudo_runner_cli("", ["--help".to_string()])
+                .unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error.message().contains("absolute path"));
+    }
+
+    #[test]
+    fn parse_rejects_launcher_override_arguments() {
+        let ParseResult::Error(message) = parse_sudo_runner_args([
+            "--runner-program".to_string(),
+            "/usr/bin/python".to_string(),
+        ]) else {
+            panic!("expected unknown-argument error");
+        };
+        assert!(message.contains("unknown argument: --runner-program"));
+    }
+
+    fn run_waiting_worker_exec(
+        prefix: Vec<String>,
+    ) -> (Vec<String>, Result<(), SudoRunnerCliError>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv = vec!["/bin/true".to_string()];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let worker_path = tmp.path().join("waiting-worker");
+        write_executable(&worker_path, waiting_worker_script());
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.launcher = Some(SudoRunnerLauncher {
+            program: worker_path.clone(),
+            prefix,
+        });
+        config.detached_execution = Some(true);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = run_sudo_runner_cli_with_io(
+            exec_cli_args(&manifest_path, digest, tmp.path()),
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        let argv_path = worker_path.with_extension("argv");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !argv_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let argv = recorded_argv(&worker_path);
+        if let Ok(pid) = fs::read_to_string(tmp.path().join("worker.pid")) {
+            if let Ok(pid) = pid.trim().parse::<u32>() {
+                let _ =
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+        (argv, result)
     }
 
     #[test]
@@ -3947,7 +4272,10 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let worker_path = tmp.path().join("waiting-worker");
         write_executable(&worker_path, waiting_worker_script());
         let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
-        config.runner_path = Some(worker_path);
+        config.launcher = Some(SudoRunnerLauncher {
+            program: worker_path,
+            prefix: Vec::new(),
+        });
         config.detached_execution = Some(true);
         config.process_identity_error =
             Some("forced identity derivation failure".to_string());
@@ -3985,7 +4313,10 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let worker_path = tmp.path().join("waiting-worker");
         write_executable(&worker_path, waiting_worker_script());
         let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
-        config.runner_path = Some(worker_path);
+        config.launcher = Some(SudoRunnerLauncher {
+            program: worker_path,
+            prefix: Vec::new(),
+        });
         config.detached_execution = Some(true);
         config.started_publish_error =
             Some("forced started handshake publish failure".to_string());

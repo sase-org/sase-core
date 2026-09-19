@@ -34,6 +34,8 @@ without a local Rust toolchain.
 - `sudo_validate_manifest`, `sudo_manifest_sha256`,
   `sudo_derive_risk_badges`, `sudo_validate_ledger` — reviewed sudo manifest
   and ledger contracts shared with the installed `sase_sudo_runner` script.
+- `sudo_runner_main(args)` — PyO3-hosted reviewed sudo runner. Detached hops
+  relaunch as `<sys.executable> -I -m sase_core_rs.sudo_runner`.
 
 `classify_axe_status` performs no filesystem, process, or clock access. Python
 supplies lock/PID liveness, marker ages, runner occupancy, lumberjack reports,

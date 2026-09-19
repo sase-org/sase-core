@@ -86,7 +86,8 @@ pub use server::{
 };
 pub use storage::{AuditLogEntryWire, DeviceTokenStore, StoreError};
 pub use sudo_runner::{
-    run_sudo_runner_cli, SudoRunnerCliError, SudoRunnerExitStatus,
+    run_python_hosted_sudo_runner_cli, run_sudo_runner_cli, SudoRunnerCliError,
+    SudoRunnerExitStatus, PYTHON_HOSTED_SUDO_RUNNER_PREFIX,
     SUDO_RUNNER_AUTH_FAILED_EXIT, SUDO_RUNNER_CANCELLED_EXIT,
     SUDO_RUNNER_INVALID_INPUT_EXIT, SUDO_RUNNER_RUNNER_ERROR_EXIT,
     SUDO_RUNNER_SUCCESS_EXIT, SUDO_RUNNER_TTY_UNAVAILABLE_EXIT,

@@ -279,7 +279,9 @@
 //! - `sudo_derive_risk_badges(manifest: dict) -> list[dict]`
 //! - `sudo_validate_ledger(ledger: dict, manifest: dict | None = None) -> dict`
 //! - `sudo_validate_handshake(handshake: dict, manifest: dict | None = None) -> dict`
-//! - `sudo_runner_main(args: list[str]) -> None`
+//! - `sudo_runner_main(args: list[str]) -> None` — PyO3-hosted reviewed sudo
+//!   runner. Detached hops relaunch as
+//!   `<sys.executable> -I -m sase_core_rs.sudo_runner`.
 //! - `fleet_classify_runtime_duration(request: dict) -> dict`
 //! - `fleet_classify_cache_freshness(request: dict) -> dict`
 //! - `runner_limit_override_get(sase_home: str, now: float | None = None) -> dict | None`
@@ -16129,18 +16131,57 @@ fn py_sudo_authorize_settlement<'py>(
     sudo_wire_to_py(py, &authorization)
 }
 
+fn python_hosted_sudo_runner_executable(py: Python<'_>) -> PyResult<PathBuf> {
+    let sys = py.import_bound("sys")?;
+    let executable: String = sys.getattr("executable")?.extract()?;
+    python_hosted_sudo_runner_executable_from_str(&executable)
+}
+
+fn python_hosted_sudo_runner_executable_from_str(
+    executable: &str,
+) -> PyResult<PathBuf> {
+    let program = PathBuf::from(executable);
+    if executable.is_empty() || !program.is_absolute() {
+        return Err(PyRuntimeError::new_err(format!(
+            "Python sys.executable is not a usable absolute path: {executable:?}"
+        )));
+    }
+    Ok(program)
+}
+
+#[cfg(test)]
+fn python_hosted_sudo_runner_prefix() -> Vec<String> {
+    sase_gateway::PYTHON_HOSTED_SUDO_RUNNER_PREFIX
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect()
+}
+
+#[cfg(test)]
+fn python_hosted_sudo_runner_launcher(
+    py: Python<'_>,
+) -> PyResult<(PathBuf, Vec<String>)> {
+    Ok((
+        python_hosted_sudo_runner_executable(py)?,
+        python_hosted_sudo_runner_prefix(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(name = "sudo_runner_main")]
 fn py_sudo_runner_main(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
-    py.allow_threads(|| sase_gateway::run_sudo_runner_cli(args))
-        .map_err(|error| {
-            let err = format!(
-                "sase_sudo_runner exited with {}: {}",
-                error.exit_code(),
-                error
-            );
-            PyRuntimeError::new_err(err)
-        })
+    let program = python_hosted_sudo_runner_executable(py)?;
+    py.allow_threads(|| {
+        sase_gateway::run_python_hosted_sudo_runner_cli(program, args)
+    })
+    .map_err(|error| {
+        let err = format!(
+            "sase_sudo_runner exited with {}: {}",
+            error.exit_code(),
+            error
+        );
+        PyRuntimeError::new_err(err)
+    })
 }
 
 #[pyfunction]
@@ -18777,6 +18818,35 @@ fn sudo_bindings_validate_manifest_risk_ledger_and_help() {
         assert!(malformed_error.to_string().contains("absolute"));
 
         py_sudo_runner_main(py, vec!["--help".to_string()]).unwrap();
+    });
+}
+
+#[test]
+fn python_hosted_sudo_runner_launcher_uses_isolated_module_execution() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (program, prefix) = python_hosted_sudo_runner_launcher(py).unwrap();
+        let sys = py.import_bound("sys").unwrap();
+        let expected: String =
+            sys.getattr("executable").unwrap().extract().unwrap();
+        assert_eq!(program, PathBuf::from(&expected));
+        assert!(program.is_absolute());
+        assert_eq!(prefix, python_hosted_sudo_runner_prefix());
+        assert_eq!(prefix, vec!["-I", "-m", "sase_core_rs.sudo_runner"]);
+    });
+}
+
+#[test]
+fn python_hosted_sudo_runner_launcher_rejects_unusable_executable() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|_py| {
+        let error =
+            python_hosted_sudo_runner_executable_from_str("").unwrap_err();
+        assert!(error.to_string().contains("usable absolute path"));
+
+        let error = python_hosted_sudo_runner_executable_from_str("python")
+            .unwrap_err();
+        assert!(error.to_string().contains("usable absolute path"));
     });
 }
 
