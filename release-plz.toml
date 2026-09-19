@@ -12,7 +12,12 @@ publish = false
 [[package]]
 name = "sase_core"
 version_group = "sase-core"
-changelog_include = ["sase_core_py"]
+# sase_core_py is the PyPI distribution. sase_gateway is not published to
+# crates.io, but the wheel bundles it (sudo runner, host gateway). Gateway-only
+# ABI fixes must appear in this changelog so they bump sase-core-rs; otherwise
+# tagged-but-unpublished versions keep rebuilding from the last sase_core tag
+# and never pick up the fix.
+changelog_include = ["sase_core_py", "sase_gateway"]
 git_tag_enable = true
 git_release_enable = true
 git_tag_name = "v{{ version }}"
