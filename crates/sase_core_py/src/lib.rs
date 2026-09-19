@@ -220,12 +220,13 @@
 //! - `effort_override_set_until(sase_home: str, effort: str, expires_at: float, source: str, now: float | None = None) -> dict`
 //! - `effort_override_clear(sase_home: str) -> bool`
 //! - `agent_hold_wire_schema_version() -> int`
-//! - `agent_hold_arm_relative(sase_home: str, armer: dict, scope: dict, selectors: dict, duration_seconds: float, liveness: dict | None = None, now: float | None = None) -> dict`
-//! - `agent_hold_arm_until(sase_home: str, armer: dict, scope: dict, selectors: dict, expires_at: float, liveness: dict | None = None, now: float | None = None) -> dict`
+//! - `agent_hold_arm_relative(sase_home: str, armer: dict, scope: dict, selectors: dict, duration_seconds: float, liveness: dict | None = None, now: float | None = None, capture: dict | None = None) -> dict`
+//! - `agent_hold_arm_until(sase_home: str, armer: dict, scope: dict, selectors: dict, expires_at: float, liveness: dict | None = None, now: float | None = None, capture: dict | None = None) -> dict`
 //! - `agent_hold_rebind(sase_home: str, old_key: str, new_armer: dict, liveness: dict | None = None, now: float | None = None) -> dict | None`
 //! - `agent_hold_release(sase_home: str, armer_key: str, liveness: dict | None = None, now: float | None = None) -> bool`
 //! - `agent_hold_list(sase_home: str, liveness: dict | None = None, now: float | None = None) -> dict`
 //! - `agent_hold_blocks_candidate(record: dict, candidate: dict) -> dict | None`
+//! - `agent_hold_summarize_capture(scope: dict, identities: list[dict], armer: dict | None = None) -> dict`
 //! - `launch_unit_hold_key(request_id: str, logical_id: str) -> str`
 //! - `launch_unit_hold_armer(unit: dict, request_id: str, project: str, pid: int, done_marker_path: str) -> dict`
 //! - `feature_flag_state_wire_schema_version() -> int`
@@ -716,8 +717,10 @@ use sase_core::agent_hold::{
     hold_blocks_candidate as core_hold_blocks_candidate,
     list_agent_holds as core_list_agent_holds,
     rebind_agent_hold_armer as core_rebind_agent_hold_armer,
-    release_agent_hold as core_release_agent_hold, AgentHoldArmerWire,
-    AgentHoldCandidateWire, AgentHoldError as AgentHoldDomainError,
+    release_agent_hold as core_release_agent_hold,
+    summarize_hold_capture as core_summarize_hold_capture, AgentHoldArmerWire,
+    AgentHoldCandidateWire, AgentHoldCaptureIdentityWire,
+    AgentHoldCaptureSummaryWire, AgentHoldError as AgentHoldDomainError,
     AgentHoldLivenessFactsWire, AgentHoldRecordWire, AgentHoldScopeWire,
     AgentHoldSelectorsWire,
 };
@@ -13945,6 +13948,18 @@ fn py_agent_hold_wire_schema_version() -> u32 {
     sase_core::AGENT_HOLD_WIRE_SCHEMA_VERSION
 }
 
+fn agent_hold_capture_from_optional(
+    capture: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<AgentHoldCaptureSummaryWire>> {
+    match capture {
+        Some(value) => Ok(Some(agent_hold_dict_from_py(
+            value.as_any(),
+            "agent hold capture",
+        )?)),
+        None => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(
@@ -13956,7 +13971,8 @@ fn py_agent_hold_wire_schema_version() -> u32 {
         selectors,
         duration_seconds,
         liveness = None,
-        now = None
+        now = None,
+        capture = None
     )
 )]
 fn py_agent_hold_arm_relative<'py>(
@@ -13968,6 +13984,7 @@ fn py_agent_hold_arm_relative<'py>(
     duration_seconds: f64,
     liveness: Option<&Bound<'py, PyDict>>,
     now: Option<f64>,
+    capture: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
     let armer: AgentHoldArmerWire =
         agent_hold_dict_from_py(armer.as_any(), "agent hold armer")?;
@@ -13976,6 +13993,7 @@ fn py_agent_hold_arm_relative<'py>(
     let selectors: AgentHoldSelectorsWire =
         agent_hold_dict_from_py(selectors.as_any(), "agent hold selectors")?;
     let liveness = agent_hold_liveness_from_optional(liveness)?;
+    let capture = agent_hold_capture_from_optional(capture)?;
     let record = core_arm_agent_hold_relative(
         &PathBuf::from(sase_home),
         armer,
@@ -13984,6 +14002,7 @@ fn py_agent_hold_arm_relative<'py>(
         duration_seconds,
         &liveness,
         effort_override_now(now)?,
+        capture,
     )
     .map_err(agent_hold_error_to_pyerr)?;
     agent_hold_wire_to_py(py, &record)
@@ -14000,7 +14019,8 @@ fn py_agent_hold_arm_relative<'py>(
         selectors,
         expires_at,
         liveness = None,
-        now = None
+        now = None,
+        capture = None
     )
 )]
 fn py_agent_hold_arm_until<'py>(
@@ -14012,6 +14032,7 @@ fn py_agent_hold_arm_until<'py>(
     expires_at: f64,
     liveness: Option<&Bound<'py, PyDict>>,
     now: Option<f64>,
+    capture: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
     let armer: AgentHoldArmerWire =
         agent_hold_dict_from_py(armer.as_any(), "agent hold armer")?;
@@ -14020,6 +14041,7 @@ fn py_agent_hold_arm_until<'py>(
     let selectors: AgentHoldSelectorsWire =
         agent_hold_dict_from_py(selectors.as_any(), "agent hold selectors")?;
     let liveness = agent_hold_liveness_from_optional(liveness)?;
+    let capture = agent_hold_capture_from_optional(capture)?;
     let record = core_arm_agent_hold_until(
         &PathBuf::from(sase_home),
         armer,
@@ -14028,6 +14050,7 @@ fn py_agent_hold_arm_until<'py>(
         expires_at,
         &liveness,
         effort_override_now(now)?,
+        capture,
     )
     .map_err(agent_hold_error_to_pyerr)?;
     agent_hold_wire_to_py(py, &record)
@@ -14122,6 +14145,39 @@ fn py_agent_hold_blocks_candidate<'py>(
         Some(block) => agent_hold_wire_to_py(py, &block),
         None => Ok(py.None()),
     }
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "agent_hold_summarize_capture",
+    signature = (scope, identities, armer = None)
+)]
+fn py_agent_hold_summarize_capture<'py>(
+    py: Python<'py>,
+    scope: &Bound<'py, PyDict>,
+    identities: &Bound<'py, PyList>,
+    armer: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    let scope: AgentHoldScopeWire =
+        agent_hold_dict_from_py(scope.as_any(), "agent hold scope")?;
+    let identities: Vec<AgentHoldCaptureIdentityWire> =
+        serde_json::from_value(py_to_json_value(identities.as_any())?)
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+            "agent hold capture identities are not a valid list: {error}"
+        ))
+            })?;
+    let armer = match armer {
+        Some(value) => Some(agent_hold_dict_from_py::<AgentHoldArmerWire>(
+            value.as_any(),
+            "agent hold armer",
+        )?),
+        None => None,
+    };
+    let result =
+        core_summarize_hold_capture(armer.as_ref(), &scope, &identities)
+            .map_err(agent_hold_error_to_pyerr)?;
+    agent_hold_wire_to_py(py, &result)
 }
 
 // --- Temporary maximum-running-agents override -----------------------
@@ -20307,6 +20363,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_agent_hold_release, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_hold_blocks_candidate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_agent_hold_summarize_capture, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_runner_limit_override_wire_schema_version,
         m
@@ -24511,6 +24568,16 @@ COMMITS:
             .unwrap();
             let liveness = liveness_obj.bind(py).downcast::<PyDict>().unwrap();
 
+            let capture_obj = json_value_to_py(
+                py,
+                &json!({
+                    "waiting_count": 2,
+                    "queued_count": 1,
+                    "skipped_running_count": 3
+                }),
+            )
+            .unwrap();
+            let capture = capture_obj.bind(py).downcast::<PyDict>().unwrap();
             let record = py_agent_hold_arm_relative(
                 py,
                 &home,
@@ -24520,10 +24587,17 @@ COMMITS:
                 60.0,
                 Some(liveness),
                 Some(now),
+                Some(capture),
             )
             .unwrap();
             let record_value = py_to_json_value(record.bind(py)).unwrap();
             assert_eq!(record_value["expires_at"], json!(now + 60.0));
+            assert_eq!(record_value["capture"]["waiting_count"], json!(2));
+            assert_eq!(record_value["capture"]["queued_count"], json!(1));
+            assert_eq!(
+                record_value["capture"]["skipped_running_count"],
+                json!(3)
+            );
 
             let snapshot =
                 py_agent_hold_list(py, &home, Some(liveness), Some(now + 1.0))
@@ -24672,6 +24746,7 @@ COMMITS:
                 60.0,
                 None,
                 Some(now),
+                None,
             )
             .unwrap();
             let new_armer_obj = json_value_to_py(
@@ -24715,6 +24790,105 @@ COMMITS:
         });
     }
 
+    #[test]
+    fn agent_hold_capture_summary_and_prune_bindings() {
+        pyo3::prepare_freethreaded_python();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy();
+        let now = 1_800_000_000.0;
+        Python::with_gil(|py| {
+            let scope_obj =
+                json_value_to_py(py, &json!({"kind": "host"})).unwrap();
+            let scope = scope_obj.bind(py).downcast::<PyDict>().unwrap();
+            let armer_obj = json_value_to_py(
+                py,
+                &json!({
+                    "kind": "agent",
+                    "key": "agent:holder",
+                    "display": "holder",
+                    "project": "sase",
+                    "agent_name": "holder.worker",
+                    "family": "holder.worker",
+                    "clan": "builders",
+                    "pid": 1234
+                }),
+            )
+            .unwrap();
+            let armer = armer_obj.bind(py).downcast::<PyDict>().unwrap();
+            let identities_obj = json_value_to_py(
+                py,
+                &json!([
+                    {
+                        "project": "sase",
+                        "created_at": now,
+                        "bucket": "waiting",
+                        "artifact_dir": "artifacts/w1",
+                        "agent_name": "target.agent--code",
+                        "family": "target.agent",
+                        "clan": "ops"
+                    },
+                    {
+                        "project": "sase",
+                        "created_at": now,
+                        "bucket": "waiting",
+                        "artifact_dir": "artifacts/kin",
+                        "agent_name": "holder.worker",
+                        "family": "holder.worker",
+                        "clan": "builders"
+                    },
+                    {
+                        "project": "sase",
+                        "created_at": now,
+                        "bucket": "running",
+                        "artifact_dir": "artifacts/r1",
+                        "agent_name": "running.agent--code",
+                        "family": "running.agent"
+                    }
+                ]),
+            )
+            .unwrap();
+            let identities =
+                identities_obj.bind(py).downcast::<PyList>().unwrap();
+            let summary = py_agent_hold_summarize_capture(
+                py,
+                scope,
+                identities,
+                Some(armer),
+            )
+            .unwrap();
+            let summary_value = py_to_json_value(summary.bind(py)).unwrap();
+            assert_eq!(summary_value["summary"]["waiting_count"], json!(1));
+            assert_eq!(
+                summary_value["summary"]["skipped_running_count"],
+                json!(1)
+            );
+            assert_eq!(summary_value["artifact_dirs"], json!(["artifacts/w1"]));
+
+            let selectors_obj =
+                json_value_to_py(py, &json!({"future": true})).unwrap();
+            let selectors =
+                selectors_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_agent_hold_arm_relative(
+                py,
+                &home,
+                armer,
+                scope,
+                selectors,
+                5.0,
+                None,
+                Some(now),
+                None,
+            )
+            .unwrap();
+            let snapshot =
+                py_agent_hold_list(py, &home, None, Some(now + 10.0)).unwrap();
+            let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+            assert_eq!(snapshot_value["holds"].as_array().unwrap().len(), 0);
+            assert_eq!(snapshot_value["pruned"].as_array().unwrap().len(), 1);
+            assert_eq!(snapshot_value["pruned"][0]["reason"], json!("expiry"));
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     fn agent_hold_bindings_map_validation_and_lock_errors() {
@@ -24755,6 +24929,7 @@ COMMITS:
                 -1.0,
                 None,
                 Some(now),
+                None,
             )
             .unwrap_err();
             assert!(validation_error.is_instance_of::<PyValueError>(py));

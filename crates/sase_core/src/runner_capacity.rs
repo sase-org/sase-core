@@ -1806,6 +1806,7 @@ mod tests {
             selectors,
             created_at: epoch("2026-09-10T00:00:00Z"),
             expires_at: epoch("2026-09-10T00:03:00Z"),
+            capture: None,
         }
     }
 

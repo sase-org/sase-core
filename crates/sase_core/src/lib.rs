@@ -195,15 +195,19 @@ pub use agent_group_archive::{
     AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 pub use agent_hold::{
-    agent_hold_lock_path, agent_hold_state_path, arm_agent_hold_relative,
-    arm_agent_hold_until, hold_blocks_candidate, list_agent_holds,
-    rebind_agent_hold_armer, release_agent_hold, AgentHoldArmerKindWire,
+    agent_hold_lock_path, agent_hold_prune_path, agent_hold_state_path,
+    arm_agent_hold_relative, arm_agent_hold_until, hold_blocks_candidate,
+    list_agent_holds, rebind_agent_hold_armer, release_agent_hold,
+    summarize_hold_capture, AgentHoldArmerKindWire,
     AgentHoldArmerLivenessFactWire, AgentHoldArmerWire,
     AgentHoldBlockArmerWire, AgentHoldBlockWire, AgentHoldCandidateWire,
-    AgentHoldError, AgentHoldLivenessFactsWire, AgentHoldRecordWire,
-    AgentHoldScopeWire, AgentHoldSelectorMatchWire, AgentHoldSelectorsWire,
-    AgentHoldSnapshotWire, AGENT_HOLD_LOCK_FILENAME, AGENT_HOLD_STATE_FILENAME,
-    AGENT_HOLD_WIRE_SCHEMA_VERSION,
+    AgentHoldCaptureBucketWire, AgentHoldCaptureIdentityWire,
+    AgentHoldCaptureResultWire, AgentHoldCaptureSummaryWire, AgentHoldError,
+    AgentHoldLivenessFactsWire, AgentHoldPruneOutcomeWire,
+    AgentHoldPruneReasonWire, AgentHoldRecordWire, AgentHoldScopeWire,
+    AgentHoldSelectorMatchWire, AgentHoldSelectorsWire, AgentHoldSnapshotWire,
+    AGENT_HOLD_LOCK_FILENAME, AGENT_HOLD_PRUNE_FILENAME,
+    AGENT_HOLD_STATE_FILENAME, AGENT_HOLD_WIRE_SCHEMA_VERSION,
 };
 pub use agent_identity::{
     agent_link_target, agent_local_hood, agent_name_ancestors,

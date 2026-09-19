@@ -23,6 +23,7 @@ use crate::store_lock::{
 
 pub const AGENT_HOLD_WIRE_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_HOLD_STATE_FILENAME: &str = "agent_holds.json";
+pub const AGENT_HOLD_PRUNE_FILENAME: &str = "agent_holds.prune.json";
 pub const AGENT_HOLD_LOCK_FILENAME: &str = "agent_holds.lock";
 
 const LOCK_TIMEOUT_ENV: &str = "SASE_AGENT_HOLD_LOCK_TIMEOUT";
@@ -99,6 +100,62 @@ pub struct AgentHoldSelectorsWire {
     pub future: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHoldPruneReasonWire {
+    Expiry,
+    DeadArmer,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHoldPruneOutcomeWire {
+    pub schema_version: u32,
+    pub reason: AgentHoldPruneReasonWire,
+    pub record: AgentHoldRecordWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHoldCaptureBucketWire {
+    Waiting,
+    Queued,
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHoldCaptureSummaryWire {
+    pub waiting_count: u64,
+    pub queued_count: u64,
+    pub skipped_running_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHoldCaptureIdentityWire {
+    pub project: String,
+    pub created_at: f64,
+    pub bucket: AgentHoldCaptureBucketWire,
+    #[serde(default)]
+    pub artifact_dir: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub clan: Option<String>,
+    #[serde(default)]
+    pub armer_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHoldCaptureResultWire {
+    pub summary: AgentHoldCaptureSummaryWire,
+    pub artifact_dirs: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHoldRecordWire {
@@ -108,6 +165,8 @@ pub struct AgentHoldRecordWire {
     pub selectors: AgentHoldSelectorsWire,
     pub created_at: f64,
     pub expires_at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<AgentHoldCaptureSummaryWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -142,6 +201,16 @@ pub enum AgentHoldArmerLivenessFactWire {
 pub struct AgentHoldSnapshotWire {
     pub schema_version: u32,
     pub holds: Vec<AgentHoldRecordWire>,
+    #[serde(default)]
+    pub pruned: Vec<AgentHoldPruneOutcomeWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentHoldPruneLogWire {
+    schema_version: u32,
+    #[serde(default)]
+    pruned: Vec<AgentHoldPruneOutcomeWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -232,6 +301,10 @@ pub fn agent_hold_state_path(sase_home: &Path) -> PathBuf {
     sase_home.join(AGENT_HOLD_STATE_FILENAME)
 }
 
+pub fn agent_hold_prune_path(sase_home: &Path) -> PathBuf {
+    sase_home.join(AGENT_HOLD_PRUNE_FILENAME)
+}
+
 pub fn agent_hold_lock_path(sase_home: &Path) -> PathBuf {
     sase_home.join(AGENT_HOLD_LOCK_FILENAME)
 }
@@ -243,11 +316,13 @@ pub fn list_agent_holds(
 ) -> Result<AgentHoldSnapshotWire, AgentHoldError> {
     validate_timestamp("now", now)?;
     with_hold_lock(sase_home, "list_agent_holds", || {
-        let records = read_records_locked(sase_home, liveness, now)?;
-        Ok(snapshot_from_records(records))
+        let loaded = load_and_prune_locked(sase_home, liveness, now)?;
+        write_prune_log(sase_home, &[])?;
+        Ok(snapshot_from_records(loaded.records, loaded.pruned))
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn arm_agent_hold_relative(
     sase_home: &Path,
     armer: AgentHoldArmerWire,
@@ -256,6 +331,7 @@ pub fn arm_agent_hold_relative(
     duration_seconds: f64,
     liveness: &AgentHoldLivenessFactsWire,
     now: f64,
+    capture: Option<AgentHoldCaptureSummaryWire>,
 ) -> Result<AgentHoldRecordWire, AgentHoldError> {
     validate_timestamp("now", now)?;
     if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
@@ -270,10 +346,11 @@ pub fn arm_agent_hold_relative(
         ));
     }
     arm_agent_hold_until(
-        sase_home, armer, scope, selectors, expires_at, liveness, now,
+        sase_home, armer, scope, selectors, expires_at, liveness, now, capture,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn arm_agent_hold_until(
     sase_home: &Path,
     armer: AgentHoldArmerWire,
@@ -282,6 +359,7 @@ pub fn arm_agent_hold_until(
     expires_at: f64,
     liveness: &AgentHoldLivenessFactsWire,
     now: f64,
+    capture: Option<AgentHoldCaptureSummaryWire>,
 ) -> Result<AgentHoldRecordWire, AgentHoldError> {
     validate_timestamp("now", now)?;
     validate_timestamp("expires_at", expires_at)?;
@@ -297,12 +375,14 @@ pub fn arm_agent_hold_until(
         selectors,
         created_at: now,
         expires_at,
+        capture,
     };
     validate_and_normalize_record(&mut record)?;
     validate_selectors_exclude_armer_kin(&record.armer, &record.selectors)?;
     let key = record.armer.key.clone();
     with_hold_lock(sase_home, "arm_agent_hold", || {
-        let mut records = read_records_locked(sase_home, liveness, now)?;
+        let loaded = load_and_prune_locked(sase_home, liveness, now)?;
+        let mut records = loaded.records;
         records.insert(key, record.clone());
         write_or_remove_state(&agent_hold_state_path(sase_home), &records)?;
         Ok(record)
@@ -319,7 +399,8 @@ pub fn rebind_agent_hold_armer(
     validate_timestamp("now", now)?;
     let old_key = validate_plain_string("old_key", old_key)?;
     with_hold_lock(sase_home, "rebind_agent_hold", || {
-        let mut records = read_records_locked(sase_home, liveness, now)?;
+        let loaded = load_and_prune_locked(sase_home, liveness, now)?;
+        let mut records = loaded.records;
         let Some(old_record) = records.get(&old_key).cloned() else {
             return Ok(None);
         };
@@ -330,6 +411,7 @@ pub fn rebind_agent_hold_armer(
             selectors: old_record.selectors,
             created_at: old_record.created_at,
             expires_at: old_record.expires_at,
+            capture: old_record.capture,
         };
         validate_and_normalize_record(&mut new_record)?;
         validate_selectors_exclude_armer_kin(
@@ -354,10 +436,65 @@ pub fn release_agent_hold(
     let armer_key = validate_plain_string("armer_key", armer_key)?;
     with_hold_lock(sase_home, "release_agent_hold", || {
         let path = agent_hold_state_path(sase_home);
-        let mut records = read_records_locked(sase_home, liveness, now)?;
+        let loaded = load_and_prune_locked(sase_home, liveness, now)?;
+        let mut records = loaded.records;
         let removed = records.remove(&armer_key).is_some();
         write_or_remove_state(&path, &records)?;
         Ok(removed)
+    })
+}
+
+pub fn summarize_hold_capture(
+    armer: Option<&AgentHoldArmerWire>,
+    scope: &AgentHoldScopeWire,
+    identities: &[AgentHoldCaptureIdentityWire],
+) -> Result<AgentHoldCaptureResultWire, AgentHoldError> {
+    let mut scope = scope.clone();
+    validate_and_normalize_scope(&mut scope)?;
+    let armer = match armer {
+        Some(armer) => {
+            let mut armer = armer.clone();
+            validate_and_normalize_armer(&mut armer)?;
+            Some(armer)
+        }
+        None => None,
+    };
+    let mut waiting_count = 0_u64;
+    let mut queued_count = 0_u64;
+    let mut skipped_running_count = 0_u64;
+    let mut artifact_dirs = BTreeSet::new();
+    for identity in identities {
+        if !capture_in_scope(&scope, identity) {
+            continue;
+        }
+        if let Some(armer) = armer.as_ref() {
+            if armer_kin_excluded(
+                armer,
+                &capture_identity_as_candidate(identity),
+            ) {
+                continue;
+            }
+        }
+        match identity.bucket {
+            AgentHoldCaptureBucketWire::Waiting => waiting_count += 1,
+            AgentHoldCaptureBucketWire::Queued => queued_count += 1,
+            AgentHoldCaptureBucketWire::Running => skipped_running_count += 1,
+        }
+        if !matches!(identity.bucket, AgentHoldCaptureBucketWire::Running) {
+            if let Some(artifact_dir) = identity.artifact_dir.as_deref() {
+                let artifact_dir =
+                    validate_plain_string("artifact_dir", artifact_dir)?;
+                artifact_dirs.insert(artifact_dir);
+            }
+        }
+    }
+    Ok(AgentHoldCaptureResultWire {
+        summary: AgentHoldCaptureSummaryWire {
+            waiting_count,
+            queued_count,
+            skipped_running_count,
+        },
+        artifact_dirs: artifact_dirs.into_iter().collect(),
     })
 }
 
@@ -395,41 +532,65 @@ pub fn hold_blocks_candidate(
     }))
 }
 
+struct LoadedHoldRecords {
+    records: BTreeMap<String, AgentHoldRecordWire>,
+    pruned: Vec<AgentHoldPruneOutcomeWire>,
+}
+
 fn snapshot_from_records(
     records: BTreeMap<String, AgentHoldRecordWire>,
+    pruned: Vec<AgentHoldPruneOutcomeWire>,
 ) -> AgentHoldSnapshotWire {
     AgentHoldSnapshotWire {
         schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
         holds: records.into_values().collect(),
+        pruned,
     }
 }
 
-fn read_records_locked(
+fn load_and_prune_locked(
     sase_home: &Path,
     liveness: &AgentHoldLivenessFactsWire,
     now: f64,
-) -> Result<BTreeMap<String, AgentHoldRecordWire>, AgentHoldError> {
+) -> Result<LoadedHoldRecords, AgentHoldError> {
     let path = agent_hold_state_path(sase_home);
+    let mut pruned = read_prune_log(sase_home)?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(BTreeMap::new())
+            write_prune_log(sase_home, &pruned)?;
+            return Ok(LoadedHoldRecords {
+                records: BTreeMap::new(),
+                pruned,
+            });
         }
         Err(_) => {
             remove_state_best_effort(&path);
-            return Ok(BTreeMap::new());
+            write_prune_log(sase_home, &pruned)?;
+            return Ok(LoadedHoldRecords {
+                records: BTreeMap::new(),
+                pruned,
+            });
         }
     };
     let raw: RawAgentHoldStateWire = match serde_json::from_slice(&bytes) {
         Ok(raw) => raw,
         Err(_) => {
             remove_state_best_effort(&path);
-            return Ok(BTreeMap::new());
+            write_prune_log(sase_home, &pruned)?;
+            return Ok(LoadedHoldRecords {
+                records: BTreeMap::new(),
+                pruned,
+            });
         }
     };
     if raw.schema_version != AGENT_HOLD_WIRE_SCHEMA_VERSION {
         remove_state_best_effort(&path);
-        return Ok(BTreeMap::new());
+        write_prune_log(sase_home, &[])?;
+        return Ok(LoadedHoldRecords {
+            records: BTreeMap::new(),
+            pruned: Vec::new(),
+        });
     }
 
     let mut changed = false;
@@ -445,10 +606,26 @@ fn read_records_locked(
             };
         if validate_and_normalize_record(&mut record).is_err()
             || record.armer.key != key
-            || now >= record.expires_at
-            || !armer_is_alive(&record, liveness)
         {
             changed = true;
+            continue;
+        }
+        if now >= record.expires_at {
+            changed = true;
+            pruned.push(AgentHoldPruneOutcomeWire {
+                schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
+                reason: AgentHoldPruneReasonWire::Expiry,
+                record,
+            });
+            continue;
+        }
+        if !armer_is_alive(&record, liveness) {
+            changed = true;
+            pruned.push(AgentHoldPruneOutcomeWire {
+                schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
+                reason: AgentHoldPruneReasonWire::DeadArmer,
+                record,
+            });
             continue;
         }
         records.insert(key, record);
@@ -456,7 +633,114 @@ fn read_records_locked(
     if changed {
         write_or_remove_state(&path, &records)?;
     }
-    Ok(records)
+    write_prune_log(sase_home, &pruned)?;
+    Ok(LoadedHoldRecords { records, pruned })
+}
+
+fn read_prune_log(
+    sase_home: &Path,
+) -> Result<Vec<AgentHoldPruneOutcomeWire>, AgentHoldError> {
+    let path = agent_hold_prune_path(sase_home);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new())
+        }
+        Err(_) => {
+            remove_state_best_effort(&path);
+            return Ok(Vec::new());
+        }
+    };
+    let log: AgentHoldPruneLogWire = match serde_json::from_slice(&bytes) {
+        Ok(log) => log,
+        Err(_) => {
+            remove_state_best_effort(&path);
+            return Ok(Vec::new());
+        }
+    };
+    if log.schema_version != AGENT_HOLD_WIRE_SCHEMA_VERSION {
+        remove_state_best_effort(&path);
+        return Ok(Vec::new());
+    }
+    let mut pruned = Vec::new();
+    for mut outcome in log.pruned {
+        if outcome.schema_version != AGENT_HOLD_WIRE_SCHEMA_VERSION {
+            continue;
+        }
+        if validate_and_normalize_record(&mut outcome.record).is_err() {
+            continue;
+        }
+        pruned.push(outcome);
+    }
+    Ok(pruned)
+}
+
+fn write_prune_log(
+    sase_home: &Path,
+    pruned: &[AgentHoldPruneOutcomeWire],
+) -> Result<(), AgentHoldError> {
+    let path = agent_hold_prune_path(sase_home);
+    if pruned.is_empty() {
+        remove_invalid_state(&path)?;
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        AgentHoldError::Validation(
+            "agent hold prune path has no parent directory".to_string(),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    let log = AgentHoldPruneLogWire {
+        schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
+        pruned: pruned.to_vec(),
+    };
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut temporary, &log)?;
+    temporary.write_all(b"\n")?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn capture_in_scope(
+    scope: &AgentHoldScopeWire,
+    identity: &AgentHoldCaptureIdentityWire,
+) -> bool {
+    match scope {
+        AgentHoldScopeWire::Host => true,
+        AgentHoldScopeWire::Project { project } => {
+            identity.project.is_empty() || identity.project == *project
+        }
+    }
+}
+
+fn capture_identity_as_candidate(
+    identity: &AgentHoldCaptureIdentityWire,
+) -> AgentHoldCandidateWire {
+    AgentHoldCandidateWire {
+        project: if identity.project.is_empty() {
+            "_".to_string()
+        } else {
+            identity.project.clone()
+        },
+        created_at: if identity.created_at.is_finite()
+            && identity.created_at > 0.0
+        {
+            identity.created_at
+        } else {
+            1.0
+        },
+        artifact_dirs: identity.artifact_dir.clone().into_iter().collect(),
+        agent_name: identity.agent_name.clone(),
+        proc_shell: None,
+        family: identity.family.clone(),
+        clan: identity.clan.clone(),
+        workflow: None,
+        tribe: None,
+        tribes: Vec::new(),
+        armer_key: identity.armer_key.clone(),
+    }
 }
 
 fn write_or_remove_state(
@@ -1117,6 +1401,41 @@ mod tests {
 
     const NOW: f64 = 1_800_000_000.0;
 
+    fn arm_agent_hold_relative(
+        sase_home: &Path,
+        armer: AgentHoldArmerWire,
+        scope: AgentHoldScopeWire,
+        selectors: AgentHoldSelectorsWire,
+        duration_seconds: f64,
+        liveness: &AgentHoldLivenessFactsWire,
+        now: f64,
+    ) -> Result<AgentHoldRecordWire, AgentHoldError> {
+        super::arm_agent_hold_relative(
+            sase_home,
+            armer,
+            scope,
+            selectors,
+            duration_seconds,
+            liveness,
+            now,
+            None,
+        )
+    }
+
+    fn arm_agent_hold_until(
+        sase_home: &Path,
+        armer: AgentHoldArmerWire,
+        scope: AgentHoldScopeWire,
+        selectors: AgentHoldSelectorsWire,
+        expires_at: f64,
+        liveness: &AgentHoldLivenessFactsWire,
+        now: f64,
+    ) -> Result<AgentHoldRecordWire, AgentHoldError> {
+        super::arm_agent_hold_until(
+            sase_home, armer, scope, selectors, expires_at, liveness, now, None,
+        )
+    }
+
     fn armer(key: &str) -> AgentHoldArmerWire {
         AgentHoldArmerWire {
             kind: AgentHoldArmerKindWire::Agent,
@@ -1417,6 +1736,7 @@ mod tests {
             },
             created_at: NOW - 10.0,
             expires_at: NOW + 10.0,
+            capture: None,
         };
         fs::write(
             &path,
@@ -1450,6 +1770,22 @@ mod tests {
         let snapshot = list_agent_holds(temp.path(), &dead, NOW).unwrap();
         assert!(snapshot.holds.is_empty());
         assert!(!path.exists());
+        assert_eq!(snapshot.pruned.len(), 2);
+        let mut reasons: Vec<_> = snapshot
+            .pruned
+            .iter()
+            .map(|outcome| (outcome.record.armer.key.as_str(), outcome.reason))
+            .collect();
+        reasons.sort_by_key(|(key, _)| *key);
+        assert_eq!(
+            reasons,
+            [
+                ("expired", AgentHoldPruneReasonWire::Expiry),
+                ("stale", AgentHoldPruneReasonWire::DeadArmer),
+            ]
+        );
+        let second = list_agent_holds(temp.path(), &dead, NOW).unwrap();
+        assert!(second.pruned.is_empty());
 
         fs::write(
             &path,
@@ -1727,6 +2063,7 @@ mod tests {
             selectors: selectors(),
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let block = hold_blocks_candidate(&record, &candidate())
             .unwrap()
@@ -1774,6 +2111,7 @@ mod tests {
             },
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let mut candidate = candidate();
         candidate.artifact_dirs.clear();
@@ -1806,6 +2144,7 @@ mod tests {
             },
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let mut before = candidate();
         before.created_at = NOW - 1.0;
@@ -1835,6 +2174,7 @@ mod tests {
             },
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let cases = [
             AgentHoldCandidateWire {
@@ -1890,6 +2230,7 @@ mod tests {
             },
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let mut hit = candidate();
         hit.agent_name = Some("foo.bar--code".to_string());
@@ -1921,6 +2262,7 @@ mod tests {
             },
             created_at: NOW,
             expires_at: NOW + 60.0,
+            capture: None,
         };
         let mut target = candidate();
         target.artifact_dirs.clear();
@@ -2001,5 +2343,225 @@ mod tests {
         std::env::remove_var(LOCK_TIMEOUT_ENV);
         lock.unlock().unwrap();
         assert!(matches!(result, Err(AgentHoldError::LockTimeout { .. })));
+    }
+
+    fn capture_identity(
+        bucket: AgentHoldCaptureBucketWire,
+        name: &str,
+        family: &str,
+        clan: &str,
+        artifact_dir: &str,
+    ) -> AgentHoldCaptureIdentityWire {
+        AgentHoldCaptureIdentityWire {
+            project: "sase".to_string(),
+            created_at: NOW,
+            bucket,
+            artifact_dir: Some(artifact_dir.to_string()),
+            agent_name: Some(name.to_string()),
+            family: Some(family.to_string()),
+            clan: Some(clan.to_string()),
+            armer_key: None,
+        }
+    }
+
+    #[test]
+    fn arm_stores_capture_and_rebind_preserves_it() {
+        let temp = tempdir().unwrap();
+        let capture = AgentHoldCaptureSummaryWire {
+            waiting_count: 2,
+            queued_count: 1,
+            skipped_running_count: 3,
+        };
+        let record = super::arm_agent_hold_relative(
+            temp.path(),
+            armer("holder"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                artifact_dirs: vec!["artifacts/w1".to_string()],
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            60.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+            Some(capture.clone()),
+        )
+        .unwrap();
+        assert_eq!(record.capture.as_ref(), Some(&capture));
+
+        let rebound = rebind_agent_hold_armer(
+            temp.path(),
+            "holder",
+            armer("new"),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 5.0,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(rebound.capture.as_ref(), Some(&capture));
+        assert_eq!(rebound.created_at, record.created_at);
+        assert_eq!(
+            rebound.selectors.artifact_dirs,
+            vec!["artifacts/w1".to_string()]
+        );
+
+        let listed = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 6.0,
+        )
+        .unwrap();
+        assert_eq!(listed.holds[0].capture.as_ref(), Some(&capture));
+    }
+
+    #[test]
+    fn legacy_records_without_capture_stay_unread() {
+        let temp = tempdir().unwrap();
+        let path = agent_hold_state_path(temp.path());
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema_version": AGENT_HOLD_WIRE_SCHEMA_VERSION,
+                "holds": {
+                    "legacy": {
+                        "schema_version": AGENT_HOLD_WIRE_SCHEMA_VERSION,
+                        "armer": armer("legacy"),
+                        "scope": {"kind": "host"},
+                        "selectors": {"future": true},
+                        "created_at": NOW,
+                        "expires_at": NOW + 60.0
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 1.0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.holds.len(), 1);
+        assert_eq!(snapshot.holds[0].capture, None);
+    }
+
+    #[test]
+    fn mutation_preserves_expiry_evidence_until_list_drains_it() {
+        let temp = tempdir().unwrap();
+        super::arm_agent_hold_relative(
+            temp.path(),
+            armer("old"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                future: true,
+                ..AgentHoldSelectorsWire::default()
+            },
+            5.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW,
+            None,
+        )
+        .unwrap();
+        super::arm_agent_hold_relative(
+            temp.path(),
+            armer("fresh"),
+            AgentHoldScopeWire::Host,
+            AgentHoldSelectorsWire {
+                names: vec!["target.agent".to_string()],
+                ..AgentHoldSelectorsWire::default()
+            },
+            60.0,
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 10.0,
+            None,
+        )
+        .unwrap();
+        assert!(agent_hold_prune_path(temp.path()).exists());
+
+        let snapshot = list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 10.0,
+        )
+        .unwrap();
+        assert_eq!(snapshot.holds.len(), 1);
+        assert_eq!(snapshot.holds[0].armer.key, "fresh");
+        assert_eq!(snapshot.pruned.len(), 1);
+        assert_eq!(snapshot.pruned[0].reason, AgentHoldPruneReasonWire::Expiry);
+        assert_eq!(snapshot.pruned[0].record.armer.key, "old");
+        assert!(!agent_hold_prune_path(temp.path()).exists());
+        assert!(list_agent_holds(
+            temp.path(),
+            &AgentHoldLivenessFactsWire::default(),
+            NOW + 11.0,
+        )
+        .unwrap()
+        .pruned
+        .is_empty());
+    }
+
+    #[test]
+    fn summarize_hold_capture_excludes_kin_and_out_of_scope() {
+        let identities = [
+            capture_identity(
+                AgentHoldCaptureBucketWire::Waiting,
+                "target.agent--code",
+                "target.agent",
+                "blocked-clan",
+                "artifacts/w1",
+            ),
+            capture_identity(
+                AgentHoldCaptureBucketWire::Queued,
+                "other.agent--code",
+                "other.agent",
+                "ops",
+                "artifacts/q1",
+            ),
+            capture_identity(
+                AgentHoldCaptureBucketWire::Waiting,
+                "holder.worker",
+                "holder.worker",
+                "builders",
+                "artifacts/kin",
+            ),
+            capture_identity(
+                AgentHoldCaptureBucketWire::Running,
+                "running.agent--code",
+                "running.agent",
+                "ops",
+                "artifacts/r1",
+            ),
+            AgentHoldCaptureIdentityWire {
+                project: "other".to_string(),
+                created_at: NOW,
+                bucket: AgentHoldCaptureBucketWire::Waiting,
+                artifact_dir: Some("artifacts/other".to_string()),
+                agent_name: Some("foreign.agent--code".to_string()),
+                family: Some("foreign.agent".to_string()),
+                clan: None,
+                armer_key: None,
+            },
+        ];
+        let result = summarize_hold_capture(
+            Some(&armer("holder")),
+            &AgentHoldScopeWire::Project {
+                project: "sase".to_string(),
+            },
+            &identities,
+        )
+        .unwrap();
+        assert_eq!(
+            result.summary,
+            AgentHoldCaptureSummaryWire {
+                waiting_count: 1,
+                queued_count: 1,
+                skipped_running_count: 1,
+            }
+        );
+        assert_eq!(
+            result.artifact_dirs,
+            vec!["artifacts/q1".to_string(), "artifacts/w1".to_string()]
+        );
     }
 }
