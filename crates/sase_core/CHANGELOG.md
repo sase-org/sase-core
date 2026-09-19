@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.61](https://github.com/sase-org/sase-core/compare/v0.34.60...v0.34.61) - 2026-09-19
+
+### Added
+
+- *(hold)* persist capture summaries and return prune evidence
+
 ## [0.34.60](https://github.com/sase-org/sase-core/compare/v0.34.59...v0.34.60) - 2026-09-19
 
 ### Added
