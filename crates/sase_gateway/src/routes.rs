@@ -866,6 +866,9 @@ async fn fleet_hello(
             service: "sase-gateway".to_string(),
             package_version: env!("CARGO_PKG_VERSION").to_string(),
         }),
+        fleet_contract_schema_version: Some(
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+        ),
         installation,
         machine_selector: state.machine_selector.clone(),
         capabilities: fleet_capabilities(&credential.scopes),
@@ -5892,6 +5895,16 @@ exit 4
         .await;
         assert_eq!(hello_status, StatusCode::OK);
         assert_eq!(hello["protocol_version"], 1);
+        assert_eq!(hello["schema_version"], GATEWAY_WIRE_SCHEMA_VERSION);
+        assert_eq!(hello["capabilities"]["schema_version"], 1);
+        assert_eq!(
+            hello["fleet_contract_schema_version"],
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION
+        );
+        assert_ne!(
+            hello["capabilities"]["schema_version"],
+            hello["fleet_contract_schema_version"]
+        );
         assert_eq!(
             hello["gateway_version"],
             json!({
@@ -5917,6 +5930,17 @@ exit 4
             hello["freshness"]["schema_version"],
             sase_core::FLEET_CONTRACT_SCHEMA_VERSION
         );
+
+        let mut old_hello = hello.clone();
+        old_hello
+            .as_object_mut()
+            .expect("hello response is an object")
+            .remove("fleet_contract_schema_version");
+        let parsed: FleetHelloResponseWire =
+            serde_json::from_value(old_hello).unwrap();
+        assert_eq!(parsed.fleet_contract_schema_version, None);
+        assert_eq!(parsed.capabilities.schema_version, 1);
+        assert_eq!(parsed.schema_version, GATEWAY_WIRE_SCHEMA_VERSION);
     }
 
     #[tokio::test]

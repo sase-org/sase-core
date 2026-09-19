@@ -354,6 +354,7 @@
       "counts": "FleetLogicalAgentCountsWire",
       "credential": "FleetCredentialRecordWire",
       "cursor": "StoreCursorWire",
+      "fleet_contract_schema_version": "u32|null; fleet-data contract; omitted by older gateways; independent of capabilities.schema_version",
       "freshness": "FleetSnapshotFreshnessWire",
       "gateway_version": "GatewayServiceVersionWire|null; omitted by older gateways",
       "installation": "InstallationIdentityRecordWire",

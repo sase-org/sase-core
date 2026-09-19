@@ -37,7 +37,11 @@ use crate::store_lock::{
     LockMode, StoreLockError,
 };
 
-/// Schema version shared by the fleet contract surface.
+/// Schema version shared by the fleet-data contract surface.
+///
+/// This is independent of the hello envelope schema, the capability-set
+/// schema, and the fleet protocol version. Gateways advertise it as
+/// `fleet_contract_schema_version` on hello; older hellos omit the field.
 pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 4;
 const FLEET_CONTRACT_MIN_READABLE_SCHEMA_VERSION: u32 = 1;
 /// Current fleet protocol version advertised by gateways and required by

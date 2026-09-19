@@ -1671,6 +1671,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                 "schema_version": "u32",
                 "protocol_version": "u32",
                 "gateway_version": "GatewayServiceVersionWire|null; omitted by older gateways",
+                "fleet_contract_schema_version": "u32|null; fleet-data contract; omitted by older gateways; independent of capabilities.schema_version",
                 "installation": "InstallationIdentityRecordWire",
                 "machine_selector": "string",
                 "capabilities": "CapabilitySetWire",

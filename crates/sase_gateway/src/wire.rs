@@ -323,12 +323,23 @@ pub struct FleetEnrollmentResponseWire {
     pub quarantine: Option<FleetQuarantineWire>,
 }
 
+/// Authenticated hello envelope.
+///
+/// Version fields are independent and must not be compared across kinds:
+/// - `schema_version` is the hello envelope (`GATEWAY_WIRE_SCHEMA_VERSION`)
+/// - `protocol_version` is the fleet protocol
+/// - `capabilities.schema_version` is the capability-set contract
+/// - `fleet_contract_schema_version` is the fleet-data contract
+///   (`sase_core::FLEET_CONTRACT_SCHEMA_VERSION`); omitted by older gateways
+/// - `gateway_version` is the serving package
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetHelloResponseWire {
     pub schema_version: u32,
     pub protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_version: Option<GatewayServiceVersionWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_contract_schema_version: Option<u32>,
     pub installation: InstallationIdentityRecordWire,
     pub machine_selector: String,
     pub capabilities: CapabilitySetWire,
@@ -1761,6 +1772,115 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn sample_hello_json() -> serde_json::Value {
+        json!({
+            "schema_version": GATEWAY_WIRE_SCHEMA_VERSION,
+            "protocol_version": FLEET_PROTOCOL_VERSION,
+            "gateway_version": {
+                "service": "sase-gateway",
+                "package_version": "0.34.63"
+            },
+            "fleet_contract_schema_version":
+                sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            "installation": {
+                "schema_version": 1,
+                "installation_id": format!(
+                    "sase_inst_v1_{}",
+                    "a".repeat(64)
+                ),
+                "created_at_unix": 1.0,
+                "generation": 1,
+                "prior_installation_id": null,
+                "rotated_at_unix": null,
+                "adopted_at_unix": null,
+                "reason": null
+            },
+            "machine_selector": "apollo",
+            "capabilities": {
+                "schema_version": 1,
+                "resource": [],
+                "host": ["fleet.hello"],
+                "protocol": ["fleet.v1"]
+            },
+            "credential": {
+                "schema_version": 1,
+                "credential_id": "cred-1",
+                "controller_id": "controller-a",
+                "controller": {
+                    "schema_version": 1,
+                    "controller_id": "controller-a",
+                    "display_name": "athena",
+                    "platform": "linux",
+                    "app_version": "0.17.1"
+                },
+                "scopes": ["fleet.hello"],
+                "issued_at_unix": 1.0,
+                "expires_at_unix": null,
+                "rotated_at_unix": null,
+                "revoked_at_unix": null,
+                "revoked_reason": null
+            },
+            "cursor": {
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "store_generation": "gen",
+                "sequence": 1
+            },
+            "counts": {
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "basis": {
+                    "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                    "input_rows": 0,
+                    "selected_rows": 0,
+                    "max_revision": null,
+                    "observed_at_unix_max": null
+                },
+                "logical_agent_total": 0,
+                "running": 0,
+                "waiting": 0,
+                "attention": 0,
+                "occupied_runner_slots": 0
+            },
+            "count_revision": null,
+            "freshness": {
+                "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+                "freshness": "fresh",
+                "partial": false,
+                "refreshed_at_unix": 1.0,
+                "error": null
+            }
+        })
+    }
+
+    #[test]
+    fn fleet_hello_keeps_capability_and_fleet_contract_versions_independent() {
+        let value = sample_hello_json();
+        let hello: FleetHelloResponseWire =
+            serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(hello.schema_version, GATEWAY_WIRE_SCHEMA_VERSION);
+        assert_eq!(hello.protocol_version, FLEET_PROTOCOL_VERSION);
+        assert_eq!(hello.capabilities.schema_version, 1);
+        assert_eq!(
+            hello.fleet_contract_schema_version,
+            Some(sase_core::FLEET_CONTRACT_SCHEMA_VERSION)
+        );
+        assert_ne!(
+            hello.capabilities.schema_version,
+            sase_core::FLEET_CONTRACT_SCHEMA_VERSION
+        );
+
+        let mut old = value;
+        old.as_object_mut()
+            .expect("hello fixture is an object")
+            .remove("fleet_contract_schema_version");
+        let old_hello: FleetHelloResponseWire =
+            serde_json::from_value(old).unwrap();
+        assert_eq!(old_hello.fleet_contract_schema_version, None);
+        assert_eq!(old_hello.capabilities.schema_version, 1);
+
+        let encoded = serde_json::to_value(&old_hello).unwrap();
+        assert!(encoded.get("fleet_contract_schema_version").is_none());
     }
 
     #[test]
