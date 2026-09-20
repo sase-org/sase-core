@@ -44,6 +44,17 @@ jobs:
       - name: cargo test --workspace
         run: ./scripts/check.sh test
 
+  # Stdlib-only unit checks for the helper scripts the Release-plz workflow
+  # runs, e.g. the publish-plan completeness gate. No toolchain or cache needed.
+  release-scripts:
+    name: release workflow scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: python3 -m unittest .github/scripts
+        run: ./scripts/check.sh script-test
+
   wheel-smoke:
     name: maturin build + import smoke
     runs-on: ubuntu-latest

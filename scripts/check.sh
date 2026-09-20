@@ -71,13 +71,14 @@ PY
 
 usage() {
     cat >&2 <<EOF
-usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy|test|all]
+usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy|test|script-test|all]
 
   fmt-check   cargo fmt --all -- --check
   fmt         cargo fmt --all
   clippy      cargo clippy --workspace --all-targets -- -D warnings
   test        cargo test --workspace
-  all         fmt-check, then clippy, then test (default)
+  script-test unittest the release-workflow helper scripts in .github/scripts
+  all         fmt-check, clippy, test, then script-test (default)
 EOF
 }
 
@@ -99,10 +100,15 @@ cmd_test() {
     cargo test --workspace
 }
 
+cmd_script_test() {
+    python3 -m unittest discover -s .github/scripts -t .github/scripts
+}
+
 cmd_all() {
     cmd_fmt_check
     cmd_clippy
     cmd_test
+    cmd_script_test
 }
 
 subcommand="${1:-all}"
@@ -112,6 +118,7 @@ case "$subcommand" in
     fmt) cmd_fmt ;;
     clippy) cmd_clippy ;;
     test) cmd_test ;;
+    script-test) cmd_script_test ;;
     all) cmd_all ;;
     *)
         usage

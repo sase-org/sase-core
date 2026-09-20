@@ -110,6 +110,46 @@ It tells the failures apart, because they have different fixes:
    It prints bytes used, bytes free, and the approximate number of releases that still fit at the average size of the
    newest ten releases, and fails if any listed version is still published or the project is at or over the limit.
 
+## Healing a partial release
+
+A release that exists on PyPI with only some of its five files is a **partial release**: a mid-upload quota rejection
+leaves one behind (that is what happened to `0.34.48`, which lost its `win_amd64` wheel and sdist). PyPI answers HTTP
+200 for such a version, so the `publish-plan` job does not ask whether the version exists; it asks whether the release
+holds every distribution named in `EXPECTED_DIST_SUFFIXES` (the one list at the top of `release-plz.yml`) with none
+yanked, through `.github/scripts/pypi_release_files.py status`. Anything short of that reads as unpublished and the
+build/publish jobs run. `publish` passes `skip-existing: true`, so a heal only ever adds files PyPI does not already
+have.
+
+- The expected set lives in the workflow and nowhere else. When the build matrix changes, update
+  `EXPECTED_DIST_SUFFIXES` in the same commit: the `publish` job compares `dist/` to it one-to-one and fails before
+  uploading anything if a build is missing from either side.
+- The automatic gate only examines the current workspace version. It never republishes history, so an older partial
+  release is not healed automatically.
+- A yanked file does not count as present. PyPI will not accept a re-upload of the filename, so a yanked workspace
+  version keeps re-triggering a build whose publish is a no-op; bump the version rather than leaving one yanked.
+
+Check any version from a checkout (stdlib only, `absent`, `partial` or `complete` on stdout, the missing entries on
+stderr):
+
+```bash
+EXPECTED_DIST_SUFFIXES="$(python3 -c "import yaml; print(yaml.safe_load(open('.github/workflows/release-plz.yml'))['env']['EXPECTED_DIST_SUFFIXES'])")" \
+  python3 .github/scripts/pypi_release_files.py status 0.34.48
+```
+
+Heal an older partial version with the guarded manual route. It rebuilds from the existing `v<version>` tag, so nothing
+newer on master can leak in, and `skip-existing` uploads only the missing files:
+
+```bash
+gh workflow run release-plz.yml --repo sase-org/sase-core \
+  -f dry_run=false -f build_wheels=true -f publish_pypi=true -f expected_version=0.34.48
+```
+
+`dry_run=false` is required by the `publish` job, and it also lets the release-plz release/PR/merge jobs run as they do
+on a push, so a dispatch can cut a release PR that is already open as a side effect. Confirm the outcome afterwards by
+re-running `status`, which must print `complete`. PyPI's JSON API is CDN-cached for a short while after an upload (right
+after the `0.34.48` heal it still listed three files for a moment), so re-query before concluding a heal failed. Healing
+does not add versions: it can only add the missing files of a version that already exists.
+
 ## Troubleshooting
 
 - `ValueError: No CSFR found in /manage/project/.../release/<version>/` after a successful login means PyPI served its

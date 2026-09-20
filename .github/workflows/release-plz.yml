@@ -3,11 +3,21 @@ name: Release-plz
 # Release flow: release-plz tags + creates the GitHub release, then the wheel
 # matrix builds sase-core-rs distributions at that tag and publishes them to
 # PyPI. Publishing is self-healing: every push and the scheduled run gate the
-# build/publish jobs on "the tagged version is missing from PyPI" rather than
-# "a release was created in this exact run", so a run that dies between
+# build/publish jobs on "the tagged version is not complete on PyPI" rather
+# than "a release was created in this exact run", so a run that dies between
 # tagging and publishing (runner starvation, discarded queued jobs, transient
 # failures) is retried automatically by the next run instead of leaving the
 # version tagged but unpublished forever (which is how v0.6.0 got stuck).
+#
+# "Complete" means every distribution in EXPECTED_DIST_SUFFIXES (below) is on
+# PyPI and unyanked, not merely that the version answers HTTP 200. A version
+# that exists with only some of its files is a partial upload, and the gate
+# treats it as unpublished: 0.34.48 lost its win_amd64 wheel and sdist when the
+# PyPI project quota tripped mid-upload, and the old existence check read it as
+# done, so the loop above never healed it. The check is scoped to the
+# workspace version, so it never republishes historical releases; a partial
+# older version is healed with a guarded workflow_dispatch (see
+# docs/pypi-retention.md, "Healing a partial release").
 on:
   push:
     branches: [master]
@@ -36,6 +46,19 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MATURIN_VERSION: "1.7"
+  # The one list of distributions a complete release holds: one entry per
+  # build job below (linux x86_64, linux aarch64, macos universal2, windows
+  # x86_64, sdist), each the tail of the file name after the version. The
+  # publish-plan gate treats a release missing any of them as unpublished, and
+  # the publish job refuses a dist/ that differs from it, so a build-matrix
+  # change that does not update this list fails loudly instead of drifting.
+  # One entry per line, no comments inside the block.
+  EXPECTED_DIST_SUFFIXES: |
+    manylinux_2_28_x86_64.whl
+    manylinux_2_28_aarch64.whl
+    universal2.whl
+    win_amd64.whl
+    .tar.gz
 
 jobs:
   release-plz-release:
@@ -84,8 +107,9 @@ jobs:
 
   # Decides whether the wheel matrix and PyPI publish need to run. Runs after
   # release-plz so a tag created moments ago in this run is already visible.
-  # needs_publish is true when the workspace version has a release tag but no
-  # matching release on PyPI — regardless of which run created the tag.
+  # needs_publish is true when the workspace version has a release tag but is
+  # not complete on PyPI (absent, or present without every distribution in
+  # EXPECTED_DIST_SUFFIXES) — regardless of which run created the tag.
   publish-plan:
     name: Publish plan
     needs: release-plz-release
@@ -127,25 +151,13 @@ jobs:
             tag_exists=false
           fi
 
-          pypi_state="$(python3 - "$version" <<'PY'
-          import sys
-          import urllib.error
-          import urllib.request
+          # absent (no such version), partial (version exists but the expected
+          # file set is not all present and unyanked) or complete. A partial
+          # release must not read as published; it is what a mid-upload quota
+          # rejection leaves behind.
+          pypi_state="$(python3 .github/scripts/pypi_release_files.py status "${version}")"
 
-          version = sys.argv[1]
-          url = f"https://pypi.org/pypi/sase-core-rs/{version}/json"
-          request = urllib.request.Request(url, headers={"Accept": "application/json"})
-          try:
-              with urllib.request.urlopen(request, timeout=30):
-                  print("published")
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise
-              print("absent")
-          PY
-          )"
-
-          if [[ "${tag_exists}" == "true" && "${pypi_state}" == "absent" ]]; then
+          if [[ "${tag_exists}" == "true" && "${pypi_state}" != "complete" ]]; then
             needs_publish=true
           else
             needs_publish=false
@@ -414,6 +426,9 @@ jobs:
             EXPECTED_VERSION="${PLAN_VERSION}"
           fi
           export EXPECTED_VERSION
+
+          # The gate and the build matrix must agree on what one release is.
+          python3 .github/scripts/pypi_release_files.py dist dist "${EXPECTED_VERSION}"
 
           git fetch --force --tags origin
           if ! tag_commit="$(git rev-parse --verify --quiet "v${EXPECTED_VERSION}^{commit}")"; then
