@@ -988,6 +988,17 @@ pub struct ToolRunRetentionResultWire {
     pub detail_rows: u64,
     pub file_candidates: Vec<ToolRunDeletionCandidateWire>,
     pub protected_unsettled: u64,
+    /// Bytes of retained log/event files that remain after every candidate is
+    /// deleted, measured with a no-follow `lstat`.
+    #[serde(default)]
+    pub retained_bytes: u64,
+    /// Bytes held by unsettled runs, which age and aggregate deletion never touch.
+    #[serde(default)]
+    pub protected_bytes: u64,
+    /// How far `retained_bytes` still exceeds `log_max_bytes` because protected
+    /// or unselectable files alone are over the aggregate target.
+    #[serde(default)]
+    pub over_target_bytes: u64,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }

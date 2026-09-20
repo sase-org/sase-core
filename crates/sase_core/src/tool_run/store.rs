@@ -1,6 +1,7 @@
 //! SQLite ToolRun store: event+projection transactions, reconciliation,
 //! retention, and query side-effect boundaries.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -778,6 +779,9 @@ fn retention(
             detail_rows: 0,
             file_candidates: Vec::new(),
             protected_unsettled: 0,
+            retained_bytes: 0,
+            protected_bytes: 0,
+            over_target_bytes: 0,
             diagnostics: vec!["tool run store does not exist".to_string()],
         });
     }
@@ -854,6 +858,11 @@ fn retention(
                 }
             }
         }
+        let usage = select_aggregate_log_candidates(
+            conn,
+            &mut file_candidates,
+            request.policy.log_max_bytes,
+        )?;
         Ok(ToolRunRetentionResultWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             dry_run: request.dry_run,
@@ -861,6 +870,9 @@ fn retention(
             detail_rows: detail_rows as u64,
             file_candidates,
             protected_unsettled: protected_unsettled as u64,
+            retained_bytes: usage.retained_bytes,
+            protected_bytes: usage.protected_bytes,
+            over_target_bytes: usage.over_target_bytes,
             diagnostics: Vec::new(),
         })
     };
@@ -948,6 +960,108 @@ fn retention(
             dry_run: false,
             ..report
         })
+    })
+}
+
+/// One settled run's retained files that survived age-based selection.
+struct SettledRunLogs {
+    run_id: String,
+    bytes: u64,
+    files: Vec<(&'static str, String)>,
+}
+
+struct AggregateLogUsage {
+    retained_bytes: u64,
+    protected_bytes: u64,
+    over_target_bytes: u64,
+}
+
+/// Size of a retained file without following symlinks; anything that is not a
+/// regular file (missing, symlink, directory) counts as zero bytes.
+fn retained_file_bytes(path: &str) -> u64 {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+        _ => 0,
+    }
+}
+
+/// Add the oldest settled runs' files as candidates until the retained bytes fit
+/// `log_max_bytes`. Unsettled runs are never selected; when their bytes alone
+/// exceed the target the excess is reported, not hidden.
+fn select_aggregate_log_candidates(
+    conn: &Connection,
+    candidates: &mut Vec<ToolRunDeletionCandidateWire>,
+    log_max_bytes: u64,
+) -> Result<AggregateLogUsage, ToolRunError> {
+    let already: HashSet<String> = candidates
+        .iter()
+        .filter_map(|candidate| candidate.path.clone())
+        .collect();
+    let mut stmt = conn.prepare(
+        "SELECT run_id, state, log_stdout_path, log_stderr_path, events_path
+         FROM runs
+         WHERE log_stdout_path IS NOT NULL
+            OR log_stderr_path IS NOT NULL
+            OR events_path IS NOT NULL
+         ORDER BY COALESCE(settled_ts, created_ts), run_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            [
+                ("stdout", row.get::<_, Option<String>>(2)?),
+                ("stderr", row.get::<_, Option<String>>(3)?),
+                ("events", row.get::<_, Option<String>>(4)?),
+            ],
+        ))
+    })?;
+    let mut protected_bytes = 0u64;
+    let mut settled: Vec<SettledRunLogs> = Vec::new();
+    for row in rows {
+        let (run_id, state, files) = row?;
+        let unsettled = state == "created" || state == "running";
+        let mut run_bytes = 0u64;
+        let mut run_files = Vec::new();
+        for (kind, path) in files {
+            let Some(path) = path else { continue };
+            if already.contains(&path) {
+                continue;
+            }
+            run_bytes += retained_file_bytes(&path);
+            run_files.push((kind, path));
+        }
+        if unsettled {
+            protected_bytes += run_bytes;
+        } else if run_bytes > 0 {
+            settled.push(SettledRunLogs {
+                run_id,
+                bytes: run_bytes,
+                files: run_files,
+            });
+        }
+    }
+    let mut retained =
+        protected_bytes + settled.iter().map(|run| run.bytes).sum::<u64>();
+    for run in settled {
+        if retained <= log_max_bytes {
+            break;
+        }
+        for (kind, path) in run.files {
+            candidates.push(ToolRunDeletionCandidateWire {
+                kind: kind.to_string(),
+                run_id: Some(run.run_id.clone()),
+                path: Some(path),
+                protected: false,
+                reason: "log_max_bytes aggregate target exceeded".to_string(),
+            });
+        }
+        retained = retained.saturating_sub(run.bytes);
+    }
+    Ok(AggregateLogUsage {
+        retained_bytes: retained,
+        protected_bytes,
+        over_target_bytes: retained.saturating_sub(log_max_bytes),
     })
 }
 
@@ -2323,6 +2437,151 @@ mod tests {
         )
         .unwrap();
         assert!(shown.run.is_some());
+    }
+
+    fn begin_with_log(
+        path: &Path,
+        now: i64,
+        log: &Path,
+        bytes: usize,
+    ) -> String {
+        fs::create_dir_all(log.parent().unwrap()).unwrap();
+        fs::write(log, vec![b'x'; bytes]).unwrap();
+        let normalized = normalize_tool_definition(definition()).unwrap();
+        begin(
+            path,
+            ToolRunBeginRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: None,
+                created_event_id: None,
+                running_event_id: None,
+                tool_name: Some("check".into()),
+                definition: normalized.definition,
+                extra_args: Vec::new(),
+                display_argv: vec!["just".into(), "check".into()],
+                private_argv: None,
+                project: Some("sase".into()),
+                agent: None,
+                workspace: None,
+                bead: None,
+                owner_kind: None,
+                owner_id: None,
+                parent_run_id: None,
+                wrapper_pid: Some(4242),
+                boot_id: Some("boot-1".into()),
+                process_start_identity: Some("start-1".into()),
+                events_path: None,
+                log_stdout_path: Some(log.to_string_lossy().into_owned()),
+                log_stderr_path: None,
+                now_ts: Some(now),
+                commit_running: true,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .run
+        .run_id
+    }
+
+    fn settle_succeeded(path: &Path, run_id: &str, now: i64) {
+        finish(
+            path,
+            ToolRunFinishRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: run_id.to_string(),
+                event_id: None,
+                state: ToolRunStateWire::Succeeded,
+                exit_code: Some(0),
+                signal: None,
+                interruption_reason: None,
+                lost_reason: None,
+                child_pid: None,
+                child_pgid: None,
+                duration_ms: Some(5),
+                fingerprint_before: None,
+                fingerprint_after: None,
+                mutated_input: None,
+                now_ts: Some(now),
+                diagnostics: Vec::new(),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    }
+
+    fn aggregate_preview(
+        path: &Path,
+        log_max_bytes: u64,
+    ) -> ToolRunRetentionResultWire {
+        retention_preview(
+            path,
+            ToolRunRetentionRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                policy: ToolRunRetentionPolicyWire {
+                    log_max_bytes,
+                    ..ToolRunRetentionPolicyWire::default()
+                },
+                now_ts: Some(1_000),
+                dry_run: true,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn retention_aggregate_target_deletes_oldest_settled_logs_first() {
+        let (temp, path) = store();
+        let logs = temp.path().join("logs");
+        let live = begin_with_log(&path, 1, &logs.join("live/stdout.log"), 900);
+        let mut settled_logs = Vec::new();
+        for (index, name) in ["oldest", "middle", "newest"].iter().enumerate() {
+            let log = logs.join(name).join("stdout.log");
+            let run_id = begin_with_log(&path, 10 + index as i64, &log, 1000);
+            settle_succeeded(&path, &run_id, 20 + index as i64);
+            settled_logs.push(log.to_string_lossy().into_owned());
+        }
+
+        // 3900 retained bytes against a 2500 target: the two oldest settled
+        // runs go, the newest settled run and the unsettled run stay.
+        let fits = aggregate_preview(&path, 2500);
+        let selected: Vec<_> = fits
+            .file_candidates
+            .iter()
+            .filter_map(|candidate| candidate.path.clone())
+            .collect();
+        assert_eq!(
+            selected,
+            vec![settled_logs[0].clone(), settled_logs[1].clone()]
+        );
+        assert!(fits
+            .file_candidates
+            .iter()
+            .all(|candidate| candidate.reason.contains("log_max_bytes")));
+        assert_eq!(fits.retained_bytes, 1900);
+        assert_eq!(fits.protected_bytes, 900);
+        assert_eq!(fits.over_target_bytes, 0);
+
+        // Protected bytes alone exceed a 500-byte target: every settled log is
+        // selected, the excess is reported, and the live run is never listed.
+        let over = aggregate_preview(&path, 500);
+        assert_eq!(over.file_candidates.len(), 3);
+        assert!(over.file_candidates.iter().all(|candidate| {
+            candidate.run_id.as_deref() != Some(live.as_str())
+                && !candidate
+                    .path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("live")
+        }));
+        assert_eq!(over.retained_bytes, 900);
+        assert_eq!(over.over_target_bytes, 400);
+
+        // A target that already fits selects nothing; Rust never deletes files.
+        let roomy = aggregate_preview(&path, 10_000);
+        assert!(roomy.file_candidates.is_empty());
+        assert_eq!(roomy.retained_bytes, 3900);
+        assert!(logs.join("oldest/stdout.log").exists());
     }
 
     #[test]
