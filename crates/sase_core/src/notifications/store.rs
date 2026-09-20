@@ -484,7 +484,11 @@ fn apply_notification_state_update_with_options(
                     if n.dismissed {
                         continue;
                     }
-                    if matches_agent_completion_notification_for_agents(n, agents) {
+                    if matches_agent_completion_notification_for_agents(n, agents)
+                        || matches_agent_settlement_notification_for_agents(
+                            n, agents,
+                        )
+                    {
                         matched_count += 1;
                         n.dismissed = true;
                         n.snooze_until = None;
@@ -1334,6 +1338,44 @@ fn matches_agent_completion_notification_for_agents(
                 && agent.raw_suffix.as_deref() == Some(raw_suffix.as_str())
         }),
     }
+}
+
+/// Host-owned settlement senders whose rows belong to exactly one agent row.
+const AGENT_SETTLEMENT_SENDERS: [&str; 2] =
+    ["epic-launch", "monitor-settlement"];
+
+fn matches_agent_settlement_notification(
+    notification: &NotificationWire,
+) -> bool {
+    if !AGENT_SETTLEMENT_SENDERS.contains(&notification.sender.as_str()) {
+        return false;
+    }
+    ["cl_name", "raw_suffix"].iter().all(|key| {
+        notification
+            .action_data
+            .get(*key)
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn matches_agent_settlement_notification_for_agents(
+    notification: &NotificationWire,
+    agents: &[NotificationAgentKeyWire],
+) -> bool {
+    if agents.is_empty() || !matches_agent_settlement_notification(notification)
+    {
+        return false;
+    }
+    let cl_name = notification.action_data.get("cl_name");
+    let raw_suffix = notification.action_data.get("raw_suffix");
+    // Exact (cl_name, raw_suffix) only, with no cl_name-only fallback like the
+    // completion matcher has: `cl_name` on these rows is the patch name shared
+    // by every agent in the project, so a fallback would let acknowledging one
+    // agent dismiss every project-wide settlement row.
+    agents.iter().any(|agent| {
+        Some(&agent.cl_name) == cl_name
+            && agent.raw_suffix.as_deref() == raw_suffix.map(String::as_str)
+    })
 }
 
 fn normalize_to_14_digit(ts: &str) -> Option<String> {

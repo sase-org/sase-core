@@ -1563,6 +1563,173 @@ fn notification_dismiss_agent_completions_matching_agents_is_completion_only() {
     assert_eq!(by_id.get("plan"), Some(&false));
 }
 
+fn settlement_notification(
+    id: &str,
+    sender: &str,
+    cl_name: &str,
+    raw_suffix: Option<&str>,
+) -> NotificationWire {
+    let mut n = notification(id);
+    n.sender = sender.to_string();
+    n.action = None;
+    n.action_data
+        .insert("cl_name".to_string(), cl_name.to_string());
+    if let Some(raw_suffix) = raw_suffix {
+        n.action_data
+            .insert("raw_suffix".to_string(), raw_suffix.to_string());
+    }
+    n
+}
+
+fn settlement_fixture_rows() -> Vec<NotificationWire> {
+    let mut completion = notification("completion");
+    completion.sender = "user-agent".to_string();
+    completion.action = Some("JumpToAgent".to_string());
+    completion
+        .action_data
+        .insert("cl_name".to_string(), "proj".to_string());
+    completion
+        .action_data
+        .insert("raw_suffix".to_string(), "20260501010203".to_string());
+
+    let mut already = settlement_notification(
+        "settle-already",
+        "epic-launch",
+        "proj",
+        Some("20260501010203"),
+    );
+    already.dismissed = true;
+
+    vec![
+        settlement_notification(
+            "settle-epic",
+            "epic-launch",
+            "proj",
+            Some("20260501010203"),
+        ),
+        settlement_notification(
+            "settle-monitor",
+            "monitor-settlement",
+            "proj",
+            Some("20260501010203"),
+        ),
+        settlement_notification(
+            "settle-other-suffix",
+            "epic-launch",
+            "proj",
+            Some("20260501010204"),
+        ),
+        settlement_notification(
+            "settle-no-suffix",
+            "epic-launch",
+            "proj",
+            None,
+        ),
+        settlement_notification(
+            "settle-other-cl",
+            "epic-launch",
+            "elsewhere",
+            Some("20260501010203"),
+        ),
+        already,
+        completion,
+        settlement_notification("axe", "axe", "proj", Some("20260501010203")),
+        settlement_notification("crs", "crs", "proj", Some("20260501010203")),
+    ]
+}
+
+#[test]
+fn notification_dismiss_agent_completions_matching_agents_matches_exact_settlement_rows(
+) {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(&path, &settlement_fixture_rows()).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "proj".to_string(),
+                raw_suffix: Some("20260501010203".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 3);
+    assert_eq!(outcome.changed_count, 3);
+
+    let by_id: std::collections::HashMap<_, _> = outcome
+        .notifications
+        .iter()
+        .map(|n| (n.id.clone(), n.dismissed))
+        .collect();
+    assert_eq!(by_id.get("settle-epic"), Some(&true));
+    assert_eq!(by_id.get("settle-monitor"), Some(&true));
+    assert_eq!(by_id.get("completion"), Some(&true));
+    // Different raw_suffix under the same cl_name stays active.
+    assert_eq!(by_id.get("settle-other-suffix"), Some(&false));
+    // No cl_name-only fallback for settlement rows without a raw_suffix.
+    assert_eq!(by_id.get("settle-no-suffix"), Some(&false));
+    assert_eq!(by_id.get("settle-other-cl"), Some(&false));
+    assert_eq!(by_id.get("axe"), Some(&false));
+    assert_eq!(by_id.get("crs"), Some(&false));
+    // Already dismissed rows stay dismissed and are not counted above.
+    assert_eq!(by_id.get("settle-already"), Some(&true));
+}
+
+#[test]
+fn notification_dismiss_agent_completions_matching_agents_skips_unmatched_settlement_rows(
+) {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(&path, &settlement_fixture_rows()).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
+            agents: vec![NotificationAgentKeyWire {
+                cl_name: "proj".to_string(),
+                raw_suffix: Some("20269999999999".to_string()),
+            }],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 0);
+    assert_eq!(outcome.changed_count, 0);
+    assert!(!outcome.rewritten);
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletionsMatchingAgents {
+            agents: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 0);
+}
+
+#[test]
+fn notification_dismiss_agent_completions_leaves_settlement_rows_alone() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(&path, &settlement_fixture_rows()).unwrap();
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::DismissAgentCompletions,
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 1);
+    let by_id: std::collections::HashMap<_, _> = outcome
+        .notifications
+        .iter()
+        .map(|n| (n.id.clone(), n.dismissed))
+        .collect();
+    assert_eq!(by_id.get("completion"), Some(&true));
+    assert_eq!(by_id.get("settle-epic"), Some(&false));
+    assert_eq!(by_id.get("settle-monitor"), Some(&false));
+}
+
 #[test]
 fn notification_dismiss_agent_completions_matches_user_agent_jump_and_error() {
     let temp = tempdir().unwrap();
