@@ -79,5 +79,13 @@ everything around the deletion but never deletes anything itself:
   interstitial (new device / re-authentication) instead of the release management form. Nothing was deleted. Confirm the
   new device from the email PyPI sent, then rerun with a **fresh** TOTP. Replaying a stored command without re-entering
   the password and TOTP cannot work.
+
+  `pypi-cleanup` does not detect the wall: it only checks that the post-login URL is not the login URL, so an
+  unconfirmed session looks like a success and it walks on to the first release page. Upstream reads the same way —
+  [issue #42](https://github.com/arcivanov/pypi-cleanup/issues/42) and
+  [issue #49](https://github.com/arcivanov/pypi-cleanup/issues/49) both resolve by confirming the emailed login, and open
+  PR [#48](https://github.com/arcivanov/pypi-cleanup/pull/48) exists to handle the redirect in the tool. **Upgrading is
+  not a fix**: `0.1.10` is still the newest stable release, and `0.1.11.dev20260320034404` is byte-identical to it in
+  `pypi_cleanup/__init__.py`. Sign in through a browser first and clear the confirmation email, then delete.
 - A `--query-only` run that selects nothing has no `Found the following releases` block, and `compare` refuses it rather
   than treating an empty selection as a match. Either the list is already gone or the tool's log format changed.
