@@ -510,6 +510,10 @@
 //! - `bead_note_remove(beads_dir: str, issue_id: str, note_id: str, author: str | None = None, now: str | None = None) -> dict`
 //! - `bead_target_routing_wire_schema_version() -> int`
 //! - `bead_route_targets(request: dict) -> dict`
+//! - `bead_touch_index_wire_schema_version() -> int`
+//! - `bead_touch_index_refresh(beads_dir: str, index_path: str) -> dict` (incremental, signature-cached rebuild of the actor-keyed touch index under `<index_path>.lock`; `reduced_streams` names exactly the streams re-reduced)
+//! - `bead_touch_index_query(index_path: str, actors: list[str] | None = None) -> dict` (read-only: loads the index file only, never scans or parses streams; a missing, truncated, or wrong-schema index returns no rows; `actors=None` returns every actor's touches)
+//! - `bead_touch_index_status(beads_dir: str, index_path: str) -> dict` (stat-only staleness report: `state` is `missing`, `unreadable`, `schema_mismatch`, `stale`, or `fresh`)
 //! - `bead_plus_one(beads_dir: str, issue_id: str, reporter: str, note: str, refs: list[str] | None = None, now: str | None = None, observed_since: str | None = None) -> dict`
 //! - `bead_snooze(beads_dir: str, issue_id: str, until: str, plus_ones: int | None = None, reason: str = "", actor: str = "", now: str | None = None) -> dict`
 //! - `bead_snooze_cancel(beads_dir: str, issue_id: str, actor: str = "", now: str | None = None) -> dict`
@@ -1084,6 +1088,7 @@ use sase_core::bead::{
     add_task_plus_one as core_bead_add_task_plus_one,
     append_issue_note as core_bead_append_issue_note,
     bead_history as core_bead_history, bead_lost_notes as core_bead_lost_notes,
+    bead_touch_index_status as core_bead_touch_index_status,
     blocked_issues as core_bead_blocked_issues,
     build_epic_work_plan as core_bead_build_epic_work_plan,
     build_epic_work_plan_from_issues as core_bead_build_epic_work_plan_from_issues,
@@ -1119,11 +1124,13 @@ use sase_core::bead::{
     plus_one_evidence_migration_sql as core_bead_plus_one_evidence_migration_sql,
     preclaim_epic_work_plan as core_bead_preclaim_epic_work_plan,
     prune_removed_flag_event_streams as core_bead_prune_removed_flag_event_streams,
+    query_bead_touches as core_query_bead_touches,
     read_event_store_issues as core_bead_read_event_store_issues,
     read_legacy_jsonl_issues as core_bead_read_legacy_jsonl_issues,
     read_store_issues as core_bead_read_store_issues,
     ready_issues as core_bead_ready_issues,
     reduce_event_streams as core_reduce_event_streams,
+    refresh_bead_touch_index as core_refresh_bead_touch_index,
     release_agent_claim as core_bead_release_agent_claim,
     remove_bead_link as core_bead_remove_link,
     remove_dependencies as core_bead_remove_dependencies,
@@ -1152,6 +1159,7 @@ use sase_core::bead::{
     BeadLinkProjectionRequestWire, BeadPreclaimAssignmentWire,
     BeadResolutionWire, BeadTargetRoutingRequestWire, BeadUpdateFieldsWire,
     IssueWire, BEAD_TARGET_ROUTING_WIRE_SCHEMA_VERSION,
+    BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
 };
 use sase_core::bead_action::{
     decide_bead_action_from_json as core_decide_bead_action_from_json,
@@ -5975,6 +5983,61 @@ fn py_bead_lost_notes<'py>(
     bead_result_to_py(
         py,
         py.allow_threads(|| core_bead_lost_notes(&beads_dir, issue_id)),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_touch_index_wire_schema_version")]
+fn py_bead_touch_index_wire_schema_version() -> u32 {
+    BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_touch_index_refresh")]
+fn py_bead_touch_index_refresh<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let index_path = PathBuf::from(index_path);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_refresh_bead_touch_index(&beads_dir, &index_path)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_touch_index_query")]
+#[pyo3(signature = (index_path, actors=None))]
+fn py_bead_touch_index_query<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    actors: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let index_path = PathBuf::from(index_path);
+    let result = py.allow_threads(|| {
+        core_query_bead_touches(&index_path, actors.as_deref())
+    });
+    bead_result_to_py(py, Ok::<_, BeadError>(result))
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_touch_index_status")]
+fn py_bead_touch_index_status<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let index_path = PathBuf::from(index_path);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_bead_touch_index_status(&beads_dir, &index_path)
+        }),
     )
 }
 
@@ -20239,6 +20302,13 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_history, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_lost_notes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_bead_touch_index_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_bead_touch_index_refresh, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_touch_index_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_touch_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
@@ -21922,6 +21992,173 @@ COMMITS:
             assert_eq!(
                 value["routes"][0]["store"]["project_label"],
                 json!("bob-cli")
+            );
+        });
+    }
+
+    #[test]
+    fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "bead_touch_index_wire_schema_version",
+                "bead_touch_index_refresh",
+                "bead_touch_index_query",
+                "bead_touch_index_status",
+            ] {
+                assert!(module.getattr(name).is_ok(), "{name}");
+            }
+            assert_eq!(py_bead_touch_index_wire_schema_version(), 1);
+
+            let dir = tempdir().unwrap();
+            let beads_dir = dir.path().join("beads");
+            let streams = beads_dir.join("events/streams");
+            fs::create_dir_all(&streams).unwrap();
+            let event =
+                |id: &str, actor: &str, op: &str, at: &str, body: JsonValue| {
+                    let mut payload = body;
+                    payload["kind"] = json!(op);
+                    json!({
+                        "schema_version": 1,
+                        "event_id": format!("b-1:{id}"),
+                        "timestamp": at,
+                        "actor": actor,
+                        "operation": op,
+                        "issue_id": "b-1",
+                        "payload": payload,
+                    })
+                    .to_string()
+                };
+            let text = [
+                event(
+                    "1",
+                    "owner@example.com",
+                    "issue_created",
+                    "2026-01-01T00:00:00Z",
+                    json!({"issue": {"id": "b-1", "title": "Bead", "status": "open", "issue_type": "task"}}),
+                ),
+                event(
+                    "2",
+                    "bbugyi200.athena.0aa",
+                    "note_appended",
+                    "2026-01-01T00:01:00Z",
+                    json!({"entry": "x"}),
+                ),
+                event(
+                    "3",
+                    "bbugyi200.athena.0aa",
+                    "issue_closed",
+                    "2026-01-01T00:02:00Z",
+                    json!({"close_reason": null}),
+                ),
+                event(
+                    "4",
+                    "013",
+                    "note_appended",
+                    "2026-01-01T00:03:00Z",
+                    json!({"entry": "y"}),
+                ),
+            ]
+            .join("\n");
+            fs::write(streams.join("b-1.jsonl"), format!("{text}\n")).unwrap();
+            let beads_dir_str = beads_dir.to_str().unwrap();
+            let index_path = dir.path().join("project/agent_bead_touches.json");
+            let index_str = index_path.to_str().unwrap();
+
+            let missing =
+                py_bead_touch_index_status(py, beads_dir_str, index_str)
+                    .unwrap();
+            let missing = py_to_json_value(missing.bind(py)).unwrap();
+            assert_eq!(missing["state"], json!("missing"));
+
+            let miss = py_bead_touch_index_query(py, index_str, None).unwrap();
+            let miss = py_to_json_value(miss.bind(py)).unwrap();
+            assert_eq!(
+                miss,
+                json!({"schema_version": 1, "generation": "", "touches": []})
+            );
+
+            let refresh =
+                py_bead_touch_index_refresh(py, beads_dir_str, index_str)
+                    .unwrap();
+            let refresh = py_to_json_value(refresh.bind(py)).unwrap();
+            let generation = refresh["generation"].clone();
+            assert_eq!(
+                refresh,
+                json!({
+                    "schema_version": 1,
+                    "generation": generation,
+                    "full_rebuild": true,
+                    "wrote": true,
+                    "stream_count": 1,
+                    "reduced_streams": ["b-1"],
+                    "reused_streams": 0,
+                    "removed_streams": [],
+                    "touch_count": 2,
+                })
+            );
+
+            let query = py_bead_touch_index_query(py, index_str, None).unwrap();
+            let query = py_to_json_value(query.bind(py)).unwrap();
+            assert_eq!(
+                query,
+                json!({
+                    "schema_version": 1,
+                    "generation": generation,
+                    "touches": [
+                        {
+                            "actor": "013",
+                            "bead_id": "b-1",
+                            "title": "Bead",
+                            "issue_type": "task",
+                            "status": "closed",
+                            "verbs": {"noted": 1},
+                            "first_at": "2026-01-01T00:03:00Z",
+                            "last_at": "2026-01-01T00:03:00Z",
+                            "stream_id": "b-1",
+                        },
+                        {
+                            "actor": "bbugyi200.athena.0aa",
+                            "bead_id": "b-1",
+                            "title": "Bead",
+                            "issue_type": "task",
+                            "status": "closed",
+                            "verbs": {"closed": 1, "noted": 1},
+                            "first_at": "2026-01-01T00:01:00Z",
+                            "last_at": "2026-01-01T00:02:00Z",
+                            "stream_id": "b-1",
+                        },
+                    ],
+                })
+            );
+
+            let only = py_bead_touch_index_query(
+                py,
+                index_str,
+                Some(vec!["013".to_string()]),
+            )
+            .unwrap();
+            let only = py_to_json_value(only.bind(py)).unwrap();
+            assert_eq!(only["touches"], json!([query["touches"][0].clone()]));
+
+            let fresh =
+                py_bead_touch_index_status(py, beads_dir_str, index_str)
+                    .unwrap();
+            let fresh = py_to_json_value(fresh.bind(py)).unwrap();
+            assert_eq!(
+                fresh,
+                json!({
+                    "schema_version": 1,
+                    "state": "fresh",
+                    "index_schema_version": 1,
+                    "generation": generation,
+                    "indexed_streams": 1,
+                    "current_streams": 1,
+                    "changed_streams": [],
+                    "vanished_streams": [],
+                })
             );
         });
     }

@@ -1,0 +1,68 @@
+[
+  {
+    "actor": "bbugyi200.athena.0bb",
+    "bead_id": "task-1",
+    "title": "A Task",
+    "issue_type": "task",
+    "status": "ready",
+    "verbs": {"created": 1, "ready": 2, "removed": 1, "snoozed": 2},
+    "first_at": "2026-03-02T09:00:00Z",
+    "last_at": "2026-03-02T09:06:00Z",
+    "stream_id": "task-1"
+  },
+  {
+    "actor": "bbugyi200.athena.0aa",
+    "bead_id": "task-1",
+    "title": "A Task",
+    "issue_type": "task",
+    "status": "ready",
+    "verbs": {"+1": 1},
+    "first_at": "2026-03-02T09:01:00Z",
+    "last_at": "2026-03-02T09:01:00Z",
+    "stream_id": "task-1"
+  },
+  {
+    "actor": "bbugyi200.athena.0aa",
+    "bead_id": "plan-1",
+    "title": "Renamed Plan",
+    "issue_type": "plan",
+    "status": "closed",
+    "verbs": {"linked": 1, "noted": 1, "ref": 1, "updated": 1},
+    "first_at": "2026-03-01T10:05:00Z",
+    "last_at": "2026-03-01T10:14:00Z",
+    "stream_id": "plan-1"
+  },
+  {
+    "actor": "sase-zt.6.5.land",
+    "bead_id": "plan-1.1",
+    "title": "Phase One",
+    "issue_type": "phase",
+    "status": "closed",
+    "verbs": {"dep": 1},
+    "first_at": "2026-03-01T10:12:00Z",
+    "last_at": "2026-03-01T10:12:00Z",
+    "stream_id": "plan-1"
+  },
+  {
+    "actor": "bbugyi200.athena.0aa",
+    "bead_id": "plan-1.1",
+    "title": "Phase One",
+    "issue_type": "phase",
+    "status": "closed",
+    "verbs": {"closed": 1},
+    "first_at": "2026-03-01T10:10:00Z",
+    "last_at": "2026-03-01T10:10:00Z",
+    "stream_id": "plan-1"
+  },
+  {
+    "actor": "013",
+    "bead_id": "plan-1.1",
+    "title": "Phase One",
+    "issue_type": "phase",
+    "status": "closed",
+    "verbs": {"noted": 3},
+    "first_at": "2026-03-01T10:07:00Z",
+    "last_at": "2026-03-01T10:09:00Z",
+    "stream_id": "plan-1"
+  }
+]

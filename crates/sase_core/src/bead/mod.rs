@@ -14,6 +14,7 @@ pub mod read;
 pub mod routing;
 pub mod schema;
 pub mod search;
+pub mod touch_index;
 pub mod wire;
 pub mod work;
 
@@ -93,6 +94,13 @@ pub use schema::{
     task_type_migration_sql, BEAD_SQLITE_SCHEMA,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
+pub use touch_index::{
+    bead_touch_index_status, query_bead_touches, reduce_stream_touches,
+    refresh_bead_touch_index, verb_for_operation, BeadStreamSignatureWire,
+    BeadTouchIndexStateWire, BeadTouchIndexStatusWire, BeadTouchIndexWire,
+    BeadTouchQueryWire, BeadTouchRefreshWire, BeadTouchWire,
+    BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
+};
 pub use wire::{
     flag_thresholds_due, notes_text, parse_snooze_timestamp,
     validate_model_value, BeadCloseRecordWire, BeadError, BeadNoteWire,
