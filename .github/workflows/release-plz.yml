@@ -24,12 +24,27 @@ name: Release-plz
 # the upload would not fit, rather than letting PyPI reject a file mid-upload
 # and leave a partial release. Every publish records the remaining headroom in
 # the job summary.
+#
+# Cadence: a release is cut once a day, not on every master push. A push (and the
+# six-hourly heal) still runs release-plz-release, release-plz-pr and the publish
+# gate, so the release PR keeps accumulating commits and a missed publish still
+# heals, but only the daily schedule below, or a workflow_dispatch with
+# dry_run=false, runs release-plz-merge. Merging on every push produced 4.32
+# releases a day (272 in 63 days) at ~75 MB each, which is what filled the 10 GB
+# PyPI project quota; one cut a day batches a day of commits into one release.
+# Do not restore merge-on-push. An urgent core fix does not have to wait for the
+# next cut: dispatch this workflow with dry_run=false (docs/pypi-retention.md,
+# "Release cadence"). The daily cron string appears in `on.schedule` and in the
+# two release-plz-merge expressions that compare github.event.schedule to it, and
+# a unit test keeps those copies identical.
 on:
   push:
     branches: [master]
   schedule:
-    # Heal missed publishes even when no push arrives.
+    # Heal missed publishes even when no push arrives. Never merges the release PR.
     - cron: "23 */6 * * *"
+    # The daily release cut: the one schedule that merges the release PR.
+    - cron: "41 7 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -583,16 +598,21 @@ jobs:
     needs: release-plz-pr
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    if: ${{ github.repository_owner == 'sase-org' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    # Runs only on a release cut: the daily schedule or a dispatch that is not a
+    # dry run. Pushes and the six-hourly heal skip it (see the header comment).
+    if: ${{ github.repository_owner == 'sase-org' && ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) || github.event.schedule == '41 7 * * *') }}
     permissions:
       contents: write
       pull-requests: write
     # Merge reconcilers look up the current guarded release-plz PR at run time,
     # so stale jobs carry no unique run output. Let the newest run evict a
     # predecessor, including a hosted-runner queue entry that can otherwise own
-    # the branch-scoped group indefinitely.
+    # the branch-scoped group indefinitely. Only release cuts share a group: a
+    # push or heal run that skips this job gets a group of its own, so it cannot
+    # evict an in-flight cut (which waits on checks for up to 45 minutes) even if
+    # GitHub resolves a skipped job's concurrency group before its `if`.
     concurrency:
-      group: release-plz-merge-${{ github.ref }}
+      group: release-plz-merge-${{ github.ref }}-${{ ((github.event_name == 'workflow_dispatch' && !inputs.dry_run) || github.event.schedule == '41 7 * * *') && 'cut' || github.run_id }}
       cancel-in-progress: true
     steps:
       - name: Resolve release PR

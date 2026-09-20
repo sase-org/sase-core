@@ -133,6 +133,46 @@ Try it against the live project, sizing `dist/` like a real release:
 PYPI_PROJECT_LIMIT_BYTES=10737418240 python3 .github/scripts/pypi_quota.py check dist
 ```
 
+## Release cadence
+
+`Release-plz` cuts **one release a day**, not one per master push. Merging the release PR on every push produced 4.32
+releases a day (272 in 63 days) at about 75 MB each, roughly 324 MB of quota a day, which is what filled the project.
+Reclaiming storage alone buys only weeks at that rate, so the cadence is bounded too: at one release a day the projected
+runway after a keep-30 reclaim is about 105 days instead of 24.
+
+Which trigger does what to the release PR:
+
+| Trigger                               | Updates release PR | Merges it (cuts a release) |
+| ------------------------------------- | ------------------ | -------------------------- |
+| push to `master`                      | yes                | **no**                     |
+| `23 */6 * * *` schedule (the heal)    | yes                | **no**                     |
+| `41 7 * * *` schedule (the daily cut) | yes                | **yes**                    |
+| `workflow_dispatch`, `dry_run=false`  | yes                | **yes**                    |
+| `workflow_dispatch`, `dry_run=true`   | no                 | no                         |
+
+Only `release-plz-merge` is gated. A push still runs `release-plz-release`, `release-plz-pr` and the `publish-plan`
+gate, so the release PR keeps accumulating commits and a tagged-but-incomplete version still heals on the next push or
+six-hourly run. The daily cron string appears in `on.schedule`, in the merge job's `if` and in its concurrency group; a
+unit test (`test_release_cadence.py`) keeps those copies identical, so change all three together. It fires at 07:41 UTC,
+off the top of the hour that GitHub congests and clear of the heal's `:23` slots. GitHub may still delay a scheduled
+run.
+
+**Cutting an urgent release** (a core fix a floor ratchet is waiting on) does not have to wait for the next cut.
+Dispatch the workflow with `dry_run=false`; `dry_run` defaults to true, and a dry-run dispatch skips the release PR and
+the merge entirely:
+
+```bash
+gh workflow run release-plz.yml --repo sase-org/sase-core -f dry_run=false
+```
+
+That updates the release PR, waits for its checks, and squash-merges it. The merge is a push to `master`, and that run
+tags the version, then builds and publishes it. If the push starts no run, the next six-hourly heal tags and publishes
+it. Keep manual cuts rare: each one is about 75 MB of quota, and every publish reports the headroom left in its job
+summary.
+
+Every merge safety guard on the release PR is unchanged (base branch, author, head-branch timestamp shape, title shape
+and body footer), because `master` is unprotected and the merge job must never touch an arbitrary open PR.
+
 ## Healing a partial release
 
 A release that exists on PyPI with only some of its five files is a **partial release**: a mid-upload quota rejection
@@ -167,11 +207,12 @@ gh workflow run release-plz.yml --repo sase-org/sase-core \
   -f dry_run=false -f build_wheels=true -f publish_pypi=true -f expected_version=0.34.48
 ```
 
-`dry_run=false` is required by the `publish` job, and it also lets the release-plz release/PR/merge jobs run as they do
-on a push, so a dispatch can cut a release PR that is already open as a side effect. Confirm the outcome afterwards by
-re-running `status`, which must print `complete`. PyPI's JSON API is CDN-cached for a short while after an upload (right
-after the `0.34.48` heal it still listed three files for a moment), so re-query before concluding a heal failed. Healing
-does not add versions: it can only add the missing files of a version that already exists.
+`dry_run=false` is required by the `publish` job, and it also makes this dispatch a release cut (see "Release
+cadence"): the release-plz PR and merge jobs run too, so an open release PR is merged as a side effect and costs another
+release of quota. Confirm the outcome afterwards by re-running `status`, which must print `complete`. PyPI's JSON API is
+CDN-cached for a short while after an upload (right after the `0.34.48` heal it still listed three files for a moment),
+so re-query before concluding a heal failed. Healing does not add versions: it can only add the missing files of a
+version that already exists.
 
 ## Troubleshooting
 
