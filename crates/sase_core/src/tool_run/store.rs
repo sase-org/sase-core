@@ -771,20 +771,6 @@ fn retention(
 ) -> Result<ToolRunRetentionResultWire, ToolRunError> {
     validate_schema(request.schema_version)?;
     validate_retention_policy(&request.policy)?;
-    if !store_path.exists() {
-        return Ok(ToolRunRetentionResultWire {
-            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-            dry_run: request.dry_run,
-            summary_rows: 0,
-            detail_rows: 0,
-            file_candidates: Vec::new(),
-            protected_unsettled: 0,
-            retained_bytes: 0,
-            protected_bytes: 0,
-            over_target_bytes: 0,
-            diagnostics: vec!["tool run store does not exist".to_string()],
-        });
-    }
     let now = request.now_ts.unwrap_or_else(unix_now);
     let summary_cut =
         now.saturating_sub(i64::from(request.policy.summary_days) * 86400);
@@ -792,6 +778,29 @@ fn retention(
         now.saturating_sub(i64::from(request.policy.detail_days) * 86400);
     let log_cut =
         now.saturating_sub(i64::from(request.policy.log_days) * 86400);
+    // Quarantined stores match no row, event, or log selector, so scan them
+    // from the filesystem once, outside the store transaction. They are
+    // reclaimed at the explicit log horizon: age is read from the quarantine
+    // timestamp in the file name (the rename moment), not from mtime (the
+    // last live write, which can long predate the corruption).
+    let quarantine = select_quarantined_stores(store_path, log_cut);
+    if !store_path.exists() {
+        // Orphaned quarantines stay reclaimable without a live ledger.
+        let retained_bytes = quarantine.remaining_bytes;
+        return Ok(ToolRunRetentionResultWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            dry_run: request.dry_run,
+            summary_rows: 0,
+            detail_rows: 0,
+            file_candidates: quarantine.candidates.clone(),
+            protected_unsettled: 0,
+            retained_bytes,
+            protected_bytes: 0,
+            over_target_bytes: retained_bytes
+                .saturating_sub(request.policy.log_max_bytes),
+            diagnostics: vec!["tool run store does not exist".to_string()],
+        });
+    }
     let inspect = |conn: &Connection| -> Result<ToolRunRetentionResultWire, ToolRunError> {
         let protected_unsettled: i64 = conn.query_row(
             "SELECT COUNT(*) FROM runs WHERE state IN ('created', 'running')",
@@ -863,6 +872,14 @@ fn retention(
             &mut file_candidates,
             request.policy.log_max_bytes,
         )?;
+        // Rust only selects quarantine files; the `tool_run_retention`
+        // reaper deletes the listed paths. Remaining (young or unreadable)
+        // quarantine bytes stay in retained accounting so the report keeps
+        // honest physical-byte totals.
+        file_candidates.extend(quarantine.candidates.iter().cloned());
+        let retained_bytes = usage
+            .retained_bytes
+            .saturating_add(quarantine.remaining_bytes);
         Ok(ToolRunRetentionResultWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             dry_run: request.dry_run,
@@ -870,9 +887,10 @@ fn retention(
             detail_rows: detail_rows as u64,
             file_candidates,
             protected_unsettled: protected_unsettled as u64,
-            retained_bytes: usage.retained_bytes,
+            retained_bytes,
             protected_bytes: usage.protected_bytes,
-            over_target_bytes: usage.over_target_bytes,
+            over_target_bytes: retained_bytes
+                .saturating_sub(request.policy.log_max_bytes),
             diagnostics: Vec::new(),
         })
     };
@@ -973,7 +991,6 @@ struct SettledRunLogs {
 struct AggregateLogUsage {
     retained_bytes: u64,
     protected_bytes: u64,
-    over_target_bytes: u64,
 }
 
 /// Size of a retained file without following symlinks; anything that is not a
@@ -1061,8 +1078,91 @@ fn select_aggregate_log_candidates(
     Ok(AggregateLogUsage {
         retained_bytes: retained,
         protected_bytes,
-        over_target_bytes: retained.saturating_sub(log_max_bytes),
     })
+}
+
+/// Quarantined corrupt stores selected for reclamation plus the quarantine
+/// bytes that stay retained.
+struct QuarantinedStoreUsage {
+    candidates: Vec<ToolRunDeletionCandidateWire>,
+    remaining_bytes: u64,
+}
+
+/// Select quarantined `<store>.corrupt-*` siblings older than `log_cut`.
+///
+/// Quarantined stores are dead full copies of the ledger: they match no row,
+/// event, or log selector, so without this they accumulate forever under the
+/// tools directory. Rust only selects; the `tool_run_retention` reaper
+/// deletes the listed paths. Files whose quarantine timestamp is unreadable
+/// are retained and counted but never selected.
+fn select_quarantined_stores(
+    store_path: &Path,
+    log_cut: i64,
+) -> QuarantinedStoreUsage {
+    let mut usage = QuarantinedStoreUsage {
+        candidates: Vec::new(),
+        remaining_bytes: 0,
+    };
+    let file_name = store_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "runs.sqlite".to_string());
+    let prefix = format!("{file_name}.corrupt-");
+    let Some(dir) = store_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return usage;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return usage;
+    };
+    let mut selected: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => meta.len(),
+            _ => continue,
+        };
+        match quarantine_timestamp_secs(&name, &prefix) {
+            Some(quarantined_ts) if quarantined_ts < log_cut => {
+                selected.push(path);
+            }
+            _ => {
+                usage.remaining_bytes =
+                    usage.remaining_bytes.saturating_add(bytes);
+            }
+        }
+    }
+    selected.sort();
+    for path in selected {
+        usage.candidates.push(ToolRunDeletionCandidateWire {
+            kind: "quarantined_store".to_string(),
+            run_id: None,
+            path: Some(path.to_string_lossy().into_owned()),
+            protected: false,
+            reason: "log_days elapsed since quarantine".to_string(),
+        });
+    }
+    usage
+}
+
+/// Seconds since the epoch when `name` was quarantined, parsed from the
+/// `.corrupt-<nanos>` suffix (`-wal`/`-shm` sidecars included). Returns
+/// `None` when the suffix is missing or malformed.
+fn quarantine_timestamp_secs(name: &str, prefix: &str) -> Option<i64> {
+    let rest = name.strip_prefix(prefix)?;
+    let rest = rest
+        .strip_suffix("-wal")
+        .or_else(|| rest.strip_suffix("-shm"))
+        .unwrap_or(rest);
+    let nanos = rest.parse::<u128>().ok()?;
+    i64::try_from(nanos / 1_000_000_000).ok()
 }
 
 fn identity_for_begin(
@@ -2360,6 +2460,123 @@ mod tests {
                 .run_count,
             1
         );
+    }
+
+    fn retention_request(
+        now: i64,
+        log_days: u32,
+    ) -> ToolRunRetentionRequestWire {
+        ToolRunRetentionRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            policy: ToolRunRetentionPolicyWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                log_days,
+                ..ToolRunRetentionPolicyWire::default()
+            },
+            now_ts: Some(now),
+            dry_run: true,
+        }
+    }
+
+    #[test]
+    fn retention_selects_quarantined_store_older_than_log_horizon() {
+        let (_temp, path) = store();
+        begin_named(&path, 1_000);
+        let dir = path.parent().unwrap();
+        // Nanos of 1 quarantine at the epoch: older than any horizon.
+        let old = dir.join("runs.sqlite.corrupt-1");
+        fs::write(&old, vec![b'q'; 64]).unwrap();
+        let old_wal = dir.join("runs.sqlite.corrupt-1-wal");
+        fs::write(&old_wal, vec![b'w'; 16]).unwrap();
+        // Quarantined "now": younger than the 14-day log horizon.
+        let now = 10_000_000i64;
+        let young = dir.join(format!(
+            "runs.sqlite.corrupt-{}",
+            (now as u128) * 1_000_000_000
+        ));
+        fs::write(&young, vec![b'y'; 32]).unwrap();
+
+        let preview = retention_preview(
+            &path,
+            retention_request(now, 14),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(preview.dry_run);
+        let mut selected: Vec<_> = preview
+            .file_candidates
+            .iter()
+            .filter_map(|candidate| candidate.path.clone())
+            .collect();
+        selected.sort();
+        assert_eq!(
+            selected,
+            vec![
+                old.to_string_lossy().into_owned(),
+                old_wal.to_string_lossy().into_owned(),
+            ]
+        );
+        assert!(preview.file_candidates.iter().all(|candidate| {
+            candidate.kind == "quarantined_store"
+                && candidate.run_id.is_none()
+                && !candidate.protected
+                && candidate.reason.contains("log_days")
+        }));
+        // The young quarantine stays and its bytes stay accounted.
+        assert_eq!(preview.retained_bytes, 32);
+        assert_eq!(preview.over_target_bytes, 0);
+
+        // Apply reports the same candidates but never deletes files: the
+        // `tool_run_retention` reaper owns deletion.
+        let applied = retention_apply(
+            &path,
+            ToolRunRetentionRequestWire {
+                dry_run: false,
+                ..retention_request(now, 14)
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(!applied.dry_run);
+        assert_eq!(
+            applied.file_candidates.len(),
+            preview.file_candidates.len()
+        );
+        assert!(old.exists() && old_wal.exists() && young.exists());
+        assert_eq!(
+            store_stats(&path, Duration::from_secs(1))
+                .unwrap()
+                .run_count,
+            1
+        );
+    }
+
+    #[test]
+    fn retention_previews_quarantined_store_without_live_store() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = path.parent().unwrap().join("runs.sqlite.corrupt-1");
+        fs::write(&old, vec![b'q'; 48]).unwrap();
+
+        let preview = retention_preview(
+            &path,
+            retention_request(10_000_000, 14),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let selected: Vec<_> = preview
+            .file_candidates
+            .iter()
+            .filter_map(|candidate| candidate.path.clone())
+            .collect();
+        assert_eq!(selected, vec![old.to_string_lossy().into_owned()]);
+        assert_eq!(preview.retained_bytes, 0);
+        assert!(preview
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("does not exist")));
+        assert!(!path.exists());
     }
 
     #[test]
