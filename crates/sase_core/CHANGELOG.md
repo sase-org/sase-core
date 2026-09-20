@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.69](https://github.com/sase-org/sase-core/compare/v0.34.68...v0.34.69) - 2026-09-20
+
+### Fixed
+
+- *(fleet)* present completed root-less plan-chain families and drop marker-less records
+
 ## [0.34.68](https://github.com/sase-org/sase-core/compare/v0.34.67...v0.34.68) - 2026-09-20
 
 ### Added
