@@ -13,11 +13,15 @@ use thiserror::Error;
 mod compatibility;
 mod grok;
 mod indicator;
+mod muse;
 mod refresh;
 mod store;
 
 pub use grok::{
     normalize_grok_billing, ProviderUsageNormalizeGrokBillingRequestWire,
+};
+pub use muse::{
+    normalize_muse_usage, ProviderUsageNormalizeMuseUsageRequestWire,
 };
 
 pub use indicator::{

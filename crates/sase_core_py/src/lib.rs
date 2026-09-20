@@ -329,6 +329,7 @@
 //! - `provider_usage_record_refresh_attempt(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
 //! - `provider_usage_normalize_grok_billing(request: dict) -> dict`
+//! - `provider_usage_normalize_muse_usage(request: dict) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`
 //! - `provider_usage_validate_indicator_config(indicator: dict | None = None) -> dict`
 //! - `provider_usage_project_indicator(request: dict) -> dict`
@@ -1552,6 +1553,7 @@ use sase_core::provider_usage::{
     load_provider_usage_store as core_load_provider_usage_store,
     mark_provider_usage_refresh_due as core_mark_provider_usage_refresh_due,
     normalize_grok_billing as core_normalize_grok_billing,
+    normalize_muse_usage as core_normalize_muse_usage,
     prepare_provider_usage_account_context as core_prepare_provider_usage_account_context,
     project_usage_indicator as core_project_usage_indicator,
     project_usage_snapshot as core_project_usage_snapshot,
@@ -1566,7 +1568,8 @@ use sase_core::provider_usage::{
     validate_usage_indicator_config as core_validate_usage_indicator_config,
     validate_usage_observation as core_validate_usage_observation,
     ProviderUsageError as ProviderUsageDomainError,
-    ProviderUsageNormalizeGrokBillingRequestWire, ProviderUsageObservationWire,
+    ProviderUsageNormalizeGrokBillingRequestWire,
+    ProviderUsageNormalizeMuseUsageRequestWire, ProviderUsageObservationWire,
     ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
     ProviderUsageRefreshDueRequestWire, ProviderUsageRefreshMarkDueRequestWire,
     ProviderUsageRefreshReservationRequestWire,
@@ -15088,6 +15091,19 @@ fn py_provider_usage_normalize_grok_billing<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_normalize_muse_usage")]
+fn py_provider_usage_normalize_muse_usage<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageNormalizeMuseUsageRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let observation = core_normalize_muse_usage(request)
+        .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &observation)
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_validate_observation")]
 fn py_provider_usage_validate_observation<'py>(
     py: Python<'py>,
@@ -20825,6 +20841,10 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_normalize_grok_billing,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_normalize_muse_usage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -34540,6 +34560,79 @@ MENTORS:
                     .to_lowercase()
                     .contains("non-finite"));
             }
+        });
+    }
+
+    #[test]
+    fn provider_usage_normalize_muse_usage_round_trips_and_separates_errors() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let now = 1_789_921_260.0;
+            let request = |payload: serde_json::Value, schema_version: u32| {
+                json!({
+                    "schema_version": schema_version,
+                    "payload": payload,
+                    "provider": "muse",
+                    "context_id": "probe",
+                    "account_generation": 1,
+                    "request_started_at": now - 3.0,
+                    "now": now,
+                })
+            };
+            let call = |request: serde_json::Value| {
+                let request_obj = json_value_to_py(py, &request).unwrap();
+                let request_dict =
+                    request_obj.bind(py).downcast::<PyDict>().unwrap();
+                py_provider_usage_normalize_muse_usage(py, request_dict)
+            };
+
+            let live = json!({
+                "usage": {
+                    "observedAtMs": 1_789_921_255_705_u64,
+                    "tier": "27681631238169137",
+                    "weekly": {
+                        "usedPercent": 0,
+                        "resetsAtMs": 1_789_948_800_000_u64,
+                    },
+                    "window": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAtMs": 1_789_935_797_000_u64,
+                    },
+                }
+            });
+            let observation = call(request(live, 1)).unwrap();
+            let value = py_to_json_value(observation.bind(py)).unwrap();
+            assert_eq!(value["outcome"], json!("ok"));
+            assert_eq!(value["plan"], json!(null));
+            assert_eq!(value["windows"][0]["key"], json!("session"));
+            assert_eq!(
+                value["windows"][0]["duration_seconds"],
+                json!(18_000.0)
+            );
+            assert_eq!(value["windows"][1]["key"], json!("weekly"));
+            assert_eq!(value["windows"][1]["duration_seconds"], json!(null));
+            assert_eq!(value["windows"][1]["period_start"], json!(null));
+
+            let absent = call(request(json!({}), 1)).unwrap();
+            let value = py_to_json_value(absent.bind(py)).unwrap();
+            assert_eq!(value["outcome"], json!("ok"));
+            assert_eq!(value["authoritative_empty"], json!(true));
+            assert_eq!(
+                value["diagnostic"],
+                json!("muse_usage_not_yet_observed")
+            );
+            assert_eq!(value["windows"], json!([]));
+
+            // Malformed vendor data is a structured observation, not an
+            // exception; a malformed request is an exception.
+            let malformed = call(request(json!({"usage": 7}), 1)).unwrap();
+            let value = py_to_json_value(malformed.bind(py)).unwrap();
+            assert_eq!(value["outcome"], json!("error"));
+            assert_eq!(value["reason_code"], json!("malformed_payload"));
+
+            let error = call(request(json!({}), 2)).unwrap_err();
+            assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
 

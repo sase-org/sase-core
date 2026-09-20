@@ -822,6 +822,11 @@ fn is_weekly_window(provider: &str, window: &UsagePublicWindowWire) -> bool {
         || (provider == "grok"
             && key == "included_weekly"
             && matches!(window.applicability, UsageApplicabilityWire::Account))
+        // Muse's weekly block deliberately carries no duration, so it can only
+        // be recognized here.
+        || (provider == "muse"
+            && key == "weekly"
+            && matches!(window.applicability, UsageApplicabilityWire::Account))
 }
 
 fn is_monthly_window(provider: &str, window: &UsagePublicWindowWire) -> bool {
