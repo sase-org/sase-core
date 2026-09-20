@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.68](https://github.com/sase-org/sase-core/compare/v0.34.67...v0.34.68) - 2026-09-20
+
+### Added
+
+- *(tool-run)* apply the aggregate log_max_bytes retention target
+
 ## [0.34.67](https://github.com/sase-org/sase-core/compare/v0.34.66...v0.34.67) - 2026-09-20
 
 ### Added
