@@ -18,6 +18,12 @@ name: Release-plz
 # workspace version, so it never republishes historical releases; a partial
 # older version is healed with a guarded workflow_dispatch (see
 # docs/pypi-retention.md, "Healing a partial release").
+#
+# Before uploading, the publish job checks the project's remaining PyPI storage
+# (PYPI_PROJECT_LIMIT_BYTES, below) and fails with the numbers and the remedy if
+# the upload would not fit, rather than letting PyPI reject a file mid-upload
+# and leave a partial release. Every publish records the remaining headroom in
+# the job summary.
 on:
   push:
     branches: [master]
@@ -59,6 +65,11 @@ env:
     universal2.whl
     win_amd64.whl
     .tar.gz
+  # PyPI's per-project storage limit: 10 GiB, measured as the summed size of every
+  # file (10,737,418,240 bytes; see docs/pypi-retention.md). The publish job
+  # refuses an upload that would not fit, before sending any of it. If PyPI
+  # grants a size increase, this is the one value to change.
+  PYPI_PROJECT_LIMIT_BYTES: "10737418240"
 
 jobs:
   release-plz-release:
@@ -494,6 +505,18 @@ jobs:
                   )
               print(f"verified {path}: {name} {version}")
           PY
+
+      # Fails before the first byte is sent when the upload would overflow the
+      # project quota. A PyPI API error is logged and skipped, so the guard is
+      # never itself the reason a good release fails.
+      - name: Check PyPI storage headroom
+        env:
+          EXPECTED_VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_version || '' }}
+          PLAN_VERSION: ${{ needs.publish-plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/pypi_quota.py check dist \
+            --version "${EXPECTED_VERSION_INPUT:-${PLAN_VERSION}}"
 
       # skip-existing keeps retries and partial-upload recovery idempotent:
       # PyPI rejects duplicate filenames anyway, so re-running a heal can only

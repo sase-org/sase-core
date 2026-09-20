@@ -3,7 +3,9 @@
 PyPI caps a project's total size at 10 GB. Measured against the JSON API, the cap trips at **10 GiB = 10,737,418,240
 bytes** of summed file sizes (not 10e9), and it trips mid-upload: PyPI answers `400 Project size too large` for the
 first file that does not fit. That is how `0.34.48` ended up with only three of its five files. Use 10 GiB as the limit
-in any headroom arithmetic; `PROJECT_LIMIT_BYTES` in `.github/scripts/pypi_retention.py` is the one place it lives.
+in any headroom arithmetic. The workflow's `PYPI_PROJECT_LIMIT_BYTES` (top of `release-plz.yml`) is the value CI
+enforces, and `PROJECT_LIMIT_BYTES` in `.github/scripts/pypi_retention.py` is the copy the retention tool uses; a unit
+test fails if they differ, so if PyPI grants a size increase, change both.
 
 A release is five files (macOS universal2, Windows, Linux x86_64, Linux aarch64 wheels, and the sdist) and currently
 weighs about 75 MB, so a project holds roughly 140 releases when nothing else is kept.
@@ -109,6 +111,27 @@ It tells the failures apart, because they have different fixes:
 
    It prints bytes used, bytes free, and the approximate number of releases that still fit at the average size of the
    newest ten releases, and fails if any listed version is still published or the project is at or over the limit.
+
+## Pre-flight quota guard
+
+The `publish` job runs `.github/scripts/pypi_quota.py check dist` before `Publish to PyPI`. It sums the project's current
+size from the PyPI JSON API, adds the bytes of the `dist/` files PyPI does not already hold (a heal of a partial release
+is only charged for the files it will actually upload, since `skip-existing` skips the rest), and compares the total to
+`PYPI_PROJECT_LIMIT_BYTES`.
+
+- **Would not fit:** the job fails before uploading anything, with the current size, incoming bytes, limit, and overflow
+  in an `::error::` annotation, so no partial release is left behind. The fix is to reclaim storage with the retention
+  workflow above (human-gated), then re-run; the publish gate sees the version is still unpublished and retries.
+- **Fits:** every publish appends bytes used, bytes free after the upload, and roughly how many more releases fit (at the
+  average of the newest ten) to the job summary, so headroom is visible as a gauge instead of a cliff.
+- **PyPI API unreachable or malformed:** the guard logs a `::warning::` and lets the upload proceed. It exists to give a
+  better error, and must not itself fail a good release.
+
+Try it against the live project, sizing `dist/` like a real release:
+
+```bash
+PYPI_PROJECT_LIMIT_BYTES=10737418240 python3 .github/scripts/pypi_quota.py check dist
+```
 
 ## Healing a partial release
 
