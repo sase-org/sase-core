@@ -1,5 +1,6 @@
 pub mod mobile;
 pub mod pending_actions;
+pub mod rules;
 pub mod store;
 pub mod tabs;
 pub mod wire;
@@ -34,6 +35,11 @@ pub use pending_actions::{
     PendingActionWire, DEFAULT_PENDING_ACTION_PREFIX_LEN,
     DEFAULT_PENDING_ACTION_STALE_SECONDS,
     PENDING_ACTION_STORE_WIRE_SCHEMA_VERSION,
+};
+pub use rules::{
+    resolve_notification_deliveries, resolve_notification_delivery,
+    NotificationDeliveryWire, NotificationRuleMatchWire, NotificationRuleWire,
+    NotificationSoundWire,
 };
 pub use store::{
     append_notification, append_notification_counts,

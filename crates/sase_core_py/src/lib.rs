@@ -108,6 +108,7 @@
 //! - `rewrite_notifications(path: str, notifications: list[dict]) -> dict`
 //! - `rewrite_notifications_counts(path: str, notifications: list[dict]) -> dict`
 //! - `classify_notification_tabs(notifications: list[dict]) -> dict`
+//! - `resolve_notification_deliveries(rules: list[dict], notifications: list[dict]) -> list[dict]`
 //! - `pending_action_from_notification(notification: dict, now: float) -> dict | None`
 //! - `register_pending_action(path: str, action: dict) -> dict`
 //! - `read_pending_action_store(path: str, legacy_path: str | None = None) -> dict`
@@ -1434,12 +1435,13 @@ use sase_core::notifications::{
     read_pending_action_store as core_read_pending_action_store,
     register_pending_action as core_register_pending_action,
     remove_pending_action as core_remove_pending_action,
+    resolve_notification_deliveries as core_resolve_notification_deliveries,
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     upsert_notification as core_upsert_notification,
-    NotificationPlusOneRequestWire, NotificationStateUpdateWire,
-    NotificationUpsertRequestWire, NotificationWire,
-    PendingActionTransportRequestWire, PendingActionWire,
+    NotificationPlusOneRequestWire, NotificationRuleWire,
+    NotificationStateUpdateWire, NotificationUpsertRequestWire,
+    NotificationWire, PendingActionTransportRequestWire, PendingActionWire,
 };
 use sase_core::pending_commit_checkpoint::{
     decide_pending_commit_checkpoint_recovery as core_decide_pending_commit_checkpoint_recovery,
@@ -10909,6 +10911,29 @@ fn py_classify_notification_tabs<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Resolve the delivery of each notification dict against delivery rule dicts.
+///
+/// One call resolves a whole poll batch, so callers never pay one FFI hop per
+/// row. The result lists one delivery dict per notification, in input order.
+/// A malformed rule dict (including an unknown key) raises `ValueError`.
+#[pyfunction]
+#[pyo3(name = "resolve_notification_deliveries")]
+fn py_resolve_notification_deliveries<'py>(
+    py: Python<'py>,
+    rules: &Bound<'py, PyList>,
+    notifications: &Bound<'py, PyList>,
+) -> PyResult<PyObject> {
+    let rules = notification_rules_from_py_list(rules)?;
+    let notifications = notifications_from_py_list(notifications)?;
+    let deliveries = py.allow_threads(|| {
+        core_resolve_notification_deliveries(&rules, &notifications)
+    });
+    let value = serde_json::to_value(deliveries).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Build one pending-action entry from a notification dict.
 #[pyfunction]
 #[pyo3(name = "pending_action_from_notification")]
@@ -11544,6 +11569,23 @@ fn notifications_from_py_list(
                 ))
             })?;
         values.push(notification);
+    }
+    Ok(values)
+}
+
+fn notification_rules_from_py_list(
+    list: &Bound<'_, PyList>,
+) -> PyResult<Vec<NotificationRuleWire>> {
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let rule: NotificationRuleWire = serde_json::from_value(value)
+            .map_err(|e| {
+                PyValueError::new_err(format!(
+                    "rules[{idx}] is not a valid NotificationRuleWire dict: {e}"
+                ))
+            })?;
+        values.push(rule);
     }
     Ok(values)
 }
@@ -20624,6 +20666,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_notification_deliveries, m)?)?;
     m.add_function(wrap_pyfunction!(py_pending_action_from_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_register_pending_action, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_pending_action_store, m)?)?;
@@ -33262,6 +33305,124 @@ MENTORS:
             assert_eq!(upsert_value["action"], json!("plus_oned"));
             assert_eq!(upsert_value["id"], json!("n1"));
             assert_eq!(upsert_value["plus_one_count"], json!(2));
+        });
+    }
+
+    #[test]
+    fn notification_delivery_binding_resolves_a_batch_in_one_call() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("resolve_notification_deliveries").is_ok());
+
+            let rules = PyList::empty_bound(py);
+            append_json(
+                py,
+                &rules,
+                json!({
+                    "name": "quiet-task-beads",
+                    "match": {"tab": "beads"},
+                    "toast": false,
+                    "sound": "none",
+                }),
+            );
+            append_json(
+                py,
+                &rules,
+                json!({"name": "chime", "sound": "/sounds/glass.aiff"}),
+            );
+            let notifications = PyList::empty_bound(py);
+            append_json(
+                py,
+                &notifications,
+                json!({
+                    "id": "triage",
+                    "timestamp": "2026-09-20T12:00:00-04:00",
+                    "sender": "bead",
+                    "notes": ["Task triage"],
+                    "tags": ["bead", "task"],
+                    "action": "TaskTriage",
+                    "action_data": {"panel": "beads"},
+                }),
+            );
+            append_json(
+                py,
+                &notifications,
+                json!({
+                    "id": "axe",
+                    "timestamp": "2026-09-20T12:00:01-04:00",
+                    "sender": "axe",
+                    "action": "ViewErrorReport",
+                }),
+            );
+
+            let result =
+                py_resolve_notification_deliveries(py, &rules, &notifications)
+                    .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            let deliveries = value.as_array().unwrap();
+            assert_eq!(deliveries.len(), 2);
+            assert_eq!(deliveries[0]["toast"], json!(false));
+            assert_eq!(deliveries[0]["sound"], json!({"kind": "none"}));
+            assert_eq!(deliveries[0]["toast_rule"], json!("quiet-task-beads"));
+            assert_eq!(deliveries[0]["sound_rule"], json!("quiet-task-beads"));
+            assert_eq!(deliveries[1]["toast"], json!(true));
+            assert_eq!(
+                deliveries[1]["sound"],
+                json!({"kind": "file", "path": "/sounds/glass.aiff"})
+            );
+            assert_eq!(deliveries[1].get("toast_rule"), None);
+            assert_eq!(deliveries[1]["sound_rule"], json!("chime"));
+            assert!(deliveries[1]["schema_version"].is_u64());
+
+            // No rules is today's behavior: toast, and ring the bell.
+            let empty = PyList::empty_bound(py);
+            let result =
+                py_resolve_notification_deliveries(py, &empty, &notifications)
+                    .unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            for delivery in value.as_array().unwrap() {
+                assert_eq!(delivery["toast"], json!(true));
+                assert_eq!(delivery["sound"], json!({"kind": "bell"}));
+                assert_eq!(delivery.get("toast_rule"), None);
+                assert_eq!(delivery.get("sound_rule"), None);
+            }
+
+            // An empty batch resolves to an empty list.
+            let none = PyList::empty_bound(py);
+            let result =
+                py_resolve_notification_deliveries(py, &rules, &none).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value, json!([]));
+        });
+    }
+
+    #[test]
+    fn notification_delivery_binding_rejects_malformed_rules() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let notifications = PyList::empty_bound(py);
+            for (bad, needle) in [
+                (json!({"match": {"tabs": "beads"}}), "unknown field `tabs`"),
+                (json!({"toats": false}), "unknown field `toats`"),
+                (json!({"match": {"tags": 7}}), "a string or a list"),
+                (json!({"toast": "yes"}), "invalid type"),
+            ] {
+                let rules = PyList::empty_bound(py);
+                append_json(py, &rules, json!({"toast": true}));
+                append_json(py, &rules, bad);
+                let err = py_resolve_notification_deliveries(
+                    py,
+                    &rules,
+                    &notifications,
+                )
+                .unwrap_err();
+                assert!(err.is_instance_of::<PyValueError>(py));
+                let message = err.to_string();
+                assert!(message.contains("rules[1]"), "{message}");
+                assert!(message.contains(needle), "{message}");
+            }
         });
     }
 
