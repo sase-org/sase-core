@@ -17,7 +17,10 @@ name: Release-plz
 # done, so the loop above never healed it. The check is scoped to the
 # workspace version, so it never republishes historical releases; a partial
 # older version is healed with a guarded workflow_dispatch (see
-# docs/pypi-retention.md, "Healing a partial release").
+# docs/pypi-retention.md, "Healing a partial release"). A yanked file is the one
+# incompleteness that does not ask for a rebuild: PyPI never accepts a re-upload
+# of a yanked filename, so the gate reports it and warns rather than queueing a
+# build on every run that can only publish nothing.
 #
 # Before uploading, the publish job checks the project's remaining PyPI storage
 # (PYPI_PROJECT_LIMIT_BYTES, below) and fails with the numbers and the remedy if
@@ -177,16 +180,24 @@ jobs:
             tag_exists=false
           fi
 
-          # absent (no such version), partial (version exists but the expected
-          # file set is not all present and unyanked) or complete. A partial
-          # release must not read as published; it is what a mid-upload quota
-          # rejection leaves behind.
+          # absent (no such version), partial (a file of the expected set is
+          # missing), yanked (the set is there but some of it is yanked) or
+          # complete. A partial release must not read as published; it is what a
+          # mid-upload quota rejection leaves behind, and re-publishing heals it.
           pypi_state="$(python3 .github/scripts/pypi_release_files.py status "${version}")"
 
-          if [[ "${tag_exists}" == "true" && "${pypi_state}" != "complete" ]]; then
+          # Only absent and partial are worth building: PyPI never accepts a
+          # re-upload of a yanked filename, so treating yanked as unpublished
+          # would rebuild the whole matrix on every push and every scheduled run
+          # forever, each time to publish nothing. Warn instead — the remedy is
+          # to bump the version, not to rebuild it.
+          if [[ "${tag_exists}" == "true" && ( "${pypi_state}" == "absent" || "${pypi_state}" == "partial" ) ]]; then
             needs_publish=true
           else
             needs_publish=false
+          fi
+          if [[ "${pypi_state}" == "yanked" ]]; then
+            echo "::warning::sase-core-rs ${version} is published but yanked; PyPI will not accept a re-upload of a yanked filename, so this release cannot be healed. Bump the version (see docs/pypi-retention.md)."
           fi
           echo "needs_publish=${needs_publish}" >> "$GITHUB_OUTPUT"
 

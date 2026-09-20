@@ -15,9 +15,18 @@ together.
 Subcommands:
 
 ``status VERSION``
-    Print ``absent`` (PyPI has no such version), ``partial`` (it exists but the
-    expected set is not all present and unyanked), or ``complete`` on stdout, with the
-    reasoning on stderr. Exits non-zero only when PyPI cannot be queried.
+    Print ``absent`` (PyPI has no such version), ``partial`` (a file of the expected
+    set is missing), ``yanked`` (the set is all there but some of it is yanked) or
+    ``complete`` on stdout, with the reasoning on stderr. Exits non-zero only when
+    PyPI cannot be queried.
+
+``partial`` and ``yanked`` are separate states because only one of them can be
+healed. A missing file is what a mid-upload quota rejection leaves behind, and
+re-running the publish uploads it. A yanked file is a deliberate act and PyPI never
+accepts a re-upload of that filename, so asking for a rebuild would queue one on
+every push and every scheduled run forever, each ending in a publish that does
+nothing. The caller is expected to treat ``yanked`` as "do not publish, say so
+loudly": the remedy is to bump the version, not to rebuild.
 
 ``dist DIR VERSION``
     Check that ``DIR`` holds exactly one file per expected entry and nothing else, so a
@@ -46,6 +55,7 @@ SUFFIXES_ENV = "EXPECTED_DIST_SUFFIXES"
 
 ABSENT = "absent"
 PARTIAL = "partial"
+YANKED = "yanked"
 COMPLETE = "complete"
 
 
@@ -101,7 +111,14 @@ def classify(
         elif all(f.get("yanked") for f in candidates):
             yanked.append(suffix)
 
-    state = COMPLETE if not missing and not yanked else PARTIAL
+    # Missing outranks yanked: a release short of a file still has a heal to run,
+    # and once that upload lands the next run settles on the yanked verdict.
+    if missing:
+        state = PARTIAL
+    elif yanked:
+        state = YANKED
+    else:
+        state = COMPLETE
     return ReleaseFiles(state, tuple(missing), tuple(yanked))
 
 
@@ -126,11 +143,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     files = fetch_release_files(args.version)
     result = classify(args.version, files or [], suffixes)
 
-    if result.state == PARTIAL:
-        for suffix in result.missing:
-            print(f"{args.version}: missing *{suffix}", file=sys.stderr)
-        for suffix in result.yanked:
-            print(f"{args.version}: only yanked files for *{suffix}", file=sys.stderr)
+    for suffix in result.missing:
+        print(f"{args.version}: missing *{suffix}", file=sys.stderr)
+    for suffix in result.yanked:
+        print(f"{args.version}: only yanked files for *{suffix}", file=sys.stderr)
+    if result.state == YANKED:
+        print(
+            f"{args.version}: PyPI never accepts a re-upload of a yanked filename, "
+            "so this cannot be healed by publishing; bump the version instead.",
+            file=sys.stderr,
+        )
     print(result.state)
     return 0
 
@@ -178,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    status = sub.add_parser("status", help="absent | partial | complete on PyPI")
+    status = sub.add_parser(
+        "status", help="absent | partial | yanked | complete on PyPI"
+    )
     status.add_argument("version")
     status.set_defaults(func=cmd_status)
 

@@ -65,6 +65,32 @@ It tells the failures apart, because they have different fixes:
    `sase-telegram`, `sase-nvim`, `sase-research-artifacts`) for an exact `sase-core-rs==` pin or a floor below the
    boundary, including `uv.lock`. If one pins a version that would be deleted, raise the boundary or pass
    `--keep-version` for it. A `==X` pin that is meant to **fail** (a negative test) does not need protecting.
+
+   **Also audit what is already published**, not just the checkouts. A consumer's *released* distributions carry
+   their own frozen `sase-core-rs` requirement in their PyPI metadata, and deleting out from under it makes that
+   published release permanently uninstallable — the source pin that a grep finds is the *next* release's, not the
+   one users are resolving today. This is not hypothetical: the 2026-09-20 keep-30 run deleted every `0.32.x`
+   release, and every published `sase` up to 0.17.1 pins `sase-core-rs>=0.32.16,<0.33.0`, so `pip install sase`
+   became unsatisfiable until a `sase` release carrying the newer floor was published. Check each consumer's live
+   metadata before choosing the boundary:
+
+   ```bash
+   python3 - <<'EOF'
+   import json, urllib.request
+   for pkg in ("sase", "sase-github", "sase-telegram", "sase-nvim", "sase-research-artifacts"):
+       try:
+           info = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/{pkg}/json"))["info"]
+       except Exception as error:  # not published at all
+           print(f"{pkg}: {error}")
+           continue
+       pins = [r for r in (info.get("requires_dist") or []) if "core-rs" in r]
+       print(f"{pkg}=={info['version']}: {pins}")
+   EOF
+   ```
+
+   Every window printed there must still contain a kept version, or that published consumer breaks. If one would
+   not, either raise the boundary with `--keep-version` to hold its window open, or publish the consumer release
+   that moves its floor **before** deleting.
 2. **Generate the list from live data**, never by hand:
 
    ```bash
@@ -188,11 +214,14 @@ have.
   uploading anything if a build is missing from either side.
 - The automatic gate only examines the current workspace version. It never republishes history, so an older partial
   release is not healed automatically.
-- A yanked file does not count as present. PyPI will not accept a re-upload of the filename, so a yanked workspace
-  version keeps re-triggering a build whose publish is a no-op; bump the version rather than leaving one yanked.
+- A yanked file does not count as present, but it is reported as `yanked` rather than `partial`, and `yanked` does
+  **not** trigger a build. PyPI never accepts a re-upload of a yanked filename, so a rebuild could not heal it; gating
+  on it would queue the whole wheel matrix on every push and every scheduled run forever, each time to publish
+  nothing. The job logs a `::warning::` instead. The remedy for a yanked workspace version is to **bump the version**,
+  not to rebuild it.
 
-Check any version from a checkout (stdlib only, `absent`, `partial` or `complete` on stdout, the missing entries on
-stderr):
+Check any version from a checkout (stdlib only, `absent`, `partial`, `yanked` or `complete` on stdout, the missing or
+yanked entries on stderr):
 
 ```bash
 EXPECTED_DIST_SUFFIXES="$(python3 -c "import yaml; print(yaml.safe_load(open('.github/workflows/release-plz.yml'))['env']['EXPECTED_DIST_SUFFIXES'])")" \

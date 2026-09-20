@@ -85,11 +85,28 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(result.state, gate.ABSENT)
         self.assertEqual(result.missing, tuple(SUFFIXES))
 
-    def test_yanked_file_does_not_count(self) -> None:
+    def test_yanked_file_is_not_complete_but_is_its_own_state(self) -> None:
+        # Not complete (the set is not all usable) and not partial (a rebuild
+        # could never heal it, because PyPI refuses a re-upload of the filename).
         result = self.classify(urls(COMPLETE_NAMES, yanked=(WINDOWS,)))
-        self.assertEqual(result.state, gate.PARTIAL)
+        self.assertEqual(result.state, gate.YANKED)
         self.assertEqual(result.missing, ())
         self.assertEqual(result.yanked, ("win_amd64.whl",))
+
+    def test_missing_file_outranks_a_yanked_one(self) -> None:
+        # There is still an upload to make, so this must stay healable.
+        names = [n for n in COMPLETE_NAMES if n != SDIST]
+        result = self.classify(urls(names, yanked=(WINDOWS,)))
+        self.assertEqual(result.state, gate.PARTIAL)
+        self.assertEqual(result.missing, (".tar.gz",))
+        self.assertEqual(result.yanked, ("win_amd64.whl",))
+
+    def test_one_unyanked_file_for_an_entry_is_enough(self) -> None:
+        # A re-upload under a different build tag leaves both files on the
+        # release; the good one satisfies the entry.
+        second = WINDOWS.replace("cp312-abi3", "cp313-abi3")
+        result = self.classify(urls([*COMPLETE_NAMES, second], yanked=(WINDOWS,)))
+        self.assertEqual(result.state, gate.COMPLETE)
 
     def test_extra_files_do_not_break_completeness(self) -> None:
         extra = f"sase_core_rs-{VERSION}-cp312-abi3-musllinux_1_2_x86_64.whl"
@@ -190,6 +207,12 @@ class StatusCliTests(unittest.TestCase):
         out, _ = self.run_status(None)
         self.assertEqual(out, "absent\n")
 
+    def test_yanked_prints_state_and_the_bump_remedy(self) -> None:
+        out, err = self.run_status(urls(COMPLETE_NAMES, yanked=(WINDOWS,)))
+        self.assertEqual(out, "yanked\n")
+        self.assertIn("only yanked files for *win_amd64.whl", err)
+        self.assertIn("bump the version", err)
+
 
 class WorkflowWiringTests(unittest.TestCase):
     """The set the workflow really declares classifies the real 0.34.48 shape."""
@@ -215,6 +238,25 @@ class WorkflowWiringTests(unittest.TestCase):
         text = WORKFLOW.read_text()
         self.assertNotIn('print("published")', text)
         self.assertIn("pypi_release_files.py status", text)
+
+    def test_workflow_builds_for_absent_and_partial_but_not_yanked(self) -> None:
+        # A yanked workspace version must not queue a build on every push and
+        # every scheduled run for a publish that can only be a no-op.
+        text = WORKFLOW.read_text()
+        self.assertIn(
+            '"${pypi_state}" == "absent" || "${pypi_state}" == "partial"', text
+        )
+        self.assertNotIn('"${pypi_state}" != "complete"', text)
+        self.assertIn('if [[ "${pypi_state}" == "yanked" ]]; then', text)
+        self.assertIn("::warning::sase-core-rs ${version} is published but yanked", text)
+
+    def test_workflow_yanked_warning_names_the_remedy(self) -> None:
+        text = WORKFLOW.read_text()
+        warning = next(
+            line for line in text.splitlines() if "::warning::sase-core-rs" in line
+        )
+        self.assertIn("Bump the version", warning)
+        self.assertIn("docs/pypi-retention.md", warning)
 
 
 if __name__ == "__main__":
