@@ -20,7 +20,8 @@ use sase_core::{
         FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
     },
     fleet_catalog::{
-        row_kind_for_record, select_fleet_presentation, PresentationRecordFacts,
+        row_kind_for_record, select_fleet_presentation, stable_revision,
+        PresentationRecordFacts,
     },
     fleet_contract::{
         classify_cache_freshness, classify_cursor_replay, count_logical_agents,
@@ -60,6 +61,7 @@ use sase_core::{
         FLEET_MUTATION_CAPABILITY_FORK, FLEET_MUTATION_CAPABILITY_RETRY,
         FLEET_MUTATION_CAPABILITY_STOP,
     },
+    fleet_owner_facts::{HostOwnerFileObserver, OwnerFileObserver},
     host_liveness::{
         HostOwnerLivenessObserver, OwnerLivenessObserver,
         OwnerProcessObservation,
@@ -96,6 +98,7 @@ struct FleetReadServiceInner {
     history_refresh_lock: AsyncMutex<()>,
     events: FleetInvalidationHub,
     liveness: Arc<dyn OwnerLivenessObserver>,
+    owner_files: Arc<dyn OwnerFileObserver>,
 }
 
 impl std::fmt::Debug for FleetReadService {
@@ -146,6 +149,7 @@ impl FleetReadService {
                 )
                 .expect("default fleet replay capacity is valid"),
                 liveness,
+                owner_files: Arc::new(HostOwnerFileObserver::default()),
             }),
         }
     }
@@ -495,6 +499,7 @@ impl FleetReadService {
                 .unwrap_or(0),
             scope: FleetCatalogScopeWire::Presentation,
             liveness: Arc::clone(&self.inner.liveness),
+            owner_files: Arc::clone(&self.inner.owner_files),
         };
         let result = tokio::time::timeout(
             self.inner.refresh_timeout,
@@ -573,6 +578,7 @@ impl FleetReadService {
                 .unwrap_or(0),
             scope: FleetCatalogScopeWire::History,
             liveness: Arc::clone(&self.inner.liveness),
+            owner_files: Arc::clone(&self.inner.owner_files),
         };
         let result = tokio::time::timeout(
             self.inner.refresh_timeout,
@@ -725,6 +731,7 @@ struct BuildSnapshotRequest {
     prior_refresh_count: u64,
     scope: FleetCatalogScopeWire,
     liveness: Arc<dyn OwnerLivenessObserver>,
+    owner_files: Arc<dyn OwnerFileObserver>,
 }
 
 #[derive(Debug, Error)]
@@ -867,6 +874,7 @@ fn build_snapshot_blocking(
         &dismissed_by_identity,
         now_unix,
         request.scope,
+        request.owner_files.as_ref(),
     )
     .map_err(FleetReadError::from)?;
     let served = selection.served;
@@ -990,7 +998,7 @@ fn resolve_record(
     let row_revision = ResourceRevisionWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical_key: logical_key.clone(),
-        revision: stable_revision(record),
+        revision: stable_revision(record, presentation),
     };
     let exact_locator =
         Some(exact_locator_for_record(logical_locator.clone(), record));
@@ -1046,6 +1054,7 @@ fn resolve_record(
                 freshness: ObservationFreshnessWire::Fresh,
                 observed_at_unix: build_unix,
                 display_status: presentation.display_status.clone(),
+                presentation: presentation.owner.clone(),
                 started_at_unix: presentation.started_at_unix,
                 run_started_at_unix: presentation.run_started_at_unix,
                 stopped_at_unix: stopped_at_unix_for_record(record),
@@ -1533,20 +1542,6 @@ fn parse_record_timestamp(value: &str) -> Option<f64> {
     let parsed =
         chrono::NaiveDateTime::parse_from_str(value, "%Y%m%d%H%M%S").ok()?;
     Some(parsed.and_utc().timestamp() as f64)
-}
-
-fn stable_revision(record: &AgentArtifactRecordWire) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(b"sase-fleet-row-revision-v1\0");
-    if let Ok(bytes) = serde_json::to_vec(record) {
-        hasher.update(bytes);
-    } else {
-        hasher.update(record.artifact_dir.as_bytes());
-    }
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    u64::from_le_bytes(bytes).max(1)
 }
 
 fn safe_identifier(value: &str, fallback_prefix: &str) -> String {

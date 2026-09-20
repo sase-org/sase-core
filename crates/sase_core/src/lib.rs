@@ -60,6 +60,7 @@ pub mod fleet_contract;
 pub mod fleet_family;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
+pub mod fleet_owner_facts;
 pub mod fleet_presentation;
 pub mod gate_decision;
 pub mod gate_followup;

@@ -29,6 +29,7 @@ use thiserror::Error;
 use crate::agent_scan::{
     AgentArtifactRecordWire, AgentMetaWire, DoneMarkerWire, RunningMarkerWire,
 };
+use crate::fleet_owner_facts::OwnerPresentationFactsWire;
 use crate::queue_directive::{
     queue_capacity_as_u32, queue_weight_is_valid, resolve_queue_capacity,
 };
@@ -42,7 +43,7 @@ use crate::store_lock::{
 /// This is independent of the hello envelope schema, the capability-set
 /// schema, and the fleet protocol version. Gateways advertise it as
 /// `fleet_contract_schema_version` on hello; older hellos omit the field.
-pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 4;
+pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 5;
 const FLEET_CONTRACT_MIN_READABLE_SCHEMA_VERSION: u32 = 1;
 /// Current fleet protocol version advertised by gateways and required by
 /// viewers. Discovery compatibility is derived from this constant.
@@ -482,6 +483,9 @@ pub struct OwnerResolutionFactsWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
+    /// Owner-derived shell, plan, question, retry, and lifecycle facts.
+    #[serde(default)]
+    pub presentation: OwnerPresentationFactsWire,
     #[serde(default = "default_row_kind")]
     pub row_kind: FleetRowKindWire,
     #[serde(default)]
@@ -564,6 +568,13 @@ pub struct ResolvedAgentSummaryWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
+    /// Owner-derived shell, plan, question, retry, and lifecycle facts. Never
+    /// carries paths; omitted when empty so legacy consumers see no change.
+    #[serde(
+        default,
+        skip_serializing_if = "OwnerPresentationFactsWire::is_empty"
+    )]
+    pub presentation: OwnerPresentationFactsWire,
     pub row_revision: ResourceRevisionWire,
     pub lifecycle: FleetLifecycleWire,
     pub liveness: OwnerLivenessWire,
@@ -2005,6 +2016,7 @@ pub fn project_resolved_agent_summary(
         agent_clan_generation: facts.agent_clan_generation.clone(),
         clan_tribe: facts.clan_tribe.clone(),
         tribe: facts.tribe.clone(),
+        presentation: facts.presentation.clone(),
         row_revision: facts.row_revision.clone(),
         lifecycle,
         liveness: facts.liveness,
@@ -2902,6 +2914,7 @@ pub fn validate_resolved_agent_summary(
     if let Some(parent_timestamp) = &summary.parent_timestamp {
         validate_identifier("parent_timestamp", parent_timestamp)?;
     }
+    summary.presentation.validate()?;
     validate_label("project_name", &summary.project_name, MAX_LABEL_BYTES)?;
     validate_label(
         "labels.project_label",
@@ -4266,6 +4279,7 @@ fn normalized_owner_facts(
             .tribe
             .as_ref()
             .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
+        presentation: facts.presentation.sanitized()?,
         row_kind: facts.row_kind,
         current_instance: facts.current_instance,
         dismissable: facts.dismissable,
@@ -7017,7 +7031,7 @@ pub(crate) fn reject_secretish(
     Ok(())
 }
 
-fn trim_to_limit(value: &str, max_bytes: usize) -> String {
+pub(crate) fn trim_to_limit(value: &str, max_bytes: usize) -> String {
     let value = value.trim();
     if value.len() <= max_bytes {
         return value.to_string();
@@ -7671,6 +7685,7 @@ mod tests {
                 agent_clan_generation: None,
                 clan_tribe: None,
                 tribe: None,
+                presentation: Default::default(),
                 row_kind: FleetRowKindWire::AgentShell,
                 current_instance: true,
                 dismissable: false,
@@ -8025,6 +8040,33 @@ mod tests {
     }
 
     #[test]
+    fn v4_shaped_summary_deserializes_at_v5_and_carries_owner_facts() {
+        let locator = logical('a', "worker");
+        let request = projection_request(
+            locator,
+            Some(exact('a', "worker", "run-1")),
+            1,
+            record_running(),
+        );
+        let summary = project_resolved_agent_summary(&request).unwrap();
+        let mut value = serde_json::to_value(&summary).unwrap();
+        // A v4 payload has no `presentation` object at all.
+        assert!(value.get("presentation").is_none());
+        value["schema_version"] = serde_json::json!(4);
+        let legacy: ResolvedAgentSummaryWire =
+            serde_json::from_value(value).unwrap();
+        assert!(legacy.presentation.is_empty());
+
+        let mut with_facts = request;
+        with_facts.owner_facts.presentation.gate_id = Some("g1".to_string());
+        with_facts.owner_facts.presentation.question_answered = true;
+        let summary = project_resolved_agent_summary(&with_facts).unwrap();
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(value["presentation"]["gate_id"], "g1");
+        assert_eq!(value["presentation"]["question_answered"], true);
+    }
+
+    #[test]
     fn projection_carries_owner_presentation_facts_for_remote_rendering() {
         let locator = logical('a', "worker");
         let exact_locator = exact('a', "worker", "run-1");
@@ -8119,12 +8161,18 @@ mod tests {
 
         let summary = project_resolved_agent_summary(&request).unwrap();
 
-        assert_eq!(summary.logical_locator.schema_version, 4);
+        assert_eq!(
+            summary.logical_locator.schema_version,
+            FLEET_CONTRACT_SCHEMA_VERSION
+        );
         assert_eq!(
             summary.logical_locator.family_id.as_deref(),
             Some("family-resolved")
         );
-        assert_eq!(summary.exact_locator.as_ref().unwrap().schema_version, 4);
+        assert_eq!(
+            summary.exact_locator.as_ref().unwrap().schema_version,
+            FLEET_CONTRACT_SCHEMA_VERSION
+        );
         assert_eq!(summary.parent_timestamp.as_deref(), Some("20260906115900"));
         assert_eq!(summary.family_role, FleetFamilyRoleWire::HistoricalShell);
         assert_eq!(summary.tribe.as_deref(), Some("review"));

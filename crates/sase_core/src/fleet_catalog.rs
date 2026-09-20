@@ -33,6 +33,10 @@ use crate::fleet_family::{
     family_shell, record_is_concrete_family_shell, tracked_parent_timestamp,
     ConcreteFamilyShellKind,
 };
+use crate::fleet_owner_facts::{
+    derive_owner_record_facts, HostOwnerFileObserver, InjectedOwnerFilesWire,
+    OwnerFileObserver, OwnerPresentationFactsWire,
+};
 use crate::fleet_presentation::{
     decide_fleet_presentation, FleetPresentationCandidateWire,
     FleetPresentationDecisionWire, FleetPresentationRequestWire,
@@ -54,10 +58,12 @@ pub struct PresentationRecordFacts {
     pub started_at_unix: Option<f64>,
     pub run_started_at_unix: Option<f64>,
     pub display_status: Option<String>,
+    pub owner: OwnerPresentationFactsWire,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct PresentationContext {
+    direct_by_dir: BTreeMap<String, PresentationRecordFacts>,
     by_timestamp: BTreeMap<String, PresentationRecordFacts>,
     root_by_family_id: BTreeMap<String, PresentationRecordFacts>,
     clan_tribe_by_key: BTreeMap<String, String>,
@@ -67,13 +73,24 @@ impl PresentationContext {
     pub fn from_records(
         records: &[AgentArtifactRecordWire],
         served: &BTreeSet<String>,
+        observation_by_identity: &BTreeMap<String, OwnerProcessObservation>,
+        files: &dyn OwnerFileObserver,
     ) -> Self {
         let mut context = Self::default();
         for record in records {
             if !served.contains(&record.artifact_dir) {
                 continue;
             }
-            let facts = direct_presentation_facts_for_record(record);
+            let liveness = observation_by_identity
+                .get(&record.artifact_dir)
+                .copied()
+                .unwrap_or(OwnerProcessObservation::Unknown)
+                .liveness();
+            let facts =
+                direct_presentation_facts_for_record(record, liveness, files);
+            context
+                .direct_by_dir
+                .insert(record.artifact_dir.clone(), facts.clone());
             if let Some(key) = clan_context_key(
                 facts.agent_clan.as_deref(),
                 facts.agent_clan_generation.as_deref(),
@@ -106,7 +123,17 @@ impl PresentationContext {
         &self,
         record: &AgentArtifactRecordWire,
     ) -> PresentationRecordFacts {
-        let mut facts = direct_presentation_facts_for_record(record);
+        let mut facts = self
+            .direct_by_dir
+            .get(&record.artifact_dir)
+            .cloned()
+            .unwrap_or_else(|| {
+                direct_presentation_facts_for_record(
+                    record,
+                    OwnerLivenessWire::Unknown,
+                    &InjectedOwnerFilesWire::default(),
+                )
+            });
         let parent = facts
             .parent_timestamp
             .as_ref()
@@ -169,6 +196,7 @@ pub fn select_fleet_presentation(
     dismissed_by_identity: &BTreeMap<String, bool>,
     now_unix: f64,
     scope: FleetCatalogScopeWire,
+    files: &dyn OwnerFileObserver,
 ) -> Result<FleetPresentationSelection, FleetContractError> {
     let mut presentation_candidates = Vec::with_capacity(records.len());
     for record in records {
@@ -206,7 +234,12 @@ pub fn select_fleet_presentation(
                 .chain(decision.recent_terminal.iter())
                 .cloned()
                 .collect();
-            let context = PresentationContext::from_records(records, &served);
+            let context = PresentationContext::from_records(
+                records,
+                &served,
+                observation_by_identity,
+                files,
+            );
             return Ok(FleetPresentationSelection {
                 decision,
                 served,
@@ -223,7 +256,12 @@ pub fn select_fleet_presentation(
             .map(|candidate| candidate.identity.clone())
             .collect(),
     };
-    let context = PresentationContext::from_records(records, &served);
+    let context = PresentationContext::from_records(
+        records,
+        &served,
+        observation_by_identity,
+        files,
+    );
     Ok(FleetPresentationSelection {
         decision: FleetPresentationDecisionWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -246,6 +284,9 @@ pub struct AssembleFleetCatalogRequestWire {
     pub observations: BTreeMap<String, String>,
     #[serde(default)]
     pub now_unix: Option<f64>,
+    /// Hermetic owner-file observations. `None` reads the host filesystem.
+    #[serde(default)]
+    pub owner_files: Option<InjectedOwnerFilesWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,12 +376,18 @@ pub fn assemble_fleet_catalog(
             .into_iter()
             .map(|result| (result.identity, result.family_root_dismissed))
             .collect();
+    let host_files = HostOwnerFileObserver::default();
+    let files: &dyn OwnerFileObserver = match &request.owner_files {
+        Some(injected) => injected,
+        None => &host_files,
+    };
     let selection = select_fleet_presentation(
         &scan.records,
         &observation_by_identity,
         &dismissed_by_identity,
         now_unix,
         FleetCatalogScopeWire::Presentation,
+        files,
     )?;
     let project_labels = project_display_labels(&projects_root);
     let mut summaries = Vec::new();
@@ -396,7 +443,7 @@ fn project_summary_for_record(
     let row_revision = ResourceRevisionWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical_key: logical_key.clone(),
-        revision: stable_revision(record),
+        revision: stable_revision(record, presentation),
     };
     let exact_locator =
         Some(exact_locator_for_record(logical_locator.clone(), record));
@@ -439,6 +486,7 @@ fn project_summary_for_record(
                 freshness: ObservationFreshnessWire::Fresh,
                 observed_at_unix: now_unix,
                 display_status: presentation.display_status.clone(),
+                presentation: presentation.owner.clone(),
                 started_at_unix: presentation.started_at_unix,
                 run_started_at_unix: presentation.run_started_at_unix,
                 stopped_at_unix: stopped_at_unix_for_record(record),
@@ -539,10 +587,13 @@ fn exact_locator_for_record(
     }
 }
 
-fn direct_presentation_facts_for_record(
+pub fn direct_presentation_facts_for_record(
     record: &AgentArtifactRecordWire,
+    liveness: OwnerLivenessWire,
+    files: &dyn OwnerFileObserver,
 ) -> PresentationRecordFacts {
     let meta = record.agent_meta.as_ref();
+    let derived = derive_owner_record_facts(record, liveness, files);
     PresentationRecordFacts {
         timestamp: record.timestamp.clone(),
         family_id: family_id_for_record(record),
@@ -554,37 +605,9 @@ fn direct_presentation_facts_for_record(
         tribe: meta.and_then(|value| value.tribe.clone()),
         started_at_unix: started_at_unix_for_record(record),
         run_started_at_unix: run_started_at_unix_for_record(record),
-        display_status: Some(display_status_for_record(record)),
+        display_status: Some(derived.status),
+        owner: derived.facts,
     }
-}
-
-fn display_status_for_record(record: &AgentArtifactRecordWire) -> String {
-    if let Some(done) = &record.done {
-        if done.repeat_stopped {
-            return "STOPPED".to_string();
-        }
-        if let Some(status) = first_non_empty([done.status_label.as_deref()]) {
-            return status.to_string();
-        }
-        if done
-            .error
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || done.outcome.as_deref().is_some_and(|value| {
-                value.starts_with("failed") || value == "failed"
-            })
-        {
-            return "FAILED".to_string();
-        }
-        return "DONE".to_string();
-    }
-    if record.pending_question.is_some() {
-        return "QUESTION".to_string();
-    }
-    if record.waiting.is_some() {
-        return "WAITING".to_string();
-    }
-    "RUNNING".to_string()
 }
 
 fn started_at_unix_for_record(record: &AgentArtifactRecordWire) -> Option<f64> {
@@ -647,7 +670,7 @@ fn parse_record_timestamp(value: &str) -> Option<f64> {
     Some(parsed.and_utc().timestamp() as f64)
 }
 
-fn parse_rfc3339_unix(value: &str) -> Option<f64> {
+pub(crate) fn parse_rfc3339_unix(value: &str) -> Option<f64> {
     let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
     Some(
         parsed.timestamp() as f64
@@ -726,13 +749,33 @@ fn parse_observation(value: &str) -> Option<OwnerProcessObservation> {
     }
 }
 
-fn stable_revision(record: &AgentArtifactRecordWire) -> u64 {
+/// Row revision over the raw record and every resolved presentation fact, so
+/// a change in a derived fact (inherited tribe, parent linkage, answered
+/// question, plan tier, rich status) invalidates cached rows. Both inputs are
+/// deterministic, so an unchanged row keeps its revision across refreshes.
+pub fn stable_revision(
+    record: &AgentArtifactRecordWire,
+    presentation: &PresentationRecordFacts,
+) -> u64 {
     let mut hasher = Sha256::new();
-    hasher.update(b"sase-fleet-row-revision-v1\0");
+    hasher.update(b"sase-fleet-row-revision-v2\0");
     if let Ok(bytes) = serde_json::to_vec(record) {
         hasher.update(bytes);
     } else {
         hasher.update(record.artifact_dir.as_bytes());
+    }
+    hasher.update(b"\0presentation\0");
+    if let Ok(bytes) = serde_json::to_vec(&(
+        &presentation.family_id,
+        &presentation.parent_timestamp,
+        &presentation.clan_tribe,
+        &presentation.tribe,
+        presentation.started_at_unix,
+        presentation.run_started_at_unix,
+        &presentation.display_status,
+        &presentation.owner,
+    )) {
+        hasher.update(bytes);
     }
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];

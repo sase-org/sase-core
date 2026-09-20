@@ -758,6 +758,7 @@ mod tests {
             agent_clan_generation: None,
             clan_tribe: None,
             tribe: None,
+            presentation: Default::default(),
             row_revision: intent.row_revision.clone(),
             lifecycle: FleetLifecycleWire::Running,
             liveness: OwnerLivenessWire::Alive,
