@@ -217,7 +217,10 @@ pub fn select_fleet_presentation(
                 .unwrap_or(false),
             family_member: record_is_concrete_family_shell(record),
             family_key: family_key_for_record(record),
+            family_anchor: record_is_concrete_family_shell(record)
+                && tracked_parent_timestamp(record).is_none(),
             process_identity_mismatch: observation.process_identity_mismatch(),
+            lifecycle_evidence: record_has_lifecycle_evidence(record),
         });
     }
     let served: BTreeSet<String> = match scope {
@@ -651,6 +654,19 @@ fn workspace_num_for_record(record: &AgentArtifactRecordWire) -> Option<u32> {
         .and_then(|meta| meta.workspace_num)
         .or_else(|| record.done.as_ref().and_then(|done| done.workspace_num))
         .and_then(|value| u32::try_from(value).ok())
+}
+
+/// Whether the record carries any owner lifecycle marker. The owner loader
+/// builds no agent from a directory holding only side files (continuation
+/// diagnostics, for example), so the catalog must not serve one either.
+fn record_has_lifecycle_evidence(record: &AgentArtifactRecordWire) -> bool {
+    record.agent_meta.is_some()
+        || record.done.is_some()
+        || record.running.is_some()
+        || record.waiting.is_some()
+        || record.pending_question.is_some()
+        || record.workflow_state.is_some()
+        || record.has_done_marker
 }
 
 fn completion_time_for_record(

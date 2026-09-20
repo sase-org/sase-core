@@ -63,23 +63,41 @@ pub struct FleetPresentationCandidateWire {
     /// Whether this candidate is a concrete family shell rather than a
     /// family root. Live and unknown members stay current. Pending
     /// (protected) dead members stay current. Other dead members of a
-    /// currently presented family are served in the bounded terminal
-    /// window so the viewer can nest them; orphan dead members stay
-    /// excluded.
+    /// presented family are served in the bounded terminal window so the
+    /// viewer can nest them.
     #[serde(default)]
     pub family_member: bool,
     /// Grouping key for "currently presented family". A family is
     /// presented when a root or a live/unknown/pending member is already
-    /// current, or a non-member terminal of the same key is inside the
-    /// recent window.
+    /// current, or a non-member terminal or an anchored terminal shell of
+    /// the same key is inside the recent window.
     #[serde(default)]
     pub family_key: Option<String>,
+    /// Whether this concrete shell carries no tracked parent, making it the
+    /// family's own origin record. Modern plan-chain families have no
+    /// separate root record: the `--plan` shell is the family's first
+    /// record and every later shell points back at it. A terminal anchor
+    /// inside the recent window presents its family; a shell whose parent
+    /// no record supplies is an orphan and never does.
+    #[serde(default)]
+    pub family_anchor: bool,
     /// Owner observation that the recorded PID is live but is not this
     /// agent (wrong command line or claim/marker mismatch). Such a row is
     /// excluded from presentation and history rather than demoted into
     /// the recent-terminal window.
     #[serde(default)]
     pub process_identity_mismatch: bool,
+    /// Whether the record carries any owner lifecycle marker (agent
+    /// metadata, running, waiting, pending-question, workflow-state or
+    /// done). An artifact directory holding only side files is not an
+    /// agent: the owner loader builds no row from it, so it is excluded
+    /// rather than served as a permanently `Unknown` running row.
+    #[serde(default = "default_lifecycle_evidence")]
+    pub lifecycle_evidence: bool,
+}
+
+fn default_lifecycle_evidence() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +152,7 @@ pub fn decide_fleet_presentation(
         )?;
         if candidate.family_root_dismissed
             || candidate.process_identity_mismatch
+            || !candidate.lifecycle_evidence
         {
             excluded.push(candidate.identity.clone());
             continue;
@@ -158,8 +177,12 @@ pub fn decide_fleet_presentation(
         terminal_candidates.push(candidate);
     }
 
+    // A non-member terminal, or an anchored shell that stands in for the
+    // root of a root-less plan-chain family, presents its family while it is
+    // inside the recent window. Unanchored members never do: their parent is
+    // missing, so they are orphans of a family nothing else vouches for.
     for candidate in &terminal_candidates {
-        if candidate.family_member {
+        if candidate.family_member && !candidate.family_anchor {
             continue;
         }
         let age = request.now_unix - candidate.completion_time_unix;
@@ -257,7 +280,9 @@ mod tests {
             family_root_dismissed,
             family_member: false,
             family_key: None,
+            family_anchor: false,
             process_identity_mismatch: false,
+            lifecycle_evidence: true,
         }
     }
 
@@ -563,20 +588,103 @@ mod tests {
     }
 
     #[test]
-    fn orphan_terminal_family_member_stays_excluded() {
+    fn root_less_terminal_family_is_served_whole_through_its_anchor() {
+        let now = 1_000_000.0;
+        let mut plan = family_member_candidate(
+            "shells--plan",
+            OwnerLivenessWire::Dead,
+            false,
+            now - DAY,
+        );
+        plan.family_anchor = true;
+        let decision = decide(
+            now,
+            vec![
+                plan,
+                family_member_candidate(
+                    "shells--mon",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - (DAY / 2.0),
+                ),
+                family_member_candidate(
+                    "shells--gate",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - (DAY / 4.0),
+                ),
+            ],
+        );
+        assert!(decision.current.is_empty());
+        assert_eq!(
+            decision.recent_terminal,
+            vec!["shells--gate", "shells--mon", "shells--plan"]
+        );
+        assert!(decision.excluded.is_empty());
+    }
+
+    #[test]
+    fn anchor_outside_the_window_does_not_present_recent_members() {
+        let now = 1_000_000.0;
+        let mut plan = family_member_candidate(
+            "old--plan",
+            OwnerLivenessWire::Dead,
+            false,
+            now - (8.0 * DAY),
+        );
+        plan.family_anchor = true;
+        let decision = decide(
+            now,
+            vec![
+                plan,
+                family_member_candidate(
+                    "old--gate",
+                    OwnerLivenessWire::Dead,
+                    false,
+                    now - DAY,
+                ),
+            ],
+        );
+        assert!(decision.recent_terminal.is_empty());
+        assert_eq!(decision.excluded, vec!["old--plan", "old--gate"]);
+    }
+
+    #[test]
+    fn unanchored_orphan_members_stay_excluded_even_when_several_are_recent() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
-            vec![family_member_candidate(
-                "orphan--gate",
-                OwnerLivenessWire::Dead,
-                false,
-                now - DAY,
-            )],
+            (0..3)
+                .map(|index| {
+                    family_member_candidate(
+                        &format!("orphan--gate-{index}"),
+                        OwnerLivenessWire::Dead,
+                        false,
+                        now - DAY,
+                    )
+                })
+                .collect(),
         );
         assert!(decision.current.is_empty());
         assert!(decision.recent_terminal.is_empty());
-        assert_eq!(decision.excluded, vec!["orphan--gate"]);
+        assert_eq!(decision.excluded.len(), 3);
+    }
+
+    #[test]
+    fn record_without_lifecycle_evidence_is_excluded() {
+        let now = 1_000_000.0;
+        let mut bare = candidate(
+            "diagnostics-only",
+            OwnerLivenessWire::Unknown,
+            false,
+            now - DAY,
+            false,
+        );
+        bare.lifecycle_evidence = false;
+        let decision = decide(now, vec![bare]);
+        assert!(decision.current.is_empty());
+        assert!(decision.recent_terminal.is_empty());
+        assert_eq!(decision.excluded, vec!["diagnostics-only"]);
     }
 
     #[test]

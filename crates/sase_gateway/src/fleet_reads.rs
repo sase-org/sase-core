@@ -2749,6 +2749,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_less_completed_plan_chain_family_is_presented_through_its_plan_shell(
+    ) {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+        let projects = home.join("projects");
+        seed_project(&projects, "proj");
+        let now = Utc::now();
+        let plan_finished = now - chrono::Duration::minutes(30);
+        let gate_finished = now - chrono::Duration::minutes(20);
+        let code_finished = now - chrono::Duration::minutes(10);
+        let plan_ts = plan_finished.format("%Y%m%d%H%M%S").to_string();
+        let gate_ts = gate_finished.format("%Y%m%d%H%M%S").to_string();
+        let code_ts = code_finished.format("%Y%m%d%H%M%S").to_string();
+        // Production shape: no separate root record. The plan shell is the
+        // family's first record (no parent) and later shells point at it.
+        seed_done_family_agent(
+            &projects,
+            &plan_ts,
+            "chain--plan",
+            "chain",
+            None,
+            plan_finished.timestamp() as f64,
+        );
+        seed_done_family_agent(
+            &projects,
+            &gate_ts,
+            "chain--gate",
+            "chain",
+            Some(&plan_ts),
+            gate_finished.timestamp() as f64,
+        );
+        seed_done_family_agent(
+            &projects,
+            &code_ts,
+            "chain--1",
+            "chain",
+            Some(&plan_ts),
+            code_finished.timestamp() as f64,
+        );
+        let service = build_service(&home, &projects);
+
+        let presentation = service.catalog(catalog_query()).await.unwrap();
+        let mut labels = presentation
+            .page
+            .rows
+            .iter()
+            .filter_map(|row| row.labels.agent_label.as_deref())
+            .collect::<Vec<_>>();
+        labels.sort_unstable();
+        assert_eq!(labels, vec!["chain--1", "chain--gate", "chain--plan"]);
+    }
+
+    #[tokio::test]
     async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
         let temp = tempdir().unwrap();
         let home = temp.path().to_path_buf();
