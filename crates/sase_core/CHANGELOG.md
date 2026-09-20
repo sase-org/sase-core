@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.70](https://github.com/sase-org/sase-core/compare/v0.34.69...v0.34.70) - 2026-09-20
+
+### Added
+
+- *(provider_usage)* normalize Muse subscription usage and classify its weekly window
+
 ## [0.34.69](https://github.com/sase-org/sase-core/compare/v0.34.68...v0.34.69) - 2026-09-20
 
 ### Fixed
