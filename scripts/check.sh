@@ -71,14 +71,19 @@ PY
 
 usage() {
     cat >&2 <<EOF
-usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy|test|script-test|all]
+usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy [args...]|test [args...]|script-test|all]
 
   fmt-check   cargo fmt --all -- --check
   fmt         cargo fmt --all
-  clippy      cargo clippy --workspace --all-targets -- -D warnings
-  test        cargo test --workspace
+  clippy      cargo clippy --workspace --all-targets [args...] -- -D warnings
+  test        cargo test --workspace [args...]
   script-test unittest the release-workflow helper scripts in .github/scripts
   all         fmt-check, clippy, test, then script-test (default)
+
+Trailing arguments to the clippy and test subcommands are forwarded to the
+underlying cargo invocation, e.g. 'check.sh test -p sase_gateway' or
+'check.sh test -- --skip foo'. An explicit package selection (-p, --package,
+--workspace) replaces the default --workspace scope.
 EOF
 }
 
@@ -90,14 +95,37 @@ cmd_fmt() {
     cargo fmt --all
 }
 
+# cargo unions --workspace with -p/--package instead of intersecting them, so a
+# bare forwarded selection would still run the whole workspace. When the caller
+# passes its own package selection, drop the default --workspace scope so a
+# single-crate run stays cheap.
+default_scope() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --) break ;;
+            -p*|--package*|--workspace) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 cmd_clippy() {
     configure_pyo3_python
-    cargo clippy --workspace --all-targets -- -D warnings
+    if default_scope "$@"; then
+        cargo clippy --workspace --all-targets "$@" -- -D warnings
+    else
+        cargo clippy --all-targets "$@" -- -D warnings
+    fi
 }
 
 cmd_test() {
     configure_pyo3_python
-    cargo test --workspace
+    if default_scope "$@"; then
+        cargo test --workspace "$@"
+    else
+        cargo test "$@"
+    fi
 }
 
 cmd_script_test() {
@@ -112,12 +140,15 @@ cmd_all() {
 }
 
 subcommand="${1:-all}"
+if [[ $# -gt 0 ]]; then
+    shift
+fi
 
 case "$subcommand" in
     fmt-check) cmd_fmt_check ;;
     fmt) cmd_fmt ;;
-    clippy) cmd_clippy ;;
-    test) cmd_test ;;
+    clippy) cmd_clippy "$@" ;;
+    test) cmd_test "$@" ;;
     script-test) cmd_script_test ;;
     all) cmd_all ;;
     *)

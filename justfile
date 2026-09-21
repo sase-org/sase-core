@@ -9,5 +9,5 @@ fmt:
 clippy:
     ./scripts/check.sh clippy
 
-test:
-    ./scripts/check.sh test
+test *args:
+    ./scripts/check.sh test {{args}}
