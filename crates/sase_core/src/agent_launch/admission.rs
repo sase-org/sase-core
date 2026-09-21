@@ -4,7 +4,7 @@
 //! condition, or dispatches. Replay is pure: terminal outcomes are never
 //! silently re-run, and dispatch uses a stable request fingerprint.
 
-use super::{
+use super::wires::{
     AgentUnitWire, LaunchOutcomeWire, LaunchPlanWire, LaunchUnitPayloadWire,
     LaunchUnitResultWire, WaitTargetWire,
 };

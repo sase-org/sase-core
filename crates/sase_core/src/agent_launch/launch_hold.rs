@@ -5,7 +5,7 @@ use crate::agent_hold::{
     AgentHoldError,
 };
 
-use super::{
+use super::wires::{
     AgentUnitWire, LaunchUnitPayloadWire, LaunchUnitWire, ProcUnitWire,
 };
 

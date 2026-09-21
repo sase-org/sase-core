@@ -5,9 +5,9 @@
 //! condition error. The evaluator never allocates a runner, workspace, agent,
 //! or proc identity.
 
-use super::{
+use super::admission::WaitedOutcomeWire;
+use super::wires::{
     LaunchOutcomeWire, LaunchUnitPayloadWire, LaunchUnitWire, WaitTargetWire,
-    WaitedOutcomeWire,
 };
 use crate::fenced_code::{
     language_from_info_string, CodeLanguage, CodeValue, CodeValueWire,

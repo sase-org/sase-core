@@ -1,10 +1,11 @@
-use super::{
+use super::directive_scan::{
     directive_occurrences, disabled_region_ranges,
     launch_inline_literal_ranges, position_in_ranges,
-    prompt_body_start_after_frontmatter, split_named_directive_arg,
-    strip_prompt_regions, unquote_directive_arg_value,
-    AgentLaunchFanoutPlanError, LaunchPlanDiagnosticWire,
+    split_named_directive_arg, unquote_directive_arg_value,
 };
+use super::fanout::prompt_body_start_after_frontmatter;
+use super::plan_resolution::strip_prompt_regions;
+use super::wires::{AgentLaunchFanoutPlanError, LaunchPlanDiagnosticWire};
 use crate::fenced_code::{fenced_block_ranges, scan_directive_owned_fences};
 use serde::{Deserialize, Serialize};
 
@@ -179,7 +180,7 @@ fn analyze_segment(prompt: &str, source_offset: usize) -> SegmentCondition {
 
 fn analyze_parenthesized_if(
     prompt: &str,
-    directive: &super::DirectiveOccurrence,
+    directive: &super::directive_scan::DirectiveOccurrence,
     source_offset: usize,
     condition: &mut SegmentCondition,
 ) {
