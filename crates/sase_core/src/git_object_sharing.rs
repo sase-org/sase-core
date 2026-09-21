@@ -665,9 +665,16 @@ mod tests {
         let plan = plan_git_object_sharing(&req).unwrap();
 
         assert_eq!(plan.status, "expected");
+        // Production canonicalizes resolved alternates, so the expectation
+        // must be canonicalized the same way (macOS temp roots carry a
+        // symlinked ancestor: /tmp -> /private/tmp).
         assert_eq!(
             plan.alternates,
-            vec![primary.to_string_lossy().into_owned()]
+            vec![primary
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
         );
     }
 

@@ -24,20 +24,24 @@ the Python binding crate.
 
 ## Build & test
 
+`just check` (or `./scripts/check.sh all`) is the verification gate — it runs the same fmt, clippy, test, and
+script-test steps as CI. Never verify with bare `cargo` invocations: they skip the script's `PYO3_PYTHON`
+resolution and, for single-crate runs, the `sase_core_py` binding tests.
+
 ```bash
-cargo fmt --all
-cargo fmt --all -- --check   # CI gate
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+just check                              # fmt-check + clippy + test + script-test (CI gate)
+./scripts/check.sh fmt-check            # formatting gate
+./scripts/check.sh clippy               # lint gate (warnings as errors)
+./scripts/check.sh test                 # full workspace test suite
 cargo run --release --example bench_parse   # direct-parser benchmark
 ```
 
-Mobile gateway hardening subsets:
+Mobile gateway hardening subsets (forwarded through the gate so `PYO3_PYTHON` still resolves):
 
 ```bash
-cargo test -p sase_gateway push_subscription
-cargo test -p sase_gateway test_push_provider_records_hint_attempts
-cargo test -p sase_gateway listener_smoke_exercises_pairing_auth_and_session
+./scripts/check.sh test -p sase_gateway push_subscription
+./scripts/check.sh test -p sase_gateway test_push_provider_records_hint_attempts
+./scripts/check.sh test -p sase_gateway listener_smoke_exercises_pairing_auth_and_session
 ```
 
 The mobile MVP packaging, private remote-access, rollback, and threat-model runbook is maintained in the SASE shell
