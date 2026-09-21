@@ -112,6 +112,14 @@ The Rust gateway does not parse xprompt arguments itself.
 The launcher program and prefix are host configuration, not CLI options or
 reviewed-manifest data.
 
+Detached execution is Linux-only: executor identity tokens are derived from
+procfs (`/proc/sys/kernel/random/boot_id` and `/proc/<pid>/stat`), so off
+Linux `sase_sudo_runner --capabilities` reports an empty capability list and
+detach requests fail with an explicit unsupported-platform error instead of a
+`/proc` read failure. The `sase_sudo_runner` console script ships on every
+platform; synchronous manifest execution works everywhere, only detached
+execution is gated.
+
 `sase_sudo_runner --manifest PATH --expected-sha256 SHA256` reads one reviewed sudo manifest, validates and canonicalizes
 it through `sase_core::sudo`, compares the canonical lowercase SHA-256 to the expected digest, and then emits exactly one
 JSON execution ledger on stdout for execution outcomes. Progress and command output go to stderr/the inherited terminal

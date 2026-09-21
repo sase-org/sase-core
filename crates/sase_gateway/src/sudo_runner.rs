@@ -228,6 +228,7 @@ struct SudoRunnerConfig {
     started_sentinel_timeout: Duration,
     detached_execution: Option<bool>,
     process_identity_error: Option<String>,
+    process_identity_override: Option<String>,
     started_publish_error: Option<String>,
 }
 
@@ -241,6 +242,7 @@ impl SudoRunnerConfig {
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
             detached_execution: None,
             process_identity_error: None,
+            process_identity_override: None,
             started_publish_error: None,
         }
     }
@@ -255,6 +257,7 @@ impl SudoRunnerConfig {
             started_sentinel_timeout: STARTED_SENTINEL_TIMEOUT,
             detached_execution: None,
             process_identity_error: None,
+            process_identity_override: None,
             started_publish_error: None,
         }
     }
@@ -619,7 +622,7 @@ fn parse_sudo_runner_args(
 }
 
 fn sudo_runner_help() -> &'static str {
-    "Usage:\n  sase_sudo_runner --capabilities|-c\n  sase_sudo_runner --manifest|-m PATH --expected-sha256|-e SHA256 [--detach-dir|-d DIR]\n\nReads one reviewed sudo manifest, verifies its canonical SHA-256, and emits either one JSON ledger on stdout or, with --detach-dir, one sudo_exec_started handshake after authentication succeeds.\n\nOptions:\n  -c, --capabilities          Print the schema-version-1 capabilities document and exit\n  -d, --detach-dir DIR       Authenticate, spawn the root executor, and print a started handshake\n  -e, --expected-sha256 SHA   Require this lowercase canonical manifest SHA-256 digest\n  -h, --help                  Show this help text\n  -m, --manifest PATH         Read the reviewed sudo manifest JSON from PATH\n\nExit statuses:\n  0  completed, command-level failure recorded, capabilities printed, or detached executor started\n  10 authentication failed\n  11 cancelled\n  12 no controlling TTY\n  13 invalid manifest, digest, handoff directory, or arguments\n  14 runner failure"
+    "Usage:\n  sase_sudo_runner --capabilities|-c\n  sase_sudo_runner --manifest|-m PATH --expected-sha256|-e SHA256 [--detach-dir|-d DIR]\n\nReads one reviewed sudo manifest, verifies its canonical SHA-256, and emits either one JSON ledger on stdout or, with --detach-dir, one sudo_exec_started handshake after authentication succeeds.\n\nOptions:\n  -c, --capabilities          Print the schema-version-1 capabilities document and exit\n  -d, --detach-dir DIR       Authenticate, spawn the root executor, and print a started handshake\n  -e, --expected-sha256 SHA   Require this lowercase canonical manifest SHA-256 digest\n  -h, --help                  Show this help text\n  -m, --manifest PATH         Read the reviewed sudo manifest JSON from PATH\n\nExit statuses:\n  0  completed, command-level failure recorded, capabilities printed, or detached executor started\n  10 authentication failed\n  11 cancelled\n  12 no controlling TTY\n  13 invalid manifest, digest, handoff directory, or arguments\n  14 runner failure\n\nPlatform support:\n  Detached execution (--detach-dir and the detached_execution capability) requires Linux procfs and is unavailable on other platforms, where --capabilities reports an empty capability list and detach requests fail with an explicit unsupported-platform error. Synchronous manifest execution works everywhere."
 }
 
 fn validate_expected_sha256(value: &str) -> Result<(), SudoWireError> {
@@ -911,6 +914,7 @@ fn run_detached_manifest(
             &manifest,
             config.started_sentinel_timeout,
             None,
+            config,
         ) {
             Ok(handshake) => handshake,
             Err(error) => {
@@ -1074,6 +1078,7 @@ fn run_internal_root_worker(
                 pid: std::process::id(),
                 manifest_sha256: manifest_sha256.clone(),
             }),
+            config,
         )?;
         match run_internal_root_worker_loaded(
             &manifest,
@@ -1418,6 +1423,7 @@ fn wait_for_started_handshake(
     manifest: &SudoManifestWire,
     timeout: Duration,
     expected: Option<WorkerHandshakeExpectation>,
+    config: &SudoRunnerConfig,
 ) -> Result<SudoExecStartedWire, SudoRunnerCliError> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1455,7 +1461,9 @@ fn wait_for_started_handshake(
                     })?;
                 validate_handshake_paths(&handshake, paths)?;
                 if let Some(expected) = expected.as_ref() {
-                    validate_worker_started_handshake(&handshake, expected)?;
+                    validate_worker_started_handshake(
+                        &handshake, expected, config,
+                    )?;
                 }
                 return Ok(handshake);
             }
@@ -1492,6 +1500,7 @@ fn wait_for_started_handshake(
 fn validate_worker_started_handshake(
     handshake: &SudoExecStartedWire,
     expected: &WorkerHandshakeExpectation,
+    config: &SudoRunnerConfig,
 ) -> Result<(), SudoRunnerCliError> {
     if handshake.executor_pid != expected.pid {
         return Err(cli_error(
@@ -1510,7 +1519,10 @@ fn validate_worker_started_handshake(
                 .to_string(),
         ));
     }
-    let identity = process_identity_token(expected.pid)?;
+    let identity = match &config.process_identity_override {
+        Some(token) => token.clone(),
+        None => process_identity_token(expected.pid)?,
+    };
     if handshake.executor_identity != identity {
         return Err(cli_error(
             SudoRunnerExitStatus::RunnerError,
@@ -1571,6 +1583,9 @@ fn derive_executor_identity(
             message.clone(),
         ));
     }
+    if let Some(token) = &config.process_identity_override {
+        return Ok(token.clone());
+    }
     process_identity_token(pid)
 }
 
@@ -1629,7 +1644,7 @@ fn current_unix_time() -> Result<f64, SudoRunnerCliError> {
         })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn process_identity_token(pid: u32) -> Result<String, SudoRunnerCliError> {
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(|error| {
@@ -1672,6 +1687,14 @@ fn process_identity_token(pid: u32) -> Result<String, SudoRunnerCliError> {
         )
     })?;
     Ok(format!("{boot_id}:{start_ticks}"))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_identity_token(_pid: u32) -> Result<String, SudoRunnerCliError> {
+    Err(cli_error(
+        SudoRunnerExitStatus::RunnerError,
+        "process identity tokens require Linux procfs; detached sudo execution is unavailable on this platform".to_string(),
+    ))
 }
 
 #[cfg(unix)]
@@ -2802,6 +2825,12 @@ mod tests {
                 program: executor_path.clone(),
                 prefix: Vec::new(),
             });
+            // Force the detached path so handshake tests exercise it on
+            // every platform. On Linux the platform default already
+            // resolves to true where procfs is available; elsewhere the
+            // default would report "unsupported" and skip the handshake
+            // these tests assert on.
+            config.detached_execution = Some(true);
             Self {
                 handoff_dir: tmp.path().to_path_buf(),
                 _tmp: tmp,
@@ -3176,6 +3205,12 @@ mv "$tmp" "$started_path"
         ]
     }
 
+    /// Synthetic identity both sides of a worker handshake agree on in
+    /// tests. Production derives this from Linux procfs; tests inject the
+    /// same value through `SudoRunnerConfig::process_identity_override` so
+    /// the handshake round-trips on platforms without `/proc`.
+    const TEST_PROCESS_IDENTITY_TOKEN: &str = "test-boot-id:12345";
+
     fn write_self_started(dir: &Path, digest: &str) -> SudoExecStartedWire {
         let pid = std::process::id();
         let handshake = SudoExecStartedWire {
@@ -3183,7 +3218,7 @@ mv "$tmp" "$started_path"
             kind: SUDO_EXEC_STARTED_KIND.to_string(),
             manifest_sha256: digest.to_string(),
             executor_pid: pid,
-            executor_identity: process_identity_token(pid).unwrap(),
+            executor_identity: TEST_PROCESS_IDENTITY_TOKEN.to_string(),
             ledger_path: dir.join(LEDGER_FILENAME).display().to_string(),
             log_path: dir.join(LOG_FILENAME).display().to_string(),
             started_at: current_unix_time().unwrap(),
@@ -3367,6 +3402,36 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         );
         assert!(platform_process_identity_available());
         assert!(detached_execution_supported(&config));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_identity_backend_reports_explicit_unsupported_error() {
+        let error = process_identity_token(std::process::id()).unwrap_err();
+        assert_eq!(error.exit_code(), SUDO_RUNNER_RUNNER_ERROR_EXIT);
+        assert!(error.message().contains("require Linux procfs"));
+        assert!(error.message().contains("unavailable on this platform"));
+        assert!(!platform_process_identity_available());
+        let mut config = SudoRunnerConfig::production();
+        config.tty_available = Some(false);
+        assert!(!detached_execution_supported(&config));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let result = run_sudo_runner_cli_with_io(
+            ["--capabilities".to_string()],
+            &config,
+            &mut stdout,
+            &mut stderr,
+        );
+        assert!(result.is_ok());
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema_version": 1,
+                "capabilities": []
+            })
+        );
     }
 
     #[test]
@@ -3830,6 +3895,8 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             prefix,
         });
         config.detached_execution = Some(true);
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
@@ -4005,7 +4072,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
         write_self_started(tmp.path(), &digest);
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
@@ -4057,7 +4126,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
                 fs::write(stop_path, "").unwrap();
             }
         });
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
@@ -4088,7 +4159,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
         write_self_started(tmp.path(), &digest);
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
@@ -4124,7 +4197,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         std::os::unix::fs::symlink(&target, tmp.path().join(LEDGER_FILENAME))
             .unwrap();
         write_self_started(tmp.path(), &digest);
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let error = run_sudo_runner_cli_with_io(
@@ -4185,6 +4260,8 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let digest = write_manifest(&manifest_path, &manifest);
         let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
         config.started_sentinel_timeout = Duration::from_millis(200);
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let error = run_sudo_runner_cli_with_io(
@@ -4243,7 +4320,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             format!("{}\n", serde_json::to_string(&handshake).unwrap()),
         )
         .unwrap();
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let error = run_sudo_runner_cli_with_io(
@@ -4318,6 +4397,8 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             prefix: Vec::new(),
         });
         config.detached_execution = Some(true);
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         config.started_publish_error =
             Some("forced started handshake publish failure".to_string());
         let mut stdout = Vec::new();
@@ -4400,7 +4481,10 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             let digest = digest.clone();
             let dir = tmp.path().to_path_buf();
             move || {
-                let config = SudoRunnerConfig::test(dir.join("unused-sudo"));
+                let mut config =
+                    SudoRunnerConfig::test(dir.join("unused-sudo"));
+                config.process_identity_override =
+                    Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
                 run_sudo_runner_cli_with_io(
@@ -4462,7 +4546,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
         write_self_started(tmp.path(), &digest);
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let result = run_sudo_runner_cli_with_io(
@@ -4510,7 +4596,9 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let manifest_path = tmp.path().join("manifest.json");
         let digest = write_manifest(&manifest_path, &manifest);
         write_self_started(tmp.path(), &digest);
-        let config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        config.process_identity_override =
+            Some(TEST_PROCESS_IDENTITY_TOKEN.to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let started = Instant::now();
