@@ -470,6 +470,43 @@ async fn unsafe_or_oversized_attachments_do_not_receive_tokens() {
 }
 
 #[tokio::test]
+async fn symlink_pointing_outside_tmp_is_not_downloadable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside_tmp = tempfile::tempdir().unwrap();
+    let outside = outside_tmp.path().join("secret.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    let link = tmp.path().join("evil.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    #[cfg(not(unix))]
+    std::fs::write(&link, "secret").unwrap();
+
+    let mut row = notification("evil-row", "2026-05-06T15:00:00Z", None);
+    row.files = vec![link.to_string_lossy().to_string()];
+    let state = state_for_notifications(&tmp, vec![row]);
+    let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
+
+    let (status, value) = json_response_with_state(
+        state,
+        notifications_request(Some(&token), "/api/v1/notifications/evil-row"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["attachments"].as_array().unwrap().len(), 1);
+    #[cfg(unix)]
+    {
+        assert_eq!(value["attachments"][0]["token"], Value::Null);
+        assert_eq!(value["attachments"][0]["downloadable"], false);
+    }
+    #[cfg(not(unix))]
+    {
+        assert!(value["attachments"][0]["token"].is_string());
+        assert_eq!(value["attachments"][0]["downloadable"], true);
+    }
+}
+
+#[tokio::test]
 async fn action_artifacts_are_declared_as_attachments() {
     let tmp = tempfile::tempdir().unwrap();
     let artifacts_dir = tmp.path().join("agent").join("artifacts");

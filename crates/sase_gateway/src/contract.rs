@@ -407,7 +407,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "content_type": "string|null",
                 "byte_size": "u64|null",
                 "source_notification_id": "string",
-                "downloadable": "bool; false for missing, oversized, symlinked, traversal, directory, or unknown-risk files",
+                "downloadable": "bool; false for missing, oversized, traversal, directory, symlink-named, or unknown-risk files; symlinked ancestors such as the macOS /tmp and /var aliases do not disqualify",
                 "download_requires_auth": "bool",
                 "can_inline": "bool",
                 "path_available": "bool"

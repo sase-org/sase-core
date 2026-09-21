@@ -649,6 +649,14 @@ pub(crate) fn hitl_path_typed_outputs(request_path: &Path) -> Vec<String> {
         .collect()
 }
 
+// Attachment contract (epic sase-157 gateway-attachments, branch (b)): a
+// symlinked _ancestor_ is not by itself evidence of an attack — on macOS
+// `/tmp` and `/var` are platform aliases, so every system-temp file has one,
+// and rejecting on "any ancestor is a symlink" makes every such attachment
+// permanently undownloadable. Only a `..` traversal or a symlink used to
+// redirect the named file itself (final component) disqualifies. The resolved
+// canonical path is what gets stored in the download token and re-verified
+// at download time, so an ancestor alias cannot redirect the served bytes.
 pub(crate) fn validate_attachment_path(
     path: &Path,
     expected_size: Option<u64>,
@@ -657,14 +665,11 @@ pub(crate) fn validate_attachment_path(
     if path
         .components()
         .any(|component| component == Component::ParentDir)
-        || contains_symlink_component(path)
+        || is_symlink(path)
     {
         return Err(());
     }
     let canonical = std::fs::canonicalize(path).map_err(|_| ())?;
-    if contains_symlink_component(&canonical) {
-        return Err(());
-    }
     let metadata = std::fs::metadata(&canonical).map_err(|_| ())?;
     if !metadata.is_file() {
         return Err(());
@@ -679,18 +684,13 @@ pub(crate) fn validate_attachment_path(
     Ok((canonical, byte_size))
 }
 
-pub(crate) fn contains_symlink_component(path: &Path) -> bool {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        if std::fs::symlink_metadata(&current)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
+/// Reports whether the named file itself is a symlink, without following it.
+/// Ancestor symlinks (such as the macOS `/tmp` and `/var` platform aliases)
+/// deliberately do not count: see `validate_attachment_path`.
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 pub(crate) fn sanitize_content_disposition_filename(

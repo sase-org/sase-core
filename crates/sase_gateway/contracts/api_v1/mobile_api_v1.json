@@ -293,7 +293,7 @@
       "defined_by": "sase_core::notifications::mobile",
       "display_name": "string",
       "download_requires_auth": "bool",
-      "downloadable": "bool; false for missing, oversized, symlinked, traversal, directory, or unknown-risk files",
+      "downloadable": "bool; false for missing, oversized, traversal, directory, symlink-named, or unknown-risk files; symlinked ancestors such as the macOS /tmp and /var aliases do not disqualify",
       "id": "string",
       "kind": "markdown|pdf|diff|image|text|json|directory|unknown",
       "path_available": "bool",
