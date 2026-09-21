@@ -12,8 +12,19 @@ env:
 
 jobs:
   rust-checks:
-    name: cargo fmt + clippy + test
-    runs-on: ubuntu-latest
+    name: cargo fmt + clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    # Advisory macOS leg: the macOS suite is still red, so report its failures
+    # without failing the workflow. The macos-ci-required phase removes this
+    # escape hatch once the suite is green.
+    # NOTE (cost): macOS runner minutes bill above the Linux rate. If that
+    # becomes a concern, follow the two-speed pattern and move the exhaustive
+    # matrix off the push path instead of dropping the macOS signal.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,9 +41,18 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
 
+      # crates/sase_core_py pins pyo3's abi3-py312 feature, which hard-errors
+      # against any interpreter older than 3.12. Pin an explicit 3.12 rather
+      # than trusting the runner image so an image update cannot produce the
+      # opaque pyo3-build-config error (scripts/check.sh also resolves a
+      # qualifying interpreter itself as a second layer).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-checks
+          shared-key: rust-checks-${{ matrix.os }}
           workspaces: ". -> target"
 
       - name: cargo fmt --all -- --check
