@@ -329,6 +329,7 @@
 //! - `provider_usage_mark_refresh_due(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_record_refresh_attempt(sase_home: str, request: dict, now: float) -> dict`
 //! - `provider_usage_validate_observation(observation: dict, now: float) -> dict`
+//! - `provider_usage_normalize_agy_usage(request: dict) -> dict`
 //! - `provider_usage_normalize_grok_billing(request: dict) -> dict`
 //! - `provider_usage_normalize_muse_usage(request: dict) -> dict`
 //! - `provider_usage_project_snapshot(observations: list[dict], now: float, cadence_seconds: float = 300, warn_percent: float = 75, critical_percent: float = 90) -> dict`

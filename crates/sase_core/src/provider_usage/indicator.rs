@@ -805,7 +805,16 @@ fn is_weekly_all_window(
     provider: &str,
     window: &UsagePublicWindowWire,
 ) -> bool {
-    is_all_model_scope(provider, window) && is_weekly_window(provider, window)
+    (is_all_model_scope(provider, window)
+        && is_weekly_window(provider, window))
+        // agy's Gemini weekly window is honestly model_family-scoped, but it
+        // is the provider's headline window: make it the header anchor
+        // without claiming an all-model scope anywhere else.
+        || (provider == "agy"
+            && window.key == "gemini-weekly"
+            && matches!(&window.applicability,
+                UsageApplicabilityWire::ModelFamily { family, .. } if family == "gemini")
+            && is_weekly_window(provider, window))
 }
 
 fn is_weekly_window(provider: &str, window: &UsagePublicWindowWire) -> bool {

@@ -1238,6 +1238,141 @@ fn provider_usage_normalize_muse_usage_round_trips_and_separates_errors() {
 }
 
 #[test]
+fn provider_usage_normalize_agy_usage_round_trips_and_separates_errors() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let now = 1_800_000_000.0;
+        let payload = || {
+            json!({
+                "conversation_id": "",
+                "status": "SUCCESS",
+                "response": "Gemini Models\tWeekly Limit Remaining\t96%\t2027-01-21T08:00:00Z\n",
+                "duration_seconds": 0,
+                "num_turns": 0,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "thinking_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "command": {
+                    "name": "usage",
+                    "data": {
+                        "description": "groups share limits",
+                        "groups": [
+                            {
+                                "name": "Gemini Models",
+                                "description": "Models within this group: Gemini Flash, Gemini Pro",
+                                "buckets": [
+                                    {
+                                        "id": "gemini-weekly",
+                                        "name": "Weekly Limit Remaining",
+                                        "description": "weekly",
+                                        "window": "weekly",
+                                        "remaining_fraction": 0.96,
+                                        "reset_time": "2027-01-21T08:00:00Z",
+                                    },
+                                    {
+                                        "id": "gemini-5h",
+                                        "name": "Five Hour Limit Remaining",
+                                        "description": "5h",
+                                        "window": "5h",
+                                        "remaining_fraction": 1,
+                                        "reset_time": "2027-01-15T12:00:00Z",
+                                    },
+                                ],
+                            },
+                            {
+                                "name": "Claude and GPT models",
+                                "buckets": [
+                                    {
+                                        "id": "3p-weekly",
+                                        "name": "Weekly Limit Remaining",
+                                        "window": "weekly",
+                                        "remaining_fraction": 1,
+                                        "reset_time": "2027-01-22T08:00:00Z",
+                                    },
+                                    {
+                                        "id": "3p-5h",
+                                        "name": "Five Hour Limit Remaining",
+                                        "window": "5h",
+                                        "remaining_fraction": 1,
+                                        "reset_time": "2027-01-15T13:00:00Z",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                },
+            })
+        };
+        let request = |payload: serde_json::Value, schema_version: u32| {
+            json!({
+                "schema_version": schema_version,
+                "payload": payload,
+                "model_ids": ["gemini-3-flash", "claude-opus-4-6"],
+                "provider": "agy",
+                "context_id": "probe",
+                "account_generation": 1,
+                "request_started_at": now - 3.0,
+                "now": now,
+            })
+        };
+        let call = |request: serde_json::Value| {
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_provider_usage_normalize_agy_usage(py, request_dict)
+        };
+
+        let observation = call(request(payload(), 1)).unwrap();
+        let value = py_to_json_value(observation.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("ok"));
+        assert_eq!(value["plan"], json!(null));
+        assert_eq!(value["account_mode"], json!("subscription"));
+        assert_eq!(value["windows"][0]["key"], json!("gemini-weekly"));
+        assert_eq!(
+            value["windows"][0]["applicability"]["kind"],
+            json!("model_family")
+        );
+        assert_eq!(
+            value["windows"][0]["applicability"]["family"],
+            json!("gemini")
+        );
+        assert_eq!(
+            value["windows"][0]["applicability"]["model_ids"],
+            json!(["gemini-3-flash"])
+        );
+        assert_eq!(value["windows"][0]["duration_seconds"], json!(604800.0));
+        assert_eq!(value["windows"][1]["key"], json!("gemini-5h"));
+        assert_eq!(value["windows"][2]["applicability"]["family"], json!("3p"));
+
+        // Malformed vendor data is a structured observation, not an
+        // exception; a malformed request is an exception.
+        let malformed = call(request(json!({"status": 7}), 1)).unwrap();
+        let value = py_to_json_value(malformed.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("error"));
+        assert_eq!(value["reason_code"], json!("malformed_payload"));
+
+        let logged_out = call(request(
+            json!({
+                "status": "ERROR",
+                "error": "authentication failed or timed out",
+            }),
+            1,
+        ))
+        .unwrap();
+        let value = py_to_json_value(logged_out.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("unauthenticated"));
+        assert_eq!(value["reason_code"], json!("logged_out"));
+
+        let error = call(request(payload(), 2)).unwrap_err();
+        assert!(error.is_instance_of::<PyValueError>(py));
+    });
+}
+
+#[test]
 fn provider_usage_store_bindings_record_load_context_and_reserve() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
+mod agy;
 mod compatibility;
 mod grok;
 mod indicator;
@@ -17,6 +18,7 @@ mod muse;
 mod refresh;
 mod store;
 
+pub use agy::{normalize_agy_usage, ProviderUsageNormalizeAgyUsageRequestWire};
 pub use grok::{
     normalize_grok_billing, ProviderUsageNormalizeGrokBillingRequestWire,
 };

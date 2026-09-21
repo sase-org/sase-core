@@ -958,6 +958,19 @@ fn py_provider_usage_record_refresh_attempt<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "provider_usage_normalize_agy_usage")]
+fn py_provider_usage_normalize_agy_usage<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ProviderUsageNormalizeAgyUsageRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let observation = core_normalize_agy_usage(request)
+        .map_err(provider_usage_error_to_pyerr)?;
+    serialize_to_py(py, &observation)
+}
+
+#[pyfunction]
 #[pyo3(name = "provider_usage_normalize_grok_billing")]
 fn py_provider_usage_normalize_grok_billing<'py>(
     py: Python<'py>,
@@ -1325,6 +1338,10 @@ pub(crate) fn register_provider_policy(
     m.add_function(wrap_pyfunction!(py_provider_usage_mark_refresh_due, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_record_refresh_attempt,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_normalize_agy_usage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

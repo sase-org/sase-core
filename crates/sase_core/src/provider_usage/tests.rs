@@ -833,6 +833,198 @@ fn indicator_muse_weekly_needs_muse_provider_and_account_scope() {
     assert_eq!(other.period.kind, UsageIndicatorPeriodKind::Unknown);
 }
 
+fn agy_payload() -> Value {
+    json!({
+        "conversation_id": "",
+        "status": "SUCCESS",
+        "response": "Gemini Models\tWeekly Limit Remaining\t96%\t2027-01-21T08:00:00Z\nGemini Models\tFive Hour Limit Remaining\t87%\t2027-01-15T12:00:00Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2027-01-22T08:00:00Z\nClaude and GPT models\tFive Hour Limit Remaining\t100%\t2027-01-15T13:00:00Z\n",
+        "duration_seconds": 0,
+        "num_turns": 0,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 0,
+        },
+        "command": {
+            "name": "usage",
+            "data": {
+                "description": "groups share limits",
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "description": "Models within this group",
+                        "buckets": [
+                            {
+                                "id": "gemini-weekly",
+                                "name": "Weekly Limit Remaining",
+                                "description": "weekly",
+                                "window": "weekly",
+                                "remaining_fraction": 0.96,
+                                "reset_time": "2027-01-21T08:00:00Z",
+                            },
+                            {
+                                "id": "gemini-5h",
+                                "name": "Five Hour Limit Remaining",
+                                "description": "5h",
+                                "window": "5h",
+                                "remaining_fraction": 0.87,
+                                "reset_time": "2027-01-15T12:00:00Z",
+                            },
+                        ],
+                    },
+                    {
+                        "name": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "id": "3p-weekly",
+                                "name": "Weekly Limit Remaining",
+                                "window": "weekly",
+                                "remaining_fraction": 1,
+                                "reset_time": "2027-01-22T08:00:00Z",
+                            },
+                            {
+                                "id": "3p-5h",
+                                "name": "Five Hour Limit Remaining",
+                                "window": "5h",
+                                "remaining_fraction": 1,
+                                "reset_time": "2027-01-15T13:00:00Z",
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+    })
+}
+
+fn normalized_agy_observation() -> ProviderUsageObservationWire {
+    normalize_agy_usage(ProviderUsageNormalizeAgyUsageRequestWire {
+        schema_version: 1,
+        payload: agy_payload(),
+        model_ids: vec![
+            "gemini-3-flash".to_string(),
+            "claude-opus-4-6".to_string(),
+        ],
+        provider: "agy".to_string(),
+        context_id: "probe".to_string(),
+        account_generation: 1,
+        request_started_at: NOW - 1.0,
+        now: NOW,
+    })
+    .unwrap()
+}
+
+#[test]
+fn indicator_selects_agy_gemini_weekly_anchor_by_default() {
+    let snapshot = indicator_snapshot(vec![normalized_agy_observation()], NOW);
+    let projection = indicator_projection(snapshot, None, NOW);
+    assert_eq!(projection.diagnostics, vec![]);
+    // `gemini-weekly` is the only agy `weekly_all` window, so it is the
+    // unlabeled anchor; the healthy sibling windows stay hidden.
+    assert_eq!(
+        projection
+            .entries
+            .iter()
+            .map(|entry| entry.window_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-weekly"]
+    );
+    let anchor = &projection.entries[0];
+    assert!(anchor.weekly_all);
+    assert_eq!(anchor.policy_source, UsageIndicatorPolicySource::WeeklyAll);
+    assert_eq!(anchor.scope.kind, UsageIndicatorScopeKind::ModelFamily);
+    assert_eq!(anchor.scope.family.as_deref(), Some("gemini"));
+    assert_eq!(anchor.period.kind, UsageIndicatorPeriodKind::Weekly);
+}
+
+#[test]
+fn indicator_agy_3p_weekly_is_weekly_but_not_anchor() {
+    let snapshot = indicator_snapshot(vec![normalized_agy_observation()], NOW);
+    // `always` keeps the non-anchor windows in the projection so their
+    // classification can be read back.
+    let projection =
+        indicator_projection(snapshot, Some(json!({"default": "always"})), NOW);
+    let by_key = projection
+        .entries
+        .iter()
+        .map(|entry| (entry.window_key.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    assert!(by_key["gemini-weekly"].weekly_all);
+    let third_party = by_key["3p-weekly"];
+    assert!(!third_party.weekly_all);
+    assert_eq!(third_party.period.kind, UsageIndicatorPeriodKind::Weekly);
+    assert_eq!(third_party.scope.kind, UsageIndicatorScopeKind::ModelFamily);
+    assert!(!by_key["gemini-5h"].weekly_all);
+    assert!(!by_key["3p-5h"].weekly_all);
+}
+
+#[test]
+fn indicator_agy_arm_needs_agy_provider_and_gemini_family() {
+    let anchor_entry =
+        |provider: &str, applicability: UsageApplicabilityWire| {
+            let snapshot = indicator_snapshot(
+                vec![usage_observation(
+                    provider,
+                    "ctx",
+                    1,
+                    NOW - 10.0,
+                    UsageCompleteness::Complete,
+                    vec![indicator_window(
+                        "gemini-weekly",
+                        5.0,
+                        Some(NOW + WEEK_SECONDS),
+                        Some(WEEK_SECONDS),
+                        applicability,
+                        NOW - 10.0,
+                    )],
+                )],
+                NOW,
+            );
+            // `always` keeps a not-weekly-all window in the projection so
+            // its classification can be read back.
+            let projection = indicator_projection(
+                snapshot,
+                Some(json!({"default": "always"})),
+                NOW,
+            );
+            assert_eq!(projection.entries.len(), 1);
+            projection.entries[0].clone()
+        };
+
+    let anchor = anchor_entry(
+        "agy",
+        UsageApplicabilityWire::ModelFamily {
+            family: "gemini".to_string(),
+            model_ids: vec!["gemini-3-flash".to_string()],
+        },
+    );
+    assert!(anchor.weekly_all);
+    // The arm never claims an all-model scope elsewhere.
+    assert_eq!(anchor.scope.kind, UsageIndicatorScopeKind::ModelFamily);
+
+    // Another provider's identical window is not the anchor.
+    let other_provider = anchor_entry(
+        "plugin",
+        UsageApplicabilityWire::ModelFamily {
+            family: "gemini".to_string(),
+            model_ids: vec!["gemini-3-flash".to_string()],
+        },
+    );
+    assert!(!other_provider.weekly_all);
+
+    // Neither is a non-`gemini` family under agy itself.
+    let other_family = anchor_entry(
+        "agy",
+        UsageApplicabilityWire::ModelFamily {
+            family: "3p".to_string(),
+            model_ids: vec!["claude-opus-4-6".to_string()],
+        },
+    );
+    assert!(!other_family.weekly_all);
+}
+
 #[test]
 fn indicator_muse_weekly_over_quota_stays_visible_unclamped() {
     let snapshot =
