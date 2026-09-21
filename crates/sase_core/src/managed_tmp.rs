@@ -898,16 +898,43 @@ fn pressure_recovered(
     }
 }
 
+/// Push a denylist entry plus its canonicalized form, so the guard fires
+/// whether or not canonicalization succeeds. Entries that do not exist
+/// canonicalize to themselves and are still compared raw; canonicalization
+/// failure never errors.
+fn push_denied(denied: &mut Vec<PathBuf>, raw: &Path) {
+    denied.push(raw.to_path_buf());
+    if let Ok(canonical) = raw.canonicalize() {
+        if canonical != raw {
+            denied.push(canonical);
+        }
+    }
+}
+
 fn validate_reap_root(root: &Path) -> Result<PathBuf, ManagedTmpReapError> {
     let resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let cwd = std::env::current_dir()
         .map_err(|error| ManagedTmpReapError::CurrentDir(error.to_string()))?
         .canonicalize()
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
-    for unsafe_root in
-        [Path::new("/"), Path::new("/tmp"), Path::new("/var/tmp")]
-    {
-        if resolved == unsafe_root {
+    // Canonicalize both sides of the comparison (or neither): every entry is
+    // stored raw and canonicalized, so `/tmp` still matches its resolved
+    // `/private/tmp` form on macOS, and the raw form still matches when
+    // canonicalization fails on either side.
+    let mut denied: Vec<PathBuf> = Vec::new();
+    for raw in ["/", "/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"] {
+        push_denied(&mut denied, Path::new(raw));
+    }
+    for key in ["TMPDIR", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            let value = PathBuf::from(value);
+            if !value.as_os_str().is_empty() {
+                push_denied(&mut denied, &value);
+            }
+        }
+    }
+    for unsafe_root in &denied {
+        if resolved == *unsafe_root {
             return Err(ManagedTmpReapError::UnsafeRoot(
                 resolved.to_string_lossy().into_owned(),
             ));
@@ -1809,11 +1836,37 @@ mod tests {
 
     #[test]
     fn broad_cleanup_roots_are_rejected() {
-        let mut req = request(Path::new("/tmp"));
-        req.root = "/tmp".to_string();
+        // Dry run: even a future guard regression must not delete anything.
+        let mut denied = vec![
+            "/".to_string(),
+            "/tmp".to_string(),
+            "/var/tmp".to_string(),
+            "/private/tmp".to_string(),
+            "/private/var/tmp".to_string(),
+        ];
+        for key in ["TMPDIR", "HOME"] {
+            if let Some(value) = std::env::var_os(key) {
+                let value = value.to_string_lossy().into_owned();
+                if !value.is_empty() && !denied.contains(&value) {
+                    denied.push(value);
+                }
+            }
+        }
+        denied.sort();
+        denied.dedup();
+        assert!(!denied.is_empty());
 
-        let error = reap_managed_tmpdir(&req).unwrap_err();
+        for root in denied {
+            let mut req = request(Path::new(&root));
+            req.root = root.clone();
+            req.apply = false;
 
-        assert!(error.to_string().contains("dedicated directory"));
+            let error = reap_managed_tmpdir(&req).unwrap_err();
+
+            assert!(
+                error.to_string().contains("dedicated directory"),
+                "root {root} was not rejected: {error}"
+            );
+        }
     }
 }
