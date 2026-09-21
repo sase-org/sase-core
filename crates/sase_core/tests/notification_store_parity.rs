@@ -569,13 +569,11 @@ fn notification_undismiss_restores_dismissed_rows() {
     .unwrap();
     assert_eq!(outcome.matched_count, 2);
     assert_eq!(outcome.changed_count, 1);
-    assert!(
-        outcome
-            .notifications
-            .iter()
-            .filter(|n| n.id == "a" || n.id == "b")
-            .all(|n| !n.dismissed)
-    );
+    assert!(outcome
+        .notifications
+        .iter()
+        .filter(|n| n.id == "a" || n.id == "b")
+        .all(|n| !n.dismissed));
 
     // The restored rows are visible to readers that exclude dismissed rows.
     let snapshot = read_notifications_snapshot(&path, false).unwrap();
