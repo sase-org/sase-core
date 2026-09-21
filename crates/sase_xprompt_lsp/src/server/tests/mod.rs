@@ -1,0 +1,10 @@
+mod at_references;
+mod catalog_loading;
+mod completion;
+mod documents;
+mod model_completion;
+mod shortcuts;
+mod snippets;
+mod support;
+mod surfaces;
+mod vcs_completion;
