@@ -494,6 +494,102 @@ fn notification_batch_dismiss_and_rewrite_all_update_the_store() {
 }
 
 #[test]
+fn notification_undismiss_restores_dismissed_rows() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    rewrite_notifications(
+        &path,
+        &[notification("a"), notification("b"), notification("c")],
+    )
+    .unwrap();
+
+    let dismissed = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkManyDismissed {
+            ids: vec!["a".to_string(), "b".to_string()],
+        },
+    )
+    .unwrap();
+    assert_eq!(dismissed.changed_count, 2);
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkUndismissed {
+            id: "a".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(
+        !outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "a")
+            .unwrap()
+            .dismissed
+    );
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .find(|n| n.id == "b")
+            .unwrap()
+            .dismissed
+    );
+
+    // Undismissing a visible row still matches but changes nothing.
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkUndismissed {
+            id: "c".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 1);
+    assert_eq!(outcome.changed_count, 0);
+
+    // Unknown ids match nothing.
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkUndismissed {
+            id: "missing".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 0);
+    assert_eq!(outcome.changed_count, 0);
+
+    let outcome = apply_notification_state_update(
+        &path,
+        &NotificationStateUpdateWire::MarkManyUndismissed {
+            ids: vec!["a".to_string(), "b".to_string(), "missing".to_string()],
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome.matched_count, 2);
+    assert_eq!(outcome.changed_count, 1);
+    assert!(
+        outcome
+            .notifications
+            .iter()
+            .filter(|n| n.id == "a" || n.id == "b")
+            .all(|n| !n.dismissed)
+    );
+
+    // The restored rows are visible to readers that exclude dismissed rows.
+    let snapshot = read_notifications_snapshot(&path, false).unwrap();
+    let ids: Vec<&str> = snapshot
+        .notifications
+        .iter()
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(ids.contains(&"a"));
+    assert!(ids.contains(&"b"));
+    assert!(ids.contains(&"c"));
+}
+
+#[test]
 fn notification_mute_and_snooze_follow_python_semantics() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());

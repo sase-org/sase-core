@@ -265,6 +265,12 @@ pub enum NotificationStateUpdateWire {
     MarkManyDismissed {
         ids: Vec<String>,
     },
+    MarkUndismissed {
+        id: String,
+    },
+    MarkManyUndismissed {
+        ids: Vec<String>,
+    },
     MarkMuted {
         id: String,
         muted: bool,

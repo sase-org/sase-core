@@ -387,6 +387,31 @@ fn apply_notification_state_update_with_options(
                     }
                 }
             }
+            NotificationStateUpdateWire::MarkUndismissed { id } => {
+                for n in &mut rows {
+                    if n.id == *id {
+                        matched_count += 1;
+                        if n.dismissed {
+                            n.dismissed = false;
+                            changed_count += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+            NotificationStateUpdateWire::MarkManyUndismissed { ids } => {
+                let ids: BTreeSet<&str> =
+                    ids.iter().map(String::as_str).collect();
+                for n in &mut rows {
+                    if ids.contains(n.id.as_str()) {
+                        matched_count += 1;
+                        if n.dismissed {
+                            n.dismissed = false;
+                            changed_count += 1;
+                        }
+                    }
+                }
+            }
             NotificationStateUpdateWire::MarkMuted { id, muted } => {
                 for n in &mut rows {
                     if n.id == *id {
