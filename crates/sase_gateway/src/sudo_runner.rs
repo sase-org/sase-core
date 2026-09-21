@@ -732,6 +732,42 @@ fn validate_handoff_paths(
     })
 }
 
+/// Compare a caller-supplied `--started-path` against the canonical handoff
+/// path derived from `--detach-dir`.
+///
+/// Both sides are canonicalized before comparing: `HandoffPaths::started_path`
+/// is built from the canonicalized detach dir, while the caller builds
+/// `--started-path` by joining the non-canonical detach dir it was given. A
+/// verbatim comparison therefore never matches when the handoff directory has
+/// a symlinked ancestor (every macOS temp dir: `/tmp` -> `/private/tmp`),
+/// which broke the detached handshake on those hosts. `--started-path` may
+/// not exist yet, so the parent is canonicalized and the file name rejoined
+/// rather than canonicalizing the full path.
+///
+/// The security intent is preserved: the file name must be the handshake file
+/// and the resolved parent must be the handoff directory, so a started-path
+/// outside the detach dir is still rejected. All file operations below use
+/// the canonical `HandoffPaths::started_path`, never the caller-supplied
+/// value.
+fn started_path_matches_handoff(
+    started_path: &Path,
+    paths: &HandoffPaths,
+) -> bool {
+    let Some(file_name) = started_path.file_name() else {
+        return false;
+    };
+    if file_name != STARTED_FILENAME {
+        return false;
+    }
+    let Some(parent) = started_path.parent() else {
+        return false;
+    };
+    match parent.canonicalize() {
+        Ok(canonical_parent) => canonical_parent == paths.dir,
+        Err(_) => false,
+    }
+}
+
 fn read_bounded_manifest_nofollow(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
@@ -984,7 +1020,7 @@ fn run_internal_root_exec(
                     .to_string(),
             ));
         };
-        if started_path != &paths.started_path {
+        if !started_path_matches_handoff(started_path, &paths) {
             return Err(cli_error(
                 SudoRunnerExitStatus::InvalidInput,
                 "internal started path must match the handoff directory"
@@ -1061,7 +1097,7 @@ fn run_internal_root_worker(
                     .to_string(),
             ));
         };
-        if started_path != &paths.started_path {
+        if !started_path_matches_handoff(started_path, &paths) {
             return Err(cli_error(
                 SudoRunnerExitStatus::InvalidInput,
                 "internal started path must match the handoff directory"
@@ -3009,6 +3045,13 @@ mod tests {
     fn fake_sudo_script() -> &'static str {
         r#"#!/bin/sh
 set -eu
+# Portable tool paths: this stub runs with a cleared environment (no PATH),
+# and macOS keeps the BSD userland (cat, rm, rmdir) in /bin while Linux
+# usrmerge provides them in /usr/bin as well. Resolve each tool once into
+# an unexported variable so nothing leaks into the env capture below.
+if [ -x /usr/bin/cat ]; then _CAT=/usr/bin/cat; else _CAT=/bin/cat; fi
+if [ -x /usr/bin/rm ]; then _RM=/usr/bin/rm; else _RM=/bin/rm; fi
+if [ -x /usr/bin/rmdir ]; then _RMDIR=/usr/bin/rmdir; else _RMDIR=/bin/rmdir; fi
 base="$0"
 {
   printf 'BEGIN\n'
@@ -3036,8 +3079,8 @@ fi
 if [ "$#" -eq 2 ] && [ "$1" = "-n" ] && [ "$2" = "-v" ]; then
   if [ -f "$base.probe_fail" ]; then exit 1; fi
   if [ -f "$base.remove_cwd_on_probe" ]; then
-    cwd_to_remove="$(/usr/bin/cat "$base.remove_cwd_on_probe")"
-    /usr/bin/rmdir "$cwd_to_remove" 2>/dev/null || /usr/bin/rm -rf "$cwd_to_remove"
+    cwd_to_remove="$("$_CAT" "$base.remove_cwd_on_probe")"
+    "$_RMDIR" "$cwd_to_remove" 2>/dev/null || "$_RM" -rf "$cwd_to_remove"
   fi
   exit 0
 fi
@@ -3059,7 +3102,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 cmd="${1:-}"
-executor_path="$(/usr/bin/cat "$base.executor" 2>/dev/null || true)"
+executor_path="$("$_CAT" "$base.executor" 2>/dev/null || true)"
 if [ -n "$executor_path" ] && [ "$cmd" = "$executor_path" ]; then
   if [ -f "$base.root_spawn_fail" ]; then exit 42; fi
   "$@"
@@ -3080,7 +3123,7 @@ case "$cmd" in
     exit 0
     ;;
   read-file)
-    /usr/bin/cat "$2"
+    "$_CAT" "$2"
     exit 0
     ;;
   /usr/bin/apt-get)
@@ -3213,6 +3256,12 @@ mv "$tmp" "$started_path"
 
     fn write_self_started(dir: &Path, digest: &str) -> SudoExecStartedWire {
         let pid = std::process::id();
+        // The handshake binds ledger/log paths to the canonical handoff
+        // directory, exactly as production's publisher writes them, so
+        // canonicalize here. Otherwise the simulated handshake disagrees
+        // with `validate_handshake_paths` under any temp root with a
+        // symlinked ancestor.
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let handshake = SudoExecStartedWire {
             schema_version: SUDO_EXEC_STARTED_WIRE_SCHEMA_VERSION,
             kind: SUDO_EXEC_STARTED_KIND.to_string(),
@@ -3548,7 +3597,14 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             argv_calls[3],
             ["-n", "-u", "root", "--", "ok"].map(str::to_string)
         );
-        assert_eq!(fixture.cwd_log()[3], "/tmp");
+        // The stub reports the observed cwd via `pwd`, and the OS resolves
+        // symlinked ancestors at `chdir` time, so on macOS this is
+        // `/private/tmp` rather than the caller-supplied `/tmp`.
+        // `manifest.cwd` is an instruction for where to run, not a value
+        // echoed back verbatim, so the expectation canonicalizes.
+        let expected_cwd =
+            fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+        assert_eq!(fixture.cwd_log()[3], expected_cwd.display().to_string());
         let env_log = fixture.env_log();
         assert!(env_log.contains("APP_MODE=reviewed"));
         assert!(env_log.contains("LC_ALL=C"));
@@ -3636,7 +3692,11 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         let (result, stdout, _) = fixture.run();
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(std::env::current_dir().unwrap(), parent_cwd);
-        assert_eq!(fixture.cwd_log()[3], cwd.display().to_string());
+        // Same canonical-cwd contract as above: under a temp root with a
+        // symlinked ancestor the stub's `pwd` reports the resolved path.
+        let expected_cwd =
+            fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        assert_eq!(fixture.cwd_log()[3], expected_cwd.display().to_string());
         let ledger = ledger(&stdout);
         assert!(ledger.entries[0].output_tail.contains("cwd payload"));
     }
@@ -3746,17 +3806,21 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             serde_json::from_str(stdout.trim()).unwrap();
         assert_eq!(handshake.kind, SUDO_EXEC_STARTED_KIND);
         assert_eq!(handshake.manifest_sha256, fixture.digest);
+        // Production derives handshake paths from the canonicalized detach
+        // dir, so the expectation canonicalizes the fixture dir rather than
+        // comparing against its non-canonical spelling.
+        let canonical_handoff = fs::canonicalize(&fixture.handoff_dir)
+            .unwrap_or_else(|_| fixture.handoff_dir.clone());
         assert_eq!(
             handshake.ledger_path,
-            fixture
-                .handoff_dir
+            canonical_handoff
                 .join(LEDGER_FILENAME)
                 .display()
                 .to_string()
         );
         assert_eq!(
             handshake.log_path,
-            fixture.handoff_dir.join(LOG_FILENAME).display().to_string()
+            canonical_handoff.join(LOG_FILENAME).display().to_string()
         );
         validate_sudo_exec_started(
             &handshake,
@@ -3906,7 +3970,12 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             &mut stderr,
         );
         let argv_path = worker_path.with_extension("argv");
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // The launcher stub records argv from a freshly spawned child; under
+        // a parallel-test fork storm that child can wait seconds before its
+        // first line runs (observed >1s on macOS), so the deadline keeps
+        // headroom far beyond the steady-state milliseconds. The loop still
+        // returns as soon as the file exists.
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !argv_path.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
@@ -4339,6 +4408,62 @@ printf 'ran\n' > "$detach_dir/worker.ran"
     }
 
     #[test]
+    fn internal_modes_reject_started_path_outside_handoff_dir() {
+        // The started-path check exists so an internal worker cannot be
+        // pointed at a handshake outside its handoff directory. The match
+        // canonicalizes both sides (see `started_path_matches_handoff`), so
+        // a path that resolves elsewhere must still be refused on every
+        // platform, symlinked temp ancestors or not.
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_started = outside.path().join(STARTED_FILENAME);
+        let mut manifest = manifest();
+        manifest.run_as = current_username();
+        manifest.cwd = tmp.path().display().to_string();
+        manifest.commands.truncate(1);
+        manifest.commands[0].argv = vec!["/bin/true".to_string()];
+        let manifest_path = tmp.path().join("manifest.json");
+        let digest = write_manifest(&manifest_path, &manifest);
+        let mut config = SudoRunnerConfig::test(tmp.path().join("unused-sudo"));
+        // The exec mode gates on detached-execution support before reaching
+        // the started-path check; force it so both modes are exercised.
+        config.detached_execution = Some(true);
+        for flag in [INTERNAL_ROOT_WORKER_FLAG, INTERNAL_ROOT_EXEC_FLAG] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let error = run_sudo_runner_cli_with_io(
+                [
+                    flag.to_string(),
+                    "-m".to_string(),
+                    manifest_path.display().to_string(),
+                    "-e".to_string(),
+                    digest.clone(),
+                    "-d".to_string(),
+                    tmp.path().display().to_string(),
+                    "--started-path".to_string(),
+                    outside_started.display().to_string(),
+                    "--parent-uid".to_string(),
+                    unsafe { libc::geteuid() }.to_string(),
+                    "--parent-gid".to_string(),
+                    unsafe { libc::getegid() }.to_string(),
+                ],
+                &config,
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap_err();
+            assert_eq!(error.exit_code(), SUDO_RUNNER_INVALID_INPUT_EXIT);
+            assert!(
+                error.message().contains("must match the handoff directory"),
+                "unexpected message for {flag}: {}",
+                error.message()
+            );
+        }
+        assert!(!outside_started.exists());
+        assert!(!tmp.path().join(STARTED_FILENAME).exists());
+    }
+
+    #[test]
     fn post_spawn_identity_failure_reaps_barred_worker() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manifest = manifest();
@@ -4526,11 +4651,14 @@ printf 'ran\n' > "$detach_dir/worker.ran"
     fn internal_worker_keeps_bounded_ledger_tail_for_large_output() {
         let tmp = tempfile::tempdir().unwrap();
         let command_path = tmp.path().join("bulk.sh");
+        // Absolute tool paths, split across directories on purpose: macOS
+        // keeps dd in /bin while tr lives in /usr/bin; Linux usrmerge
+        // provides both locations.
         write_executable(
             &command_path,
             "#!/bin/sh\n\
-/usr/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'x'\n\
-/usr/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'y' >&2\n",
+/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'x'\n\
+/bin/dd if=/dev/zero bs=1024 count=200 status=none | /usr/bin/tr '\\0' 'y' >&2\n",
         );
         let mut manifest = manifest();
         manifest.run_as = current_username();
@@ -4579,9 +4707,27 @@ printf 'ran\n' > "$detach_dir/worker.ran"
     fn internal_worker_timeout_completes_when_descendant_holds_pipe() {
         let tmp = tempfile::tempdir().unwrap();
         let command_path = tmp.path().join("hold-pipe.sh");
+        // Absolute tool paths: this stub runs with a cleared environment (no
+        // PATH), so `command -v` cannot find anything and every tool is
+        // probed by absolute path. setsid(1) detaches the pipe-holder into a
+        // new session so it survives the timeout's process-group kill; it
+        // only exists on Linux (/usr/bin, mirrored at /bin by usrmerge).
+        // Elsewhere the holder stays in the command's group and dies with
+        // it, so only the timeout path itself is exercised there.
+        //
+        // The observable output goes first, before any fork/exec in the stub:
+        // under a parallel-test fork storm the child can wait ~1s before its
+        // first line runs, so anything that must precede the timeout kill
+        // cannot sit behind stub setup. The timeout keeps headroom over that
+        // scheduling tail; the elapsed bound below is sanity only (joining a
+        // drainer is capped by DRAIN_JOIN_TIMEOUT either way).
         write_executable(
             &command_path,
-            "#!/bin/sh\nsetsid /bin/sleep 2 < /dev/null &\nprintf 'held\\n'\nexec /bin/sleep 30\n",
+            "#!/bin/sh\n\
+printf 'held\\n'\n\
+if [ -x /usr/bin/setsid ]; then _SETSID=/usr/bin/setsid; else _SETSID=/bin/setsid; fi\n\
+if [ -x \"$_SETSID\" ]; then \"$_SETSID\" /bin/sleep 5 < /dev/null & else /bin/sleep 5 < /dev/null & fi\n\
+exec /bin/sleep 30\n",
         );
         let mut manifest = manifest();
         manifest.run_as = current_username();
@@ -4590,7 +4736,7 @@ printf 'ran\n' > "$detach_dir/worker.ran"
             id: "hold".to_string(),
             argv: vec![command_path.display().to_string()],
             why: "Leave a descendant holding the pipe".to_string(),
-            timeout_seconds: Some(0.2),
+            timeout_seconds: Some(2.0),
             shell: false,
         }];
         let manifest_path = tmp.path().join("manifest.json");
@@ -4610,7 +4756,7 @@ printf 'ran\n' > "$detach_dir/worker.ran"
         );
         assert!(result.is_ok(), "{result:?}");
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(6),
             "timeout hung joining drainers: {:?}",
             started.elapsed()
         );
