@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.71](https://github.com/sase-org/sase-core/compare/v0.34.70...v0.34.71) - 2026-09-21
+
+### Added
+
+- *(provider-usage)* add agy usage normalizer and Gemini weekly anchor rule
+- *(notifications)* add undismiss transition to core store and wire format
+- *(bead)* reduce event streams into an actor-keyed touch index
+- *(notifications)* dismiss row-owned settlement rows by exact agent key
+- *(sase-core)* gate procfs process-identity token to Linux
+
+### Fixed
+
+- *(sase-core)* make macOS CI leg blocking and fix canonicalization test
+- *(xprompt-lsp)* echo catalog definition paths verbatim in go-to-definition URIs
+- *(sase-core)* reconcile canonicalized paths across sase_core and bindings
+- *(sase-core)* harden managed_tmp reap-root guard and disarm guard test
+- *(tool-run)* reclaim quarantined stores under the log retention horizon
+
+### Other
+
+- *(sase-core)* split notification_store_parity test into behavior-area modules
+- *(sase-core)* split runner_capacity into module tree
+- *(sase-core)* split editor directive into metadata, contract, candidate, context modules
+- *(sase-core)* split provider_usage tests into tests/ directory
+- *(sase-core)* split tool_run store into connection, lifecycle, query, retention modules
+- *(sase-core)* split bead events into wire, import, reduction, merge modules
+- *(agent_stats)* split run.rs into run/ module tree
+- *(bead)* split bead cli.rs into bead/cli module tree
+- *(xprompt_catalog)* split 4850-line module into <=875-line tree
+- *(editor)* split completion.rs into source-keyed module tree
+- *(sase-core)* split agent_launch/mod.rs into <=1500 line modules
+- *(sase-core)* split fleet_contract into module tree
+- *(bead)* split 11kloc mutation.rs into domain module tree
+- *(agent_scan)* split 13kloc index.rs into domain module tree
+- *(sase_core_py)* split 35kloc lib.rs into domain module tree
+
 ## [0.34.70](https://github.com/sase-org/sase-core/compare/v0.34.69...v0.34.70) - 2026-09-20
 
 ### Added

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.71](https://github.com/sase-org/sase-core/compare/v0.34.70...v0.34.71) - 2026-09-21
+
+### Added
+
+- *(provider-usage)* add agy usage normalizer and Gemini weekly anchor rule
+- *(sase-core)* gate procfs process-identity token to Linux
+- *(bead)* reduce event streams into an actor-keyed touch index
+
+### Other
+
+- *(sase_core_py)* split 35kloc lib.rs into domain module tree
+
 ## [0.34.70](https://github.com/sase-org/sase-core/compare/v0.34.69...v0.34.70) - 2026-09-20
 
 ### Added
