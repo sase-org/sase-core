@@ -27,8 +27,17 @@ jobs:
       - name: Read pinned toolchain
         id: toolchain
         run: |
-          channel=$(grep -E '^channel\s*=' rust-toolchain.toml | sed -E 's/.*=\s*"([^"]+)".*/\1/')
-          components=$(grep -E '^components\s*=' rust-toolchain.toml | sed -E 's/.*=\s*\[(.*)\]/\1/' | tr -d '"')
+          # POSIX bracket classes, not \s: BSD sed/grep on the macOS runner do
+          # not understand \s, so the substitution silently passed the whole
+          # line through as the toolchain name. The trailing '|| true' keeps
+          # GitHub's 'bash -e' from aborting before the explicit validation
+          # below names the failure.
+          channel=$(grep -E '^channel[[:space:]]*=' rust-toolchain.toml | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
+          components=$(grep -E '^components[[:space:]]*=' rust-toolchain.toml | sed -E 's/.*=[[:space:]]*\[(.*)\]/\1/' | tr -d '"' || true)
+          if [ -z "$channel" ] || printf '%s' "$channel" | grep -qE '[[:space:]=]'; then
+            echo "::error::Failed to parse a valid channel from rust-toolchain.toml (got '${channel}')" >&2
+            exit 1
+          fi
           echo "channel=${channel}" >> "$GITHUB_OUTPUT"
           echo "components=${components}" >> "$GITHUB_OUTPUT"
 
