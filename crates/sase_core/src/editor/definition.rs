@@ -51,8 +51,13 @@ fn definition_path(raw: &str) -> Option<PathBuf> {
         return None;
     }
     let path = Path::new(raw);
-    let canonical = path.canonicalize().ok()?;
-    canonical.is_file().then_some(canonical)
+    // Preserve the catalog-supplied path verbatim instead of canonicalizing
+    // it. The result is echoed back to LSP clients as a definition URI, and
+    // clients match URIs by string: a resolved `/private/tmp/...` URI for a
+    // path the client knows as `/tmp/...` breaks go-to-definition wherever a
+    // temp root has a symlinked ancestor (every macOS temp dir). Existence is
+    // still validated; only the form is preserved.
+    path.is_file().then(|| path.to_path_buf())
 }
 
 fn looks_like_uri(value: &str) -> bool {
@@ -171,8 +176,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(inline.path, inline_path.canonicalize().unwrap());
-        assert_eq!(standalone.path, standalone_path.canonicalize().unwrap());
+        assert_eq!(inline.path, inline_path);
+        assert_eq!(standalone.path, standalone_path);
         assert_eq!(inline.range, None);
     }
 
@@ -198,7 +203,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(target.path, note_path.canonicalize().unwrap());
+        assert_eq!(target.path, note_path);
         // The bare name is not a reference, so it navigates nowhere.
         assert!(definition_at_position(
             &DocumentSnapshot::new("see #glossary"),
@@ -251,9 +256,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(namespaced.path, namespaced_path.canonicalize().unwrap());
-        assert_eq!(slash.path, skill_path.canonicalize().unwrap());
-        assert_eq!(namespaced_skill.path, skill_path.canonicalize().unwrap());
+        assert_eq!(namespaced.path, namespaced_path);
+        assert_eq!(slash.path, skill_path);
+        assert_eq!(namespaced_skill.path, skill_path);
         // The pre-cutover bare reference does not resolve.
         assert_eq!(
             definition_at_position(
@@ -316,7 +321,7 @@ mod tests {
 
         assert_eq!(
             definition_path(&source_path.to_string_lossy()).unwrap(),
-            source_path.canonicalize().unwrap()
+            source_path
         );
         assert_eq!(definition_path(""), None);
         assert_eq!(definition_path("file:///tmp/source.md"), None);
@@ -357,5 +362,44 @@ mod tests {
         .unwrap();
 
         assert_eq!(target.range, Some(range));
+    }
+
+    #[test]
+    fn preserves_symlinked_ancestor_in_definition_path() {
+        // Reproduces the macOS `/tmp` -> `/private/tmp` disagreement on any
+        // platform: the supplied path goes through a symlinked ancestor, and
+        // the target must echo it verbatim so client URI string-matching
+        // keeps working.
+        let temp = tempdir().unwrap();
+        let real_dir = temp.path().join("real");
+        fs::create_dir(&real_dir).unwrap();
+        let source_path = real_dir.join("aliased.md");
+        fs::write(&source_path, "aliased").unwrap();
+        let link_dir = temp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real_dir, &link_dir).unwrap();
+        let supplied = link_dir.join("aliased.md");
+        assert!(supplied.is_file());
+        assert_ne!(
+            supplied.canonicalize().unwrap(),
+            supplied,
+            "fixture needs a symlinked ancestor to prove anything"
+        );
+
+        let entries = vec![entry(
+            "aliased",
+            "#aliased",
+            Some(supplied.to_string_lossy().into_owned()),
+            false,
+        )];
+        let target = definition_at_position(
+            &DocumentSnapshot::new("#aliased"),
+            pos(3),
+            &entries,
+        )
+        .unwrap();
+        assert_eq!(target.path, supplied);
     }
 }

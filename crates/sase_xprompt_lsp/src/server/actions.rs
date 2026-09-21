@@ -239,6 +239,11 @@ impl XpromptLspServer {
         actions
     }
 
+    // Client-visible URI form: the returned URI echoes the catalog-supplied
+    // definition path verbatim (no canonicalization). LSP clients match URIs
+    // by string, so resolving a symlinked ancestor here (e.g. `/tmp` to
+    // `/private/tmp` on macOS) would break go-to-definition for any client
+    // holding the unresolved form.
     pub async fn definition_for_text(
         &self,
         text: String,
