@@ -653,6 +653,13 @@ fn storage_design_path(
     }
     let normalized = fs::canonicalize(&resolved).unwrap_or(resolved);
     let storage_root = design_storage_root(cwd, write_beads_dir);
+    // Canonicalize both sides of the relativization: on platforms where the
+    // workspace sits under a symlinked ancestor (/tmp -> /private/tmp on
+    // macOS) `normalized` is resolved while `storage_root` is
+    // caller-supplied, so a one-sided strip_prefix never matches and every
+    // design path degrades to an absolute, machine-specific value.
+    let canonical_storage_root = fs::canonicalize(storage_root)
+        .unwrap_or_else(|_| storage_root.to_path_buf());
     let plan_roots = design_plan_roots(storage_root, write_beads_dir)
         .into_iter()
         .map(|root| fs::canonicalize(&root).unwrap_or(root))
@@ -664,7 +671,7 @@ fn storage_design_path(
         return Ok(reference);
     }
     Ok(normalized
-        .strip_prefix(storage_root)
+        .strip_prefix(&canonical_storage_root)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| normalized.display().to_string()))
 }
@@ -3793,6 +3800,44 @@ mod tests {
             std::slice::from_ref(&store.beads_dir),
             &store.beads_dir,
             &nested,
+            true,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 0);
+        let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+        assert_eq!(issue.design, "plans/plan.md");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_plan_path_is_relative_through_symlinked_workspace_root() {
+        // macOS checks out temp dirs under a symlinked ancestor (/tmp ->
+        // /private/tmp): the plan path canonicalizes but the store workspace
+        // stays caller-supplied, so a one-sided strip_prefix degrades the
+        // stored design to an absolute, machine-specific path. Reproduce that
+        // asymmetry here with a symlinked workspace root.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
+        let beads_dir = temp.path().join("link/sdd/beads");
+        let store = seed_issues_at(temp, beads_dir, Vec::new());
+        let workspace = store.beads_dir.ancestors().nth(2).unwrap();
+        let plan_path = workspace.join("plans/plan.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "# Plan\n").unwrap();
+        let outcome = execute_bead_cli(
+            &[
+                "create".to_string(),
+                "--title".to_string(),
+                "Linked plan".to_string(),
+                "--type".to_string(),
+                format!("plan({})", plan_path.display()),
+            ],
+            std::slice::from_ref(&store.beads_dir),
+            &store.beads_dir,
+            workspace,
             true,
             &[],
         )

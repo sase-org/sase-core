@@ -540,6 +540,17 @@ fn normalize_path(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }
+    let lexical = lexical_normalize(path);
+    // A relative alternate joined onto a not-yet-created object dir can name
+    // an existing target through `..` (e.g.
+    // `../../../primary/.git/objects` under a symlinked temp root): the
+    // first canonicalize fails on the missing intermediate, so retry after
+    // collapsing `.`/`..` lexically. Both sides of the expected comparison
+    // stay canonical whenever the target exists.
+    lexical.canonicalize().unwrap_or(lexical)
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -657,6 +668,37 @@ mod tests {
         assert_eq!(
             plan.alternates,
             vec![primary.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_alternates_resolve_through_symlinked_temp_root() {
+        // A symlinked temp-root ancestor (/tmp -> /private/tmp on macOS)
+        // leaves the joined alternate uncanonicalized while the expected
+        // primary path is canonical; the comparison must still agree.
+        // Reproduce that asymmetry with a symlinked temp root.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
+        let link = temp.path().join("link");
+        let objects = link.join("borrower/.git/objects");
+        let primary = link.join("primary/.git/objects");
+        std::fs::create_dir_all(&primary).unwrap();
+        let mut req = request(&objects, &primary);
+        req.alternates = vec!["../../../primary/.git/objects".to_string()];
+
+        let plan = plan_git_object_sharing(&req).unwrap();
+
+        assert_eq!(plan.status, "expected");
+        assert_eq!(
+            plan.alternates,
+            vec![primary
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
         );
     }
 

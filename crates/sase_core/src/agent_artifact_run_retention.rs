@@ -9,6 +9,7 @@
 //! locked protection snapshot.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -548,21 +549,35 @@ fn symlink_component_violation(
     projects_root: &Path,
     path: &Path,
 ) -> Option<&'static str> {
-    let lexical_root = absolutize_lexically(projects_root)?;
     let lexical_path = absolutize_lexically(path)?;
-    let relative = lexical_path.strip_prefix(&lexical_root).ok()?;
-    let mut current = lexical_root;
-    for component in relative.components() {
-        let Component::Normal(part) = component else {
-            return Some("invalid_path_component");
-        };
+    // Map the caller-supplied path onto the canonical root by climbing its
+    // ancestors: the deepest ancestor that canonicalizes to `projects_root`
+    // marks the root boundary. Ancestors above the boundary (e.g. the
+    // platform `/tmp` -> `/private/tmp` alias on macOS) are never evidence
+    // of an attack, so only components below the boundary are inspected.
+    // Comparing a canonical root against a caller-supplied path with a plain
+    // strip_prefix instead misses every below-root symlink on such hosts.
+    let mut boundary = lexical_path.clone();
+    let mut below: Vec<OsString> = Vec::new();
+    loop {
+        if boundary.canonicalize().ok().as_deref() == Some(projects_root) {
+            break;
+        }
+        {
+            let name = boundary.file_name()?;
+            below.push(name.to_owned());
+            boundary.pop();
+        }
+    }
+    let mut current = boundary;
+    for (index, part) in below.iter().rev().enumerate() {
         current.push(part);
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(_) => return Some("missing"),
         };
         if metadata.file_type().is_symlink() {
-            return Some(if current == lexical_path {
+            return Some(if index + 1 == below.len() {
                 "symlink"
             } else {
                 "symlink_ancestor"
@@ -888,6 +903,47 @@ mod tests {
         let mut request = base_request(&projects_root);
         request.candidates = vec![AgentArtifactRunCandidateWire {
             artifact_dir: alias_run.to_string_lossy().into_owned(),
+            project: "alias".to_string(),
+            timestamp: "20260101000000".to_string(),
+            protected_reasons: Vec::new(),
+        }];
+
+        let result = apply_agent_artifact_run_retention(&request).unwrap();
+
+        assert_eq!(result.removed_runs, 0);
+        assert!(real_run.exists());
+        let item = &result.run_items[0];
+        assert_eq!(item.outcome, "protected");
+        assert_eq!(item.reasons, vec!["symlink_ancestor".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_candidate_path_reports_symlink_ancestor_for_canonical_root() {
+        // On macOS the projects root canonicalizes (/tmp/... -> /private/...)
+        // while the candidate arrives caller-supplied; the symlink walk must
+        // still find a symlinked project alias below the canonical root.
+        // Reproduce that asymmetry with a symlinked temp root and a
+        // canonical projects-root input.
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(real.join("projects")).unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
+        let projects_root = real.join("projects");
+        let real_run = projects_root
+            .join("demo/artifacts/ace-run/202601/01/20260101000000");
+        candidate(&real_run, "demo", "20260101000000");
+        std::os::unix::fs::symlink(
+            projects_root.join("demo"),
+            projects_root.join("alias"),
+        )
+        .unwrap();
+        let link_run = temp.path().join(
+            "link/projects/alias/artifacts/ace-run/202601/01/20260101000000",
+        );
+        let mut request = base_request(&projects_root);
+        request.candidates = vec![AgentArtifactRunCandidateWire {
+            artifact_dir: link_run.to_string_lossy().into_owned(),
             project: "alias".to_string(),
             timestamp: "20260101000000".to_string(),
             protected_reasons: Vec::new(),

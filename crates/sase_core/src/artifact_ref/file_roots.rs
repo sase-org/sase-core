@@ -180,12 +180,17 @@ pub fn resolve_artifact_file_path(
         }
     }
 
+    // Echo the caller's path: containment and symlink-escape checks above
+    // already ran on the canonical form, and a round-trip that returns a
+    // different spelling than the caller supplied (e.g. /private/tmp/... for
+    // /tmp/... on macOS) is the wrong default. This matches
+    // `resolve_document`, which likewise echoes `root.join(payload)`.
     Ok(ArtifactRefResolutionWire {
         schema_version: super::ARTIFACT_REF_RESOLUTION_WIRE_SCHEMA_VERSION,
         status: "exact".to_string(),
         rendered,
         locator: Some(format!("{}:{relative_payload}", root.name)),
-        resolved_path: Some(candidate_canonical.to_string_lossy().into_owned()),
+        resolved_path: Some(candidate.to_string_lossy().into_owned()),
         candidates: Vec::new(),
         diagnostic: None,
     })
@@ -553,6 +558,30 @@ mod tests {
         let result = resolve(&unreadable, &context);
         fs::set_permissions(&unreadable, original).unwrap();
         assert_eq!(result.status, "denied");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_resolution_echoes_caller_path_through_symlinked_parent() {
+        // A symlinked ancestor (/tmp -> /private/tmp on macOS) must not
+        // rewrite the echoed path: containment runs on the canonical form,
+        // but the round-trip returns the caller's spelling.
+        let temp = tempdir().unwrap();
+        let real = temp.path().join("real");
+        let files = real.join("files");
+        fs::create_dir_all(&files).unwrap();
+        fs::write(files.join("notes.md"), "notes").unwrap();
+        symlink(&real, temp.path().join("link")).unwrap();
+        let context = context_for("notes", &files, None);
+        let caller = temp.path().join("link/files/notes.md");
+
+        let resolved = resolve(&caller, &context);
+
+        assert_eq!(resolved.status, "exact");
+        assert_eq!(
+            resolved.resolved_path,
+            Some(caller.to_string_lossy().into_owned())
+        );
     }
 
     #[test]
