@@ -38,7 +38,7 @@ const EPIC_FIELDS: &[&str] =
 const PHASE_FIELDS: &[&str] =
     &["id", "title", "depends_on", "description", "size", "model"];
 
-const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead show` already displays it.";
+const PHASE_DESCRIPTION_DESCRIPTION: &str = "Phase bead description: name this phase's section in the plan body and briefly summarize that section. Do not reference the plan file itself; `sase bead read` already displays it.";
 const SIZE_FIELD_TYPE: &str = "xsmall | small | medium | large | xlarge";
 const TALE_SIZE_FIELD_TYPE: &str = "xsmall | small | medium";
 const TALE_SIZE_DESCRIPTION: &str = "Estimated tale scope: `xsmall`, `small`, or `medium`; read `sase/memory/sase_sizes.md` with `/sase_memory_read` for size guidance.";
