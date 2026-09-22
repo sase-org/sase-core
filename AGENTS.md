@@ -56,6 +56,10 @@ flake. Before you treat it as yours, look for its `sase-core flake:` bead in
 - release-plz owns versions and changelogs:
   - Never edit a `version` field, a path-dependency version pin, or a `CHANGELOG.md`. A
     deliberate release recovery needs user approval and the `manual-version` PR label.
+  - A new workspace crate needs a `[[package]]` entry in `release-plz.toml`. If it is
+    never released (`release = false`), it also needs its own `git_tag_name` (for
+    example `"<crate>-v{{ version }}"`); otherwise git_only `release-pr` looks the
+    crate up at the last `v*` tag, fails, and blocks every release.
   - Commit subjects are Conventional Commits.
   - Mark a breaking change with `feat!:`/`fix!:` or a `BREAKING CHANGE:` footer. That
     covers removing or renaming a Python binding, and any wire change that old readers

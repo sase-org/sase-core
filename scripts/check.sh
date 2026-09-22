@@ -132,6 +132,7 @@ cmd_check() {
 cmd_features() {
     python3 - <<'PY'
 import json
+import re
 import subprocess
 import sys
 
@@ -140,8 +141,12 @@ EDGES = "normal,build,dev"
 
 
 def run_cargo(args):
+    # The parser reads `cargo tree` text, so force colorless output: a caller's
+    # CARGO_TERM_COLOR=always (as CI sets) or a cargo `term.color` config would
+    # otherwise wrap the `(*)` dedupe marker in ANSI escapes that parse_tree
+    # counts as features.
     proc = subprocess.run(
-        ["cargo", *args],
+        ["cargo", "--color", "never", *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -155,7 +160,8 @@ def run_cargo(args):
 def parse_tree(output):
     packages = {}
     for line in output.splitlines():
-        line = line.strip().replace("(*)", "").strip()
+        line = line.strip().replace("(*)", "")
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
         if not line:
             continue
         parts = line.split()

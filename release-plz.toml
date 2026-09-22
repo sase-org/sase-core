@@ -40,3 +40,8 @@ release = false
 [[package]]
 name = "sase_workspace_hack"
 release = false
+# git_only mode runs a tag lookup for every workspace member, even
+# `release = false` ones, and loads the package from the matched tag's tree.
+# This crate is never tagged, so its template must match no existing tag, or
+# `release-pr` fails with "cannot find package".
+git_tag_name = "sase_workspace_hack-v{{ version }}"
