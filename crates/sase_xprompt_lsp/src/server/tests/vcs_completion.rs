@@ -50,7 +50,7 @@ async fn completes_vcs_project_with_primary_and_additional_edits() {
     // `filter_text` is the `+name` trigger spelling so typing `+sa` keeps
     // the item under client-side filtering.
     assert_eq!(item.filter_text.as_deref(), Some("+sase"));
-    assert_eq!(item.detail.as_deref(), Some("#gh:sase"));
+    assert_eq!(item.detail.as_deref(), Some("+sase "));
     let Some(Documentation::MarkupContent(documentation)) =
         item.documentation.as_ref()
     else {
@@ -58,25 +58,23 @@ async fn completes_vcs_project_with_primary_and_additional_edits() {
     };
     assert_eq!(documentation.value, "SASE repo");
 
-    // Primary edit consumes the `+` trigger token...
+    // The primary edit replaces the `+` trigger token in place with the
+    // project tag; nothing else in the segment needs deleting.
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
         panic!("expected primary text edit");
     };
-    assert_eq!(edit.new_text, "");
-    // ...and the additional edit prepends the tag at the document start.
-    let additional = item.additional_text_edits.as_ref().unwrap();
-    assert_eq!(additional.len(), 1);
-    assert_eq!(additional[0].new_text, "#gh:sase ");
-    assert_eq!(additional[0].range.start, additional[0].range.end);
+    assert_eq!(edit.new_text, "+sase ");
+    assert_eq!(edit.range.start, Position::new(0, 20));
+    assert_eq!(edit.range.end, Position::new(0, 21));
+    assert!(item.additional_text_edits.is_none());
 }
 
 #[tokio::test]
 async fn completes_vcs_project_replacing_existing_tag_at_eof() {
     // `#git:foo +` -- an existing leading VCS tag immediately followed by
-    // the `+` trigger at end-of-input. Selecting a project must replace the
-    // existing tag, not double it. The primary edit deletes the trailing
-    // ` +` trigger span; the additional edit replaces the `#git:foo` range
-    // with the selected `#gh:sase ` tag.
+    // the `+` trigger at end-of-input. Selecting a project inserts the tag
+    // in place and deletes the existing `#git:foo` workspace target, so the
+    // prompt never carries two targets.
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("vcs_project_catalog.json");
     write_vcs_project_catalog(&catalog_path);
@@ -110,20 +108,21 @@ async fn completes_vcs_project_replacing_existing_tag_at_eof() {
     let item = &items[0];
     assert_eq!(item.label, "sase");
 
-    // Primary edit deletes the trailing ` +` trigger span (bytes 8..10).
+    // Primary edit replaces the trailing `+` trigger span (byte 9..10)
+    // in place with the project tag.
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
         panic!("expected primary text edit");
     };
-    assert_eq!(edit.new_text, "");
-    assert_eq!(edit.range.start, Position::new(0, 8));
+    assert_eq!(edit.new_text, "+sase ");
+    assert_eq!(edit.range.start, Position::new(0, 9));
     assert_eq!(edit.range.end, Position::new(0, 10));
 
-    // Additional edit replaces the existing `#git:foo` (bytes 0..8) tag.
+    // Additional edit deletes the existing `#git:foo ` (bytes 0..9) target.
     let additional = item.additional_text_edits.as_ref().unwrap();
     assert_eq!(additional.len(), 1);
-    assert_eq!(additional[0].new_text, "#gh:sase ");
+    assert_eq!(additional[0].new_text, "");
     assert_eq!(additional[0].range.start, Position::new(0, 0));
-    assert_eq!(additional[0].range.end, Position::new(0, 8));
+    assert_eq!(additional[0].range.end, Position::new(0, 9));
 }
 
 #[tokio::test]
@@ -161,7 +160,9 @@ async fn completes_vcs_patch_with_pr_label_details() {
     let item = &items[0];
     assert_eq!(item.label, "ship-completion");
     assert_eq!(item.kind, Some(CompletionItemKind::EVENT));
-    assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion"));
+    // `detail` mirrors the in-place insertion (with its trailing space)
+    // until the LSP phase restyles project items.
+    assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion "));
     assert_eq!(item.filter_text.as_deref(), Some("+ship-completion"));
     let label_details = item.label_details.as_ref().unwrap();
     assert_eq!(label_details.detail.as_deref(), Some(" · sase"));
@@ -185,11 +186,11 @@ async fn obsolete_and_unspaced_plus_forms_do_not_complete_vcs_projects() {
         config.vcs_project_catalog = Some(catalog_path);
     }
 
+    // Line starts and tabs are tag left boundaries, so `line\n+` and
+    // `\t+` complete now; only genuinely unclaimed `+` forms are listed.
     for (text, position) in [
         ("#+", Position::new(0, 2)),
         ("Fix #+sa", Position::new(0, 8)),
-        ("line\n+", Position::new(1, 1)),
-        ("\t+", Position::new(0, 2)),
         ("word+", Position::new(0, 5)),
         ("a+b", Position::new(0, 3)),
         ("c++", Position::new(0, 3)),
@@ -251,12 +252,12 @@ async fn bare_plus_at_bof_completes_vcs_project() {
     // `filter_text` uses the bare-plus trigger spelling so typing `+sa`
     // keeps the item under client-side filtering.
     assert_eq!(item.filter_text.as_deref(), Some("+sase"));
-    // BOF bare-plus: the prepend point coincides with the trigger deletion,
-    // so the edits merge into one primary edit with no additional edits.
+    // BOF bare-plus: the trigger deletion is the whole change, so the edits
+    // merge into one primary edit with no additional edits.
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
         panic!("expected primary text edit");
     };
-    assert_eq!(edit.new_text, "#gh:sase ");
+    assert_eq!(edit.new_text, "+sase ");
     assert!(item.additional_text_edits.is_none());
 }
 

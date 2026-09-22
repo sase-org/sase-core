@@ -25,6 +25,7 @@ use lsp_types::{
     TextDocumentEdit, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextEdit, Uri, WorkDoneProgressOptions, WorkspaceEdit,
 };
+use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
     editor_build_agent_completion_candidates,

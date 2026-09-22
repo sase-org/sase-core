@@ -43,6 +43,7 @@ mod notifications;
 mod plans;
 mod prelude;
 mod procs;
+mod project_tag;
 mod provider_policy;
 mod query;
 mod sudo;
@@ -75,6 +76,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     migration::register_migration(m)?;
     notifications::register_notifications(m)?;
     procs::register_procs(m)?;
+    project_tag::register_project_tag(m)?;
     agent_launch::register_agent_launch(m)?;
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;

@@ -244,57 +244,22 @@ pub fn is_vcs_project_trigger_token(token: &str) -> bool {
 
 /// Detect a `+query` VCS-project completion trigger token at `position`.
 ///
-/// Mirrors the Python `find_vcs_project_trigger`. The non-whitespace token must
-/// begin with `+`, and that plus must sit at document offset zero or directly
-/// after a literal ASCII space. Newlines, tabs, other whitespace, and plus signs
-/// embedded in words or operators do not trigger.
+/// Thin wrapper over [`crate::project_tag::project_tag_trigger`] so existing
+/// callers keep compiling: the plus must sit at a tag left boundary (start
+/// of the text, whitespace, `{`, or `|`), which now includes the start of a
+/// line and tabs. Plus signs embedded in words or operators do not trigger.
 ///
-/// Unlike [`extract_token_at_position`], token boundaries here are whitespace
-/// only (matching the Python contract), so `+a:b` is a single trigger token.
-/// The returned [`TokenInfo`] spans the whole trigger token; the filter query
-/// (text after the plus up to the cursor) is derived by the caller.
+/// Unlike [`extract_token_at_position`], the token extends over tag-name
+/// characters only, so the filter query (text after the plus up to the
+/// cursor) is derived by the caller from the returned span.
 pub fn vcs_project_trigger_token(
     document: &DocumentSnapshot,
     position: EditorPosition,
 ) -> Option<TokenInfo> {
     let text = document.text();
     let cursor = document.position_to_byte_offset(position)?;
-
-    // Walk back through the run of non-whitespace characters before the cursor
-    // to find the token start. By construction the character before `start` is
-    // whitespace or the start of the document -- i.e. the position rule.
-    let mut start = cursor;
-    while start > 0 {
-        let prev = previous_char_boundary(text, start)?;
-        if text[prev..].chars().next()?.is_whitespace() {
-            break;
-        }
-        start = prev;
-    }
-
-    let follows_literal_space =
-        start > 0 && text.as_bytes().get(start - 1).copied() == Some(b' ');
-    if !text[start..].starts_with('+') || !(start == 0 || follows_literal_space)
-    {
-        return None;
-    }
-
-    // The cursor must sit past the prefix for the trigger to be live.
-    if cursor < start + 1 {
-        return None;
-    }
-
-    // Extend forward to the end of the token (next whitespace or end of text).
-    let mut end = start;
-    while end < text.len() {
-        let ch = text[end..].chars().next()?;
-        if ch.is_whitespace() {
-            break;
-        }
-        end += ch.len_utf8();
-    }
-
-    token_info(document, start, end)
+    let trigger = crate::project_tag::project_tag_trigger(text, cursor)?;
+    token_info(document, trigger.start, trigger.end)
 }
 
 pub fn xprompt_reference_name(token: &str) -> Option<String> {
@@ -497,12 +462,29 @@ mod tests {
     }
 
     #[test]
-    fn vcs_project_trigger_requires_bof_or_literal_space() {
+    fn vcs_project_trigger_uses_tag_left_boundaries() {
+        // Start of a line, tabs, `{`, and `|` are tag left boundaries, so
+        // they trigger. Only BOF-or-literal-space triggered before.
+        for (text, position, expected) in [
+            ("line\n+", pos(1, 1), (5, 6, "+")),
+            ("line\n +x", pos(1, 3), (6, 8, "+x")),
+            ("\t+", pos(0, 2), (1, 2, "+")),
+            ("\u{a0}+", pos(0, 2), (2, 3, "+")),
+            ("%{+sa", pos(0, 5), (2, 5, "+sa")),
+            ("%{a | +sa", pos(0, 9), (6, 9, "+sa")),
+        ] {
+            let doc = DocumentSnapshot::new(text);
+            let token = vcs_project_trigger_token(&doc, position)
+                .unwrap_or_else(|| panic!("{text:?} should trigger"));
+            assert_eq!(token.byte_start, expected.0, "{text:?} start");
+            assert_eq!(token.byte_end, expected.1, "{text:?} end");
+            assert_eq!(token.text, expected.2, "{text:?} text");
+        }
+
         for (text, position) in [
-            ("line\n+", pos(1, 1)),
             ("line\n#+", pos(1, 2)),
-            ("\t+", pos(0, 2)),
-            ("\u{a0}+", pos(0, 2)),
+            ("a+b", pos(0, 3)),
+            ("word+", pos(0, 5)),
         ] {
             let doc = DocumentSnapshot::new(text);
             assert!(
@@ -510,12 +492,6 @@ mod tests {
                 "{text:?} should not trigger"
             );
         }
-
-        let doc = DocumentSnapshot::new("line\n +x");
-        let token = vcs_project_trigger_token(&doc, pos(1, 3)).unwrap();
-        assert_eq!(token.byte_start, 6);
-        assert_eq!(token.byte_end, 8);
-        assert_eq!(token.text, "+x");
     }
 
     #[test]

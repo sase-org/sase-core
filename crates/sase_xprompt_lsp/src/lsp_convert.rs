@@ -608,8 +608,9 @@ pub fn placeholder_completion_response(
 /// Differs from [`completion_response`] in two ways: the `filter_text` is the
 /// `+name` trigger spelling (so typing `+sa` keeps the `sase` item), and the
 /// item kind/label details distinguish projects from PRs. The primary
-/// `text_edit` and `additional_text_edits` (the prepend/replace edit) are
-/// carried over from the candidate's `replacement` / `additional_edits`.
+/// `text_edit` (the in-place insertion) and `additional_text_edits` (same-
+/// segment target deletions) are carried over from the candidate's
+/// `replacement` / `additional_edits`.
 pub fn vcs_project_completion_response(
     list: CompletionList,
     replacement_range: EditorRange,

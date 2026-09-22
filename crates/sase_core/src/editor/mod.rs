@@ -36,9 +36,8 @@ pub use at_reference::{
     AT_REFERENCE_MAX_GROUP_ROWS,
 };
 pub use completion::{
-    apply_vcs_project_selection, apply_vcs_ref_selection,
-    apply_vcs_repo_selection, assist_entries_from_catalog,
-    build_agent_completion_candidates,
+    apply_vcs_ref_selection, apply_vcs_repo_selection,
+    assist_entries_from_catalog, build_agent_completion_candidates,
     build_artifact_ref_kind_completion_candidates,
     build_artifact_ref_payload_completion_candidates,
     build_artifact_ref_payload_inventory, build_directive_clause_candidates,
@@ -127,12 +126,13 @@ pub use wire::{
     EditorDiagnostic, EditorPosition, EditorRange, EditorTextEdit,
     FinalizerCatalogRequest, FinalizerCatalogResponse, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload, TokenInfo,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoCatalogRequest,
-    VcsRepoCatalogResponse, VcsRepoEntry, VcsRepoTrigger,
-    XpromptArgumentSource, XpromptArgumentSpan, XpromptArgumentSpanRole,
-    XpromptArgumentSpanValidity, XpromptAssistEntry, XpromptCallNameSpan,
-    XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION, EDITOR_WIRE_SCHEMA_VERSION,
-    FINALIZER_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
+    VcsNamespaceEntry, VcsProjectCatalogWire, VcsProjectEntry, VcsRefTrigger,
+    VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
+    VcsRepoTrigger, XpromptArgumentSource, XpromptArgumentSpan,
+    XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
+    XpromptCallNameSpan, XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION,
+    EDITOR_WIRE_SCHEMA_VERSION, FINALIZER_CATALOG_SCHEMA_VERSION,
+    VCS_PROJECT_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub(crate) use xprompt_args::{
     find_matching_bracket_for_args, parse_xprompt_reference_body,

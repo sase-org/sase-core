@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::content_layout::MemoryTierWire;
+use crate::project_tag::ProjectTagTargetWire;
 
 pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 2;
 
@@ -118,10 +121,10 @@ pub struct CompletionCandidate {
     #[serde(default)]
     pub replacement: Option<EditorTextEdit>,
     /// Secondary edits applied alongside `replacement` (the LSP
-    /// `additionalTextEdits`). Used by `vcs_project` completion to prepend or
-    /// replace the VCS workflow tag at the start of the document while the
-    /// primary edit consumes the `+query` trigger token. Empty for every other
-    /// completion kind.
+    /// `additionalTextEdits`). Used by `vcs_project` completion to delete
+    /// every other workspace target in the trigger's `---` segment while the
+    /// primary edit replaces the `+query` trigger token in place. Empty for
+    /// every other completion kind.
     #[serde(default)]
     pub additional_edits: Vec<EditorTextEdit>,
     /// Optional entry discriminator for specialized completion surfaces.
@@ -184,6 +187,51 @@ pub struct VcsProjectEntry {
     /// Base patch status for patch rows; empty for project rows.
     #[serde(default)]
     pub status: String,
+    /// Directory key (e.g. `gh_sase-org__sase`). Present in v5+ catalogs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// Project tag spelling (e.g. `+sase`), or empty when the name is not in
+    /// the tag grammar. Present in v5+ catalogs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tag: String,
+    /// Index into the catalog's `accent_palette`. Present in v5+ catalogs;
+    /// absent for rows without an accent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_index: Option<u32>,
+    /// Whether this row is the current project. Present in v5+ catalogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
+}
+
+/// Schema version of [`VcsProjectCatalogWire`]. Catalogs v1–v4 still load:
+/// every v5 field has a serde default.
+pub const VCS_PROJECT_CATALOG_SCHEMA_VERSION: u32 = 5;
+
+/// Materialized `vcs_project` completion catalog shared by the TUI and the
+/// xprompt LSP.
+///
+/// The v5 shape is `{ "schema_version": 5, "workflow_names": [..],
+/// "entries": [VcsProjectEntry, ..], "namespaces": {..},
+/// "accent_palette": [..], "project_tags": [ProjectTagTargetWire, ..] }`.
+/// Older files omit `accent_palette` and `project_tags` (and the per-entry
+/// v5 fields) and still deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsProjectCatalogWire {
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub workflow_names: Vec<String>,
+    #[serde(default)]
+    pub entries: Vec<VcsProjectEntry>,
+    #[serde(default)]
+    pub namespaces: HashMap<String, Vec<VcsNamespaceEntry>>,
+    /// The Python-owned accent palette (hex strings); per-entry
+    /// `accent_index` points into it.
+    #[serde(default)]
+    pub accent_palette: Vec<String>,
+    /// Tag-resolution targets: every non-sibling project plus `home`.
+    #[serde(default)]
+    pub project_tags: Vec<ProjectTagTargetWire>,
 }
 
 /// One org/group-style namespace completion candidate for a VCS workflow's ref
@@ -1302,4 +1350,73 @@ pub struct FrontmatterInputType {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_catalog_wire_still_loads_with_v5_defaults() {
+        let catalog: VcsProjectCatalogWire =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "workflow_names": ["gh"],
+                "entries": [{
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:sase",
+                    "provider_display": "GitHub",
+                }],
+            }))
+            .unwrap();
+        assert_eq!(catalog.schema_version, 1);
+        assert!(catalog.accent_palette.is_empty());
+        assert!(catalog.project_tags.is_empty());
+        assert!(catalog.namespaces.is_empty());
+        assert_eq!(catalog.entries[0].key, "");
+        assert_eq!(catalog.entries[0].tag, "");
+        assert_eq!(catalog.entries[0].accent_index, None);
+        assert_eq!(catalog.entries[0].current, None);
+        assert_eq!(
+            VCS_PROJECT_CATALOG_SCHEMA_VERSION, 5,
+            "bump alongside the wire shape"
+        );
+    }
+
+    #[test]
+    fn v5_catalog_wire_round_trips() {
+        let catalog = VcsProjectCatalogWire {
+            schema_version: VCS_PROJECT_CATALOG_SCHEMA_VERSION,
+            workflow_names: vec!["gh".to_string()],
+            entries: vec![VcsProjectEntry {
+                name: "sase".to_string(),
+                vcs_prefix: "gh".to_string(),
+                display_tag: "#gh:gh_sase-org__sase".to_string(),
+                provider_display: "GitHub".to_string(),
+                description: String::new(),
+                aliases: vec![],
+                entry_kind: "project".to_string(),
+                kind: "project".to_string(),
+                project: "sase".to_string(),
+                status: String::new(),
+                key: "gh_sase-org__sase".to_string(),
+                tag: "+sase".to_string(),
+                accent_index: Some(2),
+                current: Some(true),
+            }],
+            namespaces: HashMap::new(),
+            accent_palette: vec!["#ff0000".to_string()],
+            project_tags: vec![ProjectTagTargetWire {
+                key: "gh_sase-org__sase".to_string(),
+                name: "sase".to_string(),
+                aliases: vec![],
+                workflow_type: Some("gh".to_string()),
+            }],
+        };
+        let round_tripped: VcsProjectCatalogWire =
+            serde_json::from_value(serde_json::to_value(&catalog).unwrap())
+                .unwrap();
+        assert_eq!(round_tripped, catalog);
+    }
 }

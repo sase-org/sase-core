@@ -61,6 +61,10 @@ pub(super) struct VcsProjectCatalog {
     pub(super) entries: Vec<VcsProjectEntry>,
     pub(super) workflow_names: Vec<String>,
     pub(super) namespaces: HashMap<String, Vec<VcsNamespaceEntry>>,
+    /// The Python-owned accent palette (v5+ catalogs; empty otherwise).
+    pub(super) accent_palette: Vec<String>,
+    /// Tag-resolution targets (v5+ catalogs; empty otherwise).
+    pub(super) project_tags: Vec<ProjectTagTargetWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

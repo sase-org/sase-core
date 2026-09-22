@@ -156,6 +156,80 @@ fn loads_v4_vcs_project_catalog_with_entry_kind_and_no_legacy_kind() {
 }
 
 #[test]
+fn loads_v5_vcs_project_catalog_with_palette_and_tags() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    fs::write(
+        &catalog_path,
+        r##"{
+            "schema_version": 5,
+            "workflow_names": ["gh", "git"],
+            "entries": [
+                {
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:gh_sase-org__sase",
+                    "provider_display": "GitHub",
+                    "description": "SASE repo",
+                    "aliases": ["sa"],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "sase",
+                    "status": "",
+                    "key": "gh_sase-org__sase",
+                    "tag": "+sase",
+                    "accent_index": 2,
+                    "current": true
+                }
+            ],
+            "namespaces": {},
+            "accent_palette": ["#ff0000", "#00ff00", "#0000ff"],
+            "project_tags": [
+                {
+                    "key": "gh_sase-org__sase",
+                    "name": "sase",
+                    "aliases": ["sa"],
+                    "workflow_type": "gh"
+                },
+                {
+                    "key": "home",
+                    "name": "home"
+                }
+            ]
+        }"##,
+    )
+    .unwrap();
+
+    let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+    assert_eq!(catalog.entries.len(), 1);
+    assert_eq!(catalog.entries[0].key, "gh_sase-org__sase");
+    assert_eq!(catalog.entries[0].tag, "+sase");
+    assert_eq!(catalog.entries[0].accent_index, Some(2));
+    assert_eq!(catalog.entries[0].current, Some(true));
+    assert_eq!(catalog.accent_palette.len(), 3);
+    assert_eq!(catalog.project_tags.len(), 2);
+    assert_eq!(catalog.project_tags[0].workflow_type.as_deref(), Some("gh"));
+    assert_eq!(catalog.project_tags[1].workflow_type, None);
+}
+
+#[test]
+fn pre_v5_vcs_project_catalogs_default_palette_and_tags() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    fs::write(
+        &catalog_path,
+        r#"{"schema_version": 4, "workflow_names": ["gh"], "entries": []}"#,
+    )
+    .unwrap();
+
+    let catalog = load_vcs_project_catalog(Some(&catalog_path));
+
+    assert!(catalog.accent_palette.is_empty());
+    assert!(catalog.project_tags.is_empty());
+}
+
+#[test]
 fn load_vcs_project_catalog_ignores_malformed_namespaces() {
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("vcs_project_catalog.json");

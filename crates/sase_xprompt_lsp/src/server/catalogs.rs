@@ -34,10 +34,13 @@ pub(super) fn file_history() -> Vec<String> {
 ///
 /// Read fresh on every `+` completion request. Any failure (no path, unreadable
 /// file, malformed JSON) degrades to empty results so the `+` menu simply
-/// shows nothing rather than breaking completion. Schema versions 1 through 4
-/// are accepted; v1 entries default to project rows, and v1/v2 catalogs default
-/// `namespaces` to empty. The v4 file shape is
-/// `{ "schema_version": 4, "workflow_names": [..], "entries": [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]} }`.
+/// shows nothing rather than breaking completion. Schema versions 1 through 5
+/// are accepted; v1 entries default to project rows, v1/v2 catalogs default
+/// `namespaces` to empty, and pre-v5 catalogs default `accent_palette`,
+/// `project_tags`, and the per-entry v5 fields to empty. The v5 file shape is
+/// `{ "schema_version": 5, "workflow_names": [..], "entries":
+/// [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]},
+/// "accent_palette": [..], "project_tags": [ProjectTagTargetWire, ..] }`.
 pub(super) fn load_vcs_project_catalog(
     path: Option<&Path>,
 ) -> VcsProjectCatalog {
@@ -55,7 +58,7 @@ pub(super) fn load_vcs_project_catalog(
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if !matches!(schema_version, 1..=4) {
+    if !matches!(schema_version, 1..=5) {
         warn!(
             "unsupported vcs project catalog schema_version {schema_version} at {path:?}"
         );
@@ -88,10 +91,29 @@ pub(super) fn load_vcs_project_catalog(
             .ok()
         })
         .unwrap_or_default();
+    let accent_palette = value
+        .get("accent_palette")
+        .and_then(serde_json::Value::as_array)
+        .map(|palette| {
+            palette
+                .iter()
+                .filter_map(|color| color.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let project_tags = value
+        .get("project_tags")
+        .cloned()
+        .and_then(|targets| {
+            serde_json::from_value::<Vec<ProjectTagTargetWire>>(targets).ok()
+        })
+        .unwrap_or_default();
     VcsProjectCatalog {
         entries,
         workflow_names,
         namespaces,
+        accent_palette,
+        project_tags,
     }
 }
 

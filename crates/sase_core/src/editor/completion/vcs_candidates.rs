@@ -1,5 +1,5 @@
 //! `vcs:` repository, ref, and project completions, including trigger
-//! detection, selection application, and project byte-edit computation.
+//! detection and selection application.
 
 use crate::editor::token::{vcs_project_trigger_token, DocumentSnapshot};
 use crate::editor::wire::{
@@ -8,8 +8,10 @@ use crate::editor::wire::{
     VcsNamespaceEntry, VcsProjectEntry, VcsRefTrigger, VcsRepoEntry,
     VcsRepoTrigger,
 };
-use regex::Regex;
-use std::sync::OnceLock;
+use crate::project_tag::{
+    is_tag_name, project_tag_selection_edits, ProjectTagSelectionEdit,
+    ProjectTagTargetWire,
+};
 
 pub fn build_vcs_repo_completion_candidates(
     document: &DocumentSnapshot,
@@ -520,13 +522,13 @@ fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
 }
 /// Build `vcs_project` completion candidates for a `+query` trigger token.
 ///
-/// Each candidate expands the selected project into the prompt via the
-/// canonical VCS-tag expansion algorithm (see [`apply_vcs_project_selection`]),
-/// represented as a primary edit that consumes the trigger span plus
-/// `additional_edits` that prepend/replace the VCS workflow tag at the start of
-/// the document. When those edits would overlap they are merged into a single
-/// primary edit. The output is byte-for-byte identical to the Python
-/// `apply_vcs_project_selection` for the shared golden test vectors.
+/// Each candidate applies the shared project-tag accept algorithm (see
+/// [`crate::project_tag::apply_project_tag_selection`]): the primary edit
+/// replaces the typed `+query` token in place with the row's insertion — a
+/// project row inserts `+<name> ` (or `#<workflow>:<name> ` when the name is
+/// not in the tag grammar), a PR row inserts its `#` spelling — while
+/// `additional_edits` delete every other workspace target in the trigger's
+/// `---` segment. The edits never overlap.
 pub fn build_vcs_project_completion_candidates(
     token: &TokenInfo,
     document: &DocumentSnapshot,
@@ -545,7 +547,7 @@ pub fn build_vcs_project_completion_candidates(
     // bare `+`), matching the Python `find_vcs_project_trigger`.
     let query = text.get(t0 + 1..cursor).unwrap_or("").to_lowercase();
 
-    let replace_re = vcs_replace_regex(known_workflow_names);
+    let targets = entry_completion_targets(entries);
     let mut candidates = Vec::new();
     for entry in entries {
         let matches_query = query.is_empty()
@@ -558,21 +560,21 @@ pub fn build_vcs_project_completion_candidates(
             continue;
         }
 
-        let edits = vcs_project_byte_edits(
+        let insertion = completion_insertion(entry);
+        let (primary, additional) = project_tag_selection_edits(
             text,
-            t0,
-            t1,
-            &entry.display_tag,
-            &replace_re,
+            (t0, t1),
+            &insertion,
+            known_workflow_names,
+            &targets,
         );
-        let Some(primary) = byte_edit_to_text_edit(document, &edits.primary)
+        let Some(primary) = selection_edit_to_text_edit(document, &primary)
         else {
             continue;
         };
-        let additional: Option<Vec<EditorTextEdit>> = edits
-            .additional
+        let additional: Option<Vec<EditorTextEdit>> = additional
             .iter()
-            .map(|edit| byte_edit_to_text_edit(document, edit))
+            .map(|edit| selection_edit_to_text_edit(document, edit))
             .collect();
         let Some(additional) = additional else {
             continue;
@@ -580,7 +582,7 @@ pub fn build_vcs_project_completion_candidates(
 
         candidates.push(CompletionCandidate {
             display: entry.name.clone(),
-            insertion: entry.display_tag.clone(),
+            insertion: insertion.clone(),
             detail: Some(format!(
                 "{} · {}",
                 entry.provider_display, entry.display_tag
@@ -601,36 +603,49 @@ pub fn build_vcs_project_completion_candidates(
         shared_extension: String::new(),
     }
 }
-/// Apply a selected project's VCS tag to `text`, returning the new full text.
-///
-/// This is the canonical expansion algorithm (the cross-language parity
-/// contract). It mirrors the Python `apply_vcs_project_selection`: remove the
-/// `[t0, t1)` trigger token, collapse one adjacent space, then either replace
-/// every line-start VCS workflow tag with `display_tag` or -- when none exist --
-/// prepend `display_tag` after any leading frontmatter / whitespace /
-/// `%directive` tokens.
-pub fn apply_vcs_project_selection(
-    text: &str,
-    t0: usize,
-    t1: usize,
-    display_tag: &str,
-    replace_re: &Regex,
-) -> String {
-    let (d0, d1) = strip_trigger_region(text, t0, t1);
-    let base = format!("{}{}", &text[..d0], &text[d1..]);
-    let tag_with_space = format!("{display_tag} ");
-
-    if replace_re.is_match(&base) {
-        return replace_re
-            .replace_all(&base, |caps: &regex::Captures| {
-                let prefix = caps.get(1).map_or("", |m| m.as_str());
-                format!("{prefix}{tag_with_space}")
-            })
-            .into_owned();
+/// Tag-resolution targets behind the `+` menu: project rows only. Patch rows
+/// are accepted through their `#` spelling, never as tags.
+fn entry_completion_targets(
+    entries: &[VcsProjectEntry],
+) -> Vec<ProjectTagTargetWire> {
+    entries
+        .iter()
+        .filter(|entry| vcs_project_entry_kind(entry) != "patch")
+        .map(|entry| ProjectTagTargetWire {
+            key: if entry.key.is_empty() {
+                entry.name.clone()
+            } else {
+                entry.key.clone()
+            },
+            name: entry.name.clone(),
+            aliases: entry.aliases.clone(),
+            workflow_type: Some(entry.vcs_prefix.clone()),
+        })
+        .collect()
+}
+/// Row insertion text: a project row inserts its tag (`+<name> `), falling
+/// back to `#<workflow>:<name> ` when the name is not in the tag grammar; a
+/// PR row inserts its `#` spelling.
+fn completion_insertion(entry: &VcsProjectEntry) -> String {
+    if vcs_project_entry_kind(entry) == "patch" {
+        return format!("{} ", entry.display_tag);
     }
-
-    let offset = vcs_prepend_offset(&base);
-    format!("{}{}{}", &base[..offset], tag_with_space, &base[offset..])
+    if !entry.tag.is_empty() {
+        return format!("{} ", entry.tag);
+    }
+    if is_tag_name(&entry.name) {
+        return format!("+{} ", entry.name);
+    }
+    format!("#{}:{} ", entry.vcs_prefix, entry.name)
+}
+fn selection_edit_to_text_edit(
+    document: &DocumentSnapshot,
+    edit: &ProjectTagSelectionEdit,
+) -> Option<EditorTextEdit> {
+    Some(EditorTextEdit {
+        range: document.byte_range_to_range(edit.start, edit.end)?,
+        new_text: edit.new_text.clone(),
+    })
 }
 pub(crate) fn detect_vcs_project_context_at_position(
     document: &DocumentSnapshot,
@@ -650,230 +665,4 @@ pub(crate) fn detect_vcs_project_context_at_position(
         vcs_ref: None,
         artifact_ref: None,
     })
-}
-/// A single byte-range edit: replace `text[start..end]` with `new_text`.
-pub(crate) struct VcsByteEdit {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) new_text: String,
-}
-pub(crate) struct VcsProjectByteEdits {
-    pub(crate) primary: VcsByteEdit,
-    pub(crate) additional: Vec<VcsByteEdit>,
-}
-/// Compute the primary + additional edits for one project selection.
-///
-/// Edits are expressed in original-document byte coordinates and are guaranteed
-/// not to overlap (overlapping cases are either merged into the primary edit or,
-/// defensively, collapsed into a single full-document replacement).
-pub(crate) fn vcs_project_byte_edits(
-    text: &str,
-    trigger_start: usize,
-    trigger_end: usize,
-    display_tag: &str,
-    replace_re: &Regex,
-) -> VcsProjectByteEdits {
-    let (d0, d1) = strip_trigger_region(text, trigger_start, trigger_end);
-    let base = format!("{}{}", &text[..d0], &text[d1..]);
-    let gap = d1 - d0;
-    // Map a `base` byte offset back to original-document coordinates.
-    let to_original = |p: usize| if p <= d0 { p } else { p + gap };
-    let tag_with_space = format!("{display_tag} ");
-
-    let tag_matches: Vec<(usize, usize, usize)> = replace_re
-        .captures_iter(&base)
-        .map(|caps| {
-            let whole = caps.get(0).expect("group 0 always present");
-            let prefix_len = caps.get(1).map_or(0, |m| m.len());
-            (whole.start(), whole.end(), prefix_len)
-        })
-        .collect();
-
-    let (primary, additional) = if tag_matches.is_empty() {
-        // Prepend branch: insert the tag at the frontmatter/directive-aware
-        // offset.
-        let insert_at = to_original(vcs_prepend_offset(&base));
-        if insert_at == d0 {
-            // The prepend point coincides with the trigger-deletion start;
-            // merge into one edit (the deleted region collapses to the tag).
-            (
-                VcsByteEdit {
-                    start: d0,
-                    end: d1,
-                    new_text: tag_with_space,
-                },
-                Vec::new(),
-            )
-        } else {
-            (
-                VcsByteEdit {
-                    start: d0,
-                    end: d1,
-                    new_text: String::new(),
-                },
-                vec![VcsByteEdit {
-                    start: insert_at,
-                    end: insert_at,
-                    new_text: tag_with_space,
-                }],
-            )
-        }
-    } else {
-        // Replace branch: rewrite every line-start tag, preserving any leading
-        // `%directive` prefix captured in group 1.
-        let additional = tag_matches
-            .into_iter()
-            .map(|(match_start, match_end, prefix_len)| {
-                let prefix =
-                    base[match_start..match_start + prefix_len].to_string();
-                VcsByteEdit {
-                    start: to_original(match_start),
-                    end: to_original(match_end),
-                    new_text: format!("{prefix}{tag_with_space}"),
-                }
-            })
-            .collect();
-        (
-            VcsByteEdit {
-                start: d0,
-                end: d1,
-                new_text: String::new(),
-            },
-            additional,
-        )
-    };
-
-    // Defensive guard: if the edits would overlap (no realistic input produces
-    // this, but LSP forbids overlapping ranges), fall back to a single
-    // full-document replacement with the canonical result.
-    if vcs_edits_conflict(&primary, &additional) {
-        let canonical = apply_vcs_project_selection(
-            text,
-            trigger_start,
-            trigger_end,
-            display_tag,
-            replace_re,
-        );
-        return VcsProjectByteEdits {
-            primary: VcsByteEdit {
-                start: 0,
-                end: text.len(),
-                new_text: canonical,
-            },
-            additional: Vec::new(),
-        };
-    }
-
-    VcsProjectByteEdits {
-        primary,
-        additional,
-    }
-}
-pub(crate) fn vcs_edits_conflict(
-    primary: &VcsByteEdit,
-    additional: &[VcsByteEdit],
-) -> bool {
-    let mut spans: Vec<(usize, usize)> =
-        std::iter::once((primary.start, primary.end))
-            .chain(additional.iter().map(|edit| (edit.start, edit.end)))
-            .collect();
-    spans.sort_by_key(|&(start, end)| (start, end));
-    spans.windows(2).any(|pair| pair[1].0 < pair[0].1)
-}
-fn byte_edit_to_text_edit(
-    document: &DocumentSnapshot,
-    edit: &VcsByteEdit,
-) -> Option<EditorTextEdit> {
-    Some(EditorTextEdit {
-        range: document.byte_range_to_range(edit.start, edit.end)?,
-        new_text: edit.new_text.clone(),
-    })
-}
-/// Remove the `[t0, t1)` trigger span, collapsing one adjacent space, and
-/// return the resulting deletion region `[d0, d1)`. Mirrors the Python
-/// `_strip_trigger_token`.
-fn strip_trigger_region(text: &str, t0: usize, t1: usize) -> (usize, usize) {
-    let before = &text[..t0];
-    let after = &text[t1..];
-    let before_space = before.ends_with(' ');
-    let after_space = after.starts_with(' ');
-
-    if before_space && after_space {
-        // Token sat between two spaces; drop the following one.
-        (t0, t1 + 1)
-    } else if before_space
-        && (after.is_empty() || after.starts_with(['\r', '\n']))
-    {
-        // A trailing space would be orphaned at end of line/prompt.
-        (t0 - 1, t1)
-    } else if after_space
-        && (before.is_empty() || before.ends_with(['\r', '\n']))
-    {
-        // A leading space would be orphaned at start of line/prompt.
-        (t0, t1 + 1)
-    } else {
-        (t0, t1)
-    }
-}
-/// Where a leading VCS workflow tag should be inserted: after any leading YAML
-/// frontmatter block, leading horizontal whitespace, and leading `%directive`
-/// tokens.
-/// Mirrors the Python `find_vcs_workflow_tag_prepend_offset`.
-pub(crate) fn vcs_prepend_offset(text: &str) -> usize {
-    let frontmatter_len = frontmatter_block_len(text);
-    let body = &text[frontmatter_len..];
-    let leading_ws = body
-        .char_indices()
-        .find(|(_, ch)| !ch.is_whitespace() || matches!(ch, '\n' | '\r'))
-        .map_or(body.len(), |(idx, _)| idx);
-    let after_ws = &body[leading_ws..];
-    let directive_len = directive_prefix_regex()
-        .find(after_ws)
-        .map_or(0, |m| m.end());
-    frontmatter_len + leading_ws + directive_len
-}
-/// Byte length of a leading YAML frontmatter block (`---` ... `---`), or 0 when
-/// `text` does not begin with one. Mirrors the Python `_split_frontmatter_block`.
-fn frontmatter_block_len(text: &str) -> usize {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let Some(first) = lines.first() else {
-        return 0;
-    };
-    if first.trim() != "---" {
-        return 0;
-    }
-    let mut consumed = first.len();
-    for line in &lines[1..] {
-        consumed += line.len();
-        if line.trim() == "---" {
-            return consumed;
-        }
-    }
-    0
-}
-fn directive_prefix_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?:%\S+[\s]+)+").unwrap())
-}
-/// Build the multiline pattern matching VCS workflow tags at the start of any
-/// line, mirroring the Python `_get_vcs_replace_pattern`. Group 1 captures any
-/// leading `%directive` prefix to preserve it during replacement.
-pub(crate) fn vcs_replace_regex(known_workflow_names: &[String]) -> Regex {
-    let mut names: Vec<&str> =
-        known_workflow_names.iter().map(String::as_str).collect();
-    names.sort_unstable();
-    let alternation = names
-        .iter()
-        .map(|name| regex::escape(name))
-        .collect::<Vec<_>>()
-        .join("|");
-    // The boundary after a tag is whitespace OR end-of-input. `\s` is tried
-    // first, so any actual whitespace (including a newline) is consumed and
-    // replaced exactly as before; `$` only wins at true EOF, letting a
-    // line-start tag with no trailing whitespace (e.g. `#gh:sase` alone) still
-    // be replaced rather than treated as absent.
-    let pattern = format!(
-        r"(?m)^((?:%\S+[\s]+)*)#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)(?:\s|$)"
-    );
-    Regex::new(&pattern).expect("valid vcs replace pattern")
 }

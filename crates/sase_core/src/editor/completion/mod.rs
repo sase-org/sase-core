@@ -37,8 +37,8 @@ pub use trigger_context::{
     named_args_skeleton,
 };
 pub use vcs_candidates::{
-    apply_vcs_project_selection, apply_vcs_ref_selection,
-    apply_vcs_repo_selection, build_vcs_project_completion_candidates,
+    apply_vcs_ref_selection, apply_vcs_repo_selection,
+    build_vcs_project_completion_candidates,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     detect_vcs_ref_context_at_position, detect_vcs_repo_context_at_position,
 };
@@ -52,9 +52,4 @@ pub(crate) use artifact_ref::{
     sort_commit_candidates, CommitCandidate, CommitLogFailure,
     CommitLogIoCause, ScratchStep, ARTIFACT_REF_MAX_SCAN_RESULTS,
     ARTIFACT_REF_REPOSITORY_KIND_SIDECAR,
-};
-#[cfg(test)]
-pub(crate) use vcs_candidates::{
-    vcs_edits_conflict, vcs_prepend_offset, vcs_project_byte_edits,
-    vcs_replace_regex, VcsByteEdit, VcsProjectByteEdits,
 };

@@ -85,6 +85,7 @@ pub mod perf_logs;
 pub mod plan;
 pub mod procs;
 pub mod project_spec;
+pub mod project_tag;
 pub mod prompt_archive;
 pub mod prompt_artifact;
 pub mod prompt_history_filter;
@@ -724,7 +725,6 @@ pub use disk_pressure::{
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,
     analyze_document as editor_analyze_document,
-    apply_vcs_project_selection as editor_apply_vcs_project_selection,
     apply_vcs_ref_selection as editor_apply_vcs_ref_selection,
     apply_vcs_repo_selection as editor_apply_vcs_repo_selection,
     assist_entries_from_catalog as editor_assist_entries_from_catalog,
