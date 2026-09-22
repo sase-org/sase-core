@@ -287,6 +287,32 @@ fn py_tool_run_finish<'py>(
 
 #[pyfunction]
 #[pyo3(
+    name = "tool_run_observe",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_observe<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunObserveRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunObserveRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_observe(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
     name = "tool_run_reconcile",
     signature = (store_path, request, busy_timeout_ms=250)
 )]
@@ -520,6 +546,7 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_begin, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_append_event, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_finish, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_observe, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_reconcile, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_show, m)?)?;

@@ -14,6 +14,6 @@ mod retention;
 #[cfg(test)]
 mod tests;
 
-pub use lifecycle::{append_event, begin, finish, reconcile};
+pub use lifecycle::{append_event, begin, finish, observe, reconcile};
 pub use query::{list_runs, show_run, store_stats, summarize};
 pub use retention::{retention_apply, retention_preview};

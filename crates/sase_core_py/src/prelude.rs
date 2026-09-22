@@ -1025,7 +1025,7 @@ pub(crate) use sase_core::tool_run::{
     canonicalize_tool_fingerprint as core_tool_run_canonicalize_fingerprint,
     finish as core_tool_run_finish, list_runs as core_tool_run_list,
     normalize_tool_definition as core_tool_run_normalize_definition,
-    reconcile as core_tool_run_reconcile,
+    observe as core_tool_run_observe, reconcile as core_tool_run_reconcile,
     retention_apply as core_tool_run_retention_apply,
     retention_preview as core_tool_run_retention_preview,
     show_run as core_tool_run_show, store_stats as core_tool_run_store_stats,
@@ -1033,9 +1033,9 @@ pub(crate) use sase_core::tool_run::{
     unknown_evidence as core_tool_run_unknown_evidence, ToolDefinitionWire,
     ToolFingerprintWire, ToolRunAppendRequestWire, ToolRunBeginRequestWire,
     ToolRunFinishRequestWire, ToolRunListRequestWire,
-    ToolRunReconcileRequestWire, ToolRunRetentionRequestWire,
-    ToolRunShowRequestWire, ToolRunSummaryRequestWire,
-    TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolRunObserveRequestWire, ToolRunReconcileRequestWire,
+    ToolRunRetentionRequestWire, ToolRunShowRequestWire,
+    ToolRunSummaryRequestWire, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,

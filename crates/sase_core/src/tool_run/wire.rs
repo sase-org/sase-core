@@ -663,6 +663,8 @@ pub struct ToolRunWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_pgid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_start_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutated_input: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint_before: Option<ToolFingerprintWire>,
@@ -779,6 +781,8 @@ pub struct ToolRunFinishRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_pgid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_start_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint_before: Option<ToolFingerprintWire>,
@@ -828,12 +832,46 @@ pub struct ToolRunReconcileRequestWire {
     pub now_ts: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReapCandidateWire {
+    pub run_id: String,
+    pub pgid: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_start_identity: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolRunReconcileResultWire {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
     pub marked_lost: Vec<String>,
     pub persisted: bool,
+    #[serde(default)]
+    pub reap_candidates: Vec<ToolRunReapCandidateWire>,
+    #[serde(default = "empty_diagnostics")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunObserveRequestWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_pgid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_process_start_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunObserveResultWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub run: ToolRunWire,
+    pub replayed: bool,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }

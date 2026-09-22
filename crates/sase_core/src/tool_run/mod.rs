@@ -9,8 +9,8 @@ mod wire;
 pub use catalog::normalize_tool_definition;
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
 pub use store::{
-    append_event, begin, finish, list_runs, reconcile, retention_apply,
-    retention_preview, show_run, store_stats, summarize,
+    append_event, begin, finish, list_runs, observe, reconcile,
+    retention_apply, retention_preview, show_run, store_stats, summarize,
 };
 pub use wire::*;
 

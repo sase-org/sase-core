@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS runs (
     process_start_identity TEXT,
     child_pid INTEGER,
     child_pgid INTEGER,
+    child_process_start_identity TEXT,
     mutated_input INTEGER,
     fingerprint_before_json TEXT,
     fingerprint_after_json TEXT,
@@ -135,6 +136,45 @@ pub(super) fn validate_schema(version: u32) -> Result<(), ToolRunError> {
         });
     }
     Ok(())
+}
+
+/// Add columns that postdate the store file without touching existing rows.
+/// Fresh stores already carry them through `SCHEMA_SQL`; a store written by
+/// an older binary gains them here on its first write. Reads never migrate:
+/// `load_run` selects a `NULL` placeholder when the column is absent, so a
+/// read-only open of an unmigrated store keeps working.
+pub(super) fn ensure_child_observation_columns(
+    conn: &Connection,
+) -> Result<(), ToolRunError> {
+    let mut names = Vec::new();
+    let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        names.push(name?);
+    }
+    if !names
+        .iter()
+        .any(|name| name == "child_process_start_identity")
+    {
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN child_process_start_identity TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn runs_has_child_observation_column(
+    conn: &Connection,
+) -> Result<bool, ToolRunError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == "child_process_start_identity" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(super) fn unix_now() -> i64 {
@@ -294,6 +334,7 @@ fn open_write_store(
     enable_wal_mode(&conn, busy_timeout)?;
     conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
     conn.execute_batch(SCHEMA_SQL)?;
+    ensure_child_observation_columns(&conn)?;
     enforce_schema_version(&conn, true)?;
     Ok(conn)
 }

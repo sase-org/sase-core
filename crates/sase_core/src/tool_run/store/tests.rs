@@ -2,11 +2,12 @@ use super::super::wire::{
     ToolLivenessObservationWire, ToolRunAppendRequestWire,
     ToolRunBeginRequestWire, ToolRunBeginResultWire, ToolRunEventKindWire,
     ToolRunEventWire, ToolRunFinishRequestWire, ToolRunListRequestWire,
-    ToolRunReconcileRequestWire, ToolRunRetentionPolicyWire,
-    ToolRunRetentionRequestWire, ToolRunRetentionResultWire,
-    ToolRunShowRequestWire, ToolRunStateWire, ToolRunSummaryRequestWire,
-    ToolStageWire, TOOL_RUN_LOST_REASON_RUNNER_EXITED,
-    TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolRunLivenessFactWire, ToolRunObserveRequestWire,
+    ToolRunObserveResultWire, ToolRunReconcileRequestWire,
+    ToolRunRetentionPolicyWire, ToolRunRetentionRequestWire,
+    ToolRunRetentionResultWire, ToolRunShowRequestWire, ToolRunStateWire,
+    ToolRunSummaryRequestWire, ToolStageWire,
+    TOOL_RUN_LOST_REASON_RUNNER_EXITED, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
 use super::*;
@@ -115,6 +116,7 @@ fn every_terminal_state_round_trips() {
                     .then(|| TOOL_RUN_LOST_REASON_RUNNER_EXITED.to_string()),
                 child_pid: Some(99),
                 child_pgid: Some(99),
+                child_process_start_identity: None,
                 duration_ms: (state != ToolRunStateWire::Lost).then_some(12),
                 fingerprint_before: None,
                 fingerprint_after: None,
@@ -155,6 +157,7 @@ fn invalid_transition_is_an_error() {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(1),
             fingerprint_before: None,
             fingerprint_after: None,
@@ -178,6 +181,7 @@ fn invalid_transition_is_an_error() {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(1),
             fingerprint_before: None,
             fingerprint_after: None,
@@ -463,6 +467,7 @@ fn retention_protects_unsettled_runs() {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(5),
             fingerprint_before: None,
             fingerprint_after: None,
@@ -575,6 +580,7 @@ fn settle_succeeded(path: &Path, run_id: &str, now: i64) {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(5),
             fingerprint_before: None,
             fingerprint_after: None,
@@ -685,6 +691,8 @@ fn reconcile_marks_dead_wrappers_lost_without_inventing_duration() {
     .unwrap();
     assert_eq!(result.marked_lost.len(), 1);
     assert_eq!(result.marked_lost[0], started.run.run_id);
+    // No child facts were observed, so nothing is authorized for reaping.
+    assert!(result.reap_candidates.is_empty());
     let shown = show_run(
         &path,
         ToolRunShowRequestWire {
@@ -722,6 +730,7 @@ fn unknown_liveness_is_not_proof_of_death() {
     )
     .unwrap();
     assert!(result.marked_lost.is_empty());
+    assert!(result.reap_candidates.is_empty());
     let shown = show_run(
         &path,
         ToolRunShowRequestWire {
@@ -821,6 +830,7 @@ fn finish_stores_canonical_fingerprints_and_mutated_input() {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(12),
             fingerprint_before: Some(before),
             fingerprint_after: Some(after),
@@ -871,6 +881,7 @@ fn incomplete_fingerprints_do_not_guess_mutated_input() {
             lost_reason: None,
             child_pid: None,
             child_pgid: None,
+            child_process_start_identity: None,
             duration_ms: Some(3),
             fingerprint_before: Some(before),
             fingerprint_after: Some(after),
@@ -1082,4 +1093,249 @@ fn private_argv_is_not_serialized_on_queries() {
     let encoded = serde_json::to_string(&started.run).unwrap();
     assert!(!encoded.contains("abc"));
     assert!(encoded.contains("***"));
+}
+
+fn observe_child(path: &Path, run_id: &str) -> ToolRunObserveResultWire {
+    observe(
+        path,
+        ToolRunObserveRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            child_pid: Some(4242),
+            child_pgid: Some(4242),
+            child_process_start_identity: Some("boot-1:12345".into()),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap()
+}
+
+fn dead_wrapper_fact(run_id: &str) -> ToolRunLivenessFactWire {
+    ToolRunLivenessFactWire {
+        run_id: run_id.to_string(),
+        wrapper_pid: Some(4242),
+        boot_id: Some("boot-other".into()),
+        process_start_identity: Some("start-1".into()),
+        observation: ToolLivenessObservationWire::Dead,
+        reason: Some("runner gone".into()),
+    }
+}
+
+#[test]
+fn golden_observe_and_reap_fixtures_pin_the_wire_shape() {
+    let request: ToolRunObserveRequestWire =
+        serde_json::from_str(include_str!("../fixtures/observe_request.json"))
+            .unwrap();
+    assert_eq!(request.schema_version, TOOL_RUN_WIRE_SCHEMA_VERSION);
+    assert_eq!(request.child_pid, Some(4242));
+    assert_eq!(request.child_pgid, Some(4242));
+    assert_eq!(
+        request.child_process_start_identity.as_deref(),
+        Some("boot-1:12345")
+    );
+    let candidate: crate::tool_run::wire::ToolRunReapCandidateWire =
+        serde_json::from_str(include_str!("../fixtures/reap_candidate.json"))
+            .unwrap();
+    assert_eq!(candidate.run_id, request.run_id);
+    assert_eq!(candidate.pgid, request.child_pgid.unwrap());
+    assert_eq!(
+        candidate.child_process_start_identity,
+        request.child_process_start_identity
+    );
+    // A reap candidate authorizes exactly the observed pgid plus the
+    // observed child identity: no wrapper fields leak into it.
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({
+            "run_id": request.run_id,
+            "pgid": 4242,
+            "child_process_start_identity": "boot-1:12345",
+        })
+    );
+}
+
+#[test]
+fn observe_then_finish_repeats_child_facts_idempotently() {
+    let (_temp, path) = store();
+    let started = begin_named(&path, 10);
+    let observed = observe_child(&path, &started.run.run_id);
+    assert!(!observed.replayed);
+    assert_eq!(observed.run.child_pid, Some(4242));
+    assert_eq!(observed.run.child_pgid, Some(4242));
+    assert_eq!(
+        observed.run.child_process_start_identity.as_deref(),
+        Some("boot-1:12345")
+    );
+    let finished = finish(
+        &path,
+        ToolRunFinishRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: started.run.run_id.clone(),
+            event_id: None,
+            state: ToolRunStateWire::Succeeded,
+            exit_code: Some(0),
+            signal: None,
+            interruption_reason: None,
+            lost_reason: None,
+            child_pid: Some(4242),
+            child_pgid: Some(4242),
+            child_process_start_identity: Some("boot-1:12345".into()),
+            duration_ms: Some(12),
+            fingerprint_before: None,
+            fingerprint_after: None,
+            mutated_input: None,
+            now_ts: Some(20),
+            diagnostics: Vec::new(),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(finished.run.state, ToolRunStateWire::Succeeded);
+    assert_eq!(finished.run.child_pid, Some(4242));
+    assert_eq!(finished.run.child_pgid, Some(4242));
+    assert_eq!(
+        finished.run.child_process_start_identity.as_deref(),
+        Some("boot-1:12345")
+    );
+}
+
+#[test]
+fn observe_then_lost_reports_an_authorized_reap_candidate() {
+    let (_temp, path) = store();
+    let started = begin_named(&path, 10);
+    observe_child(&path, &started.run.run_id);
+    let result = reconcile(
+        &path,
+        ToolRunReconcileRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            facts: vec![dead_wrapper_fact(&started.run.run_id)],
+            now_ts: Some(11),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result.marked_lost, vec![started.run.run_id.clone()]);
+    assert_eq!(result.reap_candidates.len(), 1);
+    let candidate = &result.reap_candidates[0];
+    assert_eq!(candidate.run_id, started.run.run_id);
+    assert_eq!(candidate.pgid, 4242);
+    assert_eq!(
+        candidate.child_process_start_identity.as_deref(),
+        Some("boot-1:12345")
+    );
+    let shown = show_run(
+        &path,
+        ToolRunShowRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: started.run.run_id,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let run = shown.run.unwrap();
+    assert_eq!(run.state, ToolRunStateWire::Lost);
+    assert_eq!(run.child_pgid, Some(4242));
+}
+
+#[test]
+fn reconcile_without_an_observation_authorizes_no_reap() {
+    let (_temp, path) = store();
+    let started = begin_named(&path, 10);
+    let result = reconcile(
+        &path,
+        ToolRunReconcileRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            facts: vec![dead_wrapper_fact(&started.run.run_id)],
+            now_ts: Some(11),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result.marked_lost, vec![started.run.run_id]);
+    assert!(result.reap_candidates.is_empty());
+}
+
+#[test]
+fn repeated_observation_replays_and_settled_or_missing_runs_reject() {
+    let (_temp, path) = store();
+    let started = begin_named(&path, 10);
+    assert!(!observe_child(&path, &started.run.run_id).replayed);
+    assert!(observe_child(&path, &started.run.run_id).replayed);
+
+    let missing = observe(
+        &path,
+        ToolRunObserveRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: "does-not-exist".into(),
+            child_pid: Some(1),
+            child_pgid: Some(1),
+            child_process_start_identity: None,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert!(matches!(missing, ToolRunError::NotFound { .. }));
+
+    finish(
+        &path,
+        ToolRunFinishRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: started.run.run_id.clone(),
+            event_id: None,
+            state: ToolRunStateWire::Succeeded,
+            exit_code: Some(0),
+            signal: None,
+            interruption_reason: None,
+            lost_reason: None,
+            child_pid: None,
+            child_pgid: None,
+            child_process_start_identity: None,
+            duration_ms: Some(1),
+            fingerprint_before: None,
+            fingerprint_after: None,
+            mutated_input: None,
+            now_ts: Some(12),
+            diagnostics: Vec::new(),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let settled = observe(
+        &path,
+        ToolRunObserveRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: started.run.run_id,
+            child_pid: Some(4242),
+            child_pgid: Some(4242),
+            child_process_start_identity: None,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert!(matches!(settled, ToolRunError::InvalidTransition { .. }));
+}
+
+#[test]
+fn reconcile_reports_candidates_only_for_observed_runs() {
+    let (_temp, path) = store();
+    let observed = begin_named(&path, 10);
+    let unobserved = begin_named(&path, 10);
+    observe_child(&path, &observed.run.run_id);
+    let result = reconcile(
+        &path,
+        ToolRunReconcileRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            facts: vec![
+                dead_wrapper_fact(&observed.run.run_id),
+                dead_wrapper_fact(&unobserved.run.run_id),
+            ],
+            now_ts: Some(11),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result.marked_lost.len(), 2);
+    assert_eq!(result.reap_candidates.len(), 1);
+    assert_eq!(result.reap_candidates[0].run_id, observed.run.run_id);
 }

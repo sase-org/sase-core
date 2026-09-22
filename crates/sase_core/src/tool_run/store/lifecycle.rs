@@ -12,8 +12,9 @@ use super::super::wire::{
     ToolLivenessObservationWire, ToolRunAppendRequestWire,
     ToolRunAppendResultWire, ToolRunBeginRequestWire, ToolRunBeginResultWire,
     ToolRunEventKindWire, ToolRunEventWire, ToolRunFinishRequestWire,
-    ToolRunFinishResultWire, ToolRunReconcileRequestWire,
-    ToolRunReconcileResultWire, ToolRunStateWire,
+    ToolRunFinishResultWire, ToolRunObserveRequestWire,
+    ToolRunObserveResultWire, ToolRunReapCandidateWire,
+    ToolRunReconcileRequestWire, ToolRunReconcileResultWire, ToolRunStateWire,
     TOOL_RUN_LOST_REASON_RUNNER_EXITED, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
@@ -166,6 +167,67 @@ pub fn append_event(
     })
 }
 
+/// Persist a running run's child process facts at spawn time.
+///
+/// Begin happens before the spawn, so the child pid, pgid, and process-start
+/// identity arrive through this call rather than through begin fields. A
+/// repeated observation with identical facts is a replay, not a conflict; a
+/// later `finish` that repeats the same facts stays idempotent through
+/// `COALESCE`. Observing a settled or missing run is an error.
+pub fn observe(
+    store_path: &Path,
+    request: ToolRunObserveRequestWire,
+    busy_timeout: Duration,
+) -> Result<ToolRunObserveResultWire, ToolRunError> {
+    validate_schema(request.schema_version)?;
+    if request.run_id.trim().is_empty() {
+        return Err(ToolRunError::invalid("run_id must not be empty"));
+    }
+    with_write_store(store_path, busy_timeout, |conn| {
+        let tx =
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(stored) = load_run(&tx, &request.run_id)? else {
+            return Err(ToolRunError::NotFound {
+                run_id: request.run_id.clone(),
+            });
+        };
+        if !stored.state.is_unsettled() {
+            return Err(ToolRunError::InvalidTransition {
+                from: stored.state.as_str().to_string(),
+                to: "observe".to_string(),
+            });
+        }
+        let replayed = stored.child_pid == request.child_pid
+            && stored.child_pgid == request.child_pgid
+            && stored.child_process_start_identity
+                == request.child_process_start_identity;
+        if !replayed {
+            tx.execute(
+                "UPDATE runs SET child_pid = COALESCE(?2, child_pid),
+                    child_pgid = COALESCE(?3, child_pgid),
+                    child_process_start_identity =
+                        COALESCE(?4, child_process_start_identity)
+                 WHERE run_id = ?1",
+                params![
+                    request.run_id,
+                    request.child_pid,
+                    request.child_pgid,
+                    request.child_process_start_identity,
+                ],
+            )?;
+            touch_write_meta(&tx, unix_now())?;
+        }
+        let run = load_run(&tx, &request.run_id)?.expect("observed run");
+        tx.commit()?;
+        Ok(ToolRunObserveResultWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run,
+            replayed,
+            diagnostics: Vec::new(),
+        })
+    })
+}
+
 pub fn finish(
     store_path: &Path,
     request: ToolRunFinishRequestWire,
@@ -213,12 +275,22 @@ pub fn finish(
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ingest_event(&tx, &event)?;
-        if request.child_pid.is_some() || request.child_pgid.is_some() {
+        if request.child_pid.is_some()
+            || request.child_pgid.is_some()
+            || request.child_process_start_identity.is_some()
+        {
             tx.execute(
                 "UPDATE runs SET child_pid = COALESCE(?2, child_pid),
-                    child_pgid = COALESCE(?3, child_pgid)
+                    child_pgid = COALESCE(?3, child_pgid),
+                    child_process_start_identity =
+                        COALESCE(?4, child_process_start_identity)
                  WHERE run_id = ?1",
-                params![request.run_id, request.child_pid, request.child_pgid],
+                params![
+                    request.run_id,
+                    request.child_pid,
+                    request.child_pgid,
+                    request.child_process_start_identity,
+                ],
             )?;
         }
         if let Some(duration_ms) = request.duration_ms {
@@ -294,6 +366,7 @@ pub fn reconcile(
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             marked_lost: Vec::new(),
             persisted: false,
+            reap_candidates: Vec::new(),
             diagnostics: vec!["tool run store does not exist".to_string()],
         });
     }
@@ -301,6 +374,7 @@ pub fn reconcile(
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut marked = Vec::new();
+        let mut reap_candidates = Vec::new();
         let mut diagnostics = Vec::new();
         for fact in &request.facts {
             match fact.observation {
@@ -336,6 +410,30 @@ pub fn reconcile(
                             };
                             ingest_event(&tx, &event)?;
                             marked.push(fact.run_id.clone());
+                            // Authorize reaping only when the wrapper is
+                            // definitively dead (this arm) and the child
+                            // facts were recorded at spawn. Rust never
+                            // signals; the caller verifies the live
+                            // process-group leader still matches the
+                            // recorded identity before signaling. A missing
+                            // pgid or identity authorizes nothing.
+                            if let (
+                                Some(pgid),
+                                Some(child_process_start_identity),
+                            ) = (
+                                run.child_pgid,
+                                run.child_process_start_identity.clone(),
+                            ) {
+                                reap_candidates.push(
+                                    ToolRunReapCandidateWire {
+                                        run_id: fact.run_id.clone(),
+                                        pgid,
+                                        child_process_start_identity: Some(
+                                            child_process_start_identity,
+                                        ),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -347,6 +445,7 @@ pub fn reconcile(
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             marked_lost: marked,
             persisted: true,
+            reap_candidates,
             diagnostics,
         })
     }) {
@@ -357,6 +456,7 @@ pub fn reconcile(
                 schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
                 marked_lost: Vec::new(),
                 persisted: false,
+                reap_candidates: Vec::new(),
                 diagnostics: vec![format!(
                     "reconciliation could not persist: {message}"
                 )],

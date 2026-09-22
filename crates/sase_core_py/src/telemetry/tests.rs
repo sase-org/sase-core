@@ -195,6 +195,43 @@ fn tool_run_bindings_round_trip_python_dicts() {
         let started = py_to_json_value(started.bind(py)).unwrap();
         assert_eq!(started["run"]["state"], json!("running"));
         let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+        let observe_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "child_pid": 4242,
+                "child_pgid": 4242,
+                "child_process_start_identity": "boot-1:12345"
+            }),
+        )
+        .unwrap();
+        let observe_request =
+            observe_obj.bind(py).downcast::<PyDict>().unwrap();
+        let observed = py_tool_run_observe(
+            py,
+            path.to_str().unwrap(),
+            observe_request,
+            1_000,
+        )
+        .unwrap();
+        let observed = py_to_json_value(observed.bind(py)).unwrap();
+        assert_eq!(observed["replayed"], json!(false));
+        assert_eq!(observed["run"]["child_pid"], json!(4242));
+        assert_eq!(observed["run"]["child_pgid"], json!(4242));
+        assert_eq!(
+            observed["run"]["child_process_start_identity"],
+            json!("boot-1:12345")
+        );
+        let replayed = py_tool_run_observe(
+            py,
+            path.to_str().unwrap(),
+            observe_request,
+            1_000,
+        )
+        .unwrap();
+        let replayed = py_to_json_value(replayed.bind(py)).unwrap();
+        assert_eq!(replayed["replayed"], json!(true));
         let finish_obj = json_value_to_py(
             py,
             &json!({

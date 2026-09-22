@@ -15,7 +15,10 @@ use super::super::wire::{
     TOOL_RUN_TYPICAL_WINDOW_DAYS, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
-use super::connection::{unix_now, validate_schema, with_read_store};
+use super::connection::{
+    runs_has_child_observation_column, unix_now, validate_schema,
+    with_read_store,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::Path;
@@ -285,30 +288,41 @@ pub(super) fn load_run(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<ToolRunWire>, ToolRunError> {
-    let mut stmt = conn.prepare(
+    // Stores written before the child-observation column existed select a
+    // NULL placeholder so the positional mapping below holds for both
+    // layouts; the read path never migrates.
+    let child_identity_projection = if runs_has_child_observation_column(conn)?
+    {
+        "child_process_start_identity"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
         "SELECT run_id, state, source, executor, attempt, tool_name,
                 definition_digest, extra_args_digest, display_argv_json,
                 private_argv_json, project, agent, workspace, bead,
                 owner_kind, owner_id, parent_run_id, created_ts, running_ts,
                 settled_ts, duration_ms, duration_missing, exit_code, signal,
                 interruption_reason, lost_reason, wrapper_pid, boot_id,
-                process_start_identity, child_pid, child_pgid, mutated_input,
+                process_start_identity, child_pid, child_pgid,
+                {child_identity_projection}, mutated_input,
                 fingerprint_before_json, fingerprint_after_json,
                 log_stdout_path, log_stderr_path, events_path, evidence_json,
                 diagnostics_json
-         FROM runs WHERE run_id = ?1",
-    )?;
+         FROM runs WHERE run_id = ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query([run_id])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
     let private_argv: Option<String> = row.get(9)?;
     let display_argv: String = row.get(8)?;
-    let evidence: String = row.get(37)?;
-    let diagnostics: String = row.get(38)?;
-    let fingerprint_before: Option<String> = row.get(32)?;
-    let fingerprint_after: Option<String> = row.get(33)?;
-    let mutated: Option<i64> = row.get(31)?;
+    let evidence: String = row.get(38)?;
+    let diagnostics: String = row.get(39)?;
+    let fingerprint_before: Option<String> = row.get(33)?;
+    let fingerprint_after: Option<String> = row.get(34)?;
+    let mutated: Option<i64> = row.get(32)?;
     Ok(Some(ToolRunWire {
         schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
         run_id: row.get(0)?,
@@ -345,13 +359,14 @@ pub(super) fn load_run(
         process_start_identity: row.get(28)?,
         child_pid: row.get(29)?,
         child_pgid: row.get(30)?,
+        child_process_start_identity: row.get(31)?,
         mutated_input: mutated.map(|value| value != 0),
         fingerprint_before: parse_optional_json(fingerprint_before)?,
         fingerprint_after: parse_optional_json(fingerprint_after)?,
         logs: ToolRunLogMetadataWire {
-            stdout_path: row.get(34)?,
-            stderr_path: row.get(35)?,
-            events_path: row.get(36)?,
+            stdout_path: row.get(35)?,
+            stderr_path: row.get(36)?,
+            events_path: row.get(37)?,
             has_private_argv: private_argv.is_some(),
         },
         evidence_completeness: serde_json::from_str(&evidence)
