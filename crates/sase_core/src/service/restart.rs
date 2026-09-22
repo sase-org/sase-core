@@ -272,8 +272,10 @@ fn restart(
     history.recent_failures.retain(|failure| *failure >= cutoff);
     history.recent_failures.push(request.now);
 
-    let crash_loop =
-        history.recent_failures.len() as u32 >= tuning.crash_loop_threshold;
+    let crash_loop = history.recent_failures.len() as u32
+        >= tuning.crash_loop_threshold
+        || (history.alert_sent
+            && history.consecutive_failures >= tuning.crash_loop_threshold);
     let notify = crash_loop && !history.alert_sent;
     if notify {
         history.alert_sent = true;
@@ -484,6 +486,77 @@ mod tests {
             decide_service_restart(&request(history, 120.0)).unwrap();
         assert_eq!(decision.history.recent_failures, vec![90.0, 120.0]);
         assert!(!decision.crash_loop);
+    }
+
+    #[test]
+    fn crash_loop_sticks_past_the_window_until_a_healthy_run() {
+        let mut history = ServiceRestartHistoryWire::default();
+        let mut now = 0.0;
+        for _ in 0..3 {
+            now += 1.0;
+            let mut input = request(history, now);
+            input.history.started_at = Some(now - 10.0);
+            let decision = decide_service_restart(&input).unwrap();
+            history = decision.history;
+        }
+        assert!(history.alert_sent);
+        assert_eq!(history.consecutive_failures, 3);
+
+        for step in [120.0, 240.0] {
+            now += step;
+            let mut input = request(history, now);
+            input.history.started_at = Some(now - 10.0);
+            let decision = decide_service_restart(&input).unwrap();
+            assert!(decision.crash_loop, "still crash_loop at {now}");
+            assert!(!decision.notify);
+            assert!(
+                decision.reason.starts_with("crash-looping (1 failures"),
+                "sticky reason keeps crash-loop wording, got: {}",
+                decision.reason
+            );
+            history = decision.history;
+        }
+        assert!(history.alert_sent);
+    }
+
+    #[test]
+    fn sticky_crash_loop_rearms_after_a_healthy_run() {
+        let mut history = ServiceRestartHistoryWire {
+            alert_sent: true,
+            consecutive_failures: 5,
+            recent_failures: vec![1000.0],
+            backoff_seconds: 60.0,
+            started_at: None,
+        };
+        history.started_at = Some(0.0);
+        let cleared = decide_service_restart(&request(history, 301.0)).unwrap();
+        assert!(!cleared.crash_loop);
+        assert!(!cleared.history.alert_sent);
+        assert_eq!(cleared.history.consecutive_failures, 1);
+
+        let mut history = cleared.history;
+        history.started_at = Some(301.0);
+        let second = decide_service_restart(&request(history, 302.0)).unwrap();
+        assert!(!second.crash_loop);
+        let mut history = second.history;
+        history.started_at = Some(302.0);
+        let third = decide_service_restart(&request(history, 303.0)).unwrap();
+        assert!(third.crash_loop);
+        assert!(third.notify);
+    }
+
+    #[test]
+    fn below_threshold_never_reports_crash_loop() {
+        let mut history = ServiceRestartHistoryWire::default();
+        for now in [1.0, 2.0] {
+            let mut input = request(history, now);
+            input.history.started_at = Some(now - 10.0);
+            let decision = decide_service_restart(&input).unwrap();
+            assert!(!decision.crash_loop);
+            assert!(!decision.notify);
+            assert!(!decision.reason.contains("crash-looping"));
+            history = decision.history;
+        }
     }
 
     #[test]

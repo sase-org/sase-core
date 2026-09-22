@@ -62,6 +62,28 @@ pub struct ServiceHostRecordWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceProcRequestWire {
+    pub generation: u64,
+    pub action: String,
+    pub requested_at: f64,
+    pub requested_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceStateWire {
     pub schema_version: u32,
     #[serde(default)]
@@ -72,6 +94,8 @@ pub struct ServiceStateWire {
     pub markers: BTreeMap<String, ServiceMarkerWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<ServiceHostRecordWire>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requests: BTreeMap<String, ServiceProcRequestWire>,
 }
 
 impl Default for ServiceStateWire {
@@ -82,6 +106,7 @@ impl Default for ServiceStateWire {
             stops: BTreeMap::new(),
             markers: BTreeMap::new(),
             host: None,
+            requests: BTreeMap::new(),
         }
     }
 }
@@ -129,6 +154,29 @@ pub enum ServiceStateMutationWire {
     },
     ClearHost {
         pid: u32,
+    },
+    RequestProc {
+        name: String,
+        action: String,
+        actor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    CompleteProcRequest {
+        name: String,
+        generation: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            alias = "completed_by"
+        )]
+        actor: Option<String>,
     },
 }
 
@@ -360,9 +408,74 @@ fn apply_mutation(
                 state.host = None;
             }
         }
+        ServiceStateMutationWire::RequestProc {
+            name,
+            action,
+            actor,
+            reason,
+        } => {
+            let generation = state
+                .requests
+                .get(&name)
+                .map_or(1, |entry| entry.generation.saturating_add(1));
+            state.requests.insert(
+                name.clone(),
+                ServiceProcRequestWire {
+                    generation,
+                    action,
+                    requested_at: now,
+                    requested_by: actor,
+                    reason,
+                    completed_generation: None,
+                    completed_at: None,
+                    completed_by: None,
+                    pid: None,
+                    outcome: None,
+                    error: None,
+                },
+            );
+            state.stops.remove(&name);
+        }
+        ServiceStateMutationWire::CompleteProcRequest {
+            name,
+            generation,
+            pid,
+            outcome,
+            error,
+            actor,
+        } => {
+            let Some(entry) = state.requests.get_mut(&name) else {
+                return *state != before;
+            };
+            if generation < entry.generation {
+                return *state != before;
+            }
+            if entry
+                .completed_generation
+                .is_some_and(|completed| completed >= generation)
+            {
+                return *state != before;
+            }
+            entry.completed_generation = Some(generation);
+            entry.completed_at = Some(now);
+            entry.completed_by = actor;
+            entry.pid = pid;
+            entry.outcome = outcome;
+            entry.error = error;
+        }
     }
     *state != before
 }
+
+const ALLOWED_PROC_REQUEST_ACTIONS: [&str; 2] = ["start", "restart"];
+const ALLOWED_PROC_REQUEST_OUTCOMES: [&str; 6] = [
+    "started",
+    "restarted",
+    "already_running",
+    "not_desired",
+    "unknown_proc",
+    "failed",
+];
 
 fn prune_expired_stops(
     state: &mut ServiceStateWire,
@@ -409,6 +522,44 @@ fn validate_mutation(
             validate_host(host)?;
         }
         ServiceStateMutationWire::ClearHost { .. } => {}
+        ServiceStateMutationWire::RequestProc {
+            name,
+            action,
+            actor,
+            ..
+        } => {
+            validate_name(name)?;
+            validate_actor(actor)?;
+            if !ALLOWED_PROC_REQUEST_ACTIONS.contains(&action.as_str()) {
+                return Err(ServiceStateError::Validation(
+                    "action must be start or restart".to_string(),
+                ));
+            }
+        }
+        ServiceStateMutationWire::CompleteProcRequest {
+            name,
+            outcome,
+            actor,
+            ..
+        } => {
+            validate_name(name)?;
+            if actor
+                .as_deref()
+                .is_some_and(|actor| actor.trim().is_empty())
+            {
+                return Err(ServiceStateError::Validation(
+                    "actor must not be empty".to_string(),
+                ));
+            }
+            if outcome.as_deref().is_some_and(|outcome| {
+                !ALLOWED_PROC_REQUEST_OUTCOMES.contains(&outcome)
+            }) {
+                return Err(ServiceStateError::Validation(format!(
+                    "outcome must be one of: {}",
+                    ALLOWED_PROC_REQUEST_OUTCOMES.join(", ")
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -853,6 +1004,265 @@ mod tests {
             ),
             Err(ServiceStateError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn proc_requests_bump_generation_and_clear_stops_and_completions() {
+        let temp = tempfile::tempdir().unwrap();
+        mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::Stop {
+                name: "scheduler".to_string(),
+                actor: "tester".to_string(),
+                reason: Some("manual".to_string()),
+            },
+            Some("boot-a"),
+            Some(10.0),
+        )
+        .unwrap();
+
+        let first = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::RequestProc {
+                name: "scheduler".to_string(),
+                action: "restart".to_string(),
+                actor: "cli".to_string(),
+                reason: Some("manual".to_string()),
+            },
+            Some("boot-a"),
+            Some(11.0),
+        )
+        .unwrap();
+        assert!(first.changed);
+        let entry = &first.snapshot.state.requests["scheduler"];
+        assert_eq!(entry.generation, 1);
+        assert_eq!(entry.action, "restart");
+        assert_eq!(entry.requested_at, 11.0);
+        assert_eq!(entry.requested_by, "cli");
+        assert_eq!(entry.reason.as_deref(), Some("manual"));
+        assert!(entry.completed_generation.is_none());
+        assert!(!first.snapshot.state.stops.contains_key("scheduler"));
+
+        let completed = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::CompleteProcRequest {
+                name: "scheduler".to_string(),
+                generation: 1,
+                pid: Some(999),
+                outcome: Some("restarted".to_string()),
+                error: None,
+                actor: Some("service-host:42".to_string()),
+            },
+            Some("boot-a"),
+            Some(12.0),
+        )
+        .unwrap();
+        assert!(completed.changed);
+        let entry = &completed.snapshot.state.requests["scheduler"];
+        assert_eq!(entry.completed_generation, Some(1));
+        assert_eq!(entry.completed_at, Some(12.0));
+        assert_eq!(entry.completed_by.as_deref(), Some("service-host:42"));
+        assert_eq!(entry.pid, Some(999));
+        assert_eq!(entry.outcome.as_deref(), Some("restarted"));
+
+        let second = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::RequestProc {
+                name: "scheduler".to_string(),
+                action: "start".to_string(),
+                actor: "cli".to_string(),
+                reason: None,
+            },
+            Some("boot-a"),
+            Some(13.0),
+        )
+        .unwrap();
+        let entry = &second.snapshot.state.requests["scheduler"];
+        assert_eq!(entry.generation, 2);
+        assert_eq!(entry.action, "start");
+        assert!(entry.completed_generation.is_none());
+        assert!(entry.completed_at.is_none());
+        assert!(entry.completed_by.is_none());
+        assert!(entry.pid.is_none());
+        assert!(entry.outcome.is_none());
+        assert!(entry.error.is_none());
+    }
+
+    #[test]
+    fn completing_a_proc_request_is_idempotent_for_stale_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::CompleteProcRequest {
+                name: "scheduler".to_string(),
+                generation: 1,
+                pid: None,
+                outcome: Some("started".to_string()),
+                error: None,
+                actor: None,
+            },
+            Some("boot-a"),
+            Some(10.0),
+        )
+        .unwrap();
+        assert!(!missing.changed);
+
+        mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::RequestProc {
+                name: "scheduler".to_string(),
+                action: "restart".to_string(),
+                actor: "cli".to_string(),
+                reason: None,
+            },
+            Some("boot-a"),
+            Some(11.0),
+        )
+        .unwrap();
+        mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::RequestProc {
+                name: "scheduler".to_string(),
+                action: "restart".to_string(),
+                actor: "cli".to_string(),
+                reason: None,
+            },
+            Some("boot-a"),
+            Some(12.0),
+        )
+        .unwrap();
+
+        let stale = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::CompleteProcRequest {
+                name: "scheduler".to_string(),
+                generation: 1,
+                pid: Some(1),
+                outcome: Some("restarted".to_string()),
+                error: None,
+                actor: None,
+            },
+            Some("boot-a"),
+            Some(13.0),
+        )
+        .unwrap();
+        assert!(!stale.changed);
+        assert!(stale.snapshot.state.requests["scheduler"]
+            .completed_generation
+            .is_none());
+
+        let current = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::CompleteProcRequest {
+                name: "scheduler".to_string(),
+                generation: 2,
+                pid: Some(2),
+                outcome: Some("restarted".to_string()),
+                error: None,
+                actor: None,
+            },
+            Some("boot-a"),
+            Some(14.0),
+        )
+        .unwrap();
+        assert!(current.changed);
+
+        let replay = mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::CompleteProcRequest {
+                name: "scheduler".to_string(),
+                generation: 2,
+                pid: Some(3),
+                outcome: Some("restarted".to_string()),
+                error: None,
+                actor: None,
+            },
+            Some("boot-a"),
+            Some(15.0),
+        )
+        .unwrap();
+        assert!(!replay.changed);
+        assert_eq!(replay.snapshot.state.requests["scheduler"].pid, Some(2));
+    }
+
+    #[test]
+    fn proc_request_mutations_reject_bad_actions_names_and_outcomes() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            mutate_service_state(
+                temp.path(),
+                ServiceStateMutationWire::RequestProc {
+                    name: "scheduler".to_string(),
+                    action: "bounce".to_string(),
+                    actor: "cli".to_string(),
+                    reason: None,
+                },
+                Some("boot-a"),
+                Some(1.0),
+            ),
+            Err(ServiceStateError::Validation(_))
+        ));
+        assert!(matches!(
+            mutate_service_state(
+                temp.path(),
+                ServiceStateMutationWire::RequestProc {
+                    name: "Bad".to_string(),
+                    action: "restart".to_string(),
+                    actor: "cli".to_string(),
+                    reason: None,
+                },
+                Some("boot-a"),
+                Some(1.0),
+            ),
+            Err(ServiceStateError::Validation(_))
+        ));
+        assert!(matches!(
+            mutate_service_state(
+                temp.path(),
+                ServiceStateMutationWire::CompleteProcRequest {
+                    name: "scheduler".to_string(),
+                    generation: 1,
+                    pid: None,
+                    outcome: Some("bounced".to_string()),
+                    error: None,
+                    actor: None,
+                },
+                Some("boot-a"),
+                Some(1.0),
+            ),
+            Err(ServiceStateError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn proc_requests_survive_boot_changes_and_stay_absent_when_unused() {
+        let temp = tempfile::tempdir().unwrap();
+        mutate_service_state(
+            temp.path(),
+            ServiceStateMutationWire::RequestProc {
+                name: "scheduler".to_string(),
+                action: "start".to_string(),
+                actor: "cli".to_string(),
+                reason: None,
+            },
+            Some("boot-a"),
+            Some(10.0),
+        )
+        .unwrap();
+        let snapshot = read_service_state(temp.path(), Some("boot-b")).unwrap();
+        assert!(snapshot.state.requests.contains_key("scheduler"));
+
+        let fresh = tempfile::tempdir().unwrap();
+        mutate_service_state(
+            fresh.path(),
+            set_enablement("scheduler", true),
+            Some("boot-a"),
+            Some(1.0),
+        )
+        .unwrap();
+        let persisted =
+            fs::read_to_string(service_state_path(fresh.path())).unwrap();
+        assert!(!persisted.contains("requests"));
     }
 
     impl ServiceStateMutationOutcomeWire {

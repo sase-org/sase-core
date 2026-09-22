@@ -16,8 +16,8 @@ use super::config::{
 };
 use super::restart::ServiceRestartDecisionWire;
 use super::state::{
-    ServiceEnablementOverrideWire, ServiceHostRecordWire, ServiceStateWire,
-    ServiceStopWire,
+    ServiceEnablementOverrideWire, ServiceHostRecordWire,
+    ServiceProcRequestWire, ServiceStateWire, ServiceStopWire,
 };
 
 pub const SERVICE_STATUS_WIRE_SCHEMA_VERSION: u32 = 1;
@@ -157,6 +157,8 @@ pub struct ServiceStatusProcWire {
     pub enablement: ServiceEnablementWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<ServiceStopWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<ServiceProcRequestWire>,
     pub desired: String,
     pub state: String,
     pub summary: String,
@@ -232,6 +234,7 @@ pub fn build_service_status(
                 entry,
                 request.state.enablement.get(&entry.name),
                 stop,
+                request.state.requests.get(&entry.name),
                 observation.copied(),
             )
         })
@@ -486,6 +489,7 @@ fn derive_configured_proc(
     entry: &ServiceProcConfigWire,
     override_value: Option<&ServiceEnablementOverrideWire>,
     stop: Option<&ServiceStopWire>,
+    request: Option<&ServiceProcRequestWire>,
     observation: Option<&ServiceProcObservationWire>,
 ) -> ServiceStatusProcWire {
     let enablement =
@@ -516,6 +520,7 @@ fn derive_configured_proc(
         unavailable_reason: entry.unavailable_reasons.first().cloned(),
         enablement,
         stop: stop.cloned(),
+        request: request.cloned(),
         desired: desired.to_string(),
         state,
         summary,
@@ -557,6 +562,7 @@ fn derive_orphan_proc(
         unavailable_reason: None,
         enablement,
         stop: None,
+        request: None,
         desired: "stopped".to_string(),
         state: state.to_string(),
         summary: observation_summary(state, observation),

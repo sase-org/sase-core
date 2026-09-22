@@ -593,6 +593,244 @@ fn service_config_compose_binding_round_trips_python_dicts() {
 }
 
 #[test]
+fn service_proc_request_mutations_round_trip_python_dicts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().to_string_lossy().to_string();
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "op": "request_proc",
+                "name": "scheduler",
+                "action": "restart",
+                "actor": "pytest",
+                "reason": "manual",
+            }),
+        )
+        .unwrap();
+        let outcome = module
+            .getattr("service_state_mutate")
+            .unwrap()
+            .call1((home.as_str(), request, "boot-a", 11.0))
+            .unwrap();
+        let outcome = py_to_json_value(&outcome).unwrap();
+        assert_eq!(outcome["changed"], json!(true));
+        assert_eq!(
+            outcome["snapshot"]["state"]["requests"]["scheduler"]["generation"],
+            json!(1)
+        );
+        assert_eq!(
+            outcome["snapshot"]["state"]["requests"]["scheduler"]["action"],
+            json!("restart")
+        );
+        assert_eq!(
+            outcome["snapshot"]["state"]["requests"]["scheduler"]
+                ["requested_by"],
+            json!("pytest")
+        );
+
+        let complete = json_value_to_py(
+            py,
+            &json!({
+                "op": "complete_proc_request",
+                "name": "scheduler",
+                "generation": 1,
+                "pid": 999,
+                "outcome": "restarted",
+                "actor": "service-host:42",
+            }),
+        )
+        .unwrap();
+        let completed = module
+            .getattr("service_state_mutate")
+            .unwrap()
+            .call1((home.as_str(), complete, "boot-a", 12.0))
+            .unwrap();
+        let completed = py_to_json_value(&completed).unwrap();
+        assert_eq!(completed["changed"], json!(true));
+        assert_eq!(
+            completed["snapshot"]["state"]["requests"]["scheduler"]
+                ["completed_generation"],
+            json!(1)
+        );
+        assert_eq!(
+            completed["snapshot"]["state"]["requests"]["scheduler"]["pid"],
+            json!(999)
+        );
+
+        let stale = json_value_to_py(
+            py,
+            &json!({
+                "op": "complete_proc_request",
+                "name": "scheduler",
+                "generation": 1,
+                "pid": 1000,
+                "outcome": "restarted",
+            }),
+        )
+        .unwrap();
+        let replay = module
+            .getattr("service_state_mutate")
+            .unwrap()
+            .call1((home.as_str(), stale, "boot-a", 13.0))
+            .unwrap();
+        let replay = py_to_json_value(&replay).unwrap();
+        assert_eq!(replay["changed"], json!(false));
+
+        let bad_action = json_value_to_py(
+            py,
+            &json!({
+                "op": "request_proc",
+                "name": "scheduler",
+                "action": "bounce",
+                "actor": "pytest",
+            }),
+        )
+        .unwrap();
+        assert!(module
+            .getattr("service_state_mutate")
+            .unwrap()
+            .call1((home.as_str(), bad_action, "boot-a", 14.0))
+            .is_err());
+
+        let bad_outcome = json_value_to_py(
+            py,
+            &json!({
+                "op": "complete_proc_request",
+                "name": "scheduler",
+                "generation": 1,
+                "outcome": "bounced",
+            }),
+        )
+        .unwrap();
+        assert!(module
+            .getattr("service_state_mutate")
+            .unwrap()
+            .call1((home.as_str(), bad_outcome, "boot-a", 15.0))
+            .is_err());
+
+        let snapshot = module
+            .getattr("service_state_read")
+            .unwrap()
+            .call1((home.as_str(), "boot-a"))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(
+            snapshot["state"]["requests"]["scheduler"]["outcome"],
+            json!("restarted")
+        );
+    });
+}
+
+#[test]
+fn service_status_build_round_trips_pending_proc_requests() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+
+        let entry = json!({
+            "name": "scheduler",
+            "description": "Scheduler",
+            "available": true,
+            "unavailable_reasons": [],
+            "source": "builtin",
+            "declared_by": "default",
+            "enabled": true,
+            "enablement": {"explicit": false},
+            "mode": "daemon",
+            "launcher": {"kind": "builtin", "builtin": "scheduler"},
+            "env": {},
+            "restart": "on-failure",
+            "success_exit_codes": [],
+            "stop_signal": "SIGTERM",
+            "stop_timeout_seconds": 10.0,
+            "after": [],
+            "log_max_bytes": 4096,
+            "field_provenance": []
+        });
+        let base_state = json!({
+            "schema_version": 1,
+            "enablement": {},
+            "stops": {},
+            "markers": {},
+            "host": null
+        });
+        let host = json!({
+            "record": {
+                "pid": 42,
+                "boot_id": "boot-a",
+                "started_at": 1.0,
+                "heartbeat_at": 19.0,
+                "mode": "foreground",
+                "sase_version": "0.test"
+            },
+            "lock_held": false,
+            "pid_alive": true,
+            "platform_unit": "sase.service",
+            "stale_after_seconds": 15.0
+        });
+        let plain = json!({
+            "generated_at": 20.0,
+            "boot_id": "boot-a",
+            "host": host,
+            "config": {
+                "schema_version": 1,
+                "fatal": false,
+                "procs": [entry],
+                "diagnostics": [],
+                "ignored_layers": []
+            },
+            "state": base_state,
+            "procs": []
+        });
+        let plain_snapshot = module
+            .getattr("service_status_build")
+            .unwrap()
+            .call1((json_value_to_py(py, &plain).unwrap(),))
+            .unwrap();
+        let plain_snapshot = py_to_json_value(&plain_snapshot).unwrap();
+        assert!(plain_snapshot["procs"][0].get("request").is_none());
+
+        let mut requested = plain.clone();
+        requested["state"]["requests"] = json!({
+            "scheduler": {
+                "generation": 2,
+                "action": "restart",
+                "requested_at": 18.0,
+                "requested_by": "pytest",
+                "reason": "manual",
+                "completed_generation": 1,
+                "completed_at": 10.0,
+                "completed_by": "service-host:42",
+                "pid": 100,
+                "outcome": "restarted"
+            }
+        });
+        let snapshot = module
+            .getattr("service_status_build")
+            .unwrap()
+            .call1((json_value_to_py(py, &requested).unwrap(),))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(snapshot["procs"][0]["request"]["generation"], json!(2));
+        assert_eq!(snapshot["procs"][0]["request"]["action"], json!("restart"));
+        assert_eq!(
+            snapshot["procs"][0]["request"]["requested_by"],
+            json!("pytest")
+        );
+        assert_ne!(
+            snapshot["change_token"], plain_snapshot["change_token"],
+            "a pending request must move the change token"
+        );
+    });
+}
+
+#[test]
 fn service_restart_decide_binding_round_trips_python_dicts() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

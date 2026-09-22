@@ -112,10 +112,16 @@ fn layer_label(layer: &ConfigLayerInputWire) -> String {
     }
 }
 
+const ALLOWED_LAYER_KINDS: [&str; 5] =
+    ["builtin", "plugin", "user", "overlay", "local"];
+
 fn classify_source(layer_kind: &str) -> &'static str {
     match layer_kind {
         "builtin" => "builtin",
         "plugin" => "plugin",
+        "user" | "overlay" | "local" => "user",
+        // Unknown kinds are rejected before composition reaches this point,
+        // so this arm is unreachable in practice.
         _ => "user",
     }
 }
@@ -166,10 +172,67 @@ pub fn compose_service_config(
     let mut fatal = false;
 
     for layer in &request.layers {
+        let label = layer_label(layer);
+
+        if let Some(error) = layer.error.as_deref() {
+            if layer.kind == "local" {
+                diagnostics.push(ConfigDiagnosticWire {
+                    severity: "warning".to_string(),
+                    code: "service_config_layer_error".to_string(),
+                    message: format!(
+                        "layer `{label}`{} has a config error: {error}; \
+                         ignoring its `service` section",
+                        layer
+                            .path
+                            .as_deref()
+                            .map_or(String::new(), |path| format!(
+                                " at `{path}`"
+                            )),
+                    ),
+                    path: Some("service".to_string()),
+                    layer: Some(label.clone()),
+                });
+            } else {
+                fatal = true;
+                diagnostics.push(ConfigDiagnosticWire {
+                    severity: "error".to_string(),
+                    code: "service_config_layer_error".to_string(),
+                    message: format!(
+                        "layer `{label}`{} has a config error: {error}; \
+                         ignoring its `service` section",
+                        layer
+                            .path
+                            .as_deref()
+                            .map_or(String::new(), |path| format!(
+                                " at `{path}`"
+                            )),
+                    ),
+                    path: Some("service".to_string()),
+                    layer: Some(label.clone()),
+                });
+            }
+            continue;
+        }
+
+        if !ALLOWED_LAYER_KINDS.contains(&layer.kind.as_str()) {
+            fatal = true;
+            diagnostics.push(ConfigDiagnosticWire {
+                severity: "error".to_string(),
+                code: "service_config_unknown_layer_kind".to_string(),
+                message: format!(
+                    "layer `{label}` has unknown kind `{}`; \
+                     ignoring its `service` section",
+                    layer.kind,
+                ),
+                path: Some("service".to_string()),
+                layer: Some(label.clone()),
+            });
+            continue;
+        }
+
         let Some(raw_service) = layer.value.get("service") else {
             continue;
         };
-        let label = layer_label(layer);
 
         if layer.kind == "local" {
             diagnostics.push(ConfigDiagnosticWire {
@@ -872,6 +935,16 @@ mod tests {
         path: Option<&str>,
         value: Value,
     ) -> ConfigLayerInputWire {
+        layer_with_error(name, kind, path, value, None)
+    }
+
+    fn layer_with_error(
+        name: &str,
+        kind: &str,
+        path: Option<&str>,
+        value: Value,
+        error: Option<&str>,
+    ) -> ConfigLayerInputWire {
         ConfigLayerInputWire {
             name: name.to_string(),
             kind: kind.to_string(),
@@ -880,7 +953,7 @@ mod tests {
             list_strategy: "concatenate".to_string(),
             writable: path.is_some(),
             exists: Some(true),
-            error: None,
+            error: error.map(str::to_string),
         }
     }
 
@@ -1225,5 +1298,82 @@ mod tests {
             composition.diagnostics[0].code,
             "service_config_invalid_section"
         );
+    }
+
+    #[test]
+    fn an_errored_overlay_is_fatal_and_names_the_file() {
+        let composition = compose(vec![layer_with_error(
+            "overlay:o.yml",
+            "overlay",
+            Some("/o.yml"),
+            serde_json::json!({"service": {"procs": {
+                "tunnel": {"command": "x"}
+            }}}),
+            Some("mapping values are not allowed here (line 2)"),
+        )]);
+        assert!(composition.fatal);
+        assert!(composition.procs.is_empty());
+        let diagnostic = composition
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "service_config_layer_error")
+            .expect("errored overlay emits service_config_layer_error");
+        assert_eq!(diagnostic.severity, "error");
+        assert!(
+            diagnostic.message.contains("/o.yml"),
+            "names the file, got: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .message
+                .contains("mapping values are not allowed"),
+            "names the parse error, got: {}",
+            diagnostic.message
+        );
+    }
+
+    #[test]
+    fn an_errored_local_layer_warns_and_is_not_fatal() {
+        let composition = compose(vec![layer_with_error(
+            "local",
+            "local",
+            Some("/proj/sase.yml"),
+            serde_json::json!({"service": {"procs": {
+                "tunnel": {"command": "x"}
+            }}}),
+            Some("mapping values are not allowed here (line 2)"),
+        )]);
+        assert!(!composition.fatal);
+        assert!(composition.procs.is_empty());
+        let diagnostic = composition
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "service_config_layer_error")
+            .expect("errored local emits service_config_layer_error");
+        assert_eq!(diagnostic.severity, "warning");
+        assert!(
+            diagnostic.message.contains("/proj/sase.yml"),
+            "names the path, got: {}",
+            diagnostic.message
+        );
+    }
+
+    #[test]
+    fn an_unknown_layer_kind_is_fatal() {
+        let composition = compose(vec![layer(
+            "machine",
+            "machine",
+            Some("/m/sase.yml"),
+            serde_json::json!({"service": {"procs": {
+                "tunnel": {"command": "x"}
+            }}}),
+        )]);
+        assert!(composition.fatal);
+        assert!(composition.procs.is_empty());
+        assert!(composition
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "service_config_unknown_layer_kind"));
     }
 }
