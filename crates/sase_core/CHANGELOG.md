@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.72](https://github.com/sase-org/sase-core/compare/v0.34.71...v0.34.72) - 2026-09-22
+
+### Added
+
+- *(plan)* add bead show validation for plan guard
+
 ## [0.34.71](https://github.com/sase-org/sase-core/compare/v0.34.70...v0.34.71) - 2026-09-21
 
 ### Added
