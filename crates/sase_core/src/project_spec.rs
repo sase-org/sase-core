@@ -814,21 +814,30 @@ fn is_valid_sase_project_name(project_name: &str) -> bool {
         && !project_name.contains(',')
 }
 
+fn fold_project_ref(project_ref: &str) -> String {
+    project_ref.to_lowercase()
+}
+
 fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
-    let project_names: BTreeSet<String> = records
+    let mut folded_project_names: BTreeSet<String> = records
         .iter()
-        .map(|record| record.project_name.clone())
+        .map(|record| fold_project_ref(&record.project_name))
         .collect();
+    folded_project_names.insert("home".to_string());
     let mut alias_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut display_name_owners: BTreeMap<String, Vec<String>> =
         BTreeMap::new();
+    let mut ref_spellings: BTreeMap<String, String> = BTreeMap::new();
     let mut warnings_by_project: BTreeMap<String, Vec<String>> =
         BTreeMap::new();
 
     for record in records.iter().filter(|record| !record.system_managed) {
+        let folded_project_name = fold_project_ref(&record.project_name);
         if let Some(display_name) = record.display_name.as_ref() {
-            if display_name != &record.project_name {
-                if project_names.contains(display_name) {
+            if fold_project_ref(display_name) != folded_project_name {
+                if folded_project_names
+                    .contains(&fold_project_ref(display_name))
+                {
                     warnings_by_project
                         .entry(record.project_name.clone())
                         .or_default()
@@ -836,22 +845,26 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
                             "PROJECT_NAME value {display_name:?} collides with project {display_name:?}"
                         ));
                 }
+                let folded = fold_project_ref(display_name);
+                ref_spellings
+                    .entry(folded.clone())
+                    .or_insert_with(|| display_name.clone());
                 display_name_owners
-                    .entry(display_name.clone())
+                    .entry(folded)
                     .or_default()
                     .push(record.project_name.clone());
             }
         }
 
         for alias in &record.aliases {
-            if alias == &record.project_name {
+            if fold_project_ref(alias) == folded_project_name {
                 warnings_by_project
                     .entry(record.project_name.clone())
                     .or_default()
                     .push(format!(
                         "PROJECT_ALIASES value {alias:?} matches canonical project name"
                     ));
-            } else if project_names.contains(alias) {
+            } else if folded_project_names.contains(&fold_project_ref(alias)) {
                 warnings_by_project
                     .entry(record.project_name.clone())
                     .or_default()
@@ -859,7 +872,9 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
                     "PROJECT_ALIASES value {alias:?} collides with project {alias:?}"
                     ));
             }
-            if record.display_name.as_ref() == Some(alias) {
+            if record.display_name.as_ref().is_some_and(|name| {
+                fold_project_ref(name) == fold_project_ref(alias)
+            }) {
                 warnings_by_project
                     .entry(record.project_name.clone())
                     .or_default()
@@ -867,20 +882,25 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
                         "PROJECT_ALIASES value {alias:?} matches PROJECT_NAME"
                     ));
             }
+            let folded = fold_project_ref(alias);
+            ref_spellings
+                .entry(folded.clone())
+                .or_insert_with(|| alias.clone());
             alias_owners
-                .entry(alias.clone())
+                .entry(folded)
                 .or_default()
                 .push(record.project_name.clone());
         }
     }
 
-    for (alias, owners) in &alias_owners {
+    for (folded, owners) in &alias_owners {
         let mut owners = owners.clone();
         owners.sort();
         owners.dedup();
         if owners.len() <= 1 {
             continue;
         }
+        let alias = ref_spellings.get(folded).map_or(folded, |name| name);
         for owner in &owners {
             let others: Vec<&str> = owners
                 .iter()
@@ -897,12 +917,14 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
         }
     }
 
-    for (display_name, mut owners) in display_name_owners.clone() {
+    for (folded, mut owners) in display_name_owners.clone() {
         owners.sort();
         owners.dedup();
         if owners.len() <= 1 {
             continue;
         }
+        let display_name =
+            ref_spellings.get(&folded).map_or(&folded, |name| name);
         for owner in &owners {
             let others: Vec<&str> = owners
                 .iter()
@@ -919,11 +941,12 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
         }
     }
 
-    for (display_name, display_owners) in display_name_owners {
-        let Some(alias_owners_for_name) = alias_owners.get(&display_name)
-        else {
+    for (folded, display_owners) in display_name_owners {
+        let Some(alias_owners_for_name) = alias_owners.get(&folded) else {
             continue;
         };
+        let display_name =
+            ref_spellings.get(&folded).map_or(&folded, |name| name);
         let mut display_owners = display_owners;
         display_owners.sort();
         display_owners.dedup();
@@ -1528,6 +1551,65 @@ mod tests {
                 .iter()
                 .any(|warning| warning
                     .contains("collides with project \"alpha\""))
+        );
+    }
+
+    #[test]
+    fn lifecycle_project_ref_collisions_are_case_insensitive_and_reserve_home()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        let alpha_dir = projects.join("alpha");
+        fs::create_dir(&alpha_dir).unwrap();
+        fs::write(
+            alpha_dir.join("alpha.sase"),
+            "PROJECT_NAME: Docs\nPROJECT_ALIASES: Shared\nNAME: alpha\n",
+        )
+        .unwrap();
+
+        let beta_dir = projects.join("beta");
+        fs::create_dir(&beta_dir).unwrap();
+        fs::write(
+            beta_dir.join("beta.sase"),
+            "PROJECT_NAME: docs\nPROJECT_ALIASES: shared, HOME\nNAME: beta\n",
+        )
+        .unwrap();
+
+        let records =
+            list_project_records(&projects, &["all".to_string()], false, false)
+                .unwrap();
+
+        assert_eq!(records.len(), 2);
+        let by_name: BTreeMap<&str, &ProjectRecordWire> = records
+            .iter()
+            .map(|record| (record.project_name.as_str(), record))
+            .collect();
+        for project in ["alpha", "beta"] {
+            let warnings = &by_name[project].parse_warnings;
+            assert!(
+                warnings.iter().any(|warning| warning
+                    .contains("PROJECT_NAME value")
+                    && warning.contains("also assigned")),
+                "{project} warns about its case-variant PROJECT_NAME: {warnings:?}"
+            );
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains("PROJECT_ALIASES value")
+                        && warning.contains("also assigned")),
+                "{project} warns about its case-variant alias: {warnings:?}"
+            );
+        }
+        assert!(
+            by_name["beta"]
+                .parse_warnings
+                .iter()
+                .any(|warning| warning.contains("\"HOME\"")
+                    && warning.contains("collides with project")),
+            "claims on the reserved home ref warn: {:?}",
+            by_name["beta"].parse_warnings
         );
     }
 
