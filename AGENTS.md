@@ -22,9 +22,11 @@ both.
   `sase_core` edit recompiles the whole crate, so batch your edits between runs.
 - `just test -p <crate> [<filter>]` runs targeted tests while you iterate.
 - `just fmt` applies formatting.
-- `just check` is the gate and runs the same steps as CI: fmt-check, clippy with
-  `-D warnings`, every test, and the script tests. Pass it before you finish. It takes
-  about 5 minutes, so give it an explicit tool timeout of 10 minutes or more.
+- `just check` is the gate and runs the same steps as CI: fmt-check, features
+  (`./scripts/check.sh features`), clippy with `-D warnings`, every test, and the
+  script tests. A features failure is fixed by
+  `cargo hakari generate && cargo hakari manage-deps`. Pass it before you finish.
+  It takes about 5 minutes, so give it an explicit tool timeout of 10 minutes or more.
 
 A targeted run never replaces `just check`. For example, `-p sase_core` alone skips the
 `sase_core_py` binding tests, and that gap let stale schema fixtures reach master in

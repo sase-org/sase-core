@@ -21,7 +21,7 @@ See `AGENTS.md`. The short version:
 
 ```bash
 just fast    # inner loop: cargo check --workspace --all-targets
-just check   # the gate (same steps as CI): fmt-check, clippy, tests, script-test
+just check   # the gate (same steps as CI): fmt-check, features, clippy, tests, script-test
 ```
 
 ```bash
