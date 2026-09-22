@@ -1,6 +1,12 @@
 default: check
 
-check:
+# Agents must run guarded tools through `sase tool run` (sase docs/tool.md).
+# The guard is the first dependency, ahead of the check script, so a refusal
+# costs milliseconds rather than a full gate run.
+_require-tool-run name:
+    @scripts/require_tool_run {{ name }}
+
+check: (_require-tool-run "check")
     ./scripts/check.sh all
 
 # Inner loop: workspace check without formatting, lint, or tests.

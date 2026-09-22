@@ -28,6 +28,12 @@ both.
   `cargo hakari generate && cargo hakari manage-deps`. Pass it before you finish.
   It takes about 5 minutes, so give it an explicit tool timeout of 10 minutes or more.
 
+## sase tool runs
+
+Agents run `sase tool run check` here, not bare `just check`: `check` is
+guarded and a raw agent invocation is refused with the wrapped and bypass
+forms. To run raw on purpose: `SASE_TOOL_BYPASS='<why>' just check`.
+
 A targeted run never replaces `just check`. For example, `-p sase_core` alone skips the
 `sase_core_py` binding tests, and that gap let stale schema fixtures reach master in
 `a509dcc`. `master` is unprotected, and a red commit also fails every release-plz run.

@@ -1,0 +1,17 @@
+# Project-owned named tools (see sase docs/tool.md, "Guarded recipes").
+# Complete entries: other config layers cannot alter this catalog.
+tools:
+  check:
+    argv: [just, check]
+    description: Run the repository scoped check.
+    stages: none
+    inputs:
+      - justfile
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/check.sh
+    args: deny
+    fingerprint:
+      toolchain:
+        cargo: [cargo, --version]
+        rustc: [rustc, --version]
