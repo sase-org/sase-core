@@ -1,3 +1,4 @@
+//! Line-and-char tail slicing for text views.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

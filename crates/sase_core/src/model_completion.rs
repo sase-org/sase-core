@@ -1,3 +1,4 @@
+//! Model-completion candidate filtering.
 use serde::{Deserialize, Serialize};
 
 pub const MODEL_COMPLETION_ENTRY_WIRE_FIELDS: &[&str] = &[

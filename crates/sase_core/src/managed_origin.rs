@@ -1,3 +1,4 @@
+//! Managed-origin reconciliation decisions for mirrored checkouts.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

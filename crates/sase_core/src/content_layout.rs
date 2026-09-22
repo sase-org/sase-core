@@ -1,3 +1,4 @@
+//! Project and home content-layout wire records.
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

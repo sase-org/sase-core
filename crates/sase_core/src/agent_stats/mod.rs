@@ -1,3 +1,4 @@
+//! Agent activity and run statistics queries.
 mod activity;
 mod gate_bundles;
 mod run;

@@ -1,3 +1,4 @@
+//! Dismissed-agent cleanup planning and bundle execution.
 pub mod execution;
 pub mod force_reuse;
 pub mod planner;

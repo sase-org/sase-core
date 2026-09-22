@@ -71,7 +71,7 @@ PY
 
 usage() {
     cat >&2 <<EOF
-usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|features|check [args...]|clippy [args...]|test [args...]|script-test|all]
+usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|features|check [args...]|clippy [args...]|test [args...]|script-test|modules|all]
 
   fmt-check   cargo fmt --all -- --check
   fmt         cargo fmt --all
@@ -80,6 +80,7 @@ usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|features|check [args...]|c
   clippy      cargo clippy --workspace --all-targets [args...] -- -D warnings
   test        cargo test --workspace [args...]
   script-test unittest the release-workflow helper scripts in .github/scripts
+  modules     list each sase_core top-level module with its one-line //! summary
   all         fmt-check, features, clippy, test, then script-test (default)
 
 Trailing arguments to the check, clippy and test subcommands are forwarded to
@@ -236,6 +237,30 @@ cmd_script_test() {
     python3 -m unittest discover -s .github/scripts -t .github/scripts
 }
 
+# Fresh-by-construction module map: every sase_core top-level module with the
+# first line of its `//!` summary. The module root is `<m>.rs` or `<m>/mod.rs`;
+# `lib.rs` is skipped. Not a gate: P1 decides whether to commit a generated map.
+cmd_modules() {
+    local src_dir="$repo_root/crates/sase_core/src"
+    local path mod root line
+    for path in "$src_dir"/*; do
+        mod="$(basename "$path")"
+        if [[ -f "$path" ]]; then
+            [[ "$mod" == *.rs ]] || continue
+            mod="${mod%.rs}"
+            root="$path"
+        elif [[ -f "$path/mod.rs" ]]; then
+            mod="$(basename "$path")"
+            root="$path/mod.rs"
+        else
+            continue
+        fi
+        [[ "$mod" == "lib" ]] && continue
+        line="$(grep -m1 '^//!' "$root" | sed -e 's|^//! \?||')" || line=""
+        printf '%s: %s\n' "$mod" "$line"
+    done | sort
+}
+
 cmd_all() {
     cmd_fmt_check
     cmd_features
@@ -257,6 +282,7 @@ case "$subcommand" in
     clippy) cmd_clippy "$@" ;;
     test) cmd_test "$@" ;;
     script-test) cmd_script_test ;;
+    modules) cmd_modules ;;
     all) cmd_all ;;
     *)
         usage

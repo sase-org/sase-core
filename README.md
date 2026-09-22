@@ -2,307 +2,48 @@
 
 [![PyPI](https://img.shields.io/pypi/v/sase-core-rs?logo=pypi&logoColor=white)](https://pypi.org/project/sase-core-rs/)
 
-Rust core for the [sase](https://github.com/sase-org/sase) Patch backend.
-
-This repo is the eventual home of the Rust Patch parser, query engine, graph index, and bead data backend. The Python
-`sase_100` repo remains the product shell; this crate owns deterministic core data operations as they are ported.
+Rust core for the [sase](https://github.com/sase-org/sase) backend. sase consumes it as
+the PyPI `sase-core-rs` extension: `pyproject.toml` pins a minor window and
+`sase-core-revision.txt` pins the exact revision its CI builds.
 
 ## Layout
 
-```
-crates/
-  sase_core/      # pure-Rust core: wire types + full-file parser
-  sase_core_py/   # PyO3 extension crate for the sase-core-rs Python package
-  sase_gateway/   # local host HTTP gateway for SASE mobile clients
-```
+| Crate                     | Owns                                                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/sase_core`        | All domain logic, with no PyO3. Flat top-level modules, one per domain; `just modules` prints a one-line summary of each                          |
+| `crates/sase_core_py`     | The `sase_core_rs` extension (PyPI `sase-core-rs`). One binding domain per `src/<domain>/`, often named differently from the core module it binds |
+| `crates/sase_gateway`     | The mobile and fleet HTTP gateway plus the `sase_sudo_runner` and `sase_federation_worker` binaries. They ship inside the wheel                   |
+| `crates/sase_xprompt_lsp` | The `sase-xprompt-lsp` language server                                                                                                            |
 
-The pure crate has no PyO3 dependency. This is deliberate — later UniFFI, WASM, or server crates need to consume
-`sase_core` without dragging a Python toolchain into their build.
+## Development
 
-`sase_gateway` is also pure Rust. It owns the mobile gateway HTTP wire contract and server skeleton without depending on
-the Python binding crate.
-
-## Build & test
-
-`just check` (or `./scripts/check.sh all`) is the verification gate — it runs the same fmt, clippy, test, and
-script-test steps as CI. Never verify with bare `cargo` invocations: they skip the script's `PYO3_PYTHON`
-resolution and, for single-crate runs, the `sase_core_py` binding tests.
+See `AGENTS.md`. The short version:
 
 ```bash
-just check                              # fmt-check + clippy + test + script-test (CI gate)
-./scripts/check.sh fmt-check            # formatting gate
-./scripts/check.sh clippy               # lint gate (warnings as errors)
-./scripts/check.sh test                 # full workspace test suite
+just fast    # inner loop: cargo check --workspace --all-targets
+just check   # the gate (same steps as CI): fmt-check, clippy, tests, script-test
+```
+
+```bash
 cargo run --release --example bench_parse   # direct-parser benchmark
 ```
 
-Mobile gateway hardening subsets (forwarded through the gate so `PYO3_PYTHON` still resolves):
-
-```bash
-./scripts/check.sh test -p sase_gateway push_subscription
-./scripts/check.sh test -p sase_gateway test_push_provider_records_hint_attempts
-./scripts/check.sh test -p sase_gateway listener_smoke_exercises_pairing_auth_and_session
-```
-
-The mobile MVP packaging, private remote-access, rollback, and threat-model runbook is maintained in the SASE shell
-repo at `../sase_100/docs/mobile_mvp_runbook.md`. The gateway README at `crates/sase_gateway/README.md` documents the
-wire routes, push subscription endpoints, and hint-only push boundary.
-
-`rust-toolchain.toml` pins the `stable` channel and installs `rustfmt` and `clippy`. `Cargo.lock` is committed so the
-workspace builds reproducibly.
+`rust-toolchain.toml` pins the `stable` channel and installs `rustfmt` and `clippy`.
+`Cargo.lock` is committed so the workspace builds reproducibly.
 
 ## Releasing / versioning
 
-release-plz owns the workspace and crate release versions. Normal feature and fix PRs must not edit
-`[workspace.package].version`, crate `[package].version`, or local path-dependency version pins in `Cargo.toml`; use
-Conventional Commits metadata instead and let release-plz calculate the next version from the merged commits. For a
-breaking change on the `0.x` line, mark the commit or squash-merge title with `!` (for example, `feat(core)!: remove
-legacy API`) or include a `BREAKING CHANGE:` footer so release-plz computes the minor bump.
+release-plz owns the workspace and crate release versions. Normal feature and fix PRs
+must not edit `[workspace.package].version`, crate `[package].version`, or local
+path-dependency version pins in `Cargo.toml`; use Conventional Commits metadata instead
+and let release-plz calculate the next version from the merged commits. For a breaking
+change on the `0.x` line, mark the commit or squash-merge title with `!` (for example,
+`feat(core)!: remove legacy API`) or include a `BREAKING CHANGE:` footer so release-plz
+computes the minor bump.
 
-The `Cargo version guard` PR check blocks release-owned Cargo version edits outside release-plz branches. The
-`manual-version` PR label is reserved for deliberate release recovery or other explicitly approved version overrides.
-Agents working in this repo should leave Cargo versions alone unless the user specifically asks for that recovery flow.
-
-The companion `sase_100` repo ships matching `just` targets so a contributor can drive both repos from one tree:
-
-```bash
-just rust-install     # maturin develop --release into .venv
-just rust-test        # cargo test --workspace
-just rust-fmt-check   # cargo fmt --all -- --check
-just rust-clippy      # warnings-as-errors
-just rust-bench       # cargo run --release --example bench_parse
-just rust-check       # fmt-check + clippy + tests
-just bench-core       # Python-side end-to-end benchmark
-```
-
-All `rust-*` targets short-circuit with a friendly message when `../sase-core` is not present, so a pure-Python
-`just install`/`just check` flow is unaffected.
-
-## Wire contract
-
-`crates/sase_core/src/wire.rs` exposes canonical Patch/Stitch records while preserving the legacy
-`sase_100/src/sase/core/wire.py` ChangeSpec wire shape:
-
-| Rust type                    | Contract role                                      |
-| ---------------------------- | -------------------------------------------------- |
-| `SourceSpanWire`             | Shared source span record                          |
-| `StitchWire`                 | Canonical lightweight Patch entry                  |
-| `CommitWire`                 | Legacy compatibility alias for stitch entries      |
-| `PatchHookStatusLineWire`    | Canonical hook status reference with `stitch_id`   |
-| `HookStatusLineWire`         | Legacy hook status reference with `commit_entry_num` |
-| `PatchHookWire`              | Canonical hook record                              |
-| `HookWire`                   | Legacy-compatible hook record                      |
-| `CommentWire`                | Shared comment record                              |
-| `MentorStatusLineWire`       | Shared mentor status record                        |
-| `PatchMentorWire`            | Canonical mentor record with `stitch_id`           |
-| `MentorWire`                 | Legacy mentor record with `entry_id`               |
-| `TimestampWire`              | Shared timestamp record                            |
-| `DeltaWire`                  | Shared delta record                                |
-| `PatchWire`                  | Canonical parsed Patch record with `stitches`      |
-| `ChangeSpecWire`             | Legacy compatibility record with `commits`         |
-| `ParseErrorWire`             | Shared parser error record                         |
-
-`crates/sase_core/src/procs/wire.rs` owns the durable proc-store wire that backs background-process tracking:
-
-| Rust type                 | Contract role                                  |
-| ------------------------- | ---------------------------------------------- |
-| `ProcWire`                | One durable background proc record             |
-| `ProcStoreStatsWire`      | JSONL read statistics                          |
-| `ProcStoreSnapshotWire`   | Snapshot envelope with canonical `procs` rows  |
-| `ProcAppendOutcomeWire`   | Append outcome plus retention results          |
-| `ProcUpdateWire`          | Partial mutation identified by `proc_id`       |
-| `ProcUpdateOutcomeWire`   | Update outcome with the matched `proc` row     |
-| `ProcPruneOutcomeWire`    | Retention outcome plus pruned proc ids         |
-
-`crates/sase_core/src/agent_scan/wire.rs` mirrors
-`sase_100/src/sase/core/agent_scan_wire.py` (Phase 3B):
-
-| Rust type                       | Python dataclass                |
-| ------------------------------- | ------------------------------- |
-| `AgentArtifactScanOptionsWire`  | `AgentArtifactScanOptionsWire`  |
-| `AgentArtifactScanStatsWire`    | `AgentArtifactScanStatsWire`    |
-| `DoneMarkerWire`                | `DoneMarkerWire`                |
-| `AgentMetaWire`                 | `AgentMetaWire`                 |
-| `RunningMarkerWire`             | `RunningMarkerWire`             |
-| `WaitingMarkerWire`             | `WaitingMarkerWire`             |
-| `WorkflowStateWire`             | `WorkflowStateWire`             |
-| `WorkflowStepStateWire`         | `WorkflowStepStateWire`         |
-| `PromptStepMarkerWire`          | `PromptStepMarkerWire`          |
-| `PlanPathMarkerWire`            | `PlanPathMarkerWire`            |
-| `AgentArtifactRecordWire`       | `AgentArtifactRecordWire`       |
-| `AgentArtifactScanWire`         | `AgentArtifactScanWire`         |
-
-JSON shape rules (enforced by tests):
-
-- `Option<T>::None` → JSON `null` (never omitted).
-- Empty list fields → JSON `[]` (never `null`).
-- `schema_version` is the first field of `PatchWire` and `ChangeSpecWire` so a Rust parser can refuse to deserialize
-  newer records.
-- `PatchWire` serializes canonical `stitches` / `stitch_id` keys. `ChangeSpecWire` keeps the legacy `commits` /
-  `commit_entry_num` / `entry_id` keys for installed consumers.
-- Canonical records deserialize legacy keys, and legacy records deserialize canonical keys, so mixed-version producers
-  and consumers can overlap during the terminology migration.
-- Proc-store records serialize canonical `procs` / `proc_id` / `pruned_proc_ids` / `proc` keys, while deserializing
-  legacy `tasks` / `task_id` / `pruned_task_ids` / `task` keys during the background-task terminology migration.
-- Field declaration order matches the current Python dataclasses at the legacy boundary, so byte-for-byte parity is
-  reachable when both sides preserve declaration order.
-
-`crates/sase_core/tests/python_wire_parity.rs` checks Rust JSON against a captured Python fixture in both directions.
-
-## Bead storage contract
-
-`crates/sase_core/src/bead/` mirrors the portable pieces of `sase_100/src/sase/bead/` for the bead backend migration:
-
-- `wire.rs` defines `IssueWire`, structured `TaskPlusOneEvidenceWire`, `DependencyWire`, status/type enums, validation
-  errors, and operation outcomes. Task +1 counts are derived from the default-empty evidence collection.
-- `config.rs` loads and saves `sdd/beads/config.json` using the same pretty JSON shape as Python.
-- `jsonl.rs` imports and exports `sdd/beads/issues.jsonl`, skips corrupt lines, applies legacy defaults, validates
-  records, sorts import rows as Python does for parent-before-child loading, and exports compact JSON sorted by issue ID.
-- `schema.rs` pins the current SQLite schema plus migration fragments for legacy issue type names, `is_ready_to_work`,
-  structured task +1 evidence, and ChangeSpec metadata columns.
-
-The append-only `task_plus_one_recorded` event and `add_task_plus_one` mutation atomically persist independent evidence,
-artifact references, and draft/closed-to-ready promotion. The PyO3 module exports the same operation as
-`bead_plus_one`.
-
-`crates/sase_core/tests/bead_storage_parity.rs` carries the Phase A bead fixtures forward into Rust and checks the
-current JSONL/config shape, legacy defaults, tolerant corrupt-line handling, missing-file behavior, and byte-compatible
-JSONL export. No production Python code routes through these bead APIs yet; read bindings and store operations land in
-later phases.
-
-## Parser status
-
-`crates/sase_core/src/parser.rs` exposes both the legacy and canonical parser contracts:
-
-```rust
-pub fn parse_project_bytes(
-    path: &str,
-    data: &[u8],
-) -> Result<Vec<ChangeSpecWire>, ParseErrorWire>;
-
-pub fn parse_patch_project_bytes(
-    path: &str,
-    data: &[u8],
-) -> Result<Vec<PatchWire>, ParseErrorWire>;
-```
-
-The parser accepts Patch boundaries (`## Patch` headers, legacy `## ChangeSpec` headers, direct `NAME:` starts,
-two-blank-line / new-NAME terminators), the scalar fields `NAME`, `DESCRIPTION`, `PARENT`, `PR` (legacy `CL` is
-accepted), `BUG`, and `STATUS`, **and** structured section parsing for canonical `STITCHES`, legacy `COMMITS`, `HOOKS`,
-`COMMENTS`, `MENTORS`, `TIMESTAMPS`, and `DELTAS`. Suffix-prefix parsing matches `sase.ace.changespec.suffix_utils`
-(including `~!:`, `~@:`, `~$:`, `?$:`, `!:`, `@:`, `$:`, `%:`, `^:`, the legacy `~:` plain form, the standalone
-`@`/`%`/`^` markers, and the `!: metahook | ...` → `metahook_complete` promotion).
-
-`source_span.start_line` / `end_line` are inclusive 1-based and reflect the real last non-blank line of the spec, which
-improves on Phase 0's Python placeholder (`end_line == start_line`).
-
-### Documented incompatibility: `source_span.end_line`
-
-Python's `changespec_to_wire` writes `end_line == start_line` because the Python parser does not track end positions.
-Rust tracks real end lines (a deliberate Phase 1 improvement, per `sase_100/plans/202604/rust_backend_phase1.md`).
-
-`crates/sase_core/tests/golden_corpus_parity.rs` normalizes Rust's `end_line` down to `start_line` before comparing
-against the Python golden snapshot, so the rest of the wire is checked byte-for-byte. The real end-line behavior is
-exercised by parser unit tests instead. Phase 1F decides whether to backfill end-line tracking in Python or keep this
-normalization at the parity boundary.
-
-## Phase status
-
-Currently complete: **Phase 1A** (workspace + wire types), **Phase 1B** (scalar parser skeleton), **Phase 1C** (section
-parser parity), **Phase 1D** (PyO3 binding + Python adapter in `sase_100`), and **Phase 1E** (dev workflow, benchmarks,
-packaging decision) of `sase_100/plans/202604/rust_backend_phase1.md`. Remaining work:
-
-- **1F** — cross-repo parity gate and handoff.
-
-For Phase 3 (`rust_backend_phase3_agent_scan.md`): **Phase 3B** added the
-pure-Rust artifact filesystem snapshot scanner under
-`crates/sase_core/src/agent_scan/` and parity tests in
-`crates/sase_core/tests/agent_scan_parity.rs`. The PyO3 binding for
-`scan_agent_artifacts` lands in Phase 3C.
-
-## Agent artifact scanner (Phase 3B)
-
-`crates/sase_core/src/agent_scan/scanner.rs` exposes:
-
-```rust
-pub fn scan_agent_artifacts(
-    projects_root: &Path,
-    options: AgentArtifactScanOptionsWire,
-) -> AgentArtifactScanWire;
-```
-
-It walks `projects_root/<project>/artifacts/<workflow>/<timestamp>/` for
-the workflow folder families pinned in `agent_scan_wire.py`
-(`ace-run`, `run`, `fix-hook`, `crs`, `summarize-hook`, plus `mentor-*`
-and `workflow-*` prefixes), and parses the marker files `agent_meta.json`,
-`done.json`, `running.json`, `waiting.json`, `workflow_state.json`,
-`plan_path.json`, and `prompt_step_*.json`. Soft errors (unreadable
-directories, malformed marker JSON, marker JSON whose top level is not a
-JSON object) are absorbed silently and counted on
-`AgentArtifactScanStatsWire`. Records are sorted by
-`(project_name, workflow_dir_name, timestamp)` before returning, matching
-`scan_agent_artifacts_python` in `sase_100`.
-
-## Python binding (`sase_core_rs`)
-
-`crates/sase_core_py` is a `cdylib` that builds the Python extension module
-`sase_core_rs`. Among its JSON-shaped APIs are:
-
-```python
-sase_core_rs.parse_project_bytes(path: str, data: bytes) -> list[dict]
-sase_core_rs.parse_patch_project_bytes(path: str, data: bytes) -> list[dict]
-sase_core_rs.axe_status_wire_schema_version() -> int
-sase_core_rs.classify_axe_status(request: dict) -> dict
-```
-
-The result is plain Python `dict`/`list`/`str`/`int`/`bool`/`None`. `parse_patch_project_bytes` mirrors the canonical
-`PatchWire` JSON shape; `parse_project_bytes` preserves the legacy `ChangeSpecWire` JSON shape. No PyO3 classes leak
-across the boundary. A Rust `ParseErrorWire` is surfaced as a Python `ValueError` whose message is the wire error's
-`Display` form (`"kind: message (file_path)"`).
-
-For AXE status, Python supplies already-collected lock, process, marker,
-runner, and lumberjack observations. Rust performs pure validation,
-normalization, and classification without filesystem or process I/O and
-returns only plain Python dictionaries, lists, scalars, and `None`.
-
-Building the wheel requires a Python interpreter on the host (`maturin develop` or `maturin build` from
-`crates/sase_core_py`). It is opt-in: the Python `sase` install does not require Rust, and `SASE_CORE_BACKEND=python`
-(the default) ignores the binding entirely. The `is_rust_available()` probe in `sase.core.backend` lazy-imports
-`sase_core_rs`, so a missing module never breaks startup.
-
-## Benchmarks
-
-Phase 1E adds two benchmark harnesses so future phases can decide whether to default `SASE_CORE_BACKEND` to `rust`:
-
-- **Rust direct** — `cargo run --release --example bench_parse` from this repo (or `just rust-bench` from `sase_100`).
-  Times only the pure Rust parser over the golden corpus and a synthetic multi-spec file. No Python in the loop.
-- **End-to-end Python** — `python tests/perf/bench_core_parse.py` in `sase_100` (or `just bench-core`). Times Python
-  direct, Python facade, `sase_core_rs.parse_project_bytes` direct, the Rust facade (PyO3 + dict→`ChangeSpecWire`
-  rehydration), and the `SASE_CORE_DUAL_RUN=1` overhead. The facade number is the one to compare against Python — the
-  direct number isolates how much of the cost is PyO3/dict marshaling vs. parsing.
-
-Both harnesses accept `--num-specs` and `--runs` flags so they can be tuned for noise floor vs. wall-clock budget.
-
-## Packaging decision (Phase 1E)
-
-> **Current status:** this Phase 1E decision has since been superseded. `sase` now declares `sase-core-rs` as a hard
-> runtime dependency with no pure-Python fallback for ported operations, and the recommended install is
-> `uv tool install sase`, which pulls a prebuilt wheel on supported platforms. The notes below are kept as the
-> historical record of the original opportunistic-detection rollout.
-
-`sase` does **not** depend on a built `sase_core_rs` wheel. The extension is detected opportunistically at import time:
-
-- Pure-Python install: `pip install sase` (or `just install`) succeeds with no Rust toolchain. `is_rust_available()`
-  returns `False`, `parse_project_bytes` runs through the Python implementation.
-- Rust-enabled install: a contributor runs `just rust-install` (which uses `maturin develop --release` from
-  `crates/sase_core_py`). After that, `is_rust_available()` returns `True` and `SASE_CORE_BACKEND=rust` (or dual-run)
-  routes through the binding.
-- CI: `just check` does not invoke any Rust target, so Python-only jobs cannot be broken by Rust packaging churn. A
-  separate `just rust-check` (fmt-check + clippy + tests) runs on demand.
-
-This keeps the rollout reversible: Phase 1F can flip the default to `rust` without touching the install path, and a
-future hard dependency on the wheel is a separate decision that can be staged behind an extra (`pip install sase[rust]`)
-if it ever becomes desirable.
+The `Cargo version guard` PR check blocks release-owned Cargo version edits outside
+release-plz branches. The `manual-version` PR label is reserved for deliberate release
+recovery or other explicitly approved version overrides.
 
 ## License
 

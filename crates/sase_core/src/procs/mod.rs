@@ -1,3 +1,4 @@
+//! Durable background-proc store and runtime retention.
 pub mod runtime;
 pub mod store;
 pub mod wire;

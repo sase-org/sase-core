@@ -1,3 +1,4 @@
+//! Performance-log snapshots and aggregation.
 mod aggregate;
 mod sources;
 mod wire;

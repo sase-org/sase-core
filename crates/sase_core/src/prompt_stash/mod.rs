@@ -1,3 +1,4 @@
+//! Prompt-stash store and snapshot operations.
 pub mod store;
 pub mod wire;
 

@@ -1,3 +1,4 @@
+//! Snippet-expansion planning and session state.
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};

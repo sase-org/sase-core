@@ -1868,7 +1868,10 @@ mod tests {
     fn inventory_pages_large_pending_set_beyond_row_cap() {
         let rows = (0..150)
             .map(|index| {
-                gate_row(&format!("gate-page-{index:04}"), Some("athena.worker"))
+                gate_row(
+                    &format!("gate-page-{index:04}"),
+                    Some("athena.worker"),
+                )
             })
             .collect::<Vec<_>>();
         let response = project_fleet_attention_inventory(
@@ -1882,10 +1885,7 @@ mod tests {
         .unwrap();
         assert_eq!(response.page.entries.len(), 100);
         assert!(response.page.has_more);
-        assert_eq!(
-            response.page.next_cursor.as_deref(),
-            Some("off:100")
-        );
+        assert_eq!(response.page.next_cursor.as_deref(), Some("off:100"));
         assert_eq!(response.page.total_matching_entries, 150);
     }
 

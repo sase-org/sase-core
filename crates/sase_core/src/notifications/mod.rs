@@ -1,3 +1,4 @@
+//! Notification store, rules, and snapshot reads.
 pub mod mobile;
 pub mod pending_actions;
 pub mod rules;

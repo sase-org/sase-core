@@ -1,3 +1,4 @@
+//! Editor services: completion, definition, diagnostics, and syntax edits.
 pub mod argument_spans;
 pub mod argument_syntax_edit;
 pub mod at_reference;

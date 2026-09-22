@@ -491,10 +491,9 @@ async fn fleet_attention_inventory_succeeds_on_busy_host() {
         ));
     }
     assert!(notifications.len() > 200);
-    let bridge =
-        Arc::new(FakeAttentionNotificationBridge::with_notifications(
-            notifications,
-        ));
+    let bridge = Arc::new(FakeAttentionNotificationBridge::with_notifications(
+        notifications,
+    ));
     state.notification_bridge = DynNotificationHostBridge::new(bridge.clone());
     let (token, _installation_id) =
         enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;

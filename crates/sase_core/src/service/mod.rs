@@ -1,3 +1,4 @@
+//! Service-proc modes, sources, config, and lifecycle state.
 pub mod config;
 pub mod restart;
 pub mod state;

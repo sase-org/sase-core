@@ -1,3 +1,4 @@
+//! Xprompt and snippet catalog loading and resolution.
 mod definition;
 mod entries;
 mod loader;

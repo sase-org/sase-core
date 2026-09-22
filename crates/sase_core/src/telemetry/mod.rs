@@ -1,3 +1,4 @@
+//! Telemetry metric recording and range queries.
 mod store;
 mod wire;
 
