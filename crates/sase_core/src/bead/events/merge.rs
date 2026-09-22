@@ -80,6 +80,12 @@ pub fn merge_bead_event_streams(
 /// the store. Passing `None` keeps the historical behavior of failing on a
 /// duplicate `issue_created`. Duplicated *child* ids need no caller input:
 /// the next free sibling number is derivable from the stream itself.
+///
+/// Argument roles: `ours` is the local branch and `theirs` is the published
+/// upstream branch. The Python resolver calls this as
+/// `merge(base, local, upstream)` (`src/sase/bead/conflict_resolver.py`), so
+/// `theirs` is upstream. When both sides share additions in orders that
+/// cannot be reconciled, the upstream (`theirs`) order wins.
 pub fn merge_bead_event_streams_with_relocation(
     base: &BeadEventStreamWire,
     ours: &BeadEventStreamWire,
@@ -110,34 +116,14 @@ pub fn merge_bead_event_streams_with_relocation(
     let theirs_base_indexes =
         validate_append_only_branch(base, theirs, "theirs")?;
     let base_events = event_keys(&base.events)?;
-    let mut additions: BTreeMap<String, (BeadEventRecordWire, BranchTag)> =
-        BTreeMap::new();
-    for (tag, branch, base_indexes) in [
-        (BranchTag::Ours, ours, &ours_base_indexes),
-        (BranchTag::Theirs, theirs, &theirs_base_indexes),
-    ] {
-        for (index, event) in branch.events.iter().enumerate() {
-            if base_indexes.contains(&index) {
-                continue;
-            }
-            let key = serde_json::to_string(event)?;
-            if base_events.contains(&key) {
-                continue;
-            }
-            additions
-                .entry(key)
-                .and_modify(|entry| entry.1 = BranchTag::Both)
-                .or_insert_with(|| (event.clone(), tag));
-        }
-    }
-
-    let mut additions = additions.into_iter().collect::<Vec<_>>();
-    additions.sort_by_key(|(serialized, (event, _))| {
-        event_union_key(event, serialized)
-    });
+    let ours_additions =
+        branch_additions(ours, &ours_base_indexes, &base_events)?;
+    let theirs_additions =
+        branch_additions(theirs, &theirs_base_indexes, &base_events)?;
+    let ordered = interleave_additions(ours_additions, theirs_additions)?;
     let mut merged = base.clone();
     let mut provenance = vec![BranchTag::Base; base.events.len()];
-    for (_, (event, tag)) in additions {
+    for (_, (event, tag)) in ordered {
         merged.events.push(event);
         provenance.push(tag);
     }
@@ -463,13 +449,218 @@ fn event_issue_ids(event: &BeadEventRecordWire) -> Vec<String> {
     ids
 }
 
+/// Serialized event key plus its record, in branch order.
+type BranchAdditions = Vec<(String, BeadEventRecordWire)>;
+/// Interleaved additions with per-event branch provenance.
+type OrderedAdditions = Vec<(String, (BeadEventRecordWire, BranchTag))>;
+/// Heap key for deterministic Kahn ties: the union key plus the node key.
+type UnionHeapKey = (String, usize, String, String, String);
+
+/// One branch's genuine additions in branch order, deduplicated.
+///
+/// `base_indexes` marks the branch positions that carry base events (in any
+/// order after pure-reorder tolerance); everything else whose serialization
+/// is not a base event is a genuine addition. Within-side duplicates keep
+/// their first occurrence so the interleave graph stays a chain.
+fn branch_additions(
+    branch: &BeadEventStreamWire,
+    base_indexes: &BTreeSet<usize>,
+    base_events: &BTreeSet<String>,
+) -> Result<BranchAdditions, BeadError> {
+    let mut additions = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (index, event) in branch.events.iter().enumerate() {
+        if base_indexes.contains(&index) {
+            continue;
+        }
+        let key = serde_json::to_string(event)?;
+        if base_events.contains(&key) {
+            continue;
+        }
+        if seen.insert(key.clone()) {
+            additions.push((key, event.clone()));
+        }
+    }
+    Ok(additions)
+}
+
+/// Order-preserving interleave of the two branches' additions.
+///
+/// Each side keeps its own relative order; when the heads disagree the
+/// smaller `event_union_key` wins so the result stays deterministic. An
+/// event present on both sides appears once. The union of both orders is
+/// topologically sorted, which for disjoint additions is exactly a
+/// head-picking k-way merge. When both sides share additions in conflicting
+/// orders the graph cycles, and the upstream (`theirs`) order wins: only
+/// `theirs` edges plus `ours` unique-to-unique edges are kept, so the result
+/// always contains `theirs` as an exact ordered subsequence, and contains
+/// `ours` whenever such an order exists.
+fn interleave_additions(
+    ours_additions: BranchAdditions,
+    theirs_additions: BranchAdditions,
+) -> Result<OrderedAdditions, BeadError> {
+    let mut events: BTreeMap<String, BeadEventRecordWire> = BTreeMap::new();
+    for (key, event) in ours_additions.iter().cloned() {
+        events.insert(key, event);
+    }
+    for (key, event) in theirs_additions.iter().cloned() {
+        events.entry(key).or_insert(event);
+    }
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ours_keys: Vec<String> =
+        ours_additions.iter().map(|(key, _)| key.clone()).collect();
+    let theirs_keys: Vec<String> = theirs_additions
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect();
+    let shared: BTreeSet<String> = ours_keys
+        .iter()
+        .filter(|key| theirs_keys.contains(key))
+        .cloned()
+        .collect();
+    let ours_shared_order: Vec<&String> = ours_keys
+        .iter()
+        .filter(|key| shared.contains(*key))
+        .collect();
+    let theirs_shared_order: Vec<&String> = theirs_keys
+        .iter()
+        .filter(|key| shared.contains(*key))
+        .collect();
+    let reconciled = ours_shared_order == theirs_shared_order;
+
+    let mut ordered_keys =
+        topo_interleave(&ours_keys, &theirs_keys, &events, reconciled);
+    if ordered_keys.is_none() {
+        ordered_keys =
+            topo_interleave(&Vec::new(), &theirs_keys, &events, false);
+    }
+    let ordered_keys = ordered_keys.unwrap_or_else(|| {
+        let mut keys: Vec<String> = theirs_keys.clone();
+        for key in &ours_keys {
+            if !keys.contains(key) {
+                keys.push(key.clone());
+            }
+        }
+        keys
+    });
+    let mut ordered = Vec::with_capacity(ordered_keys.len());
+    for key in ordered_keys {
+        let event = events.get(&key).cloned().ok_or_else(|| {
+            BeadError::validation("merge interleave missing event")
+        })?;
+        let tag = if ours_keys.contains(&key) && theirs_keys.contains(&key) {
+            BranchTag::Both
+        } else if ours_keys.contains(&key) {
+            BranchTag::Ours
+        } else {
+            BranchTag::Theirs
+        };
+        ordered.push((key, (event, tag)));
+    }
+    Ok(ordered)
+}
+
+/// Kahn topological sort of two chains, breaking ties by `event_union_key`.
+///
+/// Returns `None` when the combined order cycles. `reconciled` selects the
+/// edge set: with reconciled shared orders every consecutive edge from both
+/// sides is kept; on conflict only `theirs` edges plus `ours`
+/// unique-to-unique edges are kept so upstream wins.
+fn topo_interleave(
+    ours_keys: &[String],
+    theirs_keys: &[String],
+    events: &BTreeMap<String, BeadEventRecordWire>,
+    reconciled: bool,
+) -> Option<Vec<String>> {
+    let theirs_set: BTreeSet<&String> = theirs_keys.iter().collect();
+    let mut successors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
+    for key in ours_keys.iter().chain(theirs_keys.iter()) {
+        indegree.entry(key.clone()).or_insert(0);
+        successors.entry(key.clone()).or_default();
+    }
+    let mut add_edge = |prev: &str, next: &str| {
+        if prev == next {
+            return;
+        }
+        let entry = successors
+            .get_mut(prev)
+            .expect("interleave nodes are pre-registered");
+        if entry.insert(next.to_string()) {
+            *indegree
+                .get_mut(next)
+                .expect("interleave nodes are pre-registered") += 1;
+        }
+    };
+    let keep_ours_edge = |prev: &String, next: &String| {
+        if reconciled {
+            return true;
+        }
+        // Conflict: upstream wins, so keep only ours edges between events
+        // that are unique to ours. Shared-order edges from ours are dropped.
+        !theirs_set.contains(prev) && !theirs_set.contains(next)
+    };
+    for window in ours_keys.windows(2) {
+        if keep_ours_edge(&window[0], &window[1]) {
+            add_edge(&window[0], &window[1]);
+        }
+    }
+    for window in theirs_keys.windows(2) {
+        add_edge(&window[0], &window[1]);
+    }
+    let key_of = |key: &str| {
+        let event = events.get(key).expect("interleave nodes have events");
+        event_union_key(event, key)
+    };
+    let mut heap: BinaryHeap<Reverse<UnionHeapKey>> = BinaryHeap::new();
+    for (key, degree) in &indegree {
+        if *degree == 0 {
+            let (timestamp, priority, event_id, serialized) = key_of(key);
+            heap.push(Reverse((
+                timestamp,
+                priority,
+                event_id,
+                serialized,
+                key.clone(),
+            )));
+        }
+    }
+    let mut ordered = Vec::with_capacity(indegree.len());
+    while let Some(Reverse((_, _, _, _, key))) = heap.pop() {
+        ordered.push(key.clone());
+        let nexts: Vec<String> = successors
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for next in nexts {
+            let degree = indegree
+                .get_mut(&next)
+                .expect("interleave nodes are pre-registered");
+            *degree -= 1;
+            if *degree == 0 {
+                let (timestamp, priority, event_id, serialized) = key_of(&next);
+                heap.push(Reverse((
+                    timestamp, priority, event_id, serialized, next,
+                )));
+            }
+        }
+    }
+    if ordered.len() == indegree.len() {
+        Some(ordered)
+    } else {
+        None
+    }
+}
+
 fn validate_append_only_branch(
     base: &BeadEventStreamWire,
     branch: &BeadEventStreamWire,
     branch_name: &str,
 ) -> Result<BTreeSet<usize>, BeadError> {
-    let mut matched_indexes = BTreeSet::new();
-    let mut branch_start = 0;
     for (base_index, base_event) in base.events.iter().enumerate() {
         if branch.events.iter().any(|branch_event| {
             branch_event.event_id == base_event.event_id
@@ -481,19 +672,38 @@ fn validate_append_only_branch(
                 base_index + 1
             )));
         }
-        let Some(offset) = branch.events[branch_start..]
+    }
+    // Accept a pure-reorder branch: every base event exactly once, in any
+    // order. Streams written by the old timestamp-sorting merge look exactly
+    // like this. The merge canonicalizes them back to base order plus the
+    // branch's genuine additions, so wedged clones can heal.
+    let mut counts: Vec<usize> = vec![0; base.events.len()];
+    let mut matched_indexes = BTreeSet::new();
+    for (branch_index, branch_event) in branch.events.iter().enumerate() {
+        if let Some(base_index) = base
+            .events
             .iter()
-            .position(|branch_event| branch_event == base_event)
-        else {
+            .position(|base_event| base_event == branch_event)
+        {
+            counts[base_index] += 1;
+            matched_indexes.insert(branch_index);
+        }
+    }
+    for (base_index, count) in counts.iter().enumerate() {
+        if *count == 0 {
             return Err(BeadError::validation(format!(
                 "cannot merge non-append-only bead event stream {}: {branch_name} missing base event {}",
                 base.stream_id,
                 base_index + 1
             )));
-        };
-        let branch_index = branch_start + offset;
-        matched_indexes.insert(branch_index);
-        branch_start = branch_index + 1;
+        }
+        if *count > 1 {
+            return Err(BeadError::validation(format!(
+                "cannot merge non-append-only bead event stream {}: {branch_name} duplicate base event {}",
+                base.stream_id,
+                base_index + 1
+            )));
+        }
     }
     Ok(matched_indexes)
 }

@@ -285,3 +285,150 @@ fn child_created(
         .into_record(stream_id, ordinal)
         .unwrap()
 }
+
+fn note_event(
+    event_id: &str,
+    timestamp: &str,
+    entry: &str,
+) -> BeadEventRecordWire {
+    BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: event_id.to_string(),
+        timestamp: timestamp.to_string(),
+        actor: "owner@example.com".to_string(),
+        operation: BeadEventOperationWire::NoteAppended,
+        issue_id: "sase-165".to_string(),
+        payload: BeadEventPayloadWire::NoteAppended {
+            entry: entry.to_string(),
+        },
+    }
+}
+
+fn incident_base() -> BeadEventStreamWire {
+    let created = PendingEvent::created(&task_issue())
+        .into_record("sase-task", 1)
+        .unwrap();
+    BeadEventStreamWire {
+        stream_id: "sase-task".to_string(),
+        root_issue_id: "sase-task".to_string(),
+        events: vec![created],
+    }
+}
+
+/// Incident shape: upstream appends with non-monotonic timestamps, local
+/// appends a later note. The merge must keep upstream's recorded order so
+/// the result stays append-only relative to upstream.
+#[test]
+fn non_monotonic_upstream_plus_local_note_keeps_upstream_order() {
+    let base = incident_base();
+    let mut upstream = base.clone();
+    upstream.events.extend([
+        note_event("e38", "2026-09-22T13:55:00Z", "close"),
+        note_event("e39", "2026-09-22T13:13:00Z", "link-a"),
+        note_event("e40", "2026-09-22T13:14:00Z", "link-b"),
+    ]);
+    // Retarget the helper's issue id onto this stream's id.
+    for event in upstream.events.iter_mut().skip(1) {
+        event.issue_id = "sase-task".to_string();
+    }
+    let mut local = base.clone();
+    let mut note = note_event("note", "2026-09-22T14:00:00Z", "local");
+    note.issue_id = "sase-task".to_string();
+    local.events.push(note);
+
+    let merged = merge_bead_event_streams(&base, &local, &upstream).unwrap();
+
+    let entries: Vec<&str> = merged
+        .events
+        .iter()
+        .skip(1)
+        .map(|event| match &event.payload {
+            BeadEventPayloadWire::NoteAppended { entry } => entry.as_str(),
+            _ => "<other>",
+        })
+        .collect();
+    assert_eq!(entries, vec!["close", "link-a", "link-b", "local"]);
+    assert_eq!(&merged.events[..upstream.events.len()], &upstream.events);
+}
+
+/// A branch holding every base event exactly once in a different order (as
+/// written by the old timestamp-sorting merge) heals to base order plus its
+/// genuine additions.
+#[test]
+fn pure_reorder_branch_canonicalizes_to_base_order() {
+    let mut first = note_event("a", "2026-01-01T00:01:00Z", "a");
+    let mut second = note_event("b", "2026-01-01T00:02:00Z", "b");
+    let mut addition = note_event("c", "2026-01-01T00:03:00Z", "c");
+    first.issue_id = "sase-task".to_string();
+    second.issue_id = "sase-task".to_string();
+    addition.issue_id = "sase-task".to_string();
+    let mut base = incident_base();
+    base.events.push(first.clone());
+    base.events.push(second.clone());
+    // Wedged shape: base events reordered plus one genuine addition.
+    let mut wedged = incident_base();
+    wedged.events.push(second);
+    wedged.events.push(first);
+    wedged.events.push(addition);
+
+    let merged = merge_bead_event_streams(&base, &wedged, &base).unwrap();
+    let entries: Vec<&str> = merged
+        .events
+        .iter()
+        .skip(1)
+        .map(|event| match &event.payload {
+            BeadEventPayloadWire::NoteAppended { entry } => entry.as_str(),
+            _ => "<other>",
+        })
+        .collect();
+    assert_eq!(entries, vec!["a", "b", "c"]);
+    assert_eq!(&merged.events[..base.events.len()], &base.events);
+}
+
+/// Missing, rewritten, and duplicated base events are still rejected.
+#[test]
+fn reordered_validation_still_rejects_missing_rewritten_duplicated() {
+    let base = incident_base();
+    let mut extra = note_event("x", "2026-01-01T00:01:00Z", "x");
+    extra.issue_id = "sase-task".to_string();
+    let mut full = base.clone();
+    full.events.push(extra.clone());
+
+    let mut missing = full.clone();
+    missing.events.remove(0);
+    let missing_err =
+        merge_bead_event_streams(&full, &missing, &full).unwrap_err();
+    assert!(missing_err.message.contains("missing base event 1"));
+
+    let mut rewritten = full.clone();
+    rewritten.events[0].actor = "rewriter@example.com".to_string();
+    let rewritten_err =
+        merge_bead_event_streams(&full, &full, &rewritten).unwrap_err();
+    assert!(rewritten_err.message.contains("rewrote base event 1"));
+
+    let mut duplicated = full.clone();
+    duplicated.events.push(full.events[0].clone());
+    let duplicated_err =
+        merge_bead_event_streams(&full, &duplicated, &full).unwrap_err();
+    assert!(duplicated_err.message.contains("duplicate base event 1"));
+}
+
+/// When both sides share additions in conflicting orders, upstream
+/// (`theirs`) wins.
+#[test]
+fn conflicting_shared_order_prefers_upstream() {
+    let base = incident_base();
+    let mut first = note_event("a", "2026-01-01T00:01:00Z", "a");
+    let mut second = note_event("b", "2026-01-01T00:02:00Z", "b");
+    first.issue_id = "sase-task".to_string();
+    second.issue_id = "sase-task".to_string();
+    let mut ours = base.clone();
+    ours.events.push(first.clone());
+    ours.events.push(second.clone());
+    let mut theirs = base.clone();
+    theirs.events.push(second);
+    theirs.events.push(first);
+
+    let merged = merge_bead_event_streams(&base, &ours, &theirs).unwrap();
+    assert_eq!(&merged.events[..theirs.events.len()], &theirs.events);
+}

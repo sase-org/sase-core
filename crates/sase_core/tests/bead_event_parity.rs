@@ -1308,15 +1308,127 @@ fn merge_event_stream_orders_non_base_union_deterministically() {
         .map(|event| event.operation)
         .collect::<Vec<_>>();
 
+    // Order-preserving interleave: each side keeps its own relative order
+    // (ours is ReadyMarked then ReadyUnmarked even though the timestamps run
+    // backwards), and heads are picked by timestamp so theirs runs first.
     assert_eq!(
         operations,
         vec![
-            BeadEventOperationWire::ReadyUnmarked,
             BeadEventOperationWire::IssueClosed,
             BeadEventOperationWire::IssueOpened,
             BeadEventOperationWire::ReadyMarked,
+            BeadEventOperationWire::ReadyUnmarked,
         ]
     );
+}
+
+#[test]
+fn merge_event_stream_keeps_non_monotonic_upstream_order() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![numbered_event(
+            "gold-1",
+            1,
+            "2026-01-01T00:00:00Z",
+            BeadEventOperationWire::IssueCreated,
+            BeadEventPayloadWire::IssueCreated { issue: root },
+        )],
+    };
+    let note = |ordinal: usize, timestamp: &str, entry: &str| {
+        numbered_event(
+            "gold-1",
+            ordinal,
+            timestamp,
+            BeadEventOperationWire::NoteAppended,
+            BeadEventPayloadWire::NoteAppended {
+                entry: entry.to_string(),
+            },
+        )
+    };
+    // Upstream appends out of timestamp order; local appends a later note.
+    let mut upstream = base.clone();
+    upstream.events.extend([
+        note(2, "2026-09-22T13:55:00Z", "close"),
+        note(3, "2026-09-22T13:13:00Z", "link-a"),
+        note(4, "2026-09-22T13:14:00Z", "link-b"),
+    ]);
+    let mut local = base.clone();
+    local.events.push(note(5, "2026-09-22T14:00:00Z", "local"));
+
+    let merged = merge_bead_event_streams(&base, &local, &upstream).unwrap();
+
+    assert_eq!(&merged.events[..upstream.events.len()], &upstream.events);
+    let entries: Vec<&str> = merged
+        .events
+        .iter()
+        .skip(1)
+        .map(|event| match &event.payload {
+            BeadEventPayloadWire::NoteAppended { entry } => entry.as_str(),
+            _ => "<other>",
+        })
+        .collect();
+    assert_eq!(entries, vec!["close", "link-a", "link-b", "local"]);
+}
+
+#[test]
+fn merge_event_stream_accepts_pure_reorder_branch() {
+    let root = issue(
+        "gold-1",
+        "Root",
+        IssueTypeWire::Plan,
+        None,
+        "2026-01-01T00:00:00Z",
+    );
+    let created = numbered_event(
+        "gold-1",
+        1,
+        "2026-01-01T00:00:00Z",
+        BeadEventOperationWire::IssueCreated,
+        BeadEventPayloadWire::IssueCreated { issue: root },
+    );
+    let marked = numbered_event(
+        "gold-1",
+        2,
+        "2026-01-01T00:04:00Z",
+        BeadEventOperationWire::ReadyMarked,
+        BeadEventPayloadWire::ReadyMarked,
+    );
+    let base = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![created.clone(), marked.clone()],
+    };
+    let addition = numbered_event(
+        "gold-1",
+        3,
+        "2026-01-01T00:05:00Z",
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: "new".to_string(),
+        },
+    );
+    // Old-merge shape: base events reordered with a genuine addition.
+    let wedged = BeadEventStreamWire {
+        stream_id: "gold-1".to_string(),
+        root_issue_id: "gold-1".to_string(),
+        events: vec![marked, created, addition.clone()],
+    };
+
+    let merged = merge_bead_event_streams(&base, &wedged, &base).unwrap();
+
+    assert_eq!(merged.events, {
+        let mut expected = base.events.clone();
+        expected.push(addition);
+        expected
+    });
 }
 
 #[test]
