@@ -46,7 +46,6 @@ pub fn read_current_notifications_snapshot(
     )
 }
 
-#[allow(clippy::incompatible_msrv)]
 pub fn read_notifications_snapshot_with_options(
     path: &Path,
     include_dismissed: bool,
@@ -1479,7 +1478,7 @@ fn format_utc_python_iso(value: DateTime<Utc>) -> String {
     if nanos == 0 {
         return value.to_rfc3339_opts(SecondsFormat::Secs, false);
     }
-    if nanos % 1_000 == 0 {
+    if nanos.is_multiple_of(1_000) {
         return value.to_rfc3339_opts(SecondsFormat::Micros, false);
     }
     value.to_rfc3339_opts(SecondsFormat::Nanos, false)
@@ -1523,7 +1522,6 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
     })
 }
 
-#[allow(clippy::incompatible_msrv)]
 fn unlock(lock: File) -> Result<(), String> {
     lock.unlock().map_err(|e| e.to_string())
 }

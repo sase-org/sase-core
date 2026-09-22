@@ -244,11 +244,10 @@ fn issue_changes(
         if from == to {
             continue;
         }
-        if creating && to.map_or(true, |value| is_default_field(field, value)) {
+        if creating && to.is_none_or(|value| is_default_field(field, value)) {
             continue;
         }
-        if removing && from.map_or(true, |value| is_default_field(field, value))
-        {
+        if removing && from.is_none_or(|value| is_default_field(field, value)) {
             continue;
         }
         changes.push(BeadHistoryChangeWire {

@@ -55,7 +55,7 @@ pub(super) fn is_waiting_record(
         || record
             .slot_requested_at
             .as_deref()
-            .map_or(true, |value| value.is_empty())
+            .is_none_or(|value| value.is_empty())
     {
         return false;
     }

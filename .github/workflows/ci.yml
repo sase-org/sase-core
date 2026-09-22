@@ -63,6 +63,9 @@ jobs:
       - name: cargo fmt --all -- --check
         run: ./scripts/check.sh fmt-check
 
+      - name: unified dependency features
+        run: ./scripts/check.sh features
+
       - name: cargo clippy --workspace --all-targets -- -D warnings
         run: ./scripts/check.sh clippy
 

@@ -47,8 +47,8 @@ pub(super) fn handle_list(
             && filters
                 .issue_types
                 .as_ref()
-                .map_or(true, |types| types.contains(&issue.issue_type))
-            && filters.tiers.as_ref().map_or(true, |tiers| {
+                .is_none_or(|types| types.contains(&issue.issue_type))
+            && filters.tiers.as_ref().is_none_or(|tiers| {
                 issue.tier.as_ref().is_some_and(|tier| tiers.contains(tier))
             })
     });

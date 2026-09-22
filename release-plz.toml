@@ -36,3 +36,7 @@ release = false
 [[package]]
 name = "sase_xprompt_lsp"
 release = false
+
+[[package]]
+name = "sase_workspace_hack"
+release = false

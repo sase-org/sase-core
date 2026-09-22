@@ -420,11 +420,11 @@ fn better_priority_agent_pending(
             && record
                 .run_started_at
                 .as_deref()
-                .map_or(true, |value| value.is_empty())
+                .is_none_or(|value| value.is_empty())
             && record
                 .slot_requested_at
                 .as_deref()
-                .map_or(true, |value| value.is_empty())
+                .is_none_or(|value| value.is_empty())
             && normalize_wait_priority(record.wait_priority) < priority
     })
 }

@@ -280,9 +280,7 @@ pub fn match_prompt_history_rows(
                 })
             } else {
                 row.segment_raw_refs.iter().enumerate().any(|(i, raw_ref)| {
-                    row.segment_project_keys
-                        .get(i)
-                        .map_or(true, Option::is_none)
+                    row.segment_project_keys.get(i).is_none_or(Option::is_none)
                         && raw_ref
                             .as_deref()
                             .is_some_and(|r| r.eq_ignore_ascii_case(raw_value))

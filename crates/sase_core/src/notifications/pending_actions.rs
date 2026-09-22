@@ -143,7 +143,6 @@ pub fn register_pending_action(
     result
 }
 
-#[allow(clippy::incompatible_msrv)]
 pub fn read_pending_action_store(
     path: &Path,
     legacy_telegram_path: Option<&Path>,
@@ -1062,7 +1061,6 @@ fn open_lock_file(path: &Path) -> Result<File, String> {
         .map_err(|e| e.to_string())
 }
 
-#[allow(clippy::incompatible_msrv)]
 fn unlock(lock: File) -> Result<(), String> {
     lock.unlock().map_err(|e| e.to_string())
 }

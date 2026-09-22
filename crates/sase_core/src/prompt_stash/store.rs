@@ -42,7 +42,6 @@ impl From<String> for PromptStashStoreError {
 
 type PromptStashResult<T> = Result<T, PromptStashStoreError>;
 
-#[allow(clippy::incompatible_msrv)]
 pub fn read_prompt_stash_snapshot(
     path: &Path,
 ) -> PromptStashResult<PromptStashSnapshotWire> {
@@ -367,7 +366,6 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
     })
 }
 
-#[allow(clippy::incompatible_msrv)]
 fn unlock(lock: HeldStoreLock) -> Result<(), String> {
     lock.release().map_err(|e| e.to_string())
 }

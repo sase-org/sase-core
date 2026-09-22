@@ -311,7 +311,7 @@ fn is_runner_user_agent_kind(record: &AgentArtifactRecordWire) -> bool {
     record
         .workflow_state
         .as_ref()
-        .map_or(true, |state| state.appears_as_agent)
+        .is_none_or(|state| state.appears_as_agent)
 }
 
 /// Per-family occupancy grouping key: `(project_name, agent_family)`.

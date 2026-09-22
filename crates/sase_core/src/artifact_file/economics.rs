@@ -97,7 +97,7 @@ pub fn artifact_file_store_economics(
             options
                 .project
                 .as_ref()
-                .map_or(true, |project| row.project.as_ref() == Some(project))
+                .is_none_or(|project| row.project.as_ref() == Some(project))
         })
         .collect::<Vec<_>>();
 

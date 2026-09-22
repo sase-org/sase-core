@@ -204,7 +204,7 @@ fn is_valid_record(record: &EffortOverrideWire) -> bool {
     record.version == EFFORT_OVERRIDE_WIRE_SCHEMA_VERSION
         && is_valid_effort(&record.effort)
         && record.created_at.is_finite()
-        && record.expires_at.map_or(true, f64::is_finite)
+        && record.expires_at.is_none_or(f64::is_finite)
         && !record.source.trim().is_empty()
 }
 

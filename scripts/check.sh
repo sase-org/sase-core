@@ -71,17 +71,19 @@ PY
 
 usage() {
     cat >&2 <<EOF
-usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|clippy [args...]|test [args...]|script-test|all]
+usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|features|check [args...]|clippy [args...]|test [args...]|script-test|all]
 
   fmt-check   cargo fmt --all -- --check
   fmt         cargo fmt --all
+  features    verify unified dependency features (cargo-hakari workspace-hack)
+  check       cargo check --workspace --all-targets [args...] (inner loop)
   clippy      cargo clippy --workspace --all-targets [args...] -- -D warnings
   test        cargo test --workspace [args...]
   script-test unittest the release-workflow helper scripts in .github/scripts
-  all         fmt-check, clippy, test, then script-test (default)
+  all         fmt-check, features, clippy, test, then script-test (default)
 
-Trailing arguments to the clippy and test subcommands are forwarded to the
-underlying cargo invocation, e.g. 'check.sh test -p sase_gateway' or
+Trailing arguments to the check, clippy and test subcommands are forwarded to
+the underlying cargo invocation, e.g. 'check.sh test -p sase_gateway' or
 'check.sh test -- --skip foo'. An explicit package selection (-p, --package,
 --workspace) replaces the default --workspace scope.
 EOF
@@ -98,7 +100,9 @@ cmd_fmt() {
 # cargo unions --workspace with -p/--package instead of intersecting them, so a
 # bare forwarded selection would still run the whole workspace. When the caller
 # passes its own package selection, drop the default --workspace scope so a
-# single-crate run stays cheap.
+# single-crate run stays cheap. That cheapness holds only because the
+# cargo-hakari workspace-hack unifies dependency features: without it, a `-p`
+# run resolves fewer features and the next workspace build recompiles.
 default_scope() {
     local arg
     for arg in "$@"; do
@@ -108,6 +112,106 @@ default_scope() {
         esac
     done
     return 0
+}
+
+cmd_check() {
+    configure_pyo3_python
+    if default_scope "$@"; then
+        cargo check --workspace --all-targets "$@"
+    else
+        cargo check --all-targets "$@"
+    fi
+}
+
+# Tool-free workspace-hack drift gate: for each workspace member, every package
+# in its normal+build+dev closure must resolve the same features as the
+# workspace-wide resolution. Uses only `cargo tree` and `cargo metadata`
+# (no PYO3_PYTHON, no compile, no cargo-hakari install). The edge set matches
+# what `check`/`clippy` (`--all-targets`) and `test` actually build.
+cmd_features() {
+    python3 - <<'PY'
+import json
+import subprocess
+import sys
+
+HACK_CRATE = "sase_workspace_hack"
+EDGES = "normal,build,dev"
+
+
+def run_cargo(args):
+    proc = subprocess.run(
+        ["cargo", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(proc.returncode)
+    return proc.stdout
+
+
+def parse_tree(output):
+    packages = {}
+    for line in output.splitlines():
+        line = line.strip().replace("(*)", "").strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        key = f"{parts[0]} {parts[1]}"
+        feats = set()
+        if len(parts) > 2:
+            for feat in " ".join(parts[2:]).split(","):
+                feat = feat.strip()
+                if feat:
+                    feats.add(feat)
+        packages[key] = packages.get(key, set()) | feats
+    return packages
+
+
+try:
+    meta = json.loads(run_cargo(["metadata", "--no-deps", "--format-version", "1"]))
+except SystemExit:
+    raise
+members = sorted(
+    pkg["name"]
+    for pkg in meta["packages"]
+    if pkg["id"] in meta["workspace_members"] and pkg["name"] != HACK_CRATE
+)
+
+workspace = parse_tree(
+    run_cargo(["tree", "--workspace", "-e", EDGES, "--prefix", "none", "-f", "{p} {f}"])
+)
+
+failures = []
+for member in members:
+    member_pkgs = parse_tree(
+        run_cargo(["tree", "-p", member, "-e", EDGES, "--prefix", "none", "-f", "{p} {f}"])
+    )
+    for pkg in sorted(member_pkgs):
+        if pkg not in workspace:
+            continue
+        if member_pkgs[pkg] != workspace[pkg]:
+            member_only = sorted(member_pkgs[pkg] - workspace[pkg])
+            workspace_only = sorted(workspace[pkg] - member_pkgs[pkg])
+            failures.append(
+                f"error: feature drift for {pkg} in -p {member}:\n"
+                f"  member features:    {sorted(member_pkgs[pkg])}\n"
+                f"  workspace features: {sorted(workspace[pkg])}\n"
+                f"  member-only:   {member_only}\n"
+                f"  workspace-only: {workspace_only}"
+            )
+
+if failures:
+    sys.stderr.write("\n".join(failures) + "\n")
+    sys.stderr.write(
+        "run `cargo hakari generate && cargo hakari manage-deps` to re-unify "
+        "features (cargo-hakari install needed only for regeneration).\n"
+    )
+    raise SystemExit(1)
+PY
 }
 
 cmd_clippy() {
@@ -134,6 +238,7 @@ cmd_script_test() {
 
 cmd_all() {
     cmd_fmt_check
+    cmd_features
     cmd_clippy
     cmd_test
     cmd_script_test
@@ -147,6 +252,8 @@ fi
 case "$subcommand" in
     fmt-check) cmd_fmt_check ;;
     fmt) cmd_fmt ;;
+    features) cmd_features ;;
+    check) cmd_check "$@" ;;
     clippy) cmd_clippy "$@" ;;
     test) cmd_test "$@" ;;
     script-test) cmd_script_test ;;

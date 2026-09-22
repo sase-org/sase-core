@@ -4,6 +4,7 @@ members = [
     "crates/sase_core",
     "crates/sase_core_py",
     "crates/sase_gateway",
+    "crates/sase_workspace_hack",
     "crates/sase_xprompt_lsp",
 ]
 
@@ -12,7 +13,7 @@ version = "0.34.72"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sase-org/sase-core"
-rust-version = "1.78"
+rust-version = "1.89"
 
 [workspace.dependencies]
 sase_core = { path = "crates/sase_core", version = "0.34.72" }

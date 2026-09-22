@@ -187,95 +187,95 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_some_and(|v| v < 2) {
         migrate_recompute_hidden_v2(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 3) {
+    if prior_version.is_none_or(|v| v < 3) {
         ensure_agent_artifacts_column(&conn, "pending_question_sig", "TEXT")?;
     }
-    if prior_version.map_or(true, |v| v < 4) {
+    if prior_version.is_none_or(|v| v < 4) {
         ensure_agent_artifacts_column(&conn, "workflow_name", "TEXT")?;
         ensure_agent_artifacts_column(&conn, "agent_family", "TEXT")?;
     }
-    if prior_version.map_or(true, |v| v < 5) {
+    if prior_version.is_none_or(|v| v < 5) {
         migrate_record_json_refresh_v5(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 6) {
+    if prior_version.is_none_or(|v| v < 6) {
         migrate_record_json_refresh_v6(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 7) {
+    if prior_version.is_none_or(|v| v < 7) {
         migrate_record_json_refresh_v7(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 8) {
+    if prior_version.is_none_or(|v| v < 8) {
         migrate_record_json_refresh_v8(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 9) {
+    if prior_version.is_none_or(|v| v < 9) {
         migrate_record_json_refresh_v9(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 10) {
+    if prior_version.is_none_or(|v| v < 10) {
         migrate_record_json_refresh_v10(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 11) {
+    if prior_version.is_none_or(|v| v < 11) {
         ensure_agent_artifacts_column(&conn, "agent_clan", "TEXT")?;
         migrate_record_json_refresh_v11(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 12) {
+    if prior_version.is_none_or(|v| v < 12) {
         migrate_record_json_refresh_v12(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 13) {
+    if prior_version.is_none_or(|v| v < 13) {
         migrate_record_json_refresh_v13(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 14) {
+    if prior_version.is_none_or(|v| v < 14) {
         migrate_record_json_refresh_v14(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 15) {
+    if prior_version.is_none_or(|v| v < 15) {
         ensure_agent_artifacts_column(&conn, "agent_clan_generation", "TEXT")?;
         ensure_agent_artifacts_column(&conn, "clan_tribe", "TEXT")?;
         ensure_agent_artifacts_column(&conn, "clan_summary", "TEXT")?;
         migrate_clan_context_projection_v15(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 16) {
+    if prior_version.is_none_or(|v| v < 16) {
         migrate_record_json_refresh_v16(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 18) {
+    if prior_version.is_none_or(|v| v < 18) {
         migrate_record_json_refresh_v18(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 19) {
+    if prior_version.is_none_or(|v| v < 19) {
         ensure_agent_artifacts_column(&conn, "xprompts_sig", "TEXT")?;
         migrate_record_json_refresh_v19(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 20) {
+    if prior_version.is_none_or(|v| v < 20) {
         migrate_record_json_refresh_v20(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 21) {
+    if prior_version.is_none_or(|v| v < 21) {
         migrate_output_variable_projection_v21(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 22) {
+    if prior_version.is_none_or(|v| v < 22) {
         ensure_agent_artifacts_column(&conn, "model_alias_origin", "TEXT")?;
         migrate_model_alias_projection_v22(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 23) {
+    if prior_version.is_none_or(|v| v < 23) {
         migrate_record_json_refresh_v23(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 24) {
+    if prior_version.is_none_or(|v| v < 24) {
         ensure_agent_artifacts_column(&conn, "done_outcome", "TEXT")?;
         migrate_done_outcome_projection_v24(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 26) {
+    if prior_version.is_none_or(|v| v < 26) {
         migrate_record_json_refresh_v26(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 27) {
+    if prior_version.is_none_or(|v| v < 27) {
         migrate_record_json_refresh_v27(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 28) {
+    if prior_version.is_none_or(|v| v < 28) {
         ensure_agent_artifacts_column(&conn, "source_machine", "TEXT")?;
         migrate_source_machine_projection_v28(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 29) {
+    if prior_version.is_none_or(|v| v < 29) {
         migrate_record_json_refresh_v29(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 30) {
+    if prior_version.is_none_or(|v| v < 30) {
         ensure_agent_artifacts_column(&conn, "imported_owner_machine", "TEXT")?;
         migrate_imported_owner_machine_projection_v30(&mut conn)?;
     }
-    if prior_version.map_or(true, |v| v < 31) {
+    if prior_version.is_none_or(|v| v < 31) {
         ensure_agent_artifacts_column(&conn, "gate_shell_id", "TEXT")?;
         migrate_gate_shell_id_projection_v31(&mut conn)?;
     }

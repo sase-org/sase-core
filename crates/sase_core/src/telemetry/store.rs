@@ -298,8 +298,7 @@ fn cleanup_predicate(
     let mut clauses = Vec::new();
     let mut params = Vec::new();
     for (label, values) in &request.label_matches {
-        let placeholders = std::iter::repeat("?")
-            .take(values.len())
+        let placeholders = std::iter::repeat_n("?", values.len())
             .collect::<Vec<_>>()
             .join(", ");
         clauses.push(format!(
@@ -1465,7 +1464,7 @@ fn filter_rows(
     filters: &BTreeMap<String, String>,
 ) -> Result<Vec<AggregateRow>, String> {
     rows.into_iter()
-        .filter(|row| requested_kind.map_or(true, |kind| row.kind == kind))
+        .filter(|row| requested_kind.is_none_or(|kind| row.kind == kind))
         .filter_map(|row| match labels_from_json(&row.labels_json) {
             Ok(labels)
                 if filters

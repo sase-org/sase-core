@@ -528,7 +528,7 @@ fn is_valid_record_for_key(key: &str, record: &ProviderDisableWire) -> bool {
         && validate_provider(&record.provider).is_ok()
         && record.created_at.is_finite()
         && record.created_at > 0.0
-        && record.expires_at.map_or(true, |expires_at| {
+        && record.expires_at.is_none_or(|expires_at| {
             expires_at.is_finite() && expires_at > record.created_at
         })
         && validate_source(&record.source).is_ok()

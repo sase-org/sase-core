@@ -975,11 +975,11 @@ pub(crate) fn list_issues_in_issues(
     issues.retain(|issue| {
         statuses
             .as_ref()
-            .map_or(true, |values| values.contains(&issue.status))
+            .is_none_or(|values| values.contains(&issue.status))
             && issue_types
                 .as_ref()
-                .map_or(true, |values| values.contains(&issue.issue_type))
-            && tiers.as_ref().map_or(true, |values| {
+                .is_none_or(|values| values.contains(&issue.issue_type))
+            && tiers.as_ref().is_none_or(|values| {
                 issue
                     .tier
                     .as_ref()

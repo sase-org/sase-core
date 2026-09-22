@@ -151,7 +151,7 @@ pub fn plan_artifact_file_retention(
     let mut selected = generation_selected
         .into_iter()
         .filter(|row| {
-            before.map_or(true, |cutoff| {
+            before.is_none_or(|cutoff| {
                 row.created_at
                     .as_deref()
                     .and_then(parse_artifact_date)
@@ -159,7 +159,7 @@ pub fn plan_artifact_file_retention(
             })
         })
         .filter(|row| {
-            kinds.map_or(true, |values| {
+            kinds.is_none_or(|values| {
                 row.kind.as_ref().is_some_and(|kind| values.contains(kind))
             })
         })
@@ -167,10 +167,10 @@ pub fn plan_artifact_file_retention(
             policy
                 .project
                 .as_ref()
-                .map_or(true, |project| row.project.as_ref() == Some(project))
+                .is_none_or(|project| row.project.as_ref() == Some(project))
         })
         .filter(|row| {
-            policy.min_size_bytes.map_or(true, |minimum| {
+            policy.min_size_bytes.is_none_or(|minimum| {
                 !artifact_file_is_vcs_backed(row)
                     && row.size_bytes.is_some_and(|size| size >= minimum)
             })

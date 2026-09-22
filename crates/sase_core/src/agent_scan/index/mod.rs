@@ -114,8 +114,5 @@ fn last_gate_shell_lookup_records_decoded() -> u64 {
 }
 
 fn placeholders(len: usize) -> String {
-    std::iter::repeat("?")
-        .take(len)
-        .collect::<Vec<_>>()
-        .join(", ")
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }

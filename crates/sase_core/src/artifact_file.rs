@@ -244,53 +244,54 @@ fn query_artifact_files_at(
             })
     });
 
-    let mut rows =
-        read_artifact_file_index(index_path)?
-            .into_iter()
-            .filter(|row| {
-                kinds.map_or(true, |values| {
-                    row.kind.as_ref().is_some_and(|kind| values.contains(kind))
-                })
+    let mut rows = read_artifact_file_index(index_path)?
+        .into_iter()
+        .filter(|row| {
+            kinds.is_none_or(|values| {
+                row.kind.as_ref().is_some_and(|kind| values.contains(kind))
             })
-            .filter(|row| {
-                filters.project.as_ref().map_or(true, |project| {
-                    row.project.as_ref() == Some(project)
-                })
+        })
+        .filter(|row| {
+            filters
+                .project
+                .as_ref()
+                .is_none_or(|project| row.project.as_ref() == Some(project))
+        })
+        .filter(|row| {
+            filters
+                .agent
+                .as_ref()
+                .is_none_or(|agent| row.agent_name.as_ref() == Some(agent))
+        })
+        .filter(|row| !filters.explicit_only || row.explicit)
+        .filter(|row| {
+            since.is_none_or(|bound| {
+                row.created_at
+                    .as_deref()
+                    .and_then(parse_artifact_date)
+                    .is_some_and(|date| date >= bound)
             })
-            .filter(|row| {
-                filters.agent.as_ref().map_or(true, |agent| {
-                    row.agent_name.as_ref() == Some(agent)
-                })
+        })
+        .filter(|row| {
+            needle.as_ref().is_none_or(|query| {
+                [
+                    row.label.as_deref(),
+                    row.path.as_deref(),
+                    row.source_path.as_deref(),
+                    row.vcs_relpath.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|value| value.to_lowercase().contains(query))
             })
-            .filter(|row| !filters.explicit_only || row.explicit)
-            .filter(|row| {
-                since.map_or(true, |bound| {
-                    row.created_at
-                        .as_deref()
-                        .and_then(parse_artifact_date)
-                        .is_some_and(|date| date >= bound)
-                })
-            })
-            .filter(|row| {
-                needle.as_ref().map_or(true, |query| {
-                    [
-                        row.label.as_deref(),
-                        row.path.as_deref(),
-                        row.source_path.as_deref(),
-                        row.vcs_relpath.as_deref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .any(|value| value.to_lowercase().contains(query))
-                })
-            })
-            .filter(|row| match &consumed_refs {
-                Some(consumed_refs) => {
-                    !consumed_refs.contains(&format!("file:{}", row.id))
-                }
-                None => true,
-            })
-            .collect::<Vec<_>>();
+        })
+        .filter(|row| match &consumed_refs {
+            Some(consumed_refs) => {
+                !consumed_refs.contains(&format!("file:{}", row.id))
+            }
+            None => true,
+        })
+        .collect::<Vec<_>>();
 
     rows.sort_by(|left, right| {
         match (

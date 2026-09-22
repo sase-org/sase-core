@@ -448,7 +448,7 @@ fn inventory_name_for_path(
             let root = normalize_path(Path::new(checkout));
             if path == root.as_path() || path.starts_with(&root) {
                 let len = root.as_os_str().len();
-                if best.as_ref().map_or(true, |(best_len, _)| len > *best_len) {
+                if best.as_ref().is_none_or(|(best_len, _)| len > *best_len) {
                     best = Some((len, repo.name.clone()));
                 }
             }
@@ -513,9 +513,7 @@ fn identify_source_hit(
                 || source_root.starts_with(&base.root)
             {
                 let len = base.root.as_os_str().len();
-                if best
-                    .as_ref()
-                    .map_or(true, |(best_len, _, _)| len > *best_len)
+                if best.as_ref().is_none_or(|(best_len, _, _)| len > *best_len)
                 {
                     best =
                         Some((len, search.id.clone(), base.git_root.clone()));

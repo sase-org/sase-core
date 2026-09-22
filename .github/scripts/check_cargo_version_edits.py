@@ -14,6 +14,30 @@ from typing import Any
 DEPENDENCY_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
 MISSING = object()
 
+# The cargo-hakari workspace-hack crate is not release-managed: its manifest
+# carries hakari's fixed "0.1.0" stub version, and member manifests pin it
+# with hakari-managed "0.1" requirements. Neither is owned by release-plz, so
+# the guard allowlists exactly these two shapes and nothing else. Rules for
+# every other crate and dependency are unchanged.
+WORKSPACE_HACK_MANIFEST = "crates/sase_workspace_hack/Cargo.toml"
+WORKSPACE_HACK_DEP = "sase_workspace_hack"
+
+
+def is_workspace_hack_version_edit(edit: VersionEdit) -> bool:
+    if edit.path == WORKSPACE_HACK_MANIFEST and edit.key in (
+        "package.version",
+        "workspace.package.version",
+    ):
+        return True
+    parts = edit.key.split(".")
+    if (
+        len(parts) >= 2
+        and parts[-1] == "version"
+        and parts[-2] == WORKSPACE_HACK_DEP
+    ):
+        return True
+    return False
+
 
 @dataclass(frozen=True)
 class VersionEdit:
@@ -174,7 +198,7 @@ def find_release_version_edits(path: str, base: str, head: str) -> list[VersionE
                 after=after_version,
             )
 
-    return edits
+    return [edit for edit in edits if not is_workspace_hack_version_edit(edit)]
 
 
 def format_value(value: object) -> str:

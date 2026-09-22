@@ -317,7 +317,7 @@ pub fn prepare_provider_usage_account_context(
             let needs_record = state
                 .providers
                 .get(&provider)
-                .map_or(true, |record| record.context_id != context_id);
+                .is_none_or(|record| record.context_id != context_id);
             if needs_record {
                 state.providers.insert(
                     provider.clone(),
@@ -837,7 +837,7 @@ fn store_provider_attention(
                 && best
                     .window_key
                     .as_deref()
-                    .map_or(true, |current| window.key.as_str() < current))
+                    .is_none_or(|current| window.key.as_str() < current))
         {
             best.kind = kind;
             best.window_key = Some(window.key.clone());
@@ -1069,7 +1069,7 @@ fn complete_inventory_wins(
 ) -> bool {
     record
         .last_full_ordering_token
-        .map_or(true, |token| observation.ordering_token > token)
+        .is_none_or(|token| observation.ordering_token > token)
 }
 
 fn stored_window_wins(

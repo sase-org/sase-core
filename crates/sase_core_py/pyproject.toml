@@ -55,6 +55,9 @@ sase_sudo_runner = "sase_core_rs.sudo_runner:main"
 module-name = "sase_core_rs"
 python-source = "python"
 manifest-path = "Cargo.toml"
-features = ["extension-module"]
+# Enable pyo3's extension-module directly (not via a crate feature) so the
+# cargo-hakari workspace-hack never unifies it into local `cargo test`
+# builds, where it would break linking against libpython.
+features = ["pyo3/extension-module"]
 # Strip release wheels so platform downloads stay small.
 strip = true

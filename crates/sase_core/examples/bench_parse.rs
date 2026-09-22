@@ -90,7 +90,7 @@ fn time_bytes(label: &str, data: &[u8], runs: usize, warmup: usize) -> Summary {
         0.0
     } else {
         let mid = samples_us.len() / 2;
-        if samples_us.len() % 2 == 0 {
+        if samples_us.len().is_multiple_of(2) {
             (samples_us[mid - 1] + samples_us[mid]) / 2.0
         } else {
             samples_us[mid]

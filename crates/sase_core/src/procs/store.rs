@@ -81,7 +81,6 @@ impl From<String> for ProcStoreError {
 type ProcStoreResult<T> = Result<T, ProcStoreError>;
 
 /// Read a stable, newest-first snapshot of the proc store.
-#[allow(clippy::incompatible_msrv)]
 pub fn read_procs_snapshot(
     path: &Path,
 ) -> ProcStoreResult<ProcStoreSnapshotWire> {
@@ -1429,7 +1428,6 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
     })
 }
 
-#[allow(clippy::incompatible_msrv)]
 pub(super) fn unlock(lock: HeldStoreLock) -> Result<(), String> {
     lock.release().map_err(|error| error.to_string())
 }
