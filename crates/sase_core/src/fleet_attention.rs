@@ -334,13 +334,27 @@ pub fn project_fleet_attention(
     resolved: &[FleetAttentionLogicalIdentityWire],
     observed_at_unix: f64,
 ) -> Result<FleetAttentionSnapshotWire, FleetContractError> {
-    validate_installation_id(origin_installation_id)?;
-    validate_timestamp("observed_at_unix", observed_at_unix)?;
     if rows.len() > MAX_ATTENTION_ROWS {
         return Err(FleetContractError::Validation(format!(
             "fleet attention notification rows exceeds {MAX_ATTENTION_ROWS} entries"
         )));
     }
+    project_attention_entries(
+        origin_installation_id,
+        rows,
+        resolved,
+        observed_at_unix,
+    )
+}
+
+fn project_attention_entries(
+    origin_installation_id: &str,
+    rows: &[FleetAttentionNotificationRowWire],
+    resolved: &[FleetAttentionLogicalIdentityWire],
+    observed_at_unix: f64,
+) -> Result<FleetAttentionSnapshotWire, FleetContractError> {
+    validate_installation_id(origin_installation_id)?;
+    validate_timestamp("observed_at_unix", observed_at_unix)?;
     if resolved.len() > MAX_ATTENTION_IDENTITIES {
         return Err(FleetContractError::Validation(format!(
             "fleet attention logical identities exceeds {MAX_ATTENTION_IDENTITIES} entries"
@@ -470,7 +484,10 @@ pub fn project_fleet_attention(
 /// Unlike [`project_fleet_attention`]'s existing row-scoped callers, this is
 /// the discovery contract: the input notification rows are not pre-filtered by
 /// followed logical keys, so uncorrelated questions and gates remain visible to
-/// fleet controllers through their stable request identity.
+/// fleet controllers through their stable request identity. The raw row count
+/// does not bound this function; the response stays bounded by
+/// [`FLEET_ATTENTION_MAX_PAGE_ROWS`] paging and
+/// [`validate_fleet_attention_inventory_response`].
 pub fn project_fleet_attention_inventory(
     origin_installation_id: &str,
     rows: &[FleetAttentionNotificationRowWire],
@@ -489,7 +506,7 @@ pub fn project_fleet_attention_inventory(
         .map(parse_attention_inventory_cursor)
         .transpose()?
         .unwrap_or(0);
-    let projected = project_fleet_attention(
+    let projected = project_attention_entries(
         origin_installation_id,
         rows,
         resolved,
@@ -1816,6 +1833,78 @@ mod tests {
         assert_eq!(second.page.entries[0].request_key.request_id, "notif-c");
         assert_eq!(second.page.next_cursor, None);
         assert!(!second.page.has_more);
+    }
+
+    #[test]
+    fn inventory_succeeds_beyond_row_cap_with_mostly_non_actionable_rows() {
+        let mut rows = Vec::new();
+        for index in 0..245 {
+            let mut row = gate_row(&format!("plain-{index:04}"), None);
+            row.notification.action = None;
+            rows.push(row);
+        }
+        for index in 0..5 {
+            rows.push(gate_row(
+                &format!("gate-big-{index:04}"),
+                Some("athena.worker"),
+            ));
+        }
+        assert_eq!(rows.len(), 250);
+        let response = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(None, None),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+        assert_eq!(response.page.total_matching_entries, 5);
+        assert_eq!(response.page.entries.len(), 5);
+        assert!(!response.page.has_more);
+    }
+
+    #[test]
+    fn inventory_pages_large_pending_set_beyond_row_cap() {
+        let rows = (0..150)
+            .map(|index| {
+                gate_row(&format!("gate-page-{index:04}"), Some("athena.worker"))
+            })
+            .collect::<Vec<_>>();
+        let response = project_fleet_attention_inventory(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            &inventory_request(Some(100), None),
+            100.0,
+            fresh_snapshot(),
+        )
+        .unwrap();
+        assert_eq!(response.page.entries.len(), 100);
+        assert!(response.page.has_more);
+        assert_eq!(
+            response.page.next_cursor.as_deref(),
+            Some("off:100")
+        );
+        assert_eq!(response.page.total_matching_entries, 150);
+    }
+
+    #[test]
+    fn projection_still_rejects_rows_beyond_cap() {
+        let rows = (0..201)
+            .map(|index| {
+                gate_row(&format!("gate-cap-{index:04}"), Some("athena.worker"))
+            })
+            .collect::<Vec<_>>();
+        let error = project_fleet_attention(
+            &installation('a'),
+            &rows,
+            &[identity("athena.worker")],
+            100.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("exceeds 200 entries"), "{error}");
     }
 
     #[test]

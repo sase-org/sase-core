@@ -141,8 +141,18 @@ pub(crate) async fn fleet_attention_inventory(
         .notification_bridge
         .list_notifications(false)
         .map_err(ApiError::from_host_bridge)?;
-    let rows =
-        attention_notification_rows(&state, notifications.notifications.iter());
+    let rows = attention_notification_rows(
+        &state,
+        notifications.notifications.iter().filter(|notification| {
+            !matches!(
+                MobileActionKindWire::from_notification_action(
+                    notification.action.as_deref()
+                ),
+                MobileActionKindWire::NonAction
+                    | MobileActionKindWire::Unsupported
+            )
+        }),
+    );
     let observed_at_unix = current_unix_time();
     let response = sase_core::project_fleet_attention_inventory(
         &installation.installation_id,

@@ -466,6 +466,57 @@ async fn fleet_attention_inventory_pages_pending_entries() {
 }
 
 #[tokio::test]
+async fn fleet_attention_inventory_succeeds_on_busy_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut state = state_for_tmp(&tmp, Duration::minutes(5));
+    let envelope_path = tmp.path().join("gate_request.json");
+    write_gate_envelope(&envelope_path);
+    let mut notifications = Vec::new();
+    for index in 0..200 {
+        notifications.push(NotificationWire {
+            id: format!("plain-{index:04}"),
+            timestamp: "2026-09-07T00:00:00Z".to_string(),
+            sender: "axe".to_string(),
+            action: None,
+            action_data: BTreeMap::new(),
+            notes: Vec::new(),
+            ..Default::default()
+        });
+    }
+    for index in 0..5 {
+        notifications.push(attention_gate_notification(
+            &format!("gate-busy-{index:04}"),
+            "never-loaded-agent",
+            envelope_path.to_str().unwrap(),
+        ));
+    }
+    assert!(notifications.len() > 200);
+    let bridge =
+        Arc::new(FakeAttentionNotificationBridge::with_notifications(
+            notifications,
+        ));
+    state.notification_bridge = DynNotificationHostBridge::new(bridge.clone());
+    let (token, _installation_id) =
+        enroll_mutate(&state, &[FLEET_SCOPE_ATTENTION_READ]).await;
+
+    let (status, response) = post_attention_inventory(
+        state,
+        &token,
+        json!({
+            "schema_version": sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
+            "limit": 100,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["page"]["total_matching_entries"], json!(5));
+    let entries = response["page"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 5, "{entries:?}");
+    assert_eq!(response["page"]["has_more"], json!(false));
+}
+
+#[tokio::test]
 async fn fleet_attention_read_projects_correlated_gate_and_question() {
     let tmp = tempfile::tempdir().unwrap();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
