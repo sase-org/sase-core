@@ -51,7 +51,7 @@ pub fn scan_project_tags(text: &str) -> Vec<ProjectTagSpanWire> {
 }
 
 /// Whether `name` can be written as a project tag name.
-pub(crate) fn is_tag_name(name: &str) -> bool {
+pub fn is_tag_name(name: &str) -> bool {
     let mut chars = name.chars();
     if !chars.next().is_some_and(|ch| ch.is_ascii_alphabetic()) {
         return false;

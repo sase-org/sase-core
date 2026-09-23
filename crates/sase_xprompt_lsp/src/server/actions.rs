@@ -8,6 +8,9 @@ use super::state::{
     XpromptLspServer,
 };
 use super::*;
+use crate::project_tags::{
+    hover_at_tag, tag_diagnostics, tag_quickfixes, tag_rewrites, TagEdit,
+};
 
 impl XpromptLspServer {
     pub async fn hover_for_text(
@@ -32,6 +35,14 @@ impl XpromptLspServer {
 
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        if let Some(hover) = hover_at_tag(
+            &document,
+            to_editor_position(position),
+            &vcs_catalog.project_tags,
+            &vcs_catalog.entries,
+        ) {
+            return Some(lsp_hover(hover));
+        }
         let glossary_catalog =
             self.glossary_catalog(config.glossary_catalog.as_deref());
         active_glossary_project(
@@ -96,6 +107,11 @@ impl XpromptLspServer {
             diagnostics
                 .extend(editor_analyze_artifact_refs(&document, context));
         }
+        diagnostics.extend(tag_diagnostics(
+            &document,
+            &vcs_catalog.project_tags,
+            &vcs_catalog.entries,
+        ));
         diagnostics.into_iter().map(lsp_diagnostic).collect()
     }
 
@@ -150,6 +166,8 @@ impl XpromptLspServer {
             artifact_context,
             glossary_project.map(|project| project.catalog.as_ref()),
             argument_entries.as_deref().map(Vec::as_slice),
+            &vcs_catalog.project_tags,
+            &vcs_catalog.entries,
         )
     }
 
@@ -229,6 +247,37 @@ impl XpromptLspServer {
 
         if config.typed_launch_units {
             actions.extend(typed_launch_code_actions(&uri, &document, range));
+        }
+
+        let vcs_catalog =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        let request_range = EditorRange {
+            start: to_editor_position(range.start),
+            end: to_editor_position(range.end),
+        };
+        for fix in tag_quickfixes(&document, &vcs_catalog.project_tags) {
+            if editor_ranges_overlap(fix.range, request_range) {
+                actions.push(
+                    tag_edit_action(&uri, fix, CodeActionKind::QUICKFIX).into(),
+                );
+            }
+        }
+        for rewrite in tag_rewrites(
+            &document,
+            &vcs_catalog.project_tags,
+            &vcs_catalog.entries,
+            &vcs_catalog.workflow_names,
+        ) {
+            if editor_ranges_overlap(rewrite.range, request_range) {
+                actions.push(
+                    tag_edit_action(
+                        &uri,
+                        rewrite,
+                        CodeActionKind::REFACTOR_REWRITE,
+                    )
+                    .into(),
+                );
+            }
         }
 
         actions.push(CodeActionOrCommand::Command(Command::new(
@@ -465,6 +514,26 @@ pub(super) fn leading_utf16_units(line: &str) -> u32 {
         .take_while(|ch| matches!(ch, ' ' | '\t'))
         .map(char::len_utf16)
         .sum::<usize>() as u32
+}
+
+fn tag_edit_action(
+    uri: &Uri,
+    edit: TagEdit,
+    kind: CodeActionKind,
+) -> CodeAction {
+    text_edit_action(&edit.title, uri, edit.range, edit.new_text, kind, false)
+}
+
+fn editor_ranges_overlap(left: EditorRange, right: EditorRange) -> bool {
+    fn endpoint(position: sase_core::EditorPosition) -> (u32, u32) {
+        (position.line, position.character)
+    }
+    let (first, second) = if endpoint(left.start) <= endpoint(right.start) {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    endpoint(first.end) >= endpoint(second.start)
 }
 
 pub(super) fn text_edit_action(

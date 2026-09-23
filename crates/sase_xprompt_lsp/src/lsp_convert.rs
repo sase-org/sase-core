@@ -10,7 +10,11 @@ use sase_core::{
     DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
     EditorTextEdit, HoverPayload, ModelAliasShortcutContextWire,
     ModelAliasShortcutEditWire, ModelShortcutContextWire,
-    ModelShortcutEditWire, ModelShortcutKind, VcsRepoEntry,
+    ModelShortcutEditWire, ModelShortcutKind, VcsProjectEntry, VcsRepoEntry,
+};
+
+use crate::project_tags::{
+    entry_for_candidate, project_entry_documentation, tag_spelling,
 };
 
 pub fn to_editor_position(position: Position) -> EditorPosition {
@@ -605,21 +609,29 @@ pub fn placeholder_completion_response(
 
 /// Build the completion response for the `+` (`vcs_project`) completion kind.
 ///
-/// Differs from [`completion_response`] in two ways: the `filter_text` is the
-/// `+name` trigger spelling (so typing `+sa` keeps the `sase` item), and the
-/// item kind/label details distinguish projects from PRs. The primary
-/// `text_edit` (the in-place insertion) and `additional_text_edits` (same-
-/// segment target deletions) are carried over from the candidate's
-/// `replacement` / `additional_edits`.
+/// Project rows render as tags: the label and `filter_text` are the `+name`
+/// trigger spelling (so typing `+sa` keeps the `+sase` item), and the detail
+/// is `provider · #workflow:name`. The primary `text_edit` (the in-place
+/// insertion) and `additional_text_edits` (same-segment target deletions)
+/// are carried over from the candidate's `replacement` / `additional_edits`,
+/// so PR rows keep their behavior while also becoming in-place edits.
+/// `sort_text` preserves catalog order.
 pub fn vcs_project_completion_response(
     list: CompletionList,
     replacement_range: EditorRange,
+    entries: &[VcsProjectEntry],
 ) -> CompletionResponse {
     CompletionResponse::Array(
         list.candidates
             .into_iter()
-            .map(|candidate| {
-                vcs_project_completion_item(candidate, replacement_range)
+            .enumerate()
+            .map(|(index, candidate)| {
+                vcs_project_completion_item(
+                    candidate,
+                    replacement_range,
+                    entries,
+                    index,
+                )
             })
             .collect(),
     )
@@ -823,6 +835,8 @@ fn completion_item(
 fn vcs_project_completion_item(
     candidate: CompletionCandidate,
     replacement_range: EditorRange,
+    entries: &[VcsProjectEntry],
+    index: usize,
 ) -> CompletionItem {
     let filter_text = format!("+{}", candidate.name);
     let is_patch = is_patch_completion_kind(&candidate.kind);
@@ -853,6 +867,22 @@ fn vcs_project_completion_item(
     item.filter_text = Some(filter_text);
     item.label_details = label_details;
     item.detail = detail;
+    item.sort_text = Some(format!("{index:04}"));
+    if !is_patch {
+        if let Some((_, entry)) =
+            entry_for_candidate(&item.label, false, entries)
+        {
+            let tag = tag_spelling(entry);
+            item.label = tag.clone();
+            item.filter_text = Some(tag);
+            item.detail = Some(format!(
+                "{} · {}",
+                entry.provider_display, entry.display_tag
+            ));
+            item.documentation =
+                Some(markdown_doc(project_entry_documentation(entry)));
+        }
+    }
     item
 }
 

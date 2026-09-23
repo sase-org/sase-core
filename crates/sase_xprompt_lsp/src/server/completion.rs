@@ -298,7 +298,11 @@ impl XpromptLspServer {
             &vcs_catalog.entries,
             &vcs_catalog.workflow_names,
         );
-        vcs_project_completion_response(list, context.replacement_range)
+        vcs_project_completion_response(
+            list,
+            context.replacement_range,
+            &vcs_catalog.entries,
+        )
     }
 
     /// Build the `#workflow:` / `#workflow(` root-ref completion response.

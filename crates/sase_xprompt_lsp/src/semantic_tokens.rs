@@ -8,11 +8,18 @@ use sase_core::{
     editor_extract_xprompt_argument_spans,
     editor_extract_xprompt_argument_spans_with_catalog,
     editor_extract_xprompt_call_name_spans, fenced_block_details,
+    project_tag::{
+        resolve_project_tag, scan_project_tags, ProjectTagResolutionWire,
+        ProjectTagTargetWire,
+    },
     prompt_literal_zone_ranges, scan_artifact_refs,
     scan_directive_owned_fences, ArtifactRefContextWire, ArtifactRefSpanWire,
-    CompiledGlossaryCatalog, DocumentSnapshot, XpromptArgumentSource,
-    XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
+    CompiledGlossaryCatalog, DocumentSnapshot, VcsProjectEntry,
+    XpromptArgumentSource, XpromptArgumentSpanRole,
+    XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
+
+use crate::project_tags::accent_index_for_target;
 
 const KIND_TOKEN_TYPE: u32 = 0;
 const PAYLOAD_TOKEN_TYPE: u32 = 1;
@@ -23,11 +30,19 @@ const MACRO_TOKEN_TYPE: u32 = 5;
 const PARAMETER_TOKEN_TYPE: u32 = 6;
 const OPERATOR_TOKEN_TYPE: u32 = 7;
 const KEYWORD_TOKEN_TYPE: u32 = 8;
+const PROJECT_TAG_TOKEN_TYPE: u32 = 9;
 const DOCUMENT_ROLE_MODIFIER: u32 = 1 << 0;
 const DEPRECATED_MODIFIER: u32 = 1 << 1;
+const SIGIL_MODIFIER: u32 = 1 << 2;
+const UNKNOWN_TAG_MODIFIER: u32 = 1 << 3;
+const DISABLED_TAG_MODIFIER: u32 = 1 << 4;
+/// `accent0`…`accent17` live at bits 5..23, inside the 32-bit budget.
+const ACCENT_MODIFIER_SHIFT: u32 = 5;
+const ACCENT_MODIFIER_COUNT: usize = 18;
 const ARTIFACT_PRIORITY: u8 = 0;
 const CODE_PRIORITY: u8 = 0;
 const NAME_PRIORITY: u8 = 0;
+const PROJECT_TAG_PRIORITY: u8 = 0;
 const GLOSSARY_PRIORITY: u8 = 1;
 const ARGUMENT_PRIORITY: u8 = 2;
 
@@ -41,6 +56,14 @@ struct RawSemanticToken {
 }
 
 pub(crate) fn legend() -> SemanticTokensLegend {
+    let mut token_modifiers = vec![
+        SemanticTokenModifier::DOCUMENTATION,
+        SemanticTokenModifier::DEPRECATED,
+        SemanticTokenModifier::new("sigil"),
+        SemanticTokenModifier::new("unknown"),
+        SemanticTokenModifier::new("disabled"),
+    ];
+    token_modifiers.extend(accent_modifiers());
     SemanticTokensLegend {
         token_types: vec![
             SemanticTokenType::NAMESPACE,
@@ -52,12 +75,38 @@ pub(crate) fn legend() -> SemanticTokensLegend {
             SemanticTokenType::PARAMETER,
             SemanticTokenType::OPERATOR,
             SemanticTokenType::KEYWORD,
+            SemanticTokenType::new("saseProjectTag"),
         ],
-        token_modifiers: vec![
-            SemanticTokenModifier::DOCUMENTATION,
-            SemanticTokenModifier::DEPRECATED,
-        ],
+        token_modifiers,
     }
+}
+
+/// The `accent0`…`accent17` legend modifiers, in bit order.
+fn accent_modifiers() -> Vec<SemanticTokenModifier> {
+    vec![
+        SemanticTokenModifier::new("accent0"),
+        SemanticTokenModifier::new("accent1"),
+        SemanticTokenModifier::new("accent2"),
+        SemanticTokenModifier::new("accent3"),
+        SemanticTokenModifier::new("accent4"),
+        SemanticTokenModifier::new("accent5"),
+        SemanticTokenModifier::new("accent6"),
+        SemanticTokenModifier::new("accent7"),
+        SemanticTokenModifier::new("accent8"),
+        SemanticTokenModifier::new("accent9"),
+        SemanticTokenModifier::new("accent10"),
+        SemanticTokenModifier::new("accent11"),
+        SemanticTokenModifier::new("accent12"),
+        SemanticTokenModifier::new("accent13"),
+        SemanticTokenModifier::new("accent14"),
+        SemanticTokenModifier::new("accent15"),
+        SemanticTokenModifier::new("accent16"),
+        SemanticTokenModifier::new("accent17"),
+    ]
+}
+
+pub(crate) fn accent_modifier_bit(index: u32) -> u32 {
+    1 << (ACCENT_MODIFIER_SHIFT + index)
 }
 
 pub(crate) fn document_semantic_tokens(
@@ -65,6 +114,8 @@ pub(crate) fn document_semantic_tokens(
     artifact_context: Option<&ArtifactRefContextWire>,
     glossary_catalog: Option<&CompiledGlossaryCatalog>,
     argument_entries: Option<&[XpromptAssistEntry]>,
+    project_tags: &[ProjectTagTargetWire],
+    project_entries: &[VcsProjectEntry],
 ) -> SemanticTokens {
     let mut raw_tokens = Vec::new();
     if let Some(context) = artifact_context {
@@ -76,7 +127,60 @@ pub(crate) fn document_semantic_tokens(
     }
     raw_tokens.extend(raw_xprompt_call_name_tokens(document));
     raw_tokens.extend(raw_xprompt_argument_tokens(document, argument_entries));
+    raw_tokens.extend(raw_project_tag_tokens(
+        document,
+        project_tags,
+        project_entries,
+    ));
     encode_tokens(document, non_overlapping_tokens(raw_tokens))
+}
+
+/// One sigil (`+`) token plus one name token per project tag. Resolved tags
+/// carry their `accentN` modifier; unknown or ambiguous tags carry
+/// `unknown`; resolved tags without a VCS provider carry `disabled`.
+fn raw_project_tag_tokens(
+    document: &DocumentSnapshot,
+    targets: &[ProjectTagTargetWire],
+    entries: &[VcsProjectEntry],
+) -> Vec<RawSemanticToken> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let mut tokens = Vec::new();
+    for span in scan_project_tags(document.text()) {
+        let resolution = match resolve_project_tag(&span.name, targets) {
+            ProjectTagResolutionWire::Resolved { target_index } => {
+                let target = &targets[target_index];
+                if target.workflow_type.is_none() {
+                    DISABLED_TAG_MODIFIER
+                } else {
+                    accent_index_for_target(targets, target_index, entries)
+                        .filter(|index| {
+                            (*index as usize) < ACCENT_MODIFIER_COUNT
+                        })
+                        .map(accent_modifier_bit)
+                        .unwrap_or(0)
+                }
+            }
+            ProjectTagResolutionWire::Ambiguous { .. }
+            | ProjectTagResolutionWire::Unknown { .. } => UNKNOWN_TAG_MODIFIER,
+        };
+        tokens.push(RawSemanticToken {
+            byte_start: span.start,
+            byte_end: span.start + 1,
+            token_type: PROJECT_TAG_TOKEN_TYPE,
+            token_modifiers_bitset: SIGIL_MODIFIER | resolution,
+            priority: PROJECT_TAG_PRIORITY,
+        });
+        tokens.push(RawSemanticToken {
+            byte_start: span.name_start,
+            byte_end: span.end,
+            token_type: PROJECT_TAG_TOKEN_TYPE,
+            token_modifiers_bitset: resolution,
+            priority: PROJECT_TAG_PRIORITY,
+        });
+    }
+    tokens
 }
 
 fn raw_artifact_ref_tokens(
@@ -558,16 +662,33 @@ mod tests {
                 "macro",
                 "parameter",
                 "operator",
-                "keyword"
+                "keyword",
+                "saseProjectTag"
             ]
         );
+        assert_eq!(
+            legend
+                .token_modifiers
+                .iter()
+                .map(|modifier| modifier.as_str())
+                .collect::<Vec<_>>()[..5],
+            vec![
+                "documentation",
+                "deprecated",
+                "sigil",
+                "unknown",
+                "disabled"
+            ]
+        );
+        assert_eq!(legend.token_modifiers.len(), 2 + 3 + 18);
     }
 
     #[test]
     fn argument_tokens_cover_structure_and_literal_values() {
         let document =
             DocumentSnapshot::new("#foo(path=\"a\", count=2, enabled=true)");
-        let tokens = document_semantic_tokens(&document, None, None, None);
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
 
         assert_eq!(
             absolute_semantic_tokens(&tokens.data),
@@ -595,7 +716,8 @@ mod tests {
         let document = DocumentSnapshot::new(
             "#foo #bar:value #baz:: body\n%q(capacity=2)\n```\n#hidden %wait\n```",
         );
-        let tokens = document_semantic_tokens(&document, None, None, None);
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
 
         assert_eq!(
             absolute_semantic_tokens(&tokens.data)
@@ -619,7 +741,8 @@ mod tests {
         let document = DocumentSnapshot::new(
             "🙂 #foo(text=[[alpha\r\nbeta 🙂\r\ngamma]])",
         );
-        let tokens = document_semantic_tokens(&document, None, None, None);
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
         let absolute = absolute_semantic_tokens(&tokens.data);
 
         assert!(
@@ -644,8 +767,14 @@ mod tests {
     fn unknown_argument_keys_get_deprecated_modifier_when_catalog_is_warm() {
         let document = DocumentSnapshot::new("#foo(path=a, nope=b)");
         let entries = vec![assist_entry("foo", vec![input("path", "path", 0)])];
-        let tokens =
-            document_semantic_tokens(&document, None, None, Some(&entries));
+        let tokens = document_semantic_tokens(
+            &document,
+            None,
+            None,
+            Some(&entries),
+            &[],
+            &[],
+        );
 
         assert!(absolute_semantic_tokens(&tokens.data).contains(&(
             0,
@@ -665,6 +794,8 @@ mod tests {
             Some(&ArtifactRefContextWire::default()),
             None,
             None,
+            &[],
+            &[],
         );
         let absolute = absolute_semantic_tokens(&tokens.data);
 
@@ -679,7 +810,8 @@ mod tests {
     #[test]
     fn argument_tokens_skip_fenced_blocks() {
         let document = DocumentSnapshot::new("```\n#foo(path=\"a\")\n```");
-        let tokens = document_semantic_tokens(&document, None, None, None);
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
 
         assert!(tokens.data.is_empty());
     }
@@ -733,6 +865,8 @@ mod tests {
             Some(&ArtifactRefContextWire::default()),
             Some(&catalog),
             None,
+            &[],
+            &[],
         );
 
         assert_eq!(

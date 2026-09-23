@@ -26,4 +26,4 @@ pub use wire::{
 };
 
 pub(crate) use accept::{project_tag_selection_edits, ProjectTagSelectionEdit};
-pub(crate) use scan::is_tag_name;
+pub use scan::is_tag_name;

@@ -121,6 +121,7 @@ mod tests;
 pub use state::XpromptLspServer;
 
 use self::actions::should_invalidate_for_uri;
+use self::catalogs::load_vcs_project_catalog;
 use self::initialize::config_from_initialize;
 
 impl LanguageServer for XpromptLspServer {
@@ -129,6 +130,9 @@ impl LanguageServer for XpromptLspServer {
         params: InitializeParams,
     ) -> Result<InitializeResult> {
         let config = config_from_initialize(&params);
+        let project_tag_palette =
+            load_vcs_project_catalog(config.vcs_project_catalog.as_deref())
+                .accent_palette;
         if let Ok(mut stored) = self.config.write() {
             *stored = config;
         }
@@ -207,6 +211,11 @@ impl LanguageServer for XpromptLspServer {
                         more_trigger_character: None,
                     },
                 ),
+                experimental: Some(serde_json::json!({
+                    "sase": {
+                        "projectTagPalette": project_tag_palette,
+                    },
+                })),
                 ..Default::default()
             },
         })

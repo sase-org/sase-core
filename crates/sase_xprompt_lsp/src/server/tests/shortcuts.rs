@@ -688,7 +688,8 @@ async fn advertises_full_semantic_tokens_with_standard_legend() {
             "macro",
             "parameter",
             "operator",
-            "keyword"
+            "keyword",
+            "saseProjectTag"
         ]
     );
     assert_eq!(
@@ -698,7 +699,31 @@ async fn advertises_full_semantic_tokens_with_standard_legend() {
             .iter()
             .map(|modifier| modifier.as_str())
             .collect::<Vec<_>>(),
-        vec!["documentation", "deprecated"]
+        vec![
+            "documentation",
+            "deprecated",
+            "sigil",
+            "unknown",
+            "disabled",
+            "accent0",
+            "accent1",
+            "accent2",
+            "accent3",
+            "accent4",
+            "accent5",
+            "accent6",
+            "accent7",
+            "accent8",
+            "accent9",
+            "accent10",
+            "accent11",
+            "accent12",
+            "accent13",
+            "accent14",
+            "accent15",
+            "accent16",
+            "accent17",
+        ]
     );
     assert!(matches!(
         options.full,

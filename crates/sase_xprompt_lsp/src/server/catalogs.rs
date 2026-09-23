@@ -371,9 +371,13 @@ pub(super) fn active_artifact_ref_project<'a>(
     vcs_catalog: &VcsProjectCatalog,
     artifact_catalog: &'a ArtifactRefCatalog,
 ) -> Option<&'a ArtifactRefCatalogProject> {
-    let leading_project =
-        leading_vcs_project(document.text(), &vcs_catalog.entries);
+    let leading_project = leading_vcs_project(
+        document.text(),
+        &vcs_catalog.entries,
+        &vcs_catalog.project_tags,
+    );
     leading_project
+        .as_deref()
         .and_then(|project| artifact_ref_project(artifact_catalog, project))
         .or_else(|| {
             artifact_catalog
@@ -410,9 +414,13 @@ pub(super) fn active_glossary_project<'a>(
     vcs_catalog: &VcsProjectCatalog,
     glossary_catalog: &'a GlossaryCatalog,
 ) -> Option<&'a GlossaryCatalogProject> {
-    let leading_project =
-        leading_vcs_project(document.text(), &vcs_catalog.entries);
+    let leading_project = leading_vcs_project(
+        document.text(),
+        &vcs_catalog.entries,
+        &vcs_catalog.project_tags,
+    );
     leading_project
+        .as_deref()
         .and_then(|project| glossary_project(glossary_catalog, project))
         .or_else(|| {
             glossary_catalog
@@ -431,11 +439,17 @@ pub(super) fn active_glossary_project<'a>(
         })
 }
 
-pub(super) fn leading_vcs_project<'a>(
+pub(super) fn leading_vcs_project(
     text: &str,
-    entries: &'a [VcsProjectEntry],
-) -> Option<&'a str> {
+    entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
+) -> Option<String> {
     let token = text.split_ascii_whitespace().next()?;
+    if let Some(identity) =
+        crate::project_tags::leading_tag_identity(text, targets, entries)
+    {
+        return Some(identity);
+    }
     if !token.starts_with('#') {
         return None;
     }
@@ -454,9 +468,9 @@ pub(super) fn leading_vcs_project<'a>(
             return None;
         }
         if !entry.project.is_empty() {
-            Some(entry.project.as_str())
+            Some(entry.project.clone())
         } else {
-            Some(entry.name.as_str())
+            Some(entry.name.clone())
         }
     })
 }

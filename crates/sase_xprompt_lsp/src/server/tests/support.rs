@@ -798,6 +798,132 @@ pub(super) fn write_vcs_ref_catalog(path: &Path) {
     .unwrap();
 }
 
+/// v5 catalog with tag targets, accents, and a provider-less project.
+/// `sase` resolves with accent 2 and `current`; `notes` with accent 5;
+/// `orphan` resolves but has no VCS provider; `ship` is a patch row.
+pub(super) fn write_v5_project_tag_catalog(path: &Path) {
+    fs::write(
+        path,
+        r##"{
+            "schema_version": 5,
+            "workflow_names": ["gh", "git"],
+            "entries": [
+                {
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:sase",
+                    "provider_display": "GitHub",
+                    "description": "SASE repo",
+                    "aliases": ["sase-core"],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "sase",
+                    "status": "",
+                    "key": "gh_sase-org__sase",
+                    "tag": "+sase",
+                    "accent_index": 2,
+                    "current": true
+                },
+                {
+                    "name": "notes",
+                    "vcs_prefix": "git",
+                    "display_tag": "#git:notes",
+                    "provider_display": "Bare Git",
+                    "description": "",
+                    "aliases": [],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "notes",
+                    "status": "",
+                    "key": "git_notes",
+                    "tag": "+notes",
+                    "accent_index": 5,
+                    "current": false
+                },
+                {
+                    "name": "ship",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:ship",
+                    "provider_display": "GitHub",
+                    "description": "Completion patch",
+                    "aliases": [],
+                    "entry_kind": "patch",
+                    "kind": "changespec",
+                    "project": "sase",
+                    "status": "Ready"
+                }
+            ],
+            "accent_palette": ["#111111", "#222222", "#333333", "#444444", "#555555", "#666666"],
+            "project_tags": [
+                {
+                    "key": "gh_sase-org__sase",
+                    "name": "sase",
+                    "aliases": ["sase-core"],
+                    "workflow_type": "gh"
+                },
+                {
+                    "key": "git_notes",
+                    "name": "notes",
+                    "aliases": [],
+                    "workflow_type": "git"
+                },
+                {
+                    "key": "git_orphan",
+                    "name": "orphan",
+                    "aliases": [],
+                    "workflow_type": null
+                }
+            ]
+        }"##,
+    )
+    .unwrap();
+}
+
+/// v5 catalog where `+sase` matches two targets (ambiguous).
+pub(super) fn write_ambiguous_project_tag_catalog(path: &Path) {
+    fs::write(
+        path,
+        r##"{
+            "schema_version": 5,
+            "workflow_names": ["gh", "git"],
+            "entries": [
+                {
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:sase",
+                    "provider_display": "GitHub",
+                    "description": "SASE repo",
+                    "aliases": [],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "sase",
+                    "status": "",
+                    "key": "gh_sase-org__sase",
+                    "tag": "+sase",
+                    "accent_index": 2,
+                    "current": true
+                }
+            ],
+            "accent_palette": ["#111111", "#222222", "#333333"],
+            "project_tags": [
+                {
+                    "key": "gh_sase-org__sase",
+                    "name": "sase",
+                    "aliases": [],
+                    "workflow_type": "gh"
+                },
+                {
+                    "key": "git_sase",
+                    "name": "sase",
+                    "aliases": [],
+                    "workflow_type": "git"
+                }
+            ]
+        }"##,
+    )
+    .unwrap();
+}
+
 pub(super) fn write_glossary_catalog(
     path: &Path,
     root: &Path,

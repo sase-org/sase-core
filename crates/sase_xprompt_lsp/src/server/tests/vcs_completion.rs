@@ -43,20 +43,21 @@ async fn completes_vcs_project_with_primary_and_additional_edits() {
 
     assert_eq!(items.len(), 1);
     let item = &items[0];
-    assert_eq!(item.label, "sase");
+    assert_eq!(item.label, "+sase");
     assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
     let label_details = item.label_details.as_ref().unwrap();
     assert_eq!(label_details.description.as_deref(), Some("project"));
     // `filter_text` is the `+name` trigger spelling so typing `+sa` keeps
     // the item under client-side filtering.
     assert_eq!(item.filter_text.as_deref(), Some("+sase"));
-    assert_eq!(item.detail.as_deref(), Some("+sase "));
+    assert_eq!(item.detail.as_deref(), Some("GitHub · #gh:sase"));
+    assert_eq!(item.sort_text.as_deref(), Some("0000"));
     let Some(Documentation::MarkupContent(documentation)) =
         item.documentation.as_ref()
     else {
         panic!("expected markdown documentation");
     };
-    assert_eq!(documentation.value, "SASE repo");
+    assert_eq!(documentation.value, "SASE repo\n\n`#gh:sase`");
 
     // The primary edit replaces the `+` trigger token in place with the
     // project tag; nothing else in the segment needs deleting.
@@ -106,7 +107,7 @@ async fn completes_vcs_project_replacing_existing_tag_at_eof() {
 
     assert_eq!(items.len(), 1);
     let item = &items[0];
-    assert_eq!(item.label, "sase");
+    assert_eq!(item.label, "+sase");
 
     // Primary edit replaces the trailing `+` trigger span (byte 9..10)
     // in place with the project tag.
@@ -160,8 +161,8 @@ async fn completes_vcs_patch_with_pr_label_details() {
     let item = &items[0];
     assert_eq!(item.label, "ship-completion");
     assert_eq!(item.kind, Some(CompletionItemKind::EVENT));
-    // `detail` mirrors the in-place insertion (with its trailing space)
-    // until the LSP phase restyles project items.
+    // PR rows keep their `#` spelling: `detail` mirrors the in-place
+    // insertion (with its trailing space) while project rows render tags.
     assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion "));
     assert_eq!(item.filter_text.as_deref(), Some("+ship-completion"));
     let label_details = item.label_details.as_ref().unwrap();
@@ -245,7 +246,7 @@ async fn bare_plus_at_bof_completes_vcs_project() {
 
     assert_eq!(items.len(), 1);
     let item = &items[0];
-    assert_eq!(item.label, "sase");
+    assert_eq!(item.label, "+sase");
     assert_eq!(item.kind, Some(CompletionItemKind::MODULE));
     let label_details = item.label_details.as_ref().unwrap();
     assert_eq!(label_details.description.as_deref(), Some("project"));
@@ -293,7 +294,7 @@ async fn space_delimited_plus_completes_vcs_project() {
         panic!("expected completion array");
     };
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].label, "sase");
+    assert_eq!(items[0].label, "+sase");
     assert_eq!(items[0].filter_text.as_deref(), Some("+sase"));
 }
 
@@ -372,7 +373,7 @@ async fn automatic_and_manual_space_plus_completion_match() {
             panic!("expected completion array");
         };
         assert_eq!(items.len(), 1, "{text:?}");
-        assert_eq!(items[0].label, "sase", "{text:?}");
+        assert_eq!(items[0].label, "+sase", "{text:?}");
         assert_eq!(items[0].filter_text.as_deref(), Some("+sase"));
     }
 }
