@@ -38,26 +38,31 @@ pub use indicator::{
     UsageIndicatorWindowEntryWire, PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
 };
 pub use refresh::{
-    empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
-    refresh_backoff_seconds, refresh_failure_policy,
-    ProviderUsageRefreshAdmissionStatus, ProviderUsageRefreshAdmitOutcomeWire,
-    ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
-    ProviderUsageRefreshDueOutcomeWire, ProviderUsageRefreshDueRequestWire,
-    ProviderUsageRefreshMarkDueOutcomeWire,
+    empty_refresh_schedule, evaluate_adaptive_refresh_due,
+    evaluate_refresh_due, jitter_adaptive_backoff_seconds, provider_is_hot,
+    refresh_attempt_succeeded, refresh_backoff_seconds, refresh_failure_policy,
+    refresh_jitter_factor, HotWindowView, ProviderUsageRefreshAdmissionStatus,
+    ProviderUsageRefreshAdmitOutcomeWire, ProviderUsageRefreshAdmitRequestWire,
+    ProviderUsageRefreshAttemptWire, ProviderUsageRefreshDueOutcomeWire,
+    ProviderUsageRefreshDueRequestWire, ProviderUsageRefreshMarkDueOutcomeWire,
     ProviderUsageRefreshMarkDueRequestWire, ProviderUsageRefreshScheduleWire,
     RefreshDueDecision, RefreshFailurePolicy,
-    ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS, MAX_USAGE_REFRESH_BACKOFF_SECONDS,
-    PARKED_PROVIDER_BACKOFF_SECONDS, RATE_LIMIT_ESCALATION_BASE_SECONDS,
-    RATE_LIMIT_ESCALATION_CAP_SECONDS, RATE_LIMIT_RETRY_AFTER_MAX_SECONDS,
-    RATE_LIMIT_RETRY_AFTER_MIN_SECONDS,
+    ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS, ADAPTIVE_JITTER_HIGH,
+    ADAPTIVE_JITTER_LOW, HOT_HINT_COALESCE_SECONDS, HOT_HINT_MAX_SECONDS,
+    MAX_USAGE_REFRESH_BACKOFF_SECONDS, PARKED_PROVIDER_BACKOFF_SECONDS,
+    RATE_LIMIT_ESCALATION_BASE_SECONDS, RATE_LIMIT_ESCALATION_CAP_SECONDS,
+    RATE_LIMIT_RETRY_AFTER_MAX_SECONDS, RATE_LIMIT_RETRY_AFTER_MIN_SECONDS,
     USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS, VENDOR_DRIFT_BACKOFF_SECONDS,
 };
 pub use store::{
     admit_provider_usage_refresh, evaluate_provider_usage_refresh_due,
-    load_provider_usage_store, mark_provider_usage_refresh_due,
-    prepare_provider_usage_account_context, provider_usage_state_path,
-    record_provider_usage_observation, record_provider_usage_refresh_attempt,
-    release_provider_usage_refresh, reserve_provider_usage_refresh,
+    list_provider_usage_refresh_reservations, load_provider_usage_store,
+    load_provider_usage_store_with_floors, mark_provider_usage_hot,
+    mark_provider_usage_refresh_due, prepare_provider_usage_account_context,
+    provider_usage_state_path, record_provider_usage_observation,
+    record_provider_usage_refresh_attempt, release_provider_usage_refresh,
+    reserve_provider_usage_refresh, ListProviderUsageRefreshReservationsWire,
+    MarkProviderUsageHotOutcomeWire, MarkProviderUsageHotRequestWire,
     ProviderUsageAccountContextWire,
     ProviderUsageRefreshReservationOutcomeWire,
     ProviderUsageRefreshReservationRequestWire,
@@ -478,6 +483,36 @@ pub fn validate_probe_floor(value: f64) -> Result<f64> {
         return Err(validation(format!(
             "min_interval_seconds must be finite and in [{MIN_PROBE_INTERVAL_SECONDS}, {MAX_PROBE_INTERVAL_SECONDS}]"
         )));
+    }
+    Ok(value)
+}
+
+/// Validate a due/admit `active_cadence_seconds` hot cadence.
+///
+/// The floor is the idle cadence's job: an active cadence above it is
+/// clamped to the idle cadence at use, so validation only enforces a finite
+/// value at or above the minimum cadence.
+pub fn validate_active_cadence(value: f64) -> Result<f64> {
+    if !value.is_finite() || value < MIN_USAGE_CADENCE_SECONDS {
+        return Err(validation(format!(
+            "active_cadence_seconds must be finite and at least {MIN_USAGE_CADENCE_SECONDS}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Validate a due/admit `warn_percent` hot threshold.
+pub fn validate_hot_warn_percent(value: f64) -> Result<f64> {
+    if !value.is_finite() || value < 0.0 || value > 100.0 {
+        return Err(validation("warn_percent must be finite and in [0, 100]"));
+    }
+    Ok(value)
+}
+
+/// Validate a `mark_provider_usage_hot` `until` timestamp.
+pub fn validate_hot_until(value: f64) -> Result<f64> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(validation("until must be a finite positive timestamp"));
     }
     Ok(value)
 }

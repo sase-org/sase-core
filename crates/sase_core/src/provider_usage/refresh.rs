@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    UsageReasonCode, DEFAULT_USAGE_CADENCE_SECONDS, MIN_USAGE_CADENCE_SECONDS,
-    PROVIDER_USAGE_STORE_SCHEMA_VERSION,
+    UsageReasonCode, DEFAULT_USAGE_CADENCE_SECONDS, DEFAULT_USAGE_WARN_PERCENT,
+    MIN_USAGE_CADENCE_SECONDS, PROVIDER_USAGE_STORE_SCHEMA_VERSION,
 };
 
 /// Cap for cadence-based exponential backoff after probe failures.
@@ -27,6 +27,17 @@ pub const RATE_LIMIT_ESCALATION_CAP_SECONDS: f64 = 7_200.0;
 pub const PARKED_PROVIDER_BACKOFF_SECONDS: f64 = 21_600.0;
 /// Vendor-drift fixed backoff.
 pub const VENDOR_DRIFT_BACKOFF_SECONDS: f64 = 3_600.0;
+/// Deterministic jitter band applied to adaptive cadence intervals and
+/// adaptive backoff durations. Retry-After instants and polling floors are
+/// never jittered.
+pub const ADAPTIVE_JITTER_LOW: f64 = 0.9;
+pub const ADAPTIVE_JITTER_HIGH: f64 = 1.1;
+/// Hot-hint horizon: `mark_provider_usage_hot` caps `until` at `now` plus
+/// this many seconds.
+pub const HOT_HINT_MAX_SECONDS: f64 = 3_600.0;
+/// Hot-hint coalescing: no write when the stored `hot_until` already reaches
+/// `until` minus this many seconds.
+pub const HOT_HINT_COALESCE_SECONDS: f64 = 60.0;
 
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -57,6 +68,8 @@ pub struct ProviderUsageRefreshScheduleWire {
     pub consecutive_rate_limits: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_until: Option<f64>,
 }
 
 /// Request to evaluate whether a provider is due.
@@ -70,6 +83,16 @@ pub struct ProviderUsageRefreshDueRequestWire {
     pub cadence_seconds: f64,
     #[serde(default)]
     pub explicit: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adaptive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_interval_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cadence_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_percent: Option<f64>,
 }
 
 fn default_cadence() -> f64 {
@@ -99,6 +122,16 @@ pub struct ProviderUsageRefreshAdmitRequestWire {
     pub cadence_seconds: f64,
     #[serde(default)]
     pub explicit: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adaptive: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_interval_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_cadence_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warn_percent: Option<f64>,
 }
 
 /// Admission status for one provider/context generation.
@@ -358,6 +391,7 @@ pub fn empty_refresh_schedule(
         last_failure_reason: None,
         consecutive_rate_limits: 0,
         parked_fingerprint: None,
+        hot_until: None,
     }
 }
 
@@ -453,5 +487,267 @@ pub fn evaluate_refresh_due(
                 }
             }
         }
+    }
+}
+
+/// Deterministic jitter factor in `[0.9, 1.1]` from a stable hash of
+/// `(provider, context_id, account_generation, observed_at)`.
+///
+/// FNV-1a is used instead of the default hasher so the factor is reproducible
+/// across processes and test runs. It applies to cadence intervals and
+/// adaptive backoff durations, never to Retry-After instants or floors.
+#[must_use]
+pub fn refresh_jitter_factor(
+    provider: &str,
+    context_id: &str,
+    account_generation: u64,
+    observed_at: f64,
+) -> f64 {
+    const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+    const FNV_PRIME: u64 = 1_099_511_628_211;
+    let mut hash = FNV_OFFSET;
+    for byte in provider.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash ^= u64::from(RESERVATION_KEY_SEP);
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in context_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash ^= u64::from(RESERVATION_KEY_SEP);
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in account_generation.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash ^= u64::from(RESERVATION_KEY_SEP);
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for byte in observed_at.to_bits().to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    ADAPTIVE_JITTER_LOW + (hash % 2_001) as f64 * 0.000_1
+}
+
+const RESERVATION_KEY_SEP: u8 = 0x1f;
+
+/// Apply the deterministic jitter factor to an adaptive backoff duration.
+///
+/// The duration (not the absolute timestamp) is scaled, so Retry-After
+/// instants — which bypass this helper — keep their exact times.
+#[must_use]
+pub fn jitter_adaptive_backoff_seconds(
+    duration_seconds: f64,
+    jitter_factor: f64,
+) -> f64 {
+    duration_seconds
+        * jitter_factor.clamp(ADAPTIVE_JITTER_LOW, ADAPTIVE_JITTER_HIGH)
+}
+
+/// A stored window projected for hot-cadence evaluation.
+#[derive(Debug, Clone, Copy)]
+pub struct HotWindowView {
+    pub used_percent: f64,
+    pub resets_at: Option<f64>,
+    pub received_at: f64,
+}
+
+/// Whether a provider with an active cadence is currently hot.
+///
+/// Hot means `hot_until > now`, or any stored window that has not reset has
+/// `used_percent >= warn_percent`. Passive-coverage suppression clears hot
+/// when every stored window's `received_at` is within `active_cadence_seconds`
+/// of now: live stream events already keep the provider fresh. The rule is
+/// provider-neutral; it never branches on the provider name.
+#[must_use]
+pub fn provider_is_hot(
+    now: f64,
+    active_cadence_seconds: f64,
+    warn_percent: f64,
+    hot_until: Option<f64>,
+    windows: &[HotWindowView],
+) -> bool {
+    let signaled = hot_until.is_some_and(|until| now < until)
+        || windows.iter().any(|window| {
+            window.resets_at.is_none_or(|reset| now < reset)
+                && window.used_percent >= warn_percent
+        });
+    if !signaled {
+        return false;
+    }
+    if !windows.is_empty()
+        && windows
+            .iter()
+            .all(|window| window.received_at >= now - active_cadence_seconds)
+    {
+        return false;
+    }
+    true
+}
+
+/// Decide whether automatic or explicit refresh may run under the opt-in
+/// `adaptive` policy.
+///
+/// The order is: `retry_after` (defers everything, explicit included), the
+/// explicit cooldown, `explicit`, parking (`parked`, or `cli_changed` when the
+/// request carries a different CLI fingerprint), `backoff`, the polling
+/// `floor`, then `marked_due`, `reset_passed`, `never_observed`, and cadence.
+/// The cadence interval is
+/// `(hot ? max(active, floor) : max(idle, floor)) x jitter`, never below the
+/// floor. With `adaptive` false, callers must use [`evaluate_refresh_due`],
+/// which is byte-for-byte today's behavior.
+#[must_use]
+pub fn evaluate_adaptive_refresh_due(
+    now: f64,
+    request: &ProviderUsageRefreshDueRequestWire,
+    schedule: Option<&ProviderUsageRefreshScheduleWire>,
+    last_full_observation_at: Option<f64>,
+    reset_passed: bool,
+    windows: &[HotWindowView],
+) -> RefreshDueDecision {
+    let cadence_seconds = request.cadence_seconds;
+    let retry_after = schedule.and_then(|row| row.retry_after_until);
+    if retry_after.is_some_and(|until| now < until) {
+        return RefreshDueDecision {
+            due: false,
+            reason: "retry_after",
+            next_at: retry_after,
+        };
+    }
+    let cooldown = schedule.and_then(|row| row.cooldown_until);
+    if request.explicit && cooldown.is_some_and(|until| now < until) {
+        return RefreshDueDecision {
+            due: false,
+            reason: "cooldown",
+            next_at: cooldown,
+        };
+    }
+    if request.explicit {
+        return RefreshDueDecision {
+            due: true,
+            reason: "explicit",
+            next_at: None,
+        };
+    }
+    if let Some(schedule) = schedule {
+        if schedule.backoff_until.is_some_and(|until| now < until)
+            && schedule.parked_fingerprint.is_some()
+        {
+            let changed = match (
+                request.cli_fingerprint.as_deref(),
+                schedule.parked_fingerprint.as_deref(),
+            ) {
+                (Some(current), Some(parked)) => current != parked,
+                _ => false,
+            };
+            if changed {
+                return RefreshDueDecision {
+                    due: true,
+                    reason: "cli_changed",
+                    next_at: None,
+                };
+            }
+            return RefreshDueDecision {
+                due: false,
+                reason: "parked",
+                next_at: schedule.backoff_until,
+            };
+        }
+    }
+    let backoff = schedule.and_then(|row| row.backoff_until);
+    if backoff.is_some_and(|until| now < until) {
+        return RefreshDueDecision {
+            due: false,
+            reason: "backoff",
+            next_at: backoff,
+        };
+    }
+    if let Some(floor) = request.min_interval_seconds {
+        if let Some(started_at) = schedule.and_then(|row| row.last_started_at) {
+            if started_at + floor > now {
+                return RefreshDueDecision {
+                    due: false,
+                    reason: "floor",
+                    next_at: Some(started_at + floor),
+                };
+            }
+        }
+    }
+    let marked = schedule.and_then(|row| row.due_at);
+    if marked.is_some_and(|due_at| now >= due_at) {
+        return RefreshDueDecision {
+            due: true,
+            reason: "marked_due",
+            next_at: None,
+        };
+    }
+    if reset_passed {
+        return RefreshDueDecision {
+            due: true,
+            reason: "reset_passed",
+            next_at: None,
+        };
+    }
+    let Some(observed_at) = last_full_observation_at else {
+        return RefreshDueDecision {
+            due: true,
+            reason: "never_observed",
+            next_at: None,
+        };
+    };
+    let floor = request.min_interval_seconds.unwrap_or(0.0);
+    let mut interval = cadence_seconds.max(floor);
+    if let Some(active) = request.active_cadence_seconds {
+        let warn = request.warn_percent.unwrap_or(DEFAULT_USAGE_WARN_PERCENT);
+        let hot = provider_is_hot(
+            now,
+            active,
+            warn,
+            schedule.and_then(|row| row.hot_until),
+            windows,
+        );
+        if hot {
+            interval = active.min(cadence_seconds).max(floor);
+        }
+    }
+    let jitter = refresh_jitter_factor(
+        request.provider.as_str(),
+        request.context_id.as_str(),
+        request.account_generation,
+        observed_at,
+    );
+    let interval = (interval * jitter).max(floor);
+    cadence_decision(now, observed_at, interval, marked)
+}
+
+fn cadence_decision(
+    now: f64,
+    observed_at: f64,
+    interval: f64,
+    marked: Option<f64>,
+) -> RefreshDueDecision {
+    let next = observed_at + interval;
+    if now >= next {
+        return RefreshDueDecision {
+            due: true,
+            reason: "cadence",
+            next_at: None,
+        };
+    }
+    if let Some(due_at) = marked {
+        if due_at <= next {
+            return RefreshDueDecision {
+                due: false,
+                reason: "scheduled",
+                next_at: Some(due_at),
+            };
+        }
+    }
+    RefreshDueDecision {
+        due: false,
+        reason: "fresh",
+        next_at: Some(next),
     }
 }

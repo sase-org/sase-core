@@ -327,6 +327,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
             account_generation: 1,
             cadence_seconds: 300.0,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         NOW,
     )
@@ -342,6 +347,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
         ttl_seconds: 10.0,
         cadence_seconds: 300.0,
         explicit: false,
+        adaptive: false,
+        min_interval_seconds: None,
+        cli_fingerprint: None,
+        active_cadence_seconds: None,
+        warn_percent: None,
     };
     let first = admit_provider_usage_refresh(temp.path(), request.clone(), NOW)
         .unwrap();
@@ -408,6 +418,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
         temp.path(),
         ProviderUsageRefreshAdmitRequestWire {
             explicit: true,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
             operation_id: "op-2".to_string(),
             ..request.clone()
         },
@@ -424,6 +439,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
         temp.path(),
         ProviderUsageRefreshAdmitRequestWire {
             explicit: true,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
             operation_id: "op-3".to_string(),
             ttl_seconds: 5.0,
             ..request
@@ -446,6 +466,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
             ttl_seconds: 2.0,
             cadence_seconds: 300.0,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         NOW,
     )
@@ -464,6 +489,11 @@ fn usage_refresh_admission_joins_defers_and_recovers_after_expiry() {
             ttl_seconds: 2.0,
             cadence_seconds: 300.0,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         NOW + 3.0,
     )
@@ -556,6 +586,11 @@ fn usage_refresh_future_disable_expiry_preserves_marker_and_recovers_cadence() {
         ttl_seconds: 10.0,
         cadence_seconds: CADENCE,
         explicit: false,
+        adaptive: false,
+        min_interval_seconds: None,
+        cli_fingerprint: None,
+        active_cadence_seconds: None,
+        warn_percent: None,
     };
     let first_cadence = admit_provider_usage_refresh(
         temp.path(),
@@ -657,6 +692,11 @@ fn usage_refresh_future_disable_expiry_preserves_marker_and_recovers_cadence() {
             account_generation: generation,
             cadence_seconds: CADENCE,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         reminder_at,
     )
@@ -766,6 +806,11 @@ fn usage_refresh_mark_due_is_once_per_reason_and_survives_future_due() {
             account_generation: 1,
             cadence_seconds: 300.0,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         NOW + 2.0,
     )
@@ -780,6 +825,11 @@ fn usage_refresh_mark_due_is_once_per_reason_and_survives_future_due() {
             account_generation: 1,
             cadence_seconds: 300.0,
             explicit: false,
+            adaptive: false,
+            min_interval_seconds: None,
+            cli_fingerprint: None,
+            active_cadence_seconds: None,
+            warn_percent: None,
         },
         NOW + 61.0,
     )

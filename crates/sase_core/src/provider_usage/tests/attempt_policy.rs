@@ -262,7 +262,13 @@ fn adaptive_attempt_streaks_and_cooldown_end_to_end() {
     );
     assert_eq!(parked.consecutive_failures, 3);
     assert_eq!(parked.consecutive_rate_limits, 0);
-    assert_eq!(parked.backoff_until, Some(NOW + 2.0 + 21_600.0));
+    // The store jitters adaptive backoff durations; the pure policy stays
+    // exact (see adaptive_policy_class_table).
+    let jitter = refresh_jitter_factor("alpha", "ctx", 1, NOW + 2.0);
+    assert_eq!(
+        parked.backoff_until,
+        Some(NOW + 2.0 + jitter_adaptive_backoff_seconds(21_600.0, jitter))
+    );
     assert_eq!(parked.retry_after_until, None);
     assert_eq!(parked.parked_fingerprint.as_deref(), Some("fp-1"));
     assert_eq!(parked.last_failure_reason.as_deref(), Some("not_installed"));
@@ -322,7 +328,11 @@ fn adaptive_health_reports_retry_at_and_failure_reason() {
         .as_ref()
         .unwrap();
     assert_eq!(health.last_failure_reason.as_deref(), Some("not_installed"));
-    assert_eq!(health.retry_at, Some(NOW + 3.0 + 21_600.0));
+    let jitter = refresh_jitter_factor("alpha", "ctx", 1, NOW + 3.0);
+    assert_eq!(
+        health.retry_at,
+        Some(NOW + 3.0 + jitter_adaptive_backoff_seconds(21_600.0, jitter))
+    );
 
     // Expired gates report no retry time.
     let read = load_provider_usage_store(

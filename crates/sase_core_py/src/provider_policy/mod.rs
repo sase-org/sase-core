@@ -777,6 +777,7 @@ fn py_provider_usage_state_path(sase_home: &str) -> String {
         cadence_seconds = DEFAULT_USAGE_CADENCE_SECONDS,
         warn_percent = DEFAULT_USAGE_WARN_PERCENT,
         critical_percent = DEFAULT_USAGE_CRITICAL_PERCENT,
+        provider_min_intervals = None,
     )
 )]
 fn py_provider_usage_load<'py>(
@@ -786,16 +787,30 @@ fn py_provider_usage_load<'py>(
     cadence_seconds: f64,
     warn_percent: f64,
     critical_percent: f64,
+    provider_min_intervals: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let home = PathBuf::from(sase_home);
+    let floors = provider_min_intervals
+        .map(|intervals| {
+            let value = py_to_json_value(intervals.as_any())?;
+            serde_json::from_value::<BTreeMap<String, f64>>(value).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "invalid provider_min_intervals: {error}"
+                    ))
+                },
+            )
+        })
+        .transpose()?;
     let read = py
         .allow_threads(|| {
-            core_load_provider_usage_store(
+            core_load_provider_usage_with_floors(
                 &home,
                 now,
                 cadence_seconds,
                 warn_percent,
                 critical_percent,
+                floors,
             )
         })
         .map_err(provider_usage_store_error_to_pyerr)?;
@@ -936,6 +951,37 @@ fn py_provider_usage_mark_refresh_due<'py>(
         })
         .map_err(provider_usage_store_error_to_pyerr)?;
     serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_mark_hot")]
+fn py_provider_usage_mark_hot<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    request: &Bound<'_, PyDict>,
+    now: f64,
+) -> PyResult<PyObject> {
+    let request: MarkProviderUsageHotRequestWire =
+        provider_priority_dict_from_py(request.as_any(), "request")?;
+    let home = PathBuf::from(sase_home);
+    let outcome = py
+        .allow_threads(|| core_mark_provider_usage_hot(&home, request, now))
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+#[pyfunction]
+#[pyo3(name = "provider_usage_list_refresh_reservations")]
+fn py_provider_usage_list_refresh_reservations<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    now: f64,
+) -> PyResult<PyObject> {
+    let home = PathBuf::from(sase_home);
+    let listing = py
+        .allow_threads(|| core_list_refresh_reservations(&home, now))
+        .map_err(provider_usage_store_error_to_pyerr)?;
+    serialize_to_py(py, &listing)
 }
 
 #[pyfunction]
@@ -1336,6 +1382,11 @@ pub(crate) fn register_provider_policy(
     m.add_function(wrap_pyfunction!(py_provider_usage_refresh_due, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_admit_refresh, m)?)?;
     m.add_function(wrap_pyfunction!(py_provider_usage_mark_refresh_due, m)?)?;
+    m.add_function(wrap_pyfunction!(py_provider_usage_mark_hot, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_provider_usage_list_refresh_reservations,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_provider_usage_record_refresh_attempt,
         m
