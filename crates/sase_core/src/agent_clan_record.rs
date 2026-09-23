@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -279,10 +279,16 @@ fn cache_lookup(
     })
 }
 
-fn cache_store(path: &Path, record: &AgentClanRecordWire) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
+/// Cache *record* under the metadata of the exact file it came from.
+///
+/// Callers pass metadata taken from the same open handle as the bytes
+/// (writers only ever rename whole files into place), so a concurrent
+/// rename can never pair an old record with a newer file's metadata.
+fn cache_store(
+    path: &Path,
+    metadata: &fs::Metadata,
+    record: &AgentClanRecordWire,
+) {
     let entry = CachedRecord {
         mtime: metadata.modified().ok(),
         len: metadata.len(),
@@ -311,19 +317,26 @@ pub fn load_clan_record(
     clan: &str,
 ) -> Result<Option<AgentClanRecordWire>, ClanRecordError> {
     let path = clan_record_path(records_dir, clan)?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(None);
         }
         Err(error) => return Err(ClanRecordError::Io(error.to_string())),
     };
-    let metadata = fs::metadata(&path).ok();
-    let mtime = metadata.as_ref().and_then(|m| m.modified().ok());
-    let len = bytes.len() as u64;
-    if let Some(cached) = cache_lookup(&path, mtime, len) {
+    // Validate against the opened file itself: a rename racing this read
+    // replaces the path, never the inode behind this handle.
+    let metadata = file
+        .metadata()
+        .map_err(|error| ClanRecordError::Io(error.to_string()))?;
+    if let Some(cached) =
+        cache_lookup(&path, metadata.modified().ok(), metadata.len())
+    {
         return Ok(Some(cached));
     }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| ClanRecordError::Io(error.to_string()))?;
     let record: AgentClanRecordWire = match serde_json::from_slice(&bytes) {
         Ok(record) => record,
         Err(error) => {
@@ -331,7 +344,7 @@ pub fn load_clan_record(
             return Err(ClanRecordError::Json(error.to_string()));
         }
     };
-    cache_store(&path, &record);
+    cache_store(&path, &metadata, &record);
     Ok(Some(record))
 }
 
@@ -507,8 +520,18 @@ fn record_locked(
     attrs_changed |=
         merge_attribute(&mut staged.summary_script, script_update, false, &now);
 
-    let mut changed = attrs_changed;
-    if attrs_changed {
+    // With the record full, a new generation older than every retained one
+    // would be trimmed straight back out, so it changes nothing.
+    let dropped_on_arrival = attrs_changed
+        && !entry_exists
+        && record.generations.len() >= MAX_CLAN_GENERATIONS_PER_RECORD
+        && record
+            .generations
+            .keys()
+            .next()
+            .is_some_and(|oldest| generation < oldest.as_str());
+    let mut changed = attrs_changed && !dropped_on_arrival;
+    if changed {
         if !entry_exists || staged.first_recorded_at.trim().is_empty() {
             staged.first_recorded_at = now.clone();
         }
@@ -548,18 +571,20 @@ fn record_locked(
     }
     record.schema_version = AGENT_CLAN_RECORD_SCHEMA_VERSION;
     record.clan = clan.to_string();
-    write_record_atomic(path, &record)?;
-    cache_store(path, &record);
+    let metadata = write_record_atomic(path, &record)?;
+    cache_store(path, &metadata, &record);
     Ok(ClanRecordUpdateOutcomeWire {
         changed: true,
         record,
     })
 }
 
+/// Atomically replace *path* with *record*, returning the metadata of the
+/// file that now sits at *path* as seen through its own handle.
 fn write_record_atomic(
     path: &Path,
     record: &AgentClanRecordWire,
-) -> Result<(), ClanRecordError> {
+) -> Result<fs::Metadata, ClanRecordError> {
     let parent = path.parent().ok_or_else(|| {
         ClanRecordError::Io("clan record path has no parent".to_string())
     })?;
@@ -570,10 +595,12 @@ fn write_record_atomic(
     staged.write_all(b"\n")?;
     staged.flush()?;
     staged.as_file().sync_all()?;
-    staged
+    let persisted = staged
         .persist(path)
         .map_err(|error| ClanRecordError::Io(error.error.to_string()))?;
-    Ok(())
+    persisted
+        .metadata()
+        .map_err(|error| ClanRecordError::Io(error.to_string()))
 }
 
 fn attribute_update(
@@ -946,6 +973,29 @@ mod tests {
         assert!(!record.generations.contains_key("20260901000001"));
         assert!(record.generations.contains_key("20260901000009"));
         assert_eq!(record.latest_generation.as_deref(), Some("20260901000009"));
+
+        // A late update older than every retained generation would be
+        // trimmed straight back out: it is a no-op that leaves the file alone.
+        let path = clan_record_path(tmp.path(), "rolling").unwrap();
+        let before = fs::read(&path).unwrap();
+        let before_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let outcome = record_clan_attributes(
+            tmp.path(),
+            update(
+                "rolling",
+                "20260901000000",
+                Some(("t", ClanAttributeSourceWire::Captured)),
+                None,
+            ),
+        )
+        .unwrap();
+        assert!(!outcome.changed);
+        assert!(!outcome.record.generations.contains_key("20260901000000"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            before_mtime
+        );
     }
 
     #[test]
@@ -1087,6 +1137,25 @@ mod tests {
         assert_eq!(
             recorded_tribe(tmp.path(), "cached").as_deref(),
             Some("a-much-longer-tribe-value")
+        );
+        // A whole-file replacement renamed into place, the way every writer
+        // updates a record, is seen by the next load.
+        let mut replaced =
+            load_clan_record(tmp.path(), "cached").unwrap().unwrap();
+        replaced.generations.get_mut("g1").unwrap().tribe =
+            Some(ClanAttributeRecordWire {
+                value: Some("renamed-in".to_string()),
+                source: ClanAttributeSourceWire::Edited,
+                recorded_at: String::new(),
+                source_identity: None,
+            });
+        let staged = tmp.path().join("staged.json");
+        fs::write(&staged, serde_json::to_vec_pretty(&replaced).unwrap())
+            .unwrap();
+        fs::rename(&staged, &path).unwrap();
+        assert_eq!(
+            recorded_tribe(tmp.path(), "cached").as_deref(),
+            Some("renamed-in")
         );
         fs::write(&path, b"{ not json").unwrap();
         assert!(load_clan_record(tmp.path(), "cached").is_err());

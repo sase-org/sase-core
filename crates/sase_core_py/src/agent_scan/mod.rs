@@ -735,11 +735,6 @@ fn py_resolve_clan_tribe<'py>(
     json_value_to_py(py, &value)
 }
 
-/// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
-///
-/// Translates the dict to `serde_json::Value` first so missing fields use
-/// the Rust struct's serde defaults — this matches the Python facade's
-/// "absent → default" behavior for callers who pass partial dicts.
 /// Load one clan's durable record, or `None` when it is absent.
 #[pyfunction]
 #[pyo3(name = "load_agent_clan_record", signature = (records_dir, clan))]
@@ -863,6 +858,11 @@ fn clan_record_error_to_pyerr(
     }
 }
 
+/// Deserialize a `AgentArtifactScanOptionsWire` from a Python dict.
+///
+/// Translates the dict to `serde_json::Value` first so missing fields use
+/// the Rust struct's serde defaults — this matches the Python facade's
+/// "absent → default" behavior for callers who pass partial dicts.
 fn agent_scan_options_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<AgentArtifactScanOptionsWire> {
