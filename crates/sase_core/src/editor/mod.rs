@@ -42,7 +42,6 @@ pub use completion::{
     build_artifact_ref_payload_completion_candidates,
     build_artifact_ref_payload_inventory, build_directive_clause_candidates,
     build_identity_target_candidates, build_snippet_completion_candidates,
-    build_vcs_project_completion_candidates,
     build_vcs_project_completion_candidates_with_targets,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     build_wait_completion_candidates,
@@ -53,7 +52,7 @@ pub use completion::{
     classify_completion_context_with_workflows, colon_args_skeleton,
     detect_artifact_ref_context_at_position,
     detect_vcs_ref_context_at_position, detect_vcs_repo_context_at_position,
-    named_args_skeleton,
+    named_args_skeleton, vcs_project_entry_targets,
 };
 pub use definition::{definition_at_position, DefinitionTarget};
 pub use diagnostics::{

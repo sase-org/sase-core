@@ -20,6 +20,7 @@ use super::state::{
     XpromptLspServer,
 };
 use super::*;
+use sase_core::editor::vcs_project_entry_targets;
 
 impl XpromptLspServer {
     pub async fn completion_for_text(
@@ -291,19 +292,31 @@ impl XpromptLspServer {
         };
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
+        // Pre-v5 catalogs carry no `project_tags`: fall back to the
+        // enabled completion rows (the pre-`project_tags` behavior) so
+        // accept still deletes every other workspace target.
+        let fallback_targets;
+        let targets: &[ProjectTagTargetWire] =
+            if vcs_catalog.project_tags.is_empty() {
+                fallback_targets =
+                    vcs_project_entry_targets(&vcs_catalog.entries);
+                &fallback_targets
+            } else {
+                &vcs_catalog.project_tags
+            };
         let list = editor_build_vcs_project_completion_candidates_with_targets(
             token,
             document,
             to_editor_position(position),
             &vcs_catalog.entries,
-            &vcs_catalog.project_tags,
+            targets,
             &vcs_catalog.workflow_names,
         );
         vcs_project_completion_response(
             list,
             context.replacement_range,
             &vcs_catalog.entries,
-            &vcs_catalog.project_tags,
+            targets,
         )
     }
 

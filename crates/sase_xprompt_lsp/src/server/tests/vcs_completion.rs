@@ -127,6 +127,54 @@ async fn completes_vcs_project_replacing_existing_tag_at_eof() {
 }
 
 #[tokio::test]
+async fn vcs_project_completion_without_tags_falls_back_to_entries() {
+    // A pre-v5 catalog carries no `project_tags`: accept falls back to the
+    // enabled completion rows, so the other resolved tag is still deleted.
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_vcs_project_catalog_without_tags(&catalog_path);
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(Vec::new())),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        config.vcs_project_catalog = Some(catalog_path);
+    }
+
+    let text = "+sase do it +bo";
+    let response = server
+        .completion_for_text(
+            text.to_string(),
+            Position {
+                line: 0,
+                character: text.len() as u32,
+            },
+        )
+        .await
+        .unwrap();
+    let CompletionResponse::Array(items) = response else {
+        panic!("expected completion array");
+    };
+
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item.label, "+bob-cli");
+    assert_eq!(item.detail.as_deref(), Some("Git · #git:bob-cli"));
+
+    // Additional edit deletes the existing `+sase ` (bytes 0..6) target
+    // even though the catalog has no `project_tags`.
+    let additional = item.additional_text_edits.as_ref().unwrap();
+    assert_eq!(additional.len(), 1);
+    assert_eq!(additional[0].new_text, "");
+    assert_eq!(additional[0].range.start, Position::new(0, 0));
+    assert_eq!(additional[0].range.end, Position::new(0, 6));
+}
+
+#[tokio::test]
 async fn completes_vcs_patch_with_pr_label_details() {
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("vcs_project_catalog.json");

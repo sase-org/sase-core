@@ -735,6 +735,45 @@ pub(super) fn write_vcs_project_catalog_with_pr(path: &Path) {
     .unwrap();
 }
 
+pub(super) fn write_vcs_project_catalog_without_tags(path: &Path) {
+    // Pre-v5 shape: two enabled projects and no `project_tags`, so accept
+    // falls back to the enabled completion rows.
+    fs::write(
+        path,
+        r##"{
+            "schema_version": 4,
+            "workflow_names": ["gh", "git", "hg"],
+            "entries": [
+                {
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:sase",
+                    "provider_display": "GitHub",
+                    "description": "SASE repo",
+                    "aliases": [],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "sase",
+                    "status": ""
+                },
+                {
+                    "name": "bob-cli",
+                    "vcs_prefix": "git",
+                    "display_tag": "#git:bob-cli",
+                    "provider_display": "Git",
+                    "description": "Bob CLI",
+                    "aliases": [],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "bob-cli",
+                    "status": ""
+                }
+            ]
+        }"##,
+    )
+    .unwrap();
+}
+
 pub(super) fn write_vcs_ref_catalog(path: &Path) {
     fs::write(
         path,

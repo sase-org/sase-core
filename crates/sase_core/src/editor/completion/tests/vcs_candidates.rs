@@ -6,8 +6,9 @@ use super::support::*;
 use crate::editor::token::{vcs_project_trigger_token, DocumentSnapshot};
 use crate::editor::wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
-    EditorPosition, EditorTextEdit, VcsNamespaceEntry, VcsProjectEntry,
-    VcsRepoEntry, XpromptAssistEntry, XpromptInputHint,
+    CompletionList, EditorPosition, EditorTextEdit, TokenInfo,
+    VcsNamespaceEntry, VcsProjectEntry, VcsRepoEntry, XpromptAssistEntry,
+    XpromptInputHint,
 };
 use crate::project_tag::ProjectTagTargetWire;
 
@@ -647,6 +648,27 @@ fn apply_candidate_edits(
     out.push_str(&text[pos..]);
     out
 }
+/// Entry-derived `vcs_project` candidates for tests: mirrors the pre-v5
+/// LSP fallback, where the removal set comes from the visible entries
+/// instead of the catalog's `project_tags`.
+fn build_vcs_project_completion_candidates(
+    token: &TokenInfo,
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    entries: &[VcsProjectEntry],
+    known_workflow_names: &[String],
+) -> CompletionList {
+    let targets = vcs_project_entry_targets(entries);
+    build_vcs_project_completion_candidates_with_targets(
+        token,
+        document,
+        position,
+        entries,
+        &targets,
+        known_workflow_names,
+    )
+}
+
 /// Detect the trigger in `marked` (where `‸` is the cursor), accept the
 /// single `sase` project row, and return the edited text.
 fn accept_sase_via_builder(marked: &str) -> String {

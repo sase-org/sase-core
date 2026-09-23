@@ -1026,12 +1026,8 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
     // Two directory keys differing only by case collide: tags resolve
     // case-insensitively, so the backend would never guess between them.
     // The reserved `home` fold is reported above with its own message, so
-    // it is skipped here. Sibling owners never warn.
-    let sibling_names: BTreeSet<String> = records
-        .iter()
-        .filter(|record| is_sibling_record(record))
-        .map(|record| record.project_name.clone())
-        .collect();
+    // it is skipped here. `key_owners` already excludes sibling records,
+    // which never warn.
     for (folded, mut owners) in key_owners {
         owners.sort();
         owners.dedup();
@@ -1039,9 +1035,6 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
             continue;
         }
         for owner in &owners {
-            if sibling_names.contains(owner) {
-                continue;
-            }
             let others: Vec<&str> = owners
                 .iter()
                 .filter(|candidate| *candidate != owner)
@@ -1689,25 +1682,39 @@ mod tests {
         );
     }
 
+    fn collision_record(name: &str) -> ProjectRecordWire {
+        ProjectRecordWire {
+            schema_version: 0,
+            project_name: name.to_string(),
+            project_dir: name.to_string(),
+            project_file: format!("{name}.sase"),
+            archive_file: None,
+            workspace_dir: None,
+            state: String::new(),
+            state_explicit: false,
+            system_managed: false,
+            active_claim_count: 0,
+            launchable: true,
+            aliases: Vec::new(),
+            warnings: Vec::new(),
+            parse_warnings: Vec::new(),
+            display_name: None,
+            is_project: true,
+            vcs_kind: None,
+        }
+    }
+
     #[test]
     fn lifecycle_project_ref_collisions_flag_case_variant_keys_and_home() {
-        let temp = tempfile::tempdir().unwrap();
-        let projects = temp.path().join("projects");
-        fs::create_dir(&projects).unwrap();
-
-        for dir in ["alpha", "ALPHA"] {
-            let dir_path = projects.join(dir);
-            fs::create_dir(&dir_path).unwrap();
-            fs::write(dir_path.join(format!("{dir}.sase")), "NAME: x\n")
-                .unwrap();
-        }
-        let home_variant = projects.join("Home");
-        fs::create_dir(&home_variant).unwrap();
-        fs::write(home_variant.join("Home.sase"), "NAME: x\n").unwrap();
-
-        let records =
-            list_project_records(&projects, &["all".to_string()], false, false)
-                .unwrap();
+        // The colliding records are built directly, never as directories:
+        // macOS file systems ignore case by default, so creating `alpha`
+        // and `ALPHA` side by side fails there with `AlreadyExists`.
+        let mut records = vec![
+            collision_record("alpha"),
+            collision_record("ALPHA"),
+            collision_record("Home"),
+        ];
+        add_project_ref_collision_warnings(&mut records);
         let by_name: BTreeMap<&str, &ProjectRecordWire> = records
             .iter()
             .map(|record| (record.project_name.as_str(), record))

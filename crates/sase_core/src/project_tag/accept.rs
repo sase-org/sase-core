@@ -62,10 +62,10 @@ pub fn project_tag_trigger(
 ///
 /// The trigger token is replaced in place. Every other workspace target in
 /// the trigger's `---` segment is deleted with whitespace collapsing: VCS
-/// workflow refs at line starts (the historical replace pattern) and
-/// resolved tag spans. Unknown tags are plain text and stay; literal zones
-/// are never touched. Returns the new text and the caret byte offset just
-/// past the insertion.
+/// workflow refs (the historical replace pattern, matched mid-line as well
+/// as at line starts) and resolved tag spans. Unknown tags are plain text
+/// and stay; literal zones are never touched. Returns the new text and the
+/// caret byte offset just past the insertion.
 ///
 /// An invalid trigger span degrades to the input text with the caret clamped
 /// into range; it never panics.
@@ -231,24 +231,66 @@ fn trigger_strip_region(
     }
 }
 
-/// Delete a span, collapsing one adjacent literal space the way the
+/// Delete a span, collapsing one adjacent horizontal space the way the
 /// historical `_strip_trigger_token` did.
+///
+/// Only horizontal whitespace (space or tab) around the ref is ever
+/// eaten: a ref at end of line keeps its newline so neighbors never join.
+/// A ref alone on its line removes the whole line (with its line break)
+/// instead of leaving a blank line behind.
 fn orphan_strip_region(text: &str, start: usize, end: usize) -> (usize, usize) {
-    let before_space =
-        start > 0 && text.as_bytes().get(start - 1).copied() == Some(b' ');
-    let after_space =
-        end < text.len() && text.as_bytes().get(end).copied() == Some(b' ');
+    if let Some(region) = lone_line_region(text, start, end) {
+        return region;
+    }
+    let before_hspace =
+        start > 0 && matches!(text.as_bytes()[start - 1], b' ' | b'\t');
+    let after_hspace = matches!(text.as_bytes().get(end), Some(b' ' | b'\t'));
     let after_eol = end >= text.len() || text[end..].starts_with(['\r', '\n']);
     let before_bol = start == 0 || text[..start].ends_with(['\r', '\n']);
 
-    if before_space && after_space {
+    if before_hspace && after_hspace {
         (start, end + 1)
-    } else if before_space && after_eol {
+    } else if before_hspace && after_eol {
         (start - 1, end)
-    } else if after_space && before_bol {
+    } else if after_hspace && before_bol {
         (start, end + 1)
     } else {
         (start, end)
+    }
+}
+
+/// When the ref is the only non-blank content on its line, delete the
+/// whole line with one line break. Returns `None` when other text shares
+/// the line.
+fn lone_line_region(
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let line_start = text[..start].rfind('\n').map_or(0, |index| index + 1);
+    if !text[line_start..start]
+        .chars()
+        .all(|ch| ch == ' ' || ch == '\t')
+    {
+        return None;
+    }
+    let after = &text[end..];
+    let trailing_ws: usize = after
+        .chars()
+        .take_while(|ch| *ch == ' ' || *ch == '\t')
+        .map(char::len_utf8)
+        .sum();
+    let after_ws = &after[trailing_ws..];
+    if after_ws.starts_with("\r\n") {
+        Some((line_start, end + trailing_ws + 2))
+    } else if after_ws.starts_with('\n') {
+        Some((line_start, end + trailing_ws + 1))
+    } else if after_ws.is_empty() {
+        // Last line with no trailing break: take the preceding break too.
+        // `line_start` sits just past a `\n` here, or at zero.
+        Some((line_start.saturating_sub(1), text.len()))
+    } else {
+        None
     }
 }
 
@@ -257,8 +299,10 @@ fn orphan_strip_region(text: &str, start: usize, end: usize) -> (usize, usize) {
 ///
 /// A ref starts at text start or after whitespace (the embedded-tag rule),
 /// so mid-line refs like `fix in #gh:foo now` count. Leading `%directive`
-/// tokens are never part of the span, so they survive deletion. Callers
-/// still scope to the trigger's `---` segment and skip literal zones.
+/// tokens are never part of the span, so they survive deletion. The span
+/// covers the ref itself, never the trailing boundary whitespace, so a
+/// ref at end of line keeps its newline. Callers still scope to the
+/// trigger's `---` segment and skip literal zones.
 fn workspace_ref_deletions(
     text: &str,
     segment_start: usize,
@@ -268,21 +312,33 @@ fn workspace_ref_deletions(
     let Some(pattern) = workspace_target_ref_regex(workflow_names) else {
         return Vec::new();
     };
-    pattern
-        .captures_iter(text)
-        .filter_map(|caps| {
-            let whole = caps.get(0)?;
-            let start = whole.start();
-            let end = whole.end();
-            if start < segment_start || end > segment_end || start >= end {
-                return None;
-            }
-            if !is_ref_left_boundary(text, start) {
-                return None;
-            }
-            Some((start, end))
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos <= text.len() {
+        let Some(caps) = pattern.captures_at(text, pos) else {
+            break;
+        };
+        let whole = caps.get(0).expect("pattern always matches");
+        let start = whole.start();
+        // Group 1 is the ref itself; the trailing `(?:\s|$)` only proves
+        // the ref ends at a token boundary and is never deleted.
+        let end = caps.get(1).map_or(whole.end(), |span| span.end());
+        // A rejected glued match can swallow a valid ref inside it (the
+        // left boundary is checked after matching because the `regex`
+        // crate has no lookbehind), so resume at the next byte instead of
+        // skipping the whole match. Matches always start at the ASCII
+        // `#`, so `start + 1` is a character boundary.
+        if !is_ref_left_boundary(text, start) {
+            pos = start + 1;
+            continue;
+        }
+        pos = whole.end().max(start + 1);
+        if start < segment_start || end > segment_end || start >= end {
+            continue;
+        }
+        out.push((start, end));
+    }
+    out
 }
 
 /// The historical VCS-tag replace pattern, now used to *find* other
@@ -291,8 +347,10 @@ fn workspace_ref_deletions(
 /// Mirrors Python `get_embedded_vcs_tag_pattern`: the `#` must sit at text
 /// start or after whitespace. The regex itself matches from the `#`; the
 /// left boundary is enforced in `workspace_ref_deletions` because the
-/// `regex` crate has no lookbehind. Returns `None` when `workflow_names`
-/// is empty so an empty alternation can never match `# Heading`.
+/// `regex` crate has no lookbehind. Group 1 covers the ref itself, while
+/// the trailing `(?:\s|$)` only checks the right boundary. Returns `None`
+/// when `workflow_names` is empty so an empty alternation can never match
+/// `# Heading`.
 fn workspace_target_ref_regex(workflow_names: &[String]) -> Option<Regex> {
     let mut names: Vec<&str> = workflow_names
         .iter()
@@ -309,7 +367,7 @@ fn workspace_target_ref_regex(workflow_names: &[String]) -> Option<Regex> {
         .collect::<Vec<_>>()
         .join("|");
     let pattern = format!(
-        r"#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)(?:\s|$)"
+        r"#((?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|))(?:\s|$)"
     );
     Some(Regex::new(&pattern).expect("valid workspace target pattern"))
 }

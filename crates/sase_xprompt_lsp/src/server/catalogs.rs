@@ -4,7 +4,9 @@ use super::state::{
     GlossaryCatalogSignature, ServerConfig, VcsProjectCatalog,
 };
 use super::*;
-use sase_core::editor::VcsProjectCatalogWire;
+use sase_core::editor::{
+    VcsProjectCatalogWire, VCS_PROJECT_CATALOG_SCHEMA_VERSION,
+};
 
 pub(super) fn file_history() -> Vec<String> {
     let Some(home) = std::env::var_os("HOME") else {
@@ -35,8 +37,9 @@ pub(super) fn file_history() -> Vec<String> {
 ///
 /// Read fresh on every `+` completion request. Any failure (no path, unreadable
 /// file, malformed JSON) degrades to empty results so the `+` menu simply
-/// shows nothing rather than breaking completion. Schema versions 1 through 5
-/// are accepted; v1 entries default to project rows, v1/v2 catalogs default
+/// shows nothing rather than breaking completion. Schema versions 1 through
+/// `VCS_PROJECT_CATALOG_SCHEMA_VERSION` are accepted; v1 entries default to
+/// project rows, v1/v2 catalogs default
 /// `namespaces` to empty, and pre-v5 catalogs default `accent_palette`,
 /// `project_tags`, and the per-entry v5 fields to empty. Parsing goes
 /// through [`VcsProjectCatalogWire`] so the wire shape stays the single
@@ -61,7 +64,8 @@ pub(super) fn load_vcs_project_catalog(
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if !matches!(schema_version, 1..=5) {
+    let max_schema_version = u64::from(VCS_PROJECT_CATALOG_SCHEMA_VERSION);
+    if !(1..=max_schema_version).contains(&schema_version) {
         warn!(
             "unsupported vcs project catalog schema_version {schema_version} at {path:?}"
         );

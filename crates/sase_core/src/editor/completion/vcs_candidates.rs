@@ -608,32 +608,11 @@ pub fn build_vcs_project_completion_candidates_with_targets(
         shared_extension: String::new(),
     }
 }
-/// Build `vcs_project` candidates with the removal set derived from the
-/// visible entries (project rows only). Test and non-catalog callers use
-/// this; the LSP passes the catalog's `project_tags` through
-/// `build_vcs_project_completion_candidates_with_targets` so disabled
-/// projects and `home` delete like the TUI accept does.
-pub fn build_vcs_project_completion_candidates(
-    token: &TokenInfo,
-    document: &DocumentSnapshot,
-    position: EditorPosition,
-    entries: &[VcsProjectEntry],
-    known_workflow_names: &[String],
-) -> CompletionList {
-    let targets = entry_completion_targets(entries);
-    build_vcs_project_completion_candidates_with_targets(
-        token,
-        document,
-        position,
-        entries,
-        &targets,
-        known_workflow_names,
-    )
-}
-
-/// Tag-resolution targets behind the `+` menu: project rows only. Patch rows
-/// are accepted through their `#` spelling, never as tags.
-fn entry_completion_targets(
+/// Tag-resolution targets behind the `+` menu, derived from the visible
+/// entries (project rows only). Patch rows are accepted through their `#`
+/// spelling, never as tags. The LSP falls back to this set for pre-v5
+/// catalogs, which carry no `project_tags`.
+pub fn vcs_project_entry_targets(
     entries: &[VcsProjectEntry],
 ) -> Vec<ProjectTagTargetWire> {
     entries

@@ -747,7 +747,6 @@ pub use editor::{
     build_identity_target_candidates as editor_build_identity_target_candidates,
     build_placeholder_completion_candidates as editor_build_placeholder_completion_candidates,
     build_snippet_completion_candidates as editor_build_snippet_completion_candidates,
-    build_vcs_project_completion_candidates as editor_build_vcs_project_completion_candidates,
     build_vcs_project_completion_candidates_with_targets as editor_build_vcs_project_completion_candidates_with_targets,
     build_vcs_ref_completion_candidates as editor_build_vcs_ref_completion_candidates,
     build_vcs_repo_completion_candidates as editor_build_vcs_repo_completion_candidates,

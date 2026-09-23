@@ -438,6 +438,36 @@ fn accept_removes_mid_line_refs_like_the_python_guard() {
 }
 
 #[test]
+fn accept_keeps_line_breaks_around_end_of_line_refs() {
+    // A ref at end of line deletes up to the ref itself, never its
+    // newline, so neighbors never join and blank lines survive. A ref
+    // alone on its line removes that line without joining its neighbors.
+    for (marked, expected) in [
+        (
+            "fix in #gh:foo\nmore stuff +sa‸",
+            "fix in\nmore stuff +sase ",
+        ),
+        ("a #gh:foo\n\nb +sa‸", "a\n\nb +sase "),
+        ("line one #gh:foo\n+sa‸", "line one\n+sase "),
+        ("body\n#gh:foo\nmore +sa‸", "body\nmore +sase "),
+    ] {
+        assert_eq!(apply(marked, "+sase "), expected, "accept: {marked:?}");
+    }
+}
+
+#[test]
+fn accept_counts_refs_inside_rejected_glued_matches() {
+    // The `regex` crate has no lookbehind, so the left boundary is checked
+    // after matching. A rejected glued match must not swallow the valid
+    // ref inside it: the Python guard counts `#gh:foo` here too.
+    assert_eq!(
+        apply("x#gh(a #gh:foo) now +sa‸", "+sase "),
+        "x#gh(a now +sase ",
+        "inner ref of a glued match is removed"
+    );
+}
+
+#[test]
 fn accept_with_empty_workflow_names_matches_nothing() {
     // An empty alternation must never match `# Heading` and delete it.
     let text = "# Heading +sa";
