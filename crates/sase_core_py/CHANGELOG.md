@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.74](https://github.com/sase-org/sase-core/compare/v0.34.73...v0.34.74) - 2026-09-23
+
+### Fixed
+
+- *(core)* project-tag core fixes for bead sase-16n.11.1
+
 ## [0.34.73](https://github.com/sase-org/sase-core/compare/v0.34.72...v0.34.73) - 2026-09-23
 
 ### Added
