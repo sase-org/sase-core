@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DEFAULT_USAGE_CADENCE_SECONDS, MIN_USAGE_CADENCE_SECONDS,
+    UsageReasonCode, DEFAULT_USAGE_CADENCE_SECONDS, MIN_USAGE_CADENCE_SECONDS,
     PROVIDER_USAGE_STORE_SCHEMA_VERSION,
 };
 
@@ -15,6 +15,22 @@ use super::{
 pub const MAX_USAGE_REFRESH_BACKOFF_SECONDS: f64 = 1_800.0;
 /// Short abuse-prevention floor for explicit refresh.
 pub const USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS: f64 = 5.0;
+/// Explicit cooldown under the opt-in `adaptive` attempt policy.
+pub const ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS: f64 = 60.0;
+/// Rate-limit `Retry-After` clamp window.
+pub const RATE_LIMIT_RETRY_AFTER_MIN_SECONDS: f64 = 900.0;
+pub const RATE_LIMIT_RETRY_AFTER_MAX_SECONDS: f64 = 21_600.0;
+/// Rate-limit escalation without `Retry-After`: `900 * 2^(k-1)`, capped.
+pub const RATE_LIMIT_ESCALATION_BASE_SECONDS: f64 = 900.0;
+pub const RATE_LIMIT_ESCALATION_CAP_SECONDS: f64 = 7_200.0;
+/// Parked-provider backoff (not installed / unsupported CLI).
+pub const PARKED_PROVIDER_BACKOFF_SECONDS: f64 = 21_600.0;
+/// Vendor-drift fixed backoff.
+pub const VENDOR_DRIFT_BACKOFF_SECONDS: f64 = 3_600.0;
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
 
 /// Persisted per-provider refresh schedule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,6 +51,12 @@ pub struct ProviderUsageRefreshScheduleWire {
     pub cooldown_until: Option<f64>,
     pub due_at: Option<f64>,
     pub due_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub consecutive_rate_limits: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_fingerprint: Option<String>,
 }
 
 /// Request to evaluate whether a provider is due.
@@ -110,6 +132,142 @@ pub struct ProviderUsageRefreshAttemptWire {
     pub retry_after_seconds: Option<f64>,
     #[serde(default = "default_cadence")]
     pub cadence_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<UsageReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_interval_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adaptive: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Reason-aware failure policy applied to one finished refresh attempt.
+///
+/// Pure so the class table stays table-tested. `consecutive_failures` is
+/// the already-incremented failure streak; `prev_rate_limits` is the
+/// stored `consecutive_rate_limits` before this attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefreshFailurePolicy {
+    pub backoff_until: Option<f64>,
+    pub retry_after_until: Option<f64>,
+    pub consecutive_rate_limits: u32,
+    pub parked_fingerprint: Option<String>,
+    pub last_failure_reason: Option<String>,
+}
+
+/// Classify an attempt outcome plus reason into the adaptive policy class.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn refresh_failure_policy(
+    now: f64,
+    cadence_seconds: f64,
+    min_interval_seconds: Option<f64>,
+    outcome: &str,
+    reason: Option<UsageReasonCode>,
+    retry_after_seconds: Option<f64>,
+    cli_fingerprint: Option<&str>,
+    prev_rate_limits: u32,
+    consecutive_failures: u32,
+) -> RefreshFailurePolicy {
+    let last_failure_reason = match reason {
+        Some(code) => Some(code.as_str().to_string()),
+        None => Some(outcome.to_string()),
+    };
+    match reason {
+        Some(UsageReasonCode::RateLimited) => {
+            let next_rate = prev_rate_limits.saturating_add(1);
+            let retry_after_until = match retry_after_seconds {
+                Some(retry_after) if retry_after > 0.0 => Some(
+                    now + retry_after.clamp(
+                        RATE_LIMIT_RETRY_AFTER_MIN_SECONDS,
+                        RATE_LIMIT_RETRY_AFTER_MAX_SECONDS,
+                    ),
+                ),
+                _ => {
+                    let exponent =
+                        i32::try_from(next_rate.saturating_sub(1).min(16))
+                            .unwrap_or(16);
+                    let delay = (RATE_LIMIT_ESCALATION_BASE_SECONDS
+                        * 2_f64.powi(exponent))
+                    .min(RATE_LIMIT_ESCALATION_CAP_SECONDS);
+                    Some(now + delay)
+                }
+            };
+            RefreshFailurePolicy {
+                backoff_until: None,
+                retry_after_until,
+                consecutive_rate_limits: next_rate,
+                parked_fingerprint: None,
+                last_failure_reason,
+            }
+        }
+        Some(
+            UsageReasonCode::NotInstalled
+            | UsageReasonCode::UnsupportedCliVersion,
+        ) => RefreshFailurePolicy {
+            backoff_until: Some(now + PARKED_PROVIDER_BACKOFF_SECONDS),
+            retry_after_until: None,
+            consecutive_rate_limits: 0,
+            parked_fingerprint: cli_fingerprint.map(str::to_string),
+            last_failure_reason,
+        },
+        Some(UsageReasonCode::VendorDrift) => RefreshFailurePolicy {
+            backoff_until: Some(now + VENDOR_DRIFT_BACKOFF_SECONDS),
+            retry_after_until: None,
+            consecutive_rate_limits: 0,
+            parked_fingerprint: None,
+            last_failure_reason,
+        },
+        Some(UsageReasonCode::LoggedOut | UsageReasonCode::ApiMode) => {
+            let backoff =
+                refresh_backoff_seconds(consecutive_failures, cadence_seconds);
+            RefreshFailurePolicy {
+                backoff_until: Some(now + backoff),
+                retry_after_until: None,
+                consecutive_rate_limits: 0,
+                parked_fingerprint: None,
+                last_failure_reason,
+            }
+        }
+        _ if matches!(
+            outcome,
+            "unauthenticated" | "logged_out" | "api_mode"
+        ) =>
+        {
+            let backoff =
+                refresh_backoff_seconds(consecutive_failures, cadence_seconds);
+            RefreshFailurePolicy {
+                backoff_until: Some(now + backoff),
+                retry_after_until: None,
+                consecutive_rate_limits: 0,
+                parked_fingerprint: None,
+                last_failure_reason,
+            }
+        }
+        _ => {
+            let base = match min_interval_seconds {
+                Some(floor) => cadence_seconds.max(floor),
+                None => cadence_seconds,
+            };
+            let exponent =
+                i32::try_from(consecutive_failures.saturating_sub(1).min(16))
+                    .unwrap_or(16);
+            let backoff = (base * 2_f64.powi(exponent))
+                .min(MAX_USAGE_REFRESH_BACKOFF_SECONDS);
+            RefreshFailurePolicy {
+                backoff_until: Some(now + backoff),
+                retry_after_until: None,
+                consecutive_rate_limits: 0,
+                parked_fingerprint: None,
+                last_failure_reason,
+            }
+        }
+    }
 }
 
 /// Request to mark a provider due, optionally at a future time.
@@ -197,6 +355,9 @@ pub fn empty_refresh_schedule(
         cooldown_until: None,
         due_at: None,
         due_reason: None,
+        last_failure_reason: None,
+        consecutive_rate_limits: 0,
+        parked_fingerprint: None,
     }
 }
 

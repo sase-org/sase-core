@@ -39,13 +39,18 @@ pub use indicator::{
 };
 pub use refresh::{
     empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
-    refresh_backoff_seconds, ProviderUsageRefreshAdmissionStatus,
-    ProviderUsageRefreshAdmitOutcomeWire, ProviderUsageRefreshAdmitRequestWire,
-    ProviderUsageRefreshAttemptWire, ProviderUsageRefreshDueOutcomeWire,
-    ProviderUsageRefreshDueRequestWire, ProviderUsageRefreshMarkDueOutcomeWire,
+    refresh_backoff_seconds, refresh_failure_policy,
+    ProviderUsageRefreshAdmissionStatus, ProviderUsageRefreshAdmitOutcomeWire,
+    ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
+    ProviderUsageRefreshDueOutcomeWire, ProviderUsageRefreshDueRequestWire,
+    ProviderUsageRefreshMarkDueOutcomeWire,
     ProviderUsageRefreshMarkDueRequestWire, ProviderUsageRefreshScheduleWire,
-    RefreshDueDecision, MAX_USAGE_REFRESH_BACKOFF_SECONDS,
-    USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
+    RefreshDueDecision, RefreshFailurePolicy,
+    ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS, MAX_USAGE_REFRESH_BACKOFF_SECONDS,
+    PARKED_PROVIDER_BACKOFF_SECONDS, RATE_LIMIT_ESCALATION_BASE_SECONDS,
+    RATE_LIMIT_ESCALATION_CAP_SECONDS, RATE_LIMIT_RETRY_AFTER_MAX_SECONDS,
+    RATE_LIMIT_RETRY_AFTER_MIN_SECONDS,
+    USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS, VENDOR_DRIFT_BACKOFF_SECONDS,
 };
 pub use store::{
     admit_provider_usage_refresh, evaluate_provider_usage_refresh_due,
@@ -70,6 +75,13 @@ pub const MIN_USAGE_CADENCE_SECONDS: f64 = 60.0;
 pub const DEFAULT_USAGE_WARN_PERCENT: f64 = 75.0;
 pub const DEFAULT_USAGE_CRITICAL_PERCENT: f64 = 90.0;
 pub const USAGE_COLLECTOR_FAILING_THRESHOLD: u32 = 3;
+/// Observation `retry_after_seconds` is clamped to at most one day.
+pub const MAX_OBSERVATION_RETRY_AFTER_SECONDS: f64 = 86_400.0;
+/// Attempt `min_interval_seconds` (polling floor) bounds.
+pub const MIN_PROBE_INTERVAL_SECONDS: f64 = 60.0;
+pub const MAX_PROBE_INTERVAL_SECONDS: f64 = 86_400.0;
+/// Attempt `cli_fingerprint` length bound.
+pub const MAX_CLI_FINGERPRINT_LEN: usize = 1_024;
 
 const MAX_FUTURE_SKEW_SECONDS: f64 = 60.0;
 const MAX_OBSERVATIONS: usize = 64;
@@ -135,6 +147,27 @@ pub enum UsageReasonCode {
     DeadlineExceeded,
     ProbeFailed,
     VendorDrift,
+    RateLimited,
+}
+
+impl UsageReasonCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not_installed",
+            Self::UnsupportedCliVersion => "unsupported_cli_version",
+            Self::Timeout => "timeout",
+            Self::ParseError => "parse_error",
+            Self::AccountContextChanged => "account_context_changed",
+            Self::LoggedOut => "logged_out",
+            Self::ApiMode => "api_mode",
+            Self::MalformedPayload => "malformed_payload",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::ProbeFailed => "probe_failed",
+            Self::VendorDrift => "vendor_drift",
+            Self::RateLimited => "rate_limited",
+        }
+    }
 }
 
 /// Whether the observation is a full inventory or a named-window update.
@@ -202,6 +235,10 @@ pub struct UsageCollectorHealthWire {
     pub consecutive_failures: u32,
     pub last_success_at: Option<f64>,
     pub failing_since: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<f64>,
 }
 
 /// Attention kind for a provider or limiting window.
@@ -307,6 +344,8 @@ pub struct ProviderUsageObservationWire {
     pub source: UsageSource,
     pub outcome: UsageCollectionOutcome,
     pub reason_code: Option<UsageReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<f64>,
     pub diagnostic: Option<String>,
     pub completeness: UsageCompleteness,
     #[serde(default)]
@@ -417,6 +456,53 @@ pub fn validate_usage_cadence(cadence_seconds: f64) -> Result<f64> {
         )));
     }
     Ok(cadence_seconds)
+}
+
+/// Validate an observation `retry_after_seconds`: finite and >= 0,
+/// clamped to at most one day.
+pub fn validate_observation_retry_after(value: f64) -> Result<f64> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(validation(
+            "retry_after_seconds must be a finite nonnegative number",
+        ));
+    }
+    Ok(value.min(MAX_OBSERVATION_RETRY_AFTER_SECONDS))
+}
+
+/// Validate an attempt `min_interval_seconds` polling floor.
+pub fn validate_probe_floor(value: f64) -> Result<f64> {
+    if !value.is_finite()
+        || value < MIN_PROBE_INTERVAL_SECONDS
+        || value > MAX_PROBE_INTERVAL_SECONDS
+    {
+        return Err(validation(format!(
+            "min_interval_seconds must be finite and in [{MIN_PROBE_INTERVAL_SECONDS}, {MAX_PROBE_INTERVAL_SECONDS}]"
+        )));
+    }
+    Ok(value)
+}
+
+/// Validate an attempt `cli_fingerprint`: bounded, no control characters.
+pub fn validate_cli_fingerprint(value: &str) -> Result<String> {
+    if value != value.trim() {
+        return Err(validation(
+            "cli_fingerprint must not contain leading or trailing whitespace",
+        ));
+    }
+    if value.is_empty() {
+        return Err(validation("cli_fingerprint must be non-empty"));
+    }
+    if value.len() > MAX_CLI_FINGERPRINT_LEN {
+        return Err(validation(format!(
+            "cli_fingerprint exceeds {MAX_CLI_FINGERPRINT_LEN} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(validation(
+            "cli_fingerprint must not contain control characters",
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// Validate `0 <= warn_percent < critical_percent <= 100`.
@@ -619,6 +705,10 @@ pub fn validate_usage_observation(
         observation.authoritative_empty,
         windows.len(),
     )?;
+    let retry_after_seconds = match observation.retry_after_seconds {
+        Some(value) => Some(validate_observation_retry_after(value)?),
+        None => None,
+    };
     Ok(ProviderUsageObservationWire {
         schema_version: PROVIDER_USAGE_OBSERVATION_SCHEMA_VERSION,
         provider,
@@ -629,6 +719,7 @@ pub fn validate_usage_observation(
         source: observation.source,
         outcome: observation.outcome,
         reason_code: observation.reason_code,
+        retry_after_seconds,
         diagnostic,
         completeness: observation.completeness,
         authoritative_empty: observation.authoritative_empty,
@@ -967,6 +1058,7 @@ fn provider_attention(
 
 fn collector_health_from_schedule(
     schedule: Option<&ProviderUsageRefreshScheduleWire>,
+    now: f64,
 ) -> Option<UsageCollectorHealthWire> {
     let schedule = schedule?;
     let consecutive_failures = schedule.consecutive_failures;
@@ -977,6 +1069,31 @@ fn collector_health_from_schedule(
     } else {
         UsageCollectorHealthState::Ok
     };
+    let retry_at = match (schedule.retry_after_until, schedule.backoff_until) {
+        (Some(retry_after), Some(backoff)) => {
+            let latest = retry_after.max(backoff);
+            if latest > now {
+                Some(latest)
+            } else {
+                None
+            }
+        }
+        (Some(retry_after), None) => {
+            if retry_after > now {
+                Some(retry_after)
+            } else {
+                None
+            }
+        }
+        (None, Some(backoff)) => {
+            if backoff > now {
+                Some(backoff)
+            } else {
+                None
+            }
+        }
+        (None, None) => None,
+    };
     Some(UsageCollectorHealthWire {
         state,
         consecutive_failures,
@@ -986,6 +1103,8 @@ fn collector_health_from_schedule(
         } else {
             None
         },
+        last_failure_reason: schedule.last_failure_reason.clone(),
+        retry_at,
     })
 }
 

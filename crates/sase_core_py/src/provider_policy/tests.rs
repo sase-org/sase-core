@@ -1498,3 +1498,140 @@ fn provider_usage_store_bindings_record_load_context_and_reserve() {
         .unwrap());
     });
 }
+
+#[test]
+fn provider_usage_record_attempt_binding_covers_adaptive_fields() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let now = 1_800_000_000.0;
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_string_lossy().to_string();
+
+        // Legacy dicts without the new keys keep working.
+        let legacy = json!({
+            "provider": "alpha",
+            "context_id": "ctx",
+            "account_generation": 1,
+            "outcome": "error",
+            "retry_after_seconds": null,
+            "cadence_seconds": 300.0,
+        });
+        let legacy_obj = json_value_to_py(py, &legacy).unwrap();
+        let legacy_dict = legacy_obj.bind(py).downcast::<PyDict>().unwrap();
+        let out = py_provider_usage_record_refresh_attempt(
+            py,
+            &home,
+            legacy_dict,
+            now,
+        )
+        .unwrap();
+        let value = py_to_json_value(out.bind(py)).unwrap();
+        assert_eq!(value["consecutive_failures"], json!(1));
+        assert_eq!(value["cooldown_until"], json!(now + 5.0));
+
+        // Adaptive rate-limit attempts clamp Retry-After and escalate.
+        let adaptive = json!({
+            "provider": "alpha",
+            "context_id": "ctx",
+            "account_generation": 1,
+            "outcome": "error",
+            "retry_after_seconds": 60.0,
+            "cadence_seconds": 300.0,
+            "reason_code": "rate_limited",
+            "min_interval_seconds": 120.0,
+            "cli_fingerprint": "fp-1",
+            "adaptive": true,
+        });
+        let adaptive_obj = json_value_to_py(py, &adaptive).unwrap();
+        let adaptive_dict = adaptive_obj.bind(py).downcast::<PyDict>().unwrap();
+        let out = py_provider_usage_record_refresh_attempt(
+            py,
+            &home,
+            adaptive_dict,
+            now + 1.0,
+        )
+        .unwrap();
+        let value = py_to_json_value(out.bind(py)).unwrap();
+        assert_eq!(value["retry_after_until"], json!(now + 1.0 + 900.0));
+        assert_eq!(value["consecutive_rate_limits"], json!(1));
+        assert_eq!(value["cooldown_until"], json!(now + 1.0 + 60.0));
+        assert_eq!(value["last_failure_reason"], json!("rate_limited"));
+
+        // Unknown reason codes and bad floors are rejected.
+        let unknown = json!({
+            "provider": "alpha",
+            "context_id": "ctx",
+            "account_generation": 1,
+            "outcome": "error",
+            "retry_after_seconds": null,
+            "cadence_seconds": 300.0,
+            "reason_code": "vendor_changed",
+            "adaptive": true,
+        });
+        let unknown_obj = json_value_to_py(py, &unknown).unwrap();
+        let unknown_dict = unknown_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_provider_usage_record_refresh_attempt(
+            py,
+            &home,
+            unknown_dict,
+            now + 2.0,
+        )
+        .is_err());
+        let bad_floor = json!({
+            "provider": "alpha",
+            "context_id": "ctx",
+            "account_generation": 1,
+            "outcome": "error",
+            "retry_after_seconds": null,
+            "cadence_seconds": 300.0,
+            "reason_code": "timeout",
+            "min_interval_seconds": 10.0,
+            "adaptive": true,
+        });
+        let bad_floor_obj = json_value_to_py(py, &bad_floor).unwrap();
+        let bad_floor_dict =
+            bad_floor_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_provider_usage_record_refresh_attempt(
+            py,
+            &home,
+            bad_floor_dict,
+            now + 2.0,
+        )
+        .is_err());
+    });
+}
+
+#[test]
+fn provider_usage_observation_binding_clamps_retry_after() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let now = 1_800_000_000.0;
+        let observation = json!({
+            "schema_version": 1,
+            "provider": "alpha",
+            "context_id": "ctx",
+            "account_generation": 1,
+            "ordering_token": now - 10.0,
+            "received_at": now - 5.0,
+            "source": "probe",
+            "outcome": "error",
+            "reason_code": "rate_limited",
+            "retry_after_seconds": 100_000.0,
+            "diagnostic": null,
+            "completeness": "partial",
+            "authoritative_empty": false,
+            "account_mode": null,
+            "plan": null,
+            "windows": []
+        });
+        let observation_obj = json_value_to_py(py, &observation).unwrap();
+        let observation_dict =
+            observation_obj.bind(py).downcast::<PyDict>().unwrap();
+        let validated =
+            py_provider_usage_validate_observation(py, observation_dict, now)
+                .unwrap();
+        let value = py_to_json_value(validated.bind(py)).unwrap();
+        assert_eq!(value["reason_code"], json!("rate_limited"));
+        assert_eq!(value["retry_after_seconds"], json!(86_400.0));
+    });
+}

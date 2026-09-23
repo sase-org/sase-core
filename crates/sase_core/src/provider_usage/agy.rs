@@ -305,6 +305,7 @@ fn buckets_observation(
         source: UsageSource::Probe,
         outcome: UsageCollectionOutcome::Ok,
         reason_code: None,
+        retry_after_seconds: None,
         diagnostic: if notes.is_empty() {
             None
         } else {
@@ -567,6 +568,7 @@ fn envelope(
         source: UsageSource::Probe,
         outcome,
         reason_code,
+        retry_after_seconds: None,
         diagnostic,
         completeness,
         authoritative_empty,

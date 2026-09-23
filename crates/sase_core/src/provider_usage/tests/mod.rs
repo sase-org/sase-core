@@ -2,6 +2,7 @@
 //! modules so each test file sits beside the code it covers.
 
 mod agy;
+mod attempt_policy;
 mod attention;
 mod compatibility;
 mod freshness_health;

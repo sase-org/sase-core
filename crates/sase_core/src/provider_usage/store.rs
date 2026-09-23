@@ -7,19 +7,21 @@
 
 use super::refresh::{
     empty_refresh_schedule, evaluate_refresh_due, refresh_attempt_succeeded,
-    refresh_backoff_seconds, validate_refresh_cadence,
+    refresh_backoff_seconds, refresh_failure_policy, validate_refresh_cadence,
     ProviderUsageRefreshAdmissionStatus, ProviderUsageRefreshAdmitOutcomeWire,
     ProviderUsageRefreshAdmitRequestWire, ProviderUsageRefreshAttemptWire,
     ProviderUsageRefreshDueOutcomeWire, ProviderUsageRefreshDueRequestWire,
     ProviderUsageRefreshMarkDueOutcomeWire,
     ProviderUsageRefreshMarkDueRequestWire, ProviderUsageRefreshScheduleWire,
+    ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS,
     USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS,
 };
 use super::{
     collection_problem_is_attentive, collector_health_from_schedule,
     compatibility::{self, UsageIdentityOrigin, CLAUDE_FABLE_CANONICAL_KEY},
     project_window, sanitize_diagnostic, summarize_filtered_windows,
-    usage_window_applies, validate_ident, validate_now, validate_usage_cadence,
+    usage_window_applies, validate_cli_fingerprint, validate_ident,
+    validate_now, validate_probe_floor, validate_usage_cadence,
     validate_usage_observation, validate_usage_thresholds, window_attention,
     ProviderUsageObservationWire, UsageAttentionKind, UsageAttentionWire,
     UsageCollectionHealth, UsageCollectionOutcome, UsageCompleteness,
@@ -590,6 +592,47 @@ pub fn mark_provider_usage_refresh_due(
     )
 }
 
+fn apply_adaptive_attempt(
+    schedule: &mut ProviderUsageRefreshScheduleWire,
+    request: &ProviderUsageRefreshAttemptWire,
+    now: f64,
+) {
+    if request.reason_code.is_none()
+        && refresh_attempt_succeeded(&request.outcome)
+    {
+        schedule.last_success_at = Some(now);
+        schedule.first_failure_at = None;
+        schedule.consecutive_failures = 0;
+        schedule.backoff_until = None;
+        schedule.retry_after_until = None;
+        schedule.last_failure_reason = None;
+        schedule.consecutive_rate_limits = 0;
+        schedule.parked_fingerprint = None;
+        return;
+    }
+    if schedule.consecutive_failures == 0 {
+        schedule.first_failure_at = Some(now);
+    }
+    schedule.consecutive_failures =
+        schedule.consecutive_failures.saturating_add(1);
+    let policy = refresh_failure_policy(
+        now,
+        request.cadence_seconds,
+        request.min_interval_seconds,
+        &request.outcome,
+        request.reason_code,
+        request.retry_after_seconds,
+        request.cli_fingerprint.as_deref(),
+        schedule.consecutive_rate_limits,
+        schedule.consecutive_failures,
+    );
+    schedule.backoff_until = policy.backoff_until;
+    schedule.retry_after_until = policy.retry_after_until;
+    schedule.consecutive_rate_limits = policy.consecutive_rate_limits;
+    schedule.parked_fingerprint = policy.parked_fingerprint;
+    schedule.last_failure_reason = policy.last_failure_reason;
+}
+
 pub fn record_provider_usage_refresh_attempt(
     sase_home: &Path,
     request: ProviderUsageRefreshAttemptWire,
@@ -615,7 +658,9 @@ pub fn record_provider_usage_refresh_attempt(
                 request.account_generation,
             );
             schedule.last_finished_at = Some(now);
-            if refresh_attempt_succeeded(&request.outcome) {
+            if request.adaptive {
+                apply_adaptive_attempt(&mut schedule, &request, now);
+            } else if refresh_attempt_succeeded(&request.outcome) {
                 schedule.last_success_at = Some(now);
                 schedule.first_failure_at = None;
                 schedule.consecutive_failures = 0;
@@ -641,8 +686,13 @@ pub fn record_provider_usage_refresh_attempt(
                 schedule.due_at = None;
                 schedule.due_reason = None;
             }
-            schedule.cooldown_until =
-                Some(now + USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS);
+            schedule.cooldown_until = Some(
+                now + if request.adaptive {
+                    ADAPTIVE_EXPLICIT_COOLDOWN_SECONDS
+                } else {
+                    USAGE_REFRESH_EXPLICIT_COOLDOWN_SECONDS
+                },
+            );
             state.schedules.insert(key, schedule.clone());
             write_state_unlocked(sase_home, &state)?;
             Ok(schedule)
@@ -727,7 +777,7 @@ fn public_provider_from_record(
     };
     let known_constraints =
         store_constraint_list(&windows, warn_percent, critical_percent);
-    let collector_health = collector_health_from_schedule(schedule);
+    let collector_health = collector_health_from_schedule(schedule, now);
     let attention = store_provider_attention(
         &record.provider,
         record.last_attempt.outcome,
@@ -1113,6 +1163,7 @@ fn account_context_changed_record(
         source: UsageSource::Probe,
         outcome: UsageCollectionOutcome::Error,
         reason_code: Some(UsageReasonCode::AccountContextChanged),
+        retry_after_seconds: None,
         diagnostic,
         completeness: UsageCompleteness::Partial,
         authoritative_empty: false,
@@ -1271,6 +1322,9 @@ fn write_state_unlocked(
         schedules: state
             .schedules
             .iter()
+            .filter(|(_, schedule)| {
+                schedule_is_current_generation(&state.providers, schedule)
+            })
             .map(|(key, schedule)| {
                 serde_json::to_value(schedule)
                     .map(|value| (key.clone(), value))
@@ -1610,6 +1664,23 @@ fn prune_expired_reservations(
     reservations.retain(|_, reservation| now < reservation.expires_at);
 }
 
+/// Whether a schedule row is at the provider record's generation.
+///
+/// A schedule keyed at `(provider, generation, context_id)` is superseded
+/// when the provider record for the same `(provider, context_id)` has moved
+/// to a newer `account_generation`. Superseded rows are dropped on write.
+fn schedule_is_current_generation(
+    providers: &BTreeMap<String, ProviderUsageStoredProviderWire>,
+    schedule: &ProviderUsageRefreshScheduleWire,
+) -> bool {
+    providers
+        .get(&schedule.provider)
+        .filter(|record| record.context_id == schedule.context_id)
+        .is_none_or(|record| {
+            record.account_generation <= schedule.account_generation
+        })
+}
+
 fn reservation_key(
     provider: &str,
     context_id: &str,
@@ -1754,6 +1825,14 @@ fn validate_attempt_request(
             ));
         }
     }
+    let min_interval_seconds = match request.min_interval_seconds {
+        Some(value) => Some(validate_probe_floor(value)?),
+        None => None,
+    };
+    let cli_fingerprint = match request.cli_fingerprint {
+        Some(value) => Some(validate_cli_fingerprint(&value)?),
+        None => None,
+    };
     Ok(ProviderUsageRefreshAttemptWire {
         provider,
         context_id,
@@ -1761,6 +1840,10 @@ fn validate_attempt_request(
         outcome,
         retry_after_seconds: request.retry_after_seconds,
         cadence_seconds,
+        reason_code: request.reason_code,
+        min_interval_seconds,
+        cli_fingerprint,
+        adaptive: request.adaptive,
     })
 }
 
