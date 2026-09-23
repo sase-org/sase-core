@@ -392,12 +392,23 @@ pub fn query_agent_artifact_index(
             project_record_for_list(record);
         }
     }
-    let clan_context = if query.agents_list_projection {
+    let mut clan_context = if query.agents_list_projection {
         projection_clan_keys.extend(represented_clan_keys(&records));
         select_clan_context_for_keys(&conn, projection_clan_keys)?
     } else {
         select_clan_context(&conn, &records)?
     };
+    if let Some(records_dir) = options
+        .clan_records_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        crate::agent_clan_record::apply_clan_records_to_context(
+            Path::new(records_dir),
+            &mut clan_context,
+        );
+    }
     let index_completeness = Some(AgentArtifactIndexCompletenessWire {
         complete_history: query.include_full_history && source_reconciled,
         source_reconciled,

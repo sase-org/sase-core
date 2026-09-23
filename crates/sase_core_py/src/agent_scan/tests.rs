@@ -292,6 +292,116 @@ fn agent_alias_history_binding_round_trips_python_dict() {
 }
 
 #[test]
+fn clan_record_bindings_round_trip_python_dicts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let records = temp.path().join("agent_clans");
+        let records_str = records.to_string_lossy().into_owned();
+
+        // Missing records load as None.
+        assert!(py_load_agent_clan_record(py, &records_str, "missing")
+            .unwrap()
+            .is_none());
+
+        // Record declared attributes through the binding.
+        let update_obj = json_value_to_py(
+            py,
+            &json!({
+                "clan": "binding-clan",
+                "generation": "20260901000000",
+                "tribe": {
+                    "value": "chop",
+                    "source": "declared",
+                    "source_identity": "launch"
+                },
+                "summary": {
+                    "value": "Binding summary",
+                    "source": "script",
+                    "source_identity": "script"
+                }
+            }),
+        )
+        .unwrap();
+        let update = update_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome =
+            py_record_agent_clan_attributes(py, &records_str, update).unwrap();
+        let outcome = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(outcome["changed"], json!(true));
+        assert_eq!(
+            outcome["record"]["generations"]["20260901000000"]["tribe"]
+                ["value"],
+            json!("chop")
+        );
+
+        // Load the stored record back through the binding.
+        let loaded =
+            py_load_agent_clan_record(py, &records_str, "binding-clan")
+                .unwrap()
+                .unwrap();
+        let loaded = py_to_json_value(loaded.bind(py)).unwrap();
+        assert_eq!(loaded["schema_version"], json!(1));
+        assert_eq!(
+            loaded["generations"]["20260901000000"]["summary"]["value"],
+            json!("Binding summary")
+        );
+
+        // Capture from an artifact directory through the binding.
+        let artifacts = temp.path().join("artifacts/20260901000000");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(
+            artifacts.join("agent_meta.json"),
+            serde_json::to_vec(&json!({
+                "name": "declarer",
+                "agent_clan": "binding-clan",
+                "agent_clan_generation": "20260901000000",
+                "clan_tribe": "chop",
+                "clan_summary": "Binding summary"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let captured = py_capture_agent_clan_record_from_artifacts(
+            py,
+            &records_str,
+            artifacts.to_str().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let captured = py_to_json_value(captured.bind(py)).unwrap();
+        assert_eq!(captured["clan"], json!("binding-clan"));
+
+        // Non-clan directories capture as None.
+        let lonely = temp.path().join("lonely");
+        fs::create_dir_all(&lonely).unwrap();
+        fs::write(lonely.join("agent_meta.json"), b"{\"name\":\"x\"}").unwrap();
+        assert!(py_capture_agent_clan_record_from_artifacts(
+            py,
+            &records_str,
+            lonely.to_str().unwrap()
+        )
+        .unwrap()
+        .is_none());
+
+        // Launch defaults resolve with generation provenance.
+        let defaults = py_resolve_agent_clan_launch_defaults(
+            py,
+            &records_str,
+            "binding-clan",
+            Some("20260901999999"),
+        )
+        .unwrap();
+        let defaults = py_to_json_value(defaults.bind(py)).unwrap();
+        assert_eq!(defaults["tribe"], json!("chop"));
+        assert_eq!(defaults["tribe_generation"], json!("20260901000000"));
+        assert_eq!(defaults["summary"], json!("Binding summary"));
+
+        // Invalid clans surface as value errors.
+        assert!(py_load_agent_clan_record(py, &records_str, "  ").is_err());
+    });
+}
+
+#[test]
 fn agent_activity_stats_binding_round_trips_python_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

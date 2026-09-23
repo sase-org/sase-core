@@ -163,6 +163,119 @@ fn bounded_query_retains_dismissed_clan_declaration_as_context() {
 }
 
 #[test]
+fn recorded_clan_attributes_overlay_index_queries() {
+    use crate::agent_clan_record::{
+        record_clan_attributes, ClanAttributeSourceWire,
+        ClanAttributeUpdateWire, ClanRecordUpdateWire,
+    };
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    // A joiner carrying the epic environment tribe; the declarer that
+    // held the summary is already deleted.
+    let joiner = artifact(&projects, "20260901000001");
+    write_json(
+        &joiner.join("agent_meta.json"),
+        json!({
+            "name": "epic-joiner",
+            "agent_clan": "recorded-clan",
+            "agent_clan_generation": "20260901000000",
+            "clan_tribe": "epic"
+        }),
+    );
+    write_json(&joiner.join("waiting.json"), json!({}));
+    // A member of an unrelated generation must not see the record.
+    let other = artifact(&projects, "20260901000002");
+    write_json(
+        &other.join("agent_meta.json"),
+        json!({
+            "name": "other-joiner",
+            "agent_clan": "recorded-clan",
+            "agent_clan_generation": "20260901999999",
+            "clan_tribe": "epic"
+        }),
+    );
+    write_json(&other.join("waiting.json"), json!({}));
+
+    let records_dir = tmp.path().join("agent_clans");
+    record_clan_attributes(
+        &records_dir,
+        ClanRecordUpdateWire {
+            clan: "recorded-clan".to_string(),
+            generation: "20260901000000".to_string(),
+            tribe: Some(ClanAttributeUpdateWire {
+                value: Some("custom".to_string()),
+                source: ClanAttributeSourceWire::Edited,
+                source_identity: Some("tui".to_string()),
+            }),
+            summary: Some(ClanAttributeUpdateWire {
+                value: Some("Recorded summary".to_string()),
+                source: ClanAttributeSourceWire::Script,
+                source_identity: Some("script".to_string()),
+            }),
+            summary_script: None,
+        },
+    )
+    .unwrap();
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    let options = AgentArtifactScanOptionsWire {
+        clan_records_dir: Some(records_dir.to_string_lossy().into_owned()),
+        ..AgentArtifactScanOptionsWire::default()
+    };
+    for agents_list_projection in [false, true] {
+        let snapshot = query_agent_artifact_index(
+            &index,
+            &projects,
+            AgentArtifactIndexQueryWire {
+                include_active: true,
+                include_recent_completed: false,
+                include_full_history: false,
+                active_limit: None,
+                recent_completed_limit: None,
+                include_hidden: false,
+                freshness: AgentArtifactIndexFreshnessWire::Revalidate,
+                only_monitors: false,
+                record_shape: AgentArtifactRecordShapeWire::Full,
+                window_limit: None,
+                candidate_filter: None,
+                agents_list_projection,
+            },
+            options.clone(),
+        )
+        .unwrap();
+        let context = snapshot
+            .clan_context
+            .iter()
+            .find(|context| {
+                context.agent_clan_generation.as_deref()
+                    == Some("20260901000000")
+            })
+            .unwrap();
+        // The edited record beats the member-derived epic tribe.
+        assert_eq!(context.clan_tribe.as_deref(), Some("custom"));
+        assert_eq!(context.clan_summary.as_deref(), Some("Recorded summary"));
+        assert_eq!(context.clan_tribe_source_launch_timestamp, None);
+        assert_eq!(context.clan_tribe_source_identity.as_deref(), Some("tui"));
+        let other = snapshot
+            .clan_context
+            .iter()
+            .find(|context| {
+                context.agent_clan_generation.as_deref()
+                    == Some("20260901999999")
+            })
+            .unwrap();
+        assert_eq!(other.clan_tribe.as_deref(), Some("epic"));
+        assert_eq!(other.clan_summary, None);
+    }
+}
+
+#[test]
 fn indexed_clan_context_honors_latest_declarations_and_generations() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");

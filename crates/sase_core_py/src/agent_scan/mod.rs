@@ -740,6 +740,129 @@ fn py_resolve_clan_tribe<'py>(
 /// Translates the dict to `serde_json::Value` first so missing fields use
 /// the Rust struct's serde defaults — this matches the Python facade's
 /// "absent → default" behavior for callers who pass partial dicts.
+/// Load one clan's durable record, or `None` when it is absent.
+#[pyfunction]
+#[pyo3(name = "load_agent_clan_record", signature = (records_dir, clan))]
+fn py_load_agent_clan_record<'py>(
+    py: Python<'py>,
+    records_dir: &str,
+    clan: &str,
+) -> PyResult<Option<PyObject>> {
+    let dir = PathBuf::from(records_dir);
+    let clan = clan.to_string();
+    let record = py
+        .allow_threads(|| {
+            sase_core::agent_clan_record::load_clan_record(&dir, &clan)
+        })
+        .map_err(clan_record_error_to_pyerr)?;
+    match record {
+        Some(record) => {
+            let value = serde_json::to_value(&record).map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+            Ok(Some(json_value_to_py(py, &value)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Merge one clan record update and return the outcome dict.
+#[pyfunction]
+#[pyo3(name = "record_agent_clan_attributes", signature = (records_dir, update))]
+fn py_record_agent_clan_attributes<'py>(
+    py: Python<'py>,
+    records_dir: &str,
+    update: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(update.as_any())?;
+    let update: sase_core::agent_clan_record::ClanRecordUpdateWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "update is not a valid ClanRecordUpdateWire dict: {e}"
+            ))
+        })?;
+    let dir = PathBuf::from(records_dir);
+    let outcome = py
+        .allow_threads(|| {
+            sase_core::agent_clan_record::record_clan_attributes(&dir, update)
+        })
+        .map_err(clan_record_error_to_pyerr)?;
+    serialize_to_py(py, &outcome)
+}
+
+/// Capture a dying artifact directory's clan attributes as `captured`.
+///
+/// Returns the clan record dict, or `None` when the directory carries
+/// nothing to capture.
+#[pyfunction]
+#[pyo3(
+    name = "capture_agent_clan_record_from_artifacts",
+    signature = (records_dir, artifacts_dir)
+)]
+fn py_capture_agent_clan_record_from_artifacts<'py>(
+    py: Python<'py>,
+    records_dir: &str,
+    artifacts_dir: &str,
+) -> PyResult<Option<PyObject>> {
+    let dir = PathBuf::from(records_dir);
+    let artifacts = PathBuf::from(artifacts_dir);
+    let record = py
+        .allow_threads(|| {
+            sase_core::agent_clan_record::capture_clan_record_from_artifacts(
+                &dir, &artifacts,
+            )
+        })
+        .map_err(clan_record_error_to_pyerr)?;
+    match record {
+        Some(record) => {
+            let value = serde_json::to_value(&record).map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+            Ok(Some(json_value_to_py(py, &value)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Resolve remembered attributes for a new generation of a clan.
+#[pyfunction]
+#[pyo3(
+    name = "resolve_agent_clan_launch_defaults",
+    signature = (records_dir, clan, exclude_generation = None)
+)]
+fn py_resolve_agent_clan_launch_defaults<'py>(
+    py: Python<'py>,
+    records_dir: &str,
+    clan: &str,
+    exclude_generation: Option<&str>,
+) -> PyResult<PyObject> {
+    let dir = PathBuf::from(records_dir);
+    let clan = clan.to_string();
+    let excluded = exclude_generation.map(str::to_string);
+    let defaults = py
+        .allow_threads(|| {
+            sase_core::agent_clan_record::resolve_clan_launch_defaults(
+                &dir,
+                &clan,
+                excluded.as_deref(),
+            )
+        })
+        .map_err(clan_record_error_to_pyerr)?;
+    serialize_to_py(py, &defaults)
+}
+
+fn clan_record_error_to_pyerr(
+    err: sase_core::agent_clan_record::ClanRecordError,
+) -> PyErr {
+    match err {
+        sase_core::agent_clan_record::ClanRecordError::InvalidClan(_)
+        | sase_core::agent_clan_record::ClanRecordError::InvalidGeneration(_) => {
+            PyValueError::new_err(err.to_string())
+        }
+        _ => PyRuntimeError::new_err(err.to_string()),
+    }
+}
+
 fn agent_scan_options_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<AgentArtifactScanOptionsWire> {
@@ -870,6 +993,16 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_related_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_clan_tribe, m)?)?;
+    m.add_function(wrap_pyfunction!(py_load_agent_clan_record, m)?)?;
+    m.add_function(wrap_pyfunction!(py_record_agent_clan_attributes, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_capture_agent_clan_record_from_artifacts,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_resolve_agent_clan_launch_defaults,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_runs, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_stats_query_activity, m)?)?;
     Ok(())

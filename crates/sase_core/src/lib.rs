@@ -12,6 +12,7 @@
 
 pub mod agent_archive;
 pub mod agent_artifact_run_retention;
+pub mod agent_clan_record;
 pub mod agent_clan_tribe;
 pub mod agent_cleanup;
 pub mod agent_family;

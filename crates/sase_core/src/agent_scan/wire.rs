@@ -75,6 +75,12 @@ pub struct AgentArtifactScanOptionsWire {
     /// non-done dirs.
     #[serde(default)]
     pub capacity_only: bool,
+    /// Directory holding per-clan JSON records. When set, recorded clan
+    /// attributes are applied over member-derived `clan_context` in
+    /// every scan and index query path. Index rebuilds and upserts
+    /// ignore this option.
+    #[serde(default)]
+    pub clan_records_dir: Option<String>,
 }
 
 impl Default for AgentArtifactScanOptionsWire {
@@ -93,6 +99,7 @@ impl Default for AgentArtifactScanOptionsWire {
             only_projects: Vec::new(),
             include_project_states: Vec::new(),
             capacity_only: false,
+            clan_records_dir: None,
         }
     }
 }

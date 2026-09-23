@@ -11,7 +11,7 @@
 //! full phase plan and `..._phase3a_handoff.md` for the wire contract
 //! Phase 3B reproduces here.
 
-mod context;
+pub(crate) mod context;
 pub mod index;
 pub mod layout;
 pub mod scanner;

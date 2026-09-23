@@ -117,7 +117,8 @@ pub fn scan_agent_artifacts(
     }
 
     sort_records(&mut records, options.newest_first);
-    let clan_context = resolve_clan_context_from_records(&records);
+    let mut clan_context = resolve_clan_context_from_records(&records);
+    apply_clan_records(&options, &mut clan_context);
 
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -129,6 +130,30 @@ pub fn scan_agent_artifacts(
         clan_context,
         index_completeness: None,
     }
+}
+
+/// Apply durable clan records over member-derived context when the
+/// caller supplied a records directory.
+///
+/// Scan options echo back verbatim in results; the directory is only
+/// ever read from, and a missing or corrupt record keeps the
+/// member-derived values.
+fn apply_clan_records(
+    options: &AgentArtifactScanOptionsWire,
+    contexts: &mut [crate::agent_scan::wire::AgentClanContextWire],
+) {
+    let Some(dir) = options
+        .clan_records_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    else {
+        return;
+    };
+    crate::agent_clan_record::apply_clan_records_to_context(
+        Path::new(dir),
+        contexts,
+    );
 }
 
 /// Scan an exact set of artifact timestamp directories under
@@ -201,7 +226,8 @@ pub fn scan_agent_artifact_dirs(
     }
 
     sort_records(&mut records, options.newest_first);
-    let clan_context = resolve_clan_context_from_records(&records);
+    let mut clan_context = resolve_clan_context_from_records(&records);
+    apply_clan_records(&options, &mut clan_context);
 
     AgentArtifactScanWire {
         schema_version: AGENT_SCAN_WIRE_SCHEMA_VERSION,

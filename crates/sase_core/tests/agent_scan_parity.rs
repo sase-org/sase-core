@@ -1969,6 +1969,7 @@ fn options_round_trip_through_snapshot() {
         only_projects: vec!["myproj".to_string()],
         include_project_states: vec!["active".to_string()],
         capacity_only: true,
+        clan_records_dir: None,
     };
     let snapshot = scan_agent_artifacts(&root, options.clone());
     assert_eq!(snapshot.options, options);
