@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.73](https://github.com/sase-org/sase-core/compare/v0.34.72...v0.34.73) - 2026-09-23
+
+### Added
+
+- *(core-tags)* add project_tag scan/resolve/expand/accept with catalog wire v5
+- *(tool)* add tool_run observe core, reap wire types, and telemetry binding
+- *(services)* sticky crash-loop, proc restart requests, fatal config layers
+- *(fast-loop)* unify features via workspace-hack, add drift gate, just fast, true MSRV 1.89
+
+### Other
+
+- *(core)* agent guide, provider shims, module map, README
+
 ## [0.34.71](https://github.com/sase-org/sase-core/compare/v0.34.70...v0.34.71) - 2026-09-21
 
 ### Added
