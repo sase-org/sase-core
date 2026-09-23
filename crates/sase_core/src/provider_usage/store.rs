@@ -286,7 +286,7 @@ pub fn load_provider_usage_store_with_floors(
     )
 }
 
-fn validate_floor_map(
+pub(super) fn validate_floor_map(
     intervals: BTreeMap<String, f64>,
 ) -> Result<BTreeMap<String, f64>, ProviderUsageStoreError> {
     let mut validated = BTreeMap::new();

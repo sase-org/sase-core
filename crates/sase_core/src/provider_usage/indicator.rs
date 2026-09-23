@@ -1,11 +1,11 @@
 use super::{
     collection_problem_is_attentive, freshness_value, reset_has_passed,
-    validate_ident, validate_now, validate_usage_cadence,
-    validate_usage_thresholds, validate_used_percent, window_attention,
-    ProviderUsageError, Result, UsageApplicabilityWire, UsageAttentionKind,
-    UsageCollectionOutcome, UsageFreshness, UsagePublicProviderWire,
-    UsagePublicSnapshotWire, UsagePublicWindowWire, UsageVendorState,
-    MAX_KEY_LEN, MAX_PROVIDER_LEN, PERIOD_TOLERANCE_SECONDS,
+    store::validate_floor_map, validate_ident, validate_now,
+    validate_usage_cadence, validate_usage_thresholds, validate_used_percent,
+    window_attention, ProviderUsageError, Result, UsageApplicabilityWire,
+    UsageAttentionKind, UsageCollectionOutcome, UsageFreshness,
+    UsagePublicProviderWire, UsagePublicSnapshotWire, UsagePublicWindowWire,
+    UsageVendorState, MAX_KEY_LEN, MAX_PROVIDER_LEN, PERIOD_TOLERANCE_SECONDS,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -102,6 +102,8 @@ pub struct UsageIndicatorProjectionRequestWire {
     #[serde(default)]
     pub eligible_providers: Option<Vec<String>>,
     pub now: f64,
+    #[serde(default)]
+    pub provider_min_intervals: Option<BTreeMap<String, f64>>,
     #[serde(default = "default_usage_cadence_seconds")]
     pub cadence_seconds: f64,
     #[serde(default = "default_usage_warn_percent")]
@@ -244,6 +246,13 @@ pub fn project_usage_indicator(
         )));
     }
     validate_now(request.now)?;
+    let provider_min_intervals = match request.provider_min_intervals {
+        Some(intervals) => Some(
+            validate_floor_map(intervals)
+                .map_err(|error| validation(error.to_string()))?,
+        ),
+        None => None,
+    };
     let cadence_seconds = validate_usage_cadence(request.cadence_seconds)?;
     let (warn_percent, critical_percent) = validate_usage_thresholds(
         request.warn_percent,
@@ -271,6 +280,7 @@ pub fn project_usage_indicator(
             &config,
             request.now,
             cadence_seconds,
+            provider_min_intervals.as_ref(),
             warn_percent,
             critical_percent,
             collector_problem,
@@ -571,12 +581,17 @@ fn project_provider_entries(
     config: &UsageIndicatorConfigWire,
     now: f64,
     cadence_seconds: f64,
+    provider_min_intervals: Option<&BTreeMap<String, f64>>,
     warn_percent: f64,
     critical_percent: f64,
     collector_problem: bool,
     diagnostics: &mut Vec<UsageIndicatorDiagnosticWire>,
     entries: &mut Vec<UsageIndicatorWindowEntryWire>,
 ) {
+    let effective_cadence = provider_min_intervals
+        .and_then(|floors| floors.get(&provider.provider))
+        .map(|floor| cadence_seconds.max(*floor))
+        .unwrap_or(cadence_seconds);
     for window in &provider.windows {
         let path = format!(
             "snapshot.providers.{}.windows.{}",
@@ -593,7 +608,7 @@ fn project_provider_entries(
             continue;
         }
         let freshness =
-            freshness_value(window.observed_at, now, cadence_seconds);
+            freshness_value(window.observed_at, now, effective_cadence);
         let reset_state = reset_state(window.resets_at, now);
         let seconds_until_reset = seconds_until_reset(window.resets_at, now);
         let window_attention = window_attention(

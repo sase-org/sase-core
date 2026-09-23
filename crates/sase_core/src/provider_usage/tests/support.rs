@@ -279,6 +279,7 @@ pub(super) fn indicator_projection(
         indicator,
         eligible_providers: None,
         now,
+        provider_min_intervals: None,
         cadence_seconds: CADENCE,
         warn_percent: 75.0,
         critical_percent: 90.0,

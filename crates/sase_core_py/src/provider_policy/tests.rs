@@ -1103,6 +1103,84 @@ fn provider_usage_bindings_project_remaining_and_reject_invalid() {
 }
 
 #[test]
+fn provider_usage_project_indicator_binding_honors_floors() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let now = 1_800_000_000.0;
+        let observation = json!({
+            "schema_version": 1,
+            "provider": "alpha",
+            "context_id": "ctx-alpha",
+            "account_generation": 1,
+            "ordering_token": now - 200.0,
+            "received_at": now - 199.0,
+            "source": "probe",
+            "outcome": "ok",
+            "reason_code": null,
+            "diagnostic": null,
+            "completeness": "complete",
+            "account_mode": "subscription",
+            "plan": null,
+            "windows": [{
+                "key": "week",
+                "label": "Weekly",
+                "used_percent": 10.0,
+                "resets_at": now + 3600.0,
+                "duration_seconds": null,
+                "period_start": null,
+                "applicability": {"kind": "account"},
+                "observed_at": now - 200.0,
+                "source": "probe",
+                "vendor_state": "allowed"
+            }]
+        });
+        let observation_obj = json_value_to_py(py, &observation).unwrap();
+        let observation_dict =
+            observation_obj.bind(py).downcast::<PyDict>().unwrap();
+        let observations = PyList::empty_bound(py);
+        observations.append(observation_dict.as_any()).unwrap();
+        let snapshot = py_provider_usage_project_snapshot(
+            py,
+            &observations,
+            now,
+            60.0,
+            75.0,
+            90.0,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+
+        let project_with_floors = |floors: serde_json::Value| {
+            let request = json!({
+                "schema_version": 1,
+                "snapshot": snapshot_value,
+                "indicator": {"default": "always"},
+                "now": now,
+                "provider_min_intervals": floors,
+                "cadence_seconds": 60.0,
+                "warn_percent": 75.0,
+                "critical_percent": 90.0
+            });
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_provider_usage_project_indicator(py, request_dict).map(
+                |projection| py_to_json_value(projection.bind(py)).unwrap(),
+            )
+        };
+        // Age 200 with cadence 60 is stale without a floor, fresh with one.
+        let bare = project_with_floors(json!({})).unwrap();
+        assert_eq!(bare["entries"][0]["freshness"], json!("stale"));
+        let floored = project_with_floors(json!({"alpha": 300.0})).unwrap();
+        assert_eq!(floored["entries"][0]["freshness"], json!("fresh"));
+
+        // Invalid floors are rejected like the floor-aware store read.
+        assert!(project_with_floors(json!({"alpha": 30.0})).is_err());
+        assert!(project_with_floors(json!({"": 300.0})).is_err());
+    });
+}
+
+#[test]
 fn provider_usage_normalize_grok_billing_round_trips_and_rejects_nonfinite() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

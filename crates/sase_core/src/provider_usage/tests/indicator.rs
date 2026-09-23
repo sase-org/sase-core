@@ -362,6 +362,183 @@ fn indicator_classifies_supported_provider_window_shapes() {
 }
 
 #[test]
+fn indicator_request_without_floors_projects_as_today() {
+    let snapshot = indicator_snapshot(
+        vec![usage_observation(
+            "claude",
+            "ctx-claude",
+            1,
+            NOW - 200.0,
+            UsageCompleteness::Complete,
+            vec![indicator_window(
+                "session",
+                10.0,
+                Some(NOW + 3_600.0),
+                None,
+                UsageApplicabilityWire::Product {
+                    product: "claude".to_string(),
+                    model_ids: vec![],
+                },
+                NOW - 200.0,
+            )],
+        )],
+        NOW,
+    );
+    let request = UsageIndicatorProjectionRequestWire {
+        schema_version: PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+        snapshot: snapshot.clone(),
+        indicator: Some(json!({"default": "always"})),
+        eligible_providers: None,
+        now: NOW,
+        provider_min_intervals: None,
+        cadence_seconds: 60.0,
+        warn_percent: 75.0,
+        critical_percent: 90.0,
+    };
+    let projection = project_usage_indicator(request).unwrap();
+    assert_eq!(projection.entries.len(), 1);
+    // Age 200 with cadence 60 is past 2 x cadence: stale under bare cadence.
+    assert_eq!(projection.entries[0].freshness, UsageFreshness::Stale);
+
+    // A legacy request without the field deserializes and projects identically.
+    let legacy_json = json!({
+        "schema_version": PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+        "snapshot": serde_json::to_value(&snapshot).unwrap(),
+        "indicator": {"default": "always"},
+        "now": NOW,
+        "cadence_seconds": 60.0,
+        "warn_percent": 75.0,
+        "critical_percent": 90.0,
+    });
+    let legacy_request: UsageIndicatorProjectionRequestWire =
+        serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(legacy_request.provider_min_intervals, None);
+    let legacy_projection = project_usage_indicator(legacy_request).unwrap();
+    assert_eq!(
+        serde_json::to_value(&legacy_projection).unwrap(),
+        serde_json::to_value(&projection).unwrap()
+    );
+
+    // An explicitly empty floor map also projects identically.
+    let empty_request = UsageIndicatorProjectionRequestWire {
+        schema_version: PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+        snapshot,
+        indicator: Some(json!({"default": "always"})),
+        eligible_providers: None,
+        now: NOW,
+        provider_min_intervals: Some(BTreeMap::new()),
+        cadence_seconds: 60.0,
+        warn_percent: 75.0,
+        critical_percent: 90.0,
+    };
+    let empty_projection = project_usage_indicator(empty_request).unwrap();
+    assert_eq!(
+        serde_json::to_value(&empty_projection).unwrap(),
+        serde_json::to_value(&projection).unwrap()
+    );
+}
+
+#[test]
+fn indicator_floor_keeps_window_fresh_for_floored_provider_only() {
+    let claude_product = UsageApplicabilityWire::Product {
+        product: "claude".to_string(),
+        model_ids: vec![],
+    };
+    let snapshot = indicator_snapshot(
+        vec![
+            usage_observation(
+                "claude",
+                "ctx-claude",
+                1,
+                NOW - 200.0,
+                UsageCompleteness::Complete,
+                vec![indicator_window(
+                    "session",
+                    10.0,
+                    Some(NOW + 3_600.0),
+                    None,
+                    claude_product,
+                    NOW - 200.0,
+                )],
+            ),
+            usage_observation(
+                "codex",
+                "ctx-codex",
+                1,
+                NOW - 200.0,
+                UsageCompleteness::Complete,
+                vec![indicator_window(
+                    "codex:primary",
+                    10.0,
+                    Some(NOW + WEEK_SECONDS),
+                    Some(WEEK_SECONDS),
+                    UsageApplicabilityWire::Account,
+                    NOW - 200.0,
+                )],
+            ),
+        ],
+        NOW,
+    );
+    let mut floors = BTreeMap::new();
+    floors.insert("claude".to_string(), 300.0);
+    let request = UsageIndicatorProjectionRequestWire {
+        schema_version: PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+        snapshot,
+        indicator: Some(json!({"default": "always"})),
+        eligible_providers: None,
+        now: NOW,
+        provider_min_intervals: Some(floors),
+        cadence_seconds: 60.0,
+        warn_percent: 75.0,
+        critical_percent: 90.0,
+    };
+    let projection = project_usage_indicator(request).unwrap();
+    let by_provider = projection
+        .entries
+        .iter()
+        .map(|entry| (entry.provider.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    // Age 200 sits between 2 x cadence (120) and 2 x floor (600): the
+    // floored provider stays fresh while the unfloored one goes stale.
+    assert_eq!(by_provider["claude"].freshness, UsageFreshness::Fresh);
+    assert_eq!(by_provider["codex"].freshness, UsageFreshness::Stale);
+}
+
+#[test]
+fn indicator_invalid_floors_are_rejected() {
+    let snapshot = indicator_snapshot(vec![], NOW);
+    for (name, floors) in [
+        ("below_minimum", vec![("claude".to_string(), 59.0)]),
+        (
+            "non_finite_infinite",
+            vec![("claude".to_string(), f64::INFINITY)],
+        ),
+        ("non_finite_nan", vec![("claude".to_string(), f64::NAN)]),
+        ("above_maximum", vec![("claude".to_string(), 86_401.0)]),
+        ("empty_provider", vec![("".to_string(), 300.0)]),
+        ("whitespace_provider", vec![(" claude ".to_string(), 300.0)]),
+    ] {
+        let request = UsageIndicatorProjectionRequestWire {
+            schema_version: PROVIDER_USAGE_INDICATOR_SCHEMA_VERSION,
+            snapshot: snapshot.clone(),
+            indicator: None,
+            eligible_providers: None,
+            now: NOW,
+            provider_min_intervals: Some(
+                floors.into_iter().collect::<BTreeMap<_, _>>(),
+            ),
+            cadence_seconds: 60.0,
+            warn_percent: 75.0,
+            critical_percent: 90.0,
+        };
+        assert!(
+            project_usage_indicator(request).is_err(),
+            "{name} floor must be rejected"
+        );
+    }
+}
+
+#[test]
 fn indicator_projection_order_is_provider_then_weekly_all_then_window_key() {
     let claude_product = UsageApplicabilityWire::Product {
         product: "claude".to_string(),
