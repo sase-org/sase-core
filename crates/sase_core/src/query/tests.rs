@@ -20,7 +20,7 @@ use crate::query::{
     compile_query_with_profile, evaluate_query_many_in_corpus, parse_query,
     parse_query_with_profile, patch_query_profile, tokenize_query,
     tokenize_query_with_profile, try_evaluate_query_many_in_corpus,
-    QueryCorpus,
+    QueryCorpus, QueryProgram,
 };
 
 // ---------- helpers ----------
@@ -1532,6 +1532,198 @@ fn flat_duration_bound_values_normalize_canonically() {
     let not_duration =
         parse_query_with_profile("exit:5m", &profile).unwrap_err();
     assert!(not_duration.message.contains("integer"), "{not_duration}");
+}
+
+// ---------- wildcard `*` globs ----------
+
+fn glob_profile(boolean: bool) -> CompiledQueryProfile {
+    profile_from_parts(
+        if boolean { "glob-bool" } else { "glob-flat" },
+        boolean,
+        vec![
+            QueryFieldSpec {
+                key: "id".into(),
+                value_kind: FieldValueKind::String,
+                filterable: true,
+                searchable: false,
+                repeatable: true,
+                negatable: true,
+                exact_match: true,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "path".into(),
+                value_kind: FieldValueKind::String,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "sha".into(),
+                value_kind: FieldValueKind::String,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: Vec::new(),
+                hint: String::new(),
+            },
+            QueryFieldSpec {
+                key: "kind".into(),
+                value_kind: FieldValueKind::Enum,
+                filterable: true,
+                searchable: false,
+                repeatable: false,
+                negatable: false,
+                exact_match: false,
+                static_values: vec!["note".into(), "doc".into()],
+                hint: String::new(),
+            },
+        ],
+        vec![],
+        vec![],
+        false,
+        vec![],
+    )
+    .expect("glob profile")
+}
+
+fn glob_rows() -> Vec<QueryRow> {
+    [
+        ("alpha-1.1", "docs/202609/tags.md", "abc1234567890", "note"),
+        (
+            "alpha-1.10",
+            "docs/202609/other.md",
+            "abc99ff0000000",
+            "doc",
+        ),
+        ("alpha-1", "notes.md", "fff0000000000", "note"),
+        ("alpha-10", "202609/tags-archive.md", "ab00ff12", "doc"),
+    ]
+    .into_iter()
+    .map(|(id, path, sha, kind)| QueryRow {
+        fields: [
+            ("id".into(), QueryFieldValues::from_string(id)),
+            ("path".into(), QueryFieldValues::from_string(path)),
+            ("sha".into(), QueryFieldValues::from_string(sha)),
+            ("kind".into(), QueryFieldValues::from_string(kind)),
+        ]
+        .into_iter()
+        .collect(),
+        searchable_text: String::new(),
+        predicates: QueryPredicateFacts::default(),
+    })
+    .collect()
+}
+
+#[test]
+fn flat_exact_match_glob_is_anchored() {
+    let profile = glob_profile(false);
+    let corpus = QueryCorpus::from_rows(&profile, glob_rows());
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    // `*` matches any run (including empty), anchored to the whole value:
+    // `alpha-1.10` matches but bare `alpha-1` and `alpha-10` do not.
+    assert_eq!(matches("id:alpha-1.*"), vec![true, true, false, false]);
+    // Without the dot the glob also matches `alpha-10`: context queries
+    // use `<epic>.*` precisely to exclude those.
+    assert_eq!(matches("id:alpha-1*"), vec![true, true, true, true]);
+    // Negation and comma lists compose with globs.
+    assert_eq!(matches("-id:alpha-1.*"), vec![false, false, true, true]);
+    assert_eq!(
+        matches("id:alpha-1,alpha-1.*"),
+        vec![true, true, true, false]
+    );
+    // Matching stays case-insensitive.
+    assert_eq!(matches("id:ALPHA-1.*"), vec![true, true, false, false]);
+    // `?` is not special: it compares literally, so nothing matches.
+    assert_eq!(matches("id:alpha-1*?"), vec![false, false, false, false]);
+    // Values without `*` take the historical exact-equality path.
+    assert_eq!(matches("id:alpha-1.1"), vec![true, false, false, false]);
+    assert_eq!(matches("id:alpha-1"), vec![false, false, true, false]);
+}
+
+#[test]
+fn flat_substring_glob_is_unanchored() {
+    let profile = glob_profile(false);
+    let corpus = QueryCorpus::from_rows(&profile, glob_rows());
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    // The glob may match anywhere inside the value.
+    assert_eq!(matches("path:202609/*tags"), vec![true, false, false, true]);
+    // Leading stars and consecutive stars collapse.
+    assert_eq!(matches("path:*tags*"), vec![true, false, false, true]);
+    assert_eq!(matches("path:**tags**"), vec![true, false, false, true]);
+    // Values without `*` keep the historical substring behavior.
+    assert_eq!(matches("path:tags"), vec![true, false, false, true]);
+}
+
+#[test]
+fn flat_sha_glob_is_anchored() {
+    let profile = glob_profile(false);
+    let corpus = QueryCorpus::from_rows(&profile, glob_rows());
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    // Anchored whole-value glob, not a prefix: only the row ending in 12.
+    assert_eq!(matches("sha:ab*12"), vec![false, false, false, true]);
+    assert_eq!(matches("sha:ab*"), vec![true, true, false, true]);
+    // Values without `*` keep the historical prefix behavior.
+    assert_eq!(matches("sha:abc"), vec![true, true, false, false]);
+}
+
+#[test]
+fn flat_enum_star_is_literal() {
+    let profile = glob_profile(false);
+    // The grammar rejects enum values outside the declared set ...
+    let err = parse_query_with_profile("kind:no*", &profile).unwrap_err();
+    assert!(err.message.contains("must be one of"), "{err}");
+    // ... and a hand-built property match still compares literally.
+    let corpus = QueryCorpus::from_rows(&profile, glob_rows());
+    let program = QueryProgram {
+        source: "kind:no*".into(),
+        expr: QueryExprWire::PropertyMatch {
+            key: "kind".into(),
+            value: "no*".into(),
+        },
+        profile_digest: profile.digest.clone(),
+    };
+    assert_eq!(
+        evaluate_query_many_in_corpus(&program, &corpus),
+        vec![false, false, false, false]
+    );
+}
+
+#[test]
+fn boolean_glob_semantics_match_flat() {
+    let profile = glob_profile(true);
+    let corpus = QueryCorpus::from_rows(&profile, glob_rows());
+    let matches = |query: &str| {
+        let program = compile_query_with_profile(query, &profile).unwrap();
+        evaluate_query_many_in_corpus(&program, &corpus)
+    };
+    assert_eq!(matches("id:alpha-1.*"), vec![true, true, false, false]);
+    assert_eq!(matches("NOT id:alpha-1.*"), vec![false, false, true, true]);
+    assert_eq!(
+        matches("id:alpha-1 OR id:alpha-1.*"),
+        vec![true, true, true, false]
+    );
+    assert_eq!(matches("id:ALPHA-1.*"), vec![true, true, false, false]);
+    assert_eq!(matches("path:tags*md"), vec![true, false, false, true]);
+    assert_eq!(matches("sha:ab*12"), vec![false, false, false, true]);
+    assert_eq!(matches("sha:abc"), vec![true, true, false, false]);
+    assert_eq!(matches("id:alpha-1.1"), vec![true, false, false, false]);
 }
 
 fn bound_row(epoch: &str, duration: &str) -> QueryRow {

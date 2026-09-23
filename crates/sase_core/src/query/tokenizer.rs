@@ -136,7 +136,8 @@ impl<'a> Tokenizer<'a> {
         if is_bare_word_start_byte(self.src[self.pos]) {
             self.pos += 1;
             while self.pos < self.src.len()
-                && is_bare_word_byte(self.src[self.pos])
+                && (is_bare_word_byte(self.src[self.pos])
+                    || self.src[self.pos] == b'*')
             {
                 self.pos += 1;
             }

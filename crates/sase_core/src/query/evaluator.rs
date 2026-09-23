@@ -307,14 +307,30 @@ impl QueryEvaluationContext {
             }
             FieldValueKind::String | FieldValueKind::Enum => {
                 let wanted = query_value.to_ascii_lowercase();
+                // Enum fields keep literal equality: `*` is not special there.
+                if matches!(field.kind, FieldValueKind::Enum) {
+                    return field
+                        .values_lower
+                        .iter()
+                        .any(|item| item == &wanted);
+                }
+                if wanted.contains('*') {
+                    // `*` matches any run of characters, including empty.
+                    // Exact-match fields and `sha` anchor the glob to the
+                    // whole value; substring fields match anywhere inside it.
+                    let anchored =
+                        field.exact_match || key.eq_ignore_ascii_case("sha");
+                    return field
+                        .values_lower
+                        .iter()
+                        .any(|item| match_glob(&wanted, item, anchored));
+                }
                 if key.eq_ignore_ascii_case("sha") {
                     field
                         .values_lower
                         .iter()
                         .any(|item| item.starts_with(&wanted))
-                } else if matches!(field.kind, FieldValueKind::Enum)
-                    || field.exact_match
-                {
+                } else if field.exact_match {
                     field.values_lower.iter().any(|item| item == &wanted)
                 } else {
                     field.values_lower.iter().any(|item| item.contains(&wanted))
@@ -375,6 +391,93 @@ fn compare_numeric_bound(
         Some("<=") => values.any(|value| value <= wanted),
         _ => values.any(|value| value == wanted),
     }
+}
+
+/// Match a lowercased query `pattern` containing `*` against a lowercased
+/// row value. `*` matches any run of characters, including an empty run;
+/// consecutive `*` collapse. When `anchored`, the pattern must match the
+/// whole value; otherwise it may match any substring of it.
+///
+/// Allocation-free two-pointer matching with backtracking on `*`. Only `*`
+/// is special; `?` and every other byte compares literally.
+fn match_glob(pattern: &str, value: &str, anchored: bool) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    if anchored {
+        glob_full(pattern, value)
+    } else {
+        (0..=value.len()).any(|start| glob_prefix(pattern, &value[start..]))
+    }
+}
+
+fn glob_full(pattern: &[u8], value: &[u8]) -> bool {
+    let mut pattern_idx = 0;
+    let mut value_idx = 0;
+    let mut star: Option<usize> = None;
+    let mut mark = 0;
+    while value_idx < value.len() {
+        if pattern_idx < pattern.len() && pattern[pattern_idx] == b'*' {
+            pattern_idx = skip_stars(pattern, pattern_idx);
+            if pattern_idx == pattern.len() {
+                return true;
+            }
+            star = Some(pattern_idx);
+            mark = value_idx;
+        } else if pattern_idx < pattern.len()
+            && pattern[pattern_idx] == value[value_idx]
+        {
+            pattern_idx += 1;
+            value_idx += 1;
+        } else if let Some(resume) = star {
+            pattern_idx = resume;
+            mark += 1;
+            value_idx = mark;
+        } else {
+            return false;
+        }
+    }
+    skip_stars(pattern, pattern_idx) == pattern.len()
+}
+
+fn glob_prefix(pattern: &[u8], value: &[u8]) -> bool {
+    let mut pattern_idx = 0;
+    let mut value_idx = 0;
+    let mut star: Option<usize> = None;
+    let mut mark = 0;
+    loop {
+        if pattern_idx == pattern.len() {
+            return true;
+        }
+        if pattern[pattern_idx] == b'*' {
+            pattern_idx = skip_stars(pattern, pattern_idx);
+            if pattern_idx == pattern.len() {
+                return true;
+            }
+            star = Some(pattern_idx);
+            mark = value_idx;
+        } else if value_idx < value.len()
+            && pattern[pattern_idx] == value[value_idx]
+        {
+            pattern_idx += 1;
+            value_idx += 1;
+        } else if let Some(resume) = star {
+            mark += 1;
+            if mark > value.len() {
+                return false;
+            }
+            pattern_idx = resume;
+            value_idx = mark;
+        } else {
+            return false;
+        }
+    }
+}
+
+fn skip_stars(pattern: &[u8], mut idx: usize) -> usize {
+    while idx < pattern.len() && pattern[idx] == b'*' {
+        idx += 1;
+    }
+    idx
 }
 
 /// Evaluate a compiled query against every spec in a persistent corpus,
