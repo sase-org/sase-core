@@ -19,6 +19,8 @@ fn target(
         name: name.to_string(),
         aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
         workflow_type: workflow_type.map(str::to_string),
+        state: None,
+        workspace_dir: None,
     }
 }
 
@@ -262,6 +264,20 @@ fn resolve_suggests_known_tags() {
 }
 
 #[test]
+fn resolve_dedupes_suggestions_fully() {
+    let targets = vec![
+        target("home", "home", &[], Some("git")),
+        target("zome", "zome", &[], Some("git")),
+    ];
+    let ProjectTagResolutionWire::Unknown { suggestions } =
+        resolve_project_tag("xome", &targets)
+    else {
+        panic!("expected unknown");
+    };
+    assert_eq!(suggestions, vec!["+home".to_string(), "+zome".to_string()]);
+}
+
+#[test]
 fn expand_rewrites_resolved_tags_in_place() {
     let expanded = expand_project_tags("+sase fix the bug", &catalog());
     assert_eq!(expanded.text, "#gh:gh_sase-org__sase fix the bug");
@@ -396,6 +412,55 @@ fn accept_inserts_tags_in_place() {
     ] {
         assert_eq!(apply(marked, "+sase "), expected, "accept: {marked:?}");
     }
+}
+
+#[test]
+fn accept_removes_mid_line_refs_like_the_python_guard() {
+    // The Python one-target guard counts mid-line refs
+    // (`find_vcs_workflow_tag_span("fix in #gh:foo now")`), so accept
+    // must remove them too, leaving exactly one workspace target.
+    assert_eq!(
+        apply("fix in #gh:foo now +sa‸", "+sase "),
+        "fix in now +sase ",
+        "mid-line ref is removed"
+    );
+    assert_eq!(
+        apply("fix in #gh:foo now +sase do it +bo‸", "+bob-cli "),
+        "fix in now do it +bob-cli ",
+        "mid-line ref plus tag both go away"
+    );
+    // A `#` that is not at a token boundary is not a ref.
+    assert_eq!(
+        apply("a#gh:foo +sa‸", "+sase "),
+        "a#gh:foo +sase ",
+        "glued hash stays"
+    );
+}
+
+#[test]
+fn accept_with_empty_workflow_names_matches_nothing() {
+    // An empty alternation must never match `# Heading` and delete it.
+    let text = "# Heading +sa";
+    let cursor = text.find("+sa").unwrap() + 3;
+    let trigger = project_tag_trigger(text, cursor).unwrap();
+    let applied = apply_project_tag_selection(
+        text,
+        (trigger.start, trigger.end),
+        "+sase ",
+        &[],
+        &catalog(),
+    );
+    assert_eq!(applied.text, "# Heading +sase ");
+}
+
+#[test]
+fn accept_keeps_heading_lines() {
+    // `# Heading` is not a workspace ref for any known workflow.
+    assert_eq!(
+        apply("# Heading +sa‸", "+sase "),
+        "# Heading +sase ",
+        "heading line stays"
+    );
 }
 
 #[test]

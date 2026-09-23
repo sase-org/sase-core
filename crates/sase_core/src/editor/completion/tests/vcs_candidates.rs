@@ -9,6 +9,7 @@ use crate::editor::wire::{
     EditorPosition, EditorTextEdit, VcsNamespaceEntry, VcsProjectEntry,
     VcsRepoEntry, XpromptAssistEntry, XpromptInputHint,
 };
+use crate::project_tag::ProjectTagTargetWire;
 
 // --- vcs_repo (`#gh:owner/`) completion -------------------------------
 const VCS_REPO_CURSOR: &str = "<CURSOR>";
@@ -1008,6 +1009,56 @@ fn vcs_project_candidates_match_aliases() {
         vec!["sase"]
     );
 }
+#[test]
+fn vcs_project_accept_with_catalog_targets_removes_disabled_and_home() {
+    // The LSP passes the catalog's `project_tags` (every non-sibling
+    // project plus `home`, including disabled rows) as the removal set,
+    // so accepting `+sase` also clears a disabled `+old` and `+home`
+    // exactly like the TUI accept does. An entries-only removal set would
+    // leave them behind as unknown text.
+    let text = "+old +home +sa";
+    let doc = DocumentSnapshot::new(text);
+    let position = doc.byte_offset_to_position(text.len()).unwrap();
+    let token = vcs_project_trigger_token(&doc, position).unwrap();
+    let entries = vec![project_entry("sase", "gh")];
+    let targets = vec![
+        ProjectTagTargetWire {
+            key: "gh_sase".to_string(),
+            name: "sase".to_string(),
+            aliases: Vec::new(),
+            workflow_type: Some("gh".to_string()),
+            state: Some("enabled".to_string()),
+            workspace_dir: None,
+        },
+        ProjectTagTargetWire {
+            key: "gh_old".to_string(),
+            name: "old".to_string(),
+            aliases: Vec::new(),
+            workflow_type: Some("gh".to_string()),
+            state: Some("disabled".to_string()),
+            workspace_dir: None,
+        },
+        ProjectTagTargetWire {
+            key: "home".to_string(),
+            name: "home".to_string(),
+            aliases: Vec::new(),
+            workflow_type: Some("git".to_string()),
+            state: Some("system".to_string()),
+            workspace_dir: None,
+        },
+    ];
+    let list = build_vcs_project_completion_candidates_with_targets(
+        &token,
+        &doc,
+        position,
+        &entries,
+        &targets,
+        &vcs_names(),
+    );
+    assert_eq!(list.candidates.len(), 1);
+    assert_eq!(apply_candidate_edits(text, &list.candidates[0]), "+sase ");
+}
+
 #[test]
 fn vcs_project_edits_never_overlap() {
     // Every golden input must yield non-overlapping edits (LSP requires

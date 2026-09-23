@@ -37,7 +37,7 @@ use sase_core::{
     editor_build_file_history_completion_candidates,
     editor_build_placeholder_completion_candidates,
     editor_build_snippet_completion_candidates,
-    editor_build_vcs_project_completion_candidates,
+    editor_build_vcs_project_completion_candidates_with_targets,
     editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
     editor_build_xprompt_arg_name_candidates,

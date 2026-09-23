@@ -7,9 +7,11 @@
 //! by directory key (falling back to name) so hover, diagnostics, semantic
 //! tokens, and completion render one consistent story.
 //!
-//! The catalog wire carries no enabled/disabled state or workspace dir, so
-//! provider-less targets (no `workflow_type`) stand in for both warning
-//! cases and docs show the directory key instead of a workspace path.
+//! The catalog wire carries each target's lifecycle `state` and
+//! `workspace_dir` (serde-defaulted, so older catalogs without them keep
+//! working); disabled targets warn with an enable hint, provider-less
+//! targets (no `workflow_type`) warn as unclaimed, and hover plus
+//! completion docs show the state and workspace dir when present.
 
 use sase_core::project_tag::{
     is_tag_name, resolve_project_tag, scan_project_tags,
@@ -139,9 +141,18 @@ pub(crate) fn known_tag_spellings(
     spellings
 }
 
+/// Whether a tag target is disabled (`state == "disabled"`).
+pub(crate) fn is_disabled_target(target: &ProjectTagTargetWire) -> bool {
+    target.state.as_deref() == Some("disabled")
+}
+
 /// Markdown documentation for a project completion row: the description,
-/// then the ref, key, aliases, and current marker.
-pub(crate) fn project_entry_documentation(entry: &VcsProjectEntry) -> String {
+/// then the ref, key, aliases, current marker, and — when the catalog
+/// target carries them — the lifecycle state and workspace dir.
+pub(crate) fn project_entry_documentation(
+    entry: &VcsProjectEntry,
+    target: Option<&ProjectTagTargetWire>,
+) -> String {
     let mut blocks = Vec::new();
     if !entry.description.is_empty() {
         blocks.push(entry.description.clone());
@@ -164,12 +175,24 @@ pub(crate) fn project_entry_documentation(entry: &VcsProjectEntry) -> String {
     if entry.current == Some(true) {
         meta.push("current".to_string());
     }
+    if let Some(state) = target.and_then(|target| target.state.as_deref()) {
+        if !state.is_empty() {
+            meta.push(format!("state `{state}`"));
+        }
+    }
+    if let Some(dir) = target.and_then(|target| target.workspace_dir.as_deref())
+    {
+        if !dir.is_empty() {
+            meta.push(format!("workspace `{dir}`"));
+        }
+    }
     blocks.push(meta.join(" · "));
     blocks.join("\n\n")
 }
 
 /// Hover markdown for a resolved tag: name, provider and VCS ref,
-/// directory key, aliases, current marker, and description.
+/// directory key, aliases, current marker, state, workspace dir, and
+/// description.
 fn resolved_tag_markdown(
     tag: &str,
     target: &ProjectTagTargetWire,
@@ -201,6 +224,16 @@ fn resolved_tag_markdown(
     }
     if entry.is_some_and(|entry| entry.current == Some(true)) {
         meta.push("current".to_string());
+    }
+    if let Some(state) = target.state.as_deref() {
+        if !state.is_empty() {
+            meta.push(format!("state `{state}`"));
+        }
+    }
+    if let Some(dir) = target.workspace_dir.as_deref() {
+        if !dir.is_empty() {
+            meta.push(format!("workspace `{dir}`"));
+        }
     }
     if target.workflow_type.is_none() {
         meta.push("no VCS provider detected".to_string());
@@ -252,8 +285,9 @@ pub(crate) fn hover_at_tag(
 }
 
 /// D3 editor-column diagnostics: anchored unknown tags warn (with
-/// suggestions), ambiguous tags error, and resolved tags without a VCS
-/// provider warn. Non-anchored unknown tags are plain text: no diagnostic.
+/// suggestions), ambiguous tags error, disabled tags warn with an enable
+/// hint, and resolved tags without a VCS provider warn. Non-anchored
+/// unknown tags are plain text: no diagnostic.
 pub(crate) fn tag_diagnostics(
     document: &DocumentSnapshot,
     targets: &[ProjectTagTargetWire],
@@ -280,10 +314,20 @@ pub(crate) fn tag_diagnostics(
             .unwrap_or(0);
         match resolve_project_tag(&span.name, targets) {
             ProjectTagResolutionWire::Resolved { target_index } => {
-                if targets
-                    .get(target_index)
-                    .is_some_and(|target| target.workflow_type.is_none())
-                {
+                let Some(target) = targets.get(target_index) else {
+                    continue;
+                };
+                if is_disabled_target(target) {
+                    diagnostics.push(EditorDiagnostic {
+                        range,
+                        severity: DiagnosticSeverity::Warning,
+                        code: "disabled_project_tag".to_string(),
+                        message: format!(
+                            "`+{}` is disabled — `sase project enable {}`",
+                            span.name, target.name,
+                        ),
+                    });
+                } else if target.workflow_type.is_none() {
                     diagnostics.push(EditorDiagnostic {
                         range,
                         severity: DiagnosticSeverity::Warning,
@@ -291,7 +335,7 @@ pub(crate) fn tag_diagnostics(
                         message: format!(
                             "`+{}` resolves to `{}` but no VCS provider \
                              was detected for its workspace",
-                            span.name, targets[target_index].key,
+                            span.name, target.key,
                         ),
                     });
                 }
@@ -380,7 +424,10 @@ pub(crate) fn tag_quickfixes(
 /// Only plain project refs qualify: the ref must resolve against the tag
 /// targets with a matching provider, the entry must have a tag spelling,
 /// and patches, `owner/repo` paths, paren forms, and HITL-marked refs are
-/// skipped. Literal zones are inert.
+/// skipped. The rewritten `+tag` must itself be a standalone tag under D1
+/// (a valid left boundary before it and end/whitespace/`|`/`}` after it),
+/// so `#gh:sase.`, `#gh:sase,`, and `(#gh:sase)` never rewrite to text
+/// that would not expand. Literal zones are inert.
 pub(crate) fn tag_rewrites(
     document: &DocumentSnapshot,
     targets: &[ProjectTagTargetWire],
@@ -453,6 +500,15 @@ pub(crate) fn tag_rewrites(
         let after = text[ref_end..].chars().next();
         if after.is_some_and(|ch| ch == '/' || ch == '(') {
             idx = ref_end;
+            continue;
+        }
+        // The rewritten `+tag` must stand alone under D1: `#gh:sase.`,
+        // `#gh:sase,`, and `(#gh:sase)` would become `+sase.`, `+sase,`,
+        // and `(+sase)`, none of which ever expand.
+        if !is_tag_left_boundary(text, idx)
+            || !is_tag_right_boundary(text, ref_end)
+        {
+            idx = ref_end.max(idx + 1);
             continue;
         }
         if zones.iter().any(|zone| idx >= zone.0 && ref_end <= zone.1) {
@@ -530,6 +586,30 @@ fn is_ref_left_boundary(text: &str, hash: usize) -> bool {
     text[..hash].chars().next_back().is_some_and(|ch| {
         ch.is_whitespace() || matches!(ch, '{' | '|' | '(' | ',' | ':')
     })
+}
+
+/// Whether a rewritten `+tag` starting where `idx` (the `#`) sits would
+/// have a valid D1 left boundary: start of text, whitespace, `{`, or `|`.
+fn is_tag_left_boundary(text: &str, idx: usize) -> bool {
+    if idx == 0 {
+        return true;
+    }
+    text[..idx]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_whitespace() || ch == '{' || ch == '|')
+}
+
+/// Whether a rewritten `+tag` ending at `end` would have a valid D1 right
+/// boundary: end of text, whitespace, `|`, or `}`.
+fn is_tag_right_boundary(text: &str, end: usize) -> bool {
+    if end >= text.len() {
+        return true;
+    }
+    text[end..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_whitespace() || ch == '|' || ch == '}')
 }
 
 /// Identity behind a leading `+tag` first word, for project context.

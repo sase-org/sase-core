@@ -39,6 +39,7 @@ pub use trigger_context::{
 pub use vcs_candidates::{
     apply_vcs_ref_selection, apply_vcs_repo_selection,
     build_vcs_project_completion_candidates,
+    build_vcs_project_completion_candidates_with_targets,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     detect_vcs_ref_context_at_position, detect_vcs_repo_context_at_position,
 };

@@ -252,26 +252,32 @@ fn orphan_strip_region(text: &str, start: usize, end: usize) -> (usize, usize) {
     }
 }
 
-/// Line-start VCS workflow ref cores (without any `%directive` prefix)
-/// inside `[segment_start, segment_end)`.
+/// VCS workflow ref cores inside `[segment_start, segment_end)`, matching
+/// the Python one-target guard (`find_vcs_workflow_tag_span`).
 ///
-/// This is the historical replace pattern: group 1 captures a leading
-/// `%directive` prefix, which callers preserve.
+/// A ref starts at text start or after whitespace (the embedded-tag rule),
+/// so mid-line refs like `fix in #gh:foo now` count. Leading `%directive`
+/// tokens are never part of the span, so they survive deletion. Callers
+/// still scope to the trigger's `---` segment and skip literal zones.
 fn workspace_ref_deletions(
     text: &str,
     segment_start: usize,
     segment_end: usize,
     workflow_names: &[String],
 ) -> Vec<(usize, usize)> {
-    let pattern = workspace_target_ref_regex(workflow_names);
+    let Some(pattern) = workspace_target_ref_regex(workflow_names) else {
+        return Vec::new();
+    };
     pattern
         .captures_iter(text)
         .filter_map(|caps| {
             let whole = caps.get(0)?;
-            let prefix_len = caps.get(1).map_or(0, |m| m.len());
-            let start = whole.start() + prefix_len;
+            let start = whole.start();
             let end = whole.end();
             if start < segment_start || end > segment_end || start >= end {
+                return None;
+            }
+            if !is_ref_left_boundary(text, start) {
                 return None;
             }
             Some((start, end))
@@ -281,9 +287,21 @@ fn workspace_ref_deletions(
 
 /// The historical VCS-tag replace pattern, now used to *find* other
 /// workspace targets for deletion.
-fn workspace_target_ref_regex(workflow_names: &[String]) -> Regex {
-    let mut names: Vec<&str> =
-        workflow_names.iter().map(String::as_str).collect();
+///
+/// Mirrors Python `get_embedded_vcs_tag_pattern`: the `#` must sit at text
+/// start or after whitespace. The regex itself matches from the `#`; the
+/// left boundary is enforced in `workspace_ref_deletions` because the
+/// `regex` crate has no lookbehind. Returns `None` when `workflow_names`
+/// is empty so an empty alternation can never match `# Heading`.
+fn workspace_target_ref_regex(workflow_names: &[String]) -> Option<Regex> {
+    let mut names: Vec<&str> = workflow_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
     names.sort_unstable();
     let alternation = names
         .iter()
@@ -291,9 +309,21 @@ fn workspace_target_ref_regex(workflow_names: &[String]) -> Regex {
         .collect::<Vec<_>>()
         .join("|");
     let pattern = format!(
-        r"(?m)^((?:%\S+[\s]+)*)#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)(?:\s|$)"
+        r"#(?:{alternation})(?:!!|\?\?)?(?:\([^)]*\)|\+|[_:][^\s]*|)(?:\s|$)"
     );
-    Regex::new(&pattern).expect("valid workspace target pattern")
+    Some(Regex::new(&pattern).expect("valid workspace target pattern"))
+}
+
+/// Whether a `#` ref at byte offset `hash` sits at text start or directly
+/// after whitespace, mirroring Python `(?:^|(?<=\s))`.
+fn is_ref_left_boundary(text: &str, hash: usize) -> bool {
+    if hash == 0 {
+        return true;
+    }
+    text[..hash]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_whitespace())
 }
 
 /// The `---` segment containing `offset`.

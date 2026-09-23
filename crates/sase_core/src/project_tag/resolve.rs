@@ -100,9 +100,13 @@ fn suggest_project_tags(
             .then_with(|| left.1.cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
     });
-    ranked.dedup_by(|left, right| left.2 == right.2);
+    // Same spelling can rank from several targets (name vs. key) at
+    // different distances, so equal displays need not sort adjacently.
+    // Dedupe fully while keeping the ranked order.
+    let mut seen = std::collections::HashSet::new();
     ranked
         .into_iter()
+        .filter(|(_, _, display)| seen.insert(display.clone()))
         .take(3)
         .map(|(_, _, display)| display)
         .collect()

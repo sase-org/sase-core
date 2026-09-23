@@ -529,11 +529,17 @@ fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
 /// not in the tag grammar), a PR row inserts its `#` spelling — while
 /// `additional_edits` delete every other workspace target in the trigger's
 /// `---` segment. The edits never overlap.
-pub fn build_vcs_project_completion_candidates(
+///
+/// `entries` drive the visible rows (enabled projects plus patches);
+/// `targets` is the catalog's tag-resolution set (every non-sibling project
+/// plus `home`, including disabled rows) and drives the other-target
+/// deletions, so the LSP and the TUI accept remove the same resolved tags.
+pub fn build_vcs_project_completion_candidates_with_targets(
     token: &TokenInfo,
     document: &DocumentSnapshot,
     position: EditorPosition,
     entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
     known_workflow_names: &[String],
 ) -> CompletionList {
     let text = document.text();
@@ -547,7 +553,6 @@ pub fn build_vcs_project_completion_candidates(
     // bare `+`), matching the Python `find_vcs_project_trigger`.
     let query = text.get(t0 + 1..cursor).unwrap_or("").to_lowercase();
 
-    let targets = entry_completion_targets(entries);
     let mut candidates = Vec::new();
     for entry in entries {
         let matches_query = query.is_empty()
@@ -566,7 +571,7 @@ pub fn build_vcs_project_completion_candidates(
             (t0, t1),
             &insertion,
             known_workflow_names,
-            &targets,
+            targets,
         );
         let Some(primary) = selection_edit_to_text_edit(document, &primary)
         else {
@@ -603,6 +608,29 @@ pub fn build_vcs_project_completion_candidates(
         shared_extension: String::new(),
     }
 }
+/// Build `vcs_project` candidates with the removal set derived from the
+/// visible entries (project rows only). Test and non-catalog callers use
+/// this; the LSP passes the catalog's `project_tags` through
+/// `build_vcs_project_completion_candidates_with_targets` so disabled
+/// projects and `home` delete like the TUI accept does.
+pub fn build_vcs_project_completion_candidates(
+    token: &TokenInfo,
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+    entries: &[VcsProjectEntry],
+    known_workflow_names: &[String],
+) -> CompletionList {
+    let targets = entry_completion_targets(entries);
+    build_vcs_project_completion_candidates_with_targets(
+        token,
+        document,
+        position,
+        entries,
+        &targets,
+        known_workflow_names,
+    )
+}
+
 /// Tag-resolution targets behind the `+` menu: project rows only. Patch rows
 /// are accepted through their `#` spelling, never as tags.
 fn entry_completion_targets(
@@ -620,6 +648,8 @@ fn entry_completion_targets(
             name: entry.name.clone(),
             aliases: entry.aliases.clone(),
             workflow_type: Some(entry.vcs_prefix.clone()),
+            state: None,
+            workspace_dir: None,
         })
         .collect()
 }

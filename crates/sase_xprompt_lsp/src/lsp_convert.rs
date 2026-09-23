@@ -4,6 +4,7 @@ use lsp_types::{
     InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
     Range, TextEdit,
 };
+use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
     AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
     AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
@@ -620,6 +621,7 @@ pub fn vcs_project_completion_response(
     list: CompletionList,
     replacement_range: EditorRange,
     entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
 ) -> CompletionResponse {
     CompletionResponse::Array(
         list.candidates
@@ -630,6 +632,7 @@ pub fn vcs_project_completion_response(
                     candidate,
                     replacement_range,
                     entries,
+                    targets,
                     index,
                 )
             })
@@ -836,6 +839,7 @@ fn vcs_project_completion_item(
     candidate: CompletionCandidate,
     replacement_range: EditorRange,
     entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
     index: usize,
 ) -> CompletionItem {
     let filter_text = format!("+{}", candidate.name);
@@ -879,11 +883,36 @@ fn vcs_project_completion_item(
                 "{} · {}",
                 entry.provider_display, entry.display_tag
             ));
+            let target = target_for_entry(entry, targets);
             item.documentation =
-                Some(markdown_doc(project_entry_documentation(entry)));
+                Some(markdown_doc(project_entry_documentation(entry, target)));
         }
     }
     item
+}
+
+/// The catalog target behind a completion entry, matched by directory key
+/// first, then by exact and casefolded name (mirroring `entry_for_target`
+/// in the other direction).
+fn target_for_entry<'a>(
+    entry: &VcsProjectEntry,
+    targets: &'a [ProjectTagTargetWire],
+) -> Option<&'a ProjectTagTargetWire> {
+    if !entry.key.is_empty() {
+        if let Some(target) =
+            targets.iter().find(|target| target.key == entry.key)
+        {
+            return Some(target);
+        }
+    }
+    if let Some(target) =
+        targets.iter().find(|target| target.name == entry.name)
+    {
+        return Some(target);
+    }
+    targets
+        .iter()
+        .find(|target| target.name.eq_ignore_ascii_case(&entry.name))
 }
 
 fn vcs_ref_completion_item(

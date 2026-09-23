@@ -333,6 +333,174 @@ async fn diagnostics_flag_ambiguous_tags_as_errors() {
     );
 }
 
+#[tokio::test]
+async fn diagnostics_warn_on_disabled_tags_with_enable_hint() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog_with_state(&catalog_path);
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(Vec::new())),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        config.vcs_project_catalog = Some(catalog_path);
+    }
+
+    let diagnostics = server.diagnostics_for_text("+old do".to_string()).await;
+    let disabled = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(lsp_types::NumberOrString::String(code))
+                    if code == "disabled_project_tag"
+            )
+        })
+        .expect("disabled tag warns");
+    assert_eq!(disabled.severity, Some(DiagnosticSeverity::WARNING));
+    assert!(
+        disabled.message.contains("`+old` is disabled"),
+        "{}",
+        disabled.message
+    );
+    assert!(
+        disabled.message.contains("`sase project enable old`"),
+        "{}",
+        disabled.message
+    );
+
+    // An enabled tag with state present stays quiet.
+    let diagnostics = server.diagnostics_for_text("+sase do".to_string()).await;
+    assert!(
+        !diagnostics_contain_code(&diagnostics, "disabled_project_tag"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn semantic_tokens_mark_disabled_state_tags() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog_with_state(&catalog_path);
+    let catalog = load_vcs_project_catalog(Some(&catalog_path));
+    let document = DocumentSnapshot::new("+old fix");
+    let tokens = document_semantic_tokens(
+        &document,
+        None,
+        None,
+        None,
+        &catalog.project_tags,
+        &catalog.entries,
+    );
+    let absolute = absolute_semantic_tokens(&tokens.data);
+    // disabled -> bit 4 (16); sigil -> bit 2 (4).
+    assert!(absolute.contains(&(0, 0, 1, 9, 4 | 16)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 1, 3, 9, 16)), "{absolute:?}");
+}
+
+#[tokio::test]
+async fn hover_shows_state_and_workspace_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog_with_state(&catalog_path);
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(Vec::new())),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        config.vcs_project_catalog = Some(catalog_path);
+    }
+
+    let hover = server
+        .hover_for_text("+sase fix".to_string(), Position::new(0, 2))
+        .await
+        .expect("tag hover");
+    let lsp_types::HoverContents::Markup(markup) = hover.contents else {
+        panic!("expected markdown hover");
+    };
+    assert!(markup.value.contains("state `enabled`"), "{}", markup.value);
+    assert!(
+        markup.value.contains("workspace `/tmp/sase`"),
+        "{}",
+        markup.value
+    );
+
+    let hover = server
+        .hover_for_text("+old fix".to_string(), Position::new(0, 2))
+        .await
+        .expect("disabled tag hover");
+    let lsp_types::HoverContents::Markup(markup) = hover.contents else {
+        panic!("expected markdown hover");
+    };
+    assert!(
+        markup.value.contains("state `disabled`"),
+        "{}",
+        markup.value
+    );
+    assert!(
+        markup.value.contains("workspace `/tmp/old`"),
+        "{}",
+        markup.value
+    );
+}
+
+#[tokio::test]
+async fn completion_docs_show_state_and_workspace_dir() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog_with_state(&catalog_path);
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(Vec::new())),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        config.vcs_project_catalog = Some(catalog_path);
+    }
+
+    let response = server
+        .completion_for_text(
+            "Fix +".to_string(),
+            Position {
+                line: 0,
+                character: 5,
+            },
+        )
+        .await
+        .unwrap();
+    let CompletionResponse::Array(items) = response else {
+        panic!("expected completion array");
+    };
+    let sase = items
+        .iter()
+        .find(|item| item.label == "+sase")
+        .expect("sase row");
+    let Some(Documentation::MarkupContent(documentation)) =
+        sase.documentation.as_ref()
+    else {
+        panic!("expected markdown documentation");
+    };
+    assert!(
+        documentation.value.contains("state `enabled`"),
+        "{documentation:?}"
+    );
+    assert!(
+        documentation.value.contains("workspace `/tmp/sase`"),
+        "{documentation:?}"
+    );
+}
+
 fn quickfix_actions(
     actions: &lsp_types::CodeActionResponse,
 ) -> Vec<&lsp_types::CodeAction> {
@@ -461,6 +629,27 @@ async fn code_actions_rewrite_colon_refs_to_tags() {
         "#gh:bbugyi200/sase do this",
         "#gh(sase) do this",
         "#git:sase do this",
+    ] {
+        let actions = server
+            .code_actions_for_text(
+                uri.clone(),
+                text.to_string(),
+                Range::new(Position::new(0, 0), Position::new(0, 14)),
+            )
+            .await;
+        assert!(
+            rewrite_actions(&actions).is_empty(),
+            "{text:?}: {actions:?}"
+        );
+    }
+
+    // A rewrite whose `+tag` would not stand alone under D1 never
+    // fires: the result would not expand and the prompt would silently
+    // lose its project.
+    for text in [
+        "#gh:sase. do this",
+        "#gh:sase, do this",
+        "(#gh:sase) do this",
     ] {
         let actions = server
             .code_actions_for_text(

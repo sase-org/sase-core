@@ -291,17 +291,19 @@ impl XpromptLspServer {
         };
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
-        let list = editor_build_vcs_project_completion_candidates(
+        let list = editor_build_vcs_project_completion_candidates_with_targets(
             token,
             document,
             to_editor_position(position),
             &vcs_catalog.entries,
+            &vcs_catalog.project_tags,
             &vcs_catalog.workflow_names,
         );
         vcs_project_completion_response(
             list,
             context.replacement_range,
             &vcs_catalog.entries,
+            &vcs_catalog.project_tags,
         )
     }
 

@@ -19,7 +19,7 @@ use sase_core::{
     XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
 
-use crate::project_tags::accent_index_for_target;
+use crate::project_tags::{accent_index_for_target, is_disabled_target};
 
 const KIND_TOKEN_TYPE: u32 = 0;
 const PAYLOAD_TOKEN_TYPE: u32 = 1;
@@ -137,7 +137,8 @@ pub(crate) fn document_semantic_tokens(
 
 /// One sigil (`+`) token plus one name token per project tag. Resolved tags
 /// carry their `accentN` modifier; unknown or ambiguous tags carry
-/// `unknown`; resolved tags without a VCS provider carry `disabled`.
+/// `unknown`; disabled tags and resolved tags without a VCS provider carry
+/// `disabled`.
 fn raw_project_tag_tokens(
     document: &DocumentSnapshot,
     targets: &[ProjectTagTargetWire],
@@ -151,7 +152,8 @@ fn raw_project_tag_tokens(
         let resolution = match resolve_project_tag(&span.name, targets) {
             ProjectTagResolutionWire::Resolved { target_index } => {
                 let target = &targets[target_index];
-                if target.workflow_type.is_none() {
+                if is_disabled_target(target) || target.workflow_type.is_none()
+                {
                     DISABLED_TAG_MODIFIER
                 } else {
                     accent_index_for_target(targets, target_index, entries)

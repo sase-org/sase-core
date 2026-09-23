@@ -127,6 +127,39 @@ fn project_tag_trigger_binding_uses_char_offsets() {
 }
 
 #[test]
+fn project_tag_targets_with_state_fields_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let targets = json_value_to_py(
+            py,
+            &json!([
+                {
+                    "key": "gh_sase-org__sase",
+                    "name": "sase",
+                    "aliases": ["sa"],
+                    "workflow_type": "gh",
+                    "state": "enabled",
+                    "workspace_dir": "/tmp/sase",
+                },
+                {
+                    "key": "home",
+                    "name": "home",
+                    "aliases": [],
+                    "workflow_type": null,
+                },
+            ]),
+        )
+        .unwrap();
+        let targets = targets.bind(py).downcast::<PyList>().unwrap().clone();
+        let resolved = py_project_tag_resolve(py, "Sase", &targets).unwrap();
+        assert_eq!(
+            py_to_json_value(resolved.bind(py)).unwrap(),
+            json!({"kind": "resolved", "target_index": 0})
+        );
+    });
+}
+
+#[test]
 fn project_tag_apply_selection_binding_returns_char_cursor() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

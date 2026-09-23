@@ -879,6 +879,86 @@ pub(super) fn write_v5_project_tag_catalog(path: &Path) {
     .unwrap();
 }
 
+/// v5 catalog whose tag targets carry `state` and `workspace_dir`: `sase`
+/// is enabled with a workspace dir, `old` is disabled, and `orphan` is
+/// provider-less. `home` is a system target.
+pub(super) fn write_v5_project_tag_catalog_with_state(path: &Path) {
+    fs::write(
+        path,
+        r##"{
+            "schema_version": 5,
+            "workflow_names": ["gh", "git"],
+            "entries": [
+                {
+                    "name": "sase",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:sase",
+                    "provider_display": "GitHub",
+                    "description": "SASE repo",
+                    "aliases": ["sase-core"],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "sase",
+                    "status": "",
+                    "key": "gh_sase-org__sase",
+                    "tag": "+sase",
+                    "accent_index": 2,
+                    "current": true
+                },
+                {
+                    "name": "old",
+                    "vcs_prefix": "gh",
+                    "display_tag": "#gh:old",
+                    "provider_display": "GitHub",
+                    "description": "Old project",
+                    "aliases": [],
+                    "entry_kind": "project",
+                    "kind": "project",
+                    "project": "old",
+                    "status": "",
+                    "key": "gh_old",
+                    "tag": "+old",
+                    "accent_index": 3,
+                    "current": false
+                }
+            ],
+            "accent_palette": ["#111111", "#222222", "#333333", "#444444", "#555555", "#666666"],
+            "project_tags": [
+                {
+                    "key": "gh_sase-org__sase",
+                    "name": "sase",
+                    "aliases": ["sase-core"],
+                    "workflow_type": "gh",
+                    "state": "enabled",
+                    "workspace_dir": "/tmp/sase"
+                },
+                {
+                    "key": "gh_old",
+                    "name": "old",
+                    "aliases": [],
+                    "workflow_type": "gh",
+                    "state": "disabled",
+                    "workspace_dir": "/tmp/old"
+                },
+                {
+                    "key": "git_orphan",
+                    "name": "orphan",
+                    "aliases": [],
+                    "workflow_type": null
+                },
+                {
+                    "key": "home",
+                    "name": "home",
+                    "aliases": [],
+                    "workflow_type": "git",
+                    "state": "system"
+                }
+            ]
+        }"##,
+    )
+    .unwrap();
+}
+
 /// v5 catalog where `+sase` matches two targets (ambiguous).
 pub(super) fn write_ambiguous_project_tag_catalog(path: &Path) {
     fs::write(

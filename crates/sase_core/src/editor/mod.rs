@@ -43,6 +43,7 @@ pub use completion::{
     build_artifact_ref_payload_inventory, build_directive_clause_candidates,
     build_identity_target_candidates, build_snippet_completion_candidates,
     build_vcs_project_completion_candidates,
+    build_vcs_project_completion_candidates_with_targets,
     build_vcs_ref_completion_candidates, build_vcs_repo_completion_candidates,
     build_wait_completion_candidates,
     build_wait_completion_candidates_for_form,

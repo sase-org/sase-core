@@ -4,6 +4,7 @@ use super::state::{
     GlossaryCatalogSignature, ServerConfig, VcsProjectCatalog,
 };
 use super::*;
+use sase_core::editor::VcsProjectCatalogWire;
 
 pub(super) fn file_history() -> Vec<String> {
     let Some(home) = std::env::var_os("HOME") else {
@@ -37,10 +38,12 @@ pub(super) fn file_history() -> Vec<String> {
 /// shows nothing rather than breaking completion. Schema versions 1 through 5
 /// are accepted; v1 entries default to project rows, v1/v2 catalogs default
 /// `namespaces` to empty, and pre-v5 catalogs default `accent_palette`,
-/// `project_tags`, and the per-entry v5 fields to empty. The v5 file shape is
-/// `{ "schema_version": 5, "workflow_names": [..], "entries":
-/// [VcsProjectEntry, ..], "namespaces": {"gh": [VcsNamespaceEntry, ..]},
-/// "accent_palette": [..], "project_tags": [ProjectTagTargetWire, ..] }`.
+/// `project_tags`, and the per-entry v5 fields to empty. Parsing goes
+/// through [`VcsProjectCatalogWire`] so the wire shape stays the single
+/// source of truth. The v5 file shape is `{ "schema_version": 5,
+/// "workflow_names": [..], "entries": [VcsProjectEntry, ..], "namespaces":
+/// {"gh": [VcsNamespaceEntry, ..]}, "accent_palette": [..], "project_tags":
+/// [ProjectTagTargetWire, ..] }`.
 pub(super) fn load_vcs_project_catalog(
     path: Option<&Path>,
 ) -> VcsProjectCatalog {
@@ -64,6 +67,21 @@ pub(super) fn load_vcs_project_catalog(
         );
         return VcsProjectCatalog::default();
     }
+    // Parsing goes through the wire shape; a catalog with one malformed
+    // section still degrades per-field (e.g. bad `namespaces` keeps its
+    // entries) instead of dropping everything.
+    if let Ok(wire) =
+        serde_json::from_value::<VcsProjectCatalogWire>(value.clone())
+    {
+        return VcsProjectCatalog {
+            entries: wire.entries,
+            workflow_names: wire.workflow_names,
+            namespaces: wire.namespaces,
+            accent_palette: wire.accent_palette,
+            project_tags: wire.project_tags,
+        };
+    }
+    warn!("vcs project catalog at {path:?} has malformed sections; loading per-field");
     let entries = value
         .get("entries")
         .cloned()

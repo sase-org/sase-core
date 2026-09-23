@@ -1385,6 +1385,20 @@ mod tests {
     }
 
     #[test]
+    fn old_target_wire_without_state_fields_defaults_to_none() {
+        let target: ProjectTagTargetWire =
+            serde_json::from_value(serde_json::json!({
+                "key": "gh_sase-org__sase",
+                "name": "sase",
+                "aliases": ["sa"],
+                "workflow_type": "gh",
+            }))
+            .unwrap();
+        assert_eq!(target.state, None);
+        assert_eq!(target.workspace_dir, None);
+    }
+
+    #[test]
     fn v5_catalog_wire_round_trips() {
         let catalog = VcsProjectCatalogWire {
             schema_version: VCS_PROJECT_CATALOG_SCHEMA_VERSION,
@@ -1412,6 +1426,8 @@ mod tests {
                 name: "sase".to_string(),
                 aliases: vec![],
                 workflow_type: Some("gh".to_string()),
+                state: Some("enabled".to_string()),
+                workspace_dir: Some("/tmp/sase".to_string()),
             }],
         };
         let round_tripped: VcsProjectCatalogWire =

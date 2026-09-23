@@ -815,12 +815,25 @@ fn is_valid_sase_project_name(project_name: &str) -> bool {
 }
 
 fn fold_project_ref(project_ref: &str) -> String {
+    // Python folds with `str.casefold`; Rust has no casefold in std, so
+    // this uses Unicode `to_lowercase`. The two differ only for non-ASCII
+    // (e.g. `ß` folds to `ss` under casefold but stays `ß` here), while
+    // project directory keys, display names, and aliases are ASCII in
+    // practice, so the folds agree on every real input.
     project_ref.to_lowercase()
 }
 
+/// Whether a record is a sibling checkout (not a launchable project).
+fn is_sibling_record(record: &ProjectRecordWire) -> bool {
+    record.state.eq_ignore_ascii_case("sibling")
+}
+
 fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
+    // Sibling specs never participate: they are not launchable projects,
+    // so neither their keys nor their refs warn or collide.
     let mut folded_project_names: BTreeSet<String> = records
         .iter()
+        .filter(|record| !is_sibling_record(record))
         .map(|record| fold_project_ref(&record.project_name))
         .collect();
     folded_project_names.insert("home".to_string());
@@ -830,8 +843,30 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
     let mut ref_spellings: BTreeMap<String, String> = BTreeMap::new();
     let mut warnings_by_project: BTreeMap<String, Vec<String>> =
         BTreeMap::new();
+    // Directory keys grouped by fold, to flag keys differing only by case.
+    let mut key_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for record in records.iter().filter(|record| !is_sibling_record(record)) {
+        key_owners
+            .entry(fold_project_ref(&record.project_name))
+            .or_default()
+            .push(record.project_name.clone());
+    }
 
-    for record in records.iter().filter(|record| !record.system_managed) {
+    for record in records
+        .iter()
+        .filter(|record| !record.system_managed && !is_sibling_record(record))
+    {
+        // A non-system directory key folding to `home` collides with the
+        // reserved system project.
+        if fold_project_ref(&record.project_name) == "home" {
+            warnings_by_project
+                .entry(record.project_name.clone())
+                .or_default()
+                .push(format!(
+                    "project directory key {:?} collides with project \"home\"",
+                    record.project_name,
+                ));
+        }
         let folded_project_name = fold_project_ref(&record.project_name);
         if let Some(display_name) = record.display_name.as_ref() {
             if fold_project_ref(display_name) != folded_project_name {
@@ -988,7 +1023,48 @@ fn add_project_ref_collision_warnings(records: &mut [ProjectRecordWire]) {
         }
     }
 
+    // Two directory keys differing only by case collide: tags resolve
+    // case-insensitively, so the backend would never guess between them.
+    // The reserved `home` fold is reported above with its own message, so
+    // it is skipped here. Sibling owners never warn.
+    let sibling_names: BTreeSet<String> = records
+        .iter()
+        .filter(|record| is_sibling_record(record))
+        .map(|record| record.project_name.clone())
+        .collect();
+    for (folded, mut owners) in key_owners {
+        owners.sort();
+        owners.dedup();
+        if owners.len() <= 1 || folded == "home" {
+            continue;
+        }
+        for owner in &owners {
+            if sibling_names.contains(owner) {
+                continue;
+            }
+            let others: Vec<&str> = owners
+                .iter()
+                .filter(|candidate| *candidate != owner)
+                .map(String::as_str)
+                .collect();
+            warnings_by_project.entry(owner.clone()).or_default().push(
+                format!(
+                    "project directory key {owner:?} collides with project {}",
+                    others
+                        .iter()
+                        .map(|other| format!("{other:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            );
+        }
+    }
+
     for record in records {
+        // Sibling specs never carry collision warnings.
+        if is_sibling_record(record) {
+            continue;
+        }
         if let Some(warnings) = warnings_by_project.remove(&record.project_name)
         {
             record.parse_warnings.extend(warnings);
@@ -1610,6 +1686,93 @@ mod tests {
                     && warning.contains("collides with project")),
             "claims on the reserved home ref warn: {:?}",
             by_name["beta"].parse_warnings
+        );
+    }
+
+    #[test]
+    fn lifecycle_project_ref_collisions_flag_case_variant_keys_and_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        for dir in ["alpha", "ALPHA"] {
+            let dir_path = projects.join(dir);
+            fs::create_dir(&dir_path).unwrap();
+            fs::write(dir_path.join(format!("{dir}.sase")), "NAME: x\n")
+                .unwrap();
+        }
+        let home_variant = projects.join("Home");
+        fs::create_dir(&home_variant).unwrap();
+        fs::write(home_variant.join("Home.sase"), "NAME: x\n").unwrap();
+
+        let records =
+            list_project_records(&projects, &["all".to_string()], false, false)
+                .unwrap();
+        let by_name: BTreeMap<&str, &ProjectRecordWire> = records
+            .iter()
+            .map(|record| (record.project_name.as_str(), record))
+            .collect();
+        for key in ["alpha", "ALPHA"] {
+            assert!(
+                by_name[key]
+                    .parse_warnings
+                    .iter()
+                    .any(|warning| warning.contains("project directory key")
+                        && warning.contains("collides with project")),
+                "{key} warns about its case-variant key: {:?}",
+                by_name[key].parse_warnings
+            );
+        }
+        assert!(
+            by_name["Home"]
+                .parse_warnings
+                .iter()
+                .any(|warning| warning.contains("project directory key")
+                    && warning.contains("\"home\"")),
+            "non-system Home key warns: {:?}",
+            by_name["Home"].parse_warnings
+        );
+    }
+
+    #[test]
+    fn lifecycle_project_ref_collisions_exclude_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+
+        let real_dir = projects.join("alpha");
+        fs::create_dir(&real_dir).unwrap();
+        fs::write(
+            real_dir.join("alpha.sase"),
+            "PROJECT_ALIASES: shared\nNAME: alpha\n",
+        )
+        .unwrap();
+
+        let sibling_dir = projects.join("sibling-proj");
+        fs::create_dir(&sibling_dir).unwrap();
+        fs::write(
+            sibling_dir.join("sibling-proj.sase"),
+            "PROJECT_STATE: sibling\nPROJECT_ALIASES: shared\nNAME: other\n",
+        )
+        .unwrap();
+
+        let records =
+            list_project_records(&projects, &["all".to_string()], false, false)
+                .unwrap();
+        let by_name: BTreeMap<&str, &ProjectRecordWire> = records
+            .iter()
+            .map(|record| (record.project_name.as_str(), record))
+            .collect();
+        // A lone alias shared only with a sibling is not a collision.
+        assert!(
+            by_name["alpha"].parse_warnings.is_empty(),
+            "sibling aliases do not collide: {:?}",
+            by_name["alpha"].parse_warnings
+        );
+        assert!(
+            by_name["sibling-proj"].parse_warnings.is_empty(),
+            "siblings never carry warnings: {:?}",
+            by_name["sibling-proj"].parse_warnings
         );
     }
 

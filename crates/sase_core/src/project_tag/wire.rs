@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 
 /// One project the tag catalog knows about: every non-sibling project record
 /// (enabled or disabled) plus the system `home` project.
-///
-/// Only the fields the core needs are carried here. Display concerns (accent,
-/// state, workspace dir) stay Python-side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectTagTargetWire {
     /// Directory key, e.g. `gh_sase-org__sase`.
@@ -23,6 +20,14 @@ pub struct ProjectTagTargetWire {
     /// detected; such targets resolve but never expand.
     #[serde(default)]
     pub workflow_type: Option<String>,
+    /// Lifecycle state (`enabled` | `disabled` | `system`). Older catalogs
+    /// omit it and deserialize to `None`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Canonical workspace directory, when the catalog knows it. Older
+    /// catalogs omit it and deserialize to `None`.
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
 }
 
 /// One lexically valid project tag occurrence.
