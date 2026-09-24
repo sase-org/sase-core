@@ -135,7 +135,8 @@ fn concurrently_minted_bead_id_relocates_instead_of_wedging_the_store() {
     );
     let relocated = outcome.relocated.clone().unwrap();
     assert_eq!(relocated.stream_id, "sase-ez");
-    // Both beads survive: the older creation keeps the contested id.
+    // Both beads survive: the published upstream creation keeps the contested
+    // id, and the local creation relocates.
     let issues =
         reduce_event_streams(&[outcome.merged.clone(), relocated]).unwrap();
     assert_eq!(
@@ -143,32 +144,60 @@ fn concurrently_minted_bead_id_relocates_instead_of_wedging_the_store() {
             .iter()
             .map(|issue| (issue.id.as_str(), issue.title.as_str()))
             .collect::<Vec<_>>(),
-        vec![("sase-ey", "Ours"), ("sase-ez", "Theirs")]
+        vec![("sase-ey", "Theirs"), ("sase-ez", "Ours")]
     );
 }
 
 #[test]
-fn relocation_picks_the_same_loser_whichever_side_git_calls_ours() {
+fn upstream_creation_keeps_the_id_when_local_is_older() {
     let base = empty_stream("sase-ey");
     let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:00Z");
     let theirs = colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:01Z");
 
-    let forward = merge_bead_event_streams_with_relocation(
+    let outcome = merge_bead_event_streams_with_relocation(
         &base,
         &ours,
         &theirs,
-        Some("sase-ez"),
-    )
-    .unwrap();
-    let swapped = merge_bead_event_streams_with_relocation(
-        &base,
-        &theirs,
-        &ours,
         Some("sase-ez"),
     )
     .unwrap();
 
-    assert_eq!(forward, swapped);
+    let issues =
+        reduce_event_streams(&[outcome.merged, outcome.relocated.unwrap()])
+            .unwrap();
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| (issue.id.as_str(), issue.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("sase-ey", "Theirs"), ("sase-ez", "Ours")]
+    );
+}
+
+#[test]
+fn upstream_creation_keeps_the_id_when_local_is_newer() {
+    let base = empty_stream("sase-ey");
+    let ours = colliding_stream("sase-ey", "Ours", "2026-08-03T11:00:01Z");
+    let theirs = colliding_stream("sase-ey", "Theirs", "2026-08-03T11:00:00Z");
+
+    let outcome = merge_bead_event_streams_with_relocation(
+        &base,
+        &ours,
+        &theirs,
+        Some("sase-ez"),
+    )
+    .unwrap();
+
+    let issues =
+        reduce_event_streams(&[outcome.merged, outcome.relocated.unwrap()])
+            .unwrap();
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| (issue.id.as_str(), issue.title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("sase-ey", "Theirs"), ("sase-ez", "Ours")]
+    );
 }
 
 #[test]
@@ -189,6 +218,11 @@ fn relocated_events_are_reminted_onto_their_new_stream() {
     let event = &relocated.events[0];
     assert_eq!(event.issue_id, "sase-ez");
     assert!(event.event_id.starts_with("sase-ez:000001:"));
+    // The relocated stream carries the local creation; upstream kept the id.
+    let BeadEventPayloadWire::IssueCreated { issue } = &event.payload else {
+        panic!("relocated event must be the local issue_created");
+    };
+    assert_eq!(issue.title.as_str(), "Ours");
     assert!(outcome
         .merged
         .events
@@ -259,8 +293,8 @@ fn concurrently_minted_child_id_renumbers_to_a_free_sibling() {
             .collect::<Vec<_>>(),
         vec![
             ("sase-ey", "Epic"),
-            ("sase-ey.1", "Phase ours"),
-            ("sase-ey.2", "Phase theirs"),
+            ("sase-ey.1", "Phase theirs"),
+            ("sase-ey.2", "Phase ours"),
         ]
     );
 }

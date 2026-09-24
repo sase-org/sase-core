@@ -81,6 +81,13 @@ pub fn merge_bead_event_streams(
 /// duplicate `issue_created`. Duplicated *child* ids need no caller input:
 /// the next free sibling number is derivable from the stream itself.
 ///
+/// A duplicate `issue_created` collision is always resolved in favor of the
+/// already-published creation: the merge-base creation wins when present,
+/// otherwise the published upstream (`theirs`) creation wins, so only the
+/// pushing clone's local, unpublished creation is ever relocated. That clone
+/// is the one that receives the relocation record and can repair its
+/// references; the other clone never learns that a relocation happened.
+///
 /// Argument roles: `ours` is the local branch and `theirs` is the published
 /// upstream branch. The Python resolver calls this as
 /// `merge(base, local, upstream)` (`src/sase/bead/conflict_resolver.py`), so
@@ -226,12 +233,23 @@ fn losing_creation(
             continue;
         }
         // Whichever creation the merge base already carried is authoritative;
-        // otherwise the older creation keeps the id so both clones agree
-        // regardless of which side git happened to call "ours".
+        // otherwise the published upstream (`theirs`) creation keeps the id.
+        // A published id may already be embedded by its creator (code, commit
+        // trailers, plan links, chats), and that creator never learns about a
+        // relocation performed by another clone's push. So only the pushing
+        // clone's local, unpublished (`ours`) creation may move. The oldest
+        // `(timestamp, event_id)` fallback below is defensive only, for
+        // collisions with no base or upstream creation.
         let winner = indexes
             .iter()
             .copied()
             .find(|index| tagged[*index].1 == BranchTag::Base)
+            .or_else(|| {
+                indexes
+                    .iter()
+                    .copied()
+                    .find(|index| tagged[*index].1 == BranchTag::Theirs)
+            })
             .unwrap_or_else(|| {
                 *indexes
                     .iter()
