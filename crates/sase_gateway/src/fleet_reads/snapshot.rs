@@ -158,7 +158,9 @@ pub(super) fn build_snapshot_blocking(
             &lineage_candidates,
         )
         .map_err(|_| {
-            FleetReadError::Backend("family_dismissal_lineage".to_string())
+            FleetReadError::Backend(
+                "agent_session_dismissal_lineage".to_string(),
+            )
         })?
         .into_iter()
         .map(|result| (result.identity, result.agent_session_root_dismissed))

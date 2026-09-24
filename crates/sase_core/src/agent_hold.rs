@@ -1045,7 +1045,7 @@ pub fn validate_selectors_exclude_armer_kin(
                 });
             if matches_own_identity {
                 return Err(AgentHoldError::Validation(format!(
-                    "hold selector {kind}={value:?} names the armer's own identity, family, or clan"
+                    "hold selector {kind}={value:?} names the armer's own identity, agent session, or clan"
                 )));
             }
         }

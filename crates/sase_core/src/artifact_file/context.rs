@@ -5,7 +5,7 @@
 //! artifact directories that satisfy it, in stable producer order), return
 //! the non-chat indexed files those producers registered. Matching is by
 //! exact `agent_artifacts_dir` equality only; this deliberately does not
-//! widen the existing `agent` name filter into prefix/family matching,
+//! widen the existing `agent` name filter into prefix/agent-session matching,
 //! which stays a caller responsibility (see the wait-context phase).
 
 use std::collections::HashSet;

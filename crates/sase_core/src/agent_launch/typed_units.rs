@@ -900,7 +900,7 @@ fn validate_hold_self(
         diagnostics.push(typed_unit_diagnostic(
             "hold-self",
             &format!(
-                "%hold target {name:?} matches this launch unit's own identity, family, or clan."
+                "%hold target {name:?} matches this launch unit's own identity, agent session, or clan."
             ),
             logical_id,
             None,

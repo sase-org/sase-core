@@ -187,9 +187,9 @@ fn agent_identity_bindings_are_exported_and_preserve_shapes() {
             Some("bob.athena".to_string())
         );
 
-        let family = py_parse_agent_family_name(py, "foo.bar--code").unwrap();
+        let legacy = py_parse_agent_family_name(py, "foo.bar--code").unwrap();
         assert_eq!(
-            py_to_json_value(family.bind(py)).unwrap(),
+            py_to_json_value(legacy.bind(py)).unwrap(),
             json!({
                 "kind": "member",
                 "family_name": "foo.bar",
@@ -198,7 +198,7 @@ fn agent_identity_bindings_are_exported_and_preserve_shapes() {
         );
         let session = py_parse_agent_session_name(py, "foo.bar--code").unwrap();
         assert_eq!(
-            py_to_json_value(family.bind(py)).unwrap(),
+            py_to_json_value(legacy.bind(py)).unwrap(),
             py_to_json_value(session.bind(py)).unwrap(),
         );
         let historical =

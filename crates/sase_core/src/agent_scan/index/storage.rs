@@ -117,7 +117,7 @@ pub(super) fn open_index_with_busy_timeout(
             PRIMARY KEY (agent_type, cl_name, raw_suffix)
         );
         -- Covers dismissed-suffix lookups used by visibility filters and
-        -- the set-based family-dismissal reconcile (no schema bump: this
+        -- the set-based agent-session-dismissal reconcile (no schema bump: this
         -- index already existed before the N+1 rewrite).
         CREATE INDEX IF NOT EXISTS idx_dismissed_agents_suffix
             ON dismissed_agents(raw_suffix, cl_name, agent_type);

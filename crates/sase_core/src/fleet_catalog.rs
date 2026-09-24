@@ -386,7 +386,7 @@ pub fn assemble_fleet_catalog(
         )
         .map_err(|error| {
             FleetContractError::Validation(format!(
-                "family_dismissal_lineage: {error}"
+                "agent_session_dismissal_lineage: {error}"
             ))
         })?
         .into_iter()

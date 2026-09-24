@@ -156,7 +156,7 @@ pub(crate) fn parse_id_directive(
     }
 
     // legacy agent-family spelling; flips in core-contract
-    if let Some(family) = named.get("family") {
+    if let Some(legacy) = named.get("family") {
         if positional.len() != 1 {
             diagnostics.push(typed_unit_diagnostic(
                 "invalid-id-family",
@@ -167,7 +167,7 @@ pub(crate) fn parse_id_directive(
             return parsed;
         }
         let (force_reuse, suffix) = strip_force_reuse(&positional[0]);
-        let parent = family.trim();
+        let parent = legacy.trim();
         if parent.is_empty() {
             diagnostics.push(typed_unit_diagnostic(
                 "invalid-id-family",
@@ -536,7 +536,7 @@ pub(crate) fn apply_parsed_identity(
     if parsed_clan.is_some() && agent_session.is_some() {
         diagnostics.push(typed_unit_diagnostic(
             "clan-id-conflict",
-            "Cannot combine %clan with %id(..., family=...); choose clan membership or serial family attachment.",
+            "Cannot combine %clan with %id(..., session=...); choose clan membership or serial agent-session attachment.",
             logical_id,
             None,
         ));
