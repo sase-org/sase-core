@@ -54,7 +54,7 @@ fn count_contract_is_order_independent_and_deduplicates_current_instances() {
 
     let mut monitor = newer.clone();
     monitor.row_kind = FleetRowKindWire::Monitor;
-    monitor.family_role = FleetFamilyRoleWire::Monitor;
+    monitor.agent_session_role = FleetAgentSessionRoleWire::Monitor;
     let request = FleetLogicalAgentCountsRequestWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         summaries: vec![

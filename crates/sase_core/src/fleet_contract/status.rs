@@ -18,19 +18,19 @@ pub(crate) fn default_row_kind() -> FleetRowKindWire {
     FleetRowKindWire::AgentShell
 }
 
-/// Normalized family role for viewer folding.
+/// Normalized agent session role for viewer folding.
 ///
-/// Independent of `row_kind`: it distinguishes a family root from an
+/// Independent of `row_kind`: it distinguishes an agent session root from an
 /// ordinary member for `AgentShell` rows, carries `Monitor`/`Gate`/`Proc`
 /// straight through from their matching row kinds, and marks any row whose
 /// presentation is terminal (genuinely completed, or a demoted dead-active
 /// leftover) as `HistoricalShell` so a viewer can render "was running"
-/// uniformly once family topology stops mattering.
+/// uniformly once agent session topology stops mattering.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum FleetFamilyRoleWire {
+pub enum FleetAgentSessionRoleWire {
     Root,
     Member,
     Monitor,

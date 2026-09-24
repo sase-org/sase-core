@@ -625,7 +625,7 @@ fn target_sort_key(target: &FleetBulkTargetWire) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet_contract::FleetFamilyRoleWire;
+    use crate::fleet_contract::FleetAgentSessionRoleWire;
     use crate::fleet_contract::{
         ConnectionHealthWire, ContentMetadataWire, FleetStatusBucketWire,
         HumanDisplayLabelsWire, ObservationFreshnessWire, OriginLocatorWire,
@@ -656,7 +656,7 @@ mod tests {
                 project_id: "project-1".to_string(),
             },
             agent_id: agent.to_string(),
-            family_id: Some("family-1".to_string()),
+            agent_session_id: Some("family-1".to_string()),
         }
     }
 
@@ -733,13 +733,13 @@ mod tests {
             logical_key: logical_key_unchecked(&intent.target.logical),
             exact_key: Some("exact-1".to_string()),
             row_kind: FleetRowKindWire::AgentShell,
-            family_role: FleetFamilyRoleWire::Root,
+            agent_session_role: FleetAgentSessionRoleWire::Root,
             parent_timestamp: None,
             labels: HumanDisplayLabelsWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 project_label: "project-1".to_string(),
                 agent_label: Some("athena.worker".to_string()),
-                family_label: Some("family-1".to_string()),
+                agent_session_label: Some("family-1".to_string()),
                 owner_label: None,
                 alias: Some("apollo".to_string()),
             },

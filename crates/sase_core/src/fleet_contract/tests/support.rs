@@ -28,7 +28,7 @@ pub(super) fn logical(hex: char, agent: &str) -> LogicalAgentLocatorWire {
             project_id: "project-1".to_string(),
         },
         agent_id: agent.to_string(),
-        family_id: Some("family-1".to_string()),
+        agent_session_id: Some("family-1".to_string()),
     }
 }
 
@@ -234,7 +234,7 @@ pub(super) fn projection_request(
             started_at_unix: None,
             run_started_at_unix: None,
             stopped_at_unix: None,
-            family_id: None,
+            agent_session_id: None,
             parent_timestamp: None,
             workspace_num: None,
             project_label: None,
@@ -257,7 +257,7 @@ pub(super) fn projection_request(
 
 pub(super) fn singleton(hex: char, agent: &str) -> LogicalAgentLocatorWire {
     LogicalAgentLocatorWire {
-        family_id: None,
+        agent_session_id: None,
         ..logical(hex, agent)
     }
 }

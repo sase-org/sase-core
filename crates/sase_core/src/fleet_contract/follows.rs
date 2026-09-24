@@ -1,6 +1,7 @@
 use super::error::FleetContractError;
 use super::error::FLEET_CONTRACT_SCHEMA_VERSION;
 use super::error::MAX_LABEL_BYTES;
+use super::locators::logical_key_matches;
 use super::locators::logical_key_unchecked;
 use super::locators::LogicalAgentLocatorWire;
 use super::locators::OriginLocatorWire;
@@ -41,7 +42,7 @@ pub enum FollowStateWire {
 /// Durable viewer-local follow intent.
 ///
 /// The record identity is `(logical_key, created_by)`, where
-/// `logical_key` includes origin installation ID, project ID, family ID, and
+/// `logical_key` includes origin installation ID, project ID, agent session ID, and
 /// agent ID. Dispatch follows may be prewritten as `pending` before remote
 /// admission and activated when the authoritative receipt arrives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,10 +73,10 @@ pub struct FollowTombstoneWire {
     pub unfollowed_at_unix: f64,
 }
 
-/// Promote a singleton follow to the formed family identity.
+/// Promote a singleton follow to the formed agent session identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FollowFamilyPromotionWire {
+pub struct FollowAgentSessionPromotionWire {
     pub schema_version: u32,
     pub from: LogicalAgentLocatorWire,
     pub to: LogicalAgentLocatorWire,
@@ -119,7 +120,7 @@ pub struct FollowReconciliationRequestWire {
     pub records: Vec<FollowRecordWire>,
     pub tombstones: Vec<FollowTombstoneWire>,
     #[serde(default)]
-    pub promotions: Vec<FollowFamilyPromotionWire>,
+    pub promotions: Vec<FollowAgentSessionPromotionWire>,
     #[serde(default)]
     pub activations: Vec<FollowActivationWire>,
     pub now_unix: f64,
@@ -283,8 +284,7 @@ impl FollowRecordWire {
     pub(crate) fn validate(&self) -> Result<(), FleetContractError> {
         validate_schema("follow record", self.schema_version)?;
         self.logical_locator.validate()?;
-        let expected_key = logical_key_unchecked(&self.logical_locator);
-        if self.logical_key != expected_key {
+        if !logical_key_matches(&self.logical_key, &self.logical_locator) {
             return Err(FleetContractError::Validation(
                 "follow record logical_key does not match logical locator"
                     .to_string(),
@@ -346,8 +346,7 @@ impl FollowTombstoneWire {
     pub(crate) fn validate(&self) -> Result<(), FleetContractError> {
         validate_schema("follow tombstone", self.schema_version)?;
         self.logical_locator.validate()?;
-        let expected_key = logical_key_unchecked(&self.logical_locator);
-        if self.logical_key != expected_key {
+        if !logical_key_matches(&self.logical_key, &self.logical_locator) {
             return Err(FleetContractError::Validation(
                 "follow tombstone logical_key does not match logical locator"
                     .to_string(),
@@ -360,20 +359,20 @@ impl FollowTombstoneWire {
     }
 }
 
-impl FollowFamilyPromotionWire {
+impl FollowAgentSessionPromotionWire {
     pub(crate) fn validate(&self) -> Result<(), FleetContractError> {
-        validate_schema("follow family promotion", self.schema_version)?;
+        validate_schema("follow agent session promotion", self.schema_version)?;
         self.from.validate()?;
         self.to.validate()?;
-        if self.from.family_id.is_some() {
+        if self.from.agent_session_id.is_some() {
             return Err(FleetContractError::Validation(
-                "follow family promotion source must be a singleton locator"
+                "follow agent session promotion source must be a singleton locator"
                     .to_string(),
             ));
         }
-        if self.to.family_id.is_none() {
+        if self.to.agent_session_id.is_none() {
             return Err(FleetContractError::Validation(
-                "follow family promotion target must include family_id"
+                "follow agent session promotion target must include family_id"
                     .to_string(),
             ));
         }
@@ -381,7 +380,7 @@ impl FollowFamilyPromotionWire {
             || self.from.agent_id != self.to.agent_id
         {
             return Err(FleetContractError::Validation(
-                "follow family promotion must keep origin, project, and agent_id"
+                "follow agent session promotion must keep origin, project, and agent_id"
                     .to_string(),
             ));
         }
@@ -481,7 +480,7 @@ fn follow_record_prefer_existing(
 fn apply_follow_promotion(
     records: &mut BTreeMap<String, FollowRecordWire>,
     tombstones: &BTreeMap<String, FollowTombstoneWire>,
-    promotion: &FollowFamilyPromotionWire,
+    promotion: &FollowAgentSessionPromotionWire,
     now_unix: f64,
     diagnostics: &mut Vec<FollowDiagnosticWire>,
 ) -> Result<(), FleetContractError> {
@@ -513,7 +512,7 @@ fn apply_follow_promotion(
             diagnostics.push(follow_diagnostic(
                 FollowDiagnosticSeverityWire::Info,
                 "follow_promotion_tombstoned",
-                "explicit unfollow tombstone suppressed family promotion",
+                "explicit unfollow tombstone suppressed agent session promotion",
                 Some(to_logical_key.clone()),
             )?);
             continue;

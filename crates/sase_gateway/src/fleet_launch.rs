@@ -405,7 +405,7 @@ fn launch_primary_logical_locator(
             project_id: project_id.to_string(),
         },
         agent_id,
-        family_id: None,
+        agent_session_id: None,
     })
 }
 

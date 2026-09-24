@@ -780,7 +780,12 @@ pub(crate) fn mutation_result_locator(
         schema_version: sase_core::FLEET_CONTRACT_SCHEMA_VERSION,
         project: payload.intent.target.logical.project.clone(),
         agent_id: agent_id.to_string(),
-        family_id: payload.intent.target.logical.family_id.clone(),
+        agent_session_id: payload
+            .intent
+            .target
+            .logical
+            .agent_session_id
+            .clone(),
     })
 }
 

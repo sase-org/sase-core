@@ -11,10 +11,10 @@ use super::locators::instance_key_unchecked;
 use super::locators::logical_key_unchecked;
 use super::locators::AgentInstanceLocatorWire;
 use super::locators::LogicalAgentLocatorWire;
+use super::projection::agent_session_role_for_projection;
 use super::projection::bucket_for_lifecycle;
 use super::projection::content_metadata;
 use super::projection::current_instance_locator_schema;
-use super::projection::family_role_for_projection;
 use super::projection::first_non_empty;
 use super::projection::fleet_queue_weight_is_valid;
 use super::projection::intent_for_record;
@@ -31,7 +31,7 @@ use super::projection::terminal_lifecycle;
 use super::projection::validate_projection_request;
 use super::status::default_row_kind;
 use super::status::ConnectionHealthWire;
-use super::status::FleetFamilyRoleWire;
+use super::status::FleetAgentSessionRoleWire;
 use super::status::FleetLifecycleWire;
 use super::status::FleetRowKindWire;
 use super::status::FleetStatusBucketWire;
@@ -69,8 +69,8 @@ pub struct OwnerResolutionFactsWire {
     pub run_started_at_unix: Option<f64>,
     #[serde(default)]
     pub stopped_at_unix: Option<f64>,
-    #[serde(default)]
-    pub family_id: Option<String>,
+    #[serde(default, rename = "family_id", alias = "agent_session_id")]
+    pub agent_session_id: Option<String>,
     #[serde(default)]
     pub parent_timestamp: Option<String>,
     #[serde(default)]
@@ -111,7 +111,8 @@ pub struct HumanDisplayLabelsWire {
     pub schema_version: u32,
     pub project_label: String,
     pub agent_label: Option<String>,
-    pub family_label: Option<String>,
+    #[serde(rename = "family_label", alias = "agent_session_label")]
+    pub agent_session_label: Option<String>,
     pub owner_label: Option<String>,
     pub alias: Option<String>,
 }
@@ -142,9 +143,10 @@ pub struct ResolvedAgentSummaryWire {
     pub logical_key: String,
     pub exact_key: Option<String>,
     pub row_kind: FleetRowKindWire,
-    pub family_role: FleetFamilyRoleWire,
-    /// Parent's record identity, when this row is a tracked family member.
-    /// `None` for roots and rows with no tracked family lineage.
+    #[serde(rename = "family_role", alias = "agent_session_role")]
+    pub agent_session_role: FleetAgentSessionRoleWire,
+    /// Parent's record identity, when this row is a tracked agent session member.
+    /// `None` for roots and rows with no tracked agent session lineage.
     pub parent_timestamp: Option<String>,
     pub labels: HumanDisplayLabelsWire,
     pub project_name: String,
@@ -242,7 +244,7 @@ pub fn project_resolved_agent_summary(
     ) = queue_weight_for_record(&request.record);
     let (queue_capacity, queue_capacity_explicit) =
         queue_capacity_for_record(&request.record);
-    let family = meta
+    let agent_session = meta
         .and_then(|value| value.agent_session_shell.as_ref())
         .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()));
     let parent_timestamp = facts.parent_timestamp.clone().or_else(|| {
@@ -254,12 +256,12 @@ pub fn project_resolved_agent_summary(
             .map(str::to_string)
         })
     });
-    let family_role = family_role_for_projection(
+    let agent_session_role = agent_session_role_for_projection(
         facts.row_kind,
         lifecycle,
         facts.liveness,
         parent_timestamp.is_some()
-            || crate::fleet_family::record_is_concrete_family_shell(
+            || crate::fleet_agent_session::record_is_concrete_agent_session_shell(
                 &request.record,
             ),
     );
@@ -273,12 +275,12 @@ pub fn project_resolved_agent_summary(
         agent_label: first_non_empty([
             meta.and_then(|value| value.name.as_deref()),
             done.and_then(|value| value.name.as_deref()),
-            family.and_then(|value| value.label.as_deref()),
+            agent_session.and_then(|value| value.label.as_deref()),
         ])
         .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
-        family_label: first_non_empty([
+        agent_session_label: first_non_empty([
             meta.and_then(|value| value.agent_session.as_deref()),
-            family.and_then(|value| value.label.as_deref()),
+            agent_session.and_then(|value| value.label.as_deref()),
         ])
         .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
         owner_label: None,
@@ -291,7 +293,7 @@ pub fn project_resolved_agent_summary(
         logical_key,
         exact_key,
         row_kind: facts.row_kind,
-        family_role,
+        agent_session_role,
         parent_timestamp,
         labels,
         project_name: trim_to_limit(
@@ -436,8 +438,8 @@ pub fn validate_resolved_agent_summary(
         ("tribe", summary.tribe.as_deref()),
         ("labels.agent_label", summary.labels.agent_label.as_deref()),
         (
-            "labels.family_label",
-            summary.labels.family_label.as_deref(),
+            "labels.agent_session_label",
+            summary.labels.agent_session_label.as_deref(),
         ),
         ("labels.owner_label", summary.labels.owner_label.as_deref()),
         ("labels.alias", summary.labels.alias.as_deref()),
@@ -504,28 +506,29 @@ pub fn validate_resolved_agent_summary(
                 .to_string(),
         ));
     }
-    let family_role_matches_row_kind = match summary.row_kind {
+    let agent_session_role_matches_row_kind = match summary.row_kind {
         FleetRowKindWire::Proc => {
-            summary.family_role == FleetFamilyRoleWire::Proc
+            summary.agent_session_role == FleetAgentSessionRoleWire::Proc
         }
         FleetRowKindWire::Monitor => {
-            summary.family_role == FleetFamilyRoleWire::Monitor
+            summary.agent_session_role == FleetAgentSessionRoleWire::Monitor
         }
         FleetRowKindWire::Gate => {
-            summary.family_role == FleetFamilyRoleWire::Gate
+            summary.agent_session_role == FleetAgentSessionRoleWire::Gate
         }
         FleetRowKindWire::AgentShell
         | FleetRowKindWire::ContainerHeader
         | FleetRowKindWire::HistoricalShell => matches!(
-            summary.family_role,
-            FleetFamilyRoleWire::Root
-                | FleetFamilyRoleWire::Member
-                | FleetFamilyRoleWire::HistoricalShell
+            summary.agent_session_role,
+            FleetAgentSessionRoleWire::Root
+                | FleetAgentSessionRoleWire::Member
+                | FleetAgentSessionRoleWire::HistoricalShell
         ),
     };
-    if !family_role_matches_row_kind {
+    if !agent_session_role_matches_row_kind {
         return Err(FleetContractError::Validation(
-            "summary family_role is inconsistent with row_kind".to_string(),
+            "summary agent session role is inconsistent with row_kind"
+                .to_string(),
         ));
     }
     Ok(summary.clone())

@@ -1532,7 +1532,7 @@ mod tests {
                 project_id: "project-1".to_string(),
             },
             agent_id: agent.to_string(),
-            family_id: None,
+            agent_session_id: None,
         }
     }
 

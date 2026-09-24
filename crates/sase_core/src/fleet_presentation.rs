@@ -55,32 +55,36 @@ pub struct FleetPresentationCandidateWire {
     /// demoted dead-active record ranks and windows the same way as a
     /// genuinely completed one.
     pub completion_time_unix: f64,
-    /// Whether this candidate's family root is a dismissed identity,
+    /// Whether this candidate's agent session root is a dismissed identity,
     /// resolved by the caller through the bounded core index lineage API.
     /// A resolved owner dismissal excludes the candidate regardless of
     /// protection or apparent liveness.
-    pub family_root_dismissed: bool,
-    /// Whether this candidate is a concrete family shell rather than a
-    /// family root. Live and unknown members stay current. Pending
+    #[serde(
+        rename = "family_root_dismissed",
+        alias = "agent_session_root_dismissed"
+    )]
+    pub agent_session_root_dismissed: bool,
+    /// Whether this candidate is a concrete agent session shell rather than a
+    /// agent session root. Live and unknown members stay current. Pending
     /// (protected) dead members stay current. Other dead members of a
-    /// presented family are served in the bounded terminal window so the
+    /// presented agent sessions are served in the bounded terminal window so the
     /// viewer can nest them.
-    #[serde(default)]
-    pub family_member: bool,
-    /// Grouping key for "currently presented family". A family is
+    #[serde(default, rename = "family_member", alias = "agent_session_member")]
+    pub agent_session_member: bool,
+    /// Grouping key for "currently presented agent session". An agent session is
     /// presented when a root or a live/unknown/pending member is already
     /// current, or a non-member terminal or an anchored terminal shell of
     /// the same key is inside the recent window.
-    #[serde(default)]
-    pub family_key: Option<String>,
+    #[serde(default, rename = "family_key", alias = "agent_session_key")]
+    pub agent_session_key: Option<String>,
     /// Whether this concrete shell carries no tracked parent, making it the
-    /// family's own origin record. Modern plan-chain families have no
-    /// separate root record: the `--plan` shell is the family's first
+    /// agent session's own origin record. Modern plan-chain agent sessions have no
+    /// separate root record: the `--plan` shell is the agent session's first
     /// record and every later shell points back at it. A terminal anchor
-    /// inside the recent window presents its family; a shell whose parent
+    /// inside the recent window presents its agent session; a shell whose parent
     /// no record supplies is an orphan and never does.
-    #[serde(default)]
-    pub family_anchor: bool,
+    #[serde(default, rename = "family_anchor", alias = "agent_session_anchor")]
+    pub agent_session_anchor: bool,
     /// Owner observation that the recorded PID is live but is not this
     /// agent (wrong command line or claim/marker mismatch). Such a row is
     /// excluded from presentation and history rather than demoted into
@@ -133,7 +137,7 @@ pub fn decide_fleet_presentation(
     let mut terminal_candidates: Vec<&FleetPresentationCandidateWire> =
         Vec::new();
     let mut excluded = Vec::new();
-    let mut presented_families = BTreeSet::new();
+    let mut presented_agent_sessions = BTreeSet::new();
 
     for candidate in &request.candidates {
         validate_schema(
@@ -150,7 +154,7 @@ pub fn decide_fleet_presentation(
             "completion_time_unix",
             candidate.completion_time_unix,
         )?;
-        if candidate.family_root_dismissed
+        if candidate.agent_session_root_dismissed
             || candidate.process_identity_mismatch
             || !candidate.lifecycle_evidence
         {
@@ -161,16 +165,22 @@ pub fn decide_fleet_presentation(
             candidate.liveness,
             OwnerLivenessWire::Alive | OwnerLivenessWire::Unknown
         ) {
-            mark_presented_family(&mut presented_families, candidate);
+            mark_presented_agent_session(
+                &mut presented_agent_sessions,
+                candidate,
+            );
             current.push(candidate.identity.clone());
             continue;
         }
         // Liveness is definitively `Dead` or `NotProcess`. A pending
-        // family shell whose creator PID is dead is not obsolete: keep
+        // agent session shell whose creator PID is dead is not obsolete: keep
         // it current. Standalone protected leftovers still take the
         // bounded terminal path.
-        if candidate.family_member && candidate.protected {
-            mark_presented_family(&mut presented_families, candidate);
+        if candidate.agent_session_member && candidate.protected {
+            mark_presented_agent_session(
+                &mut presented_agent_sessions,
+                candidate,
+            );
             current.push(candidate.identity.clone());
             continue;
         }
@@ -178,23 +188,26 @@ pub fn decide_fleet_presentation(
     }
 
     // A non-member terminal, or an anchored shell that stands in for the
-    // root of a root-less plan-chain family, presents its family while it is
+    // root of a root-less plan-chain agent session, presents its agent session while it is
     // inside the recent window. Unanchored members never do: their parent is
-    // missing, so they are orphans of a family nothing else vouches for.
+    // missing, so they are orphans of an agent session nothing else vouches for.
     for candidate in &terminal_candidates {
-        if candidate.family_member && !candidate.family_anchor {
+        if candidate.agent_session_member && !candidate.agent_session_anchor {
             continue;
         }
         let age = request.now_unix - candidate.completion_time_unix;
         if age <= FLEET_PRESENTATION_RECENT_TERMINAL_WINDOW_SECONDS {
-            mark_presented_family(&mut presented_families, candidate);
+            mark_presented_agent_session(
+                &mut presented_agent_sessions,
+                candidate,
+            );
         }
     }
 
     let mut ranked: Vec<&FleetPresentationCandidateWire> = Vec::new();
     for candidate in terminal_candidates {
-        if candidate.family_member
-            && !family_is_presented(&presented_families, candidate)
+        if candidate.agent_session_member
+            && !agent_session_is_presented(&presented_agent_sessions, candidate)
         {
             excluded.push(candidate.identity.clone());
             continue;
@@ -235,12 +248,12 @@ pub fn decide_fleet_presentation(
     })
 }
 
-fn mark_presented_family(
+fn mark_presented_agent_session(
     presented: &mut BTreeSet<String>,
     candidate: &FleetPresentationCandidateWire,
 ) {
     if let Some(key) = candidate
-        .family_key
+        .agent_session_key
         .as_deref()
         .filter(|value| !value.is_empty())
     {
@@ -248,12 +261,12 @@ fn mark_presented_family(
     }
 }
 
-fn family_is_presented(
+fn agent_session_is_presented(
     presented: &BTreeSet<String>,
     candidate: &FleetPresentationCandidateWire,
 ) -> bool {
     candidate
-        .family_key
+        .agent_session_key
         .as_deref()
         .is_some_and(|key| !key.is_empty() && presented.contains(key))
 }
@@ -269,7 +282,7 @@ mod tests {
         liveness: OwnerLivenessWire,
         protected: bool,
         completion_time_unix: f64,
-        family_root_dismissed: bool,
+        agent_session_root_dismissed: bool,
     ) -> FleetPresentationCandidateWire {
         FleetPresentationCandidateWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -277,10 +290,10 @@ mod tests {
             liveness,
             protected,
             completion_time_unix,
-            family_root_dismissed,
-            family_member: false,
-            family_key: None,
-            family_anchor: false,
+            agent_session_root_dismissed,
+            agent_session_member: false,
+            agent_session_key: None,
+            agent_session_anchor: false,
             process_identity_mismatch: false,
             lifecycle_evidence: true,
         }
@@ -291,7 +304,7 @@ mod tests {
         liveness: OwnerLivenessWire,
         protected: bool,
         completion_time_unix: f64,
-        family_root_dismissed: bool,
+        agent_session_root_dismissed: bool,
     ) -> FleetPresentationCandidateWire {
         FleetPresentationCandidateWire {
             process_identity_mismatch: true,
@@ -300,20 +313,20 @@ mod tests {
                 liveness,
                 protected,
                 completion_time_unix,
-                family_root_dismissed,
+                agent_session_root_dismissed,
             )
         }
     }
 
-    fn family_member_candidate(
+    fn agent_session_member_candidate(
         identity: &str,
         liveness: OwnerLivenessWire,
         protected: bool,
         completion_time_unix: f64,
     ) -> FleetPresentationCandidateWire {
         FleetPresentationCandidateWire {
-            family_member: true,
-            family_key: Some("lane".to_string()),
+            agent_session_member: true,
+            agent_session_key: Some("lane".to_string()),
             ..candidate(
                 identity,
                 liveness,
@@ -506,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_orphan_of_dismissed_family_is_excluded() {
+    fn dead_orphan_of_dismissed_agent_session_is_excluded() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
@@ -523,16 +536,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_family_member_of_visible_family_is_served_for_nesting() {
+    fn terminal_agent_session_member_of_visible_agent_session_is_served_for_nesting(
+    ) {
         let now = 1_000_000.0;
         let mut root =
             candidate("root", OwnerLivenessWire::Dead, false, now - DAY, false);
-        root.family_key = Some("lane".to_string());
+        root.agent_session_key = Some("lane".to_string());
         let decision = decide(
             now,
             vec![
                 root,
-                family_member_candidate(
+                agent_session_member_candidate(
                     "root--gate",
                     OwnerLivenessWire::Dead,
                     false,
@@ -546,18 +560,18 @@ mod tests {
     }
 
     #[test]
-    fn live_and_unknown_family_members_remain_current() {
+    fn live_and_unknown_agent_session_members_remain_current() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
             vec![
-                family_member_candidate(
+                agent_session_member_candidate(
                     "active-member",
                     OwnerLivenessWire::Alive,
                     false,
                     now - DAY,
                 ),
-                family_member_candidate(
+                agent_session_member_candidate(
                     "unknown-member",
                     OwnerLivenessWire::Unknown,
                     false,
@@ -571,11 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_dead_creator_family_member_stays_current() {
+    fn pending_dead_creator_agent_session_member_stays_current() {
         let now = 1_000_000.0;
         let decision = decide(
             now,
-            vec![family_member_candidate(
+            vec![agent_session_member_candidate(
                 "waiting-member",
                 OwnerLivenessWire::Dead,
                 true,
@@ -588,26 +602,26 @@ mod tests {
     }
 
     #[test]
-    fn root_less_terminal_family_is_served_whole_through_its_anchor() {
+    fn root_less_terminal_agent_session_is_served_whole_through_its_anchor() {
         let now = 1_000_000.0;
-        let mut plan = family_member_candidate(
+        let mut plan = agent_session_member_candidate(
             "shells--plan",
             OwnerLivenessWire::Dead,
             false,
             now - DAY,
         );
-        plan.family_anchor = true;
+        plan.agent_session_anchor = true;
         let decision = decide(
             now,
             vec![
                 plan,
-                family_member_candidate(
+                agent_session_member_candidate(
                     "shells--mon",
                     OwnerLivenessWire::Dead,
                     false,
                     now - (DAY / 2.0),
                 ),
-                family_member_candidate(
+                agent_session_member_candidate(
                     "shells--gate",
                     OwnerLivenessWire::Dead,
                     false,
@@ -626,18 +640,18 @@ mod tests {
     #[test]
     fn anchor_outside_the_window_does_not_present_recent_members() {
         let now = 1_000_000.0;
-        let mut plan = family_member_candidate(
+        let mut plan = agent_session_member_candidate(
             "old--plan",
             OwnerLivenessWire::Dead,
             false,
             now - (8.0 * DAY),
         );
-        plan.family_anchor = true;
+        plan.agent_session_anchor = true;
         let decision = decide(
             now,
             vec![
                 plan,
-                family_member_candidate(
+                agent_session_member_candidate(
                     "old--gate",
                     OwnerLivenessWire::Dead,
                     false,
@@ -656,7 +670,7 @@ mod tests {
             now,
             (0..3)
                 .map(|index| {
-                    family_member_candidate(
+                    agent_session_member_candidate(
                         &format!("orphan--gate-{index}"),
                         OwnerLivenessWire::Dead,
                         false,

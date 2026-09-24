@@ -257,20 +257,37 @@ fn py_fleet_reconcile_follow_records<'py>(
     fleet_wire_to_py(py, &result)
 }
 
+fn fleet_followed_batch_agent_session_promotions_impl<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FollowedBatchAgentSessionPromotionRequestWire =
+        fleet_wire_from_pydict(
+            request,
+            "followed-batch agent session promotion request",
+        )?;
+    let result = core_followed_batch_agent_session_promotions(&request)
+        .map_err(fleet_contract_error_to_pyerr)?;
+    fleet_wire_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "fleet_followed_batch_agent_session_promotions")]
+fn py_fleet_followed_batch_agent_session_promotions<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    fleet_followed_batch_agent_session_promotions_impl(py, request)
+}
+
+// legacy binding name; removed in core-contract
 #[pyfunction]
 #[pyo3(name = "fleet_followed_batch_family_promotions")]
 fn py_fleet_followed_batch_family_promotions<'py>(
     py: Python<'py>,
     request: &Bound<'py, PyDict>,
 ) -> PyResult<PyObject> {
-    let request: FollowedBatchFamilyPromotionRequestWire =
-        fleet_wire_from_pydict(
-            request,
-            "followed-batch family promotion request",
-        )?;
-    let result = core_followed_batch_family_promotions(&request)
-        .map_err(fleet_contract_error_to_pyerr)?;
-    fleet_wire_to_py(py, &result)
+    fleet_followed_batch_agent_session_promotions_impl(py, request)
 }
 
 #[pyfunction]
@@ -694,6 +711,10 @@ pub(crate) fn register_fleet(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_count_logical_agents, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_follow_record_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_fleet_reconcile_follow_records, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_fleet_followed_batch_agent_session_promotions,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_followed_batch_family_promotions,
         m

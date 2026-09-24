@@ -1,4 +1,4 @@
-//! Record-resolution and presentation tests: family selection,
+//! Record-resolution and presentation tests: agent session selection,
 //! owner facts, and served-set membership.
 
 use std::{fs, sync::Arc};
@@ -77,7 +77,7 @@ async fn dead_active_leftovers_are_demoted_and_window_bounded() {
 }
 
 #[tokio::test]
-async fn orphan_terminal_family_members_are_hidden_from_presentation() {
+async fn orphan_terminal_agent_session_members_are_hidden_from_presentation() {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let projects = home.join("projects");
@@ -90,7 +90,7 @@ async fn orphan_terminal_family_members_are_hidden_from_presentation() {
         let timestamp = (now - chrono::Duration::minutes(index + 1))
             .format("%Y%m%d%H%M%S")
             .to_string();
-        seed_dead_family_agent(
+        seed_dead_agent_session_agent(
             &projects,
             &timestamp,
             &format!("lane--gate-{index}"),
@@ -103,7 +103,7 @@ async fn orphan_terminal_family_members_are_hidden_from_presentation() {
     let presentation = service.catalog(catalog_query()).await.unwrap();
     assert!(
         presentation.page.rows.is_empty(),
-        "orphan terminal members must not synthesize a family row: {:?}",
+        "orphan terminal members must not synthesize an agent session row: {:?}",
         presentation.page.rows
     );
 
@@ -115,15 +115,13 @@ async fn orphan_terminal_family_members_are_hidden_from_presentation() {
         history.page.total_matching_rows, 7,
         "explicit history keeps terminal member records reachable"
     );
-    assert!(history
-        .page
-        .rows
-        .iter()
-        .all(|row| { row.labels.family_label.as_deref() == Some("lane") }));
+    assert!(history.page.rows.iter().all(|row| {
+        row.labels.agent_session_label.as_deref() == Some("lane")
+    }));
 }
 
 #[tokio::test]
-async fn terminal_family_root_represents_completed_members() {
+async fn terminal_agent_session_root_represents_completed_members() {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let projects = home.join("projects");
@@ -133,7 +131,7 @@ async fn terminal_family_root_represents_completed_members() {
     let member_finished = now - chrono::Duration::minutes(5);
     let root_ts = root_finished.format("%Y%m%d%H%M%S").to_string();
     let member_ts = member_finished.format("%Y%m%d%H%M%S").to_string();
-    seed_done_family_agent(
+    seed_done_agent_session_agent(
         &projects,
         &root_ts,
         "lane",
@@ -141,7 +139,7 @@ async fn terminal_family_root_represents_completed_members() {
         None,
         root_finished.timestamp() as f64,
     );
-    seed_done_family_agent(
+    seed_done_agent_session_agent(
         &projects,
         &member_ts,
         "lane--gate",
@@ -167,8 +165,8 @@ async fn terminal_family_root_represents_completed_members() {
         .find(|row| row.labels.agent_label.as_deref() == Some("lane--gate"))
         .unwrap();
     assert_ne!(
-        member.family_role,
-        sase_core::fleet_contract::FleetFamilyRoleWire::Root
+        member.agent_session_role,
+        sase_core::fleet_contract::FleetAgentSessionRoleWire::Root
     );
     assert_eq!(member.parent_timestamp.as_deref(), Some(root_ts.as_str()));
 
@@ -187,7 +185,7 @@ async fn terminal_family_root_represents_completed_members() {
 }
 
 #[tokio::test]
-async fn root_less_completed_plan_chain_family_is_presented_through_its_plan_shell(
+async fn root_less_completed_plan_chain_agent_session_is_presented_through_its_plan_shell(
 ) {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
@@ -201,8 +199,8 @@ async fn root_less_completed_plan_chain_family_is_presented_through_its_plan_she
     let gate_ts = gate_finished.format("%Y%m%d%H%M%S").to_string();
     let code_ts = code_finished.format("%Y%m%d%H%M%S").to_string();
     // Production shape: no separate root record. The plan shell is the
-    // family's first record (no parent) and later shells point at it.
-    seed_done_family_agent(
+    // agent session's first record (no parent) and later shells point at it.
+    seed_done_agent_session_agent(
         &projects,
         &plan_ts,
         "chain--plan",
@@ -210,7 +208,7 @@ async fn root_less_completed_plan_chain_family_is_presented_through_its_plan_she
         None,
         plan_finished.timestamp() as f64,
     );
-    seed_done_family_agent(
+    seed_done_agent_session_agent(
         &projects,
         &gate_ts,
         "chain--gate",
@@ -218,7 +216,7 @@ async fn root_less_completed_plan_chain_family_is_presented_through_its_plan_she
         Some(&plan_ts),
         gate_finished.timestamp() as f64,
     );
-    seed_done_family_agent(
+    seed_done_agent_session_agent(
         &projects,
         &code_ts,
         "chain--1",
@@ -252,7 +250,7 @@ async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
     let plan_ts = (now - chrono::Duration::minutes(3))
         .format("%Y%m%d%H%M%S")
         .to_string();
-    seed_alive_family_agent(&projects, &root_ts, "lane", "lane", None);
+    seed_alive_agent_session_agent(&projects, &root_ts, "lane", "lane", None);
     let plan_artifact = projects
         .join("proj")
         .join("artifacts")
@@ -264,7 +262,7 @@ async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
         json!({
             "name": "lane--plan",
             "agent_family": "lane",
-            "agent_family_role": "gate",
+            "agent_agent_session_role": "gate",
             "gate_id": "gate-1",
             "gate_state": "pending"
         }),
@@ -280,15 +278,19 @@ async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
         .find(|row| row.labels.agent_label.as_deref() == Some("lane--plan"))
         .expect("plan shell served for nesting");
     assert_ne!(
-        plan.family_role,
-        sase_core::fleet_contract::FleetFamilyRoleWire::Root
+        plan.agent_session_role,
+        sase_core::fleet_contract::FleetAgentSessionRoleWire::Root
     );
     assert_eq!(plan.parent_timestamp.as_deref(), Some(root_ts.as_str()));
-    assert_eq!(plan.logical_locator.family_id.as_deref(), Some("lane"));
+    assert_eq!(
+        plan.logical_locator.agent_session_id.as_deref(),
+        Some("lane")
+    );
 }
 
 #[tokio::test]
-async fn history_rows_inherit_owner_presentation_facts_from_family_root() {
+async fn history_rows_inherit_owner_presentation_facts_from_agent_session_root()
+{
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let projects = home.join("projects");
@@ -367,10 +369,13 @@ async fn history_rows_inherit_owner_presentation_facts_from_family_root() {
 
     assert_eq!(child.status, "CHILD-DONE");
     assert_eq!(
-        child.family_role,
-        sase_core::fleet_contract::FleetFamilyRoleWire::HistoricalShell
+        child.agent_session_role,
+        sase_core::fleet_contract::FleetAgentSessionRoleWire::HistoricalShell
     );
-    assert_eq!(child.logical_locator.family_id.as_deref(), Some("lane"));
+    assert_eq!(
+        child.logical_locator.agent_session_id.as_deref(),
+        Some("lane")
+    );
     assert_eq!(child.parent_timestamp.as_deref(), Some(root_ts.as_str()));
     assert_eq!(child.tribe.as_deref(), Some("review"));
     assert_eq!(child.clan_tribe.as_deref(), Some("parity"));
@@ -391,7 +396,7 @@ async fn active_and_protected_members_remain_visible_without_root() {
     let missing_root_ts = (now - chrono::Duration::minutes(30))
         .format("%Y%m%d%H%M%S")
         .to_string();
-    seed_alive_family_agent(
+    seed_alive_agent_session_agent(
         &projects,
         &(now - chrono::Duration::minutes(3))
             .format("%Y%m%d%H%M%S")
@@ -400,7 +405,7 @@ async fn active_and_protected_members_remain_visible_without_root() {
         "lane",
         Some(&missing_root_ts),
     );
-    seed_protected_family_agent(
+    seed_protected_agent_session_agent(
         &projects,
         &(now - chrono::Duration::minutes(2))
             .format("%Y%m%d%H%M%S")
@@ -410,7 +415,7 @@ async fn active_and_protected_members_remain_visible_without_root() {
         Some(&missing_root_ts),
         "waiting.json",
     );
-    seed_protected_family_agent(
+    seed_protected_agent_session_agent(
         &projects,
         &(now - chrono::Duration::minutes(1))
             .format("%Y%m%d%H%M%S")
@@ -565,7 +570,7 @@ async fn owner_served_set_matches_visible_identity_set() {
 }
 
 #[tokio::test]
-async fn dead_orphan_of_dismissed_family_is_excluded_from_catalog() {
+async fn dead_orphan_of_dismissed_agent_session_is_excluded_from_catalog() {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let projects = home.join("projects");
@@ -615,7 +620,7 @@ async fn dead_orphan_of_dismissed_family_is_excluded_from_catalog() {
     assert!(
         all.page.rows.is_empty(),
         "a dead root and its dead member must both be excluded once the \
-             family root is dismissed: {:?}",
+             agent session root is dismissed: {:?}",
         all.page.rows
     );
 }

@@ -2,7 +2,7 @@ use super::super::*;
 use super::support::*;
 
 #[test]
-fn follow_reconciliation_promotes_singleton_to_family_identity() {
+fn follow_reconciliation_promotes_singleton_to_agent_session_identity() {
     let from = singleton('a', "worker");
     let to = logical('a', "worker");
     let record = follow_record(
@@ -17,7 +17,7 @@ fn follow_reconciliation_promotes_singleton_to_family_identity() {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             records: vec![record],
             tombstones: Vec::new(),
-            promotions: vec![FollowFamilyPromotionWire {
+            promotions: vec![FollowAgentSessionPromotionWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 from,
                 to: to.clone(),
@@ -75,7 +75,7 @@ fn follow_tombstones_suppress_dispatch_recreation_and_activation() {
     }));
 
     let singleton = singleton('a', "worker");
-    let family = logical('a', "worker");
+    let agent_session = logical('a', "worker");
     let resurrected =
         reconcile_follow_records(&FollowReconciliationRequestWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -86,10 +86,10 @@ fn follow_tombstones_suppress_dispatch_recreation_and_activation() {
                 20.0,
             )],
             tombstones: vec![tombstone(singleton.clone(), 21.0)],
-            promotions: vec![FollowFamilyPromotionWire {
+            promotions: vec![FollowAgentSessionPromotionWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 from: singleton,
-                to: family,
+                to: agent_session,
             }],
             activations: Vec::new(),
             now_unix: 22.0,

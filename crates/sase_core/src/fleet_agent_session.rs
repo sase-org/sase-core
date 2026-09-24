@@ -1,9 +1,9 @@
-//! Shared family-root versus concrete-shell classification.
+//! Shared agent session-root versus concrete-shell classification.
 //!
-//! Modern owner records often carry `family_id` / `family_shell` / a
+//! Modern owner records often carry `agent_session_id` / `agent_session_shell` / a
 //! plan-chain name suffix without `parent_timestamp`. A concrete `--plan`
-//! gate with `family_id` and a null parent is a nested shell, never a
-//! family root. Gateway presentation, catalog projection, and owner listing
+//! gate with `agent_session_id` and a null parent is a nested shell, never an
+//! agent session root. Gateway presentation, catalog projection, and owner listing
 //! must share this classifier.
 
 use crate::agent_scan::{
@@ -11,10 +11,10 @@ use crate::agent_scan::{
     DoneMarkerWire,
 };
 
-/// Kind of a concrete family shell, independent of whether a parent
+/// Kind of a concrete agent session shell, independent of whether a parent
 /// timestamp is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConcreteFamilyShellKind {
+pub enum ConcreteAgentSessionShellKind {
     Plan,
     Code,
     Monitor,
@@ -23,7 +23,7 @@ pub enum ConcreteFamilyShellKind {
     Member,
 }
 
-impl ConcreteFamilyShellKind {
+impl ConcreteAgentSessionShellKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
@@ -48,57 +48,57 @@ pub fn tracked_parent_timestamp(
     })
 }
 
-/// Family id used to group a root with its shells.
-pub fn family_id_for_record(
+/// Agent session id used to group a root with its shells.
+pub fn agent_session_id_for_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
     let meta = record.agent_meta.as_ref();
     first_non_empty([
         meta.and_then(|value| value.agent_session.as_deref()),
-        family_shell(meta, record.done.as_ref())
+        agent_session_shell(meta, record.done.as_ref())
             .and_then(|value| value.label.as_deref()),
     ])
     .map(str::to_string)
 }
 
-/// Stable grouping key for presentation "currently presented family".
-pub fn family_key_for_record(
+/// Stable grouping key for presentation "currently presented agent session".
+pub fn agent_session_key_for_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
-    if let Some(family_id) = family_id_for_record(record) {
-        return Some(family_id);
+    if let Some(agent_session_id) = agent_session_id_for_record(record) {
+        return Some(agent_session_id);
     }
     if let Some(parent) = tracked_parent_timestamp(record) {
         return Some(parent.to_string());
     }
     let name = record_name(record)?;
-    if let Some(base) = family_base_from_name(name) {
+    if let Some(base) = agent_session_base_from_name(name) {
         return Some(base.to_string());
     }
     None
 }
 
 /// Whether this record is a concrete plan/code/monitor/gate/proc/member
-/// shell rather than a family root or standalone agent.
-pub fn record_is_concrete_family_shell(
+/// shell rather than an agent session root or standalone agent.
+pub fn record_is_concrete_agent_session_shell(
     record: &AgentArtifactRecordWire,
 ) -> bool {
-    concrete_family_shell_kind(record).is_some()
+    concrete_agent_session_shell_kind(record).is_some()
 }
 
-/// Classify a record as a concrete family shell from modern facts, in
-/// this order: `family_shell.kind`, `agent_family_role` / `role_suffix`,
-/// plan-chain name suffix, then `parent_timestamp`. `family_id` alone
+/// Classify a record as a concrete agent session shell from modern facts, in
+/// this order: `agent_session_shell.kind`, `agent_session_role` / `role_suffix`,
+/// plan-chain name suffix, then `parent_timestamp`. `agent_session_id` alone
 /// does not make a root into a shell.
-pub fn concrete_family_shell_kind(
+pub fn concrete_agent_session_shell_kind(
     record: &AgentArtifactRecordWire,
-) -> Option<ConcreteFamilyShellKind> {
+) -> Option<ConcreteAgentSessionShellKind> {
     let meta = record.agent_meta.as_ref();
     if meta.and_then(|value| value.proc_id.as_deref()).is_some() {
-        return Some(ConcreteFamilyShellKind::Proc);
+        return Some(ConcreteAgentSessionShellKind::Proc);
     }
-    if let Some(kind) = family_shell(meta, record.done.as_ref())
-        .and_then(kind_from_family_shell)
+    if let Some(kind) = agent_session_shell(meta, record.done.as_ref())
+        .and_then(kind_from_agent_session_shell)
     {
         return Some(kind);
     }
@@ -114,12 +114,12 @@ pub fn concrete_family_shell_kind(
         return Some(kind);
     }
     if tracked_parent_timestamp(record).is_some() {
-        return Some(ConcreteFamilyShellKind::Member);
+        return Some(ConcreteAgentSessionShellKind::Member);
     }
     None
 }
 
-pub fn family_shell<'a>(
+pub fn agent_session_shell<'a>(
     meta: Option<&'a AgentMetaWire>,
     done: Option<&'a DoneMarkerWire>,
 ) -> Option<&'a AgentSessionShellWire> {
@@ -127,41 +127,41 @@ pub fn family_shell<'a>(
         .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()))
 }
 
-fn kind_from_family_shell(
+fn kind_from_agent_session_shell(
     shell: &AgentSessionShellWire,
-) -> Option<ConcreteFamilyShellKind> {
+) -> Option<ConcreteAgentSessionShellKind> {
     match shell.kind.trim().to_ascii_lowercase().as_str() {
-        "monitor" | "mon" => Some(ConcreteFamilyShellKind::Monitor),
-        "gate" => Some(ConcreteFamilyShellKind::Gate),
-        "proc" => Some(ConcreteFamilyShellKind::Proc),
-        "plan" => Some(ConcreteFamilyShellKind::Plan),
-        "code" => Some(ConcreteFamilyShellKind::Code),
+        "monitor" | "mon" => Some(ConcreteAgentSessionShellKind::Monitor),
+        "gate" => Some(ConcreteAgentSessionShellKind::Gate),
+        "proc" => Some(ConcreteAgentSessionShellKind::Proc),
+        "plan" => Some(ConcreteAgentSessionShellKind::Plan),
+        "code" => Some(ConcreteAgentSessionShellKind::Code),
         _ => None,
     }
 }
 
-fn kind_from_role(raw: Option<&str>) -> Option<ConcreteFamilyShellKind> {
+fn kind_from_role(raw: Option<&str>) -> Option<ConcreteAgentSessionShellKind> {
     let value = raw?.trim().trim_start_matches('-').to_ascii_lowercase();
     match value.as_str() {
-        "plan" => Some(ConcreteFamilyShellKind::Plan),
-        "code" => Some(ConcreteFamilyShellKind::Code),
-        "monitor" | "mon" => Some(ConcreteFamilyShellKind::Monitor),
-        "gate" => Some(ConcreteFamilyShellKind::Gate),
-        "proc" => Some(ConcreteFamilyShellKind::Proc),
-        "member" => Some(ConcreteFamilyShellKind::Member),
+        "plan" => Some(ConcreteAgentSessionShellKind::Plan),
+        "code" => Some(ConcreteAgentSessionShellKind::Code),
+        "monitor" | "mon" => Some(ConcreteAgentSessionShellKind::Monitor),
+        "gate" => Some(ConcreteAgentSessionShellKind::Gate),
+        "proc" => Some(ConcreteAgentSessionShellKind::Proc),
+        "member" => Some(ConcreteAgentSessionShellKind::Member),
         "root" | "epic" | "commit" | "feedback" => None,
         _ => None,
     }
 }
 
-fn kind_from_name(name: &str) -> Option<ConcreteFamilyShellKind> {
+fn kind_from_name(name: &str) -> Option<ConcreteAgentSessionShellKind> {
     let lower = name.to_ascii_lowercase();
     for (suffix, kind) in [
-        ("--plan", ConcreteFamilyShellKind::Plan),
-        ("--code", ConcreteFamilyShellKind::Code),
-        ("--gate", ConcreteFamilyShellKind::Gate),
-        ("--mon", ConcreteFamilyShellKind::Monitor),
-        ("--proc", ConcreteFamilyShellKind::Proc),
+        ("--plan", ConcreteAgentSessionShellKind::Plan),
+        ("--code", ConcreteAgentSessionShellKind::Code),
+        ("--gate", ConcreteAgentSessionShellKind::Gate),
+        ("--mon", ConcreteAgentSessionShellKind::Monitor),
+        ("--proc", ConcreteAgentSessionShellKind::Proc),
     ] {
         if name_has_plan_chain_suffix(&lower, suffix) {
             return Some(kind);
@@ -181,7 +181,7 @@ fn name_has_plan_chain_suffix(lower_name: &str, suffix: &str) -> bool {
             .all(|character| character == '-' || character.is_ascii_digit())
 }
 
-fn family_base_from_name(name: &str) -> Option<&str> {
+fn agent_session_base_from_name(name: &str) -> Option<&str> {
     let lower = name.to_ascii_lowercase();
     for suffix in ["--plan", "--code", "--gate", "--mon", "--proc"] {
         if let Some(index) = lower.rfind(suffix) {
@@ -258,41 +258,47 @@ mod tests {
                 ..AgentSessionShellWire::default()
             });
         assert_eq!(
-            concrete_family_shell_kind(&record),
-            Some(ConcreteFamilyShellKind::Gate)
+            concrete_agent_session_shell_kind(&record),
+            Some(ConcreteAgentSessionShellKind::Gate)
         );
         assert!(tracked_parent_timestamp(&record).is_none());
-        assert_eq!(family_key_for_record(&record).as_deref(), Some("lane"));
+        assert_eq!(
+            agent_session_key_for_record(&record).as_deref(),
+            Some("lane")
+        );
     }
 
     #[test]
-    fn family_id_alone_does_not_make_a_root_a_shell() {
+    fn agent_session_id_alone_does_not_make_a_root_a_shell() {
         let mut record = record_named("lane");
         record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
         record.agent_meta.as_mut().unwrap().agent_session_role =
             Some("root".to_string());
-        assert_eq!(concrete_family_shell_kind(&record), None);
-        assert_eq!(family_key_for_record(&record).as_deref(), Some("lane"));
+        assert_eq!(concrete_agent_session_shell_kind(&record), None);
+        assert_eq!(
+            agent_session_key_for_record(&record).as_deref(),
+            Some("lane")
+        );
     }
 
     #[test]
     fn name_suffix_classifies_code_and_monitor_shells() {
         assert_eq!(
-            concrete_family_shell_kind(&record_named("0k--code")),
-            Some(ConcreteFamilyShellKind::Code)
+            concrete_agent_session_shell_kind(&record_named("0k--code")),
+            Some(ConcreteAgentSessionShellKind::Code)
         );
         assert_eq!(
-            concrete_family_shell_kind(&record_named("lane--mon")),
-            Some(ConcreteFamilyShellKind::Monitor)
+            concrete_agent_session_shell_kind(&record_named("lane--mon")),
+            Some(ConcreteAgentSessionShellKind::Monitor)
         );
         assert_eq!(
-            concrete_family_shell_kind(&record_named("lane--gate-0")),
-            Some(ConcreteFamilyShellKind::Gate)
+            concrete_agent_session_shell_kind(&record_named("lane--gate-0")),
+            Some(ConcreteAgentSessionShellKind::Gate)
         );
         assert_eq!(
-            concrete_family_shell_kind(&record_named("lane--proc")),
-            Some(ConcreteFamilyShellKind::Proc)
+            concrete_agent_session_shell_kind(&record_named("lane--proc")),
+            Some(ConcreteAgentSessionShellKind::Proc)
         );
     }
 
@@ -302,8 +308,8 @@ mod tests {
         record.agent_meta.as_mut().unwrap().parent_timestamp =
             Some("20260919100000".to_string());
         assert_eq!(
-            concrete_family_shell_kind(&record),
-            Some(ConcreteFamilyShellKind::Member)
+            concrete_agent_session_shell_kind(&record),
+            Some(ConcreteAgentSessionShellKind::Member)
         );
     }
 }

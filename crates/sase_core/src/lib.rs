@@ -55,10 +55,10 @@ pub mod external_pr;
 pub mod feature_flag_state;
 pub mod fenced_code;
 pub mod finalizer;
+pub mod fleet_agent_session;
 pub mod fleet_attention;
 pub mod fleet_catalog;
 pub mod fleet_contract;
-pub mod fleet_family;
 pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod fleet_owner_facts;
@@ -900,6 +900,12 @@ pub use finalizer::{
     FinalizerSubmissionValidationWire, FinalizerTriggerKindWire,
     FINALIZER_WIRE_SCHEMA_VERSION,
 };
+pub use fleet_agent_session::{
+    agent_session_id_for_record, agent_session_key_for_record,
+    agent_session_shell, concrete_agent_session_shell_kind,
+    record_is_concrete_agent_session_shell, tracked_parent_timestamp,
+    ConcreteAgentSessionShellKind,
+};
 pub use fleet_attention::{
     decide_attention_notices, decide_fleet_attention_replay,
     evaluate_attention_precondition, fleet_attention_payload_fingerprint,
@@ -983,8 +989,8 @@ pub use fleet_contract::{
     FleetScopeCountsWire, FleetSnapshotFreshnessWire, FleetStatusBucketWire,
     FleetSummaryResponseWire, FocusFleetCountsRequestWire,
     FocusFleetCountsWire, FocusFleetFederationCountsRequestWire,
-    FollowActivationWire, FollowCreatedByWire, FollowDiagnosticSeverityWire,
-    FollowDiagnosticWire, FollowFamilyPromotionWire,
+    FollowActivationWire, FollowAgentSessionPromotionWire, FollowCreatedByWire,
+    FollowDiagnosticSeverityWire, FollowDiagnosticWire,
     FollowReconciliationRequestWire, FollowReconciliationWire,
     FollowRecordWire, FollowStateWire, FollowTombstoneWire,
     HumanDisplayLabelsWire, InstallationIdentityEnsureOutcomeWire,
@@ -1013,14 +1019,10 @@ pub use fleet_contract::{
     FLEET_READ_MAX_PROJECT_IDS, FLEET_READ_MAX_QUERY_BYTES,
     FLEET_READ_MAX_REPLAY_EVENTS,
 };
-pub use fleet_family::{
-    concrete_family_shell_kind, family_id_for_record, family_key_for_record,
-    family_shell, record_is_concrete_family_shell, tracked_parent_timestamp,
-    ConcreteFamilyShellKind,
-};
 pub use fleet_follow_promotion::{
-    followed_batch_family_promotions, FollowedBatchFamilyPromotionRequestWire,
-    FollowedBatchFamilyPromotionResultWire,
+    followed_batch_agent_session_promotions,
+    FollowedBatchAgentSessionPromotionRequestWire,
+    FollowedBatchAgentSessionPromotionResultWire,
 };
 pub use fleet_mutation::{
     decide_fleet_mutation_replay, evaluate_mutation_precondition,

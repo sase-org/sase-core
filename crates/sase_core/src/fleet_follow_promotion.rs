@@ -1,9 +1,9 @@
-//! Derive singleton-to-family follow promotions from followed-batch
+//! Derive singleton-to-agent-session follow promotions from followed-batch
 //! observations.
 //!
 //! Existing follow reconciliation applies caller-supplied promotions. This
 //! module is the shared derivation: active explicit singleton follows plus
-//! followed-batch locators in, validated [`FollowFamilyPromotionWire`] values
+//! followed-batch locators in, validated [`FollowAgentSessionPromotionWire`] values
 //! out. TUI projection and store persistence stay in the caller. Unfollow
 //! tombstones continue to win when the promotions are applied through
 //! [`crate::fleet_contract::reconcile_follow_records`].
@@ -13,16 +13,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::fleet_contract::{
-    follow_record_key, logical_locator_key, validate_schema,
-    FleetContractError, FollowCreatedByWire, FollowFamilyPromotionWire,
-    FollowRecordWire, FollowStateWire, LogicalAgentLocatorWire,
-    FLEET_CONTRACT_SCHEMA_VERSION,
+    canonical_logical_key, follow_record_key, logical_locator_key,
+    validate_schema, FleetContractError, FollowAgentSessionPromotionWire,
+    FollowCreatedByWire, FollowRecordWire, FollowStateWire,
+    LogicalAgentLocatorWire, FLEET_CONTRACT_SCHEMA_VERSION,
 };
 
-/// Request to derive family promotions from active follows and observations.
+/// Request to derive agent session promotions from active follows and observations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FollowedBatchFamilyPromotionRequestWire {
+pub struct FollowedBatchAgentSessionPromotionRequestWire {
     pub schema_version: u32,
     pub records: Vec<FollowRecordWire>,
     pub observations: Vec<LogicalAgentLocatorWire>,
@@ -31,29 +31,30 @@ pub struct FollowedBatchFamilyPromotionRequestWire {
 /// Validated promotions ready for follow reconciliation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FollowedBatchFamilyPromotionResultWire {
+pub struct FollowedBatchAgentSessionPromotionResultWire {
     pub schema_version: u32,
-    pub promotions: Vec<FollowFamilyPromotionWire>,
+    pub promotions: Vec<FollowAgentSessionPromotionWire>,
 }
 
 type PromotionIdentity = (String, String, String);
 
-/// Derive singleton-to-family promotions for explicit active follows.
+/// Derive singleton-to-agent-session promotions for explicit active follows.
 ///
 /// A promotion is emitted only when:
 /// - the source record is an explicit, active singleton
-/// - followed-batch observations contain exactly one family locator with the
+/// - followed-batch observations contain exactly one agent session locator with the
 ///   same origin, project, and agent
 /// - the source has not already been promoted in this request
-pub fn followed_batch_family_promotions(
-    request: &FollowedBatchFamilyPromotionRequestWire,
-) -> Result<FollowedBatchFamilyPromotionResultWire, FleetContractError> {
+pub fn followed_batch_agent_session_promotions(
+    request: &FollowedBatchAgentSessionPromotionRequestWire,
+) -> Result<FollowedBatchAgentSessionPromotionResultWire, FleetContractError> {
     validate_schema(
-        "followed-batch family promotion request",
+        "followed-batch agent session promotion request",
         request.schema_version,
     )?;
-    let family_locators = family_locators_by_identity(&request.observations)?;
-    if family_locators.is_empty() {
+    let agent_session_locators =
+        agent_session_locators_by_identity(&request.observations)?;
+    if agent_session_locators.is_empty() {
         return Ok(empty_result());
     }
 
@@ -61,23 +62,27 @@ pub fn followed_batch_family_promotions(
     let mut promoted_sources = BTreeSet::new();
     for record in &request.records {
         follow_record_key(record)?;
-        let Some(promotion) =
-            promotion_for_record(record, &family_locators, &promoted_sources)?
+        let Some(promotion) = promotion_for_record(
+            record,
+            &agent_session_locators,
+            &promoted_sources,
+        )?
         else {
             continue;
         };
-        let source_key = logical_locator_key(&promotion.from)?;
+        let source_key =
+            canonical_logical_key(&logical_locator_key(&promotion.from)?);
         promotions.push(promotion);
         promoted_sources.insert(source_key);
     }
-    Ok(FollowedBatchFamilyPromotionResultWire {
+    Ok(FollowedBatchAgentSessionPromotionResultWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         promotions,
     })
 }
 
-fn empty_result() -> FollowedBatchFamilyPromotionResultWire {
-    FollowedBatchFamilyPromotionResultWire {
+fn empty_result() -> FollowedBatchAgentSessionPromotionResultWire {
+    FollowedBatchAgentSessionPromotionResultWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         promotions: Vec::new(),
     }
@@ -85,20 +90,20 @@ fn empty_result() -> FollowedBatchFamilyPromotionResultWire {
 
 fn promotion_for_record(
     record: &FollowRecordWire,
-    family_locators: &BTreeMap<
+    agent_session_locators: &BTreeMap<
         PromotionIdentity,
         BTreeMap<String, LogicalAgentLocatorWire>,
     >,
     promoted_sources: &BTreeSet<String>,
-) -> Result<Option<FollowFamilyPromotionWire>, FleetContractError> {
+) -> Result<Option<FollowAgentSessionPromotionWire>, FleetContractError> {
     if record.created_by != FollowCreatedByWire::Explicit
         || record.state != FollowStateWire::Active
-        || record.logical_locator.family_id.is_some()
+        || record.logical_locator.agent_session_id.is_some()
     {
         return Ok(None);
     }
     let identity = promotion_identity(&record.logical_locator);
-    let Some(matches) = family_locators.get(&identity) else {
+    let Some(matches) = agent_session_locators.get(&identity) else {
         return Ok(None);
     };
     if matches.len() != 1 {
@@ -107,21 +112,22 @@ fn promotion_for_record(
     let target = matches
         .values()
         .next()
-        .expect("len == 1 family match")
+        .expect("len == 1 agent session match")
         .clone();
-    let source_key = logical_locator_key(&record.logical_locator)?;
-    let target_key = logical_locator_key(&target)?;
+    let source_key =
+        canonical_logical_key(&logical_locator_key(&record.logical_locator)?);
+    let target_key = canonical_logical_key(&logical_locator_key(&target)?);
     if promoted_sources.contains(&source_key) || source_key == target_key {
         return Ok(None);
     }
-    Ok(Some(FollowFamilyPromotionWire {
+    Ok(Some(FollowAgentSessionPromotionWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         from: record.logical_locator.clone(),
         to: target,
     }))
 }
 
-fn family_locators_by_identity(
+fn agent_session_locators_by_identity(
     observations: &[LogicalAgentLocatorWire],
 ) -> Result<
     BTreeMap<PromotionIdentity, BTreeMap<String, LogicalAgentLocatorWire>>,
@@ -133,10 +139,12 @@ fn family_locators_by_identity(
     > = BTreeMap::new();
     for locator in observations {
         locator.validate()?;
-        if locator.family_id.is_none() {
+        if locator.agent_session_id.is_none() {
             continue;
         }
-        let key = logical_locator_key(locator)?;
+        // Canonicalize so a `session-<hex>` fallback id groups with the
+        // emitted `family-<hex>` spelling carrying the same digest.
+        let key = canonical_logical_key(&logical_locator_key(locator)?);
         locators
             .entry(promotion_identity(locator))
             .or_default()
@@ -180,7 +188,7 @@ mod tests {
     fn logical(
         hex: char,
         agent: &str,
-        family_id: Option<&str>,
+        agent_session_id: Option<&str>,
     ) -> LogicalAgentLocatorWire {
         LogicalAgentLocatorWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -190,7 +198,7 @@ mod tests {
                 project_id: "project-1".to_string(),
             },
             agent_id: agent.to_string(),
-            family_id: family_id.map(str::to_string),
+            agent_session_id: agent_session_id.map(str::to_string),
         }
     }
 
@@ -227,9 +235,9 @@ mod tests {
     fn derive(
         records: Vec<FollowRecordWire>,
         observations: Vec<LogicalAgentLocatorWire>,
-    ) -> FollowedBatchFamilyPromotionResultWire {
-        followed_batch_family_promotions(
-            &FollowedBatchFamilyPromotionRequestWire {
+    ) -> FollowedBatchAgentSessionPromotionResultWire {
+        followed_batch_agent_session_promotions(
+            &FollowedBatchAgentSessionPromotionRequestWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 records,
                 observations,
@@ -239,9 +247,9 @@ mod tests {
     }
 
     #[test]
-    fn promotes_explicit_singleton_when_exactly_one_family_matches() {
+    fn promotes_explicit_singleton_when_exactly_one_agent_session_matches() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let result = derive(
             vec![follow_record(
                 singleton.clone(),
@@ -249,20 +257,20 @@ mod tests {
                 FollowStateWire::Active,
                 10.0,
             )],
-            vec![family.clone()],
+            vec![agent_session.clone()],
         );
         assert_eq!(
             result.promotions,
-            vec![FollowFamilyPromotionWire {
+            vec![FollowAgentSessionPromotionWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 from: singleton,
-                to: family,
+                to: agent_session,
             }]
         );
     }
 
     #[test]
-    fn skips_when_observations_match_multiple_families() {
+    fn skips_when_observations_match_multiple_agent_sessions() {
         let singleton = logical('a', "worker", None);
         let result = derive(
             vec![follow_record(
@@ -280,9 +288,9 @@ mod tests {
     }
 
     #[test]
-    fn skips_family_records_and_dispatch_records() {
+    fn skips_agent_session_records_and_dispatch_records() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let result = derive(
             vec![
                 follow_record(
@@ -292,13 +300,13 @@ mod tests {
                     10.0,
                 ),
                 follow_record(
-                    family.clone(),
+                    agent_session.clone(),
                     FollowCreatedByWire::Explicit,
                     FollowStateWire::Active,
                     10.0,
                 ),
             ],
-            vec![family],
+            vec![agent_session],
         );
         assert!(result.promotions.is_empty());
     }
@@ -349,9 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_same_family_observations_are_not_ambiguous() {
+    fn duplicate_same_agent_session_observations_are_not_ambiguous() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let result = derive(
             vec![follow_record(
                 singleton.clone(),
@@ -359,17 +367,17 @@ mod tests {
                 FollowStateWire::Active,
                 10.0,
             )],
-            vec![family.clone(), family.clone()],
+            vec![agent_session.clone(), agent_session.clone()],
         );
         assert_eq!(result.promotions.len(), 1);
         assert_eq!(result.promotions[0].from, singleton);
-        assert_eq!(result.promotions[0].to, family);
+        assert_eq!(result.promotions[0].to, agent_session);
     }
 
     #[test]
     fn skips_redundant_source_and_ignores_singleton_observations() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let record = follow_record(
             singleton.clone(),
             FollowCreatedByWire::Explicit,
@@ -378,16 +386,16 @@ mod tests {
         );
         let result = derive(
             vec![record.clone(), record],
-            vec![singleton, family.clone()],
+            vec![singleton, agent_session.clone()],
         );
         assert_eq!(result.promotions.len(), 1);
-        assert_eq!(result.promotions[0].to, family);
+        assert_eq!(result.promotions[0].to, agent_session);
     }
 
     #[test]
     fn empty_observations_or_records_yield_no_promotions() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         assert!(derive(
             vec![follow_record(
                 singleton.clone(),
@@ -399,20 +407,20 @@ mod tests {
         )
         .promotions
         .is_empty());
-        assert!(derive(vec![], vec![family]).promotions.is_empty());
+        assert!(derive(vec![], vec![agent_session]).promotions.is_empty());
     }
 
     #[test]
     fn non_tui_consumer_promotions_are_accepted_by_follow_reconciliation() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let record = follow_record(
             singleton.clone(),
             FollowCreatedByWire::Explicit,
             FollowStateWire::Active,
             10.0,
         );
-        let derived = derive(vec![record.clone()], vec![family.clone()]);
+        let derived = derive(vec![record.clone()], vec![agent_session.clone()]);
         let reconciled =
             reconcile_follow_records(&FollowReconciliationRequestWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
@@ -425,10 +433,10 @@ mod tests {
             .unwrap();
         assert!(reconciled.changed);
         assert_eq!(reconciled.records.len(), 1);
-        assert_eq!(reconciled.records[0].logical_locator, family);
+        assert_eq!(reconciled.records[0].logical_locator, agent_session);
         assert_eq!(
             reconciled.records[0].logical_key,
-            logical_key_unchecked(&family)
+            logical_key_unchecked(&agent_session)
         );
         assert_eq!(
             reconciled.records[0].created_by,
@@ -439,7 +447,7 @@ mod tests {
     #[test]
     fn unfollow_tombstones_win_when_derived_promotions_are_reconciled() {
         let singleton = logical('a', "worker", None);
-        let family = logical('a', "worker", Some("family-1"));
+        let agent_session = logical('a', "worker", Some("family-1"));
         let record = follow_record(
             singleton.clone(),
             FollowCreatedByWire::Dispatch,
@@ -453,7 +461,7 @@ mod tests {
                 FollowStateWire::Active,
                 10.0,
             )],
-            vec![family.clone()],
+            vec![agent_session.clone()],
         );
         assert_eq!(derived.promotions.len(), 1);
 
@@ -480,8 +488,8 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_schema_version() {
-        let error = followed_batch_family_promotions(
-            &FollowedBatchFamilyPromotionRequestWire {
+        let error = followed_batch_agent_session_promotions(
+            &FollowedBatchAgentSessionPromotionRequestWire {
                 schema_version: 9,
                 records: Vec::new(),
                 observations: Vec::new(),
@@ -502,8 +510,8 @@ mod tests {
             10.0,
         );
         bad_record.logical_locator.agent_id.clear();
-        let record_error = followed_batch_family_promotions(
-            &FollowedBatchFamilyPromotionRequestWire {
+        let record_error = followed_batch_agent_session_promotions(
+            &FollowedBatchAgentSessionPromotionRequestWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 records: vec![bad_record],
                 observations: vec![logical('a', "worker", Some("family-1"))],
@@ -514,8 +522,8 @@ mod tests {
 
         let mut bad_observation = logical('a', "worker", Some("family-1"));
         bad_observation.agent_id.clear();
-        let observation_error = followed_batch_family_promotions(
-            &FollowedBatchFamilyPromotionRequestWire {
+        let observation_error = followed_batch_agent_session_promotions(
+            &FollowedBatchAgentSessionPromotionRequestWire {
                 schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
                 records: vec![follow_record(
                     logical('a', "worker", None),

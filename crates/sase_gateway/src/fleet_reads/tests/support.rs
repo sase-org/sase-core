@@ -146,11 +146,11 @@ pub(super) fn seed_dead_agent(
     write_json(&artifact.join("running.json"), json!({"pid": 0}));
 }
 
-pub(super) fn seed_done_family_agent(
+pub(super) fn seed_done_agent_session_agent(
     projects: &Path,
     timestamp: &str,
     name: &str,
-    family: &str,
+    agent_session: &str,
     parent: Option<&str>,
     finished_at: f64,
 ) {
@@ -163,7 +163,7 @@ pub(super) fn seed_done_family_agent(
     fs::write(artifact.join("output.txt"), "done output").unwrap();
     write_json(
         &artifact.join("agent_meta.json"),
-        family_meta(name, family, parent),
+        agent_session_meta(name, agent_session, parent),
     );
     write_json(
         &artifact.join("done.json"),
@@ -178,11 +178,11 @@ pub(super) fn seed_done_family_agent(
     );
 }
 
-pub(super) fn seed_dead_family_agent(
+pub(super) fn seed_dead_agent_session_agent(
     projects: &Path,
     timestamp: &str,
     name: &str,
-    family: &str,
+    agent_session: &str,
     parent: Option<&str>,
 ) {
     let artifact = projects
@@ -193,16 +193,16 @@ pub(super) fn seed_dead_family_agent(
     fs::create_dir_all(&artifact).unwrap();
     write_json(
         &artifact.join("agent_meta.json"),
-        family_meta(name, family, parent),
+        agent_session_meta(name, agent_session, parent),
     );
     write_json(&artifact.join("running.json"), json!({"pid": 0}));
 }
 
-pub(super) fn seed_alive_family_agent(
+pub(super) fn seed_alive_agent_session_agent(
     projects: &Path,
     timestamp: &str,
     name: &str,
-    family: &str,
+    agent_session: &str,
     parent: Option<&str>,
 ) {
     let artifact = projects
@@ -213,7 +213,7 @@ pub(super) fn seed_alive_family_agent(
     fs::create_dir_all(&artifact).unwrap();
     write_json(
         &artifact.join("agent_meta.json"),
-        family_meta(name, family, parent),
+        agent_session_meta(name, agent_session, parent),
     );
     write_json(
         &artifact.join("running.json"),
@@ -234,11 +234,11 @@ pub(super) fn seed_waiting_agent(projects: &Path, timestamp: &str, name: &str) {
     );
 }
 
-pub(super) fn seed_protected_family_agent(
+pub(super) fn seed_protected_agent_session_agent(
     projects: &Path,
     timestamp: &str,
     name: &str,
-    family: &str,
+    agent_session: &str,
     parent: Option<&str>,
     marker: &str,
 ) {
@@ -250,20 +250,20 @@ pub(super) fn seed_protected_family_agent(
     fs::create_dir_all(&artifact).unwrap();
     write_json(
         &artifact.join("agent_meta.json"),
-        family_meta(name, family, parent),
+        agent_session_meta(name, agent_session, parent),
     );
     write_json(&artifact.join("running.json"), json!({"pid": 0}));
     write_json(&artifact.join(marker), json!({}));
 }
 
-pub(super) fn family_meta(
+pub(super) fn agent_session_meta(
     name: &str,
-    family: &str,
+    agent_session: &str,
     parent: Option<&str>,
 ) -> serde_json::Value {
     let mut meta = json!({
         "name": name,
-        "agent_family": family
+        "agent_family": agent_session
     });
     if let Some(parent) = parent {
         meta["parent_timestamp"] = json!(parent);

@@ -655,8 +655,8 @@ pub(crate) use sase_core::fleet_contract::{
     ResolvedAgentSummaryWire, RuntimeDurationRequestWire,
 };
 pub(crate) use sase_core::fleet_follow_promotion::{
-    followed_batch_family_promotions as core_followed_batch_family_promotions,
-    FollowedBatchFamilyPromotionRequestWire,
+    followed_batch_agent_session_promotions as core_followed_batch_agent_session_promotions,
+    FollowedBatchAgentSessionPromotionRequestWire,
 };
 pub(crate) use sase_core::fleet_mutation::{
     self as core_fleet_mutation, FleetMutationIntentWire,

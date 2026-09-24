@@ -6,7 +6,7 @@ use super::error::FleetContractError;
 use super::error::FLEET_CONTRACT_SCHEMA_VERSION;
 use super::error::MAX_INTENT_BYTES;
 use super::error::MAX_LABEL_BYTES;
-use super::locators::logical_key_unchecked;
+use super::locators::logical_key_matches;
 use super::locators::AgentInstanceLocatorWire;
 use super::locators::LogicalAgentLocatorWire;
 use super::locators::OriginLocatorWire;
@@ -14,7 +14,7 @@ use super::locators::ProjectLocatorWire;
 use super::resolution::OwnerResolutionFactsWire;
 use super::resolution::ResolvedAgentProjectionRequestWire;
 use super::resolution::ResolvedAgentSummaryWire;
-use super::status::FleetFamilyRoleWire;
+use super::status::FleetAgentSessionRoleWire;
 use super::status::FleetLifecycleWire;
 use super::status::FleetRowKindWire;
 use super::status::FleetStatusBucketWire;
@@ -59,7 +59,7 @@ fn current_logical_locator_schema(
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         project: current_project_locator_schema(&logical.project),
         agent_id: logical.agent_id.clone(),
-        family_id: logical.family_id.clone(),
+        agent_session_id: logical.agent_session_id.clone(),
     }
 }
 
@@ -68,8 +68,8 @@ pub(crate) fn owner_resolved_logical_locator(
     facts: &OwnerResolutionFactsWire,
 ) -> LogicalAgentLocatorWire {
     let mut logical = current_logical_locator_schema(logical);
-    if let Some(family_id) = &facts.family_id {
-        logical.family_id = Some(family_id.clone());
+    if let Some(agent_session_id) = &facts.agent_session_id {
+        logical.agent_session_id = Some(agent_session_id.clone());
     }
     logical
 }
@@ -97,9 +97,8 @@ pub(crate) fn validate_projection_request(
     let facts = normalized_owner_facts(&request.owner_facts)?;
     let logical_locator =
         owner_resolved_logical_locator(&request.logical_locator, &facts);
-    let logical_key = logical_key_unchecked(&logical_locator);
     facts.row_revision.validate()?;
-    if facts.row_revision.logical_key != logical_key {
+    if !logical_key_matches(&facts.row_revision.logical_key, &logical_locator) {
         return Err(FleetContractError::Validation(
             "row revision belongs to a different logical identity".to_string(),
         ));
@@ -153,8 +152,8 @@ pub(crate) fn normalized_owner_facts(
             ));
         }
     }
-    if let Some(family_id) = &facts.family_id {
-        validate_identifier("family_id", family_id)?;
+    if let Some(agent_session_id) = &facts.agent_session_id {
+        validate_identifier("family_id", agent_session_id)?;
     }
     if let Some(parent_timestamp) = &facts.parent_timestamp {
         validate_identifier("parent_timestamp", parent_timestamp)?;
@@ -203,8 +202,8 @@ pub(crate) fn normalized_owner_facts(
         started_at_unix: facts.started_at_unix,
         run_started_at_unix: facts.run_started_at_unix,
         stopped_at_unix: facts.stopped_at_unix,
-        family_id: facts
-            .family_id
+        agent_session_id: facts
+            .agent_session_id
             .as_ref()
             .map(|value| value.trim().to_string()),
         parent_timestamp: facts
@@ -329,7 +328,7 @@ pub(crate) fn counts_as_running(summary: &ResolvedAgentSummaryWire) -> bool {
 }
 
 /// Whether a row's presentation should be treated as terminal ("was
-/// running") for family-role and status-bucket purposes: genuinely terminal
+/// running") for agent-session-role and status-bucket purposes: genuinely terminal
 /// lifecycle, or definitively `Dead`/`NotProcess` liveness — unless a
 /// waiting/question marker protects it.
 fn presentation_is_historical(
@@ -349,25 +348,25 @@ fn presentation_is_historical(
         )
 }
 
-pub(crate) fn family_role_for_projection(
+pub(crate) fn agent_session_role_for_projection(
     row_kind: FleetRowKindWire,
     lifecycle: FleetLifecycleWire,
     liveness: OwnerLivenessWire,
     has_parent: bool,
-) -> FleetFamilyRoleWire {
+) -> FleetAgentSessionRoleWire {
     match row_kind {
-        FleetRowKindWire::Proc => FleetFamilyRoleWire::Proc,
-        FleetRowKindWire::Monitor => FleetFamilyRoleWire::Monitor,
-        FleetRowKindWire::Gate => FleetFamilyRoleWire::Gate,
+        FleetRowKindWire::Proc => FleetAgentSessionRoleWire::Proc,
+        FleetRowKindWire::Monitor => FleetAgentSessionRoleWire::Monitor,
+        FleetRowKindWire::Gate => FleetAgentSessionRoleWire::Gate,
         FleetRowKindWire::AgentShell
         | FleetRowKindWire::ContainerHeader
         | FleetRowKindWire::HistoricalShell => {
             if presentation_is_historical(lifecycle, liveness) {
-                FleetFamilyRoleWire::HistoricalShell
+                FleetAgentSessionRoleWire::HistoricalShell
             } else if has_parent {
-                FleetFamilyRoleWire::Member
+                FleetAgentSessionRoleWire::Member
             } else {
-                FleetFamilyRoleWire::Root
+                FleetAgentSessionRoleWire::Root
             }
         }
     }

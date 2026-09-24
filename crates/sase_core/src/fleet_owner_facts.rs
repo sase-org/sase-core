@@ -2,8 +2,8 @@
 //!
 //! Mirrors the per-record half of the owner's agent enrichment
 //! (`enrich_agent_from_meta_wire`): a rich base status plus the shell, plan,
-//! question, retry, and lifecycle facts the family status pass consumes. The
-//! family-level policy (`TALE DONE`, `EPIC CREATED`, root mirroring, ...) stays
+//! question, retry, and lifecycle facts the agent session status pass consumes. The
+//! agent-session-level policy (`TALE DONE`, `EPIC CREATED`, root mirroring, ...) stays
 //! with the viewer's shared status pipeline; this module only supplies the
 //! inputs it reads.
 //!
@@ -21,11 +21,11 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_scan::{AgentArtifactRecordWire, AgentSessionShellWire};
+use crate::fleet_agent_session::agent_session_shell;
 use crate::fleet_contract::{
     reject_secretish, trim_to_limit, validate_label, validate_timestamp,
     FleetContractError, OwnerLivenessWire, MAX_LABEL_BYTES,
 };
-use crate::fleet_family::family_shell;
 
 const ACTIVE_STATUSES: [&str; 2] = ["STARTING", "RUNNING"];
 const PLAN_TIER_CACHE_MAX_ENTRIES: usize = 256;
@@ -146,12 +146,17 @@ pub struct OwnerPresentationFactsWire {
     /// than a coarse legacy one. Absent (false) on older payloads.
     #[serde(default)]
     pub owner_status: bool,
-    #[serde(default)]
-    pub agent_family_role: Option<String>,
+    #[serde(
+        default,
+        rename = "agent_family_role",
+        alias = "agent_session_role"
+    )]
+    pub agent_session_role: Option<String>,
     #[serde(default)]
     pub role_suffix: Option<String>,
-    #[serde(default)]
-    pub agent_family_parallel: bool,
+    // legacy agent-family spelling; flips in core-contract
+    #[serde(default, rename = "agent_family_parallel")]
+    pub agent_session_parallel: bool,
     #[serde(default)]
     pub plan_chain_root: bool,
     #[serde(default)]
@@ -247,7 +252,7 @@ impl OwnerPresentationFactsWire {
 
     fn string_fields_mut(&mut self) -> [&mut Option<String>; 20] {
         [
-            &mut self.agent_family_role,
+            &mut self.agent_session_role,
             &mut self.role_suffix,
             &mut self.plan_action,
             &mut self.plan_tier,
@@ -460,9 +465,9 @@ pub fn derive_owner_record_facts(
         }
     }
 
-    facts.agent_family_role = label(meta.agent_session_role.as_deref());
+    facts.agent_session_role = label(meta.agent_session_role.as_deref());
     facts.role_suffix = label(meta.role_suffix.as_deref());
-    facts.agent_family_parallel = meta.agent_session_parallel;
+    facts.agent_session_parallel = meta.agent_session_parallel;
     facts.plan_chain_root = meta.plan_chain_root;
     facts.plan_action = label(meta.plan_action.as_deref());
     facts.plan_committed = meta.plan_committed;
@@ -486,7 +491,7 @@ pub fn derive_owner_record_facts(
     facts.retry_terminal = meta.retry_terminal;
     facts.reasoning_effort = label(meta.reasoning_effort.as_deref());
     facts.proc_id = label(meta.proc_id.as_deref());
-    if let Some(shell) = family_shell(Some(meta), record.done.as_ref()) {
+    if let Some(shell) = agent_session_shell(Some(meta), record.done.as_ref()) {
         apply_shell_facts(&mut facts, shell);
     }
     OwnerRecordFacts { status, facts }

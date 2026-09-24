@@ -938,7 +938,7 @@ fn summary_matches_catalog_query(
             summary.intent.as_deref(),
             Some(summary.labels.project_label.as_str()),
             summary.labels.agent_label.as_deref(),
-            summary.labels.family_label.as_deref(),
+            summary.labels.agent_session_label.as_deref(),
             summary.labels.owner_label.as_deref(),
             summary.labels.alias.as_deref(),
         ];
@@ -968,10 +968,10 @@ fn compare_catalog_summaries(
         })
         .then_with(|| {
             left.labels
-                .family_label
+                .agent_session_label
                 .as_deref()
                 .unwrap_or("")
-                .cmp(right.labels.family_label.as_deref().unwrap_or(""))
+                .cmp(right.labels.agent_session_label.as_deref().unwrap_or(""))
         })
         .then_with(|| right.observed_at_unix.total_cmp(&left.observed_at_unix))
         .then_with(|| left.logical_key.cmp(&right.logical_key))

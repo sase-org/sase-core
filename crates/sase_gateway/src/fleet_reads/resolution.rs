@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use sase_core::{
     agent_scan::AgentArtifactRecordWire,
+    fleet_agent_session::{agent_session_id_for_record, agent_session_shell},
     fleet_attention::{
         FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
         FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
@@ -22,7 +23,6 @@ use sase_core::{
         ResolvedAgentProjectionRequestWire, ResourceRevisionWire,
         FLEET_CONTRACT_SCHEMA_VERSION,
     },
-    fleet_family::{family_id_for_record, family_shell},
     fleet_mutation::{
         FLEET_MUTATION_CAPABILITY_FORK, FLEET_MUTATION_CAPABILITY_RETRY,
         FLEET_MUTATION_CAPABILITY_STOP,
@@ -57,8 +57,8 @@ pub(super) fn resolve_record(
 ) -> Result<ResolvedRecord, FleetReadError> {
     let mut logical_locator =
         logical_locator_for_record(installation_id, record);
-    if let Some(family_id) = &presentation.family_id {
-        logical_locator.family_id = Some(family_id.clone());
+    if let Some(agent_session_id) = &presentation.agent_session_id {
+        logical_locator.agent_session_id = Some(agent_session_id.clone());
     }
     let logical_key =
         logical_locator_key(&logical_locator).map_err(FleetReadError::from)?;
@@ -125,7 +125,7 @@ pub(super) fn resolve_record(
                 started_at_unix: presentation.started_at_unix,
                 run_started_at_unix: presentation.run_started_at_unix,
                 stopped_at_unix: stopped_at_unix_for_record(record),
-                family_id: presentation.family_id.clone(),
+                agent_session_id: presentation.agent_session_id.clone(),
                 parent_timestamp: presentation.parent_timestamp.clone(),
                 workspace_num: workspace_num_for_record(record),
                 project_label: project_labels
@@ -184,14 +184,14 @@ fn logical_locator_for_record(
                 meta.and_then(|value| value.artifact_agent_id.as_deref()),
                 meta.and_then(|value| value.name.as_deref()),
                 record.done.as_ref().and_then(|value| value.name.as_deref()),
-                family_shell(meta, record.done.as_ref())
+                agent_session_shell(meta, record.done.as_ref())
                     .and_then(|value| value.id.as_deref()),
                 Some(record.timestamp.as_str()),
             ])
             .unwrap_or("agent"),
             "agent",
         ),
-        family_id: family_id_for_record(record)
+        agent_session_id: agent_session_id_for_record(record)
             .map(|value| safe_identifier(&value, "family")),
     }
 }
