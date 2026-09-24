@@ -3,14 +3,17 @@
 mod canonical;
 mod catalog;
 mod fingerprint;
+mod handoff_wire;
 mod store;
 mod wire;
 
 pub use catalog::normalize_tool_definition;
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
+pub use handoff_wire::*;
 pub use store::{
-    append_event, begin, finish, list_runs, observe, reconcile,
-    retention_apply, retention_preview, show_run, store_stats, summarize,
+    append_event, begin, claim, finish, list_runs, observe, reconcile,
+    request_stop, retention_apply, retention_preview, show_run, store_stats,
+    summarize,
 };
 pub use wire::*;
 
@@ -26,6 +29,7 @@ pub enum ToolRunError {
     InvalidTransition { from: String, to: String },
     ConflictingEvent { event_id: String, reason: String },
     NotFound { run_id: String },
+    DuplicateRun { run_id: String },
     Busy { message: String },
     ReadOnly { message: String },
     Io { message: String },
@@ -76,6 +80,9 @@ impl fmt::Display for ToolRunError {
             }
             Self::NotFound { run_id } => {
                 write!(formatter, "tool run {run_id} was not found")
+            }
+            Self::DuplicateRun { run_id } => {
+                write!(formatter, "tool run {run_id} already exists")
             }
             Self::Busy { message } => {
                 write!(formatter, "tool run store is busy: {message}")

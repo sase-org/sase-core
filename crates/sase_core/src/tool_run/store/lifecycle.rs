@@ -1,25 +1,29 @@
-//! Run lifecycle writes: begin, event append, finish, and reconcile.
+//! Run lifecycle writes: begin, event append, finish, and observe.
 //!
 //! Owns the `runs`/`attempts` insert path, event ingestion with state
 //! projection, transition validation, and run-scoped fingerprint persistence.
+//! Reconciliation lives in [`super::reconcile`]; hand-off claim and stop live
+//! in [`super::handoff`].
 
 use super::super::catalog::{extra_args_digest, normalize_tool_definition};
 use super::super::fingerprint::{
     canonicalize_tool_fingerprint, fingerprint_digest,
 };
+use super::super::handoff_wire::{
+    ToolRunLaunchModeWire, ToolRunSettledByWire, ToolRunTerminalCauseWire,
+};
 use super::super::wire::{
     ToolEvidenceCompletenessWire, ToolFingerprintWire,
-    ToolLivenessObservationWire, ToolRunAppendRequestWire,
-    ToolRunAppendResultWire, ToolRunBeginRequestWire, ToolRunBeginResultWire,
-    ToolRunEventKindWire, ToolRunEventWire, ToolRunFinishRequestWire,
-    ToolRunFinishResultWire, ToolRunObserveRequestWire,
-    ToolRunObserveResultWire, ToolRunReapCandidateWire,
-    ToolRunReconcileRequestWire, ToolRunReconcileResultWire, ToolRunStateWire,
-    TOOL_RUN_LOST_REASON_RUNNER_EXITED, TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolRunAppendRequestWire, ToolRunAppendResultWire, ToolRunBeginRequestWire,
+    ToolRunBeginResultWire, ToolRunEventKindWire, ToolRunEventWire,
+    ToolRunFinishRequestWire, ToolRunFinishResultWire,
+    ToolRunObserveRequestWire, ToolRunObserveResultWire, ToolRunStateWire,
+    TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
 use super::connection::{
-    touch_write_meta, unix_now, validate_schema, with_write_store,
+    runs_column_set, touch_write_meta, unix_now, validate_schema,
+    with_write_store,
 };
 use super::query::load_run;
 use rand::{rngs::OsRng, RngCore};
@@ -51,9 +55,22 @@ pub fn begin(
             ));
         }
     }
+    validate_handoff_begin(&request, &definition_digest)?;
     with_write_store(store_path, busy_timeout, |conn| {
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let duplicate: Option<String> = tx
+            .query_row(
+                "SELECT run_id FROM runs WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if duplicate.is_some() {
+            return Err(ToolRunError::DuplicateRun {
+                run_id: run_id.clone(),
+            });
+        }
         if let Some(parent) = request.parent_run_id.as_deref() {
             let exists: Option<String> = tx
                 .query_row(
@@ -149,7 +166,7 @@ pub fn append_event(
     with_write_store(store_path, busy_timeout, |conn| {
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let replayed = ingest_event(&tx, &request.event)?;
+        let replayed = ingest_event(&tx, &request.event, None)?;
         touch_write_meta(&tx, request.event.created_ts)?;
         let run = load_run(&tx, &request.event.run_id)?.ok_or_else(|| {
             ToolRunError::NotFound {
@@ -240,6 +257,22 @@ pub fn finish(
             request.state.as_str()
         )));
     }
+    validate_finish_cause(request.state, request.terminal_cause)?;
+    if matches!(
+        (request.state, request.terminal_cause),
+        (
+            ToolRunStateWire::Failed,
+            Some(ToolRunTerminalCauseWire::LaunchFailed)
+        ) | (
+            ToolRunStateWire::Signaled,
+            Some(ToolRunTerminalCauseWire::StopRequested)
+        )
+    ) && (request.exit_code.is_some() || request.signal.is_some())
+    {
+        return Err(ToolRunError::invalid(
+            "launch_failed and stop_requested finishes carry no exit code or signal",
+        ));
+    }
     let event_id = nonempty_or_generated(request.event_id.as_deref());
     let now = request.now_ts.unwrap_or_else(unix_now);
     let event = ToolRunEventWire {
@@ -274,7 +307,7 @@ pub fn finish(
     with_write_store(store_path, busy_timeout, |conn| {
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ingest_event(&tx, &event)?;
+        let replayed = ingest_event(&tx, &event, request.terminal_cause)?;
         if request.child_pid.is_some()
             || request.child_pgid.is_some()
             || request.child_process_start_identity.is_some()
@@ -338,6 +371,23 @@ pub fn finish(
                     .map_err(|error| ToolRunError::store(error.to_string()))?
             ],
         )?;
+        if !replayed {
+            if let Some(cause) = request.terminal_cause {
+                record_settlement(
+                    &tx,
+                    &request.run_id,
+                    cause.as_str(),
+                    ToolRunSettledByWire::Wrapper.as_str(),
+                    &request.diagnostics,
+                )?;
+            } else if !request.diagnostics.is_empty() {
+                append_run_diagnostics(
+                    &tx,
+                    &request.run_id,
+                    &request.diagnostics,
+                )?;
+            }
+        }
         touch_write_meta(&tx, now)?;
         let run = load_run(&tx, &request.run_id)?.ok_or_else(|| {
             ToolRunError::NotFound {
@@ -352,118 +402,6 @@ pub fn finish(
             diagnostics: Vec::new(),
         })
     })
-}
-
-pub fn reconcile(
-    store_path: &Path,
-    request: ToolRunReconcileRequestWire,
-    busy_timeout: Duration,
-) -> Result<ToolRunReconcileResultWire, ToolRunError> {
-    validate_schema(request.schema_version)?;
-    let now = request.now_ts.unwrap_or_else(unix_now);
-    if !store_path.exists() {
-        return Ok(ToolRunReconcileResultWire {
-            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-            marked_lost: Vec::new(),
-            persisted: false,
-            reap_candidates: Vec::new(),
-            diagnostics: vec!["tool run store does not exist".to_string()],
-        });
-    }
-    match with_write_store(store_path, busy_timeout, |conn| {
-        let tx =
-            conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut marked = Vec::new();
-        let mut reap_candidates = Vec::new();
-        let mut diagnostics = Vec::new();
-        for fact in &request.facts {
-            match fact.observation {
-                ToolLivenessObservationWire::Unknown => {
-                    diagnostics.push(format!(
-                        "liveness for {} is unknown; not proof of death",
-                        fact.run_id
-                    ));
-                }
-                ToolLivenessObservationWire::Alive => {}
-                ToolLivenessObservationWire::Dead => {
-                    if let Some(run) = load_run(&tx, &fact.run_id)? {
-                        if run.state.is_unsettled() {
-                            let event_id = new_hex_id();
-                            let event = ToolRunEventWire {
-                                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-                                event_id,
-                                run_id: fact.run_id.clone(),
-                                attempt: 1,
-                                kind: ToolRunEventKindWire::Lost,
-                                created_ts: now,
-                                stage: None,
-                                sample: None,
-                                exit_code: None,
-                                signal: None,
-                                reason: Some(
-                                    fact.reason.clone().unwrap_or_else(|| {
-                                        TOOL_RUN_LOST_REASON_RUNNER_EXITED
-                                            .to_string()
-                                    }),
-                                ),
-                                diagnostics: Vec::new(),
-                            };
-                            ingest_event(&tx, &event)?;
-                            marked.push(fact.run_id.clone());
-                            // Authorize reaping only when the wrapper is
-                            // definitively dead (this arm) and the child
-                            // facts were recorded at spawn. Rust never
-                            // signals; the caller verifies the live
-                            // process-group leader still matches the
-                            // recorded identity before signaling. A missing
-                            // pgid or identity authorizes nothing.
-                            if let (
-                                Some(pgid),
-                                Some(child_process_start_identity),
-                            ) = (
-                                run.child_pgid,
-                                run.child_process_start_identity.clone(),
-                            ) {
-                                reap_candidates.push(
-                                    ToolRunReapCandidateWire {
-                                        run_id: fact.run_id.clone(),
-                                        pgid,
-                                        child_process_start_identity: Some(
-                                            child_process_start_identity,
-                                        ),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        touch_write_meta(&tx, now)?;
-        tx.commit()?;
-        Ok(ToolRunReconcileResultWire {
-            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-            marked_lost: marked,
-            persisted: true,
-            reap_candidates,
-            diagnostics,
-        })
-    }) {
-        Ok(result) => Ok(result),
-        Err(ToolRunError::Busy { message })
-        | Err(ToolRunError::ReadOnly { message }) => {
-            Ok(ToolRunReconcileResultWire {
-                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-                marked_lost: Vec::new(),
-                persisted: false,
-                reap_candidates: Vec::new(),
-                diagnostics: vec![format!(
-                    "reconciliation could not persist: {message}"
-                )],
-            })
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn identity_for_begin(
@@ -484,6 +422,95 @@ fn identity_for_begin(
             .unwrap_or(&request.definition.argv);
         Ok((None, extra_args_digest(argv)?, extra))
     }
+}
+
+fn validate_handoff_begin(
+    request: &ToolRunBeginRequestWire,
+    definition_digest: &str,
+) -> Result<(), ToolRunError> {
+    let is_handoff =
+        matches!(request.launch_mode, Some(ToolRunLaunchModeWire::Handoff));
+    if request.launch.is_some() && !is_handoff {
+        return Err(ToolRunError::invalid(
+            "launch envelope requires launch_mode handoff",
+        ));
+    }
+    if !is_handoff {
+        return Ok(());
+    }
+    if request.commit_running {
+        return Err(ToolRunError::invalid(
+            "handoff begin requires commit_running false",
+        ));
+    }
+    let Some(envelope) = request.launch.as_ref() else {
+        return Err(ToolRunError::invalid(
+            "handoff begin requires a launch envelope",
+        ));
+    };
+    let owner_kind = request.owner_kind.as_deref().unwrap_or("").trim();
+    let owner_id = request.owner_id.as_deref().unwrap_or("").trim();
+    if owner_kind.is_empty() || owner_id.is_empty() {
+        return Err(ToolRunError::invalid(
+            "handoff begin requires non-empty owner_kind and owner_id",
+        ));
+    }
+    if request.parent_run_id.is_some() {
+        return Err(ToolRunError::invalid(
+            "handoff begin must not set parent_run_id",
+        ));
+    }
+    let protected = request
+        .private_argv
+        .as_ref()
+        .unwrap_or(&request.display_argv);
+    if &envelope.argv != protected {
+        return Err(ToolRunError::invalid(
+            "launch envelope argv must equal the protected argv",
+        ));
+    }
+    if envelope.display_argv != request.display_argv {
+        return Err(ToolRunError::invalid(
+            "launch envelope display_argv mismatch",
+        ));
+    }
+    if envelope.private_argv != request.private_argv {
+        return Err(ToolRunError::invalid(
+            "launch envelope private_argv mismatch",
+        ));
+    }
+    if envelope.tool_name != request.tool_name {
+        return Err(ToolRunError::invalid(
+            "launch envelope tool_name mismatch",
+        ));
+    }
+    if envelope.extra_args != request.extra_args {
+        return Err(ToolRunError::invalid(
+            "launch envelope extra_args mismatch",
+        ));
+    }
+    if envelope.adhoc != request.tool_name.is_none() {
+        return Err(ToolRunError::invalid(
+            "launch envelope adhoc must match a missing tool_name",
+        ));
+    }
+    if request.tool_name.is_some() {
+        let normalized =
+            normalize_tool_definition(envelope.definition.clone())?;
+        if normalized.digest != *definition_digest {
+            return Err(ToolRunError::invalid(
+                "launch envelope definition digest mismatch",
+            ));
+        }
+        if let Some(digest) = envelope.digest.as_deref() {
+            if digest != definition_digest {
+                return Err(ToolRunError::invalid(
+                    "launch envelope digest mismatch",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -508,6 +535,38 @@ fn insert_run(
     let evidence =
         serde_json::to_string(&ToolEvidenceCompletenessWire::default())
             .map_err(|error| ToolRunError::store(error.to_string()))?;
+    let is_handoff =
+        matches!(request.launch_mode, Some(ToolRunLaunchModeWire::Handoff));
+    let launch_mode = request.launch_mode.map(|mode| mode.as_str().to_string());
+    let envelope_json = request
+        .launch
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| ToolRunError::store(error.to_string()))?;
+    let launcher_json = if is_handoff {
+        let launcher =
+            crate::tool_run::handoff_wire::ToolRunProcessIdentityWire {
+                pid: request.wrapper_pid,
+                boot_id: request.boot_id.clone(),
+                process_start_identity: request.process_start_identity.clone(),
+            };
+        Some(
+            serde_json::to_string(&launcher)
+                .map_err(|error| ToolRunError::store(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let (wrapper_pid, boot_id, process_start_identity) = if is_handoff {
+        (None, None, None)
+    } else {
+        (
+            request.wrapper_pid,
+            request.boot_id.clone(),
+            request.process_start_identity.clone(),
+        )
+    };
     tx.execute(
         "INSERT INTO runs(
             run_id, state, source, executor, attempt, tool_name,
@@ -515,11 +574,12 @@ fn insert_run(
             private_argv_json, project, agent, workspace, bead, owner_kind,
             owner_id, parent_run_id, created_ts, running_ts, wrapper_pid,
             boot_id, process_start_identity, log_stdout_path, log_stderr_path,
-            events_path, evidence_json, diagnostics_json
+            events_path, evidence_json, diagnostics_json,
+            launch_mode, launch_envelope_json, launcher_json, owner_log_path
          ) VALUES (
             ?1, ?2, 'native', 'inline', 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-            '[]'
+            '[]', ?24, ?25, ?26, ?27
          )",
         params![
             run_id,
@@ -542,20 +602,24 @@ fn insert_run(
             } else {
                 None
             },
-            request.wrapper_pid,
-            request.boot_id,
-            request.process_start_identity,
+            wrapper_pid,
+            boot_id,
+            process_start_identity,
             request.log_stdout_path,
             request.log_stderr_path,
             request.events_path,
             evidence,
+            launch_mode,
+            envelope_json,
+            launcher_json,
+            request.owner_log_path,
         ],
     )?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_lifecycle_event(
+pub(super) fn insert_lifecycle_event(
     tx: &Transaction<'_>,
     event_id: &str,
     run_id: &str,
@@ -605,9 +669,10 @@ fn insert_event_row(
     Ok(())
 }
 
-fn ingest_event(
+pub(super) fn ingest_event(
     tx: &Transaction<'_>,
     event: &ToolRunEventWire,
+    cause: Option<ToolRunTerminalCauseWire>,
 ) -> Result<bool, ToolRunError> {
     if event.attempt != 1 {
         return Err(ToolRunError::invalid(
@@ -637,11 +702,23 @@ fn ingest_event(
             run_id: event.run_id.clone(),
         })?;
     if let Some(target) = event.kind.target_state() {
-        if !can_transition(run.state, target) {
+        if !can_transition(run.state, target, cause) {
             return Err(ToolRunError::InvalidTransition {
                 from: run.state.as_str().to_string(),
                 to: target.as_str().to_string(),
             });
+        }
+        if matches!(
+            (run.state, target),
+            (
+                ToolRunStateWire::Created,
+                ToolRunStateWire::Failed | ToolRunStateWire::Signaled
+            )
+        ) && (event.exit_code.is_some() || event.signal.is_some())
+        {
+            return Err(ToolRunError::invalid(
+                "created launch settlements carry no exit code or signal",
+            ));
         }
     }
     insert_event_row(tx, event)?;
@@ -784,20 +861,135 @@ fn apply_event_projection(
     Ok(())
 }
 
-fn can_transition(from: ToolRunStateWire, to: ToolRunStateWire) -> bool {
-    matches!(
-        (from, to),
+pub(super) fn can_transition(
+    from: ToolRunStateWire,
+    to: ToolRunStateWire,
+    cause: Option<ToolRunTerminalCauseWire>,
+) -> bool {
+    match (from, to) {
         (ToolRunStateWire::Created, ToolRunStateWire::Running)
-            | (ToolRunStateWire::Created, ToolRunStateWire::Lost)
-            | (ToolRunStateWire::Running, ToolRunStateWire::Succeeded)
-            | (ToolRunStateWire::Running, ToolRunStateWire::Failed)
-            | (ToolRunStateWire::Running, ToolRunStateWire::Signaled)
-            | (ToolRunStateWire::Running, ToolRunStateWire::Interrupted)
-            | (ToolRunStateWire::Running, ToolRunStateWire::Lost)
-    )
+        | (ToolRunStateWire::Created, ToolRunStateWire::Lost)
+        | (ToolRunStateWire::Running, ToolRunStateWire::Succeeded)
+        | (ToolRunStateWire::Running, ToolRunStateWire::Failed)
+        | (ToolRunStateWire::Running, ToolRunStateWire::Signaled)
+        | (ToolRunStateWire::Running, ToolRunStateWire::Interrupted)
+        | (ToolRunStateWire::Running, ToolRunStateWire::Lost) => true,
+        (ToolRunStateWire::Created, ToolRunStateWire::Failed) => {
+            matches!(cause, Some(ToolRunTerminalCauseWire::LaunchFailed))
+        }
+        (ToolRunStateWire::Created, ToolRunStateWire::Signaled) => {
+            matches!(cause, Some(ToolRunTerminalCauseWire::StopRequested))
+        }
+        _ => false,
+    }
 }
 
-fn canonical_event(event: &ToolRunEventWire) -> ToolRunEventWire {
+pub(super) fn validate_finish_cause(
+    state: ToolRunStateWire,
+    cause: Option<ToolRunTerminalCauseWire>,
+) -> Result<(), ToolRunError> {
+    let Some(cause) = cause else {
+        return Ok(());
+    };
+    let allowed = match cause {
+        ToolRunTerminalCauseWire::Exited => matches!(
+            state,
+            ToolRunStateWire::Succeeded | ToolRunStateWire::Failed
+        ),
+        ToolRunTerminalCauseWire::LaunchFailed => {
+            matches!(state, ToolRunStateWire::Failed)
+        }
+        ToolRunTerminalCauseWire::Signal
+        | ToolRunTerminalCauseWire::Timeout => {
+            matches!(state, ToolRunStateWire::Signaled)
+        }
+        ToolRunTerminalCauseWire::StopRequested => matches!(
+            state,
+            ToolRunStateWire::Signaled | ToolRunStateWire::Interrupted
+        ),
+        ToolRunTerminalCauseWire::Interrupt => {
+            matches!(state, ToolRunStateWire::Interrupted)
+        }
+        ToolRunTerminalCauseWire::OwnerLost
+        | ToolRunTerminalCauseWire::WrapperLost => {
+            matches!(state, ToolRunStateWire::Lost)
+        }
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(ToolRunError::invalid(format!(
+            "terminal cause {} is not compatible with state {}",
+            cause.as_str(),
+            state.as_str()
+        )))
+    }
+}
+
+pub(super) fn append_run_diagnostics(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    additions: &[String],
+) -> Result<(), ToolRunError> {
+    if additions.is_empty() {
+        return Ok(());
+    }
+    let columns = runs_column_set(tx)?;
+    if !columns.contains("diagnostics_json") {
+        return Ok(());
+    }
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT diagnostics_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let mut merged: Vec<String> = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    for item in additions {
+        if !merged.contains(item) {
+            merged.push(item.clone());
+        }
+    }
+    let json = serde_json::to_string(&merged)
+        .map_err(|error| ToolRunError::store(error.to_string()))?;
+    tx.execute(
+        "UPDATE runs SET diagnostics_json = ?2 WHERE run_id = ?1",
+        rusqlite::params![run_id, json],
+    )?;
+    Ok(())
+}
+
+pub(super) fn record_settlement(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    terminal_cause: &str,
+    settled_by: &str,
+    diagnostics: &[String],
+) -> Result<(), ToolRunError> {
+    let columns = runs_column_set(tx)?;
+    if columns.contains("terminal_cause") {
+        tx.execute(
+            "UPDATE runs SET terminal_cause = COALESCE(terminal_cause, ?2)
+             WHERE run_id = ?1",
+            rusqlite::params![run_id, terminal_cause],
+        )?;
+    }
+    if columns.contains("settled_by") {
+        tx.execute(
+            "UPDATE runs SET settled_by = ?2 WHERE run_id = ?1",
+            rusqlite::params![run_id, settled_by],
+        )?;
+    }
+    append_run_diagnostics(tx, run_id, diagnostics)?;
+    Ok(())
+}
+
+pub(super) fn canonical_event(event: &ToolRunEventWire) -> ToolRunEventWire {
     let mut cloned = event.clone();
     cloned.diagnostics = Vec::new();
     cloned
@@ -883,14 +1075,14 @@ fn evidence_from_fingerprints(
     }
 }
 
-fn nonempty_or_generated(value: Option<&str>) -> String {
+pub(super) fn nonempty_or_generated(value: Option<&str>) -> String {
     match value {
         Some(value) if !value.trim().is_empty() => value.to_string(),
         _ => new_hex_id(),
     }
 }
 
-fn new_hex_id() -> String {
+pub(super) fn new_hex_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)

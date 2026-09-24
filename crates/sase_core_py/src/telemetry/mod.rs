@@ -339,6 +339,58 @@ fn py_tool_run_reconcile<'py>(
 
 #[pyfunction]
 #[pyo3(
+    name = "tool_run_claim",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_claim<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunClaimRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunClaimRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::claim(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_request_stop",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_request_stop<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunStopRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunStopRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::request_stop(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
     name = "tool_run_list",
     signature = (store_path, request, busy_timeout_ms=250)
 )]
@@ -548,6 +600,8 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_finish, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_observe, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_reconcile, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_claim, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_request_stop, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_summary, m)?)?;

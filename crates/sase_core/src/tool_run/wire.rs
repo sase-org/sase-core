@@ -604,6 +604,8 @@ pub struct ToolRunLogMetadataWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_path: Option<String>,
     pub has_private_argv: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -675,6 +677,16 @@ pub struct ToolRunWire {
     pub evidence_completeness: ToolEvidenceCompletenessWire,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_request: Option<super::handoff_wire::ToolRunStopRecordWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<super::handoff_wire::ToolRunProcessIdentityWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -726,6 +738,12 @@ pub struct ToolRunBeginRequestWire {
     pub now_ts: Option<i64>,
     #[serde(default = "default_commit_running")]
     pub commit_running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_mode: Option<super::handoff_wire::ToolRunLaunchModeWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<super::handoff_wire::ToolRunLaunchEnvelopeWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -792,6 +810,8 @@ pub struct ToolRunFinishRequestWire {
     pub mutated_input: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_ts: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cause: Option<super::handoff_wire::ToolRunTerminalCauseWire>,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }
@@ -819,6 +839,8 @@ pub struct ToolRunLivenessFactWire {
     pub observation: ToolLivenessObservationWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<super::handoff_wire::ToolRunOwnerFactWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -848,6 +870,8 @@ pub struct ToolRunReconcileResultWire {
     pub persisted: bool,
     #[serde(default)]
     pub reap_candidates: Vec<ToolRunReapCandidateWire>,
+    #[serde(default)]
+    pub settled: Vec<super::handoff_wire::ToolRunReconcileSettlementWire>,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }

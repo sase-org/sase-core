@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "run_id": "7f3a2b1c9d4e5f6a8b0c1d2e3f4a5b6c",
+  "owner_kind": "proc",
+  "owner_id": "proc-123",
+  "wrapper_pid": 4242,
+  "boot_id": "boot-1",
+  "process_start_identity": "boot-1:4242",
+  "owner_log_path": "logs/proc-123.log",
+  "running_event_id": "8a4b3c2d1e5f6a7b9c0d1e2f3a4b5c6d",
+  "now_ts": 11
+}

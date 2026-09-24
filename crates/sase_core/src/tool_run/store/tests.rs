@@ -24,6 +24,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
+mod compat;
+mod handoff;
+mod reconcile_owner;
+
 fn definition() -> ToolDefinitionWire {
     ToolDefinitionWire {
         schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
@@ -68,6 +72,9 @@ fn begin_named(path: &Path, now: i64) -> ToolRunBeginResultWire {
             log_stderr_path: Some("logs/run/stderr.log".into()),
             now_ts: Some(now),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_secs(1),
     )
@@ -122,6 +129,7 @@ fn every_terminal_state_round_trips() {
                 fingerprint_after: None,
                 mutated_input: None,
                 now_ts: Some(20),
+                terminal_cause: None,
                 diagnostics: Vec::new(),
             },
             Duration::from_secs(1),
@@ -163,6 +171,7 @@ fn invalid_transition_is_an_error() {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(2),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -187,6 +196,7 @@ fn invalid_transition_is_an_error() {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(3),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -473,6 +483,7 @@ fn retention_protects_unsettled_runs() {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(3),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -558,6 +569,9 @@ fn begin_with_log(path: &Path, now: i64, log: &Path, bytes: usize) -> String {
             log_stderr_path: None,
             now_ts: Some(now),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_secs(1),
     )
@@ -586,6 +600,7 @@ fn settle_succeeded(path: &Path, run_id: &str, now: i64) {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(now),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -683,6 +698,7 @@ fn reconcile_marks_dead_wrappers_lost_without_inventing_duration() {
                 process_start_identity: Some("start-1".into()),
                 observation: ToolLivenessObservationWire::Dead,
                 reason: Some("boot_changed".into()),
+                owner: None,
             }],
             now_ts: Some(11),
         },
@@ -723,6 +739,7 @@ fn unknown_liveness_is_not_proof_of_death() {
                 process_start_identity: None,
                 observation: ToolLivenessObservationWire::Unknown,
                 reason: Some("permission_denied".into()),
+                owner: None,
             }],
             now_ts: Some(11),
         },
@@ -772,6 +789,9 @@ fn version_rejection_and_unknown_evidence_slots() {
             log_stderr_path: None,
             now_ts: Some(1),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_secs(1),
     )
@@ -836,6 +856,7 @@ fn finish_stores_canonical_fingerprints_and_mutated_input() {
             fingerprint_after: Some(after),
             mutated_input: None,
             now_ts: Some(22),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -887,6 +908,7 @@ fn incomplete_fingerprints_do_not_guess_mutated_input() {
             fingerprint_after: Some(after),
             mutated_input: None,
             now_ts: Some(13),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -939,6 +961,9 @@ fn concurrent_begins_do_not_livelock() {
                 log_stderr_path: None,
                 now_ts: Some(2),
                 commit_running: true,
+                launch_mode: None,
+                launch: None,
+                owner_log_path: None,
             },
             Duration::from_millis(250),
         )
@@ -971,6 +996,9 @@ fn concurrent_begins_do_not_livelock() {
             log_stderr_path: None,
             now_ts: Some(3),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_millis(250),
     );
@@ -1014,6 +1042,9 @@ fn busy_failure_is_bounded() {
             log_stderr_path: None,
             now_ts: Some(2),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_millis(25),
     );
@@ -1085,6 +1116,9 @@ fn private_argv_is_not_serialized_on_queries() {
             log_stderr_path: None,
             now_ts: Some(1),
             commit_running: true,
+            launch_mode: None,
+            launch: None,
+            owner_log_path: None,
         },
         Duration::from_secs(1),
     )
@@ -1117,6 +1151,7 @@ fn dead_wrapper_fact(run_id: &str) -> ToolRunLivenessFactWire {
         boot_id: Some("boot-other".into()),
         process_start_identity: Some("start-1".into()),
         observation: ToolLivenessObservationWire::Dead,
+        owner: None,
         reason: Some("runner gone".into()),
     }
 }
@@ -1186,6 +1221,7 @@ fn observe_then_finish_repeats_child_facts_idempotently() {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(20),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),
@@ -1296,6 +1332,7 @@ fn repeated_observation_replays_and_settled_or_missing_runs_reject() {
             fingerprint_after: None,
             mutated_input: None,
             now_ts: Some(12),
+            terminal_cause: None,
             diagnostics: Vec::new(),
         },
         Duration::from_secs(1),

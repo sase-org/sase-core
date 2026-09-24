@@ -280,6 +280,181 @@ fn tool_run_bindings_round_trip_python_dicts() {
         .unwrap();
         let summary = py_to_json_value(summary.bind(py)).unwrap();
         assert_eq!(summary["typical_duration_ms"], json!(12));
+        let handoff_begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "now_ts": 30,
+                "commit_running": false,
+                "launch_mode": "handoff",
+                "owner_kind": "proc",
+                "owner_id": "proc-1",
+                "owner_log_path": "logs/proc-1.log",
+                "wrapper_pid": 111,
+                "boot_id": "boot-1",
+                "process_start_identity": "boot-1:111",
+                "launch": {
+                    "argv": ["just", "check"],
+                    "tool_name": "check",
+                    "extra_args": [],
+                    "display_argv": ["just", "check"],
+                    "definition": {
+                        "schema_version": 1,
+                        "name": "check",
+                        "argv": ["just", "check"],
+                        "description": "check",
+                        "stages": "run_silent",
+                        "inputs": ["Justfile"],
+                        "env": [],
+                        "args": "deny",
+                        "fingerprint": {"repos": [], "toolchain": {}}
+                    },
+                    "digest": digest,
+                    "adhoc": false
+                }
+            }),
+        )
+        .unwrap();
+        let handoff_begin_request =
+            handoff_begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let handoff_started = py_tool_run_begin(
+            py,
+            path.to_str().unwrap(),
+            handoff_begin_request,
+            1_000,
+        )
+        .unwrap();
+        let handoff_started =
+            py_to_json_value(handoff_started.bind(py)).unwrap();
+        assert_eq!(handoff_started["run"]["state"], json!("created"));
+        assert_eq!(handoff_started["run"]["launch_mode"], json!("handoff"));
+        let handoff_id = handoff_started["run"]["run_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let claim_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": handoff_id,
+                "owner_kind": "proc",
+                "owner_id": "proc-1",
+                "wrapper_pid": 4242,
+                "boot_id": "boot-1",
+                "process_start_identity": "boot-1:4242",
+                "owner_log_path": "logs/proc-1.log",
+                "now_ts": 31
+            }),
+        )
+        .unwrap();
+        let claim_request = claim_obj.bind(py).downcast::<PyDict>().unwrap();
+        let claimed =
+            py_tool_run_claim(py, path.to_str().unwrap(), claim_request, 1_000)
+                .unwrap();
+        let claimed = py_to_json_value(claimed.bind(py)).unwrap();
+        assert_eq!(claimed["outcome"], json!("claimed"));
+        assert_eq!(claimed["replayed"], json!(false));
+        assert_eq!(claimed["launch"]["argv"], json!(["just", "check"]));
+        let replayed_claim =
+            py_tool_run_claim(py, path.to_str().unwrap(), claim_request, 1_000)
+                .unwrap();
+        let replayed_claim = py_to_json_value(replayed_claim.bind(py)).unwrap();
+        assert_eq!(replayed_claim["outcome"], json!("claimed"));
+        assert_eq!(replayed_claim["replayed"], json!(true));
+        let handoff_finish_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": handoff_id,
+                "state": "succeeded",
+                "exit_code": 0,
+                "duration_ms": 5,
+                "terminal_cause": "exited",
+                "now_ts": 32
+            }),
+        )
+        .unwrap();
+        let handoff_finish_request =
+            handoff_finish_obj.bind(py).downcast::<PyDict>().unwrap();
+        let handoff_finished = py_tool_run_finish(
+            py,
+            path.to_str().unwrap(),
+            handoff_finish_request,
+            1_000,
+        )
+        .unwrap();
+        let handoff_finished =
+            py_to_json_value(handoff_finished.bind(py)).unwrap();
+        assert_eq!(handoff_finished["run"]["state"], json!("succeeded"));
+        assert_eq!(handoff_finished["run"]["terminal_cause"], json!("exited"));
+        let stop_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": handoff_id,
+                "requested_by": "agent-1",
+                "reason": "late stop",
+                "now_ts": 33
+            }),
+        )
+        .unwrap();
+        let stop_request = stop_obj.bind(py).downcast::<PyDict>().unwrap();
+        let stopped = py_tool_run_request_stop(
+            py,
+            path.to_str().unwrap(),
+            stop_request,
+            1_000,
+        )
+        .unwrap();
+        let stopped = py_to_json_value(stopped.bind(py)).unwrap();
+        assert_eq!(stopped["outcome"], json!("already_settled"));
+        let reconcile_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "facts": [{
+                    "run_id": handoff_id,
+                    "wrapper_pid": 4242,
+                    "boot_id": "boot-1",
+                    "process_start_identity": "boot-1:4242",
+                    "observation": "dead",
+                    "owner": {
+                        "kind": "proc",
+                        "id": "proc-1",
+                        "state": "terminal",
+                        "exit_code": 0,
+                        "termination_reason": "success"
+                    }
+                }],
+                "now_ts": 34
+            }),
+        )
+        .unwrap();
+        let reconcile_request =
+            reconcile_obj.bind(py).downcast::<PyDict>().unwrap();
+        let reconciled = py_tool_run_reconcile(
+            py,
+            path.to_str().unwrap(),
+            reconcile_request,
+            1_000,
+        )
+        .unwrap();
+        let reconciled = py_to_json_value(reconciled.bind(py)).unwrap();
+        assert_eq!(reconciled["persisted"], json!(true));
     });
 }
 

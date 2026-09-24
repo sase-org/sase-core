@@ -8,12 +8,16 @@
 //! preview, apply, and log reclamation.
 
 mod connection;
+mod handoff;
 mod lifecycle;
 mod query;
+mod reconcile;
 mod retention;
 #[cfg(test)]
 mod tests;
 
-pub use lifecycle::{append_event, begin, finish, observe, reconcile};
+pub use handoff::{claim, request_stop};
+pub use lifecycle::{append_event, begin, finish, observe};
 pub use query::{list_runs, show_run, store_stats, summarize};
+pub use reconcile::reconcile;
 pub use retention::{retention_apply, retention_preview};

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "outcome": "recorded",
+  "run": {
+    "schema_version": 1,
+    "run_id": "7f3a2b1c9d4e5f6a8b0c1d2e3f4a5b6c",
+    "state": "running",
+    "source": "native",
+    "executor": "inline",
+    "attempt": 1,
+    "tool_name": "check",
+    "definition_digest": "digest-1",
+    "extra_args_digest": "digest-2",
+    "display_argv": ["just", "check"],
+    "project": "sase",
+    "created_ts": 10,
+    "running_ts": 11,
+    "logs": {
+      "stdout_path": "logs/run/stdout.log",
+      "stderr_path": "logs/run/stderr.log",
+      "events_path": "logs/run/events.jsonl",
+      "has_private_argv": false
+    },
+    "evidence_completeness": {
+      "complete": false,
+      "missing": ["fingerprint_before not observed"]
+    },
+    "diagnostics": [],
+    "stop_request": {
+      "requested_ts": 12,
+      "requested_by": "agent-1",
+      "reason": "user stop"
+    }
+  },
+  "stop_request": {
+    "requested_ts": 12,
+    "requested_by": "agent-1",
+    "reason": "user stop"
+  },
+  "diagnostics": []
+}

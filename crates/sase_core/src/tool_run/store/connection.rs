@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS runs (
     child_pid INTEGER,
     child_pgid INTEGER,
     child_process_start_identity TEXT,
+    launch_mode TEXT,
+    launch_envelope_json TEXT,
+    launcher_json TEXT,
+    terminal_cause TEXT,
+    settled_by TEXT,
+    stop_request_json TEXT,
+    owner_log_path TEXT,
     mutated_input INTEGER,
     fingerprint_before_json TEXT,
     fingerprint_after_json TEXT,
@@ -146,35 +153,37 @@ pub(super) fn validate_schema(version: u32) -> Result<(), ToolRunError> {
 pub(super) fn ensure_child_observation_columns(
     conn: &Connection,
 ) -> Result<(), ToolRunError> {
-    let mut names = Vec::new();
-    let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for name in rows {
-        names.push(name?);
-    }
-    if !names
-        .iter()
-        .any(|name| name == "child_process_start_identity")
-    {
-        conn.execute(
-            "ALTER TABLE runs ADD COLUMN child_process_start_identity TEXT",
-            [],
-        )?;
+    let existing = runs_column_set(conn)?;
+    for (column, ddl) in [
+        ("child_process_start_identity", "TEXT"),
+        ("launch_mode", "TEXT"),
+        ("launch_envelope_json", "TEXT"),
+        ("launcher_json", "TEXT"),
+        ("terminal_cause", "TEXT"),
+        ("settled_by", "TEXT"),
+        ("stop_request_json", "TEXT"),
+        ("owner_log_path", "TEXT"),
+    ] {
+        if !existing.contains(column) {
+            conn.execute(
+                &format!("ALTER TABLE runs ADD COLUMN {column} {ddl}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
 
-pub(super) fn runs_has_child_observation_column(
+pub(super) fn runs_column_set(
     conn: &Connection,
-) -> Result<bool, ToolRunError> {
+) -> Result<std::collections::HashSet<String>, ToolRunError> {
     let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut set = std::collections::HashSet::new();
     for name in rows {
-        if name? == "child_process_start_identity" {
-            return Ok(true);
-        }
+        set.insert(name?);
     }
-    Ok(false)
+    Ok(set)
 }
 
 pub(super) fn unix_now() -> i64 {

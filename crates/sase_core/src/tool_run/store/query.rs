@@ -5,6 +5,10 @@
 //! `load_events`, `load_stages`, `load_samples`) shared with the write side.
 
 use super::super::catalog::extra_args_digest;
+use super::super::handoff_wire::{
+    ToolRunLaunchEnvelopeWire, ToolRunProcessIdentityWire,
+    ToolRunStopRecordWire,
+};
 use super::super::wire::{
     ToolAttemptWire, ToolLoadSampleWire, ToolRunEventWire, ToolRunExecutorWire,
     ToolRunListRequestWire, ToolRunListResultWire, ToolRunLogMetadataWire,
@@ -16,8 +20,7 @@ use super::super::wire::{
 };
 use super::super::ToolRunError;
 use super::connection::{
-    runs_has_child_observation_column, unix_now, validate_schema,
-    with_read_store,
+    runs_column_set, unix_now, validate_schema, with_read_store,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
@@ -288,15 +291,24 @@ pub(super) fn load_run(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Option<ToolRunWire>, ToolRunError> {
-    // Stores written before the child-observation column existed select a
-    // NULL placeholder so the positional mapping below holds for both
-    // layouts; the read path never migrates.
-    let child_identity_projection = if runs_has_child_observation_column(conn)?
-    {
-        "child_process_start_identity"
-    } else {
-        "NULL"
+    // Stores written before a column existed select a NULL placeholder so
+    // the positional mapping below holds for every layout; reads never
+    // migrate.
+    let columns = runs_column_set(conn)?;
+    let projection = |name: &str| {
+        if columns.contains(name) {
+            name.to_string()
+        } else {
+            "NULL".to_string()
+        }
     };
+    let child_identity_projection = projection("child_process_start_identity");
+    let launch_mode_projection = projection("launch_mode");
+    let launcher_projection = projection("launcher_json");
+    let terminal_cause_projection = projection("terminal_cause");
+    let settled_by_projection = projection("settled_by");
+    let stop_request_projection = projection("stop_request_json");
+    let owner_log_projection = projection("owner_log_path");
     let sql = format!(
         "SELECT run_id, state, source, executor, attempt, tool_name,
                 definition_digest, extra_args_digest, display_argv_json,
@@ -308,7 +320,10 @@ pub(super) fn load_run(
                 {child_identity_projection}, mutated_input,
                 fingerprint_before_json, fingerprint_after_json,
                 log_stdout_path, log_stderr_path, events_path, evidence_json,
-                diagnostics_json
+                diagnostics_json, {launch_mode_projection},
+                {launcher_projection}, {terminal_cause_projection},
+                {settled_by_projection}, {stop_request_projection},
+                {owner_log_projection}
          FROM runs WHERE run_id = ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -319,10 +334,35 @@ pub(super) fn load_run(
     let private_argv: Option<String> = row.get(9)?;
     let display_argv: String = row.get(8)?;
     let evidence: String = row.get(38)?;
-    let diagnostics: String = row.get(39)?;
+    let diagnostics_raw: String = row.get(39)?;
     let fingerprint_before: Option<String> = row.get(33)?;
     let fingerprint_after: Option<String> = row.get(34)?;
     let mutated: Option<i64> = row.get(32)?;
+    let launch_mode: Option<String> = row.get(40)?;
+    let launcher_json: Option<String> = row.get(41)?;
+    let terminal_cause: Option<String> = row.get(42)?;
+    let settled_by: Option<String> = row.get(43)?;
+    let stop_request_json: Option<String> = row.get(44)?;
+    let owner_log_path: Option<String> = row.get(45)?;
+    let mut diagnostics: Vec<String> =
+        serde_json::from_str(&diagnostics_raw)
+            .map_err(|error| ToolRunError::store(error.to_string()))?;
+    let stop_request = match stop_request_json {
+        None => None,
+        Some(raw) => {
+            match serde_json::from_str::<ToolRunStopRecordWire>(&raw) {
+                Ok(record) => Some(record),
+                Err(_) => {
+                    diagnostics
+                        .push("stored stop request was unreadable".to_string());
+                    None
+                }
+            }
+        }
+    };
+    let launcher = launcher_json.as_deref().and_then(|raw| {
+        serde_json::from_str::<ToolRunProcessIdentityWire>(raw).ok()
+    });
     Ok(Some(ToolRunWire {
         schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
         run_id: row.get(0)?,
@@ -368,11 +408,16 @@ pub(super) fn load_run(
             stderr_path: row.get(36)?,
             events_path: row.get(37)?,
             has_private_argv: private_argv.is_some(),
+            owner_log_path,
         },
         evidence_completeness: serde_json::from_str(&evidence)
             .map_err(|error| ToolRunError::store(error.to_string()))?,
-        diagnostics: serde_json::from_str(&diagnostics)
-            .map_err(|error| ToolRunError::store(error.to_string()))?,
+        diagnostics,
+        launch_mode,
+        terminal_cause,
+        settled_by,
+        stop_request,
+        launcher,
     }))
 }
 
@@ -489,6 +534,31 @@ fn parse_optional_json<T: serde::de::DeserializeOwned>(
             .map_err(|error| ToolRunError::store(error.to_string()))
     })
     .transpose()
+}
+
+pub(super) fn load_launch_envelope(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<ToolRunLaunchEnvelopeWire>, ToolRunError> {
+    let columns = runs_column_set(conn)?;
+    if !columns.contains("launch_envelope_json") {
+        return Ok(None);
+    }
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "SELECT launch_envelope_json FROM runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw.flatten() else {
+        return Ok(None);
+    };
+    let envelope = serde_json::from_str::<ToolRunLaunchEnvelopeWire>(&raw)
+        .map_err(|_| {
+            ToolRunError::invalid("stored launch envelope was unreadable")
+        })?;
+    Ok(Some(envelope))
 }
 
 fn empty_summary(diagnostic: &str) -> ToolRunSummaryResultWire {

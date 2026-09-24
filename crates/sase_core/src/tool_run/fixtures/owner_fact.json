@@ -1,0 +1,7 @@
+{
+  "kind": "proc",
+  "id": "proc-123",
+  "state": "terminal",
+  "exit_code": 0,
+  "termination_reason": "success"
+}
