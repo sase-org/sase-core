@@ -25,6 +25,8 @@ fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
             "prune_procs",
             "proc_runtime_retention_wire_schema_version",
             "apply_proc_runtime_retention",
+            "command_line_proc_tag",
+            "command_line_proc_history_limit",
             "agent_artifact_run_retention_wire_schema_version",
             "apply_agent_artifact_run_retention",
             "read_tasks_snapshot",
@@ -144,6 +146,12 @@ fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
             })
         );
     });
+}
+
+#[test]
+fn command_line_proc_binding_exposes_tag_and_limit() {
+    assert_eq!(py_command_line_proc_tag(), "command-line");
+    assert_eq!(py_command_line_proc_history_limit(), 50);
 }
 
 #[test]

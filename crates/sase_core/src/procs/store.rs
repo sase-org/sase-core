@@ -32,6 +32,10 @@ const PROC_LIFECYCLES: [&str; 2] = ["legacy", "proc-shell"];
 const STORE_LOG_OWNER: &str = "proc-store";
 const PROC_SHELL_LIFECYCLE: &str = "proc-shell";
 pub const SERVICE_PROC_HISTORY_LIMIT: usize = 20;
+/// Tag marking finished procs submitted from the TUI Command Line.
+pub const COMMAND_LINE_PROC_TAG: &str = "command-line";
+/// Retention bucket for finished procs carrying [`COMMAND_LINE_PROC_TAG`].
+pub const COMMAND_LINE_PROC_HISTORY_LIMIT: usize = 50;
 
 const LOCK_TIMEOUT_ENV: &str = "SASE_PROC_STORE_LOCK_TIMEOUT";
 const LEGACY_LOCK_TIMEOUT_ENV: &str = "SASE_TASK_STORE_LOCK_TIMEOUT";
@@ -540,6 +544,7 @@ fn apply_retention(
 ) -> (Vec<ProcWire>, Vec<String>, Vec<String>) {
     let mut keep = vec![true; rows.len()];
     let mut generic_terminals = Vec::new();
+    let mut command_line_terminals = Vec::new();
     let mut service_terminals: BTreeMap<String, Vec<(usize, &ProcWire)>> =
         BTreeMap::new();
     for (index, proc) in rows.iter().enumerate() {
@@ -551,11 +556,18 @@ fn apply_retention(
                 .entry(name.to_string())
                 .or_default()
                 .push((index, proc));
+        } else if is_command_line_proc(proc) {
+            command_line_terminals.push((index, proc));
         } else {
             generic_terminals.push((index, proc));
         }
     }
     mark_retention_prunes(&mut keep, generic_terminals, history_limit);
+    mark_retention_prunes(
+        &mut keep,
+        command_line_terminals,
+        COMMAND_LINE_PROC_HISTORY_LIMIT,
+    );
     for terminals in service_terminals.into_values() {
         mark_retention_prunes(&mut keep, terminals, SERVICE_PROC_HISTORY_LIMIT);
     }
@@ -587,6 +599,10 @@ fn mark_retention_prunes(
     for (index, _) in terminals.into_iter().skip(limit) {
         keep[index] = false;
     }
+}
+
+fn is_command_line_proc(proc: &ProcWire) -> bool {
+    proc.tags.iter().any(|tag| tag == COMMAND_LINE_PROC_TAG)
 }
 
 fn named_service_proc_name(proc: &ProcWire) -> Option<&str> {
@@ -1902,6 +1918,76 @@ mod tests {
         assert!(kept.iter().any(|row| row.proc_id == "generic-active"));
         assert_eq!(pruned_proc_ids.len(), 40);
         assert_eq!(pruned_log_proc_ids.len(), 40);
+    }
+
+    #[test]
+    fn retention_gives_command_line_procs_their_own_bucket() {
+        let mut rows = Vec::new();
+        for index in 0..60 {
+            let mut row =
+                proc(&format!("cmd-{index:02}"), "success", &timestamp(index));
+            row.tags = vec![COMMAND_LINE_PROC_TAG.to_string()];
+            rows.push(row);
+        }
+        for index in 0..100 {
+            rows.push(proc(
+                &format!("generic-{index:03}"),
+                "success",
+                &timestamp(index + 60),
+            ));
+        }
+        let mut running = proc("cmd-running", "running", &timestamp(160));
+        running.tags = vec![COMMAND_LINE_PROC_TAG.to_string()];
+        rows.push(running);
+
+        let (kept, pruned_proc_ids, _) = apply_retention(rows, 100);
+
+        let command_line = kept
+            .iter()
+            .filter(|row| {
+                is_terminal_status(&row.status) && is_command_line_proc(row)
+            })
+            .count();
+        let generic = kept
+            .iter()
+            .filter(|row| {
+                is_terminal_status(&row.status)
+                    && named_service_proc_name(row).is_none()
+                    && !is_command_line_proc(row)
+            })
+            .count();
+        assert_eq!(command_line, COMMAND_LINE_PROC_HISTORY_LIMIT);
+        assert_eq!(generic, 100);
+        assert!(
+            kept.iter().any(|row| row.proc_id == "cmd-running"),
+            "running command-line procs are never pruned"
+        );
+        assert!(pruned_proc_ids.contains(&"cmd-00".to_string()));
+        assert!(
+            !pruned_proc_ids.iter().any(|id| id.starts_with("generic-")),
+            "command-line rows must not evict generic history"
+        );
+    }
+
+    #[test]
+    fn retention_keeps_tagged_named_service_procs_in_service_buckets() {
+        let mut rows = Vec::new();
+        for index in 0..(SERVICE_PROC_HISTORY_LIMIT + 5) {
+            let mut row = proc(
+                &format!("gateway-{index:02}"),
+                "success",
+                &timestamp(index),
+            );
+            row.service =
+                Some(service_block(Some("gateway"), "daemon", "builtin"));
+            row.tags = vec![COMMAND_LINE_PROC_TAG.to_string()];
+            rows.push(row);
+        }
+
+        let (kept, _, _) = apply_retention(rows, 100);
+
+        assert_eq!(kept.len(), SERVICE_PROC_HISTORY_LIMIT);
+        assert!(kept.iter().all(|row| is_command_line_proc(row)));
     }
 
     #[test]

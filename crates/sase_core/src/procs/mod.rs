@@ -7,7 +7,8 @@ pub use runtime::apply_proc_runtime_retention;
 pub use store::{
     append_proc, begin_proc_settlement, claim_proc_supervisor, finish_proc,
     prune_procs, read_procs_snapshot, request_proc_stop, reserve_proc,
-    update_proc, ProcStoreError, SERVICE_PROC_HISTORY_LIMIT,
+    update_proc, ProcStoreError, COMMAND_LINE_PROC_HISTORY_LIMIT,
+    COMMAND_LINE_PROC_TAG, SERVICE_PROC_HISTORY_LIMIT,
 };
 pub use wire::{
     ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,

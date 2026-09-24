@@ -5,6 +5,9 @@ use crate::prelude::*;
 use crate::json_bridge::{json_value_to_py, py_to_json_value};
 
 use pyo3::wrap_pyfunction;
+use sase_core::procs::{
+    COMMAND_LINE_PROC_HISTORY_LIMIT, COMMAND_LINE_PROC_TAG,
+};
 
 // --- Background proc store bindings -------------------------------------
 fn proc_store_error_to_pyerr(error: ProcStoreError) -> PyErr {
@@ -142,6 +145,20 @@ fn py_prune_procs(
 #[pyo3(name = "proc_runtime_retention_wire_schema_version")]
 fn py_proc_runtime_retention_wire_schema_version() -> u32 {
     PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION
+}
+
+/// Tag marking finished procs submitted from the TUI Command Line.
+#[pyfunction]
+#[pyo3(name = "command_line_proc_tag")]
+fn py_command_line_proc_tag() -> &'static str {
+    COMMAND_LINE_PROC_TAG
+}
+
+/// Retention bucket for finished procs carrying the command-line tag.
+#[pyfunction]
+#[pyo3(name = "command_line_proc_history_limit")]
+fn py_command_line_proc_history_limit() -> usize {
+    COMMAND_LINE_PROC_HISTORY_LIMIT
 }
 
 #[pyfunction]
@@ -303,6 +320,8 @@ pub(crate) fn register_procs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_apply_proc_runtime_retention, m)?)?;
+    m.add_function(wrap_pyfunction!(py_command_line_proc_tag, m)?)?;
+    m.add_function(wrap_pyfunction!(py_command_line_proc_history_limit, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_tasks_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_task, m)?)?;
     m.add_function(wrap_pyfunction!(py_update_task, m)?)?;
