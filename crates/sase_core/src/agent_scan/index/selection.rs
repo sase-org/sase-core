@@ -374,6 +374,7 @@ pub(super) struct IndexedCandidateRow {
     pub(super) has_workflow_state: bool,
     pub(super) agent_clan: Option<String>,
     pub(super) agent_clan_generation: Option<String>,
+    pub(super) agent_session: Option<String>,
     pub(super) selection: CandidateSelection,
 }
 
@@ -408,6 +409,9 @@ impl IndexedCandidateRow {
             }
             AgentArtifactCandidateFieldWire::Type => {
                 vec![self.agent_type.as_str()]
+            }
+            AgentArtifactCandidateFieldWire::AgentSession => {
+                self.agent_session.as_deref().into_iter().collect()
             }
         }
     }

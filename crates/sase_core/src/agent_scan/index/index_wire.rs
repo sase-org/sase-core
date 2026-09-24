@@ -131,6 +131,11 @@ pub enum AgentArtifactIndexFreshnessWire {
 }
 
 /// Scalar fields that can be tested before `record_json` is decoded.
+///
+/// `AgentSession` reads the indexed `agent_family` column, which stores
+/// `agent_meta.agent_session`. Matching is case-insensitive like every other
+/// `Equals` field, so a caller that needs an exact lane match re-checks the
+/// hydrated record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentArtifactCandidateFieldWire {
@@ -140,6 +145,7 @@ pub enum AgentArtifactCandidateFieldWire {
     Provider,
     Machine,
     Type,
+    AgentSession,
 }
 
 /// Exact candidate filter compiled by Python from the agent-query AST.

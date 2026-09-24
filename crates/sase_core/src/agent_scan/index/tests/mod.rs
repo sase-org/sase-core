@@ -1,3 +1,4 @@
+mod agent_session_filter;
 mod clan_context;
 mod history;
 mod lineage;
