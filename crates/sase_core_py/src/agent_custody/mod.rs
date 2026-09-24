@@ -528,6 +528,52 @@ fn py_save_dismissed_agents_index(
         .map_err(PyValueError::new_err)
 }
 
+/// Atomically add and remove dismissed agent identities under a file lock.
+///
+/// Returns the merged identity list written to the host-provided index file.
+#[pyfunction]
+#[pyo3(name = "update_dismissed_agents_index")]
+fn py_update_dismissed_agents_index<'py>(
+    py: Python<'py>,
+    path: &str,
+    additions: &Bound<'_, PyList>,
+    removals: &Bound<'_, PyList>,
+) -> PyResult<PyObject> {
+    fn wire_identities(
+        items: &Bound<'_, PyList>,
+        arg: &str,
+    ) -> PyResult<Vec<AgentCleanupIdentityWire>> {
+        let mut wire_identities: Vec<AgentCleanupIdentityWire> =
+            Vec::with_capacity(items.len());
+        for (idx, item) in items.iter().enumerate() {
+            let json = py_to_json_value(&item)?;
+            let identity: AgentCleanupIdentityWire =
+                serde_json::from_value(json).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "{arg}[{idx}] is not a valid AgentCleanupIdentityWire dict: {e}"
+                    ))
+                })?;
+            wire_identities.push(identity);
+        }
+        Ok(wire_identities)
+    }
+    let wire_additions = wire_identities(additions, "additions")?;
+    let wire_removals = wire_identities(removals, "removals")?;
+    let merged = py
+        .allow_threads(|| {
+            core_update_dismissed_agents_index(
+                &PathBuf::from(path),
+                &wire_additions,
+                &wire_removals,
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    let value = serde_json::to_value(&merged).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Write one dismissed-agent bundle using the sharded bundle layout.
 #[pyfunction]
 #[pyo3(name = "save_dismissed_bundle")]
@@ -752,6 +798,7 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_plan_agent_ownership_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agents_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_update_dismissed_agents_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_bundle, m)?)?;
     m.add_function(wrap_pyfunction!(py_delete_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_release_workspace_from_content, m)?)?;

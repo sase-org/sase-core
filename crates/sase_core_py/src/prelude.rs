@@ -38,6 +38,7 @@ pub(crate) use sase_core::agent_cleanup::{
     release_workspace_from_content as core_release_workspace_from_content,
     save_dismissed_agents_index as core_save_dismissed_agents_index,
     save_dismissed_bundle_json as core_save_dismissed_bundle_json,
+    update_dismissed_agents_index as core_update_dismissed_agents_index,
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
     ForceReuseStopBarrierRequestWire,
 };

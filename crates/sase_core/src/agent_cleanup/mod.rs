@@ -9,8 +9,9 @@ pub use execution::{
     delete_agent_artifact_markers, mark_comment_agents_as_killed,
     mark_hook_agents_as_killed, mark_mentor_agents_as_killed,
     release_workspace_from_content, save_dismissed_agents_index,
-    save_dismissed_bundle_json, AgentCleanupArtifactDeleteResultWire,
-    AgentCleanupBundleWriteResultWire, AgentCleanupWorkspaceReleaseResultWire,
+    save_dismissed_bundle_json, update_dismissed_agents_index,
+    AgentCleanupArtifactDeleteResultWire, AgentCleanupBundleWriteResultWire,
+    AgentCleanupWorkspaceReleaseResultWire,
 };
 pub use force_reuse::{
     decide_force_reuse_stop_barrier, ForceReuseStopBarrierDecisionWire,
@@ -36,6 +37,6 @@ pub use wire::{
     CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
     KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_MONITOR, KILL_KIND_RUNNING,
     KILL_KIND_WORKFLOW, SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE,
-    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
-    SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
+    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_RUNNER_LIVE_DETAIL,
+    SKIPPED_UNKNOWN_KILL_KIND, SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };

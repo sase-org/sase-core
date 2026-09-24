@@ -42,7 +42,9 @@ pub fn save_dismissed_agents_index(
     dismissed: &[AgentCleanupIdentityWire],
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
     }
     let entries: Vec<(&str, &str, Option<&str>)> = dismissed
         .iter()
@@ -57,7 +59,195 @@ pub fn save_dismissed_agents_index(
     let payload = serde_json::to_string_pretty(&entries).map_err(|e| {
         format!("failed to serialize dismissed agent index: {e}")
     })?;
-    fs::write(path, payload).map_err(|e| e.to_string())
+    write_file_atomically(path, payload.as_bytes())
+}
+
+/// Read one dismissed identity from either on-disk shape: the legacy
+/// `[agent_type, cl_name, raw_suffix]` triple or the
+/// `{agent_type, cl_name, raw_suffix}` dict.
+fn dismissed_identity_from_json_value(
+    value: &JsonValue,
+) -> Option<AgentCleanupIdentityWire> {
+    if let Some(triple) = value.as_array() {
+        if triple.len() != 3 {
+            return None;
+        }
+        let agent_type = triple[0].as_str()?;
+        let cl_name = triple[1].as_str()?;
+        let raw_suffix = match &triple[2] {
+            JsonValue::Null => None,
+            JsonValue::String(suffix) => Some(suffix.clone()),
+            _ => return None,
+        };
+        return Some(AgentCleanupIdentityWire {
+            agent_type: agent_type.to_string(),
+            cl_name: cl_name.to_string(),
+            raw_suffix,
+        });
+    }
+    if let Some(record) = value.as_object() {
+        let agent_type = record.get("agent_type")?.as_str()?;
+        let cl_name = record.get("cl_name")?.as_str()?;
+        let raw_suffix = match record.get("raw_suffix") {
+            None | Some(JsonValue::Null) => None,
+            Some(JsonValue::String(suffix)) => Some(suffix.clone()),
+            Some(_) => return None,
+        };
+        return Some(AgentCleanupIdentityWire {
+            agent_type: agent_type.to_string(),
+            cl_name: cl_name.to_string(),
+            raw_suffix,
+        });
+    }
+    None
+}
+
+fn load_dismissed_index_entries(
+    path: &Path,
+) -> Result<Vec<AgentCleanupIdentityWire>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(err) => return Err(err.to_string()),
+    };
+    let value: JsonValue = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let backup = corrupt_backup_path(path, stamp);
+            fs::rename(path, &backup).map_err(|e| e.to_string())?;
+            return Ok(Vec::new());
+        }
+    };
+    let entries = value.as_array().ok_or_else(|| {
+        format!(
+            "dismissed agent index is not a JSON array: {}",
+            path.to_string_lossy()
+        )
+    })?;
+    let mut identities = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(identity) = dismissed_identity_from_json_value(entry) else {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let backup = corrupt_backup_path(path, stamp);
+            fs::rename(path, &backup).map_err(|e| e.to_string())?;
+            return Ok(Vec::new());
+        };
+        identities.push(identity);
+    }
+    Ok(identities)
+}
+
+fn sort_dismissed_identities(identities: &mut Vec<AgentCleanupIdentityWire>) {
+    identities.sort_by(|left, right| {
+        left.agent_type
+            .cmp(&right.agent_type)
+            .then(left.cl_name.cmp(&right.cl_name))
+            .then(left.raw_suffix.cmp(&right.raw_suffix))
+    });
+    identities.dedup();
+}
+
+fn corrupt_backup_path(path: &Path, stamp: u64) -> std::path::PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dismissed_agents.json".to_string());
+    path.with_file_name(format!("{file_name}.corrupt-{stamp}"))
+}
+
+fn dismissed_index_lock_path(path: &Path) -> std::path::PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| format!("{}.lock", name.to_string_lossy()))
+        .unwrap_or_else(|| "dismissed_agents.lock".to_string());
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => std::path::PathBuf::from(name),
+    }
+}
+
+/// Atomically add and remove dismissed identities under an exclusive lock.
+///
+/// Holds an exclusive advisory lock on a sibling `<file>.lock` file, reads
+/// the current entries, applies the removals and then the additions, writes
+/// the merged set back atomically, and returns the resulting set. A missing
+/// file counts as empty. An unparsable file is renamed to
+/// `<file>.corrupt-<unix_ts>` and treated as empty, never silently
+/// overwritten.
+pub fn update_dismissed_agents_index(
+    path: &Path,
+    additions: &[AgentCleanupIdentityWire],
+    removals: &[AgentCleanupIdentityWire],
+) -> Result<Vec<AgentCleanupIdentityWire>, String> {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let lock_path = dismissed_index_lock_path(path);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| e.to_string())?;
+    lock_file.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let mut current = load_dismissed_index_entries(path)?;
+    let remove_set: BTreeSet<AgentCleanupIdentityWire> =
+        removals.iter().cloned().collect();
+    current.retain(|identity| !remove_set.contains(identity));
+    for identity in additions {
+        if !current.contains(identity) {
+            current.push(identity.clone());
+        }
+    }
+    sort_dismissed_identities(&mut current);
+    save_dismissed_agents_index(path, &current)?;
+    Ok(current)
+}
+
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+    let file_name = path.file_name().ok_or_else(|| {
+        format!(
+            "dismissed agent index path has no file name: {}",
+            path.to_string_lossy()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!(
+        ".{}.tmp.{}.{}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        nonce
+    );
+    let tmp_path = match parent {
+        Some(dir) => dir.join(tmp_name),
+        None => std::path::PathBuf::from(tmp_name),
+    };
+    write_file_synced(&tmp_path, bytes)?;
+    fs::rename(&tmp_path, path).map_err(|e| e.to_string())?;
+    if let Some(dir) = parent {
+        sync_dir(dir);
+    }
+    Ok(())
 }
 
 pub fn bundle_filename_from_json(bundle: &JsonValue) -> Result<String, String> {
@@ -599,5 +789,128 @@ mod tests {
             Some("killed_agent")
         );
         assert_eq!(comments[0].suffix_type.as_deref(), Some("killed_agent"));
+    }
+
+    fn dismissed_identity(
+        cl_name: &str,
+        raw_suffix: Option<&str>,
+    ) -> AgentCleanupIdentityWire {
+        AgentCleanupIdentityWire {
+            agent_type: "run".to_string(),
+            cl_name: cl_name.to_string(),
+            raw_suffix: raw_suffix.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn concurrent_index_updates_lose_no_identities() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dismissed_agents.json");
+
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let path = path.clone();
+                scope.spawn(move || {
+                    let additions: Vec<AgentCleanupIdentityWire> = (0..8)
+                        .map(|slot| {
+                            dismissed_identity(
+                                &format!("worker-{worker}"),
+                                Some(&format!("ts-{worker}-{slot}")),
+                            )
+                        })
+                        .collect();
+                    update_dismissed_agents_index(&path, &additions, &[])
+                        .unwrap();
+                });
+            }
+        });
+
+        let final_entries =
+            update_dismissed_agents_index(&path, &[], &[]).unwrap();
+        assert_eq!(final_entries.len(), 64);
+    }
+
+    #[test]
+    fn index_removals_and_additions_compose() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dismissed_agents.json");
+        let keep = dismissed_identity("keep", Some("ts-keep"));
+        let drop = dismissed_identity("drop", Some("ts-drop"));
+        let fresh = dismissed_identity("fresh", Some("ts-fresh"));
+
+        update_dismissed_agents_index(
+            &path,
+            &[keep.clone(), drop.clone()],
+            &[],
+        )
+        .unwrap();
+        let result = update_dismissed_agents_index(
+            &path,
+            std::slice::from_ref(&fresh),
+            std::slice::from_ref(&drop),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![fresh, keep]);
+    }
+
+    #[test]
+    fn corrupt_index_is_preserved_not_overwritten() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dismissed_agents.json");
+        fs::write(&path, "{not valid json").unwrap();
+        let fresh = dismissed_identity("fresh", Some("ts-fresh"));
+
+        let result = update_dismissed_agents_index(
+            &path,
+            std::slice::from_ref(&fresh),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![fresh]);
+        let corrupt: Vec<std::path::PathBuf> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("dismissed_agents.json.corrupt-")
+                    })
+            })
+            .collect();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(fs::read_to_string(&corrupt[0]).unwrap(), "{not valid json");
+    }
+
+    #[test]
+    fn index_reads_both_triple_and_dict_entry_shapes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dismissed_agents.json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!([
+                ["run", "legacy", "ts-legacy"],
+                {
+                    "agent_type": "run",
+                    "cl_name": "shaped",
+                    "raw_suffix": "ts-shaped",
+                },
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = update_dismissed_agents_index(&path, &[], &[]).unwrap();
+
+        assert_eq!(
+            result,
+            vec![
+                dismissed_identity("legacy", Some("ts-legacy")),
+                dismissed_identity("shaped", Some("ts-shaped")),
+            ]
+        );
     }
 }

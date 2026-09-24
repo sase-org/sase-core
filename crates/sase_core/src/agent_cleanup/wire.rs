@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 4;
+pub const AGENT_CLEANUP_WIRE_SCHEMA_VERSION: u32 = 5;
 
 pub const CLEANUP_SCOPE_FOCUSED_PANEL: &str = "focused_panel";
 pub const CLEANUP_SCOPE_ALL_PANELS: &str = "all_panels";
@@ -39,6 +39,9 @@ pub const SKIPPED_NOT_DISMISSABLE: &str = "not_dismissable";
 pub const SKIPPED_NOT_KILLABLE: &str = "not_killable";
 pub const SKIPPED_UNKNOWN_KILL_KIND: &str = "unknown_kill_kind";
 pub const SKIPPED_DUPLICATE: &str = "duplicate";
+/// Skip detail for a FAILED row whose runner is still alive. It must be
+/// killed, not dismissed, so the dismiss-completed mode reports it plainly.
+pub const SKIPPED_RUNNER_LIVE_DETAIL: &str = "runner_live";
 
 /// Stable agent identity used by the Python TUI:
 /// `(agent_type, cl_name, raw_suffix)`.
@@ -104,6 +107,10 @@ pub struct AgentCleanupTargetWire {
     pub monitor_id: Option<String>,
     #[serde(default)]
     pub is_live_monitor: bool,
+    /// True when the host probed the runner pid alive at gather time. A
+    /// FAILED row with a pid and a live runner is killable, not dismissable.
+    #[serde(default)]
+    pub runner_is_live: bool,
 }
 
 /// Scope and mode requested by the host.

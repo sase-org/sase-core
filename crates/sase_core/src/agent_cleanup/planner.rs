@@ -24,8 +24,8 @@ use super::wire::{
     CONFIRMATION_SEVERITY_DISMISS, CONFIRMATION_SEVERITY_NONE, KILL_KIND_CRS,
     KILL_KIND_HOOK, KILL_KIND_MENTOR, KILL_KIND_MONITOR, KILL_KIND_RUNNING,
     KILL_KIND_WORKFLOW, SKIPPED_DUPLICATE, SKIPPED_NOT_DISMISSABLE,
-    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
-    SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
+    SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_RUNNER_LIVE_DETAIL,
+    SKIPPED_UNKNOWN_KILL_KIND, SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 
 // legacy agent-family spelling; flips in core-contract
@@ -48,6 +48,13 @@ const DISMISSABLE_STATUSES: &[&str] = &[
 
 fn is_dismissable_status(status: &str) -> bool {
     DISMISSABLE_STATUSES.contains(&status)
+}
+
+/// A FAILED row with a pid and a live runner (retry backoff) is killable,
+/// not dismissable. Every other dismissable status keeps its semantics even
+/// when live; success-terminal live runners are dismissed, never signalled.
+fn is_failed_live_runner(target: &AgentCleanupTargetWire) -> bool {
+    target.status == "FAILED" && target.pid.is_some() && target.runner_is_live
 }
 
 /// True for any child row: workflow steps, sequential agent session members, and
@@ -250,6 +257,9 @@ fn target_is_dismissable(
     target: &AgentCleanupTargetWire,
     request: &AgentCleanupRequestWire,
 ) -> bool {
+    if is_failed_live_runner(target) {
+        return false;
+    }
     is_dismissable_status(&target.status)
         || (request.include_pidless_as_dismissable && target.pid.is_none())
 }
@@ -819,9 +829,19 @@ pub fn plan_agent_cleanup(
         let dismissable =
             !target.is_live_monitor && target_is_dismissable(target, request);
         let killable = target.is_live_monitor
+            || is_failed_live_runner(target)
             || (target.pid.is_some() && !is_dismissable_status(&target.status));
 
         if request.mode == CLEANUP_MODE_DISMISS_COMPLETED {
+            if is_failed_live_runner(target) {
+                add_skip(
+                    &mut skipped_items,
+                    target,
+                    SKIPPED_NOT_DISMISSABLE,
+                    Some(SKIPPED_RUNNER_LIVE_DETAIL.to_string()),
+                );
+                continue;
+            }
             if dismissable {
                 let agent_session_still_active =
                     parallel_agent_session_members(
@@ -1068,7 +1088,20 @@ mod tests {
             step_type: None,
             monitor_id: None,
             is_live_monitor: false,
+            runner_is_live: false,
         }
+    }
+
+    fn live_target(
+        agent_type: &str,
+        cl_name: &str,
+        raw_suffix: Option<&str>,
+        status: &str,
+        pid: Option<i64>,
+    ) -> AgentCleanupTargetWire {
+        let mut item = target(agent_type, cl_name, raw_suffix, status, pid);
+        item.runner_is_live = true;
+        item
     }
 
     fn req(scope: &str, mode: &str) -> AgentCleanupRequestWire {
@@ -1920,7 +1953,7 @@ mod tests {
         request.schema_version = 3;
         let err = plan_agent_cleanup(&[], &request).unwrap_err();
         assert!(err.contains("schema mismatch"));
-        assert!(err.contains("expected 4"));
+        assert!(err.contains("expected 5"));
     }
 
     #[test]
@@ -2155,5 +2188,121 @@ mod tests {
         let decoded: AgentCleanupTargetWire =
             serde_json::from_value(encoded).unwrap();
         assert!(decoded.agent_session_parallel);
+    }
+
+    #[test]
+    fn failed_row_with_live_runner_becomes_kill_item() {
+        let row =
+            live_target("run", "retry", Some("retry-ts"), "FAILED", Some(77));
+
+        let plan = plan_agent_cleanup(
+            std::slice::from_ref(&row),
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
+        )
+        .unwrap();
+
+        assert!(plan.dismiss_items.is_empty());
+        assert_eq!(plan.kill_items.len(), 1);
+        assert_eq!(plan.kill_items[0].identity.cl_name, "retry");
+        assert_eq!(plan.kill_items[0].kind, KILL_KIND_RUNNING);
+        assert_eq!(plan.kill_items[0].pid, Some(77));
+    }
+
+    #[test]
+    fn failed_row_with_live_runner_is_not_dismissable() {
+        let row =
+            live_target("run", "retry", Some("retry-ts"), "FAILED", Some(77));
+
+        let plan = plan_agent_cleanup(
+            std::slice::from_ref(&row),
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_DISMISS_COMPLETED),
+        )
+        .unwrap();
+
+        assert!(plan.dismiss_items.is_empty());
+        assert!(plan.kill_items.is_empty());
+        assert!(plan.skipped_items.iter().any(|item| {
+            item.identity.cl_name == "retry"
+                && item.reason == SKIPPED_NOT_DISMISSABLE
+                && item.detail.as_deref() == Some(SKIPPED_RUNNER_LIVE_DETAIL)
+        }));
+    }
+
+    #[test]
+    fn failed_row_without_live_runner_stays_dismissable() {
+        let row =
+            target("run", "failed", Some("failed-ts"), "FAILED", Some(77));
+
+        let plan = plan_agent_cleanup(
+            std::slice::from_ref(&row),
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
+        )
+        .unwrap();
+
+        assert!(plan.kill_items.is_empty());
+        assert_eq!(plan.dismiss_items.len(), 1);
+        assert_eq!(plan.dismiss_items[0].identity.cl_name, "failed");
+    }
+
+    #[test]
+    fn done_row_with_live_runner_stays_dismissable() {
+        let row = live_target("run", "done", Some("done-ts"), "DONE", Some(78));
+
+        let plan = plan_agent_cleanup(
+            std::slice::from_ref(&row),
+            &req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS),
+        )
+        .unwrap();
+
+        assert!(plan.kill_items.is_empty());
+        assert_eq!(plan.dismiss_items.len(), 1);
+        assert_eq!(plan.dismiss_items[0].identity.cl_name, "done");
+    }
+
+    #[test]
+    fn failed_live_runner_cascades_through_parallel_members() {
+        let mut root =
+            target("run", "sase-6g", Some("root-ts"), "RUNNING", Some(10));
+        root.agent_session_parallel = true;
+        let mut live_failed = live_target(
+            "run",
+            "sase-6g.1",
+            Some("phase-one-ts"),
+            "FAILED",
+            Some(11),
+        );
+        live_failed.agent_session_parallel = true;
+        live_failed.parent_timestamp = Some("root-ts".to_string());
+        let mut request = req(
+            CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
+            CLEANUP_MODE_KILL_AND_DISMISS,
+        );
+        request.identities = vec![root.identity.clone()];
+
+        let plan = plan_agent_cleanup(&[root, live_failed], &request).unwrap();
+
+        assert_eq!(
+            plan.kill_items
+                .iter()
+                .map(|item| item.identity.cl_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sase-6g", "sase-6g.1"]
+        );
+        assert_eq!(plan.kill_items[1].kind, KILL_KIND_RUNNING);
+        assert!(plan.dismiss_items.is_empty());
+    }
+
+    #[test]
+    fn schema_4_request_is_rejected_after_bump() {
+        let row = target("run", "alpha", Some("alpha-ts"), "DONE", None);
+        let mut request =
+            req(CLEANUP_SCOPE_ALL_PANELS, CLEANUP_MODE_KILL_AND_DISMISS);
+        request.schema_version = 4;
+
+        let err = plan_agent_cleanup(std::slice::from_ref(&row), &request)
+            .unwrap_err();
+
+        assert!(err.contains("schema mismatch"));
+        assert!(err.contains('4'));
     }
 }
