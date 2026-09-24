@@ -275,9 +275,38 @@ fn contract_covers_the_audited_directive_matrix() {
             .collect::<Vec<_>>(),
         [
             ("bead", Vec::new()),
-            ("clan", vec!["family".to_string(), "tribe".to_string()]),
-            ("family", vec!["clan".to_string(), "tribe".to_string()]),
-            ("tribe", vec!["clan".to_string(), "family".to_string()]),
+            (
+                "clan",
+                vec![
+                    "family".to_string(),
+                    "session".to_string(),
+                    "tribe".to_string(),
+                ],
+            ),
+            (
+                "family",
+                vec![
+                    "clan".to_string(),
+                    "session".to_string(),
+                    "tribe".to_string(),
+                ],
+            ),
+            (
+                "session",
+                vec![
+                    "clan".to_string(),
+                    "family".to_string(),
+                    "tribe".to_string(),
+                ],
+            ),
+            (
+                "tribe",
+                vec![
+                    "clan".to_string(),
+                    "family".to_string(),
+                    "session".to_string(),
+                ],
+            ),
         ]
     );
 
@@ -355,7 +384,7 @@ fn id_metadata_and_completion_match_the_editor_contract() {
     assert!(!metadata.allows_multiple);
     assert_eq!(
             metadata.description,
-            "Assign an agent ID with optional bead, clan, family, or user-managed tribe"
+            "Assign an agent ID with optional bead, clan, session, or user-managed tribe"
         );
     assert_eq!(canonical_directive_name("i"), Some("id"));
     assert_eq!(directive_metadata("i").map(|d| d.name), Some("id"));
@@ -385,7 +414,7 @@ fn id_metadata_and_completion_match_the_editor_contract() {
             .iter()
             .map(|candidate| candidate.insertion.as_str())
             .collect::<Vec<_>>(),
-        ["bead=", "clan=", "family=", "tribe="]
+        ["bead=", "clan=", "session=", "tribe="]
     );
     assert_eq!(
         id_args
@@ -395,7 +424,7 @@ fn id_metadata_and_completion_match_the_editor_contract() {
         [
             "Associate this launch with a bead",
             "Derive the full ID and join this agent clan",
-            "Attach this suffix to an existing agent family",
+            "Attach this suffix to an existing agent session",
             "Assign this agent to a user-managed tribe",
         ]
     );
@@ -410,6 +439,29 @@ fn id_metadata_and_completion_match_the_editor_contract() {
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn legacy_family_keyword_stays_in_contract_but_unsuggested() {
+    let contract = directive_contract();
+    let id = contract
+        .iter()
+        .find(|entry| entry.name == "id")
+        .expect("id contract");
+    let keywords: Vec<&str> = id
+        .keywords
+        .iter()
+        .map(|keyword| keyword.name.as_str())
+        .collect();
+    assert_eq!(keywords, ["bead", "clan", "family", "session", "tribe"]);
+
+    let id_candidates = directive_argument_candidates("id");
+    let suggested: Vec<&str> = id_candidates
+        .candidates
+        .iter()
+        .map(|candidate| candidate.insertion.as_str())
+        .collect();
+    assert_eq!(suggested, ["bead=", "clan=", "session=", "tribe="]);
 }
 
 #[test]

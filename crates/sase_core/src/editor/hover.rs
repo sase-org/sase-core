@@ -363,16 +363,16 @@ mod tests {
     fn directive_argument_hover_uses_current_identity_and_clan_metadata() {
         for (text, character, heading, description) in [
             (
-                "%id(worker, family=review)",
+                "%id(worker, session=review)",
                 14,
                 "**%id**",
-                "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+                "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
             ),
             (
                 "%i(worker, tribe=review)",
                 13,
                 "**%id**",
-                "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+                "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
             ),
             (
                 "%clan(research, tr)",

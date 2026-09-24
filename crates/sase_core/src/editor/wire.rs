@@ -506,7 +506,8 @@ pub enum DirectiveValueRole {
     ModelAliasKey,
     Agent,
     Clan,
-    Family,
+    #[serde(rename = "family", alias = "session")]
+    Session,
     Tribe,
     Hood,
     Bead,
@@ -904,12 +905,12 @@ pub fn directive_snippet_recipes_with_flags(
                 "Assign an explicit ID inside an existing clan.",
             ),
             recipe(
-                "%id(..., family=...)",
+                "%id(..., session=...)",
                 "directive snippet",
-                "%id(${1:suffix}, family=${2:family})$0",
-                "%id($1, family=$2)$0",
-                "%id(suffix, family=family)",
-                "Assign a family child suffix.",
+                "%id(${1:suffix}, session=${2:session})$0",
+                "%id($1, session=$2)$0",
+                "%id(suffix, session=session)",
+                "Assign an agent session child suffix.",
             ),
             recipe(
                 "%id(tribe=...)",

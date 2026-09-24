@@ -4,11 +4,14 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 const MAX_AGENT_NAME_BYTES: usize = 512;
+// legacy agent-family spelling; flips in core-contract
+const LEGACY_AGENT_SESSION_KIND: &str = "family";
+const LEGACY_AGENT_SESSION_PAGES_DIR: &str = "families";
 const USERNAME_SYNTAX: &str =
     "lowercase ASCII letters or digits with '-' and '_' only internally";
 const RESERVED_USERNAMES: &[&str] = &[
     "agent", "agents", "clan", "clans", "families", "family", "internal",
-    "repo", "repos", "sase", "sidecar", "sidecars",
+    "session", "sessions", "repo", "repos", "sase", "sidecar", "sidecars",
 ];
 
 /// A validated v2 owner identity.
@@ -58,9 +61,10 @@ pub(crate) enum AgentOwnershipClassification {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentFamilyNameWire {
+pub struct AgentSessionNameWire {
     pub kind: String,
-    pub family_name: String,
+    #[serde(rename = "family_name", alias = "agent_session_name")]
+    pub agent_session_name: String,
     #[serde(default)]
     pub member_role: Option<String>,
 }
@@ -105,7 +109,8 @@ pub struct OwnedAgentNameWire {
     pub owner_root: Option<String>,
     pub local_name: String,
     pub hood: String,
-    pub family_name: String,
+    #[serde(rename = "family_name", alias = "agent_session_name")]
+    pub agent_session_name: String,
     #[serde(default)]
     pub member_role: Option<String>,
 }
@@ -141,9 +146,9 @@ pub enum AgentIdentityError {
     },
 
     #[error(
-        "invalid family name '{name}': expected a solo name or one terminal '--<role>' suffix"
+        "invalid agent session name '{name}': expected a solo name or one terminal '--<role>' suffix"
     )]
-    InvalidFamilyName { name: String },
+    InvalidAgentSessionName { name: String },
 
     #[error(
         "invalid owner root '{root}': {reason}; expected one or two non-empty path-safe ASCII segments"
@@ -242,7 +247,7 @@ pub fn validate_owner_root(root: &str) -> Result<(), AgentIdentityError> {
 
 /// Strictly validate a newly-created agent name.
 ///
-/// Historical classification helpers intentionally accept legacy family
+/// Historical classification helpers intentionally accept legacy agent-session
 /// markers in non-terminal segments. Name creation must continue to use this
 /// stricter entry point, which permits at most one terminal `--<role>` suffix.
 pub fn validate_agent_name(name: &str) -> Result<(), AgentIdentityError> {
@@ -403,11 +408,11 @@ pub(crate) fn localize_source_global_name(
     })
 }
 
-pub fn parse_agent_family_name(
+pub fn parse_agent_session_name(
     name: &str,
-) -> Result<AgentFamilyNameWire, AgentIdentityError> {
+) -> Result<AgentSessionNameWire, AgentIdentityError> {
     let normalized = normalize_agent_archive_name(name)?;
-    parse_normalized_family_name(&normalized)
+    parse_normalized_agent_session_name(&normalized)
 }
 
 pub fn parse_owned_agent_name(
@@ -419,10 +424,10 @@ pub fn parse_owned_agent_name(
 }
 
 pub fn agent_local_hood(name: &str) -> Result<String, AgentIdentityError> {
-    let parsed = parse_agent_family_name(name)?;
+    let parsed = parse_agent_session_name(name)?;
     Ok(historical_hood_segment(
         parsed
-            .family_name
+            .agent_session_name
             .split('.')
             .next()
             .expect("validated name has a first segment"),
@@ -443,16 +448,17 @@ pub fn agent_name_in_hood(
 ) -> Result<bool, AgentIdentityError> {
     let normalized_hood = normalize_agent_archive_name(hood)?;
     if normalized_hood.contains("--") {
-        return Err(AgentIdentityError::InvalidFamilyName {
+        return Err(AgentIdentityError::InvalidAgentSessionName {
             name: hood.to_string(),
         });
     }
-    let Ok(parsed) = parse_agent_family_name(name) else {
+    let Ok(parsed) = parse_agent_session_name(name) else {
         return Ok(false);
     };
-    let family_scope = historical_family_scope(&parsed.family_name);
-    Ok(family_scope == normalized_hood
-        || family_scope
+    let agent_session_scope =
+        historical_agent_session_scope(&parsed.agent_session_name);
+    Ok(agent_session_scope == normalized_hood
+        || agent_session_scope
             .strip_prefix(&normalized_hood)
             .is_some_and(|suffix| suffix.starts_with('.')))
 }
@@ -466,16 +472,17 @@ pub fn agent_name_in_hood_with_owner_roots(
     if normalized_hood.member_role.is_some()
         || normalized_hood.local_name.contains("--")
     {
-        return Err(AgentIdentityError::InvalidFamilyName {
+        return Err(AgentIdentityError::InvalidAgentSessionName {
             name: hood.to_string(),
         });
     }
     let Ok(parsed) = parse_owned_agent_name(name, known_owner_roots) else {
         return Ok(false);
     };
-    let family_scope = historical_family_scope(&parsed.family_name);
-    Ok(family_scope == normalized_hood.local_name
-        || family_scope
+    let agent_session_scope =
+        historical_agent_session_scope(&parsed.agent_session_name);
+    Ok(agent_session_scope == normalized_hood.local_name
+        || agent_session_scope
             .strip_prefix(&normalized_hood.local_name)
             .is_some_and(|suffix| suffix.starts_with('.')))
 }
@@ -483,8 +490,8 @@ pub fn agent_name_in_hood_with_owner_roots(
 pub fn agent_name_ancestors(
     name: &str,
 ) -> Result<Vec<String>, AgentIdentityError> {
-    let parsed = parse_agent_family_name(name)?;
-    let mut segments = parsed.family_name.split('.');
+    let parsed = parse_agent_session_name(name)?;
+    let mut segments = parsed.agent_session_name.split('.');
     let first = segments.next().expect("validated name has a first segment");
     let hood = historical_hood_segment(first);
     let mut ancestors = vec![hood.to_string()];
@@ -505,7 +512,7 @@ pub fn agent_name_ancestors_with_owner_roots(
     known_owner_roots: &[String],
 ) -> Result<Vec<String>, AgentIdentityError> {
     let parsed = parse_owned_agent_name(name, known_owner_roots)?;
-    Ok(ancestors_for_family_name(&parsed.family_name))
+    Ok(ancestors_for_agent_session_name(&parsed.agent_session_name))
 }
 
 pub fn agent_link_target(
@@ -513,15 +520,17 @@ pub fn agent_link_target(
     owner: &AgentOwnerIdentity,
 ) -> Result<AgentLinkTargetWire, AgentIdentityError> {
     owner.validate()?;
-    let parsed = parse_agent_family_name(semantic_name)?;
-    let global_base = globalize_agent_name(&parsed.family_name, owner)?;
+    let parsed = parse_agent_session_name(semantic_name)?;
+    let global_base = globalize_agent_name(&parsed.agent_session_name, owner)?;
     match parsed.member_role {
         Some(role) => {
             validate_path_component(&global_base)?;
             validate_path_component(&role)?;
             Ok(AgentLinkTargetWire {
-                kind: "family".to_string(),
-                path: format!("families/{global_base}.md"),
+                kind: LEGACY_AGENT_SESSION_KIND.to_string(),
+                path: format!(
+                    "{LEGACY_AGENT_SESSION_PAGES_DIR}/{global_base}.md"
+                ),
                 anchor: Some(format!("member-{role}")),
             })
         }
@@ -546,17 +555,19 @@ pub fn agent_link_target_with_owner_roots(
     let parsed = parse_owned_agent_name(semantic_name, &roots)?;
     let global_base = match parsed.owner_root.as_deref() {
         Some(owner_root) if !is_current_owner_root(owner_root, owner) => {
-            format!("{owner_root}.{}", parsed.family_name)
+            format!("{owner_root}.{}", parsed.agent_session_name)
         }
-        _ => globalize_agent_name(&parsed.family_name, owner)?,
+        _ => globalize_agent_name(&parsed.agent_session_name, owner)?,
     };
     match parsed.member_role {
         Some(role) => {
             validate_path_component(&global_base)?;
             validate_path_component(&role)?;
             Ok(AgentLinkTargetWire {
-                kind: "family".to_string(),
-                path: format!("families/{global_base}.md"),
+                kind: LEGACY_AGENT_SESSION_KIND.to_string(),
+                path: format!(
+                    "{LEGACY_AGENT_SESSION_PAGES_DIR}/{global_base}.md"
+                ),
                 anchor: Some(format!("member-{role}")),
             })
         }
@@ -646,20 +657,20 @@ fn owner_mismatch(
     }
 }
 
-fn parse_normalized_family_name(
+fn parse_normalized_agent_session_name(
     normalized: &str,
-) -> Result<AgentFamilyNameWire, AgentIdentityError> {
-    let (family_name, member_role) =
-        parse_normalized_family_name_unchecked(normalized);
+) -> Result<AgentSessionNameWire, AgentIdentityError> {
+    let (agent_session_name, member_role) =
+        parse_normalized_agent_session_name_unchecked(normalized);
     Ok(match member_role {
-        None => AgentFamilyNameWire {
+        None => AgentSessionNameWire {
             kind: "solo".to_string(),
-            family_name: family_name.to_string(),
+            agent_session_name: agent_session_name.to_string(),
             member_role: None,
         },
-        Some(role) => AgentFamilyNameWire {
+        Some(role) => AgentSessionNameWire {
             kind: "member".to_string(),
-            family_name: family_name.to_string(),
+            agent_session_name: agent_session_name.to_string(),
             member_role: Some(role.to_string()),
         },
     })
@@ -681,10 +692,10 @@ fn parse_normalized_owned_agent_name(
         None => (None, normalized),
     };
     validate_historical_semantic_name(local_name)?;
-    let family = parse_normalized_family_name(local_name)?;
+    let agent_session = parse_normalized_agent_session_name(local_name)?;
     let hood = historical_hood_segment(
-        family
-            .family_name
+        agent_session
+            .agent_session_name
             .split('.')
             .next()
             .expect("validated name has a first segment"),
@@ -694,8 +705,8 @@ fn parse_normalized_owned_agent_name(
         owner_root,
         local_name: local_name.to_string(),
         hood,
-        family_name: family.family_name,
-        member_role: family.member_role,
+        agent_session_name: agent_session.agent_session_name,
+        member_role: agent_session.member_role,
     })
 }
 
@@ -817,7 +828,7 @@ pub fn validate_agent_reference_name(
 
 fn validate_semantic_name(name: &str) -> Result<(), AgentIdentityError> {
     validate_historical_semantic_name(name)?;
-    validate_new_family_name(name)
+    validate_new_agent_session_name(name)
 }
 
 fn validate_historical_semantic_name(
@@ -849,7 +860,9 @@ fn validate_historical_semantic_name(
     validate_dotted_base(name)
 }
 
-fn parse_normalized_family_name_unchecked(name: &str) -> (&str, Option<&str>) {
+fn parse_normalized_agent_session_name_unchecked(
+    name: &str,
+) -> (&str, Option<&str>) {
     let terminal_start = name
         .rfind('.')
         .map_or(0, |separator| separator.saturating_add(1));
@@ -870,21 +883,23 @@ fn parse_normalized_family_name_unchecked(name: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn validate_new_family_name(name: &str) -> Result<(), AgentIdentityError> {
+fn validate_new_agent_session_name(
+    name: &str,
+) -> Result<(), AgentIdentityError> {
     let delimiter_count = name.match_indices("--").count();
     match delimiter_count {
         0 => Ok(()),
         1 => {
             let (base, role) = name.rsplit_once("--").expect("one match");
             if base.is_empty() || role.is_empty() || role.contains('.') {
-                return Err(AgentIdentityError::InvalidFamilyName {
+                return Err(AgentIdentityError::InvalidAgentSessionName {
                     name: name.to_string(),
                 });
             }
             validate_dotted_base(base)?;
             validate_simple_segment(role, name)
         }
-        _ => Err(AgentIdentityError::InvalidFamilyName {
+        _ => Err(AgentIdentityError::InvalidAgentSessionName {
             name: name.to_string(),
         }),
     }
@@ -900,9 +915,12 @@ fn historical_hood_segment(segment: &str) -> &str {
     })
 }
 
-pub(crate) fn historical_family_scope(family_name: &str) -> String {
-    let (first, suffix) =
-        family_name.split_once('.').unwrap_or((family_name, ""));
+pub(crate) fn historical_agent_session_scope(
+    agent_session_name: &str,
+) -> String {
+    let (first, suffix) = agent_session_name
+        .split_once('.')
+        .unwrap_or((agent_session_name, ""));
     let hood = historical_hood_segment(first);
     if suffix.is_empty() {
         hood.to_string()
@@ -911,8 +929,8 @@ pub(crate) fn historical_family_scope(family_name: &str) -> String {
     }
 }
 
-fn ancestors_for_family_name(family_name: &str) -> Vec<String> {
-    let mut segments = family_name.split('.');
+fn ancestors_for_agent_session_name(agent_session_name: &str) -> Vec<String> {
+    let mut segments = agent_session_name.split('.');
     let first = segments.next().expect("validated name has a first segment");
     let hood = historical_hood_segment(first);
     let mut ancestors = vec![hood.to_string()];
@@ -1046,7 +1064,7 @@ mod tests {
         assert_eq!(parsed.owner_root.as_deref(), Some("alice.athena"));
         assert_eq!(parsed.local_name, "7n--code");
         assert_eq!(parsed.hood, "7n");
-        assert_eq!(parsed.family_name, "7n");
+        assert_eq!(parsed.agent_session_name, "7n");
         assert_eq!(parsed.member_role.as_deref(), Some("code"));
 
         let parsed = parse_owned_agent_name("athena.7n--code", &roots).unwrap();
@@ -1057,7 +1075,7 @@ mod tests {
             parse_owned_agent_name("athena.7n--code", &[]).unwrap();
         assert_eq!(compatibility.owner_root, None);
         assert_eq!(compatibility.hood, "athena");
-        assert_eq!(compatibility.family_name, "athena.7n");
+        assert_eq!(compatibility.agent_session_name, "athena.7n");
     }
 
     #[test]
@@ -1182,23 +1200,23 @@ mod tests {
         for value in ["foo--", "--code", "foo--code.bar", "foo--code--test"] {
             assert!(matches!(
                 validate_agent_name(value),
-                Err(AgentIdentityError::InvalidFamilyName { .. })
+                Err(AgentIdentityError::InvalidAgentSessionName { .. })
             ));
         }
         validate_agent_name("foo.bar--code").unwrap();
     }
 
     #[test]
-    fn family_hood_ancestors_and_membership_are_canonical() {
-        let parsed = parse_agent_family_name("foo.bar.baz--code").unwrap();
+    fn agent_session_hood_ancestors_and_membership_are_canonical() {
+        let parsed = parse_agent_session_name("foo.bar.baz--code").unwrap();
         assert_eq!(parsed.kind, "member");
-        assert_eq!(parsed.family_name, "foo.bar.baz");
+        assert_eq!(parsed.agent_session_name, "foo.bar.baz");
         assert_eq!(parsed.member_role.as_deref(), Some("code"));
         assert_eq!(
-            parse_agent_family_name("foo.bar").unwrap(),
-            AgentFamilyNameWire {
+            parse_agent_session_name("foo.bar").unwrap(),
+            AgentSessionNameWire {
                 kind: "solo".to_string(),
-                family_name: "foo.bar".to_string(),
+                agent_session_name: "foo.bar".to_string(),
                 member_role: None,
             }
         );
@@ -1212,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_family_classification_is_total_and_canonical() {
+    fn historical_agent_session_classification_is_total_and_canonical() {
         let alice = owner("alice", "athena");
         let cases = [
             (
@@ -1248,10 +1266,12 @@ mod tests {
                 vec!["fi", "fi--code.f0"],
             ),
         ];
-        for (name, kind, family_name, member_role, hood, ancestors) in cases {
-            let parsed = parse_agent_family_name(name).unwrap();
+        for (name, kind, agent_session_name, member_role, hood, ancestors) in
+            cases
+        {
+            let parsed = parse_agent_session_name(name).unwrap();
             assert_eq!(parsed.kind, kind, "{name}");
-            assert_eq!(parsed.family_name, family_name, "{name}");
+            assert_eq!(parsed.agent_session_name, agent_session_name, "{name}");
             assert_eq!(parsed.member_role.as_deref(), member_role, "{name}");
             assert_eq!(agent_local_hood(name).unwrap(), hood, "{name}");
             assert_eq!(
@@ -1284,10 +1304,10 @@ mod tests {
                 "{name}"
             );
             assert_eq!(
-                parse_agent_family_name(&parsed.family_name)
+                parse_agent_session_name(&parsed.agent_session_name)
                     .unwrap()
-                    .family_name,
-                parsed.family_name,
+                    .agent_session_name,
+                parsed.agent_session_name,
                 "{name}"
             );
         }
@@ -1356,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn link_targets_distinguish_family_and_solo() {
+    fn link_targets_distinguish_agent_session_and_solo() {
         let alice = owner("alice", "athena");
         assert_eq!(
             agent_link_target("foo.bar--code", &alice).unwrap(),
@@ -1374,5 +1394,59 @@ mod tests {
                 anchor: None,
             }
         );
+    }
+
+    #[test]
+    fn agent_session_name_wire_accepts_both_key_spellings() {
+        let legacy: AgentSessionNameWire =
+            serde_json::from_value(serde_json::json!({
+                "kind": "member",
+                "family_name": "foo.bar",
+                "member_role": "code",
+            }))
+            .unwrap();
+        let new: AgentSessionNameWire =
+            serde_json::from_value(serde_json::json!({
+                "kind": "member",
+                "agent_session_name": "foo.bar",
+                "member_role": "code",
+            }))
+            .unwrap();
+        assert_eq!(legacy, new);
+        assert_eq!(legacy.agent_session_name, "foo.bar");
+    }
+
+    #[test]
+    fn agent_session_name_wire_serializes_legacy_spelling() {
+        let wire = AgentSessionNameWire {
+            kind: "solo".to_string(),
+            agent_session_name: "foo.bar".to_string(),
+            member_role: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            r#"{"kind":"solo","family_name":"foo.bar","member_role":null}"#,
+        );
+    }
+
+    #[test]
+    fn owned_agent_name_wire_accepts_both_key_spellings() {
+        let legacy: OwnedAgentNameWire =
+            serde_json::from_value(serde_json::json!({
+                "local_name": "7n--code",
+                "hood": "7n",
+                "family_name": "7n",
+                "member_role": "code",
+            }))
+            .unwrap();
+        let new: OwnedAgentNameWire =
+            serde_json::from_value(serde_json::json!({
+                "local_name": "7n--code",
+                "hood": "7n",
+                "agent_session_name": "7n",
+                "member_role": "code",
+            }))
+            .unwrap();
+        assert_eq!(legacy, new);
     }
 }

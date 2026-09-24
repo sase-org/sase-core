@@ -60,6 +60,12 @@ pub fn build_directive_completion_candidates_with_flags(
     }
 }
 
+/// Legacy `family=` stays in the directive contract (and diagnostics) so
+/// older readers keep working, but completion only ever suggests `session=`.
+fn keyword_is_suggested(directive: &str, keyword: &str) -> bool {
+    !(directive == "id" && keyword == "family")
+}
+
 pub fn directive_argument_candidates(name: &str) -> CompletionList {
     let Some(metadata) = directive_metadata(name) else {
         return CompletionList {
@@ -72,6 +78,9 @@ pub fn directive_argument_candidates(name: &str) -> CompletionList {
             candidates: metadata
                 .keywords
                 .iter()
+                .filter(|keyword| {
+                    keyword_is_suggested(metadata.name, keyword.name)
+                })
                 .map(|keyword| {
                     argument_candidate(
                         &format!("{}=", keyword.name),
@@ -118,6 +127,9 @@ pub fn build_filtered_directive_keyword_candidates(
     let selected = selected_keyword_set(selected_keywords);
     let mut candidates = Vec::new();
     for keyword in metadata.keywords {
+        if !keyword_is_suggested(metadata.name, keyword.name) {
+            continue;
+        }
         if metadata.name == "wait"
             && wait_queue_keyword_retired(keyword.name, enabled_feature_flags)
         {

@@ -486,7 +486,8 @@ fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
         "hood" => CompletionItemKind::FOLDER,
         "tribe" => CompletionItemKind::ENUM_MEMBER,
         "clan" => CompletionItemKind::MODULE,
-        "family" => CompletionItemKind::CLASS,
+        // legacy agent-family spelling; flips in core-contract
+        "family" | "session" => CompletionItemKind::CLASS,
         "proc" => CompletionItemKind::FUNCTION,
         _ => CompletionItemKind::VALUE,
     }
@@ -499,7 +500,8 @@ fn agent_completion_sort_group(kind: &str) -> u8 {
         "hood" => 1,
         "tribe" => 2,
         "clan" => 3,
-        "family" => 4,
+        // legacy agent-family spelling; flips in core-contract
+        "family" | "session" => 4,
         "proc" => 6,
         _ => 5,
     }
@@ -574,9 +576,8 @@ fn finalizer_label_description(kind: &str, detail: Option<&str>) -> String {
 
 fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
     let normalized = match kind {
-        "keyword" | "bead" | "hood" | "tribe" | "clan" | "family" | "proc" => {
-            kind
-        }
+        "keyword" | "bead" | "hood" | "tribe" | "clan" | "family"
+        | "session" | "proc" => kind,
         "" => "value",
         _ => "agent",
     };

@@ -1333,7 +1333,7 @@ async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
                     "uri": uri,
                     "languageId": "markdown",
                     "version": 1,
-                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%id(worker, fa)\n%i(worker, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
+                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%id(worker, se)\n%i(worker, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
                 }
             }
         }),
@@ -1380,29 +1380,29 @@ async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
         }),
     )
     .await;
-    let mut family_completion = None;
+    let mut session_completion = None;
     for _ in 0..8 {
         let message = read_message(&mut client_reader).await;
         if message.get("id").and_then(Value::as_i64) == Some(2) {
-            family_completion = message["result"]
+            session_completion = message["result"]
                 .as_array()
                 .and_then(|items| {
-                    items.iter().find(|item| item["label"] == "family=")
+                    items.iter().find(|item| item["label"] == "session=")
                 })
                 .cloned();
             break;
         }
     }
-    let family_completion =
-        family_completion.expect("expected family= completion item");
+    let session_completion =
+        session_completion.expect("expected session= completion item");
     assert_eq!(
-        family_completion["textEdit"],
+        session_completion["textEdit"],
         json!({
             "range": {
                 "start": {"line": 2, "character": 12},
                 "end": {"line": 2, "character": 14}
             },
-            "newText": "family="
+            "newText": "session="
         })
     );
 
@@ -1497,7 +1497,7 @@ async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
         "%id",
         "%id:...",
         "%id(..., clan=...)",
-        "%id(..., family=...)",
+        "%id(..., session=...)",
         "%id(tribe=...)",
     ] {
         assert!(labels.contains(&expected), "{labels:?}");
@@ -1507,8 +1507,8 @@ async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
     for (label, new_text) in [
         ("%id(..., clan=...)", "%id(${1:id}, clan=${2:clan})$0"),
         (
-            "%id(..., family=...)",
-            "%id(${1:suffix}, family=${2:family})$0",
+            "%id(..., session=...)",
+            "%id(${1:suffix}, session=${2:session})$0",
         ),
         ("%id(tribe=...)", "%id(tribe=${1:tribe})$0"),
     ] {

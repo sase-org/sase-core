@@ -102,6 +102,7 @@ fn agent_identity_bindings_are_exported_and_preserve_shapes() {
             "globalize_owned_agent_name",
             "foreign_agent_owner_root",
             "strip_global_agent_name",
+            "parse_agent_session_name",
             "parse_agent_family_name",
             "parse_owned_agent_name",
             "agent_local_hood",
@@ -194,6 +195,11 @@ fn agent_identity_bindings_are_exported_and_preserve_shapes() {
                 "family_name": "foo.bar",
                 "member_role": "code"
             })
+        );
+        let session = py_parse_agent_session_name(py, "foo.bar--code").unwrap();
+        assert_eq!(
+            py_to_json_value(family.bind(py)).unwrap(),
+            py_to_json_value(session.bind(py)).unwrap(),
         );
         let historical =
             py_parse_agent_family_name(py, "fi--code.f0--plan").unwrap();
@@ -363,5 +369,44 @@ fn relationship_bindings_validate_and_rewrite_plain_dicts() {
         .unwrap();
         let malformed = malformed_obj.bind(py).downcast::<PyDict>().unwrap();
         assert!(py_validate_agent_relationship_batch(py, malformed).is_err());
+    });
+}
+
+#[test]
+fn agent_session_parent_bindings_agree_across_spellings() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("resolve_agent_session_parent").is_ok());
+        assert!(module.getattr("resolve_agent_family_parent").is_ok());
+
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "parent_name": "foo",
+                "project_name": "sase",
+                "candidates": [{
+                    "name": "foo",
+                    "workflow_name": null,
+                    "project_name": "sase",
+                    "artifact_dir": "/tmp/20260702020202",
+                    "timestamp": "20260702020202",
+                    "cl_name": "sase",
+                    "raw_suffix": "20260702020202",
+                    "parent_timestamp": null,
+                    "is_terminal": true,
+                }],
+                "dismissed": [],
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let new = py_resolve_agent_session_parent(py, request).unwrap();
+        let legacy = py_resolve_agent_family_parent(py, request).unwrap();
+        let new_value = py_to_json_value(new.bind(py)).unwrap();
+        assert_eq!(new_value, py_to_json_value(legacy.bind(py)).unwrap(),);
+        assert_eq!(new_value["kind"], json!("resolved"));
     });
 }

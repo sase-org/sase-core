@@ -5,7 +5,7 @@
 //! host-verified, non-bookkeeping file change. This module owns that
 //! decision and the versioned evidence record that binds a later
 //! publication attempt back to the exact run that earned it -- an agent
-//! name or family publication elsewhere is not sufficient.
+//! name or agent session publication elsewhere is not sufficient.
 
 mod policy;
 mod wire;

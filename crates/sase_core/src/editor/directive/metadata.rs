@@ -204,15 +204,24 @@ const ID_KEYWORDS: &[DirectiveKeywordSpec] = &[
         description: "Derive the full ID and join this agent clan",
         value_role: DirectiveValueRole::Clan,
         repeatable: false,
-        conflicts_with: &["family", "tribe"],
+        conflicts_with: &["family", "session", "tribe"],
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
+        // legacy agent-family spelling; flips in core-contract
         name: "family",
-        description: "Attach this suffix to an existing agent family",
-        value_role: DirectiveValueRole::Family,
+        description: "Attach this suffix to an existing agent session",
+        value_role: DirectiveValueRole::Session,
         repeatable: false,
-        conflicts_with: &["clan", "tribe"],
+        conflicts_with: &["clan", "session", "tribe"],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "session",
+        description: "Attach this suffix to an existing agent session",
+        value_role: DirectiveValueRole::Session,
+        repeatable: false,
+        conflicts_with: &["clan", "family", "tribe"],
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
@@ -220,7 +229,7 @@ const ID_KEYWORDS: &[DirectiveKeywordSpec] = &[
         description: "Assign this agent to a user-managed tribe",
         value_role: DirectiveValueRole::Tribe,
         repeatable: false,
-        conflicts_with: &["clan", "family"],
+        conflicts_with: &["clan", "family", "session"],
         suggested_values: &[],
     },
 ];
@@ -633,9 +642,9 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     DirectiveMetadata {
         name: "id",
         alias: Some("i"),
-        description: "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+        description: "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
         argument_hint:
-            ":agent-id or :name.{@key}; ([id], bead=, clan=/family=/tribe=)",
+            ":agent-id or :name.{@key}; ([id], bead=, clan=/session=/tribe=)",
         takes_argument: true,
         allows_multiple: false,
         syntax_forms: COLON_PAREN_BARE,

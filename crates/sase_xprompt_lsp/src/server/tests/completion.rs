@@ -51,13 +51,13 @@ async fn completes_identity_and_clan_from_the_public_editor_surface() {
             "%id",
             "id",
             "i",
-            "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+            "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
         ),
         (
             "%i",
             "id",
             "i",
-            "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+            "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
         ),
         ("%cla", "clan", "c", "Declare a new parallel agent clan"),
         ("%c", "clan", "c", "Declare a new parallel agent clan"),
@@ -176,11 +176,11 @@ async fn directive_keyword_completion_uses_the_active_fragment_range() {
             "Derive the full ID and join this agent clan",
         ),
         (
-            "%id(worker, fa)",
+            "%id(worker, se)",
             14,
             12,
-            "family=",
-            "Attach this suffix to an existing agent family",
+            "session=",
+            "Attach this suffix to an existing agent session",
         ),
         (
             "%i(worker, tr)",
@@ -720,6 +720,8 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
     assert_eq!(clan, vec!["builders"]);
     let family = labels_at(server, "%i(worker, family=").await;
     assert_eq!(family, vec!["review"]);
+    let session = labels_at(server, "%i(worker, session=").await;
+    assert_eq!(session, vec!["review"]);
     let tribe = labels_at(server, "%clan(research, tribe=").await;
     assert_eq!(tribe, vec!["@ops"]);
     let hood = labels_at(server, "%hold(hood=s").await;

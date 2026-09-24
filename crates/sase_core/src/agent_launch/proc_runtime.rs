@@ -112,7 +112,7 @@ pub fn validate_standalone_proc_shell_name(
     };
     if name.contains("--") {
         return Err(
-            "Proc %id names cannot use the agent-family `--` convention."
+            "Proc %id names cannot use the agent-session `--` convention."
                 .to_string(),
         );
     }
@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_names_reject_family_qualification() {
+    fn shell_names_reject_agent_session_qualification() {
         validate_standalone_proc_shell_name(Some("checks")).unwrap();
         let error = validate_standalone_proc_shell_name(Some("agent--checks"))
             .unwrap_err();

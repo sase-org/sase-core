@@ -1,12 +1,12 @@
-//! Deterministic helpers for user-initiated agent-family attachment.
+//! Deterministic helpers for user-initiated agent-session attachment.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentFamilyParentCandidateWire {
+pub struct AgentSessionParentCandidateWire {
     pub name: String,
     #[serde(default)]
     pub workflow_name: Option<String>,
@@ -23,7 +23,7 @@ pub struct AgentFamilyParentCandidateWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentFamilyDismissedIdentityWire {
+pub struct AgentSessionDismissedIdentityWire {
     pub agent_type: String,
     pub cl_name: String,
     #[serde(default)]
@@ -31,37 +31,37 @@ pub struct AgentFamilyDismissedIdentityWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentFamilyParentResolutionRequestWire {
+pub struct AgentSessionParentResolutionRequestWire {
     pub schema_version: u32,
     pub parent_name: String,
     pub project_name: String,
     #[serde(default)]
-    pub candidates: Vec<AgentFamilyParentCandidateWire>,
+    pub candidates: Vec<AgentSessionParentCandidateWire>,
     #[serde(default)]
-    pub dismissed: Vec<AgentFamilyDismissedIdentityWire>,
+    pub dismissed: Vec<AgentSessionDismissedIdentityWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentFamilyParentResolutionWire {
+pub struct AgentSessionParentResolutionWire {
     pub schema_version: u32,
     pub kind: String,
     #[serde(default)]
-    pub parent: Option<AgentFamilyParentCandidateWire>,
+    pub parent: Option<AgentSessionParentCandidateWire>,
     #[serde(default)]
-    pub candidates: Vec<AgentFamilyParentCandidateWire>,
+    pub candidates: Vec<AgentSessionParentCandidateWire>,
 }
 
-pub fn resolve_agent_family_parent(
-    request: AgentFamilyParentResolutionRequestWire,
-) -> Result<AgentFamilyParentResolutionWire, String> {
-    if request.schema_version != AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION {
+pub fn resolve_agent_session_parent(
+    request: AgentSessionParentResolutionRequestWire,
+) -> Result<AgentSessionParentResolutionWire, String> {
+    if request.schema_version != AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION {
         return Err(format!(
-            "unsupported AgentFamilyParentResolutionRequestWire schema_version {}; expected {}",
-            request.schema_version, AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION
+            "unsupported AgentSessionParentResolutionRequestWire schema_version {}; expected {}",
+            request.schema_version, AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION
         ));
     }
 
-    let mut matching: Vec<AgentFamilyParentCandidateWire> = request
+    let mut matching: Vec<AgentSessionParentCandidateWire> = request
         .candidates
         .into_iter()
         .filter(|candidate| candidate.project_name == request.project_name)
@@ -114,7 +114,7 @@ pub fn resolve_agent_family_parent(
 type DismissedIndexes = (BTreeSet<(String, String, String)>, BTreeSet<String>);
 
 fn dismissed_indexes(
-    dismissed: &[AgentFamilyDismissedIdentityWire],
+    dismissed: &[AgentSessionDismissedIdentityWire],
 ) -> DismissedIndexes {
     let mut exact = BTreeSet::new();
     let mut suffixes = BTreeSet::new();
@@ -133,7 +133,7 @@ fn dismissed_indexes(
 }
 
 fn candidate_is_dismissed(
-    candidate: &AgentFamilyParentCandidateWire,
+    candidate: &AgentSessionParentCandidateWire,
     dismissed: &DismissedIndexes,
 ) -> bool {
     let Some(raw_suffix) = candidate.raw_suffix.as_ref() else {
@@ -152,11 +152,11 @@ fn candidate_is_dismissed(
 
 fn result(
     kind: &str,
-    parent: Option<AgentFamilyParentCandidateWire>,
-    candidates: Vec<AgentFamilyParentCandidateWire>,
-) -> AgentFamilyParentResolutionWire {
-    AgentFamilyParentResolutionWire {
-        schema_version: AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION,
+    parent: Option<AgentSessionParentCandidateWire>,
+    candidates: Vec<AgentSessionParentCandidateWire>,
+) -> AgentSessionParentResolutionWire {
+    AgentSessionParentResolutionWire {
+        schema_version: AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION,
         kind: kind.to_string(),
         parent,
         candidates,
@@ -170,8 +170,8 @@ mod tests {
     fn candidate(
         name: &str,
         timestamp: &str,
-    ) -> AgentFamilyParentCandidateWire {
-        AgentFamilyParentCandidateWire {
+    ) -> AgentSessionParentCandidateWire {
+        AgentSessionParentCandidateWire {
             name: name.to_string(),
             workflow_name: None,
             project_name: "sase".to_string(),
@@ -185,10 +185,10 @@ mod tests {
     }
 
     fn request(
-        candidates: Vec<AgentFamilyParentCandidateWire>,
-    ) -> AgentFamilyParentResolutionRequestWire {
-        AgentFamilyParentResolutionRequestWire {
-            schema_version: AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION,
+        candidates: Vec<AgentSessionParentCandidateWire>,
+    ) -> AgentSessionParentResolutionRequestWire {
+        AgentSessionParentResolutionRequestWire {
+            schema_version: AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION,
             parent_name: "foo".to_string(),
             project_name: "sase".to_string(),
             candidates,
@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn newest_terminal_visible_parent_wins() {
-        let result = resolve_agent_family_parent(request(vec![
+        let result = resolve_agent_session_parent(request(vec![
             candidate("foo", "20260701010101"),
             candidate("foo", "20260702020202"),
         ]))
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn absent_parent_reports_absent() {
-        let result = resolve_agent_family_parent(request(vec![candidate(
+        let result = resolve_agent_session_parent(request(vec![candidate(
             "bar",
             "20260701010101",
         )]))
@@ -223,13 +223,13 @@ mod tests {
     #[test]
     fn dismissed_parent_reports_dismissed() {
         let mut req = request(vec![candidate("foo", "20260701010101")]);
-        req.dismissed.push(AgentFamilyDismissedIdentityWire {
+        req.dismissed.push(AgentSessionDismissedIdentityWire {
             agent_type: "workflow".to_string(),
             cl_name: "sase".to_string(),
             raw_suffix: Some("20260701010101".to_string()),
         });
 
-        let result = resolve_agent_family_parent(req).unwrap();
+        let result = resolve_agent_session_parent(req).unwrap();
 
         assert_eq!(result.kind, "dismissed");
         assert_eq!(result.candidates[0].timestamp, "20260701010101");
@@ -241,7 +241,7 @@ mod tests {
         active.is_terminal = false;
 
         let result =
-            resolve_agent_family_parent(request(vec![active])).unwrap();
+            resolve_agent_session_parent(request(vec![active])).unwrap();
 
         assert_eq!(result.kind, "running");
         assert_eq!(result.parent.unwrap().timestamp, "20260701010101");
@@ -255,7 +255,7 @@ mod tests {
         second.artifact_dir = "/tmp/b".to_string();
 
         let result =
-            resolve_agent_family_parent(request(vec![first, second])).unwrap();
+            resolve_agent_session_parent(request(vec![first, second])).unwrap();
 
         assert_eq!(result.kind, "ambiguous");
         assert_eq!(result.candidates.len(), 2);

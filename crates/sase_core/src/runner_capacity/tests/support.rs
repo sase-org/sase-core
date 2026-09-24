@@ -167,7 +167,7 @@ pub(super) fn hold(
             display: format!("{key} display"),
             project: "proj".to_string(),
             agent_name: Some("holder.agent--code".to_string()),
-            family: Some("holder.agent".to_string()),
+            agent_session: Some("holder.agent".to_string()),
             clan: Some("holder-clan".to_string()),
             proc_id: None,
             pid: Some(123),

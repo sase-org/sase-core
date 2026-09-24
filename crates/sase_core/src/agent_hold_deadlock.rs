@@ -1,7 +1,7 @@
 //! Bounded wait-graph reachability for hold-deadlock detection.
 //!
 //! Python supplies the already-scanned relevant wait set. This module owns
-//! complete branch traversal, shared identity matching (name, family, clan,
+//! complete branch traversal, shared identity matching (name, agent session, clan,
 //! workflow, tribe, hood), waiter launch cutoffs, and self exclusion. It
 //! never writes holds or auto-releases a cycle.
 
@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_identity::{agent_name_in_hood, parse_agent_family_name};
+use crate::agent_identity::{agent_name_in_hood, parse_agent_session_name};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -18,8 +18,13 @@ pub struct HoldDeadlockCandidateWire {
     pub artifact_dir: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub family: Option<String>,
+    #[serde(
+        default,
+        rename = "family",
+        alias = "agent_session",
+        alias = "session"
+    )]
+    pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
     #[serde(default)]
@@ -36,8 +41,13 @@ pub struct HoldDeadlockWaitNodeWire {
     pub artifact_dir: String,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub family: Option<String>,
+    #[serde(
+        default,
+        rename = "family",
+        alias = "agent_session",
+        alias = "session"
+    )]
+    pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
     #[serde(default)]
@@ -123,7 +133,7 @@ fn waiter_reaches_candidate(
         IdentityView {
             artifact_dir: target_dir,
             agent_name: candidate.agent_name.as_deref(),
-            family: candidate.family.as_deref(),
+            agent_session: candidate.agent_session.as_deref(),
             clan: candidate.clan.as_deref(),
             workflow: candidate.workflow.as_deref(),
             timestamp: candidate.timestamp.as_deref(),
@@ -141,7 +151,7 @@ fn waiter_reaches_node(
         IdentityView {
             artifact_dir: &node.artifact_dir,
             agent_name: node.agent_name.as_deref(),
-            family: node.family.as_deref(),
+            agent_session: node.agent_session.as_deref(),
             clan: node.clan.as_deref(),
             workflow: node.workflow.as_deref(),
             timestamp: node.timestamp.as_deref(),
@@ -153,7 +163,7 @@ fn waiter_reaches_node(
 struct IdentityView<'a> {
     artifact_dir: &'a str,
     agent_name: Option<&'a str>,
-    family: Option<&'a str>,
+    agent_session: Option<&'a str>,
     clan: Option<&'a str>,
     workflow: Option<&'a str>,
     timestamp: Option<&'a str>,
@@ -187,17 +197,19 @@ fn identity_names(target: &IdentityView<'_>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     if let Some(name) = target.agent_name.filter(|name| !name.is_empty()) {
         names.insert(name.to_string());
-        if let Ok(parsed) = parse_agent_family_name(name) {
-            if !parsed.family_name.is_empty() {
-                names.insert(parsed.family_name);
+        if let Ok(parsed) = parse_agent_session_name(name) {
+            if !parsed.agent_session_name.is_empty() {
+                names.insert(parsed.agent_session_name);
             }
         }
     }
-    if let Some(family) = target.family.filter(|name| !name.is_empty()) {
-        names.insert(family.to_string());
-        if let Ok(parsed) = parse_agent_family_name(family) {
-            if !parsed.family_name.is_empty() {
-                names.insert(parsed.family_name);
+    if let Some(agent_session) =
+        target.agent_session.filter(|name| !name.is_empty())
+    {
+        names.insert(agent_session.to_string());
+        if let Ok(parsed) = parse_agent_session_name(agent_session) {
+            if !parsed.agent_session_name.is_empty() {
+                names.insert(parsed.agent_session_name);
             }
         }
     }
@@ -246,7 +258,10 @@ fn hood_hits(
     {
         return false;
     }
-    for name in [target.agent_name, target.family].into_iter().flatten() {
+    for name in [target.agent_name, target.agent_session]
+        .into_iter()
+        .flatten()
+    {
         if agent_name_in_hood(name, hood).unwrap_or(false) {
             return true;
         }
@@ -284,9 +299,9 @@ mod tests {
         HoldDeadlockWaitNodeWire {
             artifact_dir: dir.to_string(),
             agent_name: Some(name.to_string()),
-            family: parse_agent_family_name(name)
+            agent_session: parse_agent_session_name(name)
                 .ok()
-                .map(|parsed| parsed.family_name),
+                .map(|parsed| parsed.agent_session_name),
             timestamp: Some(dir.rsplit('/').next().unwrap_or(dir).to_string()),
             waiting_for: waiting_for
                 .iter()
@@ -304,9 +319,9 @@ mod tests {
         HoldDeadlockCandidateWire {
             artifact_dir: Some(dir.to_string()),
             agent_name: Some(name.to_string()),
-            family: parse_agent_family_name(name)
+            agent_session: parse_agent_session_name(name)
                 .ok()
-                .map(|parsed| parsed.family_name),
+                .map(|parsed| parsed.agent_session_name),
             timestamp: Some(dir.rsplit('/').next().unwrap_or(dir).to_string()),
             ..HoldDeadlockCandidateWire::default()
         }
@@ -416,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn family_wait_name_matches_role_suffixed_candidate() {
+    fn agent_session_wait_name_matches_role_suffixed_candidate() {
         let armer = node("/a/20260910120001", "armer.agent", &["team"], &[]);
         let held = candidate("/a/20260910120000", "team--code");
         assert!(reaches(armer, &held, vec![]));

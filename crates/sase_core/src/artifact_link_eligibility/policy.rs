@@ -132,7 +132,7 @@ pub fn artifact_link_release_evidence(
 
 /// Confirm *evidence* is still bound to the run trying to use it.
 ///
-/// A different run -- even one from the same agent family -- must not
+/// A different run -- even one from the same agent session -- must not
 /// borrow another run's release evidence, so both `run_id` and `agent_id`
 /// must match exactly.
 pub fn validate_artifact_link_release_evidence(
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn release_evidence_rejects_a_different_agent_in_the_same_family() {
+    fn release_evidence_rejects_a_different_agent_in_the_same_session() {
         let decision =
             decide_artifact_link_eligibility(&request(vec![real_repo("main")]))
                 .unwrap();

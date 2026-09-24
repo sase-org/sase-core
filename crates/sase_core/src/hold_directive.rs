@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::agent_hold::{normalize_hood_vec, AgentHoldSelectorsWire};
-use crate::agent_identity::parse_agent_family_name;
+use crate::agent_identity::parse_agent_session_name;
 use crate::agent_launch::parse_proc_duration_seconds;
 use crate::agent_tribe::{
     canonicalize_public_tribe_name, resolve_agent_tribe_identity,
@@ -235,12 +235,13 @@ pub fn hold_fields_to_selectors_with_identity(
     selectors.names = sorted_dedup(fields.names.iter().cloned());
     selectors.clans = sorted_dedup(fields.names.iter().cloned());
     selectors.workflows = sorted_dedup(fields.names.iter().cloned());
-    selectors.families = sorted_dedup(fields.names.iter().filter_map(|name| {
-        if name.contains("--") {
-            return None;
-        }
-        parse_agent_family_name(name).ok().map(|_| name.clone())
-    }));
+    selectors.agent_sessions =
+        sorted_dedup(fields.names.iter().filter_map(|name| {
+            if name.contains("--") {
+                return None;
+            }
+            parse_agent_session_name(name).ok().map(|_| name.clone())
+        }));
     let mut tribes = Vec::new();
     for tribe in &fields.tribes {
         tribes.push(resolve_hold_selector_tribe(tribe, identity)?);
@@ -388,7 +389,7 @@ fn parse_hold_positional(
             fields.tribes.push(parse_tribe_value(&value[1..], span)?);
         }
         _ => {
-            parse_agent_family_name(value).map_err(|error| {
+            parse_agent_session_name(value).map_err(|error| {
                 hold_error(
                     "invalid-hold-name",
                     &format!("%hold name selector {value:?} is not valid: {error}"),
@@ -777,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_names_to_selectors_without_shell_family() {
+    fn expands_names_to_selectors_without_shell_agent_session() {
         let fields = collect_ok(&[occ(
             "%hold(builder, builder--mon, hood=sase-11l, pending, future)",
             vec![
@@ -796,7 +797,7 @@ mod tests {
         assert_eq!(selectors.names, vec!["builder", "builder--mon"]);
         assert_eq!(selectors.clans, vec!["builder", "builder--mon"]);
         assert_eq!(selectors.workflows, vec!["builder", "builder--mon"]);
-        assert_eq!(selectors.families, vec!["builder"]);
+        assert_eq!(selectors.agent_sessions, vec!["builder"]);
         assert_eq!(selectors.artifact_dirs, vec!["/tmp/a"]);
         assert!(selectors.future);
     }

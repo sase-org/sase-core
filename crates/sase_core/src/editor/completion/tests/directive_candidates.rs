@@ -265,8 +265,8 @@ fn directive_keyword_completion_targets_only_the_post_comma_fragment() {
         ("%clan(research, su)", 18, 16, "clan", "summary_script="),
         ("%id(worker, cl)", 14, 12, "id", "clan="),
         ("%i(worker, cl)", 13, 11, "id", "clan="),
-        ("%id(worker, fa)", 14, 12, "id", "family="),
-        ("%i(worker, fa)", 13, 11, "id", "family="),
+        ("%id(worker, se)", 14, 12, "id", "session="),
+        ("%i(worker, se)", 13, 11, "id", "session="),
         ("%id(worker, tr)", 14, 12, "id", "tribe="),
         ("%i(worker, tr)", 13, 11, "id", "tribe="),
     ] {

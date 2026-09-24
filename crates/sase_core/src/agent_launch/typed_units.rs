@@ -169,8 +169,8 @@ fn classify_typed_launch_unit(
     let mut agent_clan_tribe: Option<String> = None;
     let mut agent_clan_summary: Option<String> = None;
     let mut agent_clan_summary_script: Option<String> = None;
-    let mut agent_family_parent: Option<String> = None;
-    let mut agent_family_suffix: Option<String> = None;
+    let mut agent_session_parent: Option<String> = None;
+    let mut agent_session_suffix: Option<String> = None;
     let mut agent_tribe: Option<String> = None;
     let mut parsed_id: Option<ParsedIdDirective> = None;
     let mut parsed_clan: Option<ParsedClanDirective> = None;
@@ -363,7 +363,7 @@ fn classify_typed_launch_unit(
                     );
                     if parsed.unsupported_on_proc {
                         proc_forbidden_directives.push(
-                            "%id(..., clan=|family=|tribe=|bead=...)"
+                            "%id(..., clan=|family=|session=|tribe=|bead=...)"
                                 .to_string(),
                         );
                     }
@@ -515,8 +515,8 @@ fn classify_typed_launch_unit(
         &mut agent_clan_tribe,
         &mut agent_clan_summary,
         &mut agent_clan_summary_script,
-        &mut agent_family_parent,
-        &mut agent_family_suffix,
+        &mut agent_session_parent,
+        &mut agent_session_suffix,
         &mut agent_tribe,
         &mut agent_bead_id,
         diagnostics,
@@ -531,7 +531,7 @@ fn classify_typed_launch_unit(
                 has_queue: !queue_occurrences.is_empty(),
                 has_hold: hold_fields.is_some(),
                 has_clan: parsed_clan.is_some() || agent_clan.is_some(),
-                has_family: agent_family_parent.is_some(),
+                has_agent_session: agent_session_parent.is_some(),
             },
             diagnostics,
         );
@@ -642,7 +642,7 @@ fn classify_typed_launch_unit(
             &logical_id,
             agent_identity.as_deref(),
             agent_identity_explicit,
-            agent_family_parent.as_deref(),
+            agent_session_parent.as_deref(),
             agent_clan.as_deref(),
             diagnostics,
         );
@@ -656,8 +656,8 @@ fn classify_typed_launch_unit(
             clan_tribe: agent_clan_tribe,
             clan_summary: agent_clan_summary,
             clan_summary_script: agent_clan_summary_script,
-            family_attach_parent: agent_family_parent,
-            family_attach_suffix: agent_family_suffix,
+            agent_session_attach_parent: agent_session_parent,
+            agent_session_attach_suffix: agent_session_suffix,
             tribe: agent_tribe,
             model: agent_model,
             reasoning_effort: agent_effort,
@@ -869,7 +869,7 @@ fn validate_hold_self(
     logical_id: &str,
     identity: Option<&str>,
     identity_explicit: bool,
-    family: Option<&str>,
+    agent_session: Option<&str>,
     clan: Option<&str>,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
@@ -881,14 +881,14 @@ fn validate_hold_self(
         if let Some(identity) = identity {
             own.insert(identity.to_string());
             if let Ok(parsed) =
-                crate::agent_identity::parse_agent_family_name(identity)
+                crate::agent_identity::parse_agent_session_name(identity)
             {
-                own.insert(parsed.family_name);
+                own.insert(parsed.agent_session_name);
             }
         }
     }
-    if let Some(family) = family {
-        own.insert(family.to_string());
+    if let Some(agent_session) = agent_session {
+        own.insert(agent_session.to_string());
     }
     if let Some(clan) = clan {
         own.insert(clan.to_string());

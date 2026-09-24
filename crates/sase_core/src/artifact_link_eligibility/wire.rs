@@ -6,7 +6,7 @@
 //! This module models that decision and the durable evidence that a
 //! qualifying change was verified, both bound to one run's stable
 //! `(run_id, agent_id)` identity so a different run -- even one in the same
-//! agent family -- cannot borrow another run's eligibility.
+//! agent session -- cannot borrow another run's eligibility.
 
 use serde::{Deserialize, Serialize};
 

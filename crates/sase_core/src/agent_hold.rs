@@ -14,7 +14,8 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 use crate::agent_identity::{
-    agent_name_in_hood, historical_family_scope, parse_agent_family_name,
+    agent_name_in_hood, historical_agent_session_scope,
+    parse_agent_session_name,
 };
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, LockMode,
@@ -60,8 +61,13 @@ pub struct AgentHoldArmerWire {
     pub project: String,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub family: Option<String>,
+    #[serde(
+        default,
+        rename = "family",
+        alias = "agent_session",
+        alias = "session"
+    )]
+    pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
     #[serde(default)]
@@ -86,8 +92,13 @@ pub struct AgentHoldSelectorsWire {
     pub artifact_dirs: Vec<String>,
     #[serde(default)]
     pub names: Vec<String>,
-    #[serde(default)]
-    pub families: Vec<String>,
+    #[serde(
+        default,
+        rename = "families",
+        alias = "agent_sessions",
+        alias = "sessions"
+    )]
+    pub agent_sessions: Vec<String>,
     #[serde(default)]
     pub hoods: Vec<String>,
     #[serde(default)]
@@ -141,8 +152,13 @@ pub struct AgentHoldCaptureIdentityWire {
     pub artifact_dir: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub family: Option<String>,
+    #[serde(
+        default,
+        rename = "family",
+        alias = "agent_session",
+        alias = "session"
+    )]
+    pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
     #[serde(default)]
@@ -224,8 +240,13 @@ pub struct AgentHoldCandidateWire {
     pub agent_name: Option<String>,
     #[serde(default)]
     pub proc_shell: Option<String>,
-    #[serde(default)]
-    pub family: Option<String>,
+    #[serde(
+        default,
+        rename = "family",
+        alias = "agent_session",
+        alias = "session"
+    )]
+    pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
     #[serde(default)]
@@ -734,7 +755,7 @@ fn capture_identity_as_candidate(
         artifact_dirs: identity.artifact_dir.clone().into_iter().collect(),
         agent_name: identity.agent_name.clone(),
         proc_shell: None,
-        family: identity.family.clone(),
+        agent_session: identity.agent_session.clone(),
         clan: identity.clan.clone(),
         workflow: None,
         tribe: None,
@@ -903,8 +924,10 @@ pub(crate) fn validate_and_normalize_armer(
         "armer.agent_name",
         armer.agent_name.take(),
     )?;
-    armer.family =
-        normalize_optional_family("armer.family", armer.family.take())?;
+    armer.agent_session = normalize_optional_agent_session(
+        "armer.agent_session",
+        armer.agent_session.take(),
+    )?;
     armer.clan = normalize_optional_plain("armer.clan", armer.clan.take())?;
     armer.proc_id =
         normalize_optional_plain("armer.proc_id", armer.proc_id.take())?;
@@ -973,8 +996,10 @@ fn validate_and_normalize_selectors(
     )?;
     selectors.names =
         normalize_agent_name_vec("selectors.names", &selectors.names)?;
-    selectors.families =
-        normalize_family_vec("selectors.families", &selectors.families)?;
+    selectors.agent_sessions = normalize_agent_session_vec(
+        "selectors.agent_sessions",
+        &selectors.agent_sessions,
+    )?;
     selectors.hoods = normalize_hood_vec("selectors.hoods", &selectors.hoods)?;
     selectors.clans = normalize_plain_vec("selectors.clans", &selectors.clans)?;
     selectors.workflows =
@@ -983,7 +1008,7 @@ fn validate_and_normalize_selectors(
         normalize_plain_vec("selectors.tribes", &selectors.tribes)?;
     if selectors.artifact_dirs.is_empty()
         && selectors.names.is_empty()
-        && selectors.families.is_empty()
+        && selectors.agent_sessions.is_empty()
         && selectors.hoods.is_empty()
         && selectors.clans.is_empty()
         && selectors.workflows.is_empty()
@@ -1001,10 +1026,10 @@ pub fn validate_selectors_exclude_armer_kin(
     armer: &AgentHoldArmerWire,
     selectors: &AgentHoldSelectorsWire,
 ) -> Result<(), AgentHoldError> {
-    let armer_family = armer_family(armer);
+    let armer_agent_session = armer_agent_session(armer);
     for (kind, values) in [
         ("names", selectors.names.as_slice()),
-        ("families", selectors.families.as_slice()),
+        ("families", selectors.agent_sessions.as_slice()),
         ("clans", selectors.clans.as_slice()),
         ("workflows", selectors.workflows.as_slice()),
     ] {
@@ -1014,8 +1039,9 @@ pub fn validate_selectors_exclude_armer_kin(
                 .as_ref()
                 .is_some_and(|agent_name| value == agent_name)
                 || armer.clan.as_ref().is_some_and(|clan| value == clan)
-                || armer_family.as_ref().is_some_and(|family| {
-                    value == family || same_or_dotted_descendant(value, family)
+                || armer_agent_session.as_ref().is_some_and(|agent_session| {
+                    value == agent_session
+                        || same_or_dotted_descendant(value, agent_session)
                 });
             if matches_own_identity {
                 return Err(AgentHoldError::Validation(format!(
@@ -1045,8 +1071,10 @@ fn validate_and_normalize_candidate(
         "candidate.proc_shell",
         candidate.proc_shell.take(),
     )?;
-    candidate.family =
-        normalize_optional_family("candidate.family", candidate.family.take())?;
+    candidate.agent_session = normalize_optional_agent_session(
+        "candidate.agent_session",
+        candidate.agent_session.take(),
+    )?;
     candidate.clan =
         normalize_optional_plain("candidate.clan", candidate.clan.take())?;
     candidate.workflow = normalize_optional_plain(
@@ -1114,12 +1142,12 @@ fn normalize_optional_agent_name(
         .transpose()
 }
 
-fn normalize_optional_family(
+fn normalize_optional_agent_session(
     label: &str,
     value: Option<String>,
 ) -> Result<Option<String>, AgentHoldError> {
     value
-        .map(|value| normalize_family(label, &value))
+        .map(|value| normalize_agent_session(label, &value))
         .transpose()
 }
 
@@ -1146,13 +1174,13 @@ fn normalize_agent_name_vec(
     Ok(set.into_iter().collect())
 }
 
-fn normalize_family_vec(
+fn normalize_agent_session_vec(
     label: &str,
     values: &[String],
 ) -> Result<Vec<String>, AgentHoldError> {
     let mut set = BTreeSet::new();
     for value in values {
-        set.insert(normalize_family(label, value)?);
+        set.insert(normalize_agent_session(label, value)?);
     }
     Ok(set.into_iter().collect())
 }
@@ -1169,7 +1197,7 @@ pub(crate) fn normalize_hood_vec(
                 "{label} must name a hood without a -- role suffix"
             )));
         }
-        parse_agent_family_name(&hood).map_err(|error| {
+        parse_agent_session_name(&hood).map_err(|error| {
             AgentHoldError::Validation(format!(
                 "{label} is not a valid hood name: {error}"
             ))
@@ -1184,7 +1212,7 @@ fn validate_agent_name_like(
     value: &str,
 ) -> Result<(), AgentHoldError> {
     let value = validate_plain_string(label, value)?;
-    parse_agent_family_name(&value).map_err(|error| {
+    parse_agent_session_name(&value).map_err(|error| {
         AgentHoldError::Validation(format!(
             "{label} is not a valid agent name: {error}"
         ))
@@ -1192,17 +1220,17 @@ fn validate_agent_name_like(
     Ok(())
 }
 
-fn normalize_family(
+fn normalize_agent_session(
     label: &str,
     value: &str,
 ) -> Result<String, AgentHoldError> {
     let value = validate_plain_string(label, value)?;
-    let parsed = parse_agent_family_name(&value).map_err(|error| {
+    let parsed = parse_agent_session_name(&value).map_err(|error| {
         AgentHoldError::Validation(format!(
-            "{label} is not a valid family name: {error}"
+            "{label} is not a valid agent session name: {error}"
         ))
     })?;
-    Ok(historical_family_scope(&parsed.family_name))
+    Ok(historical_agent_session_scope(&parsed.agent_session_name))
 }
 
 fn scope_matches(
@@ -1235,12 +1263,16 @@ fn armer_kin_excluded(
             return true;
         }
     }
-    let armer_family = armer_family(armer);
-    let candidate_family = candidate_family(candidate);
-    if let (Some(candidate_family), Some(armer_family)) =
-        (candidate_family.as_deref(), armer_family.as_deref())
-    {
-        if same_or_dotted_descendant(candidate_family, armer_family) {
+    let armer_agent_session = armer_agent_session(armer);
+    let candidate_agent_session = candidate_agent_session(candidate);
+    if let (Some(candidate_agent_session), Some(armer_agent_session)) = (
+        candidate_agent_session.as_deref(),
+        armer_agent_session.as_deref(),
+    ) {
+        if same_or_dotted_descendant(
+            candidate_agent_session,
+            armer_agent_session,
+        ) {
             return true;
         }
     }
@@ -1254,19 +1286,20 @@ fn armer_kin_excluded(
     false
 }
 
-fn armer_family(armer: &AgentHoldArmerWire) -> Option<String> {
-    armer.family.clone().or_else(|| {
-        armer
-            .agent_name
-            .as_deref()
-            .and_then(|name| normalize_family("armer.agent_name", name).ok())
+fn armer_agent_session(armer: &AgentHoldArmerWire) -> Option<String> {
+    armer.agent_session.clone().or_else(|| {
+        armer.agent_name.as_deref().and_then(|name| {
+            normalize_agent_session("armer.agent_name", name).ok()
+        })
     })
 }
 
-fn candidate_family(candidate: &AgentHoldCandidateWire) -> Option<String> {
-    candidate.family.clone().or_else(|| {
+fn candidate_agent_session(
+    candidate: &AgentHoldCandidateWire,
+) -> Option<String> {
+    candidate.agent_session.clone().or_else(|| {
         candidate.agent_name.as_deref().and_then(|name| {
-            normalize_family("candidate.agent_name", name).ok()
+            normalize_agent_session("candidate.agent_name", name).ok()
         })
     })
 }
@@ -1301,14 +1334,22 @@ fn selector_matches(
             proc_shell,
         );
     }
-    if let Some(family) = candidate_family(candidate).as_deref() {
-        push_exact_matches(&mut matches, "family", &selectors.families, family);
+    if let Some(agent_session) = candidate_agent_session(candidate).as_deref() {
+        // legacy agent-family spelling; flips in core-contract
+        push_exact_matches(
+            &mut matches,
+            "family",
+            &selectors.agent_sessions,
+            agent_session,
+        );
     }
-    if let Some(agent_or_family) =
-        candidate.agent_name.as_ref().or(candidate.family.as_ref())
+    if let Some(agent_or_session) = candidate
+        .agent_name
+        .as_ref()
+        .or(candidate.agent_session.as_ref())
     {
         for hood in &selectors.hoods {
-            if agent_name_in_hood(agent_or_family, hood).unwrap_or(false) {
+            if agent_name_in_hood(agent_or_session, hood).unwrap_or(false) {
                 matches.push(AgentHoldSelectorMatchWire {
                     kind: "hood".to_string(),
                     value: hood.clone(),
@@ -1443,7 +1484,7 @@ mod tests {
             display: format!("{key} display"),
             project: "sase".to_string(),
             agent_name: Some(format!("{key}.worker")),
-            family: Some(format!("{key}.worker")),
+            agent_session: Some(format!("{key}.worker")),
             clan: Some("builders".to_string()),
             proc_id: None,
             pid: Some(1234),
@@ -1458,7 +1499,7 @@ mod tests {
             display: "proc display".to_string(),
             project: "sase".to_string(),
             agent_name: None,
-            family: None,
+            agent_session: None,
             clan: None,
             proc_id: Some(format!("proc-{key}")),
             pid: None,
@@ -1473,7 +1514,7 @@ mod tests {
             display: "launch display".to_string(),
             project: "sase".to_string(),
             agent_name: Some("launcher.worker".to_string()),
-            family: Some("launcher.worker".to_string()),
+            agent_session: Some("launcher.worker".to_string()),
             clan: Some("builders".to_string()),
             proc_id: None,
             pid: Some(1234),
@@ -1485,7 +1526,7 @@ mod tests {
         AgentHoldSelectorsWire {
             artifact_dirs: vec!["artifacts/old".to_string()],
             names: vec!["target.agent--code".to_string()],
-            families: vec!["target.agent".to_string()],
+            agent_sessions: vec!["target.agent".to_string()],
             hoods: vec!["target".to_string()],
             clans: vec!["blocked-clan".to_string()],
             workflows: vec!["wf".to_string()],
@@ -1525,7 +1566,7 @@ mod tests {
             artifact_dirs: vec!["artifacts/old".to_string()],
             agent_name: Some("target.agent--code".to_string()),
             proc_shell: None,
-            family: None,
+            agent_session: None,
             clan: Some("blocked-clan".to_string()),
             workflow: Some("wf".to_string()),
             tribe: Some("tribe-a".to_string()),
@@ -1700,7 +1741,7 @@ mod tests {
         .unwrap();
         let mut invalid = armer("new");
         invalid.agent_name = Some("target.agent".to_string());
-        invalid.family = Some("target.agent".to_string());
+        invalid.agent_session = Some("target.agent".to_string());
         let err = rebind_agent_hold_armer(
             temp.path(),
             "old",
@@ -1975,7 +2016,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_time_kin_rejection_covers_names_families_clans_and_workflows() {
+    fn arm_time_kin_rejection_covers_names_sessions_clans_and_workflows() {
         let temp = tempdir().unwrap();
         let cases = [
             ("names", "holder.worker"),
@@ -1995,7 +2036,7 @@ mod tests {
             let mut selectors = AgentHoldSelectorsWire::default();
             match field {
                 "names" => selectors.names.push(value.to_string()),
-                "families" => selectors.families.push(value.to_string()),
+                "families" => selectors.agent_sessions.push(value.to_string()),
                 "clans" => selectors.clans.push(value.to_string()),
                 "workflows" => selectors.workflows.push(value.to_string()),
                 _ => unreachable!(),
@@ -2021,7 +2062,7 @@ mod tests {
             armer("holder"),
             AgentHoldScopeWire::Host,
             AgentHoldSelectorsWire {
-                families: vec!["holder".to_string()],
+                agent_sessions: vec!["holder".to_string()],
                 hoods: vec!["holder".to_string()],
                 tribes: vec!["builders".to_string()],
                 ..AgentHoldSelectorsWire::default()
@@ -2031,7 +2072,7 @@ mod tests {
             NOW,
         )
         .unwrap();
-        assert_eq!(record.selectors.families, vec!["holder".to_string()]);
+        assert_eq!(record.selectors.agent_sessions, vec!["holder".to_string()]);
         assert_eq!(record.selectors.hoods, vec!["holder".to_string()]);
     }
 
@@ -2163,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn armer_kin_exclusion_covers_self_family_clan_and_descendant() {
+    fn armer_kin_exclusion_covers_self_session_clan_and_descendant() {
         let record = AgentHoldRecordWire {
             schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
             armer: armer("holder"),
@@ -2186,7 +2227,7 @@ mod tests {
                 ..candidate()
             },
             AgentHoldCandidateWire {
-                family: Some("holder.worker.child".to_string()),
+                agent_session: Some("holder.worker.child".to_string()),
                 ..candidate()
             },
             AgentHoldCandidateWire {
@@ -2201,13 +2242,13 @@ mod tests {
         let mut historical_record = record;
         historical_record.armer.agent_name =
             Some("fi--code.f0--plan".to_string());
-        historical_record.armer.family = None;
+        historical_record.armer.agent_session = None;
         historical_record.armer.clan = None;
         let historical_cases = ["fi.f0--code", "fi.f0.child--plan"];
         for name in historical_cases {
             let mut historical_candidate = candidate();
             historical_candidate.agent_name = Some(name.to_string());
-            historical_candidate.family = None;
+            historical_candidate.agent_session = None;
             historical_candidate.clan = None;
             assert!(hold_blocks_candidate(
                 &historical_record,
@@ -2250,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn proc_shell_matches_name_and_hood_selectors_without_family_kin() {
+    fn proc_shell_matches_name_and_hood_selectors_without_agent_session_kin() {
         let mut record = AgentHoldRecordWire {
             schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
             armer: armer("holder"),
@@ -2267,7 +2308,7 @@ mod tests {
         let mut target = candidate();
         target.artifact_dirs.clear();
         target.agent_name = None;
-        target.family = None;
+        target.agent_session = None;
         target.clan = None;
         target.workflow = None;
         target.tribe = None;
@@ -2348,7 +2389,7 @@ mod tests {
     fn capture_identity(
         bucket: AgentHoldCaptureBucketWire,
         name: &str,
-        family: &str,
+        agent_session: &str,
         clan: &str,
         artifact_dir: &str,
     ) -> AgentHoldCaptureIdentityWire {
@@ -2358,7 +2399,7 @@ mod tests {
             bucket,
             artifact_dir: Some(artifact_dir.to_string()),
             agent_name: Some(name.to_string()),
-            family: Some(family.to_string()),
+            agent_session: Some(agent_session.to_string()),
             clan: Some(clan.to_string()),
             armer_key: None,
         }
@@ -2538,7 +2579,7 @@ mod tests {
                 bucket: AgentHoldCaptureBucketWire::Waiting,
                 artifact_dir: Some("artifacts/other".to_string()),
                 agent_name: Some("foreign.agent--code".to_string()),
-                family: Some("foreign.agent".to_string()),
+                agent_session: Some("foreign.agent".to_string()),
                 clan: None,
                 armer_key: None,
             },

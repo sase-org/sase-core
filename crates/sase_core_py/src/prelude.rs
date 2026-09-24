@@ -41,10 +41,6 @@ pub(crate) use sase_core::agent_cleanup::{
     AgentCleanupIdentityWire, AgentCleanupRequestWire, AgentCleanupTargetWire,
     ForceReuseStopBarrierRequestWire,
 };
-pub(crate) use sase_core::agent_family::{
-    resolve_agent_family_parent as core_resolve_agent_family_parent,
-    AgentFamilyParentResolutionRequestWire,
-};
 pub(crate) use sase_core::agent_group_archive::{
     delete_dismissed_agent_group as core_delete_dismissed_agent_group,
     list_dismissed_agent_groups as core_list_dismissed_agent_groups,
@@ -88,7 +84,7 @@ pub(crate) use sase_core::agent_identity::{
     globalize_owned_agent_name as core_globalize_owned_agent_name,
     normalize_agent_archive_name as core_normalize_agent_archive_name,
     normalize_owned_agent_name as core_normalize_owned_agent_name,
-    parse_agent_family_name as core_parse_agent_family_name,
+    parse_agent_session_name as core_parse_agent_session_name,
     parse_owned_agent_name as core_parse_owned_agent_name,
     project_agent_relationship_graph as core_project_agent_relationship_graph,
     rewrite_agent_relationship_batch as core_rewrite_agent_relationship_batch,
@@ -204,6 +200,10 @@ pub(crate) use sase_core::agent_scan::{
     AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION,
+};
+pub(crate) use sase_core::agent_session::{
+    resolve_agent_session_parent as core_resolve_agent_session_parent,
+    AgentSessionParentResolutionRequestWire,
 };
 pub(crate) use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,

@@ -15,7 +15,6 @@ pub mod agent_artifact_run_retention;
 pub mod agent_clan_record;
 pub mod agent_clan_tribe;
 pub mod agent_cleanup;
-pub mod agent_family;
 pub mod agent_group_archive;
 pub mod agent_hold;
 pub mod agent_hold_deadlock;
@@ -26,6 +25,7 @@ pub mod agent_ownership;
 pub mod agent_publication_batches;
 pub mod agent_runtime;
 pub mod agent_scan;
+pub mod agent_session;
 pub mod agent_stats;
 pub mod agent_tribe;
 pub mod artifact_consumption;
@@ -185,12 +185,6 @@ pub use agent_cleanup::{
     SKIPPED_NOT_IN_SCOPE, SKIPPED_NOT_KILLABLE, SKIPPED_UNKNOWN_KILL_KIND,
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
-pub use agent_family::{
-    resolve_agent_family_parent, AgentFamilyDismissedIdentityWire,
-    AgentFamilyParentCandidateWire, AgentFamilyParentResolutionRequestWire,
-    AgentFamilyParentResolutionWire,
-    AGENT_FAMILY_RESOLUTION_WIRE_SCHEMA_VERSION,
-};
 pub use agent_group_archive::{
     list_dismissed_agent_groups, list_recent_dismissed_agent_groups,
     load_dismissed_agent_group, load_recent_dismissed_agent_group,
@@ -223,13 +217,13 @@ pub use agent_hold_deadlock::{
 pub use agent_identity::{
     agent_link_target, agent_local_hood, agent_name_ancestors,
     agent_name_in_hood, globalize_agent_name, normalize_agent_archive_name,
-    parse_agent_family_name, rewrite_agent_relationship_batch,
+    parse_agent_session_name, rewrite_agent_relationship_batch,
     strip_global_agent_name, validate_agent_name,
     validate_agent_relationship_batch, validate_agent_username,
-    AgentContainerKind, AgentFamilyNameWire, AgentIdentityError,
-    AgentLinkTargetWire, AgentOwnerIdentity, AgentRelationshipBatchWire,
-    AgentRelationshipError, AgentRelationshipKind, AgentRelationshipTargetWire,
-    AgentRelationshipWire, AgentRunContainerWire, AgentRunWire,
+    AgentContainerKind, AgentIdentityError, AgentLinkTargetWire,
+    AgentOwnerIdentity, AgentRelationshipBatchWire, AgentRelationshipError,
+    AgentRelationshipKind, AgentRelationshipTargetWire, AgentRelationshipWire,
+    AgentRunContainerWire, AgentRunWire, AgentSessionNameWire,
     RewrittenAgentRelationshipBatchWire, RewrittenAgentRelationshipTargetWire,
     RewrittenAgentRelationshipWire, RewrittenAgentRunContainerWire,
     RewrittenAgentRunWire, ValidatedAgentRelationshipSummaryWire,
@@ -368,6 +362,12 @@ pub use agent_scan::{
     DEFAULT_HIDDEN_TERMINAL_HOT_ROWS, DONE_WORKFLOW_DIR_NAMES,
     DONE_WORKFLOW_DIR_PREFIXES, LEGACY_LAYOUT_VERSION,
     WORKFLOW_STATE_DIR_NAMES, WORKFLOW_STATE_DIR_PREFIXES,
+};
+pub use agent_session::{
+    resolve_agent_session_parent, AgentSessionDismissedIdentityWire,
+    AgentSessionParentCandidateWire, AgentSessionParentResolutionRequestWire,
+    AgentSessionParentResolutionWire,
+    AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION,
 };
 /// Legacy Rust alias retained for compatibility with older stats callers.
 pub use agent_stats::AgentChangeSpecWorkStatsWire;

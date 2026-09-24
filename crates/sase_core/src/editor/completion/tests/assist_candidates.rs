@@ -178,6 +178,36 @@ fn agent_candidates_are_kind_aware_ordered_and_compatible() {
         build_agent_completion_candidates("rev", None, &agent_entries, &[]);
     assert_eq!(bare_tribe.candidates[0].insertion, "@reviewers");
     assert_eq!(bare_tribe.candidates[0].name, "reviewers");
+
+    // New-spelling helper rows filter exactly like the legacy kind.
+    let new_spelling = vec![agent_target("review", "session", 3, "3 members")];
+    let legacy_filtered = build_identity_target_candidates(
+        "",
+        None,
+        &agent_entries,
+        "family",
+        &[],
+    );
+    let new_filtered = build_identity_target_candidates(
+        "",
+        None,
+        &new_spelling,
+        "family",
+        &[],
+    );
+    assert_eq!(
+        new_filtered
+            .candidates
+            .iter()
+            .map(|c| c.insertion.as_str())
+            .collect::<Vec<_>>(),
+        legacy_filtered
+            .candidates
+            .iter()
+            .filter(|c| c.insertion == "review")
+            .map(|c| c.insertion.as_str())
+            .collect::<Vec<_>>(),
+    );
     let sigil_tribe =
         build_agent_completion_candidates("@rev", None, &agent_entries, &[]);
     assert_eq!(sigil_tribe.candidates[0].insertion, "@reviewers");

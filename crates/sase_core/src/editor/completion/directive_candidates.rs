@@ -227,7 +227,7 @@ fn build_directive_value_candidates(
             "clan",
             &context.selected_values,
         ),
-        Some(DirectiveValueRole::Family) => build_identity_target_candidates(
+        Some(DirectiveValueRole::Session) => build_identity_target_candidates(
             token,
             replacement,
             &inventories.agents,

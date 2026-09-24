@@ -54,7 +54,7 @@ pub(super) fn needs_agent_entries(
         Some(
             DirectiveValueRole::Agent
                 | DirectiveValueRole::Clan
-                | DirectiveValueRole::Family
+                | DirectiveValueRole::Session
                 | DirectiveValueRole::Hood
                 | DirectiveValueRole::Tribe
         )

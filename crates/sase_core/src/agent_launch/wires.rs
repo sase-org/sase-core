@@ -257,10 +257,20 @@ pub struct AgentUnitWire {
     pub clan_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clan_summary_script: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family_attach_parent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family_attach_suffix: Option<String>,
+    #[serde(
+        default,
+        rename = "family_attach_parent",
+        alias = "agent_session_attach_parent",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_session_attach_parent: Option<String>,
+    #[serde(
+        default,
+        rename = "family_attach_suffix",
+        alias = "agent_session_attach_suffix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent_session_attach_suffix: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tribe: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,13 +331,14 @@ impl AgentUnitWire {
 
     /// Return the launch identity used for waits and collision checks.
     ///
-    /// Clan joiners compose `<clan>.<member>`; family attachments compose
-    /// `<parent>--<suffix>` when the suffix is already concrete. Auto-named
-    /// units, including `%id(@, family=...)`, have no durable name yet.
+    /// Clan joiners compose `<clan>.<member>`; agent-session attachments
+    /// compose `<parent>--<suffix>` when the suffix is already concrete.
+    /// Auto-named units, including `%id(@, family=...)`, have no durable
+    /// name yet.
     pub fn effective_identity(&self) -> Option<String> {
         if let (Some(parent), Some(suffix)) = (
-            self.family_attach_parent.as_deref(),
-            self.family_attach_suffix.as_deref(),
+            self.agent_session_attach_parent.as_deref(),
+            self.agent_session_attach_suffix.as_deref(),
         ) {
             if suffix == "@" {
                 return None;
@@ -370,9 +381,10 @@ impl AgentUnitWire {
             None => String::new(),
         };
         if let (Some(parent), Some(suffix)) = (
-            self.family_attach_parent.as_deref(),
-            self.family_attach_suffix.as_deref(),
+            self.agent_session_attach_parent.as_deref(),
+            self.agent_session_attach_suffix.as_deref(),
         ) {
+            // legacy agent-family spelling; flips in core-contract
             return Some(format!(
                 "%id({}, family={parent}{})",
                 bang(suffix),

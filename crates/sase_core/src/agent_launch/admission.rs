@@ -1178,15 +1178,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_dispatch_prompt_restores_family_and_direct_tribe() {
-        let family = agent_unit_dispatch_prompt(&AgentUnitWire {
+    fn agent_dispatch_prompt_restores_agent_session_and_direct_tribe() {
+        let agent_session = agent_unit_dispatch_prompt(&AgentUnitWire {
             prompt: "Review".to_string(),
-            family_attach_parent: Some("parent".to_string()),
-            family_attach_suffix: Some("reviewer".to_string()),
+            agent_session_attach_parent: Some("parent".to_string()),
+            agent_session_attach_suffix: Some("reviewer".to_string()),
             bead_id: Some("sase-1".to_string()),
             ..Default::default()
         });
-        assert!(family.contains("%id(reviewer, family=parent, bead=sase-1)"));
+        assert!(
+            agent_session.contains("%id(reviewer, family=parent, bead=sase-1)")
+        );
 
         let named_tribe = agent_unit_dispatch_prompt(&AgentUnitWire {
             prompt: "Review".to_string(),

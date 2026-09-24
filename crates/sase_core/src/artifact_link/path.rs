@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_identity::{
-    agent_link_target, parse_agent_family_name, AgentOwnerIdentity,
+    agent_link_target, parse_agent_session_name, AgentOwnerIdentity,
 };
 use crate::artifact_ref::{
     parse_artifact_ref_canonical, ArtifactRefAgentOwnerWire,
@@ -260,14 +260,18 @@ fn agent_page_relpath(
         })?;
         return Ok(PathBuf::from(target.path));
     }
-    let parsed = parse_agent_family_name(name).map_err(|error| {
+    let parsed = parse_agent_session_name(name).map_err(|error| {
         ArtifactLinkError::validation(format!("invalid agent name: {error}"))
     })?;
     if parsed.member_role.is_some() {
-        Ok(PathBuf::from(format!("families/{}.md", parsed.family_name)))
+        // legacy agent-family spelling; flips in core-contract
+        Ok(PathBuf::from(format!(
+            "families/{}.md",
+            parsed.agent_session_name
+        )))
     } else {
         Ok(PathBuf::from("agents")
-            .join(&parsed.family_name)
+            .join(&parsed.agent_session_name)
             .join("README.md"))
     }
 }

@@ -396,8 +396,8 @@ async fn snippet_clients_receive_identity_and_clan_forms() {
         );
         assert_snippet_item(
             &items,
-            "%id(..., family=...)",
-            "%id(${1:suffix}, family=${2:family})$0",
+            "%id(..., session=...)",
+            "%id(${1:suffix}, session=${2:session})$0",
         );
         assert_snippet_item(
             &items,
@@ -597,10 +597,10 @@ async fn identity_and_clan_editor_surfaces_use_current_metadata() {
 
     for (text, cursor, heading, description) in [
         (
-            "%i(worker, family=review)",
+            "%i(worker, session=review)",
             13,
             "**%id**",
-            "Assign an agent ID with optional bead, clan, family, or user-managed tribe",
+            "Assign an agent ID with optional bead, clan, session, or user-managed tribe",
         ),
         (
             "%c(research, tr)",

@@ -15,8 +15,8 @@ pub(crate) struct ParsedIdDirective {
     pub(crate) bead_id: Option<String>,
     pub(crate) clan: Option<String>,
     pub(crate) tribe: Option<String>,
-    pub(crate) family_parent: Option<String>,
-    pub(crate) family_suffix: Option<String>,
+    pub(crate) agent_session_parent: Option<String>,
+    pub(crate) agent_session_suffix: Option<String>,
     pub(crate) force_reuse: bool,
     pub(crate) unsupported_on_proc: bool,
 }
@@ -54,7 +54,8 @@ pub(crate) fn parse_id_directive(
         let (name, value_raw) = split_named_directive_arg(arg);
         let value = unquote_directive_arg_value(value_raw.trim());
         match name.as_deref() {
-            Some("bead") | Some("clan") | Some("family") | Some("tribe") => {
+            Some("bead") | Some("clan") | Some("family") | Some("session")
+            | Some("tribe") => {
                 parsed.unsupported_on_proc = true;
                 named.insert(name.unwrap(), value);
             }
@@ -63,7 +64,7 @@ pub(crate) fn parse_id_directive(
                 diagnostics.push(typed_unit_diagnostic(
                     "invalid-id-keyword",
                     &format!(
-                        "Unsupported keyword on %id: {other}=. Only bead=, clan=, family=, and tribe= are supported."
+                        "Unsupported keyword on %id: {other}=. Only bead=, clan=, family=, session=, and tribe= are supported."
                     ),
                     logical_id,
                     Some(span),
@@ -74,14 +75,23 @@ pub(crate) fn parse_id_directive(
         }
     }
 
-    let membership: Vec<&str> = ["clan", "family", "tribe"]
+    if named.contains_key("family") && named.contains_key("session") {
+        diagnostics.push(typed_unit_diagnostic(
+            "invalid-id-session",
+            "The family= and session= keywords on %id are conflicting spellings of the same agent-session attachment; use session=<parent> alone.",
+            logical_id,
+            Some(span),
+        ));
+        return parsed;
+    }
+    let membership: Vec<&str> = ["clan", "family", "session", "tribe"]
         .into_iter()
         .filter(|key| named.contains_key(*key))
         .collect();
     if membership.len() > 1 {
         diagnostics.push(typed_unit_diagnostic(
             "id-keyword-conflict",
-            "The clan=, family=, and tribe= keywords on %id are mutually exclusive; set at most one.",
+            "The clan=, family=, session=, and tribe= keywords on %id are mutually exclusive; set at most one.",
             logical_id,
             Some(span),
         ));
@@ -90,7 +100,7 @@ pub(crate) fn parse_id_directive(
     if positional.len() > 1 {
         diagnostics.push(typed_unit_diagnostic(
             "invalid-id-form",
-            "The positional family form on %id is no longer supported; use %id(<suffix>, family=<parent>) instead.",
+            "The positional agent-session form on %id is no longer supported; use %id(<suffix>, session=<parent>) instead.",
             logical_id,
             Some(span),
         ));
@@ -145,6 +155,7 @@ pub(crate) fn parse_id_directive(
         return parsed;
     }
 
+    // legacy agent-family spelling; flips in core-contract
     if let Some(family) = named.get("family") {
         if positional.len() != 1 {
             diagnostics.push(typed_unit_diagnostic(
@@ -175,7 +186,9 @@ pub(crate) fn parse_id_directive(
             ));
             return parsed;
         }
-        if let Some(message) = invalid_family_suffix_reason(&suffix) {
+        if let Some(message) =
+            invalid_agent_session_suffix_reason(&suffix, "family")
+        {
             diagnostics.push(typed_unit_diagnostic(
                 "invalid-id-family",
                 &message,
@@ -184,8 +197,55 @@ pub(crate) fn parse_id_directive(
             ));
             return parsed;
         }
-        parsed.family_parent = Some(parent.to_string());
-        parsed.family_suffix = Some(suffix);
+        parsed.agent_session_parent = Some(parent.to_string());
+        parsed.agent_session_suffix = Some(suffix);
+        parsed.force_reuse = force_reuse;
+        return parsed;
+    }
+
+    if let Some(session) = named.get("session") {
+        if positional.len() != 1 {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-session",
+                "The session= keyword on %id requires exactly one positional suffix; use %id(<suffix>, session=<session>) or %id(@, session=<session>).",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        let (force_reuse, suffix) = strip_force_reuse(&positional[0]);
+        let parent = session.trim();
+        if parent.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-session",
+                "The session= keyword on %id requires a non-empty agent session name.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if suffix.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-session",
+                "The session= keyword on %id requires a non-empty suffix.",
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        if let Some(message) =
+            invalid_agent_session_suffix_reason(&suffix, "session")
+        {
+            diagnostics.push(typed_unit_diagnostic(
+                "invalid-id-session",
+                &message,
+                logical_id,
+                Some(span),
+            ));
+            return parsed;
+        }
+        parsed.agent_session_parent = Some(parent.to_string());
+        parsed.agent_session_suffix = Some(suffix);
         parsed.force_reuse = force_reuse;
         return parsed;
     }
@@ -420,18 +480,18 @@ pub(crate) fn apply_parsed_identity(
     agent_clan_tribe: &mut Option<String>,
     agent_clan_summary: &mut Option<String>,
     agent_clan_summary_script: &mut Option<String>,
-    agent_family_parent: &mut Option<String>,
-    agent_family_suffix: &mut Option<String>,
+    agent_session_parent: &mut Option<String>,
+    agent_session_suffix: &mut Option<String>,
     agent_tribe: &mut Option<String>,
     agent_bead_id: &mut Option<String>,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
     if let Some(id) = parsed_id {
-        if id.family_parent.is_some() {
+        if id.agent_session_parent.is_some() {
             *agent_identity = None;
             *agent_identity_explicit = false;
-            *agent_family_parent = id.family_parent.clone();
-            *agent_family_suffix = id.family_suffix.clone();
+            *agent_session_parent = id.agent_session_parent.clone();
+            *agent_session_suffix = id.agent_session_suffix.clone();
         } else if let Some(identity) = id.identity.as_ref() {
             *agent_identity = Some(identity.clone());
             *agent_identity_explicit = true;
@@ -454,7 +514,8 @@ pub(crate) fn apply_parsed_identity(
     }
 
     let join_clan = parsed_id.and_then(|id| id.clan.as_ref());
-    let family = parsed_id.and_then(|id| id.family_parent.as_ref());
+    let agent_session =
+        parsed_id.and_then(|id| id.agent_session_parent.as_ref());
     let id_tribe = parsed_id.and_then(|id| id.tribe.as_ref());
     if parsed_clan.is_some() && join_clan.is_some() {
         diagnostics.push(typed_unit_diagnostic(
@@ -472,7 +533,7 @@ pub(crate) fn apply_parsed_identity(
             None,
         ));
     }
-    if parsed_clan.is_some() && family.is_some() {
+    if parsed_clan.is_some() && agent_session.is_some() {
         diagnostics.push(typed_unit_diagnostic(
             "clan-id-conflict",
             "Cannot combine %clan with %id(..., family=...); choose clan membership or serial family attachment.",
@@ -508,7 +569,10 @@ fn strip_force_reuse(raw: &str) -> (bool, String) {
     }
 }
 
-fn invalid_family_suffix_reason(suffix: &str) -> Option<String> {
+fn invalid_agent_session_suffix_reason(
+    suffix: &str,
+    keyword: &str,
+) -> Option<String> {
     if suffix == "@" {
         return None;
     }
@@ -517,7 +581,7 @@ fn invalid_family_suffix_reason(suffix: &str) -> Option<String> {
         || suffix.contains("--")
     {
         return Some(format!(
-            "Invalid %i family suffix '{suffix}'. Pass the bare suffix without a family separator, e.g. %i(reviewer, family=parent)."
+            "Invalid %i {keyword} suffix '{suffix}'. Pass the bare suffix without an agent-session separator, e.g. %i(reviewer, {keyword}=parent)."
         ));
     }
     if !suffix
@@ -525,7 +589,7 @@ fn invalid_family_suffix_reason(suffix: &str) -> Option<String> {
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
     {
         return Some(format!(
-            "Invalid %i family suffix '{suffix}'. Use letters, numbers, and underscores only, or @ to allocate the next free suffix."
+            "Invalid %i {keyword} suffix '{suffix}'. Use letters, numbers, and underscores only, or @ to allocate the next free suffix."
         ));
     }
     None

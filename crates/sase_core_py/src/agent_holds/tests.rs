@@ -477,3 +477,63 @@ fn agent_hold_bindings_map_validation_and_lock_errors() {
         assert!(timeout.is_instance_of::<PyTimeoutError>(py));
     });
 }
+
+#[test]
+fn agent_hold_bindings_accept_new_spellings_and_serialize_legacy() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().to_string_lossy();
+    let now = 1_800_000_000.0;
+    Python::with_gil(|py| {
+        let armer_obj = json_value_to_py(
+            py,
+            &json!({
+                "kind": "agent",
+                "key": "agent:hold-new",
+                "display": "Hold New",
+                "project": "sase",
+                "agent_name": "hold.agent",
+                "agent_session": "hold.agent",
+                "pid": 1234
+            }),
+        )
+        .unwrap();
+        let armer = armer_obj.bind(py).downcast::<PyDict>().unwrap();
+        let scope_obj = json_value_to_py(
+            py,
+            &json!({"kind": "project", "project": "sase"}),
+        )
+        .unwrap();
+        let scope = scope_obj.bind(py).downcast::<PyDict>().unwrap();
+        let selectors_obj = json_value_to_py(
+            py,
+            &json!({
+                "artifact_dirs": ["artifact/a"],
+                "sessions": ["target.agent"],
+                "future": false
+            }),
+        )
+        .unwrap();
+        let selectors = selectors_obj.bind(py).downcast::<PyDict>().unwrap();
+        let record = py_agent_hold_arm_relative(
+            py,
+            &home,
+            armer,
+            scope,
+            selectors,
+            60.0,
+            None,
+            Some(now),
+            None,
+        )
+        .unwrap();
+        let record_value = py_to_json_value(record.bind(py)).unwrap();
+        assert_eq!(record_value["armer"]["family"], json!("hold.agent"));
+        assert!(record_value["armer"].get("agent_session").is_none());
+        assert_eq!(
+            record_value["selectors"]["families"],
+            json!(["target.agent"])
+        );
+        assert!(record_value["selectors"].get("sessions").is_none());
+    });
+}

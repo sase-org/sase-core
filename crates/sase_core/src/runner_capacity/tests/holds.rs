@@ -35,7 +35,7 @@ fn hold_barrier_blocks_queued_candidate_decision() {
     let hold = hold(
         "agent:hold-a",
         AgentHoldSelectorsWire {
-            families: vec!["target.agent".to_string()],
+            agent_sessions: vec!["target.agent".to_string()],
             ..AgentHoldSelectorsWire::default()
         },
     );

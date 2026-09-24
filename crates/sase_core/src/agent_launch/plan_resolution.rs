@@ -177,7 +177,7 @@ pub(crate) fn validate_typed_wait_cycles(
 #[derive(Debug)]
 struct UnitHoldFacts {
     identity: Option<String>,
-    family: Option<String>,
+    agent_session: Option<String>,
     clan: Option<String>,
     tribe: Option<String>,
     workflow: Option<String>,
@@ -225,14 +225,14 @@ fn unit_hold_facts(raw: &RawLaunchUnit) -> UnitHoldFacts {
         LaunchUnitPayloadWire::Agent(agent) => {
             let identity = agent.effective_identity();
             let identity_ref = identity.as_deref();
-            let family = identity_ref
+            let agent_session = identity_ref
                 .and_then(|name| {
-                    crate::agent_identity::parse_agent_family_name(name).ok()
+                    crate::agent_identity::parse_agent_session_name(name).ok()
                 })
-                .map(|parsed| parsed.family_name);
+                .map(|parsed| parsed.agent_session_name);
             UnitHoldFacts {
                 identity,
-                family,
+                agent_session,
                 clan: agent.clan.clone(),
                 tribe: agent.tribe.clone().or_else(|| agent.clan_tribe.clone()),
                 workflow: agent.workspace_reference.clone(),
@@ -240,7 +240,7 @@ fn unit_hold_facts(raw: &RawLaunchUnit) -> UnitHoldFacts {
         }
         LaunchUnitPayloadWire::Proc(proc_unit) => UnitHoldFacts {
             identity: proc_unit.shell_name.clone(),
-            family: None,
+            agent_session: None,
             clan: None,
             tribe: None,
             workflow: proc_unit.selected_project.clone(),
@@ -254,7 +254,7 @@ fn hold_matches_unit(hold: &HoldFieldsWire, target: &UnitHoldFacts) -> bool {
     }
     hold.names.iter().any(|name| {
         target.identity.as_deref() == Some(name.as_str())
-            || target.family.as_deref() == Some(name.as_str())
+            || target.agent_session.as_deref() == Some(name.as_str())
             || target.clan.as_deref() == Some(name.as_str())
             || target.workflow.as_deref() == Some(name.as_str())
     }) || hold
@@ -275,11 +275,14 @@ fn hold_kin_excluded(holder: &UnitHoldFacts, target: &UnitHoldFacts) -> bool {
     if holder.clan.is_some() && holder.clan == target.clan {
         return true;
     }
-    match (holder.family.as_deref(), target.family.as_deref()) {
-        (Some(holder_family), Some(target_family)) => {
-            target_family == holder_family
-                || target_family
-                    .strip_prefix(holder_family)
+    match (
+        holder.agent_session.as_deref(),
+        target.agent_session.as_deref(),
+    ) {
+        (Some(holder_agent_session), Some(target_agent_session)) => {
+            target_agent_session == holder_agent_session
+                || target_agent_session
+                    .strip_prefix(holder_agent_session)
                     .is_some_and(|rest| rest.starts_with('.'))
         }
         _ => false,
@@ -317,7 +320,7 @@ pub(crate) fn validate_proc_shell_name(
     if shell_name.contains("--") {
         diagnostics.push(typed_unit_diagnostic(
             "invalid-proc-shell-name",
-            "Proc %id names cannot use the agent-family `--` convention.",
+            "Proc %id names cannot use the agent-session `--` convention.",
             logical_id,
             None,
         ));
@@ -527,7 +530,7 @@ pub(crate) struct DispatchCombinationFacts {
     pub(crate) has_queue: bool,
     pub(crate) has_hold: bool,
     pub(crate) has_clan: bool,
-    pub(crate) has_family: bool,
+    pub(crate) has_agent_session: bool,
 }
 
 pub(crate) fn validate_dispatch_combinations(
@@ -551,8 +554,8 @@ pub(crate) fn validate_dispatch_combinations(
     if facts.has_clan {
         forbidden.push("%clan");
     }
-    if facts.has_family {
-        forbidden.push("%id(..., family=...)");
+    if facts.has_agent_session {
+        forbidden.push("%id(..., session=...)");
     }
     if forbidden.is_empty() {
         return;
