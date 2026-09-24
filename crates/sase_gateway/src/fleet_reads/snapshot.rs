@@ -12,7 +12,7 @@ use sase_core::{
     agent_scan::{
         AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
         AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
-        FamilyDismissalLineageCandidateWire,
+        AgentSessionDismissalLineageCandidateWire,
     },
     fleet_catalog::select_fleet_presentation,
     fleet_contract::{
@@ -27,7 +27,7 @@ use sase_core::{
     fleet_owner_facts::OwnerFileObserver,
     host_liveness::{OwnerLivenessObserver, OwnerProcessObservation},
     list_project_records, query_agent_artifact_index,
-    resolve_family_dismissal_lineage,
+    resolve_agent_session_dismissal_lineage,
 };
 
 use super::{
@@ -136,22 +136,24 @@ pub(super) fn build_snapshot_blocking(
                 (identity.clone(), observation.liveness())
             })
             .collect();
-    let lineage_candidates: Vec<FamilyDismissalLineageCandidateWire> = scan
-        .records
-        .iter()
-        .map(|record| FamilyDismissalLineageCandidateWire {
-            identity: record.artifact_dir.clone(),
-            project_name: record.project_name.clone(),
-            workflow_dir_name: record.workflow_dir_name.clone(),
-            timestamp: record.timestamp.clone(),
-            seed_definitively_dead: matches!(
-                liveness_by_identity.get(&record.artifact_dir),
-                Some(OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess)
-            ),
-        })
-        .collect();
+    let lineage_candidates: Vec<AgentSessionDismissalLineageCandidateWire> =
+        scan.records
+            .iter()
+            .map(|record| AgentSessionDismissalLineageCandidateWire {
+                identity: record.artifact_dir.clone(),
+                project_name: record.project_name.clone(),
+                workflow_dir_name: record.workflow_dir_name.clone(),
+                timestamp: record.timestamp.clone(),
+                seed_definitively_dead: matches!(
+                    liveness_by_identity.get(&record.artifact_dir),
+                    Some(
+                        OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+                    )
+                ),
+            })
+            .collect();
     let dismissed_by_identity: BTreeMap<String, bool> =
-        resolve_family_dismissal_lineage(
+        resolve_agent_session_dismissal_lineage(
             &request.index_path,
             &lineage_candidates,
         )
@@ -159,7 +161,7 @@ pub(super) fn build_snapshot_blocking(
             FleetReadError::Backend("family_dismissal_lineage".to_string())
         })?
         .into_iter()
-        .map(|result| (result.identity, result.family_root_dismissed))
+        .map(|result| (result.identity, result.agent_session_root_dismissed))
         .collect();
 
     // Select the served set, then build details, content handles, summaries,

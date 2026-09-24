@@ -235,7 +235,7 @@ fn runner_query_requires_matching_live_workspace_claim() {
 }
 
 #[test]
-fn runner_eligibility_honors_family_workflow_visibility_and_project() {
+fn runner_eligibility_honors_agent_session_workflow_visibility_and_project() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let terminal = || {
@@ -350,9 +350,9 @@ fn runner_eligibility_honors_family_workflow_visibility_and_project() {
     let result = query_run_stats(&index, filtered).unwrap();
     let runners = result.runners.as_ref().unwrap();
 
-    // root, parallel, serial (now occupancy-eligible without agent_family),
-    // and workflow-agent. The serial child is its own family because it
-    // has no agent_family, matching the Python grouping fallback.
+    // root, parallel, serial (now occupancy-eligible without agent_session),
+    // and workflow-agent. The serial child is its own agent session because it
+    // has no agent_session, matching the Python grouping fallback.
     assert_eq!(runners.peak_runners, 4);
     assert_eq!(runners.runner_seconds, 400.0);
     assert_eq!(runners.distribution[4].seconds, 100.0);

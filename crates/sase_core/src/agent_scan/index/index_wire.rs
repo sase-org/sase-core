@@ -188,9 +188,9 @@ pub struct AgentArtifactIndexQueryWire {
     pub include_hidden: bool,
     #[serde(default)]
     pub freshness: AgentArtifactIndexFreshnessWire,
-    /// Restrict results to real monitor family members
-    /// (`agent_meta.agent_family_role == "monitor"` and a non-empty
-    /// `agent_meta.family_shell.id` on a `"monitor"`-kind shell).
+    /// Restrict results to real monitor agent session members
+    /// (`agent_meta.agent_session_role == "monitor"` and a non-empty
+    /// `agent_meta.agent_session_shell.id` on a `"monitor"`-kind shell).
     #[serde(default)]
     pub only_monitors: bool,
     #[serde(default)]

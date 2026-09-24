@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::agent_scan::{
-    query_agent_artifact_index, resolve_family_dismissal_lineage,
+    query_agent_artifact_index, resolve_agent_session_dismissal_lineage,
     AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
     AgentArtifactRecordShapeWire, AgentArtifactRecordWire,
-    AgentArtifactScanOptionsWire, FamilyDismissalLineageCandidateWire,
+    AgentArtifactScanOptionsWire, AgentSessionDismissalLineageCandidateWire,
 };
 use crate::fleet_contract::{
     ensure_installation_identity, instance_locator_key, logical_locator_key,
@@ -351,34 +351,37 @@ pub fn assemble_fleet_catalog(
                 )
             })
             .collect();
-    let lineage_candidates: Vec<FamilyDismissalLineageCandidateWire> = scan
-        .records
-        .iter()
-        .map(|record| FamilyDismissalLineageCandidateWire {
-            identity: record.artifact_dir.clone(),
-            project_name: record.project_name.clone(),
-            workflow_dir_name: record.workflow_dir_name.clone(),
-            timestamp: record.timestamp.clone(),
-            seed_definitively_dead: matches!(
-                observation_by_identity.get(&record.artifact_dir),
-                Some(
-                    OwnerProcessObservation::Dead
-                        | OwnerProcessObservation::NotProcess
-                        | OwnerProcessObservation::IdentityMismatch
-                )
-            ),
-        })
-        .collect();
-    let dismissed_by_identity: BTreeMap<String, bool> =
-        resolve_family_dismissal_lineage(&index_path, &lineage_candidates)
-            .map_err(|error| {
-                FleetContractError::Validation(format!(
-                    "family_dismissal_lineage: {error}"
-                ))
-            })?
-            .into_iter()
-            .map(|result| (result.identity, result.family_root_dismissed))
+    let lineage_candidates: Vec<AgentSessionDismissalLineageCandidateWire> =
+        scan.records
+            .iter()
+            .map(|record| AgentSessionDismissalLineageCandidateWire {
+                identity: record.artifact_dir.clone(),
+                project_name: record.project_name.clone(),
+                workflow_dir_name: record.workflow_dir_name.clone(),
+                timestamp: record.timestamp.clone(),
+                seed_definitively_dead: matches!(
+                    observation_by_identity.get(&record.artifact_dir),
+                    Some(
+                        OwnerProcessObservation::Dead
+                            | OwnerProcessObservation::NotProcess
+                            | OwnerProcessObservation::IdentityMismatch
+                    )
+                ),
+            })
             .collect();
+    let dismissed_by_identity: BTreeMap<String, bool> =
+        resolve_agent_session_dismissal_lineage(
+            &index_path,
+            &lineage_candidates,
+        )
+        .map_err(|error| {
+            FleetContractError::Validation(format!(
+                "family_dismissal_lineage: {error}"
+            ))
+        })?
+        .into_iter()
+        .map(|result| (result.identity, result.agent_session_root_dismissed))
+        .collect();
     let host_files = HostOwnerFileObserver::default();
     let files: &dyn OwnerFileObserver = match &request.owner_files {
         Some(injected) => injected,

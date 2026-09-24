@@ -90,8 +90,8 @@ pub struct GateFollowupAttemptWire {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateFollowupSuccessorEvidenceWire {
-    #[serde(default)]
-    pub family_name: Option<String>,
+    #[serde(default, rename = "family_name", alias = "agent_session_name")]
+    pub agent_session_name: Option<String>,
     #[serde(default)]
     pub expected_suffix: Option<String>,
     #[serde(default)]

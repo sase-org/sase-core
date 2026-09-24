@@ -113,7 +113,7 @@ pub(super) fn record_running() -> AgentArtifactRecordWire {
             name: Some("athena.worker".to_string()),
             model: Some("gpt-5".to_string()),
             llm_provider: Some("codex".to_string()),
-            agent_family: Some("family-1".to_string()),
+            agent_session: Some("family-1".to_string()),
             ..AgentMetaWire::default()
         }),
         done: None,

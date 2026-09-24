@@ -7,7 +7,8 @@
 //! must share this classifier.
 
 use crate::agent_scan::{
-    AgentArtifactRecordWire, AgentMetaWire, DoneMarkerWire, FamilyShellWire,
+    AgentArtifactRecordWire, AgentMetaWire, AgentSessionShellWire,
+    DoneMarkerWire,
 };
 
 /// Kind of a concrete family shell, independent of whether a parent
@@ -53,7 +54,7 @@ pub fn family_id_for_record(
 ) -> Option<String> {
     let meta = record.agent_meta.as_ref();
     first_non_empty([
-        meta.and_then(|value| value.agent_family.as_deref()),
+        meta.and_then(|value| value.agent_session.as_deref()),
         family_shell(meta, record.done.as_ref())
             .and_then(|value| value.label.as_deref()),
     ])
@@ -103,7 +104,7 @@ pub fn concrete_family_shell_kind(
     }
     if let Some(kind) = kind_from_role(meta.and_then(|value| {
         first_non_empty([
-            value.agent_family_role.as_deref(),
+            value.agent_session_role.as_deref(),
             value.role_suffix.as_deref(),
         ])
     })) {
@@ -121,13 +122,13 @@ pub fn concrete_family_shell_kind(
 pub fn family_shell<'a>(
     meta: Option<&'a AgentMetaWire>,
     done: Option<&'a DoneMarkerWire>,
-) -> Option<&'a FamilyShellWire> {
-    meta.and_then(|value| value.family_shell.as_ref())
-        .or_else(|| done.and_then(|value| value.family_shell.as_ref()))
+) -> Option<&'a AgentSessionShellWire> {
+    meta.and_then(|value| value.agent_session_shell.as_ref())
+        .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()))
 }
 
 fn kind_from_family_shell(
-    shell: &FamilyShellWire,
+    shell: &AgentSessionShellWire,
 ) -> Option<ConcreteFamilyShellKind> {
     match shell.kind.trim().to_ascii_lowercase().as_str() {
         "monitor" | "mon" => Some(ConcreteFamilyShellKind::Monitor),
@@ -217,7 +218,7 @@ mod tests {
     use super::*;
     use crate::agent_scan::{
         AgentArtifactRecordShapeWire, AgentArtifactRecordWire, AgentMetaWire,
-        FamilyShellWire,
+        AgentSessionShellWire,
     };
 
     fn record_named(name: &str) -> AgentArtifactRecordWire {
@@ -249,12 +250,12 @@ mod tests {
     #[test]
     fn plan_without_parent_timestamp_is_a_shell_not_a_root() {
         let mut record = record_named("0n--plan");
-        record.agent_meta.as_mut().unwrap().agent_family =
+        record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
-        record.agent_meta.as_mut().unwrap().family_shell =
-            Some(FamilyShellWire {
+        record.agent_meta.as_mut().unwrap().agent_session_shell =
+            Some(AgentSessionShellWire {
                 kind: "gate".to_string(),
-                ..FamilyShellWire::default()
+                ..AgentSessionShellWire::default()
             });
         assert_eq!(
             concrete_family_shell_kind(&record),
@@ -267,9 +268,9 @@ mod tests {
     #[test]
     fn family_id_alone_does_not_make_a_root_a_shell() {
         let mut record = record_named("lane");
-        record.agent_meta.as_mut().unwrap().agent_family =
+        record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
-        record.agent_meta.as_mut().unwrap().agent_family_role =
+        record.agent_meta.as_mut().unwrap().agent_session_role =
             Some("root".to_string());
         assert_eq!(concrete_family_shell_kind(&record), None);
         assert_eq!(family_key_for_record(&record).as_deref(), Some("lane"));

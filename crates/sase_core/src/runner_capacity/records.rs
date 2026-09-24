@@ -67,7 +67,7 @@ pub(super) fn is_waiting_record(
 }
 
 fn serial_continuation_reuses_claim(record: &RunnerCapacityRecordWire) -> bool {
-    !record.agent_family_parallel
+    !record.agent_session_parallel
         && (record
             .parent_timestamp
             .as_deref()
@@ -79,20 +79,20 @@ fn serial_continuation_reuses_claim(record: &RunnerCapacityRecordWire) -> bool {
 }
 
 fn is_pending_gate(record: &RunnerCapacityRecordWire) -> bool {
-    record.agent_family_role.as_deref() == Some("gate")
-        && record.family_shell_kind.as_deref() == Some("gate")
+    record.agent_session_role.as_deref() == Some("gate")
+        && record.agent_session_shell_kind.as_deref() == Some("gate")
         && record
-            .family_shell_id
+            .agent_session_shell_id
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
-        && record.family_shell_state.as_deref() == Some("pending")
+        && record.agent_session_shell_state.as_deref() == Some("pending")
 }
 
 fn is_real_monitor_member(record: &RunnerCapacityRecordWire) -> bool {
-    record.agent_family_role.as_deref() == Some("monitor")
-        && record.family_shell_kind.as_deref() == Some("monitor")
+    record.agent_session_role.as_deref() == Some("monitor")
+        && record.agent_session_shell_kind.as_deref() == Some("monitor")
         && record
-            .family_shell_id
+            .agent_session_shell_id
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty())
 }

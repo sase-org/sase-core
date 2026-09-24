@@ -3,11 +3,11 @@
 use super::support::*;
 
 #[test]
-fn shared_family_claim_counts_once_for_capacity() {
+fn shared_agent_session_claim_counts_once_for_capacity() {
     let mut serial_root = running("serial-root", Some(2.0));
-    serial_root.agent_family = Some("fam".to_string());
+    serial_root.agent_session = Some("fam".to_string());
     let mut serial_child = running("serial-child", Some(1.0));
-    serial_child.agent_family = Some("fam".to_string());
+    serial_child.agent_session = Some("fam".to_string());
     serial_child.parent_timestamp = Some("serial-root".to_string());
     let mut waiting_agent =
         waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
@@ -25,11 +25,11 @@ fn shared_family_claim_counts_once_for_capacity() {
 }
 
 #[test]
-fn serial_successor_waits_only_after_family_releases_claim() {
+fn serial_successor_waits_only_after_agent_session_releases_claim() {
     let mut active = running("root", Some(2.0));
-    active.agent_family = Some("fam".to_string());
+    active.agent_session = Some("fam".to_string());
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("root".to_string());
 
     let with_claim = snapshot(4.0, vec![active.clone(), successor.clone()]);
@@ -44,10 +44,10 @@ fn serial_successor_waits_only_after_family_releases_claim() {
 #[test]
 fn serial_successor_of_parallel_member_shares_parallel_lineage_claim() {
     let mut parallel = running("parallel", Some(2.0));
-    parallel.agent_family = Some("fam".to_string());
-    parallel.agent_family_parallel = true;
+    parallel.agent_session = Some("fam".to_string());
+    parallel.agent_session_parallel = true;
     let mut successor = running("successor", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("parallel".to_string());
 
     let result = snapshot(4.0, vec![parallel, successor]);
@@ -62,15 +62,16 @@ fn serial_successor_of_parallel_member_shares_parallel_lineage_claim() {
 }
 
 #[test]
-fn unrelated_same_display_family_claim_does_not_hide_parallel_successor() {
+fn unrelated_same_display_agent_session_claim_does_not_hide_parallel_successor()
+{
     let mut serial_branch = running("serial-branch", Some(2.0));
-    serial_branch.agent_family = Some("fam".to_string());
+    serial_branch.agent_session = Some("fam".to_string());
     let mut parallel_parent = running("parallel-parent", Some(2.0));
-    parallel_parent.agent_family = Some("fam".to_string());
-    parallel_parent.agent_family_parallel = true;
+    parallel_parent.agent_session = Some("fam".to_string());
+    parallel_parent.agent_session_parallel = true;
     parallel_parent.live = false;
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("parallel-parent".to_string());
 
     let result = snapshot(4.0, vec![serial_branch, parallel_parent, successor]);
@@ -82,12 +83,12 @@ fn unrelated_same_display_family_claim_does_not_hide_parallel_successor() {
 }
 
 #[test]
-fn explicit_claim_owner_separates_same_family_branches() {
+fn explicit_claim_owner_separates_same_agent_session_branches() {
     let mut left = running("left", Some(1.0));
-    left.agent_family = Some("fam".to_string());
+    left.agent_session = Some("fam".to_string());
     left.runner_claim_owner_key = Some("branch-left".to_string());
     let mut right = running("right", Some(1.0));
-    right.agent_family = Some("fam".to_string());
+    right.agent_session = Some("fam".to_string());
     right.runner_claim_owner_key = Some("branch-right".to_string());
 
     let result = snapshot(4.0, vec![left, right]);
@@ -106,17 +107,17 @@ fn explicit_claim_owner_separates_same_family_branches() {
 #[test]
 fn nested_monitor_successor_reuses_starter_lineage() {
     let mut starter = running("starter", Some(2.0));
-    starter.agent_family = Some("fam".to_string());
+    starter.agent_session = Some("fam".to_string());
     let mut monitor = running("monitor", Some(2.0));
-    monitor.agent_family = Some("fam".to_string());
-    monitor.agent_family_role = Some("monitor".to_string());
-    monitor.family_shell_kind = Some("monitor".to_string());
-    monitor.family_shell_id = Some("mon-1".to_string());
+    monitor.agent_session = Some("fam".to_string());
+    monitor.agent_session_role = Some("monitor".to_string());
+    monitor.agent_session_shell_kind = Some("monitor".to_string());
+    monitor.agent_session_shell_id = Some("mon-1".to_string());
     monitor.parent_timestamp = Some("starter".to_string());
     monitor.pid = Some(99);
     monitor.run_started_at = None;
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("monitor".to_string());
 
     let live = snapshot(
@@ -140,16 +141,16 @@ fn nested_monitor_successor_reuses_starter_lineage() {
 #[test]
 fn nested_gate_successor_reuses_starter_lineage() {
     let mut starter = running("starter", Some(2.0));
-    starter.agent_family = Some("fam".to_string());
+    starter.agent_session = Some("fam".to_string());
     let mut gate = running("gate", Some(2.0));
-    gate.agent_family = Some("fam".to_string());
-    gate.agent_family_role = Some("gate".to_string());
-    gate.family_shell_kind = Some("gate".to_string());
-    gate.family_shell_id = Some("gate-1".to_string());
-    gate.family_shell_state = Some("approved".to_string());
+    gate.agent_session = Some("fam".to_string());
+    gate.agent_session_role = Some("gate".to_string());
+    gate.agent_session_shell_kind = Some("gate".to_string());
+    gate.agent_session_shell_id = Some("gate-1".to_string());
+    gate.agent_session_shell_state = Some("approved".to_string());
     gate.parent_timestamp = Some("starter".to_string());
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("gate".to_string());
 
     let decision = snapshot_with_candidate(4.0, vec![starter, gate], successor)

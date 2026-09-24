@@ -126,12 +126,12 @@ mod tests {
     }
 
     #[test]
-    fn qualify_preserves_family_names() {
+    fn qualify_preserves_agent_session_names() {
         assert_eq!(
             qualify_machine_agent_name("foo--code", "athena"),
             "athena.foo--code"
         );
-        // Already-qualified family name is untouched.
+        // Already-qualified agent session name is untouched.
         assert_eq!(
             qualify_machine_agent_name("athena.foo--code", "athena"),
             "athena.foo--code"

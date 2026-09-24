@@ -257,8 +257,8 @@ pub struct DoneMarkerWire {
     pub status_label: Option<String>,
     /// Terminal monitor or gate-shell projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(default)]
-    pub family_shell: Option<FamilyShellWire>,
+    #[serde(default, rename = "family_shell", alias = "agent_session_shell")]
+    pub agent_session_shell: Option<AgentSessionShellWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
     #[serde(default)]
@@ -563,12 +563,17 @@ pub struct AgentMetaWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub clan_summary: Option<String>,
-    #[serde(default)]
-    pub agent_family: Option<String>,
-    #[serde(default)]
-    pub agent_family_role: Option<String>,
-    #[serde(default)]
-    pub agent_family_parallel: bool,
+    #[serde(default, rename = "agent_family", alias = "agent_session")]
+    pub agent_session: Option<String>,
+    #[serde(
+        default,
+        rename = "agent_family_role",
+        alias = "agent_session_role"
+    )]
+    pub agent_session_role: Option<String>,
+    // legacy agent-family spelling; flips in core-contract
+    #[serde(default, rename = "agent_family_parallel")]
+    pub agent_session_parallel: bool,
     #[serde(default)]
     pub source_machine: Option<String>,
     #[serde(default)]
@@ -681,8 +686,8 @@ pub struct AgentMetaWire {
     pub retry_error_category: Option<String>,
     /// Terminal monitor or gate-shell projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(default)]
-    pub family_shell: Option<FamilyShellWire>,
+    #[serde(default, rename = "family_shell", alias = "agent_session_shell")]
+    pub agent_session_shell: Option<AgentSessionShellWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
     #[serde(default)]
@@ -720,9 +725,9 @@ impl AgentMetaWire {
     }
 }
 
-/// Monitor-only fields of a `family_shell` record.
+/// Monitor-only fields of a `agent_session_shell` record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct FamilyShellMonitorWire {
+pub struct AgentSessionShellMonitorWire {
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -743,12 +748,12 @@ pub struct FamilyShellMonitorWire {
     pub idle_timeout_seconds: Option<f64>,
 }
 
-/// Gate-only fields of a `family_shell` record.
+/// Gate-only fields of a `agent_session_shell` record.
 ///
 /// `kind` here is the gate's own flavor (e.g. `"approval"`), not the
-/// `FamilyShellWire::kind` discriminator.
+/// `AgentSessionShellWire::kind` discriminator.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct FamilyShellGateWire {
+pub struct AgentSessionShellGateWire {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -769,14 +774,14 @@ pub struct FamilyShellGateWire {
     pub claim_holder_pid: Option<i64>,
 }
 
-/// One durable family-shell member: a monitor or a gate, never both.
+/// One durable agent-session-shell member: a monitor or a gate, never both.
 ///
 /// `kind` discriminates `"monitor"` / `"gate"`. The fields below `kind` are
 /// the ones both shells carry (mirroring the two flat `monitor_*` /
 /// `gate_*` prefixes they replace); `monitor` / `gate` hold whichever
 /// kind's own fields, with the other left `None`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct FamilyShellWire {
+pub struct AgentSessionShellWire {
     #[serde(default)]
     pub kind: String,
     #[serde(default)]
@@ -840,9 +845,9 @@ pub struct FamilyShellWire {
     #[serde(default)]
     pub host_completion_reason: Option<String>,
     #[serde(default)]
-    pub monitor: Option<FamilyShellMonitorWire>,
+    pub monitor: Option<AgentSessionShellMonitorWire>,
     #[serde(default)]
-    pub gate: Option<FamilyShellGateWire>,
+    pub gate: Option<AgentSessionShellGateWire>,
 }
 
 /// Compact projection of `running.json`.
@@ -1238,7 +1243,7 @@ mod tests {
     fn agent_meta_wire_round_trips_every_monitor_field() {
         let meta = AgentMetaWire {
             name: Some("acme--mon".to_string()),
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "monitor".to_string(),
                 id: Some("m4kq".to_string()),
                 label: Some("just check-full".to_string()),
@@ -1278,7 +1283,7 @@ mod tests {
                 host_completion_reason: Some(
                     "verification succeeded".to_string(),
                 ),
-                monitor: Some(FamilyShellMonitorWire {
+                monitor: Some(AgentSessionShellMonitorWire {
                     command: Some("just check-full".to_string()),
                     cwd: Some("/home/bryan/workspaces/acme".to_string()),
                     exit_code: Some(1),
@@ -1310,7 +1315,7 @@ mod tests {
             serde_json::from_value(old_record).unwrap();
 
         assert_eq!(decoded.name.as_deref(), Some("pre-monitor-agent"));
-        assert_eq!(decoded.family_shell, None);
+        assert_eq!(decoded.agent_session_shell, None);
         assert!(decoded.model_alias_trail.is_empty());
         assert_eq!(decoded.model_alias_origin, None);
     }
@@ -1319,7 +1324,7 @@ mod tests {
     fn agent_meta_wire_round_trips_every_gate_field() {
         let meta = AgentMetaWire {
             name: Some("acme--gate".to_string()),
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "gate".to_string(),
                 id: Some("gate-1".to_string()),
                 state: Some("pending".to_string()),
@@ -1356,7 +1361,7 @@ mod tests {
                 timeout_seconds: Some(600.0),
                 request_fingerprint: Some("sha256:cafe".to_string()),
                 monitor: None,
-                gate: Some(FamilyShellGateWire {
+                gate: Some(AgentSessionShellGateWire {
                     kind: Some("approval".to_string()),
                     accent: Some("#0BCDEC".to_string()),
                     creator_agent: Some("acme--0".to_string()),
@@ -1389,9 +1394,35 @@ mod tests {
             serde_json::from_value(old_record).unwrap();
 
         assert_eq!(decoded.name.as_deref(), Some("pre-gate-agent"));
-        assert_eq!(decoded.family_shell, None);
+        assert_eq!(decoded.agent_session_shell, None);
         assert_eq!(decoded.shell_kind, None);
         assert_eq!(decoded.proc_id, None);
+    }
+
+    #[test]
+    fn agent_meta_wire_accepts_agent_session_spellings_but_emits_legacy() {
+        let legacy: AgentMetaWire = serde_json::from_value(serde_json::json!({
+            "agent_family": "fam",
+            "agent_family_role": "monitor",
+            "family_shell": {"kind": "monitor"},
+        }))
+        .unwrap();
+        let new: AgentMetaWire = serde_json::from_value(serde_json::json!({
+            "agent_session": "fam",
+            "agent_session_role": "monitor",
+            "agent_session_shell": {"kind": "monitor"},
+        }))
+        .unwrap();
+        assert_eq!(new, legacy);
+        assert_eq!(new.agent_session.as_deref(), Some("fam"));
+        assert_eq!(new.agent_session_role.as_deref(), Some("monitor"));
+        let encoded = serde_json::to_value(&new).unwrap();
+        assert_eq!(encoded["agent_family"], "fam");
+        assert_eq!(encoded["agent_family_role"], "monitor");
+        assert!(encoded.get("agent_session").is_none());
+        assert!(encoded.get("agent_session_role").is_none());
+        assert_eq!(encoded["family_shell"]["kind"], "monitor");
+        assert!(encoded.get("agent_session_shell").is_none());
     }
 
     #[test]
@@ -1489,7 +1520,7 @@ mod tests {
             monitor_followup_budget_decision_path: Some(
                 "/tmp/followup-budget.json".to_string(),
             ),
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "monitor".to_string(),
                 state: Some("completed".to_string()),
                 elapsed_seconds: Some(17.5),
@@ -1507,7 +1538,7 @@ mod tests {
                 host_completion_status: Some("completed_by_host".to_string()),
                 host_completion_message: Some("done".to_string()),
                 host_completion_reason: Some("eligible".to_string()),
-                monitor: Some(FamilyShellMonitorWire {
+                monitor: Some(AgentSessionShellMonitorWire {
                     exit_code: Some(0),
                     ..Default::default()
                 }),
@@ -1527,7 +1558,7 @@ mod tests {
         let done = DoneMarkerWire {
             outcome: Some("gated".to_string()),
             status_label: Some("ANSWERED".to_string()),
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "gate".to_string(),
                 id: Some("gate-1".to_string()),
                 state: Some("answered".to_string()),
@@ -1543,7 +1574,7 @@ mod tests {
                     "artifacts/gate_followup.md".to_string(),
                 ),
                 monitor: None,
-                gate: Some(FamilyShellGateWire {
+                gate: Some(AgentSessionShellGateWire {
                     kind: Some("approval".to_string()),
                     bundle_path: Some("gate_bundle.json".to_string()),
                     notification_id: Some("notif-1".to_string()),
@@ -1571,6 +1602,6 @@ mod tests {
 
         assert_eq!(decoded.outcome.as_deref(), Some("completed"));
         assert_eq!(decoded.status_label, None);
-        assert_eq!(decoded.family_shell, None);
+        assert_eq!(decoded.agent_session_shell, None);
     }
 }

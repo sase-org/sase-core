@@ -705,7 +705,7 @@ mod tests {
             }],
             revived_at: None,
             times_revived: 0,
-            canonical_global_family: None,
+            canonical_global_agent_session: None,
             source_snapshot_digest: None,
         }
     }

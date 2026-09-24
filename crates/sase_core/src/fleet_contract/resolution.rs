@@ -243,8 +243,8 @@ pub fn project_resolved_agent_summary(
     let (queue_capacity, queue_capacity_explicit) =
         queue_capacity_for_record(&request.record);
     let family = meta
-        .and_then(|value| value.family_shell.as_ref())
-        .or_else(|| done.and_then(|value| value.family_shell.as_ref()));
+        .and_then(|value| value.agent_session_shell.as_ref())
+        .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()));
     let parent_timestamp = facts.parent_timestamp.clone().or_else(|| {
         meta.and_then(|value| {
             first_non_empty([
@@ -277,7 +277,7 @@ pub fn project_resolved_agent_summary(
         ])
         .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
         family_label: first_non_empty([
-            meta.and_then(|value| value.agent_family.as_deref()),
+            meta.and_then(|value| value.agent_session.as_deref()),
             family.and_then(|value| value.label.as_deref()),
         ])
         .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),

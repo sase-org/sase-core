@@ -8,20 +8,20 @@ use super::support::*;
 fn default_weights_match_serial_and_parallel_lane_counting() {
     let standalone = running("standalone", None);
     let mut serial_root = running("serial-root", Some(2.0));
-    serial_root.agent_family = Some("fam".to_string());
+    serial_root.agent_session = Some("fam".to_string());
     let mut serial_child = running("serial-child", Some(1.0));
-    serial_child.agent_family = Some("fam".to_string());
+    serial_child.agent_session = Some("fam".to_string());
     serial_child.parent_timestamp = Some("serial-root".to_string());
     let mut parallel = running("parallel", Some(0.25));
-    parallel.agent_family = Some("fam".to_string());
-    parallel.agent_family_parallel = true;
+    parallel.agent_session = Some("fam".to_string());
+    parallel.agent_session_parallel = true;
     let mut pending_question = running("question", Some(4.0));
     pending_question.pending_question = true;
     let mut pending_gate = running("gate", Some(4.0));
-    pending_gate.agent_family_role = Some("gate".to_string());
-    pending_gate.family_shell_kind = Some("gate".to_string());
-    pending_gate.family_shell_id = Some("gate-1".to_string());
-    pending_gate.family_shell_state = Some("pending".to_string());
+    pending_gate.agent_session_role = Some("gate".to_string());
+    pending_gate.agent_session_shell_kind = Some("gate".to_string());
+    pending_gate.agent_session_shell_id = Some("gate-1".to_string());
+    pending_gate.agent_session_shell_state = Some("pending".to_string());
     let mut hidden_workflow = running("workflow", Some(4.0));
     hidden_workflow.workflow_dir_name = "workflow-build".to_string();
 

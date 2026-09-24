@@ -25,7 +25,7 @@ mod tests;
 pub use alias_history::query_agent_alias_history;
 
 pub use dismissal::{
-    reconcile_agent_artifact_index_dismissed_family_members,
+    reconcile_agent_artifact_index_dismissed_agent_session_members,
     replace_agent_artifact_index_dismissed_agents,
     replace_agent_artifact_index_dismissed_agents_with_force,
     AgentArtifactIndexDismissalReconcileWire,
@@ -42,8 +42,9 @@ pub use index_wire::{
 };
 
 pub use lineage::{
-    query_related_agent_artifact_dirs, resolve_family_dismissal_lineage,
-    FamilyDismissalLineageCandidateWire, FamilyDismissalLineageResultWire,
+    query_related_agent_artifact_dirs, resolve_agent_session_dismissal_lineage,
+    AgentSessionDismissalLineageCandidateWire,
+    AgentSessionDismissalLineageResultWire,
 };
 
 pub use maintenance::{
@@ -116,3 +117,6 @@ fn last_gate_shell_lookup_records_decoded() -> u64 {
 fn placeholders(len: usize) -> String {
     std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
+
+// legacy agent-family spelling; flips in core-contract
+pub(super) const AGENT_SESSION_INDEX_COLUMN: &str = "agent_family";

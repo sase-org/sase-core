@@ -64,8 +64,8 @@ pub(super) fn runtime_group_value(
         AgentStatsRuntimeGroupByWire::Clan => {
             meta.and_then(|value| value.agent_clan.as_deref())
         }
-        AgentStatsRuntimeGroupByWire::Family => {
-            meta.and_then(|value| value.agent_family.as_deref())
+        AgentStatsRuntimeGroupByWire::Session => {
+            meta.and_then(|value| value.agent_session.as_deref())
         }
         AgentStatsRuntimeGroupByWire::Agent => meta
             .and_then(|value| value.name.as_deref())

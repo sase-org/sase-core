@@ -2,8 +2,8 @@ use super::index_wire::{
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
 };
 use super::lineage::{
-    insert_lineage_timestamp, DismissalReconcileCandidate,
-    FamilyDismissalLineageCandidateWire, IndexedLineageRow,
+    insert_lineage_timestamp, AgentSessionDismissalLineageCandidateWire,
+    DismissalReconcileCandidate, IndexedLineageRow,
     MAX_RELATED_ARTIFACT_QUERY_ITERATIONS,
 };
 use super::record_index_sql_statements;
@@ -86,7 +86,7 @@ pub fn replace_agent_artifact_index_dismissed_agents_with_force(
     })
 }
 
-/// Counts from reconciling visible members of already-dismissed families.
+/// Counts from reconciling visible members of already-dismissed agent sessions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArtifactIndexDismissalReconcileWire {
     pub schema_version: u32,
@@ -100,14 +100,14 @@ pub struct AgentArtifactIndexDismissalReconcileWire {
     pub rows_skipped_decode_errors: u64,
 }
 
-/// Back-fill dismissed identities for dead members of already-dismissed families.
+/// Back-fill dismissed identities for dead members of already-dismissed agent sessions.
 ///
 /// The visible-row filter only hides an indexed row when that row's own
-/// suffix/type identity is present in `dismissed_agents`. Older family
+/// suffix/type identity is present in `dismissed_agents`. Older agent session
 /// dismissals could leave unloaded member records visible even though their
-/// family root was dismissed. This pass discovers those rows from indexed
+/// agent session root was dismissed. This pass discovers those rows from indexed
 /// lineage and records their identities without deleting artifacts.
-pub fn reconcile_agent_artifact_index_dismissed_family_members(
+pub fn reconcile_agent_artifact_index_dismissed_agent_session_members(
     index_path: &Path,
     dry_run: bool,
 ) -> Result<AgentArtifactIndexDismissalReconcileWire, String> {
@@ -128,7 +128,7 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
     let mut additions = BTreeSet::new();
 
     for candidate in snapshot.candidates {
-        let family_key = (
+        let agent_session_key = (
             candidate.project_name.clone(),
             candidate.workflow_dir_name.clone(),
         );
@@ -148,11 +148,13 @@ pub fn reconcile_agent_artifact_index_dismissed_family_members(
             continue;
         }
         let lineage_candidate = candidate.into();
-        let Some(rows) = snapshot.lineage_by_family.get(&family_key) else {
+        let Some(rows) =
+            snapshot.lineage_by_agent_session.get(&agent_session_key)
+        else {
             report.rows_skipped_no_dismissed_root += 1;
             continue;
         };
-        if !family_root_dismissed_from_snapshot(
+        if !agent_session_root_dismissed_from_snapshot(
             &lineage_candidate,
             rows,
             &dismissed,
@@ -225,7 +227,7 @@ pub(super) struct DismissalLineageRow {
 
 pub(super) struct DismissalReconcileSnapshot {
     pub(super) candidates: Vec<DismissalReconcileCandidate>,
-    pub(super) lineage_by_family:
+    pub(super) lineage_by_agent_session:
         HashMap<(String, String), Vec<DismissalLineageRow>>,
 }
 
@@ -452,7 +454,7 @@ pub(super) fn select_dismissal_reconcile_snapshot(
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
     let mut candidates = Vec::new();
-    let mut lineage_by_family: HashMap<
+    let mut lineage_by_agent_session: HashMap<
         (String, String),
         Vec<DismissalLineageRow>,
     > = HashMap::new();
@@ -473,11 +475,14 @@ pub(super) fn select_dismissal_reconcile_snapshot(
             lineage_row.lineage.project_name.clone(),
             lineage_row.lineage.workflow_dir_name.clone(),
         );
-        lineage_by_family.entry(key).or_default().push(lineage_row);
+        lineage_by_agent_session
+            .entry(key)
+            .or_default()
+            .push(lineage_row);
     }
     Ok(DismissalReconcileSnapshot {
         candidates,
-        lineage_by_family,
+        lineage_by_agent_session,
     })
 }
 
@@ -490,7 +495,7 @@ pub(super) fn dismissal_lineage_row_from_sql(
             project_name: row.get(1)?,
             workflow_dir_name: row.get(2)?,
             timestamp: row.get(3)?,
-            agent_family: row.get(6)?,
+            agent_session: row.get(6)?,
             parent_timestamp: row.get(7)?,
             retry_of_timestamp: row.get(8)?,
             retried_as_timestamp: row.get(9)?,
@@ -617,14 +622,14 @@ pub(super) fn snapshot_select_lineage_rows(
     matched
 }
 
-pub(super) fn family_root_row_from_snapshot<'a>(
+pub(super) fn agent_session_root_row_from_snapshot<'a>(
     rows: &'a [DismissalLineageRow],
-    agent_family: Option<&str>,
+    agent_session: Option<&str>,
 ) -> Option<&'a DismissalLineageRow> {
-    let family = agent_family.filter(|value| !value.is_empty())?;
+    let agent_session = agent_session.filter(|value| !value.is_empty())?;
     rows.iter()
         .filter(|row| {
-            row.lineage.agent_family.as_deref() == Some(family)
+            row.lineage.agent_session.as_deref() == Some(agent_session)
                 && row.lineage.parent_timestamp.is_none()
         })
         .min_by(|left, right| {
@@ -637,8 +642,8 @@ pub(super) fn family_root_row_from_snapshot<'a>(
         })
 }
 
-pub(super) fn family_root_dismissed_from_snapshot(
-    candidate: &FamilyDismissalLineageCandidateWire,
+pub(super) fn agent_session_root_dismissed_from_snapshot(
+    candidate: &AgentSessionDismissalLineageCandidateWire,
     rows: &[DismissalLineageRow],
     dismissed: &DismissedIndex,
 ) -> bool {
@@ -684,9 +689,9 @@ pub(super) fn family_root_dismissed_from_snapshot(
     {
         root
     } else {
-        let Some(root) = family_root_row_from_snapshot(
+        let Some(root) = agent_session_root_row_from_snapshot(
             rows,
-            seed.lineage.agent_family.as_deref(),
+            seed.lineage.agent_session.as_deref(),
         ) else {
             return false;
         };

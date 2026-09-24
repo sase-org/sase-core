@@ -815,9 +815,9 @@ fn running_record_carries_agent_meta() {
         meta.clan_summary.as_deref(),
         Some("[bold]RESEARCH PROMPT:[/bold]\nStudy clan summaries")
     );
-    assert!(meta.agent_family.is_none());
-    assert!(meta.agent_family_role.is_none());
-    assert!(meta.agent_family_parallel);
+    assert!(meta.agent_session.is_none());
+    assert!(meta.agent_session_role.is_none());
+    assert!(meta.agent_session_parallel);
     assert_eq!(meta.pid, Some(22222));
     assert!(meta.plan);
     assert!(!meta.plan_approved);
@@ -904,7 +904,7 @@ fn plan_committed_survives_live_scan_and_indexed_reads() {
 }
 
 #[test]
-fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
+fn agent_session_parallel_survives_live_scan_and_indexed_reads() {
     let tmp = tempdir().unwrap();
     let root = build_fixture_tree(&tmp.path().join("projects"));
 
@@ -915,14 +915,14 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             .agent_meta
             .as_ref()
             .unwrap()
-            .agent_family_parallel
+            .agent_session_parallel
     );
     assert!(
         !record_by_timestamp(&source, TS_HOME_RUNNING)
             .agent_meta
             .as_ref()
             .unwrap()
-            .agent_family_parallel
+            .agent_session_parallel
     );
 
     let index = tmp.path().join("agent_artifact_index.sqlite");
@@ -958,7 +958,7 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
             .agent_meta
             .as_ref()
             .unwrap()
-            .agent_family_parallel
+            .agent_session_parallel
     );
     let indexed_meta = record_by_timestamp(&indexed, TS_ACE_RUN_RUNNING)
         .agent_meta
@@ -974,7 +974,7 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
         indexed_meta.clan_summary.as_deref(),
         Some("[bold]RESEARCH PROMPT:[/bold]\nStudy clan summaries")
     );
-    assert!(indexed_meta.agent_family.is_none());
+    assert!(indexed_meta.agent_session.is_none());
 
     let conn = Connection::open(index).unwrap();
     let indexed_clan: Option<String> = conn
@@ -997,7 +997,7 @@ fn agent_family_parallel_survives_live_scan_and_indexed_reads() {
 }
 
 #[test]
-fn explicit_agent_clan_preserves_sequential_family_fields() {
+fn explicit_agent_clan_preserves_sequential_agent_session_fields() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("projects");
     let dir = root
@@ -1019,9 +1019,9 @@ fn explicit_agent_clan_preserves_sequential_family_fields() {
         scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
     let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
     assert_eq!(meta.agent_clan.as_deref(), Some("alpha"));
-    assert_eq!(meta.agent_family.as_deref(), Some("alpha.family"));
-    assert_eq!(meta.agent_family_role.as_deref(), Some("code"));
-    assert!(!meta.agent_family_parallel);
+    assert_eq!(meta.agent_session.as_deref(), Some("alpha.family"));
+    assert_eq!(meta.agent_session_role.as_deref(), Some("code"));
+    assert!(!meta.agent_session_parallel);
 }
 
 #[test]
@@ -1365,8 +1365,8 @@ fn scalar_agent_meta_timestamps_are_normalized_to_lists() {
     let rec = record_by_timestamp(&snapshot, "20260429131818");
     let meta = rec.agent_meta.as_ref().unwrap();
 
-    assert_eq!(meta.agent_family.as_deref(), Some("planner"));
-    assert_eq!(meta.agent_family_role.as_deref(), Some("root"));
+    assert_eq!(meta.agent_session.as_deref(), Some("planner"));
+    assert_eq!(meta.agent_session_role.as_deref(), Some("root"));
     assert!(meta.plan_chain_root);
     assert_eq!(
         meta.plan_submitted_at,

@@ -6,6 +6,9 @@ use super::wire::{
     RunnerCapacityRecordWire,
 };
 
+// legacy agent-family spelling; flips in core-contract
+const SERIAL_AGENT_SESSION_CLAIM_KIND: &str = "serial_family";
+
 #[derive(Debug, Clone)]
 pub(super) struct ClaimLineage {
     pub(super) owner_key: String,
@@ -118,7 +121,7 @@ fn claim_lineage_inner(
     {
         return explicit_claim_lineage(record, owner);
     }
-    if record.agent_family_parallel {
+    if record.agent_session_parallel {
         return parallel_claim_lineage(record);
     }
     if let Some(parent_timestamp) =
@@ -147,15 +150,15 @@ fn explicit_claim_lineage(
     record: &RunnerCapacityRecordWire,
     owner: String,
 ) -> ClaimLineage {
-    let claim_kind = if record.agent_family_parallel {
+    let claim_kind = if record.agent_session_parallel {
         "parallel_member"
     } else if record.parent_timestamp.is_some()
         || record
-            .agent_family
+            .agent_session
             .as_deref()
             .is_some_and(|value| !value.is_empty())
     {
-        "serial_family"
+        SERIAL_AGENT_SESSION_CLAIM_KIND
     } else {
         "standalone"
     };
@@ -170,13 +173,13 @@ fn explicit_claim_lineage(
 }
 
 fn parallel_claim_lineage(record: &RunnerCapacityRecordWire) -> ClaimLineage {
-    let family = record
-        .agent_family
+    let agent_session = record
+        .agent_session
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("standalone");
-    let lineage_key = format!("{family}:parallel:{}", record.timestamp);
+    let lineage_key = format!("{agent_session}:parallel:{}", record.timestamp);
     ClaimLineage {
         owner_key: format!("{}:{lineage_key}", record.project_name),
         project_name: record.project_name.clone(),
@@ -190,17 +193,17 @@ fn parallel_claim_lineage(record: &RunnerCapacityRecordWire) -> ClaimLineage {
 fn serial_or_standalone_claim_lineage(
     record: &RunnerCapacityRecordWire,
 ) -> ClaimLineage {
-    if let Some(family) = record
-        .agent_family
+    if let Some(agent_session) = record
+        .agent_session
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         return ClaimLineage {
-            owner_key: format!("{}:{family}", record.project_name),
+            owner_key: format!("{}:{agent_session}", record.project_name),
             project_name: record.project_name.clone(),
-            claim_kind: "serial_family".to_string(),
-            lineage_key: family.to_string(),
+            claim_kind: SERIAL_AGENT_SESSION_CLAIM_KIND.to_string(),
+            lineage_key: agent_session.to_string(),
             owner_artifact_dir: Some(record.artifact_dir.clone()),
             owner_timestamp: Some(record.timestamp.clone()),
         };

@@ -1777,13 +1777,16 @@ mod tests {
         assert_eq!(legacy.status, "exact");
         assert_eq!(legacy.rendered, "agent:athena.sase-7r.land--code");
 
-        let family_member = resolve_artifact_ref(
+        let agent_session_member = resolve_artifact_ref(
             &parse_artifact_ref("agent:9w--code").unwrap(),
             &context,
         )
         .unwrap();
-        assert_eq!(family_member.status, "exact");
-        assert_eq!(family_member.rendered, "agent:bbugyi200.athena.9w--code");
+        assert_eq!(agent_session_member.status, "exact");
+        assert_eq!(
+            agent_session_member.rendered,
+            "agent:bbugyi200.athena.9w--code"
+        );
 
         let missing = resolve_artifact_ref(
             &parse_artifact_ref("agent:absent").unwrap(),

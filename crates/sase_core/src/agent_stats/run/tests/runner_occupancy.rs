@@ -152,7 +152,7 @@ fn runner_occupancy_handles_overlap_carry_in_waits_and_boundaries() {
 }
 
 #[test]
-fn runner_occupancy_merges_serial_family_and_counts_parallel() {
+fn runner_occupancy_merges_serial_agent_session_and_counts_parallel() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let terminal_at = |offset: i64| {
@@ -222,7 +222,7 @@ fn runner_occupancy_merges_serial_family_and_counts_parallel() {
     let result = query_run_stats(&index, runner_request(0, 100, 100)).unwrap();
     let runners = result.runners.as_ref().unwrap();
 
-    // Serial family occupies [0, 100] after the starter-to-monitor gap is
+    // Serial agent session occupies [0, 100] after the starter-to-monitor gap is
     // filled and the follow-up abuts the monitor. The parallel member
     // adds a second slot on [70, 90].
     assert_eq!(runners.peak_runners, 2);

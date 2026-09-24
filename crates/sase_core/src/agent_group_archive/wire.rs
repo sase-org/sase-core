@@ -62,8 +62,12 @@ pub struct SavedAgentGroupWire {
     pub revived_at: Option<String>,
     #[serde(default)]
     pub times_revived: i64,
-    #[serde(default)]
-    pub canonical_global_family: Option<String>,
+    #[serde(
+        default,
+        rename = "canonical_global_family",
+        alias = "canonical_global_agent_session"
+    )]
+    pub canonical_global_agent_session: Option<String>,
     #[serde(default)]
     pub source_snapshot_digest: Option<String>,
 }

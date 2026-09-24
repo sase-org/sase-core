@@ -5,9 +5,9 @@ use super::support::*;
 #[test]
 fn candidate_decision_reuses_active_lineage_or_rejects_reweight() {
     let mut active = running("root", Some(2.0));
-    active.agent_family = Some("fam".to_string());
+    active.agent_session = Some("fam".to_string());
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(1.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("root".to_string());
 
     let inherited =
@@ -34,7 +34,7 @@ fn candidate_decision_reuses_active_lineage_or_rejects_reweight() {
 fn candidate_decision_excludes_unadmitted_candidate_from_own_claim() {
     let unrelated = running("unrelated", Some(2.0));
     let mut candidate = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    candidate.agent_family = Some("fam".to_string());
+    candidate.agent_session = Some("fam".to_string());
     candidate.parent_timestamp = Some("released-parent".to_string());
     candidate.run_started_at = Some("2026-09-10T00:00:01Z".to_string());
 
@@ -102,10 +102,10 @@ fn invalid_released_lineage_weight_blocks_omitted_candidate() {
 fn candidate_serial_successor_of_live_parallel_member_reuses_parallel_lineage()
 {
     let mut parallel = running("parallel", Some(2.0));
-    parallel.agent_family = Some("fam".to_string());
-    parallel.agent_family_parallel = true;
+    parallel.agent_session = Some("fam".to_string());
+    parallel.agent_session_parallel = true;
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("parallel".to_string());
 
     let decision = snapshot_with_candidate(4.0, vec![parallel], successor)
@@ -119,12 +119,12 @@ fn candidate_serial_successor_of_live_parallel_member_reuses_parallel_lineage()
 }
 
 #[test]
-fn persisted_owner_keeps_released_parallel_successor_off_unrelated_family_claim(
+fn persisted_owner_keeps_released_parallel_successor_off_unrelated_agent_session_claim(
 ) {
     let mut serial_branch = running("serial-branch", Some(2.0));
-    serial_branch.agent_family = Some("fam".to_string());
+    serial_branch.agent_session = Some("fam".to_string());
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("parallel-parent".to_string());
     successor.runner_claim_owner_key =
         Some("fam:parallel:parallel-parent".to_string());

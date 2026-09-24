@@ -432,19 +432,19 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
     let meta: AgentMetaWire =
         serde_json::from_value(python_fixture.clone()).unwrap();
 
-    assert!(meta.agent_family_parallel);
+    assert!(meta.agent_session_parallel);
     assert_eq!(
         serde_json::to_value(meta).unwrap()["agent_family_parallel"],
         python_fixture["agent_family_parallel"]
     );
 
     let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
-    assert!(!legacy.agent_family_parallel);
+    assert!(!legacy.agent_session_parallel);
     assert!(legacy.epic_plan_ref.is_none());
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.clan_summary.is_none());
     assert!(legacy.wait_priority.is_none());
-    assert!(legacy.family_shell.is_none());
+    assert!(legacy.agent_session_shell.is_none());
 
     let clan: AgentMetaWire = serde_json::from_str(
         r#"{"agent_clan":"alpha","clan_tribe":"research","clan_summary":"[bold]Summary[/bold]"}"#,
@@ -480,7 +480,7 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     let generation = encoded.find("\"agent_clan_generation\"").unwrap();
     let tribe = encoded.find("\"clan_tribe\"").unwrap();
     let summary = encoded.find("\"clan_summary\"").unwrap();
-    let family = encoded.find("\"agent_family\"").unwrap();
+    let agent_session = encoded.find("\"agent_family\"").unwrap();
     let role = encoded.find("\"agent_family_role\"").unwrap();
     let parallel = encoded.find("\"agent_family_parallel\"").unwrap();
     assert!(sdd_plan < epic_plan);
@@ -489,8 +489,8 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     assert!(clan < generation);
     assert!(generation < tribe);
     assert!(tribe < summary);
-    assert!(summary < family);
-    assert!(family < role);
+    assert!(summary < agent_session);
+    assert!(agent_session < role);
     assert!(role < parallel);
 }
 
@@ -525,7 +525,7 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
     let target: AgentCleanupTargetWire =
         serde_json::from_value(python_fixture.clone()).unwrap();
 
-    assert!(target.agent_family_parallel);
+    assert!(target.agent_session_parallel);
     assert_eq!(target.agent_clan.as_deref(), Some("shipping"));
     assert_eq!(target.agent_clan_generation.as_deref(), Some("current-gen"));
     assert_eq!(
@@ -544,7 +544,7 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
             "status": "RUNNING"
         }))
         .unwrap();
-    assert!(!legacy.agent_family_parallel);
+    assert!(!legacy.agent_session_parallel);
     assert!(legacy.agent_clan.is_none());
     assert!(legacy.agent_clan_generation.is_none());
     assert!(legacy.monitor_id.is_none());

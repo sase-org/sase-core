@@ -475,3 +475,37 @@ fn agent_activity_stats_binding_round_trips_python_dict() {
         let _ = fs::remove_dir_all(root);
     });
 }
+
+#[test]
+fn reconcile_dismissed_members_bindings_agree_across_spellings() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(&root).unwrap();
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        let index_str = index.to_string_lossy().into_owned();
+        py_rebuild_agent_artifact_index(
+            py,
+            &index_str,
+            root.to_string_lossy().as_ref(),
+            None,
+        )
+        .unwrap();
+
+        let new =
+            py_reconcile_agent_artifact_index_dismissed_agent_session_members(
+                py, &index_str, true,
+            )
+            .unwrap();
+        let legacy =
+            py_reconcile_agent_artifact_index_dismissed_family_members(
+                py, &index_str, true,
+            )
+            .unwrap();
+        let new_value = py_to_json_value(new.bind(py)).unwrap();
+        let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
+        assert_eq!(new_value, legacy_value);
+        assert_eq!(new_value["dry_run"], json!(true));
+    });
+}

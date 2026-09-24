@@ -184,7 +184,7 @@ pub(crate) use sase_core::agent_scan::{
     query_related_agent_artifact_dirs as core_query_related_agent_artifact_dirs,
     read_agent_artifact_index_meta as core_read_agent_artifact_index_meta,
     rebuild_agent_artifact_index as core_rebuild_agent_artifact_index,
-    reconcile_agent_artifact_index_dismissed_family_members as core_reconcile_agent_artifact_index_dismissed_family_members,
+    reconcile_agent_artifact_index_dismissed_agent_session_members as core_reconcile_agent_artifact_index_dismissed_agent_session_members,
     replace_agent_artifact_index_dismissed_agents_with_force as core_replace_agent_artifact_index_dismissed_agents_with_force,
     resolve_agent_artifact_path as core_resolve_agent_artifact_path,
     resolve_agent_artifact_timestamp_path as core_resolve_agent_artifact_timestamp_path,

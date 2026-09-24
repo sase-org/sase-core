@@ -92,8 +92,12 @@ pub struct AgentExpectedOwnerWire {
     pub container_kind: Option<String>,
     #[serde(default)]
     pub clan_generation: Option<String>,
-    #[serde(default)]
-    pub family_generation: Option<String>,
+    #[serde(
+        default,
+        rename = "family_generation",
+        alias = "agent_session_generation"
+    )]
+    pub agent_session_generation: Option<String>,
     #[serde(default)]
     pub reservation_kind: Option<String>,
     #[serde(default)]
@@ -119,8 +123,12 @@ pub struct AgentOwnershipSlotWire {
     pub expected_owner: Option<AgentExpectedOwnerWire>,
     #[serde(default)]
     pub expected_clan_generation: Option<String>,
-    #[serde(default)]
-    pub expected_family_generation: Option<String>,
+    #[serde(
+        default,
+        rename = "expected_family_generation",
+        alias = "expected_agent_session_generation"
+    )]
+    pub expected_agent_session_generation: Option<String>,
     #[serde(default)]
     pub marker_state: Option<AgentMarkerStateWire>,
     #[serde(default)]
@@ -253,7 +261,8 @@ pub enum AgentNameReservationOperationWire {
     ClaimPlanned,
     ReserveClan,
     ClaimClan,
-    ConvertFamily,
+    #[serde(rename = "convert_family", alias = "convert_session")]
+    ConvertSession,
     ReserveTemplate,
     ReleasePlanned,
     ReleasePlannedClan,
@@ -267,7 +276,8 @@ impl AgentNameReservationOperationWire {
             Self::ClaimPlanned => "claim_planned",
             Self::ReserveClan => "reserve_clan",
             Self::ClaimClan => "claim_clan",
-            Self::ConvertFamily => "convert_family",
+            // legacy agent-family spelling; flips in core-contract
+            Self::ConvertSession => "convert_family",
             Self::ReserveTemplate => "reserve_template",
             Self::ReleasePlanned => "release_planned",
             Self::ReleasePlannedClan => "release_planned_clan",
@@ -343,8 +353,12 @@ pub struct AgentExpectedOwnerPredicateWire {
     pub container_kind: Option<String>,
     #[serde(default)]
     pub clan_generation: Option<String>,
-    #[serde(default)]
-    pub family_generation: Option<String>,
+    #[serde(
+        default,
+        rename = "family_generation",
+        alias = "agent_session_generation"
+    )]
+    pub agent_session_generation: Option<String>,
     #[serde(default)]
     pub must_be_absent: bool,
 }

@@ -90,7 +90,7 @@ fn related_artifact_dirs_follow_retry_and_parent_lineage() {
 }
 
 #[test]
-fn resolve_family_dismissal_lineage_follows_parent_to_dismissed_root() {
+fn resolve_agent_session_dismissal_lineage_follows_parent_to_dismissed_root() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let root = artifact(&projects, "20260505120000");
@@ -118,21 +118,21 @@ fn resolve_family_dismissal_lineage_follows_parent_to_dismissed_root() {
     .unwrap();
 
     let candidates = vec![
-        FamilyDismissalLineageCandidateWire {
+        AgentSessionDismissalLineageCandidateWire {
             identity: "root".to_string(),
             project_name: "proj".to_string(),
             workflow_dir_name: "ace-run".to_string(),
             timestamp: "20260505120000".to_string(),
             seed_definitively_dead: false,
         },
-        FamilyDismissalLineageCandidateWire {
+        AgentSessionDismissalLineageCandidateWire {
             identity: "member".to_string(),
             project_name: "proj".to_string(),
             workflow_dir_name: "ace-run".to_string(),
             timestamp: "20260505120500".to_string(),
             seed_definitively_dead: false,
         },
-        FamilyDismissalLineageCandidateWire {
+        AgentSessionDismissalLineageCandidateWire {
             identity: "unrelated".to_string(),
             project_name: "proj".to_string(),
             workflow_dir_name: "ace-run".to_string(),
@@ -141,9 +141,12 @@ fn resolve_family_dismissal_lineage_follows_parent_to_dismissed_root() {
         },
     ];
 
-    let before = resolve_family_dismissal_lineage(&index, &candidates).unwrap();
+    let before =
+        resolve_agent_session_dismissal_lineage(&index, &candidates).unwrap();
     assert!(
-        before.iter().all(|result| !result.family_root_dismissed),
+        before
+            .iter()
+            .all(|result| !result.agent_session_root_dismissed),
         "nothing is dismissed yet: {before:?}"
     );
 
@@ -157,10 +160,16 @@ fn resolve_family_dismissal_lineage_follows_parent_to_dismissed_root() {
     )
     .unwrap();
 
-    let after = resolve_family_dismissal_lineage(&index, &candidates).unwrap();
+    let after =
+        resolve_agent_session_dismissal_lineage(&index, &candidates).unwrap();
     let dismissed_by_identity: BTreeMap<&str, bool> = after
         .iter()
-        .map(|result| (result.identity.as_str(), result.family_root_dismissed))
+        .map(|result| {
+            (
+                result.identity.as_str(),
+                result.agent_session_root_dismissed,
+            )
+        })
         .collect();
     assert!(dismissed_by_identity["root"]);
     assert!(dismissed_by_identity["member"]);
@@ -172,7 +181,7 @@ fn resolve_family_dismissal_lineage_follows_parent_to_dismissed_root() {
 }
 
 #[test]
-fn resolve_family_dismissal_lineage_honors_dead_seed_own_dismissal() {
+fn resolve_agent_session_dismissal_lineage_honors_dead_seed_own_dismissal() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let killed = artifact(&projects, "20260505130000");
@@ -206,7 +215,7 @@ fn resolve_family_dismissal_lineage_honors_dead_seed_own_dismissal() {
     )
     .unwrap();
     let candidate =
-        |seed_definitively_dead| FamilyDismissalLineageCandidateWire {
+        |seed_definitively_dead| AgentSessionDismissalLineageCandidateWire {
             identity: "killed".to_string(),
             project_name: "proj".to_string(),
             workflow_dir_name: "ace-run".to_string(),
@@ -215,16 +224,18 @@ fn resolve_family_dismissal_lineage_honors_dead_seed_own_dismissal() {
         };
 
     let unproven =
-        resolve_family_dismissal_lineage(&index, &[candidate(false)]).unwrap();
+        resolve_agent_session_dismissal_lineage(&index, &[candidate(false)])
+            .unwrap();
     assert!(
-        !unproven[0].family_root_dismissed,
+        !unproven[0].agent_session_root_dismissed,
         "without liveness evidence an active record keeps the strict \
          identity match: {unproven:?}"
     );
     let dead =
-        resolve_family_dismissal_lineage(&index, &[candidate(true)]).unwrap();
+        resolve_agent_session_dismissal_lineage(&index, &[candidate(true)])
+            .unwrap();
     assert!(
-        dead[0].family_root_dismissed,
+        dead[0].agent_session_root_dismissed,
         "a definitively dead record honors its own dismissal: {dead:?}"
     );
 }
@@ -333,7 +344,7 @@ fn find_gate_shell_by_gate_id_ignores_inherited_id_on_descendant() {
     );
     // A follow-up agent launched after the gate settles inherits the
     // same on-disk `gate_id` but is not itself a gate-shell member: its
-    // `agent_family_role` is not "gate".
+    // `agent_session_role` is not "gate".
     write_json(
         &artifact_for_project(&projects, "proj", "20260812100100")
             .join("agent_meta.json"),

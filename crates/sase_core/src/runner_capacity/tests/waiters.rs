@@ -128,19 +128,19 @@ fn implicit_zero_negative_and_nan_record_weights_still_fail_closed() {
 #[test]
 fn zero_weight_claim_is_not_reusable_by_a_serial_successor() {
     let mut starter = running("starter", Some(2.0));
-    starter.agent_family = Some("fam".to_string());
+    starter.agent_session = Some("fam".to_string());
     starter.live = false;
     let mut monitor = running("monitor", Some(0.0));
-    monitor.agent_family = Some("fam".to_string());
-    monitor.agent_family_role = Some("monitor".to_string());
-    monitor.family_shell_kind = Some("monitor".to_string());
-    monitor.family_shell_id = Some("mon-1".to_string());
+    monitor.agent_session = Some("fam".to_string());
+    monitor.agent_session_role = Some("monitor".to_string());
+    monitor.agent_session_shell_kind = Some("monitor".to_string());
+    monitor.agent_session_shell_id = Some("mon-1".to_string());
     monitor.parent_timestamp = Some("starter".to_string());
     monitor.pid = Some(99);
     monitor.run_started_at = None;
     monitor.queue_weight_explicit = true;
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(1.0));
-    successor.agent_family = Some("fam".to_string());
+    successor.agent_session = Some("fam".to_string());
     successor.parent_timestamp = Some("monitor".to_string());
     successor.queue_weight_explicit = true;
 

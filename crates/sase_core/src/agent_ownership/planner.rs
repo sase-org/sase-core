@@ -27,9 +27,14 @@ const RESERVATION_KIND_PLANNED: &str = "planned";
 const RESERVATION_KIND_CLAIMED: &str = "claimed";
 const RESERVATION_KIND_PLANNED_CLAN: &str = "planned_clan";
 const RESERVATION_KIND_CLAN: &str = "clan";
-const RESERVATION_KIND_FAMILY: &str = "family";
+// legacy agent-family spelling; flips in core-contract
+const RESERVATION_KIND_AGENT_SESSION: &str = "family";
 const CONTAINER_KIND_CLAN: &str = "clan";
-const CONTAINER_KIND_FAMILY: &str = "family";
+// legacy agent-family spelling; flips in core-contract
+const CONTAINER_KIND_AGENT_SESSION: &str = "family";
+/// New agent-session spelling accepted wherever container kinds are compared.
+/// Stored values keep the legacy spelling until core-contract.
+const AGENT_SESSION_CONTAINER_KIND_ALIAS: &str = "session";
 const CONTAINER_KIND_OWNER_NAMESPACE: &str = "owner_namespace";
 const ORIGIN_IMPORT_V1: &str = "import_v1";
 const ORIGIN_IMPORT_V2: &str = "import_v2";
@@ -742,8 +747,9 @@ fn slot_owner_predicate(
     if predicate.clan_generation.is_none() {
         predicate.clan_generation = slot.expected_clan_generation.clone();
     }
-    if predicate.family_generation.is_none() {
-        predicate.family_generation = slot.expected_family_generation.clone();
+    if predicate.agent_session_generation.is_none() {
+        predicate.agent_session_generation =
+            slot.expected_agent_session_generation.clone();
     }
     Some(predicate)
 }
@@ -782,7 +788,7 @@ fn expected_owner_predicate(
         reservation_kind: owner.reservation_kind.clone(),
         container_kind: owner.container_kind.clone(),
         clan_generation: owner.clan_generation.clone(),
-        family_generation: owner.family_generation.clone(),
+        agent_session_generation: owner.agent_session_generation.clone(),
         must_be_absent: false,
     }
 }
@@ -814,7 +820,7 @@ fn source_record_predicate(
         reservation_kind: None,
         container_kind: None,
         clan_generation: None,
-        family_generation: None,
+        agent_session_generation: None,
         must_be_absent: false,
     }
 }
@@ -885,7 +891,7 @@ fn duplicate_reservation_request_ids(
         }
         let mut names = vec![reservation.name.as_str()];
         if reservation.operation
-            == AgentNameReservationOperationWire::ConvertFamily
+            == AgentNameReservationOperationWire::ConvertSession
         {
             if let Some(member_name) = reservation.member_name.as_deref() {
                 names.push(member_name);
@@ -952,8 +958,8 @@ fn decide_reservation(
         AgentNameReservationOperationWire::ClaimClan => {
             decide_claim_clan(batch, request, entries)
         }
-        AgentNameReservationOperationWire::ConvertFamily => {
-            decide_convert_family(batch, request, entries)
+        AgentNameReservationOperationWire::ConvertSession => {
+            decide_convert_agent_session(batch, request, entries)
         }
         AgentNameReservationOperationWire::ReserveTemplate => {
             decide_reserve_template(batch, request, entries)
@@ -1258,7 +1264,7 @@ fn decide_claim_clan(
     }
 }
 
-fn decide_convert_family(
+fn decide_convert_agent_session(
     batch: &AgentOwnershipBatchRequestWire,
     request: &AgentNameReservationRequestWire,
     entries: &BTreeMap<String, AgentNameRegistryEntryWire>,
@@ -1266,12 +1272,12 @@ fn decide_convert_family(
     let Some(member_name) = non_empty(request.member_name.as_deref()) else {
         return ReservationDecision::blocked(blocked_reservation(
             request,
-            "missing_family_member_name",
+            "missing_agent_session_member_name",
             None,
             None,
         ));
     };
-    let family_name =
+    let agent_session_name =
         match normalize_request_name(batch, request, &request.name, "name") {
             Ok(name) => name,
             Err(blocked) => return ReservationDecision::blocked(*blocked),
@@ -1285,7 +1291,7 @@ fn decide_convert_family(
         Ok(name) => name,
         Err(blocked) => return ReservationDecision::blocked(*blocked),
     };
-    for name in [&family_name, &member_name] {
+    for name in [&agent_session_name, &member_name] {
         if let Some(blocked) =
             local_namespace_block(batch, request, entries, name)
         {
@@ -1293,9 +1299,9 @@ fn decide_convert_family(
         }
     }
 
-    let (family_storage_name, existing) = equivalent_entry(
+    let (agent_session_storage_name, existing) = equivalent_entry(
         entries,
-        &family_name,
+        &agent_session_name,
         &batch.owner,
         &batch.known_owner_roots,
     );
@@ -1306,16 +1312,19 @@ fn decide_convert_family(
                     request,
                     "container_collision",
                     Some("name is reserved by a clan container".to_string()),
-                    Some(family_storage_name),
+                    Some(agent_session_storage_name),
                 ));
             }
-            Some(CONTAINER_KIND_FAMILY) | None => {}
+            Some(kind)
+                if kind == CONTAINER_KIND_AGENT_SESSION
+                    || kind == AGENT_SESSION_CONTAINER_KIND_ALIAS => {}
+            None => {}
             Some(_) => {
                 return ReservationDecision::blocked(blocked_reservation(
                     request,
                     "container_collision",
                     None,
-                    Some(family_storage_name),
+                    Some(agent_session_storage_name),
                 ));
             }
         }
@@ -1326,8 +1335,8 @@ fn decide_convert_family(
                 batch,
                 request,
                 entries,
-                &family_name,
-                &family_storage_name,
+                &agent_session_name,
+                &agent_session_storage_name,
             ));
         }
     }
@@ -1350,15 +1359,19 @@ fn decide_convert_family(
         }
     }
 
-    let mut family_entry = local_artifact_entry(
+    let mut agent_session_entry = local_artifact_entry(
         batch,
         request,
-        &family_storage_name,
-        RESERVATION_KIND_FAMILY,
+        &agent_session_storage_name,
+        RESERVATION_KIND_AGENT_SESSION,
     );
-    family_entry.container_kind = Some(CONTAINER_KIND_FAMILY.to_string());
-    let family_expected =
-        registry_expected_predicate(request, &family_storage_name, existing);
+    agent_session_entry.container_kind =
+        Some(CONTAINER_KIND_AGENT_SESSION.to_string());
+    let agent_session_expected = registry_expected_predicate(
+        request,
+        &agent_session_storage_name,
+        existing,
+    );
     let member_entry = local_artifact_entry(
         batch,
         request,
@@ -1374,18 +1387,18 @@ fn decide_convert_family(
         accepted: accepted_reservation(
             request,
             REGISTRY_MERGE_ACTION_UPSERT,
-            &family_name,
-            &family_storage_name,
-            "family_conversion_upsert",
+            &agent_session_name,
+            &agent_session_storage_name,
+            "agent_session_conversion_upsert",
             None,
         ),
         merges: vec![
             AgentNameRegistryMergeWire {
                 request_id: request.request_id.clone(),
                 action: REGISTRY_MERGE_ACTION_UPSERT.to_string(),
-                name: family_storage_name,
-                entry: Some(family_entry),
-                expected: family_expected,
+                name: agent_session_storage_name,
+                entry: Some(agent_session_entry),
+                expected: agent_session_expected,
             },
             AgentNameRegistryMergeWire {
                 request_id: request.request_id.clone(),
@@ -1956,7 +1969,7 @@ fn registry_expected_predicate(
         reservation_kind: None,
         container_kind: None,
         clan_generation: None,
-        family_generation: None,
+        agent_session_generation: None,
         must_be_absent: existing.is_none(),
     };
     if let Some(existing) = existing {
@@ -2179,7 +2192,7 @@ mod tests {
             }),
             container_kind: None,
             clan_generation: None,
-            family_generation: None,
+            agent_session_generation: None,
             reservation_kind: Some("claimed".to_string()),
             marker_state: Some(AgentMarkerStateWire {
                 status: "DONE".to_string(),
@@ -2502,7 +2515,8 @@ mod tests {
             allow_waiting_cleanup: false,
         });
         let mut container = expected_owner("family", "ts-b", "/b");
-        container.container_kind = Some(CONTAINER_KIND_FAMILY.to_string());
+        container.container_kind =
+            Some(CONTAINER_KIND_AGENT_SESSION.to_string());
         req.cleanup_roots.push(AgentCleanupRootWire {
             root_id: "container".to_string(),
             requested_name: "family".to_string(),
@@ -2661,5 +2675,49 @@ mod tests {
             entry.reservation_kind.as_deref(),
             Some(RESERVATION_KIND_CLEANUP_IN_PROGRESS)
         );
+    }
+
+    #[test]
+    fn convert_session_operation_accepts_both_spellings_but_emits_legacy() {
+        let legacy: AgentNameReservationOperationWire =
+            serde_json::from_value(serde_json::json!("convert_family"))
+                .unwrap();
+        let new: AgentNameReservationOperationWire =
+            serde_json::from_value(serde_json::json!("convert_session"))
+                .unwrap();
+        assert_eq!(new, legacy);
+        assert_eq!(new, AgentNameReservationOperationWire::ConvertSession);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("convert_family")
+        );
+        assert_eq!(
+            AgentNameReservationOperationWire::ConvertSession.as_str(),
+            "convert_family"
+        );
+    }
+
+    #[test]
+    fn agent_session_generation_accepts_both_spellings_but_emits_legacy() {
+        let legacy: AgentExpectedOwnerWire =
+            serde_json::from_value(serde_json::json!({
+                "name": "alpha",
+                "family_generation": "20260902000000"
+            }))
+            .unwrap();
+        let new: AgentExpectedOwnerWire =
+            serde_json::from_value(serde_json::json!({
+                "name": "alpha",
+                "agent_session_generation": "20260902000000"
+            }))
+            .unwrap();
+        assert_eq!(new, legacy);
+        assert_eq!(
+            new.agent_session_generation.as_deref(),
+            Some("20260902000000")
+        );
+        let encoded = serde_json::to_value(&new).unwrap();
+        assert_eq!(encoded["family_generation"], "20260902000000");
+        assert!(encoded.get("agent_session_generation").is_none());
     }
 }

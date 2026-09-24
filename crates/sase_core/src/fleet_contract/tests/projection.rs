@@ -163,7 +163,7 @@ fn projection_applies_owner_resolved_lineage_and_normalizes_locator_schemas() {
     });
     record.has_done_marker = true;
     if let Some(meta) = record.agent_meta.as_mut() {
-        meta.agent_family = None;
+        meta.agent_session = None;
         meta.parent_timestamp = None;
         meta.tribe = None;
         meta.clan_tribe = None;

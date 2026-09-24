@@ -30,7 +30,8 @@ fn default_xprompt_breakdown_n() -> u32 {
 pub enum AgentStatsRuntimeGroupByWire {
     Tribe,
     Clan,
-    Family,
+    #[serde(rename = "family", alias = "session")]
+    Session,
     #[default]
     Agent,
     Provider,
@@ -522,6 +523,20 @@ mod tests {
         let decoded: AgentRunStatsResponseWire =
             serde_json::from_value(payload).unwrap();
         assert!(decoded.xprompts.is_none());
+    }
+
+    #[test]
+    fn runtime_group_by_session_accepts_both_spellings_but_emits_legacy() {
+        let legacy: AgentStatsRuntimeGroupByWire =
+            serde_json::from_value(serde_json::json!("family")).unwrap();
+        let new: AgentStatsRuntimeGroupByWire =
+            serde_json::from_value(serde_json::json!("session")).unwrap();
+        assert_eq!(new, legacy);
+        assert_eq!(new, AgentStatsRuntimeGroupByWire::Session);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("family")
+        );
     }
 
     #[test]

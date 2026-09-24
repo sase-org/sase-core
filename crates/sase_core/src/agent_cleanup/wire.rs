@@ -93,8 +93,9 @@ pub struct AgentCleanupTargetWire {
     pub stop_time: Option<String>,
     #[serde(default)]
     pub is_workflow_child: bool,
-    #[serde(default)]
-    pub agent_family_parallel: bool,
+    // legacy agent-family spelling; flips in core-contract
+    #[serde(default, rename = "agent_family_parallel")]
+    pub agent_session_parallel: bool,
     #[serde(default)]
     pub appears_as_agent: bool,
     #[serde(default)]

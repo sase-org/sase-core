@@ -31,7 +31,7 @@ pub(super) struct RecordSummary {
     pub(super) agent_clan_generation: Option<String>,
     pub(super) clan_tribe: Option<String>,
     pub(super) clan_summary: Option<String>,
-    pub(super) agent_family: Option<String>,
+    pub(super) agent_session: Option<String>,
     pub(super) model: Option<String>,
     pub(super) llm_provider: Option<String>,
     pub(super) started_at: Option<String>,
@@ -106,7 +106,7 @@ impl RecordSummary {
                 .and_then(|(_, generation)| generation.clone()),
             clan_tribe: meta.and_then(|m| m.clan_tribe.clone()),
             clan_summary: meta.and_then(|m| m.clan_summary.clone()),
-            agent_family: meta.and_then(|m| m.agent_family.clone()),
+            agent_session: meta.and_then(|m| m.agent_session.clone()),
             model: meta
                 .and_then(|m| m.model.clone())
                 .or_else(|| done.and_then(|d| d.model.clone()))
@@ -165,7 +165,7 @@ pub(super) fn gate_shell_id_from_record(
     record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.family_shell.as_ref())
+        .and_then(|meta| meta.agent_session_shell.as_ref())
         .and_then(|shell| shell.id.clone())
 }
 

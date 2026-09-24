@@ -260,7 +260,7 @@ fn machine_candidate_uses_meta_then_done_machine_precedence() {
 }
 
 #[test]
-fn machine_candidate_includes_mixed_provenance_family_relatives() {
+fn machine_candidate_includes_mixed_provenance_agent_session_relatives() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let parent = artifact(&projects, "20260827105200");
@@ -465,7 +465,7 @@ fn schema_v27_upgrade_adds_and_backfills_source_machine_projection() {
 }
 
 #[test]
-fn only_monitors_filters_to_monitor_family_role() {
+fn only_monitors_filters_to_monitor_agent_session_role() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let plain_agent = artifact(&projects, "20260812170000");
@@ -519,7 +519,7 @@ fn only_monitors_filters_to_monitor_family_role() {
         indexed.records[0]
             .agent_meta
             .as_ref()
-            .and_then(|meta| meta.family_shell.as_ref())
+            .and_then(|meta| meta.agent_session_shell.as_ref())
             .and_then(|shell| shell.id.as_deref()),
         Some("m4kq")
     );

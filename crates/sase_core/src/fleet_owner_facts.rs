@@ -20,7 +20,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_scan::{AgentArtifactRecordWire, FamilyShellWire};
+use crate::agent_scan::{AgentArtifactRecordWire, AgentSessionShellWire};
 use crate::fleet_contract::{
     reject_secretish, trim_to_limit, validate_label, validate_timestamp,
     FleetContractError, OwnerLivenessWire, MAX_LABEL_BYTES,
@@ -460,9 +460,9 @@ pub fn derive_owner_record_facts(
         }
     }
 
-    facts.agent_family_role = label(meta.agent_family_role.as_deref());
+    facts.agent_family_role = label(meta.agent_session_role.as_deref());
     facts.role_suffix = label(meta.role_suffix.as_deref());
-    facts.agent_family_parallel = meta.agent_family_parallel;
+    facts.agent_family_parallel = meta.agent_session_parallel;
     facts.plan_chain_root = meta.plan_chain_root;
     facts.plan_action = label(meta.plan_action.as_deref());
     facts.plan_committed = meta.plan_committed;
@@ -494,7 +494,7 @@ pub fn derive_owner_record_facts(
 
 fn apply_shell_facts(
     facts: &mut OwnerPresentationFactsWire,
-    shell: &FamilyShellWire,
+    shell: &AgentSessionShellWire,
 ) {
     let kind = shell.kind.trim().to_ascii_lowercase();
     let id = label(shell.id.as_deref());
@@ -540,8 +540,8 @@ mod tests {
     use super::*;
     use crate::agent_scan::wire::PendingQuestionMarkerWire;
     use crate::agent_scan::{
-        AgentMetaWire, DoneMarkerWire, FamilyShellGateWire,
-        FamilyShellMonitorWire, WaitingMarkerWire,
+        AgentMetaWire, AgentSessionShellGateWire, AgentSessionShellMonitorWire,
+        DoneMarkerWire, WaitingMarkerWire,
     };
 
     fn record(meta: AgentMetaWire) -> AgentArtifactRecordWire {
@@ -714,13 +714,13 @@ mod tests {
     #[test]
     fn gate_monitor_and_proc_shell_facts() {
         let gate = record(AgentMetaWire {
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "gate".into(),
                 id: Some("g1".into()),
                 state: Some("pending".into()),
                 label: Some("plan review".into()),
                 start_status: Some("PLAN REVIEW".into()),
-                gate: Some(FamilyShellGateWire {
+                gate: Some(AgentSessionShellGateWire {
                     kind: Some("approval".into()),
                     accent: Some("blue".into()),
                     ..Default::default()
@@ -739,11 +739,11 @@ mod tests {
         assert!(facts.monitor_id.is_none());
 
         let monitor = record(AgentMetaWire {
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "monitor".into(),
                 id: Some("m1".into()),
                 state: Some("running".into()),
-                monitor: Some(FamilyShellMonitorWire {
+                monitor: Some(AgentSessionShellMonitorWire {
                     command: Some("sleep 1".into()),
                     ..Default::default()
                 }),
@@ -757,7 +757,7 @@ mod tests {
 
         let proc = record(AgentMetaWire {
             proc_id: Some("p1".into()),
-            family_shell: Some(FamilyShellWire {
+            agent_session_shell: Some(AgentSessionShellWire {
                 kind: "proc".into(),
                 state: Some("running".into()),
                 label: Some("build".into()),

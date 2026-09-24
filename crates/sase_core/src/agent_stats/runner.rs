@@ -1,7 +1,7 @@
 use crate::agent_runtime::{
     derive_active_intervals, is_real_monitor_member_record,
-    is_runner_occupancy_record, merge_family_occupancy_intervals,
-    occupancy_member_start, runner_slot_family_key, ActiveInterval,
+    is_runner_occupancy_record, merge_agent_session_occupancy_intervals,
+    occupancy_member_start, runner_slot_agent_session_key, ActiveInterval,
     ActiveIntervalError, ClanRuntimeMemberWire, RunnerOccupancyContribution,
     WaitPolicy,
 };
@@ -177,8 +177,8 @@ impl RunnerStatsBuilder {
     ) {
         let meta = record.agent_meta.as_ref();
         self.contributions.push(RunnerOccupancyContribution {
-            family_key: runner_slot_family_key(record),
-            parallel: meta.is_some_and(|value| value.agent_family_parallel),
+            agent_session_key: runner_slot_agent_session_key(record),
+            parallel: meta.is_some_and(|value| value.agent_session_parallel),
             monitor: is_real_monitor_member_record(record),
             intervals,
         });
@@ -191,7 +191,8 @@ impl RunnerStatsBuilder {
         bucket_seconds: u64,
         all_time: bool,
     ) -> Option<AgentRunnerStatsWire> {
-        let intervals = merge_family_occupancy_intervals(&self.contributions);
+        let intervals =
+            merge_agent_session_occupancy_intervals(&self.contributions);
         let effective_start = if all_time {
             intervals
                 .iter()
@@ -568,25 +569,39 @@ mod tests {
         assert!(!HostRunnerLivenessProbe::default().is_live(&record));
     }
 
-    fn family_record(
+    /// Read a test-only meta override under its new `agent_session_*`
+    /// spelling first, falling back to the legacy `agent_family_*` spelling.
+    fn agent_session_test_str(
+        extra_meta: &serde_json::Value,
+        new_key: &str,
+        legacy_key: &str,
+    ) -> Option<String> {
+        extra_meta
+            .get(new_key)
+            .or_else(|| extra_meta.get(legacy_key))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    }
+
+    fn agent_session_record(
         name: &str,
         start: &str,
         extra_meta: serde_json::Value,
     ) -> AgentArtifactRecordWire {
         let mut record = open_record(name, Some(start));
         let meta = record.agent_meta.as_mut().unwrap();
-        if let Some(family) = extra_meta
-            .get("agent_family")
-            .and_then(|value| value.as_str())
+        if let Some(agent_session) =
+            agent_session_test_str(&extra_meta, "agent_session", "agent_family")
         {
-            meta.agent_family = Some(family.to_string());
+            meta.agent_session = Some(agent_session);
         }
         if extra_meta
-            .get("agent_family_parallel")
+            .get("agent_session_parallel")
+            .or_else(|| extra_meta.get("agent_family_parallel"))
             .and_then(|value| value.as_bool())
             == Some(true)
         {
-            meta.agent_family_parallel = true;
+            meta.agent_session_parallel = true;
         }
         if let Some(parent) = extra_meta
             .get("parent_timestamp")
@@ -594,21 +609,23 @@ mod tests {
         {
             meta.parent_timestamp = Some(parent.to_string());
         }
-        if let Some(role) = extra_meta
-            .get("agent_family_role")
-            .and_then(|value| value.as_str())
-        {
-            meta.agent_family_role = Some(role.to_string());
+        if let Some(role) = agent_session_test_str(
+            &extra_meta,
+            "agent_session_role",
+            "agent_family_role",
+        ) {
+            meta.agent_session_role = Some(role);
         }
         if let Some(monitor_id) = extra_meta
             .get("monitor_id")
             .and_then(|value| value.as_str())
         {
-            meta.family_shell = Some(crate::agent_scan::FamilyShellWire {
-                kind: "monitor".to_string(),
-                id: Some(monitor_id.to_string()),
-                ..Default::default()
-            });
+            meta.agent_session_shell =
+                Some(crate::agent_scan::AgentSessionShellWire {
+                    kind: "monitor".to_string(),
+                    id: Some(monitor_id.to_string()),
+                    ..Default::default()
+                });
         }
         if let Some(end) = extra_meta
             .get("stopped_at")
@@ -620,11 +637,11 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_serial_family_shells_count_as_one_slot() {
+    fn overlapping_serial_agent_session_shells_count_as_one_slot() {
         let mut builder = RunnerStatsBuilder::default();
         let live = |_: &AgentArtifactRecordWire| false;
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "root",
                 "0",
                 json!({
@@ -638,7 +655,7 @@ mod tests {
             &live,
         );
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "serial",
                 "20",
                 json!({
@@ -662,11 +679,11 @@ mod tests {
     }
 
     #[test]
-    fn monitor_handoff_gap_does_not_reopen_family_interval() {
+    fn monitor_handoff_gap_does_not_reopen_agent_session_interval() {
         let mut builder = RunnerStatsBuilder::default();
         let live = |_: &AgentArtifactRecordWire| false;
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "20260710000000",
                 "0",
                 json!({
@@ -680,7 +697,7 @@ mod tests {
             &live,
         );
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "20260710000030",
                 "30",
                 json!({
@@ -704,11 +721,11 @@ mod tests {
     }
 
     #[test]
-    fn inherited_monitor_id_does_not_fill_family_gap() {
+    fn inherited_monitor_id_does_not_fill_agent_session_gap() {
         let mut builder = RunnerStatsBuilder::default();
         let live = |_: &AgentArtifactRecordWire| false;
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "root",
                 "0",
                 json!({
@@ -722,7 +739,7 @@ mod tests {
             &live,
         );
         builder.add_record(
-            &family_record(
+            &agent_session_record(
                 "ordinary",
                 "30",
                 json!({

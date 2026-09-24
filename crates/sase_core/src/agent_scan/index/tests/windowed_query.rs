@@ -391,7 +391,8 @@ fn agents_list_projection_derives_clan_context_from_waiting_only_scalars() {
 }
 
 #[test]
-fn agents_list_projection_preserves_family_relative_projectable_extras() {
+fn agents_list_projection_preserves_agent_session_relative_projectable_extras()
+{
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let parent = artifact(&projects, "20260828130000");

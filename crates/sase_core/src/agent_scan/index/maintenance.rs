@@ -626,7 +626,7 @@ pub(super) fn upsert_record(
             record.workflow_dir_name,
             summary.workflow_name,
             summary.agent_clan,
-            summary.agent_family,
+            summary.agent_session,
             record.timestamp,
             summary.status,
             summary.agent_type,

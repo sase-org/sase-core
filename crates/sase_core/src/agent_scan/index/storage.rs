@@ -192,7 +192,11 @@ pub(super) fn open_index_with_busy_timeout(
     }
     if prior_version.is_none_or(|v| v < 4) {
         ensure_agent_artifacts_column(&conn, "workflow_name", "TEXT")?;
-        ensure_agent_artifacts_column(&conn, "agent_family", "TEXT")?;
+        ensure_agent_artifacts_column(
+            &conn,
+            super::AGENT_SESSION_INDEX_COLUMN,
+            "TEXT",
+        )?;
     }
     if prior_version.is_none_or(|v| v < 5) {
         migrate_record_json_refresh_v5(&mut conn)?;

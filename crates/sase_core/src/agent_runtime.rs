@@ -1,4 +1,4 @@
-//! Wall-clock runtime aggregation for agent clans and sequential families.
+//! Wall-clock runtime aggregation for agent clans and sequential agent sessions.
 //!
 //! A member contributes the interval from `run_started_at` through its
 //! terminal marker (or `now` while it is live). Callers choose whether to
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_scan::{AgentArtifactRecordWire, ACE_RUN_WORKFLOW_DIR};
 
-const MONITOR_FAMILY_ROLE: &str = "monitor";
-const GATE_FAMILY_ROLE: &str = "gate";
+const MONITOR_AGENT_SESSION_ROLE: &str = "monitor";
+const GATE_AGENT_SESSION_ROLE: &str = "gate";
 
 /// Runtime-relevant projection of one agent artifact record.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,7 +82,7 @@ impl ClanRuntimeMemberWire {
     }
 }
 
-/// Wall-clock runtime for a clan or sequential family.
+/// Wall-clock runtime for a clan or sequential agent session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClanRuntimeWire {
     pub wall_clock_seconds: f64,
@@ -106,7 +106,7 @@ pub(crate) enum ActiveIntervalError {
 /// Which inactive windows a runtime consumer removes from a member interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitPolicy {
-    /// Exclude plan-review and question waits from clan/family wall time.
+    /// Exclude plan-review and question waits from clan/agent-session wall time.
     HumanWaits,
     /// Exclude only question waits where runner admission released the slot.
     SlotYield,
@@ -179,7 +179,7 @@ pub fn aggregate_clan_runtime_records(
 
 /// Derive active intervals for one member under the requested wait policy,
 /// capped at an exclusive query end. Runner analytics clips these intervals at
-/// its lower analysis bound; clan/family runtime consumes them from run start.
+/// its lower analysis bound; clan/agent-session runtime consumes them from run start.
 pub(crate) fn derive_active_intervals(
     member: &ClanRuntimeMemberWire,
     query_end: f64,
@@ -224,9 +224,9 @@ pub(crate) fn derive_active_intervals(
 /// Return whether an artifact may itself be parked at the runner-slot gate.
 ///
 /// This is the admission/eligibility half of the split shared with Python
-/// `is_runner_slot_user_agent_record`: a root or a parallel family member
+/// `is_runner_slot_user_agent_record`: a root or a parallel agent session member
 /// waits for its own slot, while a serial child, monitor, or post-handoff
-/// follow-up rides the slot its family already holds. Terminal records stay
+/// follow-up rides the slot its agent session already holds. Terminal records stay
 /// eligible so historical analytics can still classify the row; occupancy
 /// uses [`is_runner_occupancy_record`] / [`running_agent_slot_count`].
 pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
@@ -240,7 +240,7 @@ pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
         .parent_timestamp
         .as_deref()
         .is_some_and(|value| !value.is_empty())
-        || meta.agent_family_parallel
+        || meta.agent_session_parallel
 }
 
 /// Return whether an artifact is the kind of user-agent row that can hold a
@@ -248,7 +248,7 @@ pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
 ///
 /// Unlike [`is_runner_eligible_record`], this ignores lineage
 /// (`parent_timestamp`). A live serial child, monitor member, or post-handoff
-/// follow-up can be the shell currently holding a family's slot. Terminal
+/// follow-up can be the shell currently holding an agent session's slot. Terminal
 /// rows stay included so historical occupancy can reconstruct their
 /// intervals. Mirrors the record-kind half of Python
 /// `is_runner_slot_occupying_record`.
@@ -258,7 +258,7 @@ pub(crate) fn is_runner_occupancy_record(
     is_runner_user_agent_kind(record)
 }
 
-/// Return whether *record* is the durable monitor member for its family.
+/// Return whether *record* is the durable monitor member for its agent session.
 ///
 /// `monitor_id` is inherited by the starter and later monitor-associated
 /// follow-ups, so it cannot classify a row on its own. A real monitor member
@@ -269,18 +269,18 @@ pub(crate) fn is_real_monitor_member_record(
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
-    meta.agent_family_role
+    meta.agent_session_role
         .as_deref()
-        .is_some_and(|role| role.trim() == MONITOR_FAMILY_ROLE)
+        .is_some_and(|role| role.trim() == MONITOR_AGENT_SESSION_ROLE)
         && meta
-            .family_shell
+            .agent_session_shell
             .as_ref()
-            .filter(|shell| shell.kind == MONITOR_FAMILY_ROLE)
+            .filter(|shell| shell.kind == MONITOR_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
-/// Return whether *record* is the durable gate-shell member for its family.
+/// Return whether *record* is the durable gate-shell member for its agent session.
 ///
 /// `gate_id` may be inherited by later gate-associated follow-ups, so a real
 /// gate member must carry both the explicit gate role and a durable gate id.
@@ -290,13 +290,13 @@ pub(crate) fn is_real_gate_member_record(
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
-    meta.agent_family_role
+    meta.agent_session_role
         .as_deref()
-        .is_some_and(|role| role.trim() == GATE_FAMILY_ROLE)
+        .is_some_and(|role| role.trim() == GATE_AGENT_SESSION_ROLE)
         && meta
-            .family_shell
+            .agent_session_shell
             .as_ref()
-            .filter(|shell| shell.kind == GATE_FAMILY_ROLE)
+            .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
@@ -314,21 +314,21 @@ fn is_runner_user_agent_kind(record: &AgentArtifactRecordWire) -> bool {
         .is_none_or(|state| state.appears_as_agent)
 }
 
-/// Per-family occupancy grouping key: `(project_name, agent_family)`.
+/// Per-agent-session occupancy grouping key: `(project_name, agent_session)`.
 ///
-/// A record with no `agent_family` falls back to its own `timestamp`, which
+/// A record with no `agent_session` falls back to its own `timestamp`, which
 /// keeps standalone agents and independently launched clan members counting
-/// individually. Mirrors Python `runner_slot_family_key`.
-pub(crate) fn runner_slot_family_key(
+/// individually. Mirrors Python `runner_slot_agent_session_key`.
+pub(crate) fn runner_slot_agent_session_key(
     record: &AgentArtifactRecordWire,
 ) -> (String, String) {
-    let family = record
+    let agent_session = record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.agent_family.as_deref())
+        .and_then(|meta| meta.agent_session.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or(record.timestamp.as_str());
-    (record.project_name.clone(), family.to_string())
+    (record.project_name.clone(), agent_session.to_string())
 }
 
 /// Return whether *record* is occupying a runner slot in a live snapshot.
@@ -354,9 +354,9 @@ pub fn is_runner_slot_occupying_record(
     let gate = is_real_gate_member_record(record);
     if gate
         && meta
-            .family_shell
+            .agent_session_shell
             .as_ref()
-            .filter(|shell| shell.kind == GATE_FAMILY_ROLE)
+            .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.state.as_deref())
             .is_some_and(|state| state.trim() == "pending")
     {
@@ -373,10 +373,10 @@ pub fn is_runner_slot_occupying_record(
     started && is_live(record)
 }
 
-/// Count runner slots held right now, one per occupied family.
+/// Count runner slots held right now, one per occupied agent session.
 ///
-/// A family holds one slot while any non-parallel member is occupying.
-/// Each live parallel member (`agent_family_parallel`) additionally holds
+/// An agent session holds one slot while any non-parallel member is occupying.
+/// Each live parallel member (`agent_session_parallel`) additionally holds
 /// its own slot. Mirrors Python `running_agent_slot_count`.
 pub fn running_agent_slot_count(
     records: &[AgentArtifactRecordWire],
@@ -386,7 +386,7 @@ pub fn running_agent_slot_count(
         BTreeMap::new();
     for record in records {
         groups
-            .entry(runner_slot_family_key(record))
+            .entry(runner_slot_agent_session_key(record))
             .or_default()
             .push(record);
     }
@@ -401,7 +401,7 @@ pub fn running_agent_slot_count(
             if candidate
                 .agent_meta
                 .as_ref()
-                .is_some_and(|meta| meta.agent_family_parallel)
+                .is_some_and(|meta| meta.agent_session_parallel)
             {
                 parallel_occupying += 1;
             } else {
@@ -413,10 +413,10 @@ pub fn running_agent_slot_count(
     count
 }
 
-/// One record's derived occupancy intervals, tagged for family merging.
+/// One record's derived occupancy intervals, tagged for agent session merging.
 #[derive(Debug, Clone)]
 pub(crate) struct RunnerOccupancyContribution {
-    pub family_key: (String, String),
+    pub agent_session_key: (String, String),
     pub parallel: bool,
     pub monitor: bool,
     pub intervals: Vec<ActiveInterval>,
@@ -424,11 +424,11 @@ pub(crate) struct RunnerOccupancyContribution {
 
 /// Merge per-record intervals into per-slot occupancy intervals.
 ///
-/// Serial members of one family are unioned so overlapping in-process
+/// Serial members of one agent session are unioned so overlapping in-process
 /// handoffs do not double-count. A gap between a serial member's end and
-/// a later monitor start is filled so the family's interval stays open
+/// a later monitor start is filled so the agent session's interval stays open
 /// across the monitor handoff. Parallel members stay independent slots.
-pub(crate) fn merge_family_occupancy_intervals(
+pub(crate) fn merge_agent_session_occupancy_intervals(
     contributions: &[RunnerOccupancyContribution],
 ) -> Vec<ActiveInterval> {
     let mut groups: BTreeMap<
@@ -437,7 +437,7 @@ pub(crate) fn merge_family_occupancy_intervals(
     > = BTreeMap::new();
     for contribution in contributions {
         groups
-            .entry(&contribution.family_key)
+            .entry(&contribution.agent_session_key)
             .or_default()
             .push(contribution);
     }
@@ -456,12 +456,13 @@ pub(crate) fn merge_family_occupancy_intervals(
                 serial.extend(contribution.intervals.iter().copied());
             }
         }
-        occupancy.extend(merge_serial_family_intervals(&serial, &monitors));
+        occupancy
+            .extend(merge_serial_agent_session_intervals(&serial, &monitors));
     }
     occupancy
 }
 
-fn merge_serial_family_intervals(
+fn merge_serial_agent_session_intervals(
     serial: &[ActiveInterval],
     monitors: &[ActiveInterval],
 ) -> Vec<ActiveInterval> {
@@ -1114,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn two_independent_families_occupy_two_slots() {
+    fn two_independent_agent_sessions_occupy_two_slots() {
         let records = [
             occupancy_record(
                 "/a",
@@ -1138,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn live_parallel_family_members_count_individually() {
+    fn live_parallel_agent_session_members_count_individually() {
         let mut records = [
             occupancy_record(
                 "/root",
@@ -1166,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_question_on_familys_only_live_shell_frees_its_slot() {
+    fn pending_question_on_sessions_only_live_shell_frees_its_slot() {
         let mut records = [occupancy_record(
             "/root",
             serde_json::json!({ "agent_family": "fam" }),
@@ -1295,7 +1296,8 @@ mod tests {
     }
 
     #[test]
-    fn records_from_two_projects_sharing_a_family_name_count_separately() {
+    fn records_from_two_projects_sharing_an_agent_session_name_count_separately(
+    ) {
         let records = [
             occupancy_record_on(
                 "proj-a",
@@ -1312,11 +1314,11 @@ mod tests {
     }
 
     #[test]
-    fn family_interval_merge_unions_overlap_and_fills_monitor_gap() {
-        let family = ("proj".to_string(), "fam".to_string());
-        let merged = merge_family_occupancy_intervals(&[
+    fn agent_session_interval_merge_unions_overlap_and_fills_monitor_gap() {
+        let agent_session = ("proj".to_string(), "fam".to_string());
+        let merged = merge_agent_session_occupancy_intervals(&[
             RunnerOccupancyContribution {
-                family_key: family.clone(),
+                agent_session_key: agent_session.clone(),
                 parallel: false,
                 monitor: false,
                 intervals: vec![ActiveInterval {
@@ -1325,7 +1327,7 @@ mod tests {
                 }],
             },
             RunnerOccupancyContribution {
-                family_key: family.clone(),
+                agent_session_key: agent_session.clone(),
                 parallel: false,
                 monitor: false,
                 intervals: vec![ActiveInterval {
@@ -1334,7 +1336,7 @@ mod tests {
                 }],
             },
             RunnerOccupancyContribution {
-                family_key: family.clone(),
+                agent_session_key: agent_session.clone(),
                 parallel: false,
                 monitor: true,
                 intervals: vec![ActiveInterval {
@@ -1343,7 +1345,7 @@ mod tests {
                 }],
             },
             RunnerOccupancyContribution {
-                family_key: family,
+                agent_session_key: agent_session,
                 parallel: true,
                 monitor: false,
                 intervals: vec![ActiveInterval {

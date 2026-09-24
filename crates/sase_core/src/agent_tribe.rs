@@ -37,7 +37,7 @@ pub fn reserved_tribe_target_reason(tribe: &str) -> String {
     format!(
         "the reserved @{tribe} panel is the untagged bucket, not a real \
          tribe, so it can never resolve — target a named tribe, an agent, \
-         a family, or a clan instead"
+         an agent session, or a clan instead"
     )
 }
 

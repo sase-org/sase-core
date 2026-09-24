@@ -68,7 +68,7 @@ fn py_scan_agent_artifact_dirs<'py>(
     json_value_to_py(py, &value)
 }
 
-/// Return wall-clock union runtime for clan/family members.
+/// Return wall-clock union runtime for clan/agent-session members.
 #[pyfunction]
 #[pyo3(name = "aggregate_clan_runtime")]
 fn py_aggregate_clan_runtime<'py>(
@@ -370,7 +370,43 @@ fn py_prune_hidden_terminal_agent_artifact_index_rows<'py>(
     json_value_to_py(py, &value)
 }
 
-/// Back-fill dismissed identities for visible dead members of dismissed families.
+/// Back-fill dismissed identities for visible dead members of dismissed
+/// agent sessions.
+fn reconcile_agent_artifact_index_dismissed_agent_session_members_impl<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    dry_run: bool,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let update = py
+        .allow_threads(|| {
+            core_reconcile_agent_artifact_index_dismissed_agent_session_members(
+                &index, dry_run,
+            )
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    let value = serde_json::to_value(&update).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(
+    name = "reconcile_agent_artifact_index_dismissed_agent_session_members",
+    signature = (index_path, dry_run = false)
+)]
+fn py_reconcile_agent_artifact_index_dismissed_agent_session_members<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    dry_run: bool,
+) -> PyResult<PyObject> {
+    reconcile_agent_artifact_index_dismissed_agent_session_members_impl(
+        py, index_path, dry_run,
+    )
+}
+
+// legacy binding name; removed in core-contract
 #[pyfunction]
 #[pyo3(
     name = "reconcile_agent_artifact_index_dismissed_family_members",
@@ -381,18 +417,9 @@ fn py_reconcile_agent_artifact_index_dismissed_family_members<'py>(
     index_path: &str,
     dry_run: bool,
 ) -> PyResult<PyObject> {
-    let index = PathBuf::from(index_path);
-    let update = py
-        .allow_threads(|| {
-            core_reconcile_agent_artifact_index_dismissed_family_members(
-                &index, dry_run,
-            )
-        })
-        .map_err(PyRuntimeError::new_err)?;
-    let value = serde_json::to_value(&update).map_err(|e| {
-        PyValueError::new_err(format!("internal serialize error: {e}"))
-    })?;
-    json_value_to_py(py, &value)
+    reconcile_agent_artifact_index_dismissed_agent_session_members_impl(
+        py, index_path, dry_run,
+    )
 }
 
 /// Read one metadata value from the persistent artifact index.
@@ -955,6 +982,10 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_prune_hidden_terminal_agent_artifact_index_rows,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_reconcile_agent_artifact_index_dismissed_agent_session_members,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

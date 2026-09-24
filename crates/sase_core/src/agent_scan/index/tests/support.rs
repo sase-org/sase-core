@@ -1,7 +1,7 @@
 use super::super::dismissal::{
     record_is_dismissed, select_dismissal_reconcile_candidates,
 };
-use super::super::lineage::family_root_dismissed_for_candidate;
+use super::super::lineage::agent_session_root_dismissed_for_candidate;
 use super::super::record_summary::RecordSummary;
 use super::super::selection::{
     dismissed_identity_for_record,
@@ -197,7 +197,7 @@ pub(super) fn reconcile_n_plus_one(
             report.rows_already_dismissed += 1;
             continue;
         }
-        if !family_root_dismissed_for_candidate(&conn, &candidate.into())
+        if !agent_session_root_dismissed_for_candidate(&conn, &candidate.into())
             .unwrap()
         {
             report.rows_skipped_no_dismissed_root += 1;
@@ -209,11 +209,11 @@ pub(super) fn reconcile_n_plus_one(
     report
 }
 
-pub(super) fn fixture_dead_family_record(
+pub(super) fn fixture_dead_agent_session_record(
     timestamp: &str,
     cl_name: &str,
     parent_timestamp: Option<&str>,
-    agent_family: Option<&str>,
+    agent_session: Option<&str>,
 ) -> AgentArtifactRecordWire {
     AgentArtifactRecordWire {
         project_name: "proj".to_string(),
@@ -225,7 +225,7 @@ pub(super) fn fixture_dead_family_record(
         agent_meta: Some(AgentMetaWire {
             name: Some(cl_name.to_string()),
             cl_name: Some(cl_name.to_string()),
-            agent_family: agent_family.map(str::to_string),
+            agent_session: agent_session.map(str::to_string),
             parent_timestamp: parent_timestamp.map(str::to_string),
             ..AgentMetaWire::default()
         }),

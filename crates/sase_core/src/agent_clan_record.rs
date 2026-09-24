@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_honors_the_parallel_family_fallback() {
+    fn capture_honors_the_parallel_agent_session_fallback() {
         let tmp = tempdir().unwrap();
         let artifacts = tmp
             .path()
@@ -1248,6 +1248,29 @@ mod tests {
                 .unwrap();
         assert_eq!(captured.clan, "fam");
         assert!(captured.generations.contains_key("20260902000000"));
+
+        let new_artifacts = tmp
+            .path()
+            .join("projects/proj/artifacts/ace-run/20260902000001");
+        fs::create_dir_all(&new_artifacts).unwrap();
+        fs::write(
+            new_artifacts.join("agent_meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "worker",
+                "agent_session": "fam",
+                "agent_family_parallel": true,
+                "agent_clan_generation": "20260902000001",
+                "clan_summary": "Session work"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let new_captured =
+            capture_clan_record_from_artifacts(tmp.path(), &new_artifacts)
+                .unwrap()
+                .unwrap();
+        assert_eq!(new_captured.clan, "fam");
+        assert!(new_captured.generations.contains_key("20260902000001"));
     }
 
     #[test]

@@ -3,7 +3,8 @@ use super::super::maintenance::upsert_record;
 use super::super::storage::open_index;
 use super::super::*;
 use super::support::{
-    artifact, fixture_dead_family_record, reconcile_n_plus_one, write_json,
+    artifact, fixture_dead_agent_session_record, reconcile_n_plus_one,
+    write_json,
 };
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_scan::wire::{
@@ -256,12 +257,12 @@ fn active_query_excludes_dismissed_identity_after_rebuild() {
 }
 
 #[test]
-fn dismissal_reconcile_backfills_dead_family_members_only() {
+fn dismissal_reconcile_backfills_dead_agent_session_members_only() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     let root = artifact(&projects, "20260515120000");
     let member = artifact(&projects, "20260515120500");
-    let family_fallback_member = artifact(&projects, "20260515121000");
+    let agent_session_fallback_member = artifact(&projects, "20260515121000");
     let dead_active_member = artifact(&projects, "20260515121500");
     let live_member = artifact(&projects, "20260515122000");
     let unknown_member = artifact(&projects, "20260515122500");
@@ -291,7 +292,7 @@ fn dismissal_reconcile_backfills_dead_family_members_only() {
         json!({"outcome": "completed", "cl_name": "fam--0"}),
     );
     write_json(
-        &family_fallback_member.join("agent_meta.json"),
+        &agent_session_fallback_member.join("agent_meta.json"),
         json!({
             "name": "fam--code",
             "cl_name": "fam--code",
@@ -300,7 +301,7 @@ fn dismissal_reconcile_backfills_dead_family_members_only() {
         }),
     );
     write_json(
-        &family_fallback_member.join("done.json"),
+        &agent_session_fallback_member.join("done.json"),
         json!({"outcome": "completed", "cl_name": "fam--code"}),
     );
     write_json(
@@ -395,8 +396,10 @@ fn dismissal_reconcile_backfills_dead_family_members_only() {
     .unwrap();
 
     let dry_run =
-        reconcile_agent_artifact_index_dismissed_family_members(&index, true)
-            .unwrap();
+        reconcile_agent_artifact_index_dismissed_agent_session_members(
+            &index, true,
+        )
+        .unwrap();
     assert_eq!(dry_run.rows_backfilled, 3);
     assert_eq!(dry_run.rows_skipped_live_or_unknown, 5);
 
@@ -423,8 +426,10 @@ fn dismissal_reconcile_backfills_dead_family_members_only() {
     assert_eq!(before.records.len(), 8, "dry run must not hide rows");
 
     let applied =
-        reconcile_agent_artifact_index_dismissed_family_members(&index, false)
-            .unwrap();
+        reconcile_agent_artifact_index_dismissed_agent_session_members(
+            &index, false,
+        )
+        .unwrap();
     assert_eq!(applied.rows_backfilled, 3);
 
     let after = query_agent_artifact_index(
@@ -512,8 +517,10 @@ fn dismissal_reconcile_uses_dismissed_parent_suffix_when_root_row_deleted() {
     .unwrap();
 
     let applied =
-        reconcile_agent_artifact_index_dismissed_family_members(&index, false)
-            .unwrap();
+        reconcile_agent_artifact_index_dismissed_agent_session_members(
+            &index, false,
+        )
+        .unwrap();
     assert_eq!(applied.rows_backfilled, 1);
 
     let after = query_agent_artifact_index(
@@ -599,7 +606,7 @@ fn dismissal_reconcile_is_set_based_on_large_fixture() {
     upsert_record(
         &tx,
         Path::new("/proj"),
-        &fixture_dead_family_record(root_ts, "fam", None, Some("fam")),
+        &fixture_dead_agent_session_record(root_ts, "fam", None, Some("fam")),
     )
     .unwrap();
     let member_count = 10_000usize;
@@ -608,7 +615,7 @@ fn dismissal_reconcile_is_set_based_on_large_fixture() {
         upsert_record(
             &tx,
             Path::new("/proj"),
-            &fixture_dead_family_record(
+            &fixture_dead_agent_session_record(
                 &timestamp,
                 &format!("fam--{i}"),
                 Some(root_ts),
@@ -640,8 +647,10 @@ fn dismissal_reconcile_is_set_based_on_large_fixture() {
 
     let expected = reconcile_n_plus_one(&index, true);
     let applied =
-        reconcile_agent_artifact_index_dismissed_family_members(&index, true)
-            .unwrap();
+        reconcile_agent_artifact_index_dismissed_agent_session_members(
+            &index, true,
+        )
+        .unwrap();
     assert_eq!(applied.candidate_rows, member_count as u64);
     assert_eq!(applied.rows_backfilled, member_count as u64);
     assert_eq!(applied.candidate_rows, expected.candidate_rows);

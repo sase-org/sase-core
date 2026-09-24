@@ -20,8 +20,8 @@ pub(crate) fn clan_key_from_meta(
         .agent_clan
         .as_deref()
         .or_else(|| {
-            meta.agent_family_parallel
-                .then_some(meta.agent_family.as_deref())
+            meta.agent_session_parallel
+                .then_some(meta.agent_session.as_deref())
                 .flatten()
         })?
         .trim();

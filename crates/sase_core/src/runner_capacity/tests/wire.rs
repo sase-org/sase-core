@@ -74,3 +74,56 @@ fn dual_written_capacity_fields_prefer_canonical_without_duplicate_error() {
     assert_eq!(result.waiters[0].queue_capacity, Some(100));
     assert_eq!(result.waiters[0].admission_limit, 100.0);
 }
+
+#[test]
+fn agent_session_spellings_deserialize_but_legacy_keys_emit() {
+    let legacy: RunnerCapacityRecordWire =
+        serde_json::from_value(serde_json::json!({
+            "artifact_dir": "/tmp/a",
+            "project_name": "proj",
+            "timestamp": "a",
+            "agent_family": "fam",
+            "agent_family_role": "monitor",
+            "family_shell_kind": "monitor",
+            "family_shell_id": "m1",
+            "family_shell_state": "running"
+        }))
+        .unwrap();
+    let new: RunnerCapacityRecordWire =
+        serde_json::from_value(serde_json::json!({
+            "artifact_dir": "/tmp/a",
+            "project_name": "proj",
+            "timestamp": "a",
+            "agent_session": "fam",
+            "agent_session_role": "monitor",
+            "agent_session_shell_kind": "monitor",
+            "agent_session_shell_id": "m1",
+            "agent_session_shell_state": "running"
+        }))
+        .unwrap();
+    assert_eq!(new, legacy);
+    assert_eq!(new.agent_session.as_deref(), Some("fam"));
+    let encoded = serde_json::to_value(&new).unwrap();
+    assert_eq!(encoded["agent_family"], "fam");
+    assert_eq!(encoded["agent_family_role"], "monitor");
+    assert_eq!(encoded["family_shell_kind"], "monitor");
+    assert_eq!(encoded["family_shell_id"], "m1");
+    assert_eq!(encoded["family_shell_state"], "running");
+    assert!(encoded.get("agent_session").is_none());
+    assert!(encoded.get("agent_session_shell_kind").is_none());
+}
+
+#[test]
+fn legacy_parallel_key_stays_input_only() {
+    let record: RunnerCapacityRecordWire =
+        serde_json::from_value(serde_json::json!({
+            "artifact_dir": "/tmp/a",
+            "project_name": "proj",
+            "timestamp": "a",
+            "agent_family_parallel": true
+        }))
+        .unwrap();
+    assert!(record.agent_session_parallel);
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert_eq!(encoded["agent_family_parallel"], true);
+}

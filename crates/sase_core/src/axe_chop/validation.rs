@@ -727,7 +727,7 @@ fn validate_clan_member_identity(
             "invalid_clan_member_name",
             format!("{base}.agent_name"),
             format!(
-                "composed clan member name `{composed}` contains `--`, which is reserved for agent families"
+                "composed clan member name `{composed}` contains `--`, which is reserved for agent sessions"
             ),
         ));
     }

@@ -28,6 +28,10 @@ use super::wire::{
     SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 
+// legacy agent-family spelling; flips in core-contract
+const PARALLEL_AGENT_SESSION_STILL_ACTIVE_DETAIL: &str =
+    "parallel family still active";
+
 const DISMISSABLE_STATUSES: &[&str] = &[
     "DONE",
     "FAILED",
@@ -46,7 +50,7 @@ fn is_dismissable_status(status: &str) -> bool {
     DISMISSABLE_STATUSES.contains(&status)
 }
 
-/// True for any child row: workflow steps, sequential family members, and
+/// True for any child row: workflow steps, sequential agent session members, and
 /// monitor proc shells. The wire's `is_workflow_child` flag is a historical
 /// alias for this broader predicate.
 fn is_child_row(target: &AgentCleanupTargetWire) -> bool {
@@ -56,7 +60,7 @@ fn is_child_row(target: &AgentCleanupTargetWire) -> bool {
 }
 
 /// Mirrors `AgentChildLinkage::WORKFLOW_STEP`: only a workflow step child is
-/// covered by its parent's cascade. Family members and monitor proc shells
+/// covered by its parent's cascade. Agent session members and monitor proc shells
 /// carry a `parent_timestamp` but are independent agent rows with their own
 /// PID, artifacts, and dismissal record.
 fn is_workflow_step_child(target: &AgentCleanupTargetWire) -> bool {
@@ -212,7 +216,7 @@ fn parallel_members_by_parent(
     let mut members: BTreeMap<String, Vec<&AgentCleanupTargetWire>> =
         BTreeMap::new();
     for target in targets {
-        if !target.agent_family_parallel || target.parent_workflow.is_some() {
+        if !target.agent_session_parallel || target.parent_workflow.is_some() {
             continue;
         }
         let Some(parent_timestamp) = &target.parent_timestamp else {
@@ -226,11 +230,11 @@ fn parallel_members_by_parent(
     members
 }
 
-fn parallel_family_members<'a>(
+fn parallel_agent_session_members<'a>(
     root: &AgentCleanupTargetWire,
     members_by_parent: &'a BTreeMap<String, Vec<&'a AgentCleanupTargetWire>>,
 ) -> &'a [&'a AgentCleanupTargetWire] {
-    if !root.agent_family_parallel || is_child_row(root) {
+    if !root.agent_session_parallel || is_child_row(root) {
         return &[];
     }
     let Some(raw_suffix) = &root.raw_suffix else {
@@ -819,18 +823,22 @@ pub fn plan_agent_cleanup(
 
         if request.mode == CLEANUP_MODE_DISMISS_COMPLETED {
             if dismissable {
-                let family_still_active = parallel_family_members(
-                    target,
-                    &parallel_members_by_parent,
-                )
-                .iter()
-                .any(|member| !target_is_dismissable(member, request));
-                if family_still_active {
+                let agent_session_still_active =
+                    parallel_agent_session_members(
+                        target,
+                        &parallel_members_by_parent,
+                    )
+                    .iter()
+                    .any(|member| !target_is_dismissable(member, request));
+                if agent_session_still_active {
                     add_skip(
                         &mut skipped_items,
                         target,
                         SKIPPED_NOT_DISMISSABLE,
-                        Some("parallel family still active".to_string()),
+                        Some(
+                            PARALLEL_AGENT_SESSION_STILL_ACTIVE_DETAIL
+                                .to_string(),
+                        ),
                     );
                     continue;
                 }
@@ -921,7 +929,8 @@ pub fn plan_agent_cleanup(
         if !action_identities.contains(&root.identity) {
             continue;
         }
-        for member in parallel_family_members(root, &parallel_members_by_parent)
+        for member in
+            parallel_agent_session_members(root, &parallel_members_by_parent)
         {
             if action_identities.contains(&member.identity) {
                 continue;
@@ -1054,7 +1063,7 @@ mod tests {
             start_time: None,
             stop_time: None,
             is_workflow_child: false,
-            agent_family_parallel: false,
+            agent_session_parallel: false,
             appears_as_agent: false,
             step_type: None,
             monitor_id: None,
@@ -1312,14 +1321,14 @@ mod tests {
     }
 
     #[test]
-    fn clan_scope_keeps_active_parallel_family_root_from_dismissal() {
+    fn clan_scope_keeps_active_parallel_agent_session_root_from_dismissal() {
         let mut root = target("run", "family", Some("root-ts"), "DONE", None);
-        root.agent_family_parallel = true;
+        root.agent_session_parallel = true;
         root.agent_clan = Some("research".to_string());
         root.agent_clan_generation = Some("generation".to_string());
         let mut member =
             target("run", "family.1", Some("member-ts"), "RUNNING", Some(101));
-        member.agent_family_parallel = true;
+        member.agent_session_parallel = true;
         member.parent_timestamp = Some("root-ts".to_string());
         member.agent_clan = Some("research".to_string());
         member.agent_clan_generation = Some("generation".to_string());
@@ -1368,10 +1377,10 @@ mod tests {
     }
 
     #[test]
-    fn parallel_family_root_kill_cascades_to_live_members_only() {
+    fn parallel_agent_session_root_kill_cascades_to_live_members_only() {
         let mut root =
             target("run", "sase-6g", Some("root-ts"), "RUNNING", Some(10));
-        root.agent_family_parallel = true;
+        root.agent_session_parallel = true;
         let mut phase_one = target(
             "run",
             "sase-6g.1",
@@ -1379,7 +1388,7 @@ mod tests {
             "RUNNING",
             Some(11),
         );
-        phase_one.agent_family_parallel = true;
+        phase_one.agent_session_parallel = true;
         phase_one.parent_timestamp = Some("root-ts".to_string());
         let mut phase_two = target(
             "run",
@@ -1388,7 +1397,7 @@ mod tests {
             "RUNNING",
             Some(12),
         );
-        phase_two.agent_family_parallel = true;
+        phase_two.agent_session_parallel = true;
         phase_two.parent_timestamp = Some("root-ts".to_string());
         let mut serial_child = target(
             "run",
@@ -1427,7 +1436,7 @@ mod tests {
     fn killing_one_parallel_member_leaves_root_and_siblings_untouched() {
         let mut root =
             target("run", "sase-6g", Some("root-ts"), "RUNNING", Some(10));
-        root.agent_family_parallel = true;
+        root.agent_session_parallel = true;
         let mut selected = target(
             "run",
             "sase-6g.1",
@@ -1435,7 +1444,7 @@ mod tests {
             "RUNNING",
             Some(11),
         );
-        selected.agent_family_parallel = true;
+        selected.agent_session_parallel = true;
         selected.parent_timestamp = Some("root-ts".to_string());
         let mut sibling = target(
             "run",
@@ -1444,7 +1453,7 @@ mod tests {
             "RUNNING",
             Some(12),
         );
-        sibling.agent_family_parallel = true;
+        sibling.agent_session_parallel = true;
         sibling.parent_timestamp = Some("root-ts".to_string());
         let mut request = req(
             CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
@@ -1462,10 +1471,10 @@ mod tests {
     #[test]
     fn dismissing_parallel_root_cascades_only_after_members_finish() {
         let mut root = target("run", "root", Some("root-ts"), "DONE", None);
-        root.agent_family_parallel = true;
+        root.agent_session_parallel = true;
         let mut member =
             target("run", "member", Some("member-ts"), "RUNNING", Some(11));
-        member.agent_family_parallel = true;
+        member.agent_session_parallel = true;
         member.parent_timestamp = Some("root-ts".to_string());
         let mut request = req(
             CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
@@ -1553,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn broad_scopes_act_on_family_member_child_rows_directly() {
+    fn broad_scopes_act_on_agent_session_member_child_rows_directly() {
         let mut child =
             target("run", "child", Some("child"), "RUNNING", Some(11));
         child.parent_timestamp = Some("root".to_string());
@@ -1597,7 +1606,7 @@ mod tests {
         }
     }
 
-    fn clan_sequential_family_chain() -> (
+    fn clan_sequential_agent_session_chain() -> (
         AgentCleanupTargetWire,
         AgentCleanupTargetWire,
         AgentCleanupTargetWire,
@@ -1606,19 +1615,21 @@ mod tests {
             target("run", "sase-ps.plan", Some("20260818102050"), "DONE", None);
         plan_root.agent_clan = Some("sase-ps".to_string());
         plan_root.agent_clan_generation = Some("20260818102050".to_string());
-        plan_root.agent_family_parallel = false;
+        plan_root.agent_session_parallel = false;
 
-        let mut family_root = target(
+        let mut agent_session_root = target(
             "run",
             "sase-ps.plan--1",
             Some("20260818114621"),
             "DONE",
             None,
         );
-        family_root.parent_timestamp = Some("20260818102050".to_string());
-        family_root.agent_clan = Some("sase-ps".to_string());
-        family_root.agent_clan_generation = Some("20260818102050".to_string());
-        family_root.agent_family_parallel = false;
+        agent_session_root.parent_timestamp =
+            Some("20260818102050".to_string());
+        agent_session_root.agent_clan = Some("sase-ps".to_string());
+        agent_session_root.agent_clan_generation =
+            Some("20260818102050".to_string());
+        agent_session_root.agent_session_parallel = false;
 
         let mut monitor = target(
             "run",
@@ -1630,12 +1641,14 @@ mod tests {
         monitor.parent_timestamp = Some("20260818114621".to_string());
         monitor.agent_clan = Some("sase-ps".to_string());
         monitor.agent_clan_generation = Some("20260818102050".to_string());
-        monitor.agent_family_parallel = false;
+        monitor.agent_session_parallel = false;
 
-        (plan_root, family_root, monitor)
+        (plan_root, agent_session_root, monitor)
     }
 
-    fn assert_clan_sequential_family_dismissed(plan: &AgentCleanupPlanWire) {
+    fn assert_clan_sequential_agent_session_dismissed(
+        plan: &AgentCleanupPlanWire,
+    ) {
         assert_eq!(
             plan.dismiss_items
                 .iter()
@@ -1657,36 +1670,42 @@ mod tests {
     }
 
     #[test]
-    fn clan_scope_dismisses_sequential_family_and_monitor_rows() {
-        let (plan_root, family_root, monitor) = clan_sequential_family_chain();
+    fn clan_scope_dismisses_sequential_agent_session_and_monitor_rows() {
+        let (plan_root, agent_session_root, monitor) =
+            clan_sequential_agent_session_chain();
         let mut request =
             req(CLEANUP_SCOPE_CLAN, CLEANUP_MODE_KILL_AND_DISMISS);
         request.clan_name = Some("sase-ps".to_string());
         request.clan_generation = Some("20260818102050".to_string());
 
-        let plan =
-            plan_agent_cleanup(&[plan_root, family_root, monitor], &request)
-                .unwrap();
-        assert_clan_sequential_family_dismissed(&plan);
+        let plan = plan_agent_cleanup(
+            &[plan_root, agent_session_root, monitor],
+            &request,
+        )
+        .unwrap();
+        assert_clan_sequential_agent_session_dismissed(&plan);
     }
 
     #[test]
-    fn explicit_identities_dismiss_sequential_family_and_monitor_rows() {
-        let (plan_root, family_root, monitor) = clan_sequential_family_chain();
+    fn explicit_identities_dismiss_sequential_agent_session_and_monitor_rows() {
+        let (plan_root, agent_session_root, monitor) =
+            clan_sequential_agent_session_chain();
         let mut request = req(
             CLEANUP_SCOPE_EXPLICIT_IDENTITIES,
             CLEANUP_MODE_KILL_AND_DISMISS,
         );
         request.identities = vec![
             plan_root.identity.clone(),
-            family_root.identity.clone(),
+            agent_session_root.identity.clone(),
             monitor.identity.clone(),
         ];
 
-        let plan =
-            plan_agent_cleanup(&[plan_root, family_root, monitor], &request)
-                .unwrap();
-        assert_clan_sequential_family_dismissed(&plan);
+        let plan = plan_agent_cleanup(
+            &[plan_root, agent_session_root, monitor],
+            &request,
+        )
+        .unwrap();
+        assert_clan_sequential_agent_session_dismissed(&plan);
     }
 
     #[test]
@@ -1949,9 +1968,9 @@ mod tests {
     fn selected_owner_cascades_to_nested_live_monitor() {
         let plan_root =
             target("run", "sase-ru.6", Some("root-ts"), "DONE", None);
-        let mut family =
+        let mut member =
             target("run", "sase-ru.6--1", Some("family-ts"), "DONE", None);
-        family.parent_timestamp = Some("root-ts".to_string());
+        member.parent_timestamp = Some("root-ts".to_string());
         let monitor = live_monitor(
             "sase-ru.6--mon-1",
             "mon-ts",
@@ -1965,7 +1984,7 @@ mod tests {
         );
         request.identities = vec![plan_root.identity.clone()];
 
-        let plan = plan_agent_cleanup(&[plan_root, family, monitor], &request)
+        let plan = plan_agent_cleanup(&[plan_root, member, monitor], &request)
             .unwrap();
 
         assert_eq!(
@@ -2124,5 +2143,17 @@ mod tests {
             vec!["owner"]
         );
         assert_eq!(plan.side_effects.monitor_stop_requests.len(), 1);
+    }
+
+    #[test]
+    fn cleanup_target_parallel_flag_keeps_legacy_wire_spelling() {
+        let mut row = target("run", "alpha", None, "RUNNING", None);
+        row.agent_session_parallel = true;
+        let encoded = serde_json::to_value(&row).unwrap();
+        assert_eq!(encoded["agent_family_parallel"], serde_json::json!(true));
+        assert!(encoded.get("agent_session_parallel").is_none());
+        let decoded: AgentCleanupTargetWire =
+            serde_json::from_value(encoded).unwrap();
+        assert!(decoded.agent_session_parallel);
     }
 }

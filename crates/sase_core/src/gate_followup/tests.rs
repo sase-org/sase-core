@@ -127,7 +127,7 @@ fn launched_receipt_is_a_noop() {
 fn existing_running_successor_without_receipt_is_adopted() {
     let mut input = request();
     input.successor_evidence = Some(GateFollowupSuccessorEvidenceWire {
-        family_name: Some("0j8.f0.f2".to_string()),
+        agent_session_name: Some("0j8.f0.f2".to_string()),
         expected_suffix: Some("--code".to_string()),
         attached_agent: Some("0j8.f0.f2--code".to_string()),
         running: true,
@@ -263,6 +263,22 @@ fn mismatched_attempt_fingerprint_is_ignored() {
     let verdict = decide_gate_followup(&input).unwrap();
     assert_eq!(verdict.disposition, DISPOSITION_INTERRUPTED);
     assert!(verdict.launch_allowed);
+}
+
+#[test]
+fn successor_evidence_name_accepts_both_spellings_but_emits_legacy() {
+    let legacy: GateFollowupSuccessorEvidenceWire =
+        serde_json::from_value(serde_json::json!({"family_name": "fam"}))
+            .unwrap();
+    let new: GateFollowupSuccessorEvidenceWire = serde_json::from_value(
+        serde_json::json!({"agent_session_name": "fam"}),
+    )
+    .unwrap();
+    assert_eq!(new, legacy);
+    assert_eq!(new.agent_session_name.as_deref(), Some("fam"));
+    let encoded = serde_json::to_value(&new).unwrap();
+    assert_eq!(encoded["family_name"], "fam");
+    assert!(encoded.get("agent_session_name").is_none());
 }
 
 #[test]
