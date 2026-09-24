@@ -31,6 +31,7 @@ mod artifact_refs;
 mod axe;
 mod bead_decisions;
 mod beads;
+mod command_line;
 mod config;
 mod continuation;
 mod editor_completion;
@@ -61,6 +62,7 @@ pub use sase_core as core;
 #[pyo3(name = "sase_core_rs")]
 fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     query::register_query(m)?;
+    command_line::register_command_line(m)?;
     agent_identity::register_agent_identity(m)?;
     vcs::register_vcs(m)?;
     config::register_config(m)?;

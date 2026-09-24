@@ -1987,7 +1987,7 @@ mod tests {
         let (kept, _, _) = apply_retention(rows, 100);
 
         assert_eq!(kept.len(), SERVICE_PROC_HISTORY_LIMIT);
-        assert!(kept.iter().all(|row| is_command_line_proc(row)));
+        assert!(kept.iter().all(is_command_line_proc));
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub mod axe_overrun;
 pub mod axe_status;
 pub mod bead;
 pub mod bead_action;
+pub mod command_line;
 pub mod commit_footer;
 pub mod commit_sha;
 pub mod commit_subject;
