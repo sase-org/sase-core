@@ -166,6 +166,17 @@ pub fn builtin_artifact_relations() -> Vec<ArtifactRelationWire> {
             &["job", "chop"],
             &["agent"],
         ),
+        ArtifactRelationWire::builtin(
+            "awaits",
+            "awaited-by",
+            true,
+            "projection",
+            "The waiting agent is the source; the bead it waited on is the target.",
+            "agent:sase-tj.land awaits bead:sase-tj.2",
+            "bead:sase-tj.2 awaits agent:sase-tj.land",
+            &["agent"],
+            &["bead"],
+        ),
     ]
 }
 
@@ -247,6 +258,7 @@ mod tests {
                 "derives-from",
                 "produced-by",
                 "launched",
+                "awaits",
             ]
         );
         let related = lookup_artifact_relation("related").unwrap();
@@ -255,6 +267,13 @@ mod tests {
         let cites = lookup_artifact_relation("cites").unwrap();
         assert!(cites.directed);
         assert_eq!(cites.inverse, "cited-by");
+        let awaits = lookup_artifact_relation("awaits").unwrap();
+        assert!(awaits.directed);
+        assert_eq!(awaits.inverse, "awaited-by");
+        assert_eq!(
+            relation_label_from_perspective("awaits", false).unwrap(),
+            "awaited-by"
+        );
     }
 
     #[test]
@@ -345,6 +364,28 @@ mod tests {
         assert_eq!(
             relation_label_from_perspective("launched", false).unwrap(),
             "launched-by"
+        );
+    }
+
+    #[test]
+    fn awaits_is_a_projection_only_agent_to_bead_relation() {
+        let awaits = lookup_artifact_relation("awaits").unwrap();
+        assert!(awaits.directed);
+        assert_eq!(awaits.inverse, "awaited-by");
+        assert_eq!(awaits.written_by, "projection");
+        assert_eq!(awaits.recommended_source_kinds, ["agent"]);
+        assert_eq!(awaits.recommended_target_kinds, ["bead"]);
+        assert!(awaits.positive_example.starts_with("agent:"));
+        assert!(awaits.positive_example.contains("awaits bead:"));
+        assert!(awaits.negative_example.starts_with("bead:"));
+        assert!(awaits.negative_example.contains("awaits agent:"));
+        assert_eq!(
+            relation_label_from_perspective("awaits", true).unwrap(),
+            "awaits"
+        );
+        assert_eq!(
+            relation_label_from_perspective("awaits", false).unwrap(),
+            "awaited-by"
         );
     }
 }
