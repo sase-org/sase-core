@@ -642,6 +642,8 @@ pub struct AgentMetaWire {
     pub queue_capacity: Option<i64>,
     #[serde(default)]
     pub queue_capacity_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
     #[serde(default, skip_serializing)]
     pub(crate) wait_runners: Option<i64>,
     #[serde(default, skip_serializing)]
@@ -882,6 +884,8 @@ pub struct WaitingMarkerWire {
     pub wait_until: Option<String>,
     #[serde(default)]
     pub queue_capacity: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
     #[serde(default)]
     pub wait_priority: Option<i64>,
     #[serde(default)]

@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 
 use crate::queue_directive::{
-    normalize_persisted_queue_capacity, queue_capacity_budget_enabled,
-    queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+    normalize_persisted_queue_capacity_with_multiplier,
+    queue_capacity_budget_enabled, queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
 };
 
 use super::capacity_math::{
@@ -15,7 +15,8 @@ use super::capacity_math::{
 };
 use super::holds::hold_barrier_blockers;
 use super::records::{
-    effective_weight, explicit_queue_capacity, is_user_agent_record,
+    effective_weight, explicit_queue_capacity,
+    explicit_queue_capacity_multiplier, is_user_agent_record,
     is_waiting_record, record_index,
 };
 use super::wire::{
@@ -67,11 +68,14 @@ pub(super) fn build_waiters(
         let requested_weight =
             effective_weight(record).unwrap_or(DEFAULT_QUEUE_WEIGHT);
         let queue_capacity = explicit_queue_capacity(record);
+        let queue_capacity_multiplier =
+            explicit_queue_capacity_multiplier(record);
         let (admission_limit, zero_drain_barrier) = waiter_admission_limit(
             request,
             record,
             requested_weight,
             queue_capacity,
+            queue_capacity_multiplier,
             capacity_budget,
             diagnostics,
         );
@@ -130,6 +134,7 @@ pub(super) fn build_waiters(
                 timestamp: record.timestamp.clone(),
                 requested_weight,
                 queue_capacity,
+                queue_capacity_multiplier,
                 admission_limit,
                 eligible: blockers.is_empty(),
                 parked,
@@ -155,12 +160,14 @@ fn waiter_admission_limit(
     record: &RunnerCapacityRecordWire,
     requested_weight: f64,
     queue_capacity: Option<u32>,
+    queue_capacity_multiplier: Option<f64>,
     capacity_budget: bool,
     diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
 ) -> (f64, bool) {
-    let normalized = normalize_persisted_queue_capacity(
+    let normalized = normalize_persisted_queue_capacity_with_multiplier(
         queue_capacity,
         record.queue_capacity_explicit,
+        queue_capacity_multiplier,
         requested_weight,
         request.effective_limit,
         capacity_budget,

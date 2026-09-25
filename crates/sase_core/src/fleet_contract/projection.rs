@@ -610,6 +610,30 @@ pub(crate) fn queue_capacity_for_record(
     (None, false)
 }
 
+/// Resolve the persisted multiplier with the same waiting-over-metadata and
+/// integer-over-multiplier precedence as queue capacity itself.
+pub(crate) fn queue_capacity_multiplier_for_record(
+    record: &AgentArtifactRecordWire,
+) -> Option<f64> {
+    if let Some(waiting) = &record.waiting {
+        if waiting.queue_capacity.is_some() || waiting.wait_runners.is_some() {
+            return None;
+        }
+        if waiting.queue_capacity_multiplier.is_some() {
+            return waiting.queue_capacity_multiplier;
+        }
+    }
+    if let Some(meta) = &record.agent_meta {
+        if meta.queue_capacity.is_some() || meta.wait_runners.is_some() {
+            return None;
+        }
+        if meta.queue_capacity_multiplier.is_some() {
+            return meta.queue_capacity_multiplier;
+        }
+    }
+    None
+}
+
 pub(crate) fn intent_for_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {

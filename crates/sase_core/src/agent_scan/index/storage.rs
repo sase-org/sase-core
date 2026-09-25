@@ -283,6 +283,9 @@ pub(super) fn open_index_with_busy_timeout(
         ensure_agent_artifacts_column(&conn, "gate_shell_id", "TEXT")?;
         migrate_gate_shell_id_projection_v31(&mut conn)?;
     }
+    if prior_version.is_none_or(|v| v < 32) {
+        migrate_record_json_refresh_v32(&mut conn)?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
@@ -826,6 +829,14 @@ pub(super) fn migrate_source_machine_projection_v28(
 /// `waiting.queue_capacity` so indexed running/history rows keep authored
 /// budgets after waiting markers disappear.
 pub(super) fn migrate_record_json_refresh_v29(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v32 refreshes `record_json` so indexed rows include authored
+/// `queue_capacity_multiplier` values from agent metadata and wait markers.
+pub(super) fn migrate_record_json_refresh_v32(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())

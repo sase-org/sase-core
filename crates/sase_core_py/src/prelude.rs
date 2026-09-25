@@ -933,6 +933,7 @@ pub(crate) use sase_core::query::{
     CompiledQueryProfile, QueryCorpus as CoreQueryCorpus, QueryFieldValues,
     QueryPredicateFacts, QueryProgram as CoreQueryProgram, QueryRow,
 };
+pub(crate) use sase_core::queue_directive::normalize_persisted_queue_capacity_with_multiplier as core_normalize_persisted_queue_capacity_with_multiplier;
 pub(crate) use sase_core::referenced_by::{
     parse_referenced_by_block as core_parse_referenced_by_block,
     remove_referenced_by_block as core_remove_referenced_by_block,
@@ -1059,7 +1060,6 @@ pub(crate) use sase_core::{
     format_hold_directive as core_format_hold_directive,
     format_queue_directive as core_format_queue_directive,
     hold_fields_to_selectors_with_identity as core_hold_fields_to_selectors_with_identity,
-    normalize_persisted_queue_capacity as core_normalize_persisted_queue_capacity,
     parse_queue_capacity_with_flags as core_parse_queue_capacity_with_flags,
     queue_directive_flag_key as core_queue_directive_flag_key, HoldFieldsWire,
     HoldOccurrenceWire, HoldSelectorIdentityWire, QueueFieldsWire,

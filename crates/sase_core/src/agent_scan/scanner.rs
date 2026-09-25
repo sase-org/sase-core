@@ -1140,6 +1140,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         coerce_queue_weight(data);
     let (queue_capacity, queue_capacity_explicit) =
         crate::queue_directive::queue_capacity_from_map(data);
+    let queue_capacity_multiplier =
+        crate::queue_directive::queue_capacity_multiplier_from_map(data);
 
     AgentMetaWire {
         name: coerce_str(data.get("name")),
@@ -1213,6 +1215,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         wait_priority: coerce_int(data.get("wait_priority")),
         queue_capacity,
         queue_capacity_explicit,
+        queue_capacity_multiplier,
         wait_runners: None,
         wait_runners_explicit: false,
         queue_weight,
@@ -1535,6 +1538,8 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         coerce_queue_weight(data);
     let (queue_capacity, queue_capacity_explicit) =
         crate::queue_directive::queue_capacity_from_map(data);
+    let queue_capacity_multiplier =
+        crate::queue_directive::queue_capacity_multiplier_from_map(data);
     WaitingMarkerWire {
         waiting_for: coerce_str_list(data.get("waiting_for")),
         wait_for_beads: coerce_str_list(data.get("wait_for_beads")),
@@ -1542,6 +1547,7 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_duration: coerce_float(data.get("wait_duration")),
         wait_until: coerce_str(data.get("wait_until")),
         queue_capacity,
+        queue_capacity_multiplier,
         wait_priority: coerce_int(data.get("wait_priority")),
         queue_weight,
         queue_weight_explicit: coerce_bool_truthy(
@@ -2665,5 +2671,87 @@ mod tests {
         );
         assert_eq!(zero_rec.waiting.as_ref().unwrap().queue_capacity, Some(0));
         assert!(zero_rec.waiting.as_ref().unwrap().queue_capacity_explicit);
+    }
+
+    #[test]
+    fn scanner_reads_valid_queue_capacity_multiplier_from_meta_and_waiting() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let metadata = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260925010000");
+        let waiting = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260925010001");
+        let invalid = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260925010002");
+        write_json(
+            &metadata.join("agent_meta.json"),
+            json!({"name": "metadata", "queue_capacity_multiplier": 1.5}),
+        );
+        write_json(
+            &waiting.join("agent_meta.json"),
+            json!({"name": "waiting", "queue_capacity_multiplier": 1.5}),
+        );
+        write_json(
+            &waiting.join("waiting.json"),
+            json!({"queue_capacity_multiplier": 0.5}),
+        );
+        write_json(
+            &invalid.join("agent_meta.json"),
+            json!({"name": "invalid", "queue_capacity_multiplier": 1.125}),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        let record = |timestamp: &str| {
+            snapshot
+                .records
+                .iter()
+                .find(|record| record.timestamp == timestamp)
+                .unwrap()
+        };
+        assert_eq!(
+            record("20260925010000")
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_multiplier,
+            Some(1.5)
+        );
+        let waiting_record = record("20260925010001");
+        assert_eq!(
+            waiting_record
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_multiplier,
+            Some(1.5)
+        );
+        assert_eq!(
+            waiting_record
+                .waiting
+                .as_ref()
+                .unwrap()
+                .queue_capacity_multiplier,
+            Some(0.5)
+        );
+        assert_eq!(
+            record("20260925010002")
+                .agent_meta
+                .as_ref()
+                .unwrap()
+                .queue_capacity_multiplier,
+            None
+        );
     }
 }

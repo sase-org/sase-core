@@ -558,7 +558,7 @@ pub(crate) fn py_queue_directive_flag_key() -> &'static str {
 
 #[pyfunction]
 #[pyo3(name = "normalize_persisted_queue_capacity")]
-#[pyo3(signature = (queue_capacity, queue_capacity_explicit, effective_weight, global_limit, capacity_budget))]
+#[pyo3(signature = (queue_capacity, queue_capacity_explicit, effective_weight, global_limit, capacity_budget, queue_capacity_multiplier = None))]
 pub(crate) fn py_normalize_persisted_queue_capacity(
     py: Python<'_>,
     queue_capacity: Option<u32>,
@@ -566,14 +566,18 @@ pub(crate) fn py_normalize_persisted_queue_capacity(
     effective_weight: f64,
     global_limit: f64,
     capacity_budget: bool,
+    queue_capacity_multiplier: Option<f64>,
 ) -> PyResult<PyObject> {
-    let value = serde_json::to_value(core_normalize_persisted_queue_capacity(
-        queue_capacity,
-        queue_capacity_explicit,
-        effective_weight,
-        global_limit,
-        capacity_budget,
-    ))
+    let value = serde_json::to_value(
+        core_normalize_persisted_queue_capacity_with_multiplier(
+            queue_capacity,
+            queue_capacity_explicit,
+            queue_capacity_multiplier,
+            effective_weight,
+            global_limit,
+            capacity_budget,
+        ),
+    )
     .map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;

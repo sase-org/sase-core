@@ -177,3 +177,53 @@ fn zero_weight_claim_is_not_reusable_by_a_serial_successor() {
     assert_eq!(decision.decision, "acquire_capacity");
     assert_eq!(decision.effective_weight, 1.0);
 }
+
+#[test]
+fn multiplier_capacity_resolves_for_waiters_and_preserves_legacy_behavior() {
+    for (multiplier, effective_limit, expected) in
+        [(1.5, 5.0, 7.5), (0.5, 5.0, 2.5), (1.15, 3.0, 3.45)]
+    {
+        let mut record =
+            waiting("multiplier", "2026-09-10T00:00:00Z", Some(0.25));
+        record.queue_capacity_multiplier = Some(multiplier);
+        let result = snapshot_with_flags(
+            effective_limit,
+            vec![record],
+            &capacity_budget_flags(),
+        );
+        let projected = waiter(&result, "multiplier");
+        assert_eq!(projected.queue_capacity_multiplier, Some(multiplier));
+        assert_eq!(projected.admission_limit, expected);
+        assert!(projected.eligible);
+    }
+
+    let mut over_limit =
+        waiting("over-limit", "2026-09-10T00:00:00Z", Some(8.0));
+    over_limit.queue_capacity_multiplier = Some(1.5);
+    let blocked =
+        snapshot_with_flags(5.0, vec![over_limit], &capacity_budget_flags());
+    assert_eq!(waiter(&blocked, "over-limit").admission_limit, 7.5);
+    assert_eq!(
+        waiter(&blocked, "over-limit").blockers[0].code,
+        "weight-exceeds-limit"
+    );
+
+    let mut integer_wins =
+        waiting("integer-wins", "2026-09-10T00:00:00Z", Some(0.25));
+    integer_wins.queue_capacity = Some(4);
+    integer_wins.queue_capacity_explicit = true;
+    integer_wins.queue_capacity_multiplier = Some(1.5);
+    let integer_result =
+        snapshot_with_flags(5.0, vec![integer_wins], &capacity_budget_flags());
+    let integer_waiter = waiter(&integer_result, "integer-wins");
+    assert_eq!(integer_waiter.queue_capacity, Some(4));
+    assert_eq!(integer_waiter.queue_capacity_multiplier, None);
+    assert_eq!(integer_waiter.admission_limit, 4.0);
+
+    let mut legacy = waiting("legacy", "2026-09-10T00:00:00Z", Some(0.25));
+    legacy.queue_capacity_multiplier = Some(1.5);
+    let legacy_result = snapshot(5.0, vec![legacy]);
+    let legacy_waiter = waiter(&legacy_result, "legacy");
+    assert_eq!(legacy_waiter.queue_capacity_multiplier, Some(1.5));
+    assert_eq!(legacy_waiter.admission_limit, 5.0);
+}

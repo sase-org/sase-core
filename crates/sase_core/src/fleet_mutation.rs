@@ -784,6 +784,7 @@ mod tests {
             },
             queue_capacity: None,
             queue_capacity_explicit: false,
+            queue_capacity_multiplier: None,
             queue_weight: None,
             queue_weight_explicit: false,
             queue_weight_invalid: false,

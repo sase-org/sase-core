@@ -118,6 +118,19 @@ pub fn queue_capacity_as_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|value| u32::try_from(value).ok())
 }
 
+/// Read a persisted capacity multiplier when it is a valid JSON number.
+///
+/// Unlike integer capacity, a multiplier is always explicit by its presence.
+/// Invalid persisted values deliberately behave as omitted, matching the
+/// tolerant reader behavior for invalid persisted integer capacities.
+pub fn queue_capacity_multiplier_from_map(
+    data: &Map<String, Value>,
+) -> Option<f64> {
+    data.get("queue_capacity_multiplier")
+        .and_then(Value::as_f64)
+        .filter(|value| queue_capacity_multiplier_is_valid(*value))
+}
+
 /// Shared persisted-zero translation for admission and continuation resume.
 ///
 /// Newly authored zero capacity remains a parse error when the budget flag is on.
@@ -129,10 +142,14 @@ pub struct PersistedQueueCapacityNormWire {
     pub admission_limit: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authored_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_multiplier: Option<f64>,
     pub authored_explicit: bool,
     pub legacy_zero: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reauthor_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reauthor_multiplier: Option<f64>,
 }
 
 pub fn normalize_persisted_queue_capacity(
@@ -142,36 +159,87 @@ pub fn normalize_persisted_queue_capacity(
     global_limit: f64,
     capacity_budget: bool,
 ) -> PersistedQueueCapacityNormWire {
+    normalize_persisted_queue_capacity_with_multiplier(
+        queue_capacity,
+        queue_capacity_explicit,
+        None,
+        effective_weight,
+        global_limit,
+        capacity_budget,
+    )
+}
+
+/// Normalize persisted capacity forms for admission and continuation
+/// reauthoring. An integer wins over a multiplier when both are present so an
+/// older integer-only writer cannot accidentally change an existing budget.
+pub fn normalize_persisted_queue_capacity_with_multiplier(
+    queue_capacity: Option<u32>,
+    queue_capacity_explicit: bool,
+    queue_capacity_multiplier: Option<f64>,
+    effective_weight: f64,
+    global_limit: f64,
+    capacity_budget: bool,
+) -> PersistedQueueCapacityNormWire {
+    let multiplier = if queue_capacity.is_none() {
+        queue_capacity_multiplier
+            .filter(|value| queue_capacity_multiplier_is_valid(*value))
+    } else {
+        None
+    };
+    if let Some(multiplier) = multiplier {
+        return PersistedQueueCapacityNormWire {
+            admission_limit: if capacity_budget {
+                resolve_queue_capacity_multiplier(multiplier, global_limit)
+                    .unwrap_or(global_limit)
+            } else {
+                global_limit
+            },
+            authored_capacity: None,
+            authored_multiplier: Some(multiplier),
+            authored_explicit: true,
+            legacy_zero: false,
+            reauthor_capacity: None,
+            reauthor_multiplier: Some(multiplier),
+        };
+    }
     if !capacity_budget || !queue_capacity_explicit {
         return PersistedQueueCapacityNormWire {
             admission_limit: global_limit,
             authored_capacity: queue_capacity,
+            authored_multiplier: None,
             authored_explicit: queue_capacity_explicit,
             legacy_zero: false,
             reauthor_capacity: queue_capacity,
+            reauthor_multiplier: None,
         };
     }
     match queue_capacity {
         Some(0) => PersistedQueueCapacityNormWire {
             admission_limit: effective_weight,
             authored_capacity: Some(0),
+            authored_multiplier: None,
             authored_explicit: true,
             legacy_zero: true,
             reauthor_capacity: None,
+            reauthor_multiplier: None,
         },
         Some(capacity) => PersistedQueueCapacityNormWire {
             admission_limit: f64::from(capacity),
             authored_capacity: Some(capacity),
+            authored_multiplier: None,
             authored_explicit: true,
             legacy_zero: false,
             reauthor_capacity: Some(capacity),
+            reauthor_multiplier: None,
         },
         None => PersistedQueueCapacityNormWire {
             admission_limit: global_limit,
             authored_capacity: None,
+            authored_multiplier: None,
             authored_explicit: true,
             legacy_zero: false,
             reauthor_capacity: None,
+            reauthor_multiplier: None,
         },
     }
 }
@@ -1879,6 +1947,56 @@ mod tests {
         assert_eq!(
             serde_json::to_value(fields).unwrap(),
             serde_json::json!({"queue_capacity_multiplier": 1.5})
+        );
+    }
+
+    #[test]
+    fn persisted_multiplier_resolves_at_admission_and_reauthors() {
+        let on = normalize_persisted_queue_capacity_with_multiplier(
+            None,
+            false,
+            Some(1.5),
+            0.25,
+            5.0,
+            true,
+        );
+        assert_eq!(on.admission_limit, 7.5);
+        assert_eq!(on.authored_multiplier, Some(1.5));
+        assert_eq!(on.reauthor_multiplier, Some(1.5));
+        assert!(on.authored_explicit);
+
+        let off = normalize_persisted_queue_capacity_with_multiplier(
+            None,
+            false,
+            Some(1.5),
+            0.25,
+            5.0,
+            false,
+        );
+        assert_eq!(off.admission_limit, 5.0);
+        assert_eq!(off.reauthor_multiplier, Some(1.5));
+
+        let integer_wins = normalize_persisted_queue_capacity_with_multiplier(
+            Some(4),
+            true,
+            Some(1.5),
+            0.25,
+            5.0,
+            true,
+        );
+        assert_eq!(integer_wins.admission_limit, 4.0);
+        assert_eq!(integer_wins.authored_capacity, Some(4));
+        assert_eq!(integer_wins.authored_multiplier, None);
+
+        let data = serde_json::json!({"queue_capacity_multiplier": 0.5});
+        assert_eq!(
+            queue_capacity_multiplier_from_map(data.as_object().unwrap()),
+            Some(0.5)
+        );
+        let invalid = serde_json::json!({"queue_capacity_multiplier": 1.125});
+        assert_eq!(
+            queue_capacity_multiplier_from_map(invalid.as_object().unwrap()),
+            None
         );
     }
 }

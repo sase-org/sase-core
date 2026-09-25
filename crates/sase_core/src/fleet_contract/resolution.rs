@@ -24,6 +24,7 @@ use super::projection::normalized_owner_facts;
 use super::projection::owner_resolved_logical_locator;
 use super::projection::provider_for_record;
 use super::projection::queue_capacity_for_record;
+use super::projection::queue_capacity_multiplier_for_record;
 use super::projection::queue_weight_for_record;
 use super::projection::reject_inconsistent_projection;
 use super::projection::status_for_record;
@@ -191,6 +192,8 @@ pub struct ResolvedAgentSummaryWire {
     #[serde(default)]
     pub queue_capacity_explicit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_weight: Option<f64>,
     #[serde(default)]
     pub queue_weight_explicit: bool,
@@ -244,6 +247,8 @@ pub fn project_resolved_agent_summary(
     ) = queue_weight_for_record(&request.record);
     let (queue_capacity, queue_capacity_explicit) =
         queue_capacity_for_record(&request.record);
+    let queue_capacity_multiplier =
+        queue_capacity_multiplier_for_record(&request.record);
     let agent_session = meta
         .and_then(|value| value.agent_session_shell.as_ref())
         .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()));
@@ -324,6 +329,7 @@ pub fn project_resolved_agent_summary(
         content: content_metadata(&facts.content_handles)?,
         queue_capacity,
         queue_capacity_explicit,
+        queue_capacity_multiplier,
         queue_weight,
         queue_weight_explicit,
         queue_weight_invalid,

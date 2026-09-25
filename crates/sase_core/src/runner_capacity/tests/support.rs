@@ -40,6 +40,7 @@ pub(super) fn rec(name: &str) -> RunnerCapacityRecordWire {
         slot_requested_at: None,
         queue_capacity: None,
         queue_capacity_explicit: false,
+        queue_capacity_multiplier: None,
         wait_runners: None,
         wait_runners_explicit: false,
         wait_priority: None,

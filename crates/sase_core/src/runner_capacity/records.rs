@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::queue_directive::{
     authored_queue_weight_is_valid, queue_capacity_as_u32,
-    queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+    queue_capacity_multiplier_is_valid, queue_weight_is_valid,
+    DEFAULT_QUEUE_WEIGHT,
 };
 
 use super::claims::claim_lineage;
@@ -141,4 +142,15 @@ pub(super) fn explicit_queue_capacity(
         return None;
     }
     queue_capacity_as_u32(record.queue_capacity)
+}
+
+pub(super) fn explicit_queue_capacity_multiplier(
+    record: &RunnerCapacityRecordWire,
+) -> Option<f64> {
+    if explicit_queue_capacity(record).is_some() {
+        return None;
+    }
+    record
+        .queue_capacity_multiplier
+        .filter(|value| queue_capacity_multiplier_is_valid(*value))
 }

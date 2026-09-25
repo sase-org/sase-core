@@ -108,6 +108,8 @@ pub struct RunnerCapacityRecordWire {
     pub queue_capacity: Option<i64>,
     #[serde(default)]
     pub queue_capacity_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
     #[serde(default, skip_serializing)]
     pub(super) wait_runners: Option<i64>,
     #[serde(default, skip_serializing)]
@@ -180,6 +182,8 @@ pub struct RunnerCapacityWaiterWire {
         skip_serializing_if = "Option::is_none"
     )]
     pub queue_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
     pub admission_limit: f64,
     pub eligible: bool,
     #[serde(default)]

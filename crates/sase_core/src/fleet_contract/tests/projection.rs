@@ -234,6 +234,45 @@ fn projection_carries_canonical_queue_capacity_from_metadata() {
         serde_json::from_value(value).unwrap();
     assert_eq!(validate_resolved_agent_summary(&decoded).unwrap(), summary);
 }
+
+#[test]
+fn projection_preserves_multiplier_with_waiting_precedence() {
+    let locator = logical('a', "capacity-multiplier");
+    let exact_locator = exact('a', "capacity-multiplier", "run-1");
+    let mut record = record_running();
+    if let Some(meta) = record.agent_meta.as_mut() {
+        meta.queue_capacity_multiplier = Some(1.5);
+    }
+    record.waiting = Some(crate::agent_scan::WaitingMarkerWire {
+        queue_capacity_multiplier: Some(0.5),
+        ..crate::agent_scan::WaitingMarkerWire::default()
+    });
+    let request = projection_request(locator, Some(exact_locator), 1, record);
+
+    let summary = project_resolved_agent_summary(&request).unwrap();
+
+    assert_eq!(summary.queue_capacity, None);
+    assert_eq!(summary.queue_capacity_multiplier, Some(0.5));
+    let value = serde_json::to_value(&summary).unwrap();
+    assert_eq!(value["queue_capacity_multiplier"], json!(0.5));
+
+    let mut integer_record = record_running();
+    if let Some(meta) = integer_record.agent_meta.as_mut() {
+        meta.queue_capacity = Some(4);
+        meta.queue_capacity_explicit = true;
+        meta.queue_capacity_multiplier = Some(1.5);
+    }
+    let integer_request = projection_request(
+        logical('a', "integer-wins"),
+        Some(exact('a', "integer-wins", "run-1")),
+        1,
+        integer_record,
+    );
+    let integer_summary =
+        project_resolved_agent_summary(&integer_request).unwrap();
+    assert_eq!(integer_summary.queue_capacity, Some(4));
+    assert_eq!(integer_summary.queue_capacity_multiplier, None);
+}
 #[test]
 fn projection_reads_legacy_queue_capacity_without_emitting_legacy_alias() {
     let locator = logical('a', "legacy-capacity");

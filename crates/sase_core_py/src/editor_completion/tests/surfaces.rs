@@ -527,12 +527,27 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             0.25,
             8.0,
             true,
+            None,
         )
         .unwrap();
         let normalized = py_to_json_value(normalized.bind(py)).unwrap();
         assert_eq!(normalized["admission_limit"], json!(0.25));
         assert_eq!(normalized["legacy_zero"], json!(true));
         assert!(normalized.get("reauthor_capacity").is_none());
+        let multiplier_normalized = py_normalize_persisted_queue_capacity(
+            py,
+            None,
+            false,
+            0.25,
+            5.0,
+            true,
+            Some(1.5),
+        )
+        .unwrap();
+        let multiplier_normalized =
+            py_to_json_value(multiplier_normalized.bind(py)).unwrap();
+        assert_eq!(multiplier_normalized["admission_limit"], json!(7.5));
+        assert_eq!(multiplier_normalized["reauthor_multiplier"], json!(1.5));
         let capacity_request = json_value_to_py(
             py,
             &json!({
