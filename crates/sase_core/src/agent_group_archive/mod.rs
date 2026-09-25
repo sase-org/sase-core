@@ -144,9 +144,11 @@ fn normalize_group(
     mut group: SavedAgentGroupWire,
 ) -> Result<SavedAgentGroupWire, String> {
     validate_group_id(&group.group_id)?;
+    // Saved groups are durable: v1 and the pre-agent-session-contract v2
+    // files keep loading and normalize to the current version.
     if !matches!(
         group.schema_version,
-        1 | AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
+        1 | 2 | AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
     ) {
         return Err(format!(
             "saved agent group schema mismatch: got {}, expected {}",
@@ -573,6 +575,48 @@ mod tests {
         assert_eq!(saved.name.as_deref(), Some("Backend batch"));
         assert_eq!(page.groups[0].name.as_deref(), Some("Backend batch"));
         assert_eq!(loaded.name.as_deref(), Some("Backend batch"));
+    }
+
+    #[test]
+    fn pre_contract_v2_group_still_loads_and_lists() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("pre-contract.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "group_id": "pre-contract",
+                "created_at": "2026-09-24T12:00:00Z",
+                "source": "marked_agents",
+                "title": "1 agent in cl",
+                "agent_count": 1,
+                "top_level_agent_count": 1,
+                "status_counts": {"DONE": 1},
+                "project_names": ["proj"],
+                "cl_names": ["cl"],
+                "agent_refs": [],
+                "revived_at": null,
+                "times_revived": 0,
+                "canonical_global_family": "alice.athena.lane",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_dismissed_agent_group(tmp.path(), "pre-contract")
+            .unwrap()
+            .unwrap();
+        let page = list_dismissed_agent_groups(tmp.path(), 20, None);
+
+        assert_eq!(
+            loaded.schema_version,
+            AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            loaded.canonical_global_agent_session.as_deref(),
+            Some("alice.athena.lane")
+        );
+        assert_eq!(page.groups.len(), 1);
+        assert_eq!(page.groups[0].group_id, "pre-contract");
     }
 
     #[test]

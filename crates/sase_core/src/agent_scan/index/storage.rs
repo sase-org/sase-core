@@ -99,8 +99,6 @@ pub(super) fn open_index_with_busy_timeout(
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_workflow_name
             ON agent_artifacts(workflow_name, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session
-            ON agent_artifacts(agent_session, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_parent_timestamp
             ON agent_artifacts(project_name, workflow_dir_name, parent_timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retry_of_timestamp
@@ -286,8 +284,13 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_none_or(|v| v < 32) {
         migrate_record_json_refresh_v32(&mut conn)?;
     }
+    if prior_version.is_none_or(|v| v < 33) {
+        migrate_agent_session_column_v33(&conn)?;
+    }
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
+        "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
+         ON agent_artifacts(agent_session, timestamp); \
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
          ON agent_artifacts(agent_clan, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_done_outcome \
          ON agent_artifacts(done_outcome); \
@@ -392,11 +395,10 @@ pub(super) fn count_table_rows(
     u64::try_from(count).map_err(|e| e.to_string())
 }
 
-pub(super) fn ensure_agent_artifacts_column(
+fn agent_artifacts_has_column(
     conn: &Connection,
     column: &str,
-    column_type: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(agent_artifacts)")
         .map_err(|e| e.to_string())?;
@@ -404,8 +406,19 @@ pub(super) fn ensure_agent_artifacts_column(
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let existing: String = row.get(1).map_err(|e| e.to_string())?;
         if existing == column {
-            return Ok(());
+            return Ok(true);
         }
+    }
+    Ok(false)
+}
+
+pub(super) fn ensure_agent_artifacts_column(
+    conn: &Connection,
+    column: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    if agent_artifacts_has_column(conn, column)? {
+        return Ok(());
     }
     conn.execute(
         &format!(
@@ -840,6 +853,31 @@ pub(super) fn migrate_record_json_refresh_v32(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v33 renames the legacy `agent_family` column to `agent_session` in place,
+/// so an upgraded index keeps every indexed session lane instead of failing
+/// to open. The legacy index would follow the rename onto the new column, so
+/// it is dropped; the caller recreates the index under its new name.
+pub(super) fn migrate_agent_session_column_v33(
+    conn: &Connection,
+) -> Result<(), String> {
+    const LEGACY_AGENT_SESSION_INDEX_COLUMN: &str = "agent_family";
+    conn.execute_batch("DROP INDEX IF EXISTS idx_agent_artifacts_agent_family")
+        .map_err(|e| e.to_string())?;
+    if !agent_artifacts_has_column(conn, LEGACY_AGENT_SESSION_INDEX_COLUMN)? {
+        return Ok(());
+    }
+    conn.execute(
+        &format!(
+            "ALTER TABLE agent_artifacts RENAME COLUMN \
+             {LEGACY_AGENT_SESSION_INDEX_COLUMN} TO {}",
+            super::AGENT_SESSION_INDEX_COLUMN
+        ),
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// v30 adds the imported-owner machine projection so candidate filters can

@@ -1,8 +1,11 @@
+use super::super::storage::read_index_schema_version;
 use super::super::*;
 use super::support::{artifact, query_timestamps, rebuild_index, write_json};
 use crate::agent_scan::wire::AgentArtifactScanOptionsWire;
+use rusqlite::Connection;
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::path::Path;
 use tempfile::tempdir;
 
 fn session_query(value: &str) -> AgentArtifactIndexQueryWire {
@@ -94,4 +97,82 @@ fn agent_session_candidate_decodes_only_matching_rows() {
 
     assert_eq!(scan.records.len(), 1);
     assert_eq!(scan.stats.record_json_decoded, 1);
+}
+
+/// Rewind a freshly built index to the on-disk shape a v32 core left
+/// behind: the session lane still lives in the legacy `agent_family`
+/// column and index.
+fn rewind_to_legacy_agent_family_column(index: &Path) {
+    Connection::open(index)
+        .unwrap()
+        .execute_batch(
+            "DROP INDEX idx_agent_artifacts_agent_session;
+             ALTER TABLE agent_artifacts
+                 RENAME COLUMN agent_session TO agent_family;
+             CREATE INDEX idx_agent_artifacts_agent_family
+                 ON agent_artifacts(agent_family, timestamp);
+             UPDATE meta SET value = '32' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+}
+
+fn sqlite_names(conn: &Connection, sql: &str) -> BTreeSet<String> {
+    conn.prepare(sql)
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn legacy_agent_family_column_migrates_in_place() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let lane_a = artifact(&projects, "20260924100000");
+    let lane_b = artifact(&projects, "20260924100100");
+    write_json(
+        &lane_a.join("agent_meta.json"),
+        json!({"name": "lane-a--plan", "agent_session": "lane-a"}),
+    );
+    write_json(
+        &lane_b.join("agent_meta.json"),
+        json!({"name": "lane-b--plan", "agent_session": "lane-b"}),
+    );
+    let index = rebuild_index(tmp.path(), &projects);
+    rewind_to_legacy_agent_family_column(&index);
+
+    // The first query after an upgrade opens the v32 index; it must migrate
+    // it instead of failing on the renamed column.
+    assert_eq!(
+        query_timestamps(&index, &projects, session_query("lane-a")),
+        BTreeSet::from(["20260924100000".to_string()])
+    );
+
+    let conn = Connection::open(&index).unwrap();
+    let columns = sqlite_names(
+        &conn,
+        "SELECT name FROM pragma_table_info('agent_artifacts')",
+    );
+    assert!(columns.contains("agent_session"));
+    assert!(!columns.contains("agent_family"));
+    let indexes = sqlite_names(
+        &conn,
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'index' AND tbl_name = 'agent_artifacts'",
+    );
+    assert!(indexes.contains("idx_agent_artifacts_agent_session"));
+    assert!(!indexes.contains("idx_agent_artifacts_agent_family"));
+    assert_eq!(
+        read_index_schema_version(&conn).unwrap(),
+        AGENT_ARTIFACT_INDEX_SCHEMA_VERSION
+    );
+    let lane: String = conn
+        .query_row(
+            "SELECT agent_session FROM agent_artifacts WHERE timestamp = ?1",
+            ["20260924100100"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lane, "lane-b");
 }
