@@ -231,7 +231,7 @@ fn build_directive_value_candidates(
             token,
             replacement,
             &inventories.agents,
-            "family",
+            "session",
             &context.selected_values,
         ),
         Some(DirectiveValueRole::Tribe) => build_identity_target_candidates(
