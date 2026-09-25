@@ -458,7 +458,10 @@ pub enum AgentRelationshipError {
 pub fn validate_agent_relationship_batch(
     batch: &AgentRelationshipBatchWire,
 ) -> Result<ValidatedAgentRelationshipSummaryWire, AgentRelationshipError> {
-    if batch.schema_version != AGENT_RELATIONSHIP_SCHEMA_VERSION {
+    // Published agents-sidecar snapshots are durable and still stamp their
+    // batches with the pre-agent-session-contract v2; those differ only in
+    // the legacy `family` container kind, which deserializes as a session.
+    if !matches!(batch.schema_version, 2 | AGENT_RELATIONSHIP_SCHEMA_VERSION) {
         return Err(AgentRelationshipError::UnsupportedSchema {
             actual: batch.schema_version,
             expected: AGENT_RELATIONSHIP_SCHEMA_VERSION,
@@ -1542,6 +1545,23 @@ mod tests {
             summary.container_order,
             ["session:alice.athena.fi--code.f0"]
         );
+    }
+
+    #[test]
+    fn pre_contract_v2_batch_with_family_container_still_validates() {
+        let mut value = serde_json::to_value(valid_batch()).unwrap();
+        value["schema_version"] = json!(2);
+        value["containers"][0]["kind"] = json!("family");
+        let batch: AgentRelationshipBatchWire =
+            serde_json::from_value(value).unwrap();
+
+        let summary = validate_agent_relationship_batch(&batch).unwrap();
+
+        assert_eq!(summary.schema_version, AGENT_RELATIONSHIP_SCHEMA_VERSION);
+        assert_eq!(summary.container_count, 2);
+        assert!(summary
+            .container_order
+            .contains(&"session:alice.athena.foo".to_string()));
     }
 
     #[test]
