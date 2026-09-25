@@ -70,7 +70,7 @@ pub struct OwnerResolutionFactsWire {
     pub run_started_at_unix: Option<f64>,
     #[serde(default)]
     pub stopped_at_unix: Option<f64>,
-    #[serde(default, rename = "family_id", alias = "agent_session_id")]
+    #[serde(default, alias = "family_id")]
     pub agent_session_id: Option<String>,
     #[serde(default)]
     pub parent_timestamp: Option<String>,
@@ -112,7 +112,7 @@ pub struct HumanDisplayLabelsWire {
     pub schema_version: u32,
     pub project_label: String,
     pub agent_label: Option<String>,
-    #[serde(rename = "family_label", alias = "agent_session_label")]
+    #[serde(alias = "family_label")]
     pub agent_session_label: Option<String>,
     pub owner_label: Option<String>,
     pub alias: Option<String>,
@@ -144,7 +144,7 @@ pub struct ResolvedAgentSummaryWire {
     pub logical_key: String,
     pub exact_key: Option<String>,
     pub row_kind: FleetRowKindWire,
-    #[serde(rename = "family_role", alias = "agent_session_role")]
+    #[serde(alias = "family_role")]
     pub agent_session_role: FleetAgentSessionRoleWire,
     /// Parent's record identity, when this row is a tracked agent session member.
     /// `None` for roots and rows with no tracked agent session lineage.

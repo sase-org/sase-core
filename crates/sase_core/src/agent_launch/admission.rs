@@ -1209,9 +1209,8 @@ mod tests {
             bead_id: Some("sase-1".to_string()),
             ..Default::default()
         });
-        assert!(
-            agent_session.contains("%id(reviewer, family=parent, bead=sase-1)")
-        );
+        assert!(agent_session
+            .contains("%id(reviewer, session=parent, bead=sase-1)"));
 
         let named_tribe = agent_unit_dispatch_prompt(&AgentUnitWire {
             prompt: "Review".to_string(),

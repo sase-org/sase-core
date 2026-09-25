@@ -476,16 +476,6 @@ fn py_parse_agent_session_name(
     parse_agent_session_name_impl(py, name)
 }
 
-// legacy binding name; removed in core-contract
-#[pyfunction]
-#[pyo3(name = "parse_agent_family_name")]
-fn py_parse_agent_family_name(
-    py: Python<'_>,
-    name: &str,
-) -> PyResult<PyObject> {
-    parse_agent_session_name_impl(py, name)
-}
-
 #[pyfunction]
 #[pyo3(name = "parse_owned_agent_name", signature = (name, known_owner_roots = None))]
 fn py_parse_owned_agent_name(
@@ -688,16 +678,6 @@ fn py_resolve_agent_session_parent<'py>(
     resolve_agent_session_parent_impl(py, request)
 }
 
-// legacy binding name; removed in core-contract
-#[pyfunction]
-#[pyo3(name = "resolve_agent_family_parent")]
-fn py_resolve_agent_family_parent<'py>(
-    py: Python<'py>,
-    request: &Bound<'py, PyDict>,
-) -> PyResult<PyObject> {
-    resolve_agent_session_parent_impl(py, request)
-}
-
 pub(crate) fn register_agent_identity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_is_agent_name_template, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_agent_name_template, m)?)?;
@@ -751,7 +731,6 @@ pub(crate) fn register_agent_identity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_foreign_agent_owner_root, m)?)?;
     m.add_function(wrap_pyfunction!(py_strip_global_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_agent_session_name, m)?)?;
-    m.add_function(wrap_pyfunction!(py_parse_agent_family_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_owned_agent_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_local_hood, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_name_in_hood, m)?)?;
@@ -762,7 +741,6 @@ pub(crate) fn register_agent_identity(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_agent_relationship_batch, m)?)?;
     m.add_function(wrap_pyfunction!(py_project_agent_relationship_graph, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_session_parent, m)?)?;
-    m.add_function(wrap_pyfunction!(py_resolve_agent_family_parent, m)?)?;
     Ok(())
 }
 

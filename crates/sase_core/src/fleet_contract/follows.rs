@@ -372,7 +372,7 @@ impl FollowAgentSessionPromotionWire {
         }
         if self.to.agent_session_id.is_none() {
             return Err(FleetContractError::Validation(
-                "follow agent session promotion target must include family_id"
+                "follow agent session promotion target must include agent_session_id"
                     .to_string(),
             ));
         }

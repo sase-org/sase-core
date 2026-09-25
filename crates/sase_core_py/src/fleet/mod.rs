@@ -280,16 +280,6 @@ fn py_fleet_followed_batch_agent_session_promotions<'py>(
     fleet_followed_batch_agent_session_promotions_impl(py, request)
 }
 
-// legacy binding name; removed in core-contract
-#[pyfunction]
-#[pyo3(name = "fleet_followed_batch_family_promotions")]
-fn py_fleet_followed_batch_family_promotions<'py>(
-    py: Python<'py>,
-    request: &Bound<'py, PyDict>,
-) -> PyResult<PyObject> {
-    fleet_followed_batch_agent_session_promotions_impl(py, request)
-}
-
 #[pyfunction]
 #[pyo3(name = "fleet_count_focus_and_fleet")]
 fn py_fleet_count_focus_and_fleet<'py>(
@@ -713,10 +703,6 @@ pub(crate) fn register_fleet(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fleet_reconcile_follow_records, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_fleet_followed_batch_agent_session_promotions,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        py_fleet_followed_batch_family_promotions,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_fleet_count_focus_and_fleet, m)?)?;

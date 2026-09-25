@@ -690,7 +690,7 @@ fn typed_launch_rejects_conflicting_session_and_family_spellings() {
 }
 
 #[test]
-fn agent_unit_attach_keys_accept_both_spellings_and_serialize_legacy() {
+fn agent_unit_attach_keys_accept_both_spellings_and_serialize_canonical() {
     let legacy: AgentUnitWire = serde_json::from_value(json!({
         "prompt": "Review",
         "family_attach_parent": "parent",
@@ -705,10 +705,10 @@ fn agent_unit_attach_keys_accept_both_spellings_and_serialize_legacy() {
     .unwrap();
     assert_eq!(legacy, new);
     let value = serde_json::to_value(&legacy).unwrap();
-    assert_eq!(value["family_attach_parent"], json!("parent"));
-    assert_eq!(value["family_attach_suffix"], json!("reviewer"));
-    assert!(value.get("agent_session_attach_parent").is_none());
-    assert!(value.get("agent_session_attach_suffix").is_none());
+    assert_eq!(value["agent_session_attach_parent"], json!("parent"));
+    assert_eq!(value["agent_session_attach_suffix"], json!("reviewer"));
+    assert!(value.get("family_attach_parent").is_none());
+    assert!(value.get("family_attach_suffix").is_none());
 }
 
 #[test]

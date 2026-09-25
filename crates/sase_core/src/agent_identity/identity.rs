@@ -4,9 +4,8 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 const MAX_AGENT_NAME_BYTES: usize = 512;
-// legacy agent-family spelling; flips in core-contract
-const LEGACY_AGENT_SESSION_KIND: &str = "family";
-const LEGACY_AGENT_SESSION_PAGES_DIR: &str = "families";
+const AGENT_SESSION_KIND: &str = "session";
+const AGENT_SESSION_PAGES_DIR: &str = "sessions";
 const USERNAME_SYNTAX: &str =
     "lowercase ASCII letters or digits with '-' and '_' only internally";
 const RESERVED_USERNAMES: &[&str] = &[
@@ -63,7 +62,7 @@ pub(crate) enum AgentOwnershipClassification {
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionNameWire {
     pub kind: String,
-    #[serde(rename = "family_name", alias = "agent_session_name")]
+    #[serde(alias = "family_name")]
     pub agent_session_name: String,
     #[serde(default)]
     pub member_role: Option<String>,
@@ -109,7 +108,7 @@ pub struct OwnedAgentNameWire {
     pub owner_root: Option<String>,
     pub local_name: String,
     pub hood: String,
-    #[serde(rename = "family_name", alias = "agent_session_name")]
+    #[serde(alias = "family_name")]
     pub agent_session_name: String,
     #[serde(default)]
     pub member_role: Option<String>,
@@ -527,10 +526,8 @@ pub fn agent_link_target(
             validate_path_component(&global_base)?;
             validate_path_component(&role)?;
             Ok(AgentLinkTargetWire {
-                kind: LEGACY_AGENT_SESSION_KIND.to_string(),
-                path: format!(
-                    "{LEGACY_AGENT_SESSION_PAGES_DIR}/{global_base}.md"
-                ),
+                kind: AGENT_SESSION_KIND.to_string(),
+                path: format!("{AGENT_SESSION_PAGES_DIR}/{global_base}.md"),
                 anchor: Some(format!("member-{role}")),
             })
         }
@@ -564,10 +561,8 @@ pub fn agent_link_target_with_owner_roots(
             validate_path_component(&global_base)?;
             validate_path_component(&role)?;
             Ok(AgentLinkTargetWire {
-                kind: LEGACY_AGENT_SESSION_KIND.to_string(),
-                path: format!(
-                    "{LEGACY_AGENT_SESSION_PAGES_DIR}/{global_base}.md"
-                ),
+                kind: AGENT_SESSION_KIND.to_string(),
+                path: format!("{AGENT_SESSION_PAGES_DIR}/{global_base}.md"),
                 anchor: Some(format!("member-{role}")),
             })
         }
@@ -1370,8 +1365,8 @@ mod tests {
             &roots,
         )
         .unwrap();
-        assert_eq!(target.kind, "family");
-        assert_eq!(target.path, "families/athena.7n.md");
+        assert_eq!(target.kind, "session");
+        assert_eq!(target.path, "sessions/athena.7n.md");
         assert_eq!(target.anchor.as_deref(), Some("member-code"));
     }
 
@@ -1381,8 +1376,8 @@ mod tests {
         assert_eq!(
             agent_link_target("foo.bar--code", &alice).unwrap(),
             AgentLinkTargetWire {
-                kind: "family".to_string(),
-                path: "families/alice.athena.foo.bar.md".to_string(),
+                kind: "session".to_string(),
+                path: "sessions/alice.athena.foo.bar.md".to_string(),
                 anchor: Some("member-code".to_string()),
             }
         );
@@ -1417,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_name_wire_serializes_legacy_spelling() {
+    fn agent_session_name_wire_serializes_canonical_spelling() {
         let wire = AgentSessionNameWire {
             kind: "solo".to_string(),
             agent_session_name: "foo.bar".to_string(),
@@ -1425,7 +1420,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&wire).unwrap(),
-            r#"{"kind":"solo","family_name":"foo.bar","member_role":null}"#,
+            r#"{"kind":"solo","agent_session_name":"foo.bar","member_role":null}"#,
         );
     }
 

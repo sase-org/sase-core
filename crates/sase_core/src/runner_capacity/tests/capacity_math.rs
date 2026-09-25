@@ -45,7 +45,7 @@ fn default_weights_match_serial_and_parallel_lane_counting() {
             .iter()
             .map(|claim| claim.claim_kind.as_str())
             .collect::<Vec<_>>(),
-        ["serial_family", "parallel_member", "standalone"]
+        ["serial_session", "parallel_member", "standalone"]
     );
 }
 

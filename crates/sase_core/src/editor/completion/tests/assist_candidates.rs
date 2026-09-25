@@ -169,7 +169,7 @@ fn agent_candidates_are_kind_aware_ordered_and_compatible() {
         vec![
             ("tribe", "@reviewers"),
             ("clan", "builders"),
-            ("family", "review"),
+            ("session", "review"),
             ("agent", "legacy"),
         ]
     );

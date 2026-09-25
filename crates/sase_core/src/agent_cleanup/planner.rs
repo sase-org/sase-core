@@ -28,9 +28,8 @@ use super::wire::{
     SKIPPED_UNKNOWN_KILL_KIND, SKIPPED_WORKFLOW_CHILD_CASCADE_ONLY,
 };
 
-// legacy agent-family spelling; flips in core-contract
 const PARALLEL_AGENT_SESSION_STILL_ACTIVE_DETAIL: &str =
-    "parallel family still active";
+    "parallel session still active";
 
 const DISMISSABLE_STATUSES: &[&str] = &[
     "DONE",
@@ -1377,7 +1376,7 @@ mod tests {
             item.identity.cl_name == "family"
                 && item.reason == SKIPPED_NOT_DISMISSABLE
                 && item.detail.as_deref()
-                    == Some("parallel family still active")
+                    == Some("parallel session still active")
         }));
     }
 
@@ -1523,7 +1522,7 @@ mod tests {
             item.identity == root.identity
                 && item.reason == SKIPPED_NOT_DISMISSABLE
                 && item.detail.as_deref()
-                    == Some("parallel family still active")
+                    == Some("parallel session still active")
         }));
 
         member.status = "DONE".to_string();
@@ -1953,7 +1952,7 @@ mod tests {
         request.schema_version = 3;
         let err = plan_agent_cleanup(&[], &request).unwrap_err();
         assert!(err.contains("schema mismatch"));
-        assert!(err.contains("expected 5"));
+        assert!(err.contains("expected 6"));
     }
 
     #[test]
@@ -2179,12 +2178,12 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_target_parallel_flag_keeps_legacy_wire_spelling() {
+    fn cleanup_target_parallel_flag_emits_canonical_wire_spelling() {
         let mut row = target("run", "alpha", None, "RUNNING", None);
         row.agent_session_parallel = true;
         let encoded = serde_json::to_value(&row).unwrap();
-        assert_eq!(encoded["agent_family_parallel"], serde_json::json!(true));
-        assert!(encoded.get("agent_session_parallel").is_none());
+        assert_eq!(encoded["agent_session_parallel"], serde_json::json!(true));
+        assert!(encoded.get("agent_family_parallel").is_none());
         let decoded: AgentCleanupTargetWire =
             serde_json::from_value(encoded).unwrap();
         assert!(decoded.agent_session_parallel);

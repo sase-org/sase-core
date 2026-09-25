@@ -124,11 +124,7 @@ impl From<DismissalReconcileCandidate>
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSessionDismissalLineageResultWire {
     pub identity: String,
-    // legacy agent-family spelling; flips in core-contract
-    #[serde(
-        rename = "family_root_dismissed",
-        alias = "agent_session_root_dismissed"
-    )]
+    #[serde(alias = "family_root_dismissed")]
     pub agent_session_root_dismissed: bool,
 }
 
@@ -266,7 +262,7 @@ pub(super) fn select_lineage_row_by_timestamp(
     conn.query_row(
         r#"
         SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
-               agent_family, parent_timestamp, retry_of_timestamp,
+               agent_session, parent_timestamp, retry_of_timestamp,
                retried_as_timestamp, retry_chain_root_timestamp
         FROM agent_artifacts
         WHERE project_name = ?1 AND workflow_dir_name = ?2 AND timestamp = ?3
@@ -351,7 +347,7 @@ pub(super) fn select_lineage_row_by_artifact_dir(
     conn.query_row(
         r#"
         SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
-               agent_family, parent_timestamp, retry_of_timestamp,
+               agent_session, parent_timestamp, retry_of_timestamp,
                retried_as_timestamp, retry_chain_root_timestamp
         FROM agent_artifacts
         WHERE artifact_dir = ?1
@@ -377,7 +373,7 @@ pub(super) fn select_lineage_rows(
     let sql = format!(
         r#"
         SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
-               agent_family, parent_timestamp, retry_of_timestamp,
+               agent_session, parent_timestamp, retry_of_timestamp,
                retried_as_timestamp, retry_chain_root_timestamp
         FROM agent_artifacts
         WHERE project_name = ?
@@ -423,12 +419,12 @@ pub(super) fn agent_session_root_by_agent_session(
     conn.query_row(
         r#"
         SELECT artifact_dir, project_name, workflow_dir_name, timestamp,
-               agent_family, parent_timestamp, retry_of_timestamp,
+               agent_session, parent_timestamp, retry_of_timestamp,
                retried_as_timestamp, retry_chain_root_timestamp
         FROM agent_artifacts
         WHERE project_name = ?1
           AND workflow_dir_name = ?2
-          AND agent_family = ?3
+          AND agent_session = ?3
           AND parent_timestamp IS NULL
         ORDER BY timestamp ASC, artifact_dir ASC
         LIMIT 1

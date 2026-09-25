@@ -406,22 +406,6 @@ fn py_reconcile_agent_artifact_index_dismissed_agent_session_members<'py>(
     )
 }
 
-// legacy binding name; removed in core-contract
-#[pyfunction]
-#[pyo3(
-    name = "reconcile_agent_artifact_index_dismissed_family_members",
-    signature = (index_path, dry_run = false)
-)]
-fn py_reconcile_agent_artifact_index_dismissed_family_members<'py>(
-    py: Python<'py>,
-    index_path: &str,
-    dry_run: bool,
-) -> PyResult<PyObject> {
-    reconcile_agent_artifact_index_dismissed_agent_session_members_impl(
-        py, index_path, dry_run,
-    )
-}
-
 /// Read one metadata value from the persistent artifact index.
 #[pyfunction]
 #[pyo3(name = "read_agent_artifact_index_meta")]
@@ -986,10 +970,6 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_reconcile_agent_artifact_index_dismissed_agent_session_members,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        py_reconcile_agent_artifact_index_dismissed_family_members,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_read_agent_artifact_index_meta, m)?)?;

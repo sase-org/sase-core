@@ -27,14 +27,11 @@ const RESERVATION_KIND_PLANNED: &str = "planned";
 const RESERVATION_KIND_CLAIMED: &str = "claimed";
 const RESERVATION_KIND_PLANNED_CLAN: &str = "planned_clan";
 const RESERVATION_KIND_CLAN: &str = "clan";
-// legacy agent-family spelling; flips in core-contract
-const RESERVATION_KIND_AGENT_SESSION: &str = "family";
+const RESERVATION_KIND_AGENT_SESSION: &str = "session";
 const CONTAINER_KIND_CLAN: &str = "clan";
-// legacy agent-family spelling; flips in core-contract
-const CONTAINER_KIND_AGENT_SESSION: &str = "family";
-/// New agent-session spelling accepted wherever container kinds are compared.
-/// Stored values keep the legacy spelling until core-contract.
-const AGENT_SESSION_CONTAINER_KIND_ALIAS: &str = "session";
+const CONTAINER_KIND_AGENT_SESSION: &str = "session";
+/// Legacy durable container kind accepted while old records remain on disk.
+const LEGACY_AGENT_SESSION_CONTAINER_KIND: &str = "family";
 const CONTAINER_KIND_OWNER_NAMESPACE: &str = "owner_namespace";
 const ORIGIN_IMPORT_V1: &str = "import_v1";
 const ORIGIN_IMPORT_V2: &str = "import_v2";
@@ -1317,7 +1314,7 @@ fn decide_convert_agent_session(
             }
             Some(kind)
                 if kind == CONTAINER_KIND_AGENT_SESSION
-                    || kind == AGENT_SESSION_CONTAINER_KIND_ALIAS => {}
+                    || kind == LEGACY_AGENT_SESSION_CONTAINER_KIND => {}
             None => {}
             Some(_) => {
                 return ReservationDecision::blocked(blocked_reservation(
@@ -2678,7 +2675,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_session_operation_accepts_both_spellings_but_emits_legacy() {
+    fn convert_session_operation_accepts_legacy_spelling_but_emits_canonical() {
         let legacy: AgentNameReservationOperationWire =
             serde_json::from_value(serde_json::json!("convert_family"))
                 .unwrap();
@@ -2689,16 +2686,16 @@ mod tests {
         assert_eq!(new, AgentNameReservationOperationWire::ConvertSession);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("convert_family")
+            serde_json::json!("convert_session")
         );
         assert_eq!(
             AgentNameReservationOperationWire::ConvertSession.as_str(),
-            "convert_family"
+            "convert_session"
         );
     }
 
     #[test]
-    fn agent_session_generation_accepts_both_spellings_but_emits_legacy() {
+    fn agent_session_generation_accepts_legacy_spelling_but_emits_canonical() {
         let legacy: AgentExpectedOwnerWire =
             serde_json::from_value(serde_json::json!({
                 "name": "alpha",
@@ -2717,7 +2714,7 @@ mod tests {
             Some("20260902000000")
         );
         let encoded = serde_json::to_value(&new).unwrap();
-        assert_eq!(encoded["family_generation"], "20260902000000");
-        assert!(encoded.get("agent_session_generation").is_none());
+        assert_eq!(encoded["agent_session_generation"], "20260902000000");
+        assert!(encoded.get("family_generation").is_none());
     }
 }

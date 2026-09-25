@@ -18,12 +18,7 @@ pub struct HoldDeadlockCandidateWire {
     pub artifact_dir: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(
-        default,
-        rename = "family",
-        alias = "agent_session",
-        alias = "session"
-    )]
+    #[serde(default)]
     pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
@@ -41,12 +36,7 @@ pub struct HoldDeadlockWaitNodeWire {
     pub artifact_dir: String,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(
-        default,
-        rename = "family",
-        alias = "agent_session",
-        alias = "session"
-    )]
+    #[serde(default)]
     pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,

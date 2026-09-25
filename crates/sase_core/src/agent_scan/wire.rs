@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 9;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 10;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -257,7 +257,7 @@ pub struct DoneMarkerWire {
     pub status_label: Option<String>,
     /// Terminal monitor or gate-shell projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(default, rename = "family_shell", alias = "agent_session_shell")]
+    #[serde(default, alias = "family_shell")]
     pub agent_session_shell: Option<AgentSessionShellWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
@@ -563,16 +563,11 @@ pub struct AgentMetaWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub clan_summary: Option<String>,
-    #[serde(default, rename = "agent_family", alias = "agent_session")]
+    #[serde(default, alias = "agent_family")]
     pub agent_session: Option<String>,
-    #[serde(
-        default,
-        rename = "agent_family_role",
-        alias = "agent_session_role"
-    )]
+    #[serde(default, alias = "agent_family_role")]
     pub agent_session_role: Option<String>,
-    // legacy agent-family spelling; flips in core-contract
-    #[serde(default, rename = "agent_family_parallel")]
+    #[serde(default, alias = "agent_family_parallel")]
     pub agent_session_parallel: bool,
     #[serde(default)]
     pub source_machine: Option<String>,
@@ -688,7 +683,7 @@ pub struct AgentMetaWire {
     pub retry_error_category: Option<String>,
     /// Terminal monitor or gate-shell projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(default, rename = "family_shell", alias = "agent_session_shell")]
+    #[serde(default, alias = "family_shell")]
     pub agent_session_shell: Option<AgentSessionShellWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
@@ -1404,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_meta_wire_accepts_agent_session_spellings_but_emits_legacy() {
+    fn agent_meta_wire_accepts_legacy_spellings_but_emits_canonical() {
         let legacy: AgentMetaWire = serde_json::from_value(serde_json::json!({
             "agent_family": "fam",
             "agent_family_role": "monitor",
@@ -1421,12 +1416,12 @@ mod tests {
         assert_eq!(new.agent_session.as_deref(), Some("fam"));
         assert_eq!(new.agent_session_role.as_deref(), Some("monitor"));
         let encoded = serde_json::to_value(&new).unwrap();
-        assert_eq!(encoded["agent_family"], "fam");
-        assert_eq!(encoded["agent_family_role"], "monitor");
-        assert!(encoded.get("agent_session").is_none());
-        assert!(encoded.get("agent_session_role").is_none());
-        assert_eq!(encoded["family_shell"]["kind"], "monitor");
-        assert!(encoded.get("agent_session_shell").is_none());
+        assert_eq!(encoded["agent_session"], "fam");
+        assert_eq!(encoded["agent_session_role"], "monitor");
+        assert!(encoded.get("agent_family").is_none());
+        assert!(encoded.get("agent_family_role").is_none());
+        assert_eq!(encoded["agent_session_shell"]["kind"], "monitor");
+        assert!(encoded.get("family_shell").is_none());
     }
 
     #[test]

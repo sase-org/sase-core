@@ -547,7 +547,7 @@ pub(super) fn upsert_record(
         r#"
         INSERT INTO agent_artifacts (
             artifact_dir, projects_root, project_name, project_dir, project_file,
-            workflow_dir_name, workflow_name, agent_clan, agent_family, timestamp,
+            workflow_dir_name, workflow_name, agent_clan, agent_session, timestamp,
             status, agent_type, cl_name,
             agent_name, model, llm_provider, started_at, finished_at,
             has_done_marker, has_running_marker, has_waiting_marker,
@@ -574,7 +574,7 @@ pub(super) fn upsert_record(
             workflow_dir_name = excluded.workflow_dir_name,
             workflow_name = excluded.workflow_name,
             agent_clan = excluded.agent_clan,
-            agent_family = excluded.agent_family,
+            agent_session = excluded.agent_session,
             timestamp = excluded.timestamp,
             status = excluded.status,
             agent_type = excluded.agent_type,

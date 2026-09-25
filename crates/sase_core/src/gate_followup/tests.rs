@@ -266,7 +266,7 @@ fn mismatched_attempt_fingerprint_is_ignored() {
 }
 
 #[test]
-fn successor_evidence_name_accepts_both_spellings_but_emits_legacy() {
+fn successor_evidence_name_accepts_legacy_spelling_but_emits_canonical() {
     let legacy: GateFollowupSuccessorEvidenceWire =
         serde_json::from_value(serde_json::json!({"family_name": "fam"}))
             .unwrap();
@@ -277,8 +277,8 @@ fn successor_evidence_name_accepts_both_spellings_but_emits_legacy() {
     assert_eq!(new, legacy);
     assert_eq!(new.agent_session_name.as_deref(), Some("fam"));
     let encoded = serde_json::to_value(&new).unwrap();
-    assert_eq!(encoded["family_name"], "fam");
-    assert!(encoded.get("agent_session_name").is_none());
+    assert_eq!(encoded["agent_session_name"], "fam");
+    assert!(encoded.get("family_name").is_none());
 }
 
 #[test]

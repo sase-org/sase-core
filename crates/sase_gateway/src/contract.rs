@@ -1639,7 +1639,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                     "queue_capacity_multiplier": "f64|null; authored multiplier of the machine's effective runner-capacity budget"
                 },
                 "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, lifecycle timestamps, workspace number, clan/tribe identity, queue capacity and multiplier, capabilities, content metadata",
-                "family": "normalized family_role (root/member/monitor/gate/proc/historical_shell) plus optional parent_timestamp lineage, for viewer folding"
+                "session": "normalized agent_session_role (root/member/monitor/gate/proc/historical_shell) plus optional parent_timestamp lineage, for viewer folding"
             },
             "ResolvedAgentDetailWire": {
                 "defined_by": "sase_core::fleet_contract",

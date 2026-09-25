@@ -493,8 +493,7 @@ fn queue_has_capacity_assignment(
 }
 fn agent_entry_kind(entry: &AgentCompletionEntry) -> &str {
     match entry.kind.as_str() {
-        // legacy agent-family spelling; flips in core-contract
-        "family" | "session" => "family",
+        "family" | "session" => "session",
         "clan" => "clan",
         "hood" => "hood",
         "tribe" => "tribe",

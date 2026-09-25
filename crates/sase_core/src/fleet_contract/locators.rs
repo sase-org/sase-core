@@ -40,7 +40,7 @@ pub struct LogicalAgentLocatorWire {
     pub schema_version: u32,
     pub project: ProjectLocatorWire,
     pub agent_id: String,
-    #[serde(rename = "family_id", alias = "agent_session_id")]
+    #[serde(alias = "family_id")]
     pub agent_session_id: Option<String>,
 }
 
@@ -147,7 +147,7 @@ impl LogicalAgentLocatorWire {
         self.project.validate()?;
         validate_identifier("agent_id", &self.agent_id)?;
         if let Some(agent_session_id) = &self.agent_session_id {
-            validate_identifier("family_id", agent_session_id)?;
+            validate_identifier("agent_session_id", agent_session_id)?;
         }
         Ok(())
     }
@@ -164,11 +164,8 @@ impl AgentInstanceLocatorWire {
     }
 }
 
-// legacy agent-family spelling; flips in core-contract
-pub(crate) const LEGACY_AGENT_SESSION_KEY_SEGMENT: &str = "family";
-/// New agent-session spelling accepted wherever stored logical keys are
-/// compared. Stored values keep the legacy spelling until core-contract.
-pub(crate) const AGENT_SESSION_KEY_SEGMENT_ALIAS: &str = "session";
+pub(crate) const AGENT_SESSION_KEY_SEGMENT: &str = "session";
+const LEGACY_AGENT_SESSION_KEY_SEGMENT: &str = "family";
 
 pub(crate) fn logical_key_unchecked(
     locator: &LogicalAgentLocatorWire,
@@ -177,7 +174,7 @@ pub(crate) fn logical_key_unchecked(
         ("origin", locator.project.origin.installation_id.as_str()),
         ("project", locator.project.project_id.as_str()),
         (
-            LEGACY_AGENT_SESSION_KEY_SEGMENT,
+            AGENT_SESSION_KEY_SEGMENT,
             locator.agent_session_id.as_deref().unwrap_or(""),
         ),
         ("agent", locator.agent_id.as_str()),
@@ -186,8 +183,8 @@ pub(crate) fn logical_key_unchecked(
 
 /// Whether a stored logical key identifies `locator`.
 ///
-/// Emitted keys keep the legacy `family:` segment; this also accepts keys
-/// built with a `session:` segment so newer writers compare equal.
+/// Emitted keys use the canonical `session:` segment; legacy `family:` keys
+/// remain comparable while durable fleet state is migrated.
 pub(crate) fn logical_key_matches(
     stored: &str,
     locator: &LogicalAgentLocatorWire,
@@ -196,10 +193,9 @@ pub(crate) fn logical_key_matches(
         || canonical_logical_key(stored) == logical_key_unchecked(locator)
 }
 
-/// Canonical form for comparing stored logical keys: an accepted `session:`
-/// segment folds to the emitted `family` spelling, and a `session-<hex>`
-/// fallback id in the agent session segment compares equal to the emitted
-/// `family-<hex>` spelling carrying the same digest. Plain identifiers
+/// Canonical form for comparing stored logical keys: legacy `family:`
+/// segments fold to `session`, and `family-<hex>` fallback ids in the agent
+/// session segment compare equal to emitted `session-<hex>` values. Plain identifiers
 /// compare exactly. Malformed keys compare exactly.
 pub(crate) fn canonical_logical_key(key: &str) -> String {
     let Some(segments) = split_length_key(key) else {
@@ -207,12 +203,12 @@ pub(crate) fn canonical_logical_key(key: &str) -> String {
     };
     let mut out = String::from("v1");
     for (name, value) in segments {
-        let name = if name == AGENT_SESSION_KEY_SEGMENT_ALIAS {
-            LEGACY_AGENT_SESSION_KEY_SEGMENT
+        let name = if name == LEGACY_AGENT_SESSION_KEY_SEGMENT {
+            AGENT_SESSION_KEY_SEGMENT
         } else {
             name.as_str()
         };
-        let value = if name == LEGACY_AGENT_SESSION_KEY_SEGMENT {
+        let value = if name == AGENT_SESSION_KEY_SEGMENT {
             canonical_agent_session_id(&value)
         } else {
             value
@@ -227,14 +223,14 @@ pub(crate) fn canonical_logical_key(key: &str) -> String {
     out
 }
 
-/// Fold an accepted `session-<hex>` fallback id to the emitted
-/// `family-<hex>` spelling. Anything else compares exactly.
+/// Fold a legacy `family-<hex>` fallback id to canonical `session-<hex>`.
+/// Anything else compares exactly.
 fn canonical_agent_session_id(value: &str) -> String {
-    if let Some(digest) = value.strip_prefix("session-") {
+    if let Some(digest) = value.strip_prefix("family-") {
         if digest.len() == 16
             && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return format!("family-{digest}");
+            return format!("session-{digest}");
         }
     }
     value.to_string()
@@ -318,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn locator_accepts_agent_session_spelling_but_emits_legacy() {
+    fn locator_accepts_legacy_spelling_but_emits_canonical() {
         let legacy: LogicalAgentLocatorWire =
             serde_json::from_value(locator_json("family_id")).unwrap();
         let new: LogicalAgentLocatorWire =
@@ -326,30 +322,29 @@ mod tests {
         assert_eq!(new, legacy);
         assert_eq!(new.agent_session_id.as_deref(), Some("session-1"));
         let encoded = serde_json::to_value(&new).unwrap();
-        assert_eq!(encoded["family_id"], "session-1");
-        assert!(encoded.get("agent_session_id").is_none());
+        assert_eq!(encoded["agent_session_id"], "session-1");
+        assert!(encoded.get("family_id").is_none());
     }
 
     #[test]
     fn logical_key_matches_accepts_both_segments() {
         let wire = locator(Some("session-1"));
         let emitted = logical_key_unchecked(&wire);
-        assert!(emitted.contains("|family:"));
+        assert!(emitted.contains("|session:"));
         assert!(logical_key_matches(&emitted, &wire));
-        let session_spelled = emitted.replacen("|family:", "|session:", 1);
-        assert!(logical_key_matches(&session_spelled, &wire));
+        let legacy_spelled = emitted.replacen("|session:", "|family:", 1);
+        assert!(logical_key_matches(&legacy_spelled, &wire));
         let other = locator(None);
         assert!(!logical_key_matches(&emitted, &other));
         assert!(!logical_key_matches("not-a-key", &wire));
     }
 
-    /// Rebuild `emitted` with a `session:` segment and a `session-<hex>`
-    /// fallback id, keeping every length prefix well-formed. (`session-` is
-    /// one byte longer than `family-`.)
-    fn session_spelled_key(emitted: &str, digest: &str) -> String {
+    /// Rebuild `emitted` with legacy family names, keeping every length prefix
+    /// well-formed. (`family-` is one byte shorter than `session-`.)
+    fn legacy_spelled_key(emitted: &str, digest: &str) -> String {
         emitted.replacen(
-            &format!("|family:23:family-{digest}"),
             &format!("|session:24:session-{digest}"),
+            &format!("|family:23:family-{digest}"),
             1,
         )
     }
@@ -357,40 +352,40 @@ mod tests {
     #[test]
     fn fallback_ids_compare_equal_across_spellings() {
         let digest = "0123456789abcdef";
-        let wire = locator(Some(&format!("family-{digest}")));
+        let wire = locator(Some(&format!("session-{digest}")));
         let emitted = logical_key_unchecked(&wire);
-        let session_spelled = session_spelled_key(&emitted, digest);
-        assert_ne!(session_spelled, emitted);
-        assert!(logical_key_matches(&session_spelled, &wire));
-        let other_digest = locator(Some("family-abcdef0123456789"));
-        assert!(!logical_key_matches(&session_spelled, &other_digest));
+        let legacy_spelled = legacy_spelled_key(&emitted, digest);
+        assert_ne!(legacy_spelled, emitted);
+        assert!(logical_key_matches(&legacy_spelled, &wire));
+        let other_digest = locator(Some("session-abcdef0123456789"));
+        assert!(!logical_key_matches(&legacy_spelled, &other_digest));
         // The segment alias is value-independent, but fallback-id
         // folding only applies to `<prefix>-<16 hex>` values.
         let plain = locator(Some("lane"));
         let plain_key = logical_key_unchecked(&plain);
         assert!(logical_key_matches(
-            &plain_key.replace("|family:4:lane", "|session:4:lane"),
+            &plain_key.replace("|session:4:lane", "|family:4:lane"),
             &plain,
         ));
         assert!(!logical_key_matches(
-            &plain_key.replace("|family:4:lane", "|family:12:session-lane"),
+            &plain_key.replace("|session:4:lane", "|session:12:family-lane"),
             &plain,
         ));
-        let non_hex = locator(Some("session-xyz"));
+        let non_hex = locator(Some("family-xyz"));
         assert!(!logical_key_matches(
-            &logical_key_unchecked(&locator(Some("family-xyz"))),
+            &logical_key_unchecked(&locator(Some("session-xyz"))),
             &non_hex,
         ));
     }
 
     #[test]
-    fn canonical_logical_key_folds_session_segment_and_fallback_id() {
+    fn canonical_logical_key_folds_legacy_segment_and_fallback_id() {
         let digest = "0123456789abcdef";
-        let wire = locator(Some(&format!("family-{digest}")));
+        let wire = locator(Some(&format!("session-{digest}")));
         let emitted = logical_key_unchecked(&wire);
-        let session_key = session_spelled_key(&emitted, digest);
-        assert_ne!(session_key, emitted);
-        assert_eq!(canonical_logical_key(&session_key), emitted);
+        let legacy_key = legacy_spelled_key(&emitted, digest);
+        assert_ne!(legacy_key, emitted);
+        assert_eq!(canonical_logical_key(&legacy_key), emitted);
         assert_eq!(canonical_logical_key("not-a-key"), "not-a-key");
     }
 }

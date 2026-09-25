@@ -146,16 +146,11 @@ pub struct OwnerPresentationFactsWire {
     /// than a coarse legacy one. Absent (false) on older payloads.
     #[serde(default)]
     pub owner_status: bool,
-    #[serde(
-        default,
-        rename = "agent_family_role",
-        alias = "agent_session_role"
-    )]
+    #[serde(default, alias = "agent_family_role")]
     pub agent_session_role: Option<String>,
     #[serde(default)]
     pub role_suffix: Option<String>,
-    // legacy agent-family spelling; flips in core-contract
-    #[serde(default, rename = "agent_family_parallel")]
+    #[serde(default, alias = "agent_family_parallel")]
     pub agent_session_parallel: bool,
     #[serde(default)]
     pub plan_chain_root: bool,

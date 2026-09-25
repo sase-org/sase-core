@@ -60,8 +60,7 @@ pub fn build_directive_completion_candidates_with_flags(
     }
 }
 
-/// Legacy `family=` stays in the directive contract (and diagnostics) so
-/// older readers keep working, but completion only ever suggests `session=`.
+/// Legacy `family=` stays accepted but is hidden from completion.
 fn keyword_is_suggested(directive: &str, keyword: &str) -> bool {
     !(directive == "id" && keyword == "family")
 }

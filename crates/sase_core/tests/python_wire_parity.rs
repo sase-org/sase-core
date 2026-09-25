@@ -434,7 +434,7 @@ fn agent_meta_parallel_membership_matches_python_wire_defaulting() {
 
     assert!(meta.agent_session_parallel);
     assert_eq!(
-        serde_json::to_value(meta).unwrap()["agent_family_parallel"],
+        serde_json::to_value(meta).unwrap()["agent_session_parallel"],
         python_fixture["agent_family_parallel"]
     );
 
@@ -480,9 +480,9 @@ fn agent_meta_clan_field_order_matches_python_wire() {
     let generation = encoded.find("\"agent_clan_generation\"").unwrap();
     let tribe = encoded.find("\"clan_tribe\"").unwrap();
     let summary = encoded.find("\"clan_summary\"").unwrap();
-    let agent_session = encoded.find("\"agent_family\"").unwrap();
-    let role = encoded.find("\"agent_family_role\"").unwrap();
-    let parallel = encoded.find("\"agent_family_parallel\"").unwrap();
+    let agent_session = encoded.find("\"agent_session\"").unwrap();
+    let role = encoded.find("\"agent_session_role\"").unwrap();
+    let parallel = encoded.find("\"agent_session_parallel\"").unwrap();
     assert!(sdd_plan < epic_plan);
     assert!(epic_plan < question);
     assert!(workflow < clan);
@@ -529,7 +529,7 @@ fn cleanup_target_parallel_membership_matches_python_wire_defaulting() {
     assert_eq!(target.agent_clan.as_deref(), Some("shipping"));
     assert_eq!(target.agent_clan_generation.as_deref(), Some("current-gen"));
     assert_eq!(
-        serde_json::to_value(target).unwrap()["agent_family_parallel"],
+        serde_json::to_value(target).unwrap()["agent_session_parallel"],
         python_fixture["agent_family_parallel"]
     );
 

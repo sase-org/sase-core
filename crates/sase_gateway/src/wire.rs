@@ -51,8 +51,8 @@ pub use sase_core::host_bridge::{
 };
 
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
-pub const FLEET_API_WIRE_SCHEMA_VERSION: u32 = 1;
-pub const FLEET_PROTOCOL_VERSION: u32 = 1;
+pub const FLEET_API_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const FLEET_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBuildWire {

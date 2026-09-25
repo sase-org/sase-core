@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Version for gate-follow-up requests and decisions.
-pub const GATE_FOLLOWUP_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const GATE_FOLLOWUP_WIRE_SCHEMA_VERSION: u32 = 2;
 
 pub const MODE_SETTLE: &str = "settle";
 pub const MODE_RESUME: &str = "resume";
@@ -90,7 +90,7 @@ pub struct GateFollowupAttemptWire {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateFollowupSuccessorEvidenceWire {
-    #[serde(default, rename = "family_name", alias = "agent_session_name")]
+    #[serde(default, alias = "family_name")]
     pub agent_session_name: Option<String>,
     #[serde(default)]
     pub expected_suffix: Option<String>,

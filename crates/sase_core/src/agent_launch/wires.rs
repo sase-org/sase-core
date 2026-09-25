@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 1;
-pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,15 +259,13 @@ pub struct AgentUnitWire {
     pub clan_summary_script: Option<String>,
     #[serde(
         default,
-        rename = "family_attach_parent",
-        alias = "agent_session_attach_parent",
+        alias = "family_attach_parent",
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_session_attach_parent: Option<String>,
     #[serde(
         default,
-        rename = "family_attach_suffix",
-        alias = "agent_session_attach_suffix",
+        alias = "family_attach_suffix",
         skip_serializing_if = "Option::is_none"
     )]
     pub agent_session_attach_suffix: Option<String>,
@@ -386,9 +384,8 @@ impl AgentUnitWire {
             self.agent_session_attach_parent.as_deref(),
             self.agent_session_attach_suffix.as_deref(),
         ) {
-            // legacy agent-family spelling; flips in core-contract
             return Some(format!(
-                "%id({}, family={parent}{})",
+                "%id({}, session={parent}{})",
                 bang(suffix),
                 bead_suffix(true)
             ));

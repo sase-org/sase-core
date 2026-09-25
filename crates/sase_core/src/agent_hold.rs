@@ -22,7 +22,7 @@ use crate::store_lock::{
     StoreLockError,
 };
 
-pub const AGENT_HOLD_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_HOLD_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const AGENT_HOLD_STATE_FILENAME: &str = "agent_holds.json";
 pub const AGENT_HOLD_PRUNE_FILENAME: &str = "agent_holds.prune.json";
 pub const AGENT_HOLD_LOCK_FILENAME: &str = "agent_holds.lock";
@@ -61,12 +61,7 @@ pub struct AgentHoldArmerWire {
     pub project: String,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(
-        default,
-        rename = "family",
-        alias = "agent_session",
-        alias = "session"
-    )]
+    #[serde(default, alias = "family")]
     pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
@@ -92,12 +87,7 @@ pub struct AgentHoldSelectorsWire {
     pub artifact_dirs: Vec<String>,
     #[serde(default)]
     pub names: Vec<String>,
-    #[serde(
-        default,
-        rename = "families",
-        alias = "agent_sessions",
-        alias = "sessions"
-    )]
+    #[serde(default, alias = "families")]
     pub agent_sessions: Vec<String>,
     #[serde(default)]
     pub hoods: Vec<String>,
@@ -152,12 +142,7 @@ pub struct AgentHoldCaptureIdentityWire {
     pub artifact_dir: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(
-        default,
-        rename = "family",
-        alias = "agent_session",
-        alias = "session"
-    )]
+    #[serde(default, alias = "family")]
     pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
@@ -240,12 +225,7 @@ pub struct AgentHoldCandidateWire {
     pub agent_name: Option<String>,
     #[serde(default)]
     pub proc_shell: Option<String>,
-    #[serde(
-        default,
-        rename = "family",
-        alias = "agent_session",
-        alias = "session"
-    )]
+    #[serde(default, alias = "family")]
     pub agent_session: Option<String>,
     #[serde(default)]
     pub clan: Option<String>,
@@ -1335,10 +1315,9 @@ fn selector_matches(
         );
     }
     if let Some(agent_session) = candidate_agent_session(candidate).as_deref() {
-        // legacy agent-family spelling; flips in core-contract
         push_exact_matches(
             &mut matches,
-            "family",
+            "session",
             &selectors.agent_sessions,
             agent_session,
         );
@@ -2118,7 +2097,7 @@ mod tests {
             [
                 "artifact_dir",
                 "name",
-                "family",
+                "session",
                 "hood",
                 "clan",
                 "workflow",

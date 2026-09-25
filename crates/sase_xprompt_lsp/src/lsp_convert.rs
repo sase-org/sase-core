@@ -486,7 +486,6 @@ fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
         "hood" => CompletionItemKind::FOLDER,
         "tribe" => CompletionItemKind::ENUM_MEMBER,
         "clan" => CompletionItemKind::MODULE,
-        // legacy agent-family spelling; flips in core-contract
         "family" | "session" => CompletionItemKind::CLASS,
         "proc" => CompletionItemKind::FUNCTION,
         _ => CompletionItemKind::VALUE,
@@ -500,7 +499,6 @@ fn agent_completion_sort_group(kind: &str) -> u8 {
         "hood" => 1,
         "tribe" => 2,
         "clan" => 3,
-        // legacy agent-family spelling; flips in core-contract
         "family" | "session" => 4,
         "proc" => 6,
         _ => 5,

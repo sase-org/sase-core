@@ -118,5 +118,4 @@ fn placeholders(len: usize) -> String {
     std::iter::repeat_n("?", len).collect::<Vec<_>>().join(", ")
 }
 
-// legacy agent-family spelling; flips in core-contract
-pub(super) const AGENT_SESSION_INDEX_COLUMN: &str = "agent_family";
+pub(super) const AGENT_SESSION_INDEX_COLUMN: &str = "agent_session";

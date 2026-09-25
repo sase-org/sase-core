@@ -35,7 +35,10 @@ fn launch_request_round_trips_json_shape() {
     };
 
     let value = serde_json::to_value(&request).unwrap();
-    assert_eq!(value["schema_version"], json!(1));
+    assert_eq!(
+        value["schema_version"],
+        json!(AGENT_LAUNCH_WIRE_SCHEMA_VERSION)
+    );
     assert_eq!(value["extra_env"]["SASE_REPEAT_NAME"], json!("task.1"));
     let back: AgentLaunchRequestWire = serde_json::from_value(value).unwrap();
     assert_eq!(back, request);

@@ -120,7 +120,7 @@ fn runner_occupancy_handles_overlap_carry_in_waits_and_boundaries() {
     .unwrap();
     let runners = result.runners.as_ref().unwrap();
 
-    assert_eq!(result.schema_version, 6);
+    assert_eq!(result.schema_version, 7);
     assert_eq!(result.totals.runs, 4);
     assert_eq!(runners.start_ts, RUNNER_BASE as f64);
     assert_eq!(runners.end_ts, (RUNNER_BASE + 100) as f64);

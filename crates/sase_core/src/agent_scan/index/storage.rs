@@ -50,7 +50,7 @@ pub(super) fn open_index_with_busy_timeout(
             agent_clan_generation TEXT,
             clan_tribe TEXT,
             clan_summary TEXT,
-            agent_family TEXT,
+            agent_session TEXT,
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
             agent_type TEXT NOT NULL,
@@ -99,8 +99,8 @@ pub(super) fn open_index_with_busy_timeout(
             ON agent_artifacts(project_name, workflow_dir_name, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_workflow_name
             ON agent_artifacts(workflow_name, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_family
-            ON agent_artifacts(agent_family, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session
+            ON agent_artifacts(agent_session, timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_parent_timestamp
             ON agent_artifacts(project_name, workflow_dir_name, parent_timestamp);
         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_retry_of_timestamp

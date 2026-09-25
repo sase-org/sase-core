@@ -20,7 +20,7 @@ pub(super) const CANDIDATE_ROW_COLUMNS: &str =
     "artifact_dir, project_name, agent_type, \
      cl_name, model, llm_provider, source_machine, imported_owner_machine, \
      workflow_dir_name, has_done_marker, has_running_marker, \
-     has_workflow_state, agent_clan, agent_clan_generation, agent_family";
+     has_workflow_state, agent_clan, agent_clan_generation, agent_session";
 
 pub(super) fn indexed_candidate_row_from_sql(
     row: &rusqlite::Row<'_>,
@@ -276,7 +276,7 @@ pub(super) fn select_candidate_tree_keys(
     for chunk in artifact_dirs.chunks(LOAD_RECORDS_BATCH_SIZE) {
         let placeholders = placeholders(chunk.len());
         let sql = format!(
-            "SELECT timestamp, agent_family, agent_clan, parent_timestamp \
+            "SELECT timestamp, agent_session, agent_clan, parent_timestamp \
              FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;

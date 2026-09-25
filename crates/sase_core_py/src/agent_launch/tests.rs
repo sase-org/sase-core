@@ -61,7 +61,10 @@ fn hold_directive_bindings_collect_format_and_expand() {
         .unwrap();
         let selectors_value = py_to_json_value(selectors.bind(py)).unwrap();
         assert_eq!(selectors_value["names"], json!(["planner", "reviewer"]));
-        assert_eq!(selectors_value["families"], json!(["planner", "reviewer"]));
+        assert_eq!(
+            selectors_value["agent_sessions"],
+            json!(["planner", "reviewer"])
+        );
         assert_eq!(selectors_value["hoods"], json!(["sase-11l"]));
         assert_eq!(selectors_value["artifact_dirs"], json!(["artifact/a"]));
     });

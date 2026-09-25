@@ -217,20 +217,19 @@ const ID_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
-        // legacy agent-family spelling; flips in core-contract
-        name: "family",
-        description: "Attach this suffix to an existing agent session",
-        value_role: DirectiveValueRole::Session,
-        repeatable: false,
-        conflicts_with: &["clan", "session", "tribe"],
-        suggested_values: &[],
-    },
-    DirectiveKeywordSpec {
         name: "session",
         description: "Attach this suffix to an existing agent session",
         value_role: DirectiveValueRole::Session,
         repeatable: false,
         conflicts_with: &["clan", "family", "tribe"],
+        suggested_values: &[],
+    },
+    DirectiveKeywordSpec {
+        name: "family",
+        description: "Attach this suffix to an existing agent session",
+        value_role: DirectiveValueRole::Session,
+        repeatable: false,
+        conflicts_with: &["clan", "session", "tribe"],
         suggested_values: &[],
     },
     DirectiveKeywordSpec {

@@ -155,7 +155,7 @@ pub(crate) fn parse_id_directive(
         return parsed;
     }
 
-    // legacy agent-family spelling; flips in core-contract
+    // Legacy durable directives keep accepting `family=` while session is canonical.
     if let Some(legacy) = named.get("family") {
         if positional.len() != 1 {
             diagnostics.push(typed_unit_diagnostic(

@@ -264,9 +264,8 @@ fn agent_page_relpath(
         ArtifactLinkError::validation(format!("invalid agent name: {error}"))
     })?;
     if parsed.member_role.is_some() {
-        // legacy agent-family spelling; flips in core-contract
         Ok(PathBuf::from(format!(
-            "families/{}.md",
+            "sessions/{}.md",
             parsed.agent_session_name
         )))
     } else {

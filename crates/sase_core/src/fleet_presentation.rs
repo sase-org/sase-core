@@ -59,23 +59,20 @@ pub struct FleetPresentationCandidateWire {
     /// resolved by the caller through the bounded core index lineage API.
     /// A resolved owner dismissal excludes the candidate regardless of
     /// protection or apparent liveness.
-    #[serde(
-        rename = "family_root_dismissed",
-        alias = "agent_session_root_dismissed"
-    )]
+    #[serde(alias = "family_root_dismissed")]
     pub agent_session_root_dismissed: bool,
     /// Whether this candidate is a concrete agent session shell rather than a
     /// agent session root. Live and unknown members stay current. Pending
     /// (protected) dead members stay current. Other dead members of a
     /// presented agent sessions are served in the bounded terminal window so the
     /// viewer can nest them.
-    #[serde(default, rename = "family_member", alias = "agent_session_member")]
+    #[serde(default, alias = "family_member")]
     pub agent_session_member: bool,
     /// Grouping key for "currently presented agent session". An agent session is
     /// presented when a root or a live/unknown/pending member is already
     /// current, or a non-member terminal or an anchored terminal shell of
     /// the same key is inside the recent window.
-    #[serde(default, rename = "family_key", alias = "agent_session_key")]
+    #[serde(default, alias = "family_key")]
     pub agent_session_key: Option<String>,
     /// Whether this concrete shell carries no tracked parent, making it the
     /// agent session's own origin record. Modern plan-chain agent sessions have no
@@ -83,7 +80,7 @@ pub struct FleetPresentationCandidateWire {
     /// record and every later shell points back at it. A terminal anchor
     /// inside the recent window presents its agent session; a shell whose parent
     /// no record supplies is an orphan and never does.
-    #[serde(default, rename = "family_anchor", alias = "agent_session_anchor")]
+    #[serde(default, alias = "family_anchor")]
     pub agent_session_anchor: bool,
     /// Owner observation that the recorded PID is live but is not this
     /// agent (wrong command line or claim/marker mismatch). Such a row is

@@ -154,7 +154,7 @@ pub(crate) fn normalized_owner_facts(
         }
     }
     if let Some(agent_session_id) = &facts.agent_session_id {
-        validate_identifier("family_id", agent_session_id)?;
+        validate_identifier("agent_session_id", agent_session_id)?;
     }
     if let Some(parent_timestamp) = &facts.parent_timestamp {
         validate_identifier("parent_timestamp", parent_timestamp)?;

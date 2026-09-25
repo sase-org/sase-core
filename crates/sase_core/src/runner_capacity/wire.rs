@@ -4,7 +4,7 @@ use crate::agent_hold::AgentHoldRecordWire;
 
 use crate::queue_directive::resolve_queue_capacity;
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 5;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 6;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,36 +65,19 @@ pub struct RunnerCapacityRecordWire {
     pub run_started_at: Option<String>,
     #[serde(default)]
     pub parent_timestamp: Option<String>,
-    #[serde(default, rename = "agent_family", alias = "agent_session")]
+    #[serde(default)]
     pub agent_session: Option<String>,
-    #[serde(
-        default,
-        rename = "agent_family_role",
-        alias = "agent_session_role"
-    )]
+    #[serde(default)]
     pub agent_session_role: Option<String>,
-    // legacy agent-family spelling; flips in core-contract
-    #[serde(default, rename = "agent_family_parallel")]
+    #[serde(default, alias = "agent_family_parallel")]
     pub agent_session_parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_claim_owner_key: Option<String>,
-    #[serde(
-        default,
-        rename = "family_shell_kind",
-        alias = "agent_session_shell_kind"
-    )]
+    #[serde(default)]
     pub agent_session_shell_kind: Option<String>,
-    #[serde(
-        default,
-        rename = "family_shell_id",
-        alias = "agent_session_shell_id"
-    )]
+    #[serde(default)]
     pub agent_session_shell_id: Option<String>,
-    #[serde(
-        default,
-        rename = "family_shell_state",
-        alias = "agent_session_shell_state"
-    )]
+    #[serde(default)]
     pub agent_session_shell_state: Option<String>,
     #[serde(default)]
     pub queue_weight: Option<f64>,

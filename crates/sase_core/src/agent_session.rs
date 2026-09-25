@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionParentCandidateWire {

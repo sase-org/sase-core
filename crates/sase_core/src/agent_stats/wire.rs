@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 6;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 7;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -30,7 +30,7 @@ fn default_xprompt_breakdown_n() -> u32 {
 pub enum AgentStatsRuntimeGroupByWire {
     Tribe,
     Clan,
-    #[serde(rename = "family", alias = "session")]
+    #[serde(rename = "session", alias = "family")]
     Session,
     #[default]
     Agent,
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_group_by_session_accepts_both_spellings_but_emits_legacy() {
+    fn runtime_group_by_session_accepts_legacy_spelling_but_emits_canonical() {
         let legacy: AgentStatsRuntimeGroupByWire =
             serde_json::from_value(serde_json::json!("family")).unwrap();
         let new: AgentStatsRuntimeGroupByWire =
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(new, AgentStatsRuntimeGroupByWire::Session);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("family")
+            serde_json::json!("session")
         );
     }
 

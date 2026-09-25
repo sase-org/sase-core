@@ -1,7 +1,7 @@
 use crate::agent_scan::wire::{AgentArtifactRecordShapeWire, UsedXPromptWire};
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 32;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 33;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -132,7 +132,7 @@ pub enum AgentArtifactIndexFreshnessWire {
 
 /// Scalar fields that can be tested before `record_json` is decoded.
 ///
-/// `AgentSession` reads the indexed `agent_family` column, which stores
+/// `AgentSession` reads the indexed `agent_session` column, which stores
 /// `agent_meta.agent_session`. Matching is case-insensitive like every other
 /// `Equals` field, so a caller that needs an exact lane match re-checks the
 /// hydrated record.

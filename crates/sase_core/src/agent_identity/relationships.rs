@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
-pub const AGENT_RELATIONSHIP_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_RELATIONSHIP_SCHEMA_VERSION: u32 = 3;
 
 const MAX_RUNS: usize = 4_096;
 const MAX_CONTAINERS: usize = 2_048;
@@ -45,7 +45,7 @@ pub struct AgentRunWire {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AgentContainerKind {
-    #[serde(rename = "family", alias = "session")]
+    #[serde(rename = "session", alias = "family")]
     Session,
     Clan,
 }
@@ -53,8 +53,7 @@ pub enum AgentContainerKind {
 impl AgentContainerKind {
     const fn as_str(self) -> &'static str {
         match self {
-            // legacy agent-family spelling; flips in core-contract
-            Self::Session => "family",
+            Self::Session => "session",
             Self::Clan => "clan",
         }
     }
@@ -1506,12 +1505,12 @@ mod tests {
     fn valid_mixed_batch_returns_canonical_summary() {
         let summary =
             validate_agent_relationship_batch(&valid_batch()).unwrap();
-        assert_eq!(summary.schema_version, 2);
+        assert_eq!(summary.schema_version, 3);
         assert_eq!(summary.run_count, 4);
         assert_eq!(summary.run_order, ["run-1", "run-2", "run-3", "run-4"]);
         assert_eq!(
             summary.container_order,
-            ["clan:alice.athena.work", "family:alice.athena.foo"]
+            ["clan:alice.athena.work", "session:alice.athena.foo"]
         );
         assert_eq!(summary.relationship_order.len(), 4);
     }
@@ -1541,12 +1540,12 @@ mod tests {
         assert_eq!(summary.run_count, 2);
         assert_eq!(
             summary.container_order,
-            ["family:alice.athena.fi--code.f0"]
+            ["session:alice.athena.fi--code.f0"]
         );
     }
 
     #[test]
-    fn container_kind_accepts_session_and_serializes_family() {
+    fn container_kind_accepts_legacy_family_and_serializes_session() {
         let legacy: AgentRunContainerWire =
             serde_json::from_value(serde_json::json!({
                 "kind": "family",
@@ -1567,7 +1566,7 @@ mod tests {
         assert_eq!(legacy.kind, AgentContainerKind::Session);
         assert_eq!(
             serde_json::to_value(&legacy).unwrap()["kind"],
-            serde_json::json!("family"),
+            serde_json::json!("session"),
         );
     }
 

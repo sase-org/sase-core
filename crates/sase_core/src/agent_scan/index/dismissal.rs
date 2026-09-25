@@ -191,7 +191,7 @@ pub(super) fn select_dismissal_reconcile_candidates(
         WHERE hidden = 0
           AND (
               parent_timestamp IS NOT NULL
-              OR agent_family IS NOT NULL
+              OR agent_session IS NOT NULL
               OR retry_of_timestamp IS NOT NULL
               OR retry_chain_root_timestamp IS NOT NULL
           )
@@ -379,7 +379,7 @@ pub(super) fn select_dismissal_reconcile_snapshot(
                 workflow_dir_name,
                 timestamp,
                 record_json,
-                agent_family,
+                agent_session,
                 parent_timestamp,
                 retry_of_timestamp,
                 retried_as_timestamp,
@@ -395,7 +395,7 @@ pub(super) fn select_dismissal_reconcile_snapshot(
             WHERE hidden = 0
               AND (
                   parent_timestamp IS NOT NULL
-                  OR agent_family IS NOT NULL
+                  OR agent_session IS NOT NULL
                   OR retry_of_timestamp IS NOT NULL
                   OR retry_chain_root_timestamp IS NOT NULL
               )
@@ -408,7 +408,7 @@ pub(super) fn select_dismissal_reconcile_snapshot(
             timestamp,
             record_json,
             artifact_dir,
-            agent_family,
+            agent_session,
             parent_timestamp,
             retry_of_timestamp,
             retried_as_timestamp,
@@ -429,7 +429,7 @@ pub(super) fn select_dismissal_reconcile_snapshot(
             a.timestamp,
             NULL,
             a.artifact_dir,
-            a.agent_family,
+            a.agent_session,
             a.parent_timestamp,
             a.retry_of_timestamp,
             a.retried_as_timestamp,

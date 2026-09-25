@@ -29,7 +29,7 @@ fn scan_agent_artifacts_binding_preserves_canonical_and_legacy_capacity() {
             py_scan_agent_artifacts(py, root.to_string_lossy().as_ref(), None)
                 .unwrap();
         let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
-        assert_eq!(snapshot["schema_version"], json!(9));
+        assert_eq!(snapshot["schema_version"], json!(10));
         let record = &snapshot["records"][0];
         assert_eq!(record["agent_meta"]["queue_capacity"], json!(100));
         assert_eq!(
@@ -114,7 +114,7 @@ fn agent_stats_binding_round_trips_python_dict() {
             py_agent_stats_query_runs(py, index.to_str().unwrap(), request)
                 .unwrap();
         let result = py_to_json_value(result.bind(py)).unwrap();
-        assert_eq!(result["schema_version"], json!(6));
+        assert_eq!(result["schema_version"], json!(7));
         assert_eq!(result["totals"]["runs"], json!(1));
         assert_eq!(result["totals"]["completed"], json!(1));
         assert_eq!(result["commits"]["committing_runs"], json!(1));
@@ -464,7 +464,7 @@ fn agent_activity_stats_binding_round_trips_python_dict() {
         )
         .unwrap();
         let result = py_to_json_value(result.bind(py)).unwrap();
-        assert_eq!(result["schema_version"], json!(6));
+        assert_eq!(result["schema_version"], json!(7));
         assert_eq!(result["skills"][0]["name"], json!("review"));
         assert_eq!(result["skills"][0]["distinct_agents"], json!(1));
         assert_eq!(result["questions"]["sessions"], json!(1));
@@ -477,7 +477,7 @@ fn agent_activity_stats_binding_round_trips_python_dict() {
 }
 
 #[test]
-fn reconcile_dismissed_members_bindings_agree_across_spellings() {
+fn reconcile_dismissed_members_binding_is_canonical_only() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let temp = tempfile::tempdir().unwrap();
@@ -498,14 +498,7 @@ fn reconcile_dismissed_members_bindings_agree_across_spellings() {
                 py, &index_str, true,
             )
             .unwrap();
-        let legacy =
-            py_reconcile_agent_artifact_index_dismissed_family_members(
-                py, &index_str, true,
-            )
-            .unwrap();
         let new_value = py_to_json_value(new.bind(py)).unwrap();
-        let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
-        assert_eq!(new_value, legacy_value);
         assert_eq!(new_value["dry_run"], json!(true));
     });
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::content_layout::MemoryTierWire;
 use crate::project_tag::ProjectTagTargetWire;
 
-pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EditorPosition {
@@ -506,7 +506,7 @@ pub enum DirectiveValueRole {
     ModelAliasKey,
     Agent,
     Clan,
-    #[serde(rename = "family", alias = "session")]
+    #[serde(rename = "session", alias = "family")]
     Session,
     Tribe,
     Hood,

@@ -6,8 +6,7 @@ use super::wire::{
     RunnerCapacityRecordWire,
 };
 
-// legacy agent-family spelling; flips in core-contract
-const SERIAL_AGENT_SESSION_CLAIM_KIND: &str = "serial_family";
+const SERIAL_AGENT_SESSION_CLAIM_KIND: &str = "serial_session";
 
 #[derive(Debug, Clone)]
 pub(super) struct ClaimLineage {

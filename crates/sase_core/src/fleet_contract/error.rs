@@ -8,13 +8,13 @@ use thiserror::Error;
 /// This is independent of the hello envelope schema, the capability-set
 /// schema, and the fleet protocol version. Gateways advertise it as
 /// `fleet_contract_schema_version` on hello; older hellos omit the field.
-pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 5;
+pub const FLEET_CONTRACT_SCHEMA_VERSION: u32 = 6;
 
 pub(crate) const FLEET_CONTRACT_MIN_READABLE_SCHEMA_VERSION: u32 = 1;
 
 /// Current fleet protocol version advertised by gateways and required by
 /// viewers. Discovery compatibility is derived from this constant.
-pub const FLEET_PROTOCOL_VERSION: u32 = 1;
+pub const FLEET_PROTOCOL_VERSION: u32 = 2;
 
 /// Current persisted installation-identity file schema.
 pub const FLEET_INSTALLATION_IDENTITY_SCHEMA_VERSION: u32 = 1;

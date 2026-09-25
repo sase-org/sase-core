@@ -491,7 +491,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         )
         .is_err());
         assert!(py_parse_queue_capacity("true", None).is_err());
-        assert_eq!(py_runner_capacity_policy_schema_version(), 5);
+        assert_eq!(py_runner_capacity_policy_schema_version(), 6);
         let on_contract = py_directive_contract(
             py,
             Some(vec!["queue_capacity_budget".to_string()]),
@@ -574,7 +574,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         let capacity =
             py_runner_capacity_snapshot(py, capacity_request.bind(py)).unwrap();
         let capacity = py_to_json_value(capacity.bind(py)).unwrap();
-        assert_eq!(capacity["schema_version"], json!(5));
+        assert_eq!(capacity["schema_version"], json!(6));
         assert_eq!(capacity["occupied_capacity"], json!(0.75));
         assert_eq!(
             capacity["first_eligible_artifact_dir"],
@@ -589,7 +589,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
                         "artifact_dir": "/tmp/root",
                         "project_name": "proj",
                         "timestamp": "root",
-                        "agent_family": "fam",
+                        "agent_session": "fam",
                         "run_started_at": "2026-09-10T00:00:00Z",
                         "queue_weight": 2.0
                     }
@@ -599,7 +599,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
                     "project_name": "proj",
                     "timestamp": "successor",
                     "parent_timestamp": "root",
-                    "agent_family": "fam",
+                    "agent_session": "fam",
                     "slot_requested_at": "2026-09-10T00:00:01Z"
                 }
             }),
@@ -633,14 +633,14 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             &json!({
                 "effective_limit": 1.0,
                 "holds": [{
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "armer": {
                         "kind": "agent",
                         "key": "agent:hold",
                         "display": "Hold Agent",
                         "project": "proj",
                         "agent_name": "holder.agent--code",
-                        "family": "holder.agent",
+                        "agent_session": "holder.agent",
                         "pid": 123
                     },
                     "scope": {"kind": "project", "project": "proj"},

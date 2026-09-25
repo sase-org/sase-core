@@ -307,18 +307,18 @@ fn contract_covers_the_audited_directive_matrix() {
                 ],
             ),
             (
-                "family",
-                vec![
-                    "clan".to_string(),
-                    "session".to_string(),
-                    "tribe".to_string(),
-                ],
-            ),
-            (
                 "session",
                 vec![
                     "clan".to_string(),
                     "family".to_string(),
+                    "tribe".to_string(),
+                ],
+            ),
+            (
+                "family",
+                vec![
+                    "clan".to_string(),
+                    "session".to_string(),
                     "tribe".to_string(),
                 ],
             ),
@@ -476,7 +476,7 @@ fn legacy_family_keyword_stays_in_contract_but_unsuggested() {
         .iter()
         .map(|keyword| keyword.name.as_str())
         .collect();
-    assert_eq!(keywords, ["bead", "clan", "family", "session", "tribe"]);
+    assert_eq!(keywords, ["bead", "clan", "session", "family", "tribe"]);
 
     let id_candidates = directive_argument_candidates("id");
     let suggested: Vec<&str> = id_candidates

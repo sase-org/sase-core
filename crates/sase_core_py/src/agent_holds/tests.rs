@@ -10,7 +10,7 @@ fn agent_hold_bindings_round_trip_and_predicate() {
     let home = temp.path().to_string_lossy();
     let now = 1_800_000_000.0;
     Python::with_gil(|py| {
-        assert_eq!(py_agent_hold_wire_schema_version(), 1);
+        assert_eq!(py_agent_hold_wire_schema_version(), 2);
         let armer_obj = json_value_to_py(
             py,
             &json!({
@@ -125,7 +125,7 @@ fn agent_hold_bindings_round_trip_and_predicate() {
             [
                 "artifact_dir",
                 "name",
-                "family",
+                "session",
                 "hood",
                 "clan",
                 "workflow",
@@ -479,7 +479,7 @@ fn agent_hold_bindings_map_validation_and_lock_errors() {
 }
 
 #[test]
-fn agent_hold_bindings_accept_new_spellings_and_serialize_legacy() {
+fn agent_hold_bindings_accept_legacy_spellings_and_serialize_canonical() {
     pyo3::prepare_freethreaded_python();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().to_string_lossy();
@@ -509,7 +509,7 @@ fn agent_hold_bindings_accept_new_spellings_and_serialize_legacy() {
             py,
             &json!({
                 "artifact_dirs": ["artifact/a"],
-                "sessions": ["target.agent"],
+                "agent_sessions": ["target.agent"],
                 "future": false
             }),
         )
@@ -528,12 +528,12 @@ fn agent_hold_bindings_accept_new_spellings_and_serialize_legacy() {
         )
         .unwrap();
         let record_value = py_to_json_value(record.bind(py)).unwrap();
-        assert_eq!(record_value["armer"]["family"], json!("hold.agent"));
-        assert!(record_value["armer"].get("agent_session").is_none());
+        assert_eq!(record_value["armer"]["agent_session"], json!("hold.agent"));
+        assert!(record_value["armer"].get("family").is_none());
         assert_eq!(
-            record_value["selectors"]["families"],
+            record_value["selectors"]["agent_sessions"],
             json!(["target.agent"])
         );
-        assert!(record_value["selectors"].get("sessions").is_none());
+        assert!(record_value["selectors"].get("families").is_none());
     });
 }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_GROUP_ARCHIVE_WIRE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAgentGroupRefWire {
@@ -62,11 +62,7 @@ pub struct SavedAgentGroupWire {
     pub revived_at: Option<String>,
     #[serde(default)]
     pub times_revived: i64,
-    #[serde(
-        default,
-        rename = "canonical_global_family",
-        alias = "canonical_global_agent_session"
-    )]
+    #[serde(default, alias = "canonical_global_family")]
     pub canonical_global_agent_session: Option<String>,
     #[serde(default)]
     pub source_snapshot_digest: Option<String>,

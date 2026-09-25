@@ -612,13 +612,13 @@ fn fleet_issue_bootstrap_binding_delegates_to_store_without_persisting_secret()
     Python::with_gil(|py| {
         let home = tempfile::tempdir().unwrap();
         let request = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "requested_scopes": [
                 " fleet.summary.read ",
                 "fleet.hello",
                 "fleet.hello"
             ],
-            "supported_protocol_versions": [99, 1],
+            "supported_protocol_versions": [99, 2],
             "expires_at_unix": null,
             "installation_pin": null
         });
@@ -676,9 +676,9 @@ fn fleet_issue_bootstrap_binding_delegates_to_store_without_persisting_secret()
         assert!(stored.contains("secret_hash"));
 
         let pinned_request = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "requested_scopes": [],
-            "supported_protocol_versions": [1],
+            "supported_protocol_versions": [2],
             "expires_at_unix": null,
             "installation_pin": "not-the-current-installation"
         });
@@ -704,13 +704,12 @@ fn fleet_followed_batch_agent_session_promotions_round_trip_json_shapes() {
     Python::with_gil(|py| {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         sase_core_rs(py, &module).unwrap();
-        for name in [
-            "fleet_followed_batch_agent_session_promotions",
-            // legacy binding name; removed in core-contract
-            "fleet_followed_batch_family_promotions",
-        ] {
-            assert!(module.getattr(name).is_ok(), "missing {name}");
-        }
+        assert!(module
+            .getattr("fleet_followed_batch_agent_session_promotions")
+            .is_ok());
+        assert!(module
+            .getattr("fleet_followed_batch_family_promotions")
+            .is_err());
 
         let installation_id = format!("sase_inst_v1_{}", "a".repeat(64));
         let locator = |agent_session_id: Option<&str>| {
@@ -725,11 +724,11 @@ fn fleet_followed_batch_agent_session_promotions_round_trip_json_shapes() {
                     "project_id": "project-1",
                 },
                 "agent_id": "worker",
-                "family_id": agent_session_id,
+                "agent_session_id": agent_session_id,
             })
         };
         let singleton = locator(None);
-        let agent_session = locator(Some("family-1"));
+        let agent_session = locator(Some("session-1"));
         let singleton_key: String = module
             .getattr("fleet_logical_locator_key")
             .unwrap()
@@ -761,19 +760,12 @@ fn fleet_followed_batch_agent_session_promotions_round_trip_json_shapes() {
             }),
         )
         .unwrap();
-        let legacy_result = module
-            .getattr("fleet_followed_batch_family_promotions")
-            .unwrap()
-            .call1((request.bind(py).downcast::<PyDict>().unwrap(),))
-            .unwrap();
-        let legacy_result = py_to_json_value(&legacy_result).unwrap();
         let result = module
             .getattr("fleet_followed_batch_agent_session_promotions")
             .unwrap()
             .call1((request.bind(py).downcast::<PyDict>().unwrap(),))
             .unwrap();
         let result = py_to_json_value(&result).unwrap();
-        assert_eq!(result, legacy_result);
         assert_eq!(
             result["schema_version"],
             json!(core_fleet_contract::FLEET_CONTRACT_SCHEMA_VERSION)
@@ -781,7 +773,7 @@ fn fleet_followed_batch_agent_session_promotions_round_trip_json_shapes() {
         assert_eq!(result["promotions"][0]["from"], singleton);
         assert_eq!(result["promotions"][0]["to"], agent_session);
 
-        let other_agent_session = locator(Some("family-2"));
+        let other_agent_session = locator(Some("session-2"));
         let ambiguous = json_value_to_py(
             py,
             &json!({

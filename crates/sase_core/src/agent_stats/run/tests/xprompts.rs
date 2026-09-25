@@ -112,7 +112,7 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
     focused_request.xprompt_breakdown_top_n = 1;
     focused_request.xprompt_focus = Some("gh".to_string());
     let result = query_run_stats(&index, focused_request).unwrap();
-    assert_eq!(result.schema_version, 6);
+    assert_eq!(result.schema_version, 7);
     let xprompts = result.xprompts.as_ref().unwrap();
     assert_eq!(xprompts.runs_with_xprompts, 3);
     assert_eq!(xprompts.runs_without_xprompts, 1);
