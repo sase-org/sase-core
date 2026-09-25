@@ -120,7 +120,7 @@ pub fn queue_capacity_as_u32(value: Option<i64>) -> Option<u32> {
 
 /// Shared persisted-zero translation for admission and continuation resume.
 ///
-/// Newly authored zero remains a parse error when the budget flag is on.
+/// Newly authored zero capacity remains a parse error when the budget flag is on.
 /// A persisted explicit zero becomes an exact effective-weight drain budget
 /// rather than a rounded integer or a silent fall-back to the global limit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,7 +331,7 @@ pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
         parts.push(format!("priority={priority}"));
     }
     if let Some(weight) = fields.weight {
-        if queue_weight_is_valid(weight) {
+        if authored_queue_weight_is_valid(weight) {
             parts.push(format!("weight={}", format_queue_weight(weight)));
         }
     }
@@ -346,8 +346,20 @@ pub fn queue_weight_is_valid(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
+/// Return whether a weight is valid after it has been authored explicitly.
+///
+/// Capacity limits retain the stricter [`queue_weight_is_valid`] contract:
+/// unlike a launch weight, a zero capacity limit is never meaningful.
+pub fn authored_queue_weight_is_valid(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
 pub fn format_queue_weight(value: f64) -> String {
-    value.to_string()
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Validate a capacity threshold string through the same contract as
@@ -650,16 +662,39 @@ fn parse_weight(
     raw: &str,
     span: Option<[usize; 2]>,
 ) -> Result<f64, QueueParseErrorWire> {
-    if raw.is_empty() {
+    if raw.is_empty() || raw.starts_with('-') {
         return Err(weight_error(span));
     }
     let Ok(parsed) = raw.parse::<f64>() else {
         return Err(weight_error(span));
     };
+    if parsed == 0.0 {
+        if zero_weight_literal_is_valid(raw) {
+            return Ok(0.0);
+        }
+        return Err(weight_error(span));
+    }
     if !queue_weight_is_valid(parsed) {
         return Err(weight_error(span));
     }
     Ok(parsed)
+}
+
+/// Distinguish a literal zero from a nonzero literal that underflowed to zero.
+/// `f64` parsing intentionally happens first so this helper only validates the
+/// significand of an already-valid float spelling.
+fn zero_weight_literal_is_valid(raw: &str) -> bool {
+    let raw = raw.strip_prefix('+').unwrap_or(raw);
+    let mantissa = raw.split(['e', 'E']).next().unwrap_or_default();
+    let mut saw_digit = false;
+    for character in mantissa.chars() {
+        match character {
+            '0' => saw_digit = true,
+            '.' => {}
+            _ => return false,
+        }
+    }
+    saw_digit
 }
 
 enum InvalidInt {
@@ -758,7 +793,7 @@ fn invalid_capacity_zero_error(
 fn weight_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "invalid-queue-weight",
-        "%queue(weight=...) requires a positive finite base-10 float; zero, negative, NaN, infinity, overflow, underflow-to-zero, boolean, empty, and nonnumeric values are rejected.",
+        "%queue(weight=...) requires a non-negative finite base-10 float; negative, NaN, infinity, overflow, underflow-to-zero, boolean, empty, and nonnumeric values are rejected. Use weight=0 for a launch that adds no runner load.",
         span,
     )
 }
@@ -1230,10 +1265,51 @@ mod tests {
     }
 
     #[test]
+    fn accepts_exact_zero_weight_literals_with_or_without_capacity_budget() {
+        for flags in [Vec::new(), capacity_budget_flags()] {
+            for value in ["0", "0.0", ".0", "0.", "+0", "0e5"] {
+                let result = collect_queue_fields_with_flags(
+                    &[occ("%q(w=value)", vec![named("w", value)])],
+                    &flags,
+                );
+                assert!(result.errors.is_empty(), "{value}: {result:?}");
+                let fields = result.fields.expect("zero weight fields");
+                let weight = fields.weight.expect("explicit zero weight");
+                assert_eq!(weight, 0.0, "{value}");
+                assert!(!weight.is_sign_negative(), "{value}");
+                assert_eq!(
+                    format_queue_directive(&fields).as_deref(),
+                    Some("%queue(weight=0)"),
+                    "{value}"
+                );
+            }
+        }
+
+        let fields = collect_queue_fields_with_flags(
+            &[occ("%q(1, w=0)", vec![positional("1"), named("w", "0")])],
+            &capacity_budget_flags(),
+        )
+        .fields
+        .expect("zero weight is within a positive capacity budget");
+        assert_eq!(fields.queue_capacity, Some(1));
+        assert_eq!(fields.weight, Some(0.0));
+        assert_eq!(format_queue_weight(0.0), "0");
+        assert_eq!(format_queue_weight(-0.0), "0");
+        assert_eq!(
+            format_queue_directive(&QueueFieldsWire {
+                weight: Some(-0.0),
+                ..QueueFieldsWire::default()
+            })
+            .as_deref(),
+            Some("%queue(weight=0)")
+        );
+    }
+
+    #[test]
     fn rejects_invalid_weight_values() {
         for value in [
-            "", "0", "-0", "-0.0", "-1", "true", "false", "many", "NaN", "inf",
-            "Infinity", "1e309", "1e-324",
+            "", "-0", "-0.0", "-0e0", "-1", "true", "false", "many", "NaN",
+            "inf", "Infinity", "1e309", "1e-324", "0e-400x",
         ] {
             let weight = occ("%q(w=x)", vec![named("w", value)]);
             assert_eq!(
@@ -1307,5 +1383,10 @@ mod tests {
         assert_eq!(off.admission_limit, 8.0);
         assert_eq!(off.reauthor_capacity, Some(0));
         assert!(!off.legacy_zero);
+
+        let zero_weight =
+            normalize_persisted_queue_capacity(Some(0), true, 0.0, 8.0, true);
+        assert_eq!(zero_weight.admission_limit, 0.0);
+        assert!(zero_weight.legacy_zero);
     }
 }

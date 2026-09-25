@@ -41,7 +41,9 @@ use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
     read_project_lifecycle_from_content, ProjectLifecycleState,
 };
-use crate::queue_directive::queue_weight_is_valid;
+use crate::queue_directive::{
+    authored_queue_weight_is_valid, queue_weight_is_valid,
+};
 
 const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 const USED_XPROMPTS_FILE: &str = "xprompts.json";
@@ -912,7 +914,7 @@ fn coerce_queue_weight(
 /// weight contract in `queue_weight_is_valid`.
 fn marker_queue_weight_is_valid(weight: f64, explicit: bool) -> bool {
     if explicit {
-        weight.is_finite() && weight >= 0.0
+        authored_queue_weight_is_valid(weight)
     } else {
         queue_weight_is_valid(weight)
     }

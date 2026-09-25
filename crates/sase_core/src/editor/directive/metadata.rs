@@ -149,6 +149,10 @@ const WAIT_PRIORITY_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
 
 const QUEUE_WEIGHT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
+        value: "0",
+        documentation: "No load: runs without counting toward capacity",
+    },
+    DirectiveSuggestedValue {
         value: "0.25",
         documentation: "Quarter capacity unit",
     },
@@ -411,16 +415,16 @@ const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
     },
     DirectiveKeywordSpec {
         name: "w",
-        description: "Alias for weight=; positive capacity units",
-        value_role: DirectiveValueRole::PositiveFloat,
+        description: "Alias for weight=; non-negative capacity units claimed by this launch; 0 adds no load",
+        value_role: DirectiveValueRole::NonNegativeFloat,
         repeatable: false,
         conflicts_with: &["weight"],
         suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
     },
     DirectiveKeywordSpec {
         name: "weight",
-        description: "Positive capacity units claimed by this launch",
-        value_role: DirectiveValueRole::PositiveFloat,
+        description: "Non-negative capacity units claimed by this launch; 0 adds no load",
+        value_role: DirectiveValueRole::NonNegativeFloat,
         repeatable: false,
         conflicts_with: &["w"],
         suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
@@ -484,16 +488,16 @@ const QUEUE_BUDGET_KEYWORDS: &[DirectiveKeywordSpec] = &[
     },
     DirectiveKeywordSpec {
         name: "w",
-        description: "Alias for weight=; positive capacity units",
-        value_role: DirectiveValueRole::PositiveFloat,
+        description: "Alias for weight=; non-negative capacity units claimed by this launch; 0 adds no load",
+        value_role: DirectiveValueRole::NonNegativeFloat,
         repeatable: false,
         conflicts_with: &["weight"],
         suggested_values: QUEUE_WEIGHT_SUGGESTIONS,
     },
     DirectiveKeywordSpec {
         name: "weight",
-        description: "Positive capacity units claimed by this launch",
-        value_role: DirectiveValueRole::PositiveFloat,
+        description: "Non-negative capacity units claimed by this launch; 0 adds no load",
+        value_role: DirectiveValueRole::NonNegativeFloat,
         repeatable: false,
         conflicts_with: &["w"],
         suggested_values: QUEUE_WEIGHT_SUGGESTIONS,

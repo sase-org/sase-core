@@ -29,7 +29,8 @@ use crate::agent_scan::{
     AgentArtifactRecordWire, AgentMetaWire, DoneMarkerWire, RunningMarkerWire,
 };
 use crate::queue_directive::{
-    queue_capacity_as_u32, queue_weight_is_valid, resolve_queue_capacity,
+    authored_queue_weight_is_valid, queue_capacity_as_u32,
+    queue_weight_is_valid, resolve_queue_capacity,
 };
 use std::collections::BTreeSet;
 
@@ -573,7 +574,7 @@ pub(crate) fn queue_weight_for_record(
 /// strictly-positive `%queue`/`%q` weight contract in `queue_weight_is_valid`.
 pub(crate) fn fleet_queue_weight_is_valid(weight: f64, explicit: bool) -> bool {
     if explicit {
-        weight.is_finite() && weight >= 0.0
+        authored_queue_weight_is_valid(weight)
     } else {
         queue_weight_is_valid(weight)
     }

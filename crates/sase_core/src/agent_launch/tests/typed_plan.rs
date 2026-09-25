@@ -831,6 +831,25 @@ fn typed_launch_parses_queue_spellings_and_round_trips() {
 }
 
 #[test]
+fn typed_launch_parses_explicit_zero_queue_weight() {
+    let plan = plan_queue("%q(w=0)\nDo work");
+    let (runners, priority, weight, weight_explicit, cleaned) =
+        agent_fields(&plan);
+    assert_eq!(runners, None);
+    assert_eq!(priority, None);
+    assert_eq!(weight, Some(0.0));
+    assert!(weight_explicit);
+    assert_eq!(cleaned, "Do work");
+    assert_eq!(
+        crate::agent_unit_dispatch_prompt(match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => agent,
+            other => panic!("expected agent payload, got {other:?}"),
+        }),
+        "%queue(weight=0)\nDo work"
+    );
+}
+
+#[test]
 fn typed_launch_rejects_wait_queue_keywords() {
     let runners = plan_queue_err("%wait(runners=5)\nDo work");
     assert!(runners.to_string().contains("%queue(capacity="));

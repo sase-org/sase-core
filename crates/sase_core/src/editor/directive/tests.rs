@@ -135,6 +135,20 @@ fn contract_covers_the_audited_directive_matrix() {
             .map(|keyword| keyword.conflicts_with.clone()),
         Some(vec!["weight".to_string()])
     );
+    for queue in [queue, &on_queue] {
+        for keyword in queue
+            .keywords
+            .iter()
+            .filter(|keyword| matches!(keyword.name.as_str(), "w" | "weight"))
+        {
+            assert_eq!(
+                keyword.value_role,
+                DirectiveValueRole::NonNegativeFloat
+            );
+            assert_eq!(keyword.suggested_values[0].value, "0");
+            assert!(keyword.description.contains("0 adds no load"));
+        }
+    }
     assert_eq!(
         queue
             .keywords
@@ -1127,7 +1141,7 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
         queue_insertions("%q(w=0.25, "),
         ["capacity=", "p=", "priority=", "0", "1"]
     );
-    assert_eq!(queue_insertions("%q(weight="), ["0.25", "1.0", "2.0"]);
+    assert_eq!(queue_insertions("%q(weight="), ["0", "0.25", "1.0", "2.0"]);
     assert!(queue_insertions("%q(")
         .iter()
         .all(|value| value != "planner" && value != "builders"));

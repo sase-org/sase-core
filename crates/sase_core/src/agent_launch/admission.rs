@@ -1149,6 +1149,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_dispatch_prompt_round_trips_explicit_zero_weight() {
+        let prompt = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review".to_string(),
+            queue_weight: Some(0.0),
+            queue_weight_explicit: true,
+            ..Default::default()
+        });
+        assert_eq!(prompt, "%queue(weight=0)\nReview");
+    }
+
+    #[test]
     fn agent_dispatch_prompt_restores_clan_declaration_and_join() {
         let declaration = agent_unit_dispatch_prompt(&AgentUnitWire {
             prompt: "Lead the split".to_string(),

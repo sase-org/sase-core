@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::queue_directive::{
-    queue_capacity_as_u32, queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+    authored_queue_weight_is_valid, queue_capacity_as_u32,
+    queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
 };
 
 use super::claims::claim_lineage;
@@ -127,7 +128,7 @@ pub(super) fn effective_weight(
 /// strictly-positive `%queue`/`%q` weight contract in `queue_weight_is_valid`.
 fn record_weight_is_valid(weight: f64, explicit: bool) -> bool {
     if explicit {
-        weight.is_finite() && weight >= 0.0
+        authored_queue_weight_is_valid(weight)
     } else {
         queue_weight_is_valid(weight)
     }

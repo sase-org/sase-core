@@ -32,6 +32,7 @@ struct WaiterEvaluation<'a> {
     requested_weight: f64,
     queue_capacity: Option<u32>,
     admission_limit: f64,
+    zero_drain_barrier: bool,
     capacity_budget: bool,
     priority: i32,
     fail_closed: bool,
@@ -66,7 +67,7 @@ pub(super) fn build_waiters(
         let requested_weight =
             effective_weight(record).unwrap_or(DEFAULT_QUEUE_WEIGHT);
         let queue_capacity = explicit_queue_capacity(record);
-        let admission_limit = waiter_admission_limit(
+        let (admission_limit, zero_drain_barrier) = waiter_admission_limit(
             request,
             record,
             requested_weight,
@@ -82,6 +83,7 @@ pub(super) fn build_waiters(
             requested_weight,
             queue_capacity,
             admission_limit,
+            zero_drain_barrier,
             capacity_budget,
             priority,
             fail_closed,
@@ -102,11 +104,11 @@ pub(super) fn build_waiters(
             }
         }
         let parked = has_resource_blocker(&blockers);
-        let capacity_shortfall = waiter_capacity_shortfall(
-            claims,
-            requested_weight,
-            admission_limit,
-        );
+        let capacity_shortfall = if zero_drain_barrier {
+            occupied_capacity.max(0.0)
+        } else {
+            waiter_capacity_shortfall(claims, requested_weight, admission_limit)
+        };
         let wait_capacity_shortfall = if capacity_budget {
             0.0
         } else {
@@ -155,7 +157,7 @@ fn waiter_admission_limit(
     queue_capacity: Option<u32>,
     capacity_budget: bool,
     diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
-) -> f64 {
+) -> (f64, bool) {
     let normalized = normalize_persisted_queue_capacity(
         queue_capacity,
         record.queue_capacity_explicit,
@@ -170,7 +172,10 @@ fn waiter_admission_limit(
             Some(record.artifact_dir.clone()),
         ));
     }
-    normalized.admission_limit
+    (
+        normalized.admission_limit,
+        normalized.legacy_zero && normalized.admission_limit == 0.0,
+    )
 }
 
 fn waiter_blockers(
@@ -200,7 +205,19 @@ fn waiter_blockers(
             None,
         ));
     }
-    if !queue_weight_is_valid(eval.admission_limit) {
+    if eval.zero_drain_barrier {
+        if eval.occupied_capacity > 0.0 {
+            blockers.push(blocker(
+                "insufficient-capacity",
+                "Persisted queue_capacity=0 waits for occupied runner capacity to drain to zero.",
+                Some(eval.requested_weight),
+                Some(0.0),
+                None,
+                None,
+                Some(eval.admission_limit),
+            ));
+        }
+    } else if !queue_weight_is_valid(eval.admission_limit) {
         blockers.push(blocker(
             "invalid-capacity-limit",
             "The effective runner capacity limit must be positive and finite.",

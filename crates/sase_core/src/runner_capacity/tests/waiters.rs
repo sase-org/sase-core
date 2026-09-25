@@ -103,6 +103,21 @@ fn waiter_admits_when_only_other_records_are_zero_weight() {
 }
 
 #[test]
+fn explicit_zero_weight_waiter_respects_queue_order() {
+    let mut first = waiting("first", "2026-09-10T00:00:00Z", Some(0.0));
+    first.queue_weight_explicit = true;
+    let second = waiting("second", "2026-09-10T00:00:01Z", Some(1.0));
+
+    let result = snapshot(2.0, vec![first, second]);
+    assert_eq!(
+        result.first_eligible_artifact_dir.as_deref(),
+        Some("/tmp/first")
+    );
+    assert!(waiter(&result, "first").eligible);
+    assert_eq!(waiter(&result, "second").blockers[0].code, "queue-order");
+}
+
+#[test]
 fn implicit_zero_negative_and_nan_record_weights_still_fail_closed() {
     let implicit_zero =
         waiting("implicit-zero", "2026-09-10T00:00:00Z", Some(0.0));

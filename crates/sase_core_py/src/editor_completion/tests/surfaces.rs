@@ -396,7 +396,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             .unwrap()
             .iter()
             .any(|keyword| keyword["name"] == "weight"
-                && keyword["value_role"] == "positive_float"));
+                && keyword["value_role"] == "non_negative_float"));
         assert_eq!(py_queue_directive_flag_key(), "queue_directive");
         let occurrences = json_value_to_py(
             py,
@@ -427,6 +427,13 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             formatted.as_deref(),
             Some("%queue(capacity=5, priority=20, weight=2)")
         );
+        let zero_formatted = py_format_queue_directive(
+            json_value_to_py(py, &json!({"weight": 0.0}))
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(zero_formatted.as_deref(), Some("%queue(weight=0)"));
         assert_eq!(py_parse_queue_capacity("0", None).unwrap(), 0);
         assert_eq!(py_parse_queue_capacity("3", None).unwrap(), 3);
         assert!(py_parse_queue_capacity(

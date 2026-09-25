@@ -733,6 +733,10 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
     assert!(labels_at(server, "%wait(priority=").await.is_empty());
     assert_eq!(labels_at(server, "%q:").await, vec!["1", "100"]);
     assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
+    assert_eq!(
+        labels_at(server, "%q(weight=").await,
+        vec!["0", "0.25", "1.0", "2.0"]
+    );
     assert_eq!(labels_at(server, "%repeat:").await, vec!["2", "3"]);
     assert_eq!(
         labels_at(server, "%xprompts_enabled:").await,
@@ -755,6 +759,10 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
     assert_eq!(
         labels_at(server, "%queue(").await,
         vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
+    );
+    assert_eq!(
+        labels_at(server, "%q(weight=").await,
+        vec!["0", "0.25", "1.0", "2.0"]
     );
 }
 

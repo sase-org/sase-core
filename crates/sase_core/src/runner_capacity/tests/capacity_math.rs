@@ -231,6 +231,41 @@ fn legacy_capacity_zero_translates_under_capacity_budget() {
     assert_eq!(drained.waiters[0].admission_limit, 0.25);
 }
 
+#[test]
+fn legacy_capacity_zero_with_zero_weight_is_a_true_drain_barrier() {
+    let flags = capacity_budget_flags();
+    let occupied = running("occupied", Some(f64::MIN_POSITIVE));
+    let mut waiting_agent =
+        waiting("waiter", "2026-09-10T00:00:00Z", Some(0.0));
+    waiting_agent.queue_weight_explicit = true;
+    waiting_agent.queue_capacity = Some(0);
+    waiting_agent.queue_capacity_explicit = true;
+
+    let blocked =
+        snapshot_with_flags(8.0, vec![occupied, waiting_agent.clone()], &flags);
+    let blocked_waiter = waiter(&blocked, "waiter");
+    assert!(!blocked_waiter.eligible);
+    assert_eq!(blocked_waiter.admission_limit, 0.0);
+    assert_eq!(blocked_waiter.blockers[0].code, "insufficient-capacity");
+    assert!(blocked_waiter
+        .blockers
+        .iter()
+        .all(|blocker| blocker.code != "invalid-capacity-limit"));
+    assert!(blocked
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "legacy-capacity-zero"));
+
+    let drained = snapshot_with_flags(8.0, vec![waiting_agent], &flags);
+    assert_eq!(
+        drained.first_eligible_artifact_dir.as_deref(),
+        Some("/tmp/waiter")
+    );
+    assert!(drained.waiters[0].eligible);
+    assert_eq!(drained.waiters[0].admission_limit, 0.0);
+    assert!(drained.waiters[0].blockers.is_empty());
+}
+
 fn occupied_drain_admits(mut waiter: RunnerCapacityRecordWire) {
     waiter.queue_capacity = Some(0);
     waiter.queue_capacity_explicit = true;
