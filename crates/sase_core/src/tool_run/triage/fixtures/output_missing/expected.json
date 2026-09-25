@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (ruff)",
+  "status": "output_missing",
+  "items": [],
+  "diagnostics": []
+}

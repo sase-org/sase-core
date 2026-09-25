@@ -1,0 +1,4 @@
+src/foo.py:10:5: error: "Foo" has no attribute "bar"  [attr-defined]
+src/foo.py:10:5: error: "Foo" has no attribute "bar"  [attr-defined]
+src/foo.py:22:1: error: Name "baz" is not defined  [name-defined]
+src/foo.py:23: note: see https://mypy.example.com

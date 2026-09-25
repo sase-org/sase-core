@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "fmt (markdown)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "fmt (markdown)",
+      "extractor": "prettier",
+      "extractor_version": 1,
+      "signature": "d2b0be6ee98147c0d77b75acfb996d96bc87a2e3b75d5246d3fefbe02af78c19",
+      "display": "[warn] docs/guide.md",
+      "locator_paths": [
+        "docs/guide.md"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

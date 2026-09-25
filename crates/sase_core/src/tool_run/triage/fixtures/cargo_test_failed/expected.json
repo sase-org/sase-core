@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "stage_key": "check",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "check",
+      "extractor": "cargo_test",
+      "extractor_version": 1,
+      "signature": "9fdda38a92a77830be8f7f1b4259d2423b842adc87cef3752d8b4d294f1126d1",
+      "display": "test tool_run::triage::tests::foo ... FAILED",
+      "locator_paths": [],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

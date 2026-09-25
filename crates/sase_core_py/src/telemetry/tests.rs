@@ -504,3 +504,177 @@ fn perf_logs_query_binding_round_trips_python_dict() {
         assert_eq!(result["coverage"][0]["records_in_window"], json!(1));
     });
 }
+
+#[test]
+fn tool_run_triage_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        // Begin + observe (with fingerprint_before) + finish a named run.
+        let begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "now_ts": 10,
+                "commit_running": true
+            }),
+        )
+        .unwrap();
+        let begin_request = begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let started =
+            py_tool_run_begin(py, path.to_str().unwrap(), begin_request, 1_000)
+                .unwrap();
+        let started = py_to_json_value(started.bind(py)).unwrap();
+        let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+        let observe_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "child_pid": 1,
+                "fingerprint_before": {
+                    "schema_version": 1,
+                    "repos": [{
+                        "identity": "sase",
+                        "head": "abc",
+                        "dirty_paths": [],
+                    }],
+                    "inputs": [],
+                    "env": {},
+                    "toolchain": {},
+                    "completeness": {"complete": true, "missing": []},
+                }
+            }),
+        )
+        .unwrap();
+        let observe_request =
+            observe_obj.bind(py).downcast::<PyDict>().unwrap();
+        let observed = py_tool_run_observe(
+            py,
+            path.to_str().unwrap(),
+            observe_request,
+            1_000,
+        )
+        .unwrap();
+        let observed = py_to_json_value(observed.bind(py)).unwrap();
+        assert!(observed["run"]["fingerprint_before"].is_object());
+        let finish_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "state": "failed",
+                "exit_code": 1,
+                "duration_ms": 5,
+                "now_ts": 20
+            }),
+        )
+        .unwrap();
+        let finish_request = finish_obj.bind(py).downcast::<PyDict>().unwrap();
+        let finished = py_tool_run_finish(
+            py,
+            path.to_str().unwrap(),
+            finish_request,
+            1_000,
+        )
+        .unwrap();
+        let finished = py_to_json_value(finished.bind(py)).unwrap();
+        assert_eq!(finished["run"]["state"], json!("failed"));
+        // Extract a symvision output.
+        let extract_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "stage_key": "lint (symvision)",
+                "output": "Unused public functions/classes:\n  my_helper in src/helpers.py\n",
+            }),
+        )
+        .unwrap();
+        let extract_request =
+            extract_obj.bind(py).downcast::<PyDict>().unwrap();
+        let extracted =
+            py_tool_run_triage_extract(py, extract_request).unwrap();
+        let extracted = py_to_json_value(extracted.bind(py)).unwrap();
+        assert_eq!(extracted["status"], json!("parsed"));
+        assert_eq!(extracted["items"].as_array().unwrap().len(), 1);
+        let mut item = extracted["items"][0].clone();
+        item["stage_key"] = json!("lint (symvision)");
+        // Record its items.
+        let record_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "stages": [{
+                    "schema_version": 1,
+                    "stage_key": "lint (symvision)",
+                    "stage_id": "stage-1",
+                    "extraction_status": "parsed",
+                    "output_path": "logs/stage.log",
+                    "items": [item],
+                }],
+                "run_facts": {
+                    "schema_version": 1,
+                    "continuation_mode": "never",
+                    "triaged_ts": 21,
+                },
+                "now_ts": 22
+            }),
+        )
+        .unwrap();
+        let record_request = record_obj.bind(py).downcast::<PyDict>().unwrap();
+        let recorded = py_tool_run_triage_record(
+            py,
+            path.to_str().unwrap(),
+            record_request,
+            1_000,
+        )
+        .unwrap();
+        let recorded = py_to_json_value(recorded.bind(py)).unwrap();
+        assert_eq!(recorded["items_inserted"], json!(1));
+        // Show them back.
+        let show_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "run_id": run_id}),
+        )
+        .unwrap();
+        let show_request = show_obj.bind(py).downcast::<PyDict>().unwrap();
+        let shown = py_tool_run_triage_show(
+            py,
+            path.to_str().unwrap(),
+            show_request,
+            1_000,
+        )
+        .unwrap();
+        let shown = py_to_json_value(shown.bind(py)).unwrap();
+        assert_eq!(shown["run_found"], json!(true));
+        assert_eq!(shown["triaged"], json!(true));
+        assert_eq!(shown["items"].as_array().unwrap().len(), 1);
+        // Replay reports items_existing.
+        let replayed = py_tool_run_triage_record(
+            py,
+            path.to_str().unwrap(),
+            record_request,
+            1_000,
+        )
+        .unwrap();
+        let replayed = py_to_json_value(replayed.bind(py)).unwrap();
+        assert_eq!(replayed["items_inserted"], json!(0));
+        assert_eq!(replayed["items_existing"], json!(1));
+    });
+}

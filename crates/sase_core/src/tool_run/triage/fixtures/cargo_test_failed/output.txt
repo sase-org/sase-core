@@ -1,0 +1,4 @@
+   Running unittests src/lib.rs (/srv/ws/sase_34/target/debug/deps/sase_core-abc123)
+test tool_run::triage::tests::foo ... FAILED
+test tool_run::triage::tests::bar ... ok
+error: test failed, to rerun pass `-p sase_core`

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (symvision)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (symvision)",
+      "extractor": "symvision",
+      "extractor_version": 1,
+      "signature": "5e47c3baf1a0d7a663bc4e1cbdd43b992302530adeb2d011513055d6dc3301a2",
+      "display": "Error: --epic-symbol 'my_symbol(my-bead)': symbol is closed",
+      "locator_paths": [
+        "Justfile"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

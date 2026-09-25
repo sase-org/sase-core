@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "stage_key": "_setup",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "_setup",
+      "extractor": "environment",
+      "extractor_version": 1,
+      "signature": "ffed7414755219742f9b2e2f0d71ebe50c01d68a01139e7dfc1913b11d951dea",
+      "display": "environment: missing_binding — run just install [setup] ERROR: missing required binding(s): sase_core_rs",
+      "locator_paths": [],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

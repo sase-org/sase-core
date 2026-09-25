@@ -1,0 +1,1 @@
+Error: --epic-symbol 'my_symbol(my-bead)': symbol is closed

@@ -1,0 +1,2 @@
+[warn] docs/guide.md
+[warn] Code style issues found in the above file. Skipping.

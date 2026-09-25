@@ -14,6 +14,7 @@ use super::connection::{
     touch_write_meta, unix_now, validate_schema, with_read_store,
     with_write_store,
 };
+use super::triage::triage_tables_present;
 use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
 use std::fs;
@@ -91,7 +92,7 @@ fn retention(
             [summary_cut],
             |row| row.get(0),
         )?;
-        let detail_rows: i64 = conn.query_row(
+        let base_detail_rows: i64 = conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM events e
                     JOIN runs r ON r.run_id = e.run_id
@@ -109,6 +110,61 @@ fn retention(
             [detail_cut],
             |row| row.get(0),
         )?;
+        let has_triage = triage_tables_present(conn)?;
+        let triage_detail_rows: i64 = if has_triage {
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM tool_triage_items i
+                        JOIN runs r ON r.run_id = i.run_id
+                        WHERE r.state NOT IN ('created', 'running')
+                          AND i.created_ts < ?1)
+                  + (SELECT COUNT(*) FROM tool_triage_stages s
+                        JOIN runs r ON r.run_id = s.run_id
+                        WHERE r.state NOT IN ('created', 'running')
+                          AND s.created_ts < ?1)
+                  + (SELECT COUNT(*) FROM tool_triage_runs t
+                        JOIN runs r ON r.run_id = t.run_id
+                        WHERE r.state NOT IN ('created', 'running')
+                          AND t.created_ts < ?1)",
+                [detail_cut],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
+        // Triage rows of summary-deleted runs not already counted above.
+        let triage_summary_extra: i64 = if has_triage {
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM tool_triage_items i
+                     WHERE i.run_id IN (
+                        SELECT run_id FROM runs
+                        WHERE state NOT IN ('created', 'running')
+                          AND settled_ts IS NOT NULL
+                          AND settled_ts < ?1
+                     ) AND i.created_ts >= ?2)
+                  + (SELECT COUNT(*) FROM tool_triage_stages s
+                     WHERE s.run_id IN (
+                        SELECT run_id FROM runs
+                        WHERE state NOT IN ('created', 'running')
+                          AND settled_ts IS NOT NULL
+                          AND settled_ts < ?1
+                     ) AND s.created_ts >= ?2)
+                  + (SELECT COUNT(*) FROM tool_triage_runs t
+                     WHERE t.run_id IN (
+                        SELECT run_id FROM runs
+                        WHERE state NOT IN ('created', 'running')
+                          AND settled_ts IS NOT NULL
+                          AND settled_ts < ?1
+                     ) AND t.created_ts >= ?2)",
+                [summary_cut, detail_cut],
+                |row| row.get(0),
+            )?
+        } else {
+            0
+        };
+        let detail_rows: i64 =
+            base_detail_rows + triage_detail_rows + triage_summary_extra;
         let mut file_candidates = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT run_id, log_stdout_path, log_stderr_path, events_path
@@ -128,9 +184,9 @@ fn retention(
         for row in rows {
             let (run_id, stdout, stderr, events) = row?;
             for (kind, path) in [
-                ("stdout", stdout),
-                ("stderr", stderr),
-                ("events", events),
+                ("stdout", stdout.clone()),
+                ("stderr", stderr.clone()),
+                ("events", events.clone()),
             ] {
                 if let Some(path) = path {
                     file_candidates.push(ToolRunDeletionCandidateWire {
@@ -141,6 +197,15 @@ fn retention(
                         reason: "log_days elapsed after settlement".to_string(),
                     });
                 }
+            }
+            for path in stage_output_files(events.as_deref()) {
+                file_candidates.push(ToolRunDeletionCandidateWire {
+                    kind: "stage_output".to_string(),
+                    run_id: Some(run_id.clone()),
+                    path: Some(path),
+                    protected: false,
+                    reason: "log_days elapsed after settlement".to_string(),
+                });
             }
         }
         let usage = select_aggregate_log_candidates(
@@ -205,6 +270,35 @@ fn retention(
             )",
             [detail_cut],
         )?;
+        if triage_tables_present(&tx)? {
+            tx.execute(
+                "DELETE FROM tool_triage_items WHERE item_id IN (
+                    SELECT i.item_id FROM tool_triage_items i
+                    JOIN runs r ON r.run_id = i.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND i.created_ts < ?1
+                )",
+                [detail_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM tool_triage_stages WHERE (run_id, stage_key) IN (
+                    SELECT s.run_id, s.stage_key FROM tool_triage_stages s
+                    JOIN runs r ON r.run_id = s.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND s.created_ts < ?1
+                )",
+                [detail_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM tool_triage_runs WHERE run_id IN (
+                    SELECT t.run_id FROM tool_triage_runs t
+                    JOIN runs r ON r.run_id = t.run_id
+                    WHERE r.state NOT IN ('created', 'running')
+                      AND t.created_ts < ?1
+                )",
+                [detail_cut],
+            )?;
+        }
         tx.execute(
             "DELETE FROM events WHERE run_id IN (
                 SELECT run_id FROM runs
@@ -241,6 +335,35 @@ fn retention(
             )",
             [summary_cut],
         )?;
+        if triage_tables_present(&tx)? {
+            tx.execute(
+                "DELETE FROM tool_triage_items WHERE run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                )",
+                [summary_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM tool_triage_stages WHERE run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                )",
+                [summary_cut],
+            )?;
+            tx.execute(
+                "DELETE FROM tool_triage_runs WHERE run_id IN (
+                    SELECT run_id FROM runs
+                    WHERE state NOT IN ('created', 'running')
+                      AND settled_ts IS NOT NULL
+                      AND settled_ts < ?1
+                )",
+                [summary_cut],
+            )?;
+        }
         tx.execute(
             "DELETE FROM runs
              WHERE state NOT IN ('created', 'running')
@@ -276,6 +399,47 @@ fn retained_file_bytes(path: &str) -> u64 {
         Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
         _ => 0,
     }
+}
+
+/// List stage-output files for one run's events path.
+///
+/// Returns regular files (via `symlink_metadata`) in
+/// `<events_path parent>/stage_output/`, sorted. The `stage_output`
+/// directory itself must be a real directory, not a symlink.
+pub fn stage_output_files(events_path: Option<&str>) -> Vec<String> {
+    let Some(events_path) = events_path else {
+        return Vec::new();
+    };
+    if events_path.trim().is_empty() {
+        return Vec::new();
+    }
+    let events = Path::new(events_path);
+    let Some(parent) = events.parent() else {
+        return Vec::new();
+    };
+    let dir = parent.join("stage_output");
+    let Ok(meta) = fs::symlink_metadata(&dir) else {
+        return Vec::new();
+    };
+    if !meta.file_type().is_dir() || meta.file_type().is_symlink() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_file() => {
+                out.push(path.to_string_lossy().into_owned());
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Add the oldest settled runs' files as candidates until the retained bytes fit
@@ -316,6 +480,10 @@ fn select_aggregate_log_candidates(
         let unsettled = state == "created" || state == "running";
         let mut run_bytes = 0u64;
         let mut run_files = Vec::new();
+        let events_path: Option<String> = files
+            .iter()
+            .find(|(kind, _)| *kind == "events")
+            .and_then(|(_, path)| path.clone());
         for (kind, path) in files {
             let Some(path) = path else { continue };
             if already.contains(&path) {
@@ -323,6 +491,17 @@ fn select_aggregate_log_candidates(
             }
             run_bytes += retained_file_bytes(&path);
             run_files.push((kind, path));
+        }
+        // Stage-output files share the run's settled/unsettled protection.
+        for path in stage_output_files(events_path.as_deref()) {
+            if already.contains(&path) {
+                continue;
+            }
+            let bytes = retained_file_bytes(&path);
+            // Only count files with bytes; zero-byte or missing files add
+            // no accounting but are still selectable when over target.
+            run_bytes += bytes;
+            run_files.push(("stage_output", path));
         }
         if unsettled {
             protected_bytes += run_bytes;

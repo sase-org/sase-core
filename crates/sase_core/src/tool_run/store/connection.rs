@@ -133,6 +133,32 @@ CREATE INDEX IF NOT EXISTS idx_tool_stages_run
     ON stages(run_id, started_ts);
 CREATE INDEX IF NOT EXISTS idx_tool_samples_run
     ON samples(run_id, observed_ts);
+CREATE TABLE IF NOT EXISTS tool_triage_items (
+    item_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    stage_id TEXT, stage_key TEXT NOT NULL,
+    extractor TEXT NOT NULL, extractor_version INTEGER NOT NULL,
+    signature TEXT NOT NULL, display TEXT NOT NULL,
+    locator_paths_json TEXT NOT NULL, occurrences INTEGER NOT NULL,
+    created_ts INTEGER NOT NULL,
+    class TEXT, touched INTEGER, rule_version INTEGER, knobs_json TEXT,
+    evidence_json TEXT, possible_owners_json TEXT, classified_ts INTEGER);
+CREATE TABLE IF NOT EXISTS tool_triage_stages (
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    stage_key TEXT NOT NULL, stage_id TEXT,
+    extraction_status TEXT NOT NULL, output_path TEXT, created_ts INTEGER NOT NULL,
+    mode TEXT, decision TEXT, reason TEXT, elapsed_ms INTEGER, decided_ts INTEGER,
+    PRIMARY KEY (run_id, stage_key));
+CREATE TABLE IF NOT EXISTS tool_triage_runs (
+    run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+    continuation_mode TEXT, recipe_finished_ts INTEGER,
+    first_continued_exit_code INTEGER, continuation_extra_ms INTEGER,
+    repeat_of_run_id TEXT, triaged_ts INTEGER, created_ts INTEGER NOT NULL,
+    diagnostics_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_tool_triage_items_run
+    ON tool_triage_items(run_id, stage_key);
+CREATE INDEX IF NOT EXISTS idx_tool_triage_items_signature
+    ON tool_triage_items(signature, extractor_version);
 "#;
 
 pub(super) fn validate_schema(version: u32) -> Result<(), ToolRunError> {

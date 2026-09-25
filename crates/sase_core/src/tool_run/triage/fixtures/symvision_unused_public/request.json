@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (symvision)",
+  "stage_id": "symvision-1",
+  "truncated": false,
+  "project_root": "/srv/ws/sase_34",
+  "workspace_roots": []
+}

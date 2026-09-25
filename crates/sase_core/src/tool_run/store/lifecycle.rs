@@ -214,11 +214,11 @@ pub fn observe(
                 to: "observe".to_string(),
             });
         }
-        let replayed = stored.child_pid == request.child_pid
+        let child_replayed = stored.child_pid == request.child_pid
             && stored.child_pgid == request.child_pgid
             && stored.child_process_start_identity
                 == request.child_process_start_identity;
-        if !replayed {
+        if !child_replayed {
             tx.execute(
                 "UPDATE runs SET child_pid = COALESCE(?2, child_pid),
                     child_pgid = COALESCE(?3, child_pgid),
@@ -234,13 +234,52 @@ pub fn observe(
             )?;
             touch_write_meta(&tx, unix_now())?;
         }
+        let mut diagnostics = Vec::new();
+        let fingerprint_written = if let Some(fingerprint) =
+            request.fingerprint_before.as_ref()
+        {
+            let canonical = canonicalize_tool_fingerprint(fingerprint.clone())?;
+            match stored.fingerprint_before.as_ref() {
+                None => {
+                    let json = serde_json::to_string(&canonical.fingerprint)
+                        .map_err(|error| {
+                            ToolRunError::store(error.to_string())
+                        })?;
+                    tx.execute(
+                        "UPDATE runs SET fingerprint_before_json = ?2
+                         WHERE run_id = ?1",
+                        params![request.run_id, json],
+                    )?;
+                    touch_write_meta(&tx, unix_now())?;
+                    true
+                }
+                Some(stored_fingerprint)
+                    if *stored_fingerprint == canonical.fingerprint =>
+                {
+                    false
+                }
+                Some(_) => {
+                    diagnostics.push(
+                        "fingerprint_before differs from the recorded value; kept the recorded value"
+                            .to_string(),
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !diagnostics.is_empty() {
+            append_run_diagnostics(&tx, &request.run_id, &diagnostics)?;
+        }
+        let replayed = child_replayed && !fingerprint_written;
         let run = load_run(&tx, &request.run_id)?.expect("observed run");
         tx.commit()?;
         Ok(ToolRunObserveResultWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run,
             replayed,
-            diagnostics: Vec::new(),
+            diagnostics,
         })
     })
 }
@@ -333,12 +372,19 @@ pub fn finish(
                 params![request.run_id, duration_ms],
             )?;
         }
-        let fingerprint_before = persist_optional_fingerprint(
-            &tx,
-            &request.run_id,
-            "fingerprint_before_json",
-            request.fingerprint_before.as_ref(),
-        )?;
+        let stored_before_load =
+            load_run(&tx, &request.run_id)?.ok_or_else(|| {
+                ToolRunError::NotFound {
+                    run_id: request.run_id.clone(),
+                }
+            })?;
+        let (fingerprint_before, before_diagnostic) =
+            persist_fingerprint_before_keep_first(
+                &tx,
+                &request.run_id,
+                stored_before_load.fingerprint_before.as_ref(),
+                request.fingerprint_before.as_ref(),
+            )?;
         let fingerprint_after = persist_optional_fingerprint(
             &tx,
             &request.run_id,
@@ -388,6 +434,11 @@ pub fn finish(
                 )?;
             }
         }
+        let mut finish_diagnostics = Vec::new();
+        if let Some(diagnostic) = before_diagnostic {
+            finish_diagnostics.push(diagnostic.clone());
+            append_run_diagnostics(&tx, &request.run_id, &[diagnostic])?;
+        }
         touch_write_meta(&tx, now)?;
         let run = load_run(&tx, &request.run_id)?.ok_or_else(|| {
             ToolRunError::NotFound {
@@ -399,7 +450,7 @@ pub fn finish(
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run,
             event_id: event_id.clone(),
-            diagnostics: Vec::new(),
+            diagnostics: finish_diagnostics,
         })
     })
 }
@@ -993,6 +1044,37 @@ pub(super) fn canonical_event(event: &ToolRunEventWire) -> ToolRunEventWire {
     let mut cloned = event.clone();
     cloned.diagnostics = Vec::new();
     cloned
+}
+
+fn persist_fingerprint_before_keep_first(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    stored: Option<&ToolFingerprintWire>,
+    fingerprint: Option<&ToolFingerprintWire>,
+) -> Result<(Option<ToolFingerprintWire>, Option<String>), ToolRunError> {
+    let Some(fingerprint) = fingerprint else {
+        return Ok((None, None));
+    };
+    let canonical = canonicalize_tool_fingerprint(fingerprint.clone())?;
+    match stored {
+        None => {
+            let json = serde_json::to_string(&canonical.fingerprint)
+                .map_err(|error| ToolRunError::store(error.to_string()))?;
+            tx.execute(
+                "UPDATE runs SET fingerprint_before_json = ?2 WHERE run_id = ?1",
+                params![run_id, json],
+            )?;
+            Ok((Some(canonical.fingerprint), None))
+        }
+        Some(stored) if *stored == canonical.fingerprint => Ok((None, None)),
+        Some(_) => Ok((
+            None,
+            Some(
+                "fingerprint_before differs from the recorded value; kept the recorded value"
+                    .to_string(),
+            ),
+        )),
+    }
 }
 
 fn persist_optional_fingerprint(

@@ -5,6 +5,7 @@ mod catalog;
 mod fingerprint;
 mod handoff_wire;
 mod store;
+mod triage;
 mod wire;
 
 pub use catalog::normalize_tool_definition;
@@ -13,7 +14,12 @@ pub use handoff_wire::*;
 pub use store::{
     append_event, begin, claim, finish, list_runs, observe, reconcile,
     request_stop, retention_apply, retention_preview, show_run, store_stats,
-    summarize,
+    summarize, triage_record, triage_show,
+};
+pub use triage::*;
+pub use triage::{
+    compare_triage_signatures, extract_triage_items,
+    TOOL_RUN_TRIAGE_DISPLAY_MAX_CHARS, TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT,
 };
 pub use wire::*;
 

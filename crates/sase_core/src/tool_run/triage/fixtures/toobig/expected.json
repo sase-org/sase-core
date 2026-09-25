@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (toobig)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (toobig)",
+      "extractor": "toobig",
+      "extractor_version": 1,
+      "signature": "805058f0eb1baa3daaf340078b89bde2bf073f662a95cdf2056ea1eab36716fc",
+      "display": "ERROR: VIOLATION: src/big.py has 2500 lines",
+      "locator_paths": [
+        "src/big.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

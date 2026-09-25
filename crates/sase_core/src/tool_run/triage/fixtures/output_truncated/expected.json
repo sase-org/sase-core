@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (mypy)",
+  "status": "output_truncated",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "996b8d4025e4e3fd5b72e73dd3e4487e11089b0a647b125b379cc946a02757e8",
+      "display": "src/foo.py:10:5: error: \"Foo\" has no attribute \"bar\" [attr-defined]",
+      "locator_paths": [
+        "src/foo.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": [
+    "output truncated; items may be incomplete"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "fmt (python)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "fmt (python)",
+      "extractor": "ruff_format",
+      "extractor_version": 1,
+      "signature": "62437155f05c97ee7d32da6ef4a9c3f52c7d8a800984d9a0137aba85b25f024e",
+      "display": "Would reformat: src/foo.py",
+      "locator_paths": [
+        "src/foo.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

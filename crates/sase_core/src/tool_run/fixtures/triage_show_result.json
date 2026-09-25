@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "run_id": "triage-1",
+  "run_found": true,
+  "triaged": true,
+  "run_facts": {
+    "schema_version": 1,
+    "continuation_mode": "never",
+    "recipe_finished_ts": 100,
+    "first_continued_exit_code": null,
+    "continuation_extra_ms": null,
+    "repeat_of_run_id": null,
+    "triaged_ts": 101,
+    "diagnostics": []
+  },
+  "stages": [],
+  "items": [],
+  "diagnostics": []
+}

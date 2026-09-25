@@ -1,0 +1,3 @@
+Unused public functions/classes:
+  my_helper in src/helpers.py
+  other_fn in src/other.py

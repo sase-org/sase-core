@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (ruff)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (ruff)",
+      "extractor": "ruff",
+      "extractor_version": 1,
+      "signature": "392d39c13c6ae28d55c87fa7d2894c09fa85158ba64502f0563d54dfa6ba9e0b",
+      "display": "F401 [*] `os` imported but unused",
+      "locator_paths": [
+        "src/foo.py"
+      ],
+      "occurrences": 1
+    },
+    {
+      "schema_version": 1,
+      "stage_key": "lint (ruff)",
+      "extractor": "ruff",
+      "extractor_version": 1,
+      "signature": "2f062ad7db06cbf5301f0503a1971f41c8764f71ee8774b954052e75ab63b724",
+      "display": "src/bar.py:3:5: F841 Local variable `x` is assigned but never used",
+      "locator_paths": [
+        "src/bar.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

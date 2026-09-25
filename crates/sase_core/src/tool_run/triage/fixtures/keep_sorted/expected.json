@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (keep-sorted)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (keep-sorted)",
+      "extractor": "keep_sorted",
+      "extractor_version": 1,
+      "signature": "11f47d1cdb9afa6313e968725031f3707cc2138af9f84ca839bd7f323be88cda",
+      "display": "src/sase/default_config.yml: block 2 is out of order at line 15",
+      "locator_paths": [
+        "src/sase/default_config.yml"
+      ],
+      "occurrences": 2
+    }
+  ],
+  "diagnostics": []
+}

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (symvision)",
+  "stage_id": "symvision-1",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (symvision)",
+      "stage_id": "symvision-1",
+      "extractor": "symvision",
+      "extractor_version": 1,
+      "signature": "8ab01024f2dae62664283a6e8bb544c4da60fab1418bfced30a739f8b96db3ae",
+      "display": "my_helper in src/helpers.py",
+      "locator_paths": [
+        "src/helpers.py"
+      ],
+      "occurrences": 1
+    },
+    {
+      "schema_version": 1,
+      "stage_key": "lint (symvision)",
+      "stage_id": "symvision-1",
+      "extractor": "symvision",
+      "extractor_version": 1,
+      "signature": "d7925d420cbac37873236df6794e2a4339c86881ab76d85d6dd5b7ca468d94f8",
+      "display": "other_fn in src/other.py",
+      "locator_paths": [
+        "src/other.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

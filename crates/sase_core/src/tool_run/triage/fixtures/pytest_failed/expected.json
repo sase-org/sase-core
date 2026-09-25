@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "stage_key": "test (scoped)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "test (scoped)",
+      "extractor": "pytest",
+      "extractor_version": 1,
+      "signature": "9b52e9f1587b4c9ad0577c18e6158062cdf3ca83a0fda22fd25e09a859eed155",
+      "display": "FAILED tests/test_foo.py::test_bar[param1] - AssertionError",
+      "locator_paths": [
+        "tests/test_foo.py"
+      ],
+      "occurrences": 2
+    },
+    {
+      "schema_version": 1,
+      "stage_key": "test (scoped)",
+      "extractor": "pytest",
+      "extractor_version": 1,
+      "signature": "cd16584d7f19679690a5bb8f70917de2b714ab0e36f197286c9b64eba906635b",
+      "display": "FAILED tests/test_baz.py::test_qux - Failed",
+      "locator_paths": [
+        "tests/test_baz.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

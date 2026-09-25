@@ -876,7 +876,7 @@ pub struct ToolRunReconcileResultWire {
     pub diagnostics: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRunObserveRequestWire {
     #[serde(default = "schema_version")]
@@ -888,6 +888,8 @@ pub struct ToolRunObserveRequestWire {
     pub child_pgid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_process_start_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_before: Option<ToolFingerprintWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

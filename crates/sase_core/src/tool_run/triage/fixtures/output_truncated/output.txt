@@ -1,0 +1,1 @@
+src/foo.py:10:5: error: "Foo" has no attribute "bar"  [attr-defined]

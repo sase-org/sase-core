@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (feature flags)",
+  "status": "generic",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (feature flags)",
+      "extractor": "generic",
+      "extractor_version": 1,
+      "signature": "2172be0214eddc648ea92dc93d01b63d73e1e2fc146ad7f64fb42c7ea84daf20",
+      "display": "[feature-flags] 2 flags checked in <dur>",
+      "locator_paths": [],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

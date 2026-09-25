@@ -564,6 +564,7 @@ fn foreground_lost_records_wrapper_lost_and_reap_only_unowned() {
             child_pid: Some(99),
             child_pgid: Some(99),
             child_process_start_identity: Some("boot-1:99".into()),
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )
@@ -629,6 +630,7 @@ fn foreground_lost_records_wrapper_lost_and_reap_only_unowned() {
             child_pid: Some(100),
             child_pgid: Some(100),
             child_process_start_identity: Some("boot-1:100".into()),
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )
@@ -661,6 +663,7 @@ fn handoff_never_reaps_and_settled_list_is_correct() {
             child_pid: Some(50),
             child_pgid: Some(50),
             child_process_start_identity: Some("boot-1:50".into()),
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )

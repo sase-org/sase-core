@@ -1,0 +1,2 @@
+[feature-flags] ERROR: unknown flag 'new_ui' in src/config.py:12
+[feature-flags] 2 flags checked in 0.12s

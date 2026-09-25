@@ -27,6 +27,7 @@ use tempfile::tempdir;
 mod compat;
 mod handoff;
 mod reconcile_owner;
+mod triage;
 
 fn definition() -> ToolDefinitionWire {
     ToolDefinitionWire {
@@ -1138,6 +1139,7 @@ fn observe_child(path: &Path, run_id: &str) -> ToolRunObserveResultWire {
             child_pid: Some(4242),
             child_pgid: Some(4242),
             child_process_start_identity: Some("boot-1:12345".into()),
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )
@@ -1307,6 +1309,7 @@ fn repeated_observation_replays_and_settled_or_missing_runs_reject() {
             child_pid: Some(1),
             child_pgid: Some(1),
             child_process_start_identity: None,
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )
@@ -1346,6 +1349,7 @@ fn repeated_observation_replays_and_settled_or_missing_runs_reject() {
             child_pid: Some(4242),
             child_pgid: Some(4242),
             child_process_start_identity: None,
+            fingerprint_before: None,
         },
         Duration::from_secs(1),
     )

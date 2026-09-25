@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (mypy)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "996b8d4025e4e3fd5b72e73dd3e4487e11089b0a647b125b379cc946a02757e8",
+      "display": "src/foo.py:10:5: error: \"Foo\" has no attribute \"bar\" [attr-defined]",
+      "locator_paths": [
+        "src/foo.py"
+      ],
+      "occurrences": 2
+    },
+    {
+      "schema_version": 1,
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "7965bf01467533b325f13cf8564df642323d2f396d110809264a7da328e5fa9c",
+      "display": "src/foo.py:22:1: error: Name \"baz\" is not defined [name-defined]",
+      "locator_paths": [
+        "src/foo.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

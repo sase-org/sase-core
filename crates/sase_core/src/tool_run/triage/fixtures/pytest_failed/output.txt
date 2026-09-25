@@ -1,0 +1,4 @@
+FAILED tests/test_foo.py::test_bar[param1] - AssertionError
+FAILED tests/test_foo.py::test_bar[param2] - AssertionError
+ERROR    sase.x:app.py:375 something happened
+FAILED tests/test_baz.py::test_qux - Failed

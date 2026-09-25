@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (symvision)",
+  "status": "parsed",
+  "items": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (symvision)",
+      "extractor": "symvision",
+      "extractor_version": 1,
+      "signature": "35553e85424cc58a35f5c68ce63be3d97b5f27ce286dc51aa0979bda98bb72ba",
+      "display": "_internal in src/internal.py",
+      "locator_paths": [
+        "src/internal.py"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "diagnostics": []
+}

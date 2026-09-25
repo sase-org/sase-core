@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "stage_key": "lint (mypy)",
+  "stage_id": "stage-1",
+  "output": "src/foo.py:10:5: error: Incompatible types  [assignment]\n",
+  "truncated": false,
+  "project_root": "/srv/ws/sase_34",
+  "workspace_roots": []
+}

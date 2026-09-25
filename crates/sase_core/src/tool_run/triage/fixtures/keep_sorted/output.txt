@@ -1,0 +1,4 @@
+[
+{"path": "src/sase/default_config.yml", "message": "block 2 is out of order at line 15"},
+{"path": "src/sase/default_config.yml", "message": "block 5 is out of order at line 42"}
+]
