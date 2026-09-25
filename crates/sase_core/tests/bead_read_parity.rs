@@ -961,6 +961,7 @@ fn close_event(
             close_reason: close_reason.map(str::to_string),
             resolution: Some(BeadResolutionWire::Done),
             forced_descendant_ids: Vec::new(),
+            closed_by: None,
         },
     }
 }

@@ -55,18 +55,6 @@
     "stream_id": "plan-1"
   },
   {
-    "actor": "bbugyi200.athena.0aa",
-    "bead_id": "plan-1.1",
-    "title": "Phase One",
-    "issue_type": "phase",
-    "status": "closed",
-    "verbs": {"closed": 1},
-    "first_at": "2026-03-01T10:10:00Z",
-    "last_at": "2026-03-01T10:10:00Z",
-    "current_note_count": 0,
-    "stream_id": "plan-1"
-  },
-  {
     "actor": "013",
     "bead_id": "plan-1.1",
     "title": "Phase One",

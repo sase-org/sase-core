@@ -86,7 +86,7 @@ pub fn close_issues_with_note(
     resolution: Option<BeadResolutionWire>,
     force: bool,
     note: Option<String>,
-    note_author: Option<String>,
+    actor: Option<String>,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let note = match note {
@@ -98,13 +98,26 @@ pub fn close_issues_with_note(
                     "note entry cannot be empty or blank",
                 ));
             }
-            Some((entry, note_author))
+            Some(entry)
         }
     };
 
     with_bead_mutation_lock(beads_dir, "close", || {
         let mut store = MutableStore::load(beads_dir)?;
         let now = now.unwrap_or_else(now_utc);
+        // The acting closer: trimmed non-blank value, else the store owner.
+        // It is the note author and the envelope actor plus `closed_by` on
+        // every `issue_closed` event in the batch (requested ids,
+        // `--force`-swept descendants, and auto-closed delegated parents).
+        // A blank owner (test-only stores) leaves `closed_by` absent rather
+        // than writing a blank value `validate_for` rejects.
+        let actor = actor
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&store.config.owner)
+            .to_string();
+        let closed_by = (!actor.trim().is_empty()).then(|| actor.clone());
         let effective_resolution =
             resolution.clone().unwrap_or(BeadResolutionWire::Done);
         if force {
@@ -162,15 +175,10 @@ pub fn close_issues_with_note(
         }
 
         let mut noted_ids = Vec::new();
-        if let Some((entry, requested_author)) = note.as_ref() {
-            let author = requested_author
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&store.config.owner)
-                .to_string();
+        if let Some(entry) = note.as_ref() {
             for issue_id in &requested_ids {
                 let index = store.issue_index(issue_id)?;
-                append_note_to_store(&mut store, index, entry, &author, &now)?;
+                append_note_to_store(&mut store, index, entry, &actor, &now)?;
                 noted_ids.push(issue_id.clone());
             }
         }
@@ -220,9 +228,10 @@ pub fn close_issues_with_note(
                     close_reason: event.issue.close_reason.clone(),
                     resolution: event.issue.resolution.clone(),
                     forced_descendant_ids: event.forced_descendant_ids.clone(),
+                    closed_by: closed_by.clone(),
                 },
                 &now,
-                &event.issue.created_by,
+                &actor,
             )?;
         }
 

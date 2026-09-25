@@ -723,6 +723,7 @@ mod tests {
                         close_reason: Some("done".to_string()),
                         resolution: None,
                         forced_descendant_ids: Vec::new(),
+                        closed_by: None,
                     },
                 ),
                 event(
@@ -741,6 +742,7 @@ mod tests {
                         close_reason: None,
                         resolution: None,
                         forced_descendant_ids: Vec::new(),
+                        closed_by: None,
                     },
                 ),
             ],

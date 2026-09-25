@@ -850,6 +850,8 @@ fn py_bead_open<'py>(
     )
 }
 
+/// Close beads. `author` is the close actor: it is recorded on the note
+/// (when one is given) and on every `issue_closed` event in the batch.
 #[pyfunction]
 #[pyo3(name = "bead_close")]
 #[pyo3(signature = (

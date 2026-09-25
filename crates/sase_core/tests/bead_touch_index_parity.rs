@@ -51,7 +51,10 @@ fn fixture_store_reduces_to_the_pinned_snapshot() {
         refresh.reduced_streams,
         vec!["copied", "only-1", "plan-1", "task-1"]
     );
-    assert_eq!((refresh.stream_count, refresh.touch_count), (4, 6));
+    // The legacy `issue_closed` at 10:10 carries no `closed_by` and no
+    // same-instant note, so it credits nobody: the planner's false `closed`
+    // verb is gone and five touches remain.
+    assert_eq!((refresh.stream_count, refresh.touch_count), (4, 5));
 
     let query = query_bead_touches(&index_path, None);
     assert_eq!(query.schema_version, BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION);

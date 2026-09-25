@@ -6,6 +6,7 @@ use crate::bead::jsonl::read_event_store;
 use crate::bead::mutation::store::MutableStore;
 use crate::bead::wire::BeadResolutionWire;
 use crate::bead::wire::IssueTypeWire;
+use crate::bead::wire::PhaseSizeWire;
 use crate::bead::wire::StatusWire;
 use std::fs;
 use tempfile::tempdir;
@@ -710,5 +711,299 @@ fn reopening_a_bead_that_was_never_closed_archives_nothing() {
         let (projected, reduced) = projected_and_reduced(&beads_dir, issue_id);
         assert_eq!(projected, reduced);
         assert!(projected.close_history.is_empty(), "{issue_id}");
+    }
+}
+
+#[test]
+fn close_stamps_the_supplied_actor_on_the_envelope_and_closed_by() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+        .unwrap();
+    fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+    let issue_id = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Closable".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            created_by: Some("creator-agent".to_string()),
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap()
+    .id;
+
+    // Without `--note` the actor is still recorded on the close event.
+    close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&issue_id),
+        Some("verified".to_string()),
+        None,
+        false,
+        None,
+        Some("closer-agent".to_string()),
+        Some("2026-01-01T00:01:00Z".to_string()),
+    )
+    .unwrap();
+
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    let close = streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .find(|event| {
+            event.issue_id == issue_id
+                && event.operation == BeadEventOperationWire::IssueClosed
+        })
+        .expect("one close event");
+    // The creator never leaks onto the close: the envelope and the durable
+    // payload both name the acting closer.
+    assert_eq!(close.actor, "closer-agent");
+    assert!(matches!(
+        &close.payload,
+        BeadEventPayloadWire::IssueClosed { closed_by, .. }
+            if closed_by.as_deref() == Some("closer-agent")
+    ));
+
+    // A close with a note attributes the note to the same actor.
+    let noted_id = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Noted".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            created_by: Some("creator-agent".to_string()),
+            now: Some("2026-01-01T00:02:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap()
+    .id;
+    close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&noted_id),
+        None,
+        None,
+        false,
+        Some("evidence".to_string()),
+        Some("closer-agent".to_string()),
+        Some("2026-01-01T00:03:00Z".to_string()),
+    )
+    .unwrap();
+    let issue = MutableStore::load(&beads_dir)
+        .unwrap()
+        .get_issue(&noted_id)
+        .unwrap()
+        .clone();
+    assert!(note_text(&issue).contains("closer-agent"));
+
+    // No actor falls back to the store owner.
+    let owned_id = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Owned".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            now: Some("2026-01-01T00:04:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap()
+    .id;
+    close_issues(
+        &beads_dir,
+        std::slice::from_ref(&owned_id),
+        None,
+        None,
+        false,
+        Some("2026-01-01T00:05:00Z".to_string()),
+    )
+    .unwrap();
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    let close = streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .find(|event| {
+            event.issue_id == owned_id
+                && event.operation == BeadEventOperationWire::IssueClosed
+        })
+        .expect("one close event");
+    assert_eq!(close.actor, "owner@example.com");
+    assert!(matches!(
+        &close.payload,
+        BeadEventPayloadWire::IssueClosed { closed_by, .. }
+            if closed_by.as_deref() == Some("owner@example.com")
+    ));
+}
+
+#[test]
+fn close_stamps_the_actor_on_the_delegated_parent() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+        .unwrap();
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        [
+            issue(
+                "sase-1",
+                "Root epic",
+                "plan",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ),
+            issue(
+                "sase-1.1",
+                "Delegated phase",
+                "phase",
+                Some("sase-1"),
+                "open",
+                "2026-01-01T00:01:00Z",
+            ),
+            issue(
+                "sase-1.1.1",
+                "Child epic",
+                "plan",
+                Some("sase-1.1"),
+                "open",
+                "2026-01-01T00:02:00Z",
+            ),
+            issue(
+                "sase-1.1.1.1",
+                "Child phase",
+                "phase",
+                Some("sase-1.1.1"),
+                "open",
+                "2026-01-01T00:03:00Z",
+            ),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    close_issues_with_note(
+        &beads_dir,
+        &["sase-1.1.1.1".to_string()],
+        Some("phase complete".to_string()),
+        None,
+        false,
+        None,
+        Some("worker".to_string()),
+        Some("2026-01-01T12:00:00Z".to_string()),
+    )
+    .unwrap();
+    close_issues_with_note(
+        &beads_dir,
+        &["sase-1.1.1".to_string()],
+        Some("landed".to_string()),
+        None,
+        false,
+        None,
+        Some("worker".to_string()),
+        Some("2026-01-02T00:00:00Z".to_string()),
+    )
+    .unwrap();
+
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    // The auto-closed delegated parent shares the actor with the request
+    // that completed it.
+    for issue_id in ["sase-1.1.1", "sase-1.1"] {
+        let close = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .find(|event| {
+                event.issue_id == issue_id
+                    && event.operation == BeadEventOperationWire::IssueClosed
+            })
+            .unwrap_or_else(|| panic!("close event for {issue_id}"));
+        assert_eq!(close.actor, "worker", "{issue_id}");
+        assert!(
+            matches!(
+                &close.payload,
+                BeadEventPayloadWire::IssueClosed { closed_by, .. }
+                    if closed_by.as_deref() == Some("worker")
+            ),
+            "{issue_id}"
+        );
+    }
+}
+
+#[test]
+fn forced_close_stamps_the_actor_on_every_swept_descendant() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+        .unwrap();
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        [
+            issue(
+                "sase-9",
+                "Plan",
+                "plan",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ),
+            issue(
+                "sase-9.1",
+                "Open phase",
+                "phase",
+                Some("sase-9"),
+                "open",
+                "2026-01-01T00:01:00Z",
+            ),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    close_issues_with_note(
+        &beads_dir,
+        &["sase-9".to_string()],
+        Some("Canceled unfinished work".to_string()),
+        Some(BeadResolutionWire::Canceled),
+        true,
+        None,
+        Some("worker".to_string()),
+        Some("2026-01-02T00:00:00Z".to_string()),
+    )
+    .unwrap();
+
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    for issue_id in ["sase-9.1", "sase-9"] {
+        let close = streams
+            .iter()
+            .flat_map(|stream| &stream.events)
+            .find(|event| {
+                event.issue_id == issue_id
+                    && event.operation == BeadEventOperationWire::IssueClosed
+            })
+            .unwrap_or_else(|| panic!("close event for {issue_id}"));
+        assert_eq!(close.actor, "worker", "{issue_id}");
+        assert!(
+            matches!(
+                &close.payload,
+                BeadEventPayloadWire::IssueClosed { closed_by, .. }
+                    if closed_by.as_deref() == Some("worker")
+            ),
+            "{issue_id}"
+        );
     }
 }

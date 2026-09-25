@@ -189,6 +189,10 @@ pub enum BeadEventPayloadWire {
         resolution: Option<BeadResolutionWire>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         forced_descendant_ids: Vec<String>,
+        /// Acting closer recorded at write time. `None` on legacy events;
+        /// `Some` on every event written by the current close mutation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        closed_by: Option<String>,
     },
     IssueRemoved {
         #[serde(default)]
@@ -309,10 +313,6 @@ impl BeadEventPayloadWire {
                 BeadEventPayloadWire::IssueOpened,
             )
             | (
-                BeadEventOperationWire::IssueClosed,
-                BeadEventPayloadWire::IssueClosed { .. },
-            )
-            | (
                 BeadEventOperationWire::IssueRemoved,
                 BeadEventPayloadWire::IssueRemoved { .. },
             )
@@ -332,6 +332,20 @@ impl BeadEventPayloadWire {
                 BeadEventOperationWire::TaskSnoozeWoken,
                 BeadEventPayloadWire::TaskSnoozeWoken { .. },
             ) => Ok(()),
+            (
+                BeadEventOperationWire::IssueClosed,
+                BeadEventPayloadWire::IssueClosed { closed_by, .. },
+            ) => {
+                if closed_by
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err(BeadError::validation(
+                        "issue_closed closed_by cannot be empty or blank",
+                    ));
+                }
+                Ok(())
+            }
             (
                 BeadEventOperationWire::TaskSnoozed,
                 BeadEventPayloadWire::TaskSnoozed { snooze },

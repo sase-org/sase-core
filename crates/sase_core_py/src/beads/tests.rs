@@ -56,7 +56,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
-        assert_eq!(py_bead_touch_index_wire_schema_version(), 2);
+        assert_eq!(py_bead_touch_index_wire_schema_version(), 3);
 
         let dir = tempdir().unwrap();
         let beads_dir = dir.path().join("beads");
@@ -122,7 +122,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         let miss = py_to_json_value(miss.bind(py)).unwrap();
         assert_eq!(
             miss,
-            json!({"schema_version": 2, "generation": "", "touches": []})
+            json!({"schema_version": 3, "generation": "", "touches": []})
         );
 
         let refresh =
@@ -132,7 +132,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             refresh,
             json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "generation": generation,
                 "full_rebuild": true,
                 "wrote": true,
@@ -149,7 +149,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             query,
             json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "generation": generation,
                 "touches": [
                     {
@@ -177,9 +177,9 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                         "title": "Bead",
                         "issue_type": "task",
                         "status": "closed",
-                        "verbs": {"closed": 1, "noted": 1},
+                        "verbs": {"noted": 1},
                         "first_at": "2026-01-01T00:01:00Z",
-                        "last_at": "2026-01-01T00:02:00Z",
+                        "last_at": "2026-01-01T00:01:00Z",
                         "current_note_count": 1,
                         "note_preview": {
                             "id": "b-1:2",
@@ -209,9 +209,9 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             fresh,
             json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "state": "fresh",
-                "index_schema_version": 2,
+                "index_schema_version": 3,
                 "generation": generation,
                 "indexed_streams": 1,
                 "current_streams": 1,
@@ -1430,4 +1430,59 @@ fn bead_work_plan_binding_exposes_additive_bead_id_fields() {
         assert_eq!(value["land_agent_name"], json!("beads-1.land"));
         assert_eq!(value["land_waits_on"], json!(["beads-1.1"]));
     });
+}
+
+#[test]
+fn bead_close_binding_stamps_the_supplied_author_on_the_close_event() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let issue = core_bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Closable".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    Python::with_gil(|py| {
+        let path = beads_dir.to_str().unwrap();
+        py_bead_close(
+            py,
+            path,
+            vec![issue.id.clone()],
+            None,
+            None,
+            false,
+            Some("2026-01-01T00:01:00Z".to_string()),
+            None,
+            Some("worker".to_string()),
+        )
+        .unwrap();
+    });
+
+    let streams = beads_dir.join("events/streams");
+    let mut found = false;
+    for entry in fs::read_dir(&streams).unwrap() {
+        let text = fs::read_to_string(entry.unwrap().path()).unwrap();
+        for line in text.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["operation"] == "issue_closed"
+                && value["issue_id"] == issue.id.as_str()
+            {
+                assert_eq!(value["actor"], "worker");
+                assert_eq!(value["payload"]["closed_by"], "worker");
+                found = true;
+            }
+        }
+    }
+    assert!(found, "expected one stamped issue_closed event");
 }

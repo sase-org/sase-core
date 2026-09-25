@@ -172,7 +172,9 @@ pub(super) fn handle_close(
         Ok(ids) => ids,
         Err(err) => return Ok(issue_ids_resolution_outcome(err)),
     };
-    let note_author = note.as_ref().and_then(|_| close_note_author());
+    // The close actor is always resolved, with or without `--note`: it
+    // stamps the note author and every `issue_closed` event in the batch.
+    let close_actor = close_note_author();
     match close_issues_with_note(
         write_beads_dir,
         &ids,
@@ -180,7 +182,7 @@ pub(super) fn handle_close(
         resolution,
         force,
         note,
-        note_author,
+        close_actor,
         None,
     ) {
         Ok(outcome) => {

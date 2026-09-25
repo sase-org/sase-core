@@ -27,6 +27,7 @@ fn redundant_close_is_an_exact_no_op() {
             close_reason: Some("shipped".to_string()),
             resolution: Some(BeadResolutionWire::Done),
             forced_descendant_ids: Vec::new(),
+            closed_by: None,
         },
     };
     let redundant_close = BeadEventRecordWire {
@@ -36,6 +37,7 @@ fn redundant_close_is_an_exact_no_op() {
             close_reason: None,
             resolution: Some(BeadResolutionWire::Canceled),
             forced_descendant_ids: Vec::new(),
+            closed_by: None,
         },
         ..first_close.clone()
     };

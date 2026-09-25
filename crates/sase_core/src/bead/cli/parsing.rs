@@ -411,14 +411,22 @@ pub(super) fn parse_close_args(args: &[String]) -> Option<ParsedCloseArgs> {
 }
 
 pub(super) fn close_note_author() -> Option<String> {
-    ["SASE_AGENT_NAME", "SASE_AGENT"]
-        .into_iter()
-        .find_map(|key| {
-            env::var(key)
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
+    // Mirrors Python's `discover_agent_identity`: the bare launcher flag
+    // `SASE_AGENT=1` carries no identity.
+    for key in ["SASE_AGENT_NAME", "SASE_AGENT"] {
+        let Ok(value) = env::var(key) else {
+            continue;
+        };
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if key == "SASE_AGENT" && trimmed == "1" {
+            continue;
+        }
+        return Some(trimmed);
+    }
+    None
 }
 
 pub(super) fn parse_resolution(value: &str) -> Option<BeadResolutionWire> {

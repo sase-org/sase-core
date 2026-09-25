@@ -147,3 +147,52 @@ fn issue_update_event_fields_round_trip_every_field() {
         );
     }
 }
+
+#[test]
+fn issue_closed_without_closed_by_round_trips_byte_identically() {
+    let payload = BeadEventPayloadWire::IssueClosed {
+        close_reason: Some("done".to_string()),
+        resolution: None,
+        forced_descendant_ids: Vec::new(),
+        closed_by: None,
+    };
+    let json = serde_json::to_value(&payload).unwrap();
+    assert!(json.get("closed_by").is_none());
+    let decoded: BeadEventPayloadWire =
+        serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(decoded, payload);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), json);
+
+    // A legacy record validates as-is.
+    let record = BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: "e-1".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        actor: "creator-agent".to_string(),
+        operation: BeadEventOperationWire::IssueClosed,
+        issue_id: "sase-1".to_string(),
+        payload,
+    };
+    record.validate().unwrap();
+}
+
+#[test]
+fn issue_closed_rejects_a_blank_closed_by() {
+    let record = BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: "e-1".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        actor: "closer-agent".to_string(),
+        operation: BeadEventOperationWire::IssueClosed,
+        issue_id: "sase-1".to_string(),
+        payload: BeadEventPayloadWire::IssueClosed {
+            close_reason: None,
+            resolution: None,
+            forced_descendant_ids: Vec::new(),
+            closed_by: Some("   ".to_string()),
+        },
+    };
+    let error = record.validate().unwrap_err();
+    assert_eq!(error.kind, "validation");
+    assert!(error.message.contains("closed_by"));
+}
