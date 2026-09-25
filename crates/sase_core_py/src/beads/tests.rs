@@ -56,7 +56,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
-        assert_eq!(py_bead_touch_index_wire_schema_version(), 1);
+        assert_eq!(py_bead_touch_index_wire_schema_version(), 2);
 
         let dir = tempdir().unwrap();
         let beads_dir = dir.path().join("beads");
@@ -122,7 +122,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         let miss = py_to_json_value(miss.bind(py)).unwrap();
         assert_eq!(
             miss,
-            json!({"schema_version": 1, "generation": "", "touches": []})
+            json!({"schema_version": 2, "generation": "", "touches": []})
         );
 
         let refresh =
@@ -132,7 +132,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             refresh,
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "generation": generation,
                 "full_rebuild": true,
                 "wrote": true,
@@ -149,7 +149,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             query,
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "generation": generation,
                 "touches": [
                     {
@@ -161,6 +161,14 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                         "verbs": {"noted": 1},
                         "first_at": "2026-01-01T00:03:00Z",
                         "last_at": "2026-01-01T00:03:00Z",
+                        "current_note_count": 1,
+                        "note_preview": {
+                            "id": "b-1:4",
+                            "author": "013",
+                            "timestamp": "2026-01-01T00:03:00Z",
+                            "text": "y",
+                            "truncated": false,
+                        },
                         "stream_id": "b-1",
                     },
                     {
@@ -172,6 +180,14 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                         "verbs": {"closed": 1, "noted": 1},
                         "first_at": "2026-01-01T00:01:00Z",
                         "last_at": "2026-01-01T00:02:00Z",
+                        "current_note_count": 1,
+                        "note_preview": {
+                            "id": "b-1:2",
+                            "author": "bbugyi200.athena.0aa",
+                            "timestamp": "2026-01-01T00:01:00Z",
+                            "text": "x",
+                            "truncated": false,
+                        },
                         "stream_id": "b-1",
                     },
                 ],
@@ -193,9 +209,9 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             fresh,
             json!({
-                "schema_version": 1,
+                "schema_version": 2,
                 "state": "fresh",
-                "index_schema_version": 1,
+                "index_schema_version": 2,
                 "generation": generation,
                 "indexed_streams": 1,
                 "current_streams": 1,

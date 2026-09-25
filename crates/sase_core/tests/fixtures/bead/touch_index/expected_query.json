@@ -8,6 +8,7 @@
     "verbs": {"created": 1, "ready": 2, "removed": 1, "snoozed": 2},
     "first_at": "2026-03-02T09:00:00Z",
     "last_at": "2026-03-02T09:06:00Z",
+    "current_note_count": 0,
     "stream_id": "task-1"
   },
   {
@@ -19,6 +20,7 @@
     "verbs": {"+1": 1},
     "first_at": "2026-03-02T09:01:00Z",
     "last_at": "2026-03-02T09:01:00Z",
+    "current_note_count": 0,
     "stream_id": "task-1"
   },
   {
@@ -30,6 +32,14 @@
     "verbs": {"linked": 1, "noted": 1, "ref": 1, "updated": 1},
     "first_at": "2026-03-01T10:05:00Z",
     "last_at": "2026-03-01T10:14:00Z",
+    "current_note_count": 1,
+    "note_preview": {
+      "id": "plan-1:000004:note_appended:plan-1",
+      "author": "bbugyi200.athena.0aa",
+      "timestamp": "2026-03-01T10:05:00Z",
+      "text": "first",
+      "truncated": false
+    },
     "stream_id": "plan-1"
   },
   {
@@ -41,6 +51,7 @@
     "verbs": {"dep": 1},
     "first_at": "2026-03-01T10:12:00Z",
     "last_at": "2026-03-01T10:12:00Z",
+    "current_note_count": 0,
     "stream_id": "plan-1"
   },
   {
@@ -52,6 +63,7 @@
     "verbs": {"closed": 1},
     "first_at": "2026-03-01T10:10:00Z",
     "last_at": "2026-03-01T10:10:00Z",
+    "current_note_count": 0,
     "stream_id": "plan-1"
   },
   {
@@ -63,6 +75,14 @@
     "verbs": {"noted": 3},
     "first_at": "2026-03-01T10:07:00Z",
     "last_at": "2026-03-01T10:09:00Z",
+    "current_note_count": 2,
+    "note_preview": {
+      "id": "plan-1:000007:note_appended:plan-1.1",
+      "author": "013",
+      "timestamp": "2026-03-01T10:09:00Z",
+      "text": "b",
+      "truncated": false
+    },
     "stream_id": "plan-1"
   }
 ]

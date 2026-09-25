@@ -96,10 +96,11 @@ pub use schema::{
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use touch_index::{
     bead_touch_index_status, query_bead_touches, reduce_stream_touches,
-    refresh_bead_touch_index, verb_for_operation, BeadStreamSignatureWire,
-    BeadTouchIndexStateWire, BeadTouchIndexStatusWire, BeadTouchIndexWire,
-    BeadTouchQueryWire, BeadTouchRefreshWire, BeadTouchWire,
-    BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
+    refresh_bead_touch_index, verb_for_operation, BeadNotePreviewWire,
+    BeadStreamSignatureWire, BeadTouchIndexStateWire, BeadTouchIndexStatusWire,
+    BeadTouchIndexWire, BeadTouchQueryWire, BeadTouchRefreshWire,
+    BeadTouchWire, BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
+    NOTE_PREVIEW_TEXT_LIMIT,
 };
 pub use wire::{
     flag_thresholds_due, notes_text, parse_snooze_timestamp,

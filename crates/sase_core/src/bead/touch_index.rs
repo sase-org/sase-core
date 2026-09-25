@@ -51,10 +51,45 @@ use super::wire::{BeadError, IssueTypeWire, StatusWire};
 ///
 /// Bumping it makes every existing index a cache miss: the next refresh
 /// rebuilds from the streams and the query returns nothing until then.
-pub const BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION: u32 = 2;
+
+/// Bound on the note text stored in a [`BeadNotePreviewWire`], in Unicode
+/// scalar values (`char`s). One pathological note cannot grow the shared
+/// index without limit; longer text is cut at this prefix and marked with
+/// `truncated`. The TUI applies its separate three-display-line limit.
+pub const NOTE_PREVIEW_TEXT_LIMIT: usize = 1024;
 
 const LOCK_TIMEOUT_ENV: &str = "SASE_BEAD_TOUCH_INDEX_LOCK_TIMEOUT";
 const LOCK_TIMEOUT_DEFAULT: Duration = Duration::from_secs(2);
+
+/// Preview of the newest surviving structured note one agent authored on
+/// one bead.
+///
+/// Derived only from `note_appended` / `note_edited` / `note_removed`
+/// payloads replayed by stable note ID. The note keeps its original author
+/// and append timestamp even when another actor edits it later; `text` is
+/// the current text cut to [`NOTE_PREVIEW_TEXT_LIMIT`]. Legacy free-text
+/// note blobs without per-note attribution never produce a preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadNotePreviewWire {
+    /// Stable note ID: the `event_id` of the `note_appended` event.
+    pub id: String,
+    /// Original author (trimmed event actor at append time).
+    pub author: String,
+    /// Original append timestamp (RFC 3339 Z display form).
+    pub timestamp: String,
+    /// Current text, cut to [`NOTE_PREVIEW_TEXT_LIMIT`] scalar values.
+    pub text: String,
+    /// Edit instant (RFC 3339 Z display form), when edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
+    /// Trimmed actor of the last edit, when edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_by: Option<String>,
+    /// True when `text` was shortened for the cache.
+    #[serde(default)]
+    pub truncated: bool,
+}
 
 /// One `(actor, bead)` pair with aggregated verbs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +109,15 @@ pub struct BeadTouchWire {
     pub first_at: String,
     /// Newest contributing event timestamp (RFC 3339 Z).
     pub last_at: String,
+    /// Number of surviving structured notes this actor authored on this
+    /// bead. Retracted notes vanish; edits keep the count.
+    #[serde(default)]
+    pub current_note_count: u64,
+    /// Newest surviving structured note this actor authored on this bead,
+    /// by append timestamp with deterministic ID tie-break. `None` when the
+    /// actor has no surviving notes here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_preview: Option<BeadNotePreviewWire>,
     /// Stream file that produced this row. Cache bookkeeping: a refresh
     /// reuses the rows of an unchanged stream verbatim. Consumers ignore it.
     pub stream_id: String,
@@ -197,6 +241,16 @@ pub fn verb_for_operation(
 /// only event carrying a title. Touch rows come only from events recorded by
 /// an agent actor: an email address, or a name `validate_agent_name` rejects,
 /// is not an agent and contributes nothing.
+///
+/// Note previews replay the structured `note_appended` / `note_edited` /
+/// `note_removed` payloads by stable note ID (the append event's `event_id`,
+/// mirroring the bead store's note rules: blank append/edit text is ignored,
+/// edits retarget text in place, removals delete the note, and an edit or
+/// remove naming an unknown ID leaves every other row alone). Only appends
+/// by a valid agent enter the projection; an edit by another actor updates
+/// the text without moving authorship. Embedded legacy note blobs on
+/// `issue_created` never produce previews. Verb counts and touch timestamps
+/// are unaffected by the preview replay, including edit/remove actions.
 pub fn reduce_stream_touches(
     stream_id: &str,
     contents: &str,
@@ -209,11 +263,13 @@ pub fn reduce_stream_touches(
 
     let mut metas: HashMap<&str, BeadMeta> = HashMap::new();
     let mut accs: BTreeMap<(&str, &str), TouchAcc> = BTreeMap::new();
+    let mut notes: HashMap<String, BTreeMap<String, LiveNote>> = HashMap::new();
     for event in &events {
         metas
             .entry(event.issue_id.as_str())
             .or_default()
             .apply(&event.meta_update);
+        apply_note_event(&mut notes, event);
         let Some(verb) = verb_for_operation(event.operation) else {
             continue;
         };
@@ -229,6 +285,8 @@ pub fn reduce_stream_touches(
         .filter_map(|((bead_id, actor), acc)| {
             let (first, last) = (acc.first?, acc.last?);
             let meta = metas.get(bead_id).cloned().unwrap_or_default();
+            let (current_note_count, note_preview) =
+                note_preview_for(bead_id, actor, &notes);
             Some(BeadTouchWire {
                 actor: actor.to_string(),
                 bead_id: bead_id.to_string(),
@@ -238,10 +296,139 @@ pub fn reduce_stream_touches(
                 verbs: acc.verbs,
                 first_at: first.text,
                 last_at: last.text,
+                current_note_count,
+                note_preview,
                 stream_id: stream_id.to_string(),
             })
         })
         .collect()
+}
+
+/// One surviving structured note before it is projected onto a touch row.
+struct LiveNote {
+    author: String,
+    at: DateTime<Utc>,
+    at_text: String,
+    text: String,
+    edited_at: Option<String>,
+    edited_by: Option<String>,
+}
+
+impl LiveNote {
+    fn preview(&self, id: &str) -> BeadNotePreviewWire {
+        let (text, truncated) = truncate_preview_text(&self.text);
+        BeadNotePreviewWire {
+            id: id.to_string(),
+            author: self.author.clone(),
+            timestamp: self.at_text.clone(),
+            text,
+            edited_at: self.edited_at.clone(),
+            edited_by: self.edited_by.clone(),
+            truncated,
+        }
+    }
+}
+
+/// Replay one event's note payload into the per-bead note tables.
+///
+/// Never affects verbs or timestamps; those stay with [`TouchAcc`].
+fn apply_note_event(
+    notes: &mut HashMap<String, BTreeMap<String, LiveNote>>,
+    event: &ParsedEvent,
+) {
+    match (&event.note_detail, event.operation) {
+        (
+            NoteDetail::Append { entry },
+            BeadEventOperationWire::NoteAppended,
+        ) => {
+            let text = entry.trim();
+            if text.is_empty() {
+                return;
+            }
+            let Some(author) = agent_actor(&event.actor) else {
+                return;
+            };
+            let note_id = event.event_id.trim();
+            if note_id.is_empty() {
+                return;
+            }
+            notes.entry(event.issue_id.clone()).or_default().insert(
+                note_id.to_string(),
+                LiveNote {
+                    author: author.to_string(),
+                    at: event.at,
+                    at_text: event.at_text.clone(),
+                    text: text.to_string(),
+                    edited_at: None,
+                    edited_by: None,
+                },
+            );
+        }
+        (
+            NoteDetail::Edit { note_id, text },
+            BeadEventOperationWire::NoteEdited,
+        ) => {
+            let note_id = note_id.trim();
+            let text = text.trim();
+            if note_id.is_empty() || text.is_empty() {
+                return;
+            }
+            if let Some(note) = notes
+                .get_mut(&event.issue_id)
+                .and_then(|by_id| by_id.get_mut(note_id))
+            {
+                note.text = text.to_string();
+                note.edited_at = Some(event.at_text.clone());
+                note.edited_by = Some(event.actor.clone());
+            }
+        }
+        (
+            NoteDetail::Remove { note_id },
+            BeadEventOperationWire::NoteRemoved,
+        ) => {
+            let note_id = note_id.trim();
+            if note_id.is_empty() {
+                return;
+            }
+            if let Some(by_id) = notes.get_mut(&event.issue_id) {
+                by_id.remove(note_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Count the surviving notes one author holds on one bead and select the
+/// newest preview by append instant, breaking ties on the stable note ID.
+fn note_preview_for(
+    bead_id: &str,
+    actor: &str,
+    notes: &HashMap<String, BTreeMap<String, LiveNote>>,
+) -> (u64, Option<BeadNotePreviewWire>) {
+    let Some(by_id) = notes.get(bead_id) else {
+        return (0, None);
+    };
+    let mut authored: Vec<(&String, &LiveNote)> = by_id
+        .iter()
+        .filter(|(_, note)| note.author == actor)
+        .collect();
+    if authored.is_empty() {
+        return (0, None);
+    }
+    authored.sort_by(|(left_id, left), (right_id, right)| {
+        left.at.cmp(&right.at).then_with(|| left_id.cmp(right_id))
+    });
+    let count = authored.len() as u64;
+    let (id, newest) = authored.last().expect("non-empty after length check");
+    (count, Some(newest.preview(id)))
+}
+
+/// Cut note text to [`NOTE_PREVIEW_TEXT_LIMIT`] Unicode scalar values.
+fn truncate_preview_text(text: &str) -> (String, bool) {
+    if text.chars().nth(NOTE_PREVIEW_TEXT_LIMIT).is_none() {
+        return (text.to_string(), false);
+    }
+    (text.chars().take(NOTE_PREVIEW_TEXT_LIMIT).collect(), true)
 }
 
 /// Bring the index at `index_path` up to date with `beads_dir`'s streams.
@@ -565,11 +752,34 @@ impl TouchAcc {
 
 struct ParsedEvent {
     operation: BeadEventOperationWire,
+    event_id: String,
     issue_id: String,
     actor: String,
     at: DateTime<Utc>,
     at_text: String,
     meta_update: MetaUpdate,
+    note_detail: NoteDetail,
+}
+
+/// Structured note payload carried by one event, if any.
+///
+/// Kept separate from [`MetaUpdate`] because previews replay by stable note
+/// ID while verbs and timestamps stay with [`TouchAcc`]. A detail whose
+/// operation disagrees is ignored by [`apply_note_event`].
+#[derive(Debug, Default)]
+enum NoteDetail {
+    Append {
+        entry: String,
+    },
+    Edit {
+        note_id: String,
+        text: String,
+    },
+    Remove {
+        note_id: String,
+    },
+    #[default]
+    None,
 }
 
 impl ParsedEvent {
@@ -598,14 +808,58 @@ impl ParsedEvent {
         let at = DateTime::parse_from_rfc3339(raw_at.trim())
             .ok()?
             .with_timezone(&Utc);
+        let event_id = value
+            .get("event_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let note_detail = note_detail(operation, payload);
         Some(Self {
             operation,
+            event_id,
             issue_id: issue_id.to_string(),
             actor: value.get("actor")?.as_str()?.trim().to_string(),
             at,
             at_text: display_timestamp(raw_at.trim(), at),
             meta_update: meta_update(operation, payload),
+            note_detail,
         })
+    }
+}
+
+/// Extract the structured note payload, if the operation carries one.
+///
+/// Missing or mistyped fields yield [`NoteDetail::None`]: the event still
+/// counts its verb, it just has no preview effect.
+fn note_detail(
+    operation: BeadEventOperationWire,
+    payload: &Value,
+) -> NoteDetail {
+    match operation {
+        BeadEventOperationWire::NoteAppended => match payload.get("entry") {
+            Some(Value::String(entry)) => NoteDetail::Append {
+                entry: entry.clone(),
+            },
+            _ => NoteDetail::None,
+        },
+        BeadEventOperationWire::NoteEdited => {
+            match (payload.get("note_id"), payload.get("text")) {
+                (Some(Value::String(note_id)), Some(Value::String(text))) => {
+                    NoteDetail::Edit {
+                        note_id: note_id.clone(),
+                        text: text.clone(),
+                    }
+                }
+                _ => NoteDetail::None,
+            }
+        }
+        BeadEventOperationWire::NoteRemoved => match payload.get("note_id") {
+            Some(Value::String(note_id)) => NoteDetail::Remove {
+                note_id: note_id.clone(),
+            },
+            _ => NoteDetail::None,
+        },
+        _ => NoteDetail::None,
     }
 }
 
@@ -929,6 +1183,75 @@ mod tests {
             timestamp,
             json!({"entry": "text"}),
         )
+    }
+
+    fn note_entry(
+        actor: &str,
+        issue_id: &str,
+        timestamp: &str,
+        entry: &str,
+    ) -> String {
+        event(
+            actor,
+            "note_appended",
+            issue_id,
+            timestamp,
+            json!({"entry": entry}),
+        )
+    }
+
+    fn note_with_id(
+        event_id: &str,
+        actor: &str,
+        issue_id: &str,
+        timestamp: &str,
+        entry: &str,
+    ) -> String {
+        json!({
+            "schema_version": 1,
+            "event_id": event_id,
+            "timestamp": timestamp,
+            "actor": actor,
+            "operation": "note_appended",
+            "issue_id": issue_id,
+            "payload": {"kind": "note_appended", "entry": entry},
+        })
+        .to_string()
+    }
+
+    fn note_edited(
+        actor: &str,
+        issue_id: &str,
+        timestamp: &str,
+        note_id: &str,
+        text: &str,
+    ) -> String {
+        event(
+            actor,
+            "note_edited",
+            issue_id,
+            timestamp,
+            json!({"note_id": note_id, "text": text}),
+        )
+    }
+
+    fn note_removed(
+        actor: &str,
+        issue_id: &str,
+        timestamp: &str,
+        note_id: &str,
+    ) -> String {
+        event(
+            actor,
+            "note_removed",
+            issue_id,
+            timestamp,
+            json!({"note_id": note_id}),
+        )
+    }
+
+    fn append_id(issue_id: &str, timestamp: &str) -> String {
+        format!("{issue_id}:note_appended:{timestamp}")
     }
 
     fn bare(actor: &str, operation: &str, issue_id: &str, ts: &str) -> String {
@@ -1550,7 +1873,7 @@ mod tests {
             b"not json".to_vec(),
             b"{}".to_vec(),
             b"[]".to_vec(),
-            b"{\"schema_version\":1,\"touches\":7}".to_vec(),
+            b"{\"schema_version\":2,\"touches\":7}".to_vec(),
             Vec::new(),
         ] {
             fs::write(&store.index_path, &corrupt).unwrap();
@@ -1681,7 +2004,10 @@ mod tests {
         let raw: Value =
             serde_json::from_slice(&fs::read(&store.index_path).unwrap())
                 .unwrap();
-        assert_eq!(raw["schema_version"], json!(1));
+        assert_eq!(
+            raw["schema_version"],
+            json!(BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION)
+        );
         assert_eq!(raw["generation"], json!(outcome.generation));
         let signature = raw["streams"]["b-1"].as_array().unwrap();
         assert_eq!(signature.len(), 2);
@@ -1698,9 +2024,335 @@ mod tests {
                 "verbs": {"noted": 1},
                 "first_at": "2026-01-01T00:01:00Z",
                 "last_at": "2026-01-01T00:01:00Z",
+                "current_note_count": 1,
+                "note_preview": {
+                    "id": "b-1:note_appended:2026-01-01T00:01:00Z",
+                    "author": AGENT_A,
+                    "timestamp": "2026-01-01T00:01:00Z",
+                    "text": "text",
+                    "truncated": false,
+                },
                 "stream_id": "b-1",
             })
         );
+    }
+
+    #[test]
+    fn note_preview_covers_append_and_selects_the_newest() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "first"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:02:00Z", "second"),
+            ]),
+        );
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 2);
+        let preview = touch.note_preview.as_ref().expect("preview");
+        assert_eq!(preview.id, append_id("b-1", "2026-01-01T00:02:00Z"));
+        assert_eq!(preview.author, AGENT_A);
+        assert_eq!(preview.timestamp, "2026-01-01T00:02:00Z");
+        assert_eq!(preview.text, "second");
+        assert_eq!(preview.edited_at, None);
+        assert_eq!(preview.edited_by, None);
+        assert!(!preview.truncated);
+        // Verbs and timestamps are untouched by the preview replay.
+        assert_eq!(touch.verbs, verbs(&[("noted", 2)]));
+        assert_eq!(touch.first_at, "2026-01-01T00:01:00Z");
+        assert_eq!(touch.last_at, "2026-01-01T00:02:00Z");
+    }
+
+    #[test]
+    fn note_preview_tie_breaks_on_stable_id() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_with_id(
+                    "n-b",
+                    AGENT_A,
+                    "b-1",
+                    "2026-01-01T00:01:00Z",
+                    "bravo",
+                ),
+                note_with_id(
+                    "n-a",
+                    AGENT_A,
+                    "b-1",
+                    "2026-01-01T00:01:00Z",
+                    "alpha",
+                ),
+            ]),
+        );
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 2);
+        // Same append instant: the larger stable ID wins, deterministically.
+        assert_eq!(touch.note_preview.as_ref().unwrap().id, "n-b");
+        assert_eq!(touch.note_preview.as_ref().unwrap().text, "bravo");
+    }
+
+    #[test]
+    fn note_previews_stay_scoped_to_author_and_bead() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                created(OWNER, "b-2", "Other", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "a-note"),
+                note_entry(AGENT_B, "b-1", "2026-01-01T00:02:00Z", "b-note"),
+                note_entry(AGENT_A, "b-2", "2026-01-01T00:03:00Z", "a-other"),
+            ]),
+        );
+        let a1 = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(a1.current_note_count, 1);
+        assert_eq!(a1.note_preview.as_ref().unwrap().text, "a-note");
+        let b1 = touch_for(&touches, "b-1", AGENT_B);
+        assert_eq!(b1.current_note_count, 1);
+        assert_eq!(b1.note_preview.as_ref().unwrap().text, "b-note");
+        assert_eq!(b1.note_preview.as_ref().unwrap().author, AGENT_B);
+    }
+
+    #[test]
+    fn edit_by_another_actor_updates_text_without_moving_authorship() {
+        let first_id = append_id("b-1", "2026-01-01T00:01:00Z");
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "original"),
+                note_edited(
+                    AGENT_B,
+                    "b-1",
+                    "2026-01-01T00:02:00Z",
+                    &first_id,
+                    "revised",
+                ),
+            ]),
+        );
+        let authored = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(authored.current_note_count, 1);
+        let preview = authored.note_preview.as_ref().expect("preview");
+        assert_eq!(preview.id, first_id);
+        assert_eq!(preview.author, AGENT_A);
+        assert_eq!(preview.timestamp, "2026-01-01T00:01:00Z");
+        assert_eq!(preview.text, "revised");
+        assert_eq!(preview.edited_at.as_deref(), Some("2026-01-01T00:02:00Z"));
+        assert_eq!(preview.edited_by.as_deref(), Some(AGENT_B));
+        // The editor still earns its noted verb, but gains no preview from
+        // someone else's note.
+        let editor = touch_for(&touches, "b-1", AGENT_B);
+        assert_eq!(editor.verbs, verbs(&[("noted", 1)]));
+        assert_eq!(editor.current_note_count, 0);
+        assert_eq!(editor.note_preview, None);
+    }
+
+    #[test]
+    fn removal_falls_back_to_the_previous_note_then_to_nothing() {
+        let first_id = append_id("b-1", "2026-01-01T00:01:00Z");
+        let second_id = append_id("b-1", "2026-01-01T00:02:00Z");
+        let base = [
+            created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+            note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "first"),
+            note_entry(AGENT_A, "b-1", "2026-01-01T00:02:00Z", "second"),
+        ];
+        let touches = reduce_stream_touches("b-1", &lines(&base));
+        assert_eq!(
+            touch_for(&touches, "b-1", AGENT_A)
+                .note_preview
+                .as_ref()
+                .unwrap()
+                .id,
+            second_id
+        );
+
+        let mut removed_second = base.to_vec();
+        removed_second.push(note_removed(
+            AGENT_A,
+            "b-1",
+            "2026-01-01T00:03:00Z",
+            &second_id,
+        ));
+        let touches = reduce_stream_touches("b-1", &lines(&removed_second));
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 1);
+        assert_eq!(touch.note_preview.as_ref().unwrap().id, first_id);
+        assert_eq!(touch.note_preview.as_ref().unwrap().text, "first");
+        // Removal counts as a noted action even as the preview shrinks.
+        assert_eq!(touch.verbs, verbs(&[("noted", 3)]));
+
+        let mut removed_both = removed_second.clone();
+        removed_both.push(note_removed(
+            AGENT_B,
+            "b-1",
+            "2026-01-01T00:04:00Z",
+            &first_id,
+        ));
+        let touches = reduce_stream_touches("b-1", &lines(&removed_both));
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 0);
+        assert_eq!(touch.note_preview, None);
+    }
+
+    #[test]
+    fn unknown_edit_and_remove_ids_leave_previews_alone() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "kept"),
+                note_edited(
+                    AGENT_A,
+                    "b-1",
+                    "2026-01-01T00:02:00Z",
+                    "missing",
+                    "elsewhere",
+                ),
+                note_removed(AGENT_A, "b-1", "2026-01-01T00:03:00Z", "missing"),
+            ]),
+        );
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 1);
+        assert_eq!(touch.note_preview.as_ref().unwrap().text, "kept");
+        // Unknown IDs still count their noted verbs.
+        assert_eq!(touch.verbs, verbs(&[("noted", 3)]));
+    }
+
+    #[test]
+    fn non_agent_and_blank_appends_never_produce_previews() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(OWNER, "b-1", "2026-01-01T00:01:00Z", "owner note"),
+                note_entry(
+                    "has space",
+                    "b-1",
+                    "2026-01-01T00:02:00Z",
+                    "bad actor",
+                ),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:03:00Z", "   "),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:04:00Z", "real"),
+            ]),
+        );
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 1);
+        assert_eq!(touch.note_preview.as_ref().unwrap().text, "real");
+        // Blank appends still earn verbs; human appends never become rows.
+        assert_eq!(touch.verbs, verbs(&[("noted", 2)]));
+        assert!(touches.iter().all(|touch| touch.actor != OWNER));
+    }
+
+    #[test]
+    fn malformed_note_payloads_keep_verbs_but_skip_previews() {
+        let text = lines(&[
+            created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+            // Non-string entry: verb without a preview.
+            event(
+                AGENT_A,
+                "note_appended",
+                "b-1",
+                "2026-01-01T00:01:00Z",
+                json!({"entry": 7}),
+            ),
+            // Blank edit text: preview effect skipped.
+            note_edited(
+                AGENT_A,
+                "b-1",
+                "2026-01-01T00:02:00Z",
+                &append_id("b-1", "2026-01-01T00:01:00Z"),
+                "   ",
+            ),
+            // Missing note_id: preview effect skipped.
+            event(
+                AGENT_A,
+                "note_removed",
+                "b-1",
+                "2026-01-01T00:03:00Z",
+                json!({}),
+            ),
+        ]);
+        let touches = reduce_stream_touches("b-1", &text);
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.verbs, verbs(&[("noted", 3)]));
+        assert_eq!(touch.current_note_count, 0);
+        assert_eq!(touch.note_preview, None);
+    }
+
+    #[test]
+    fn long_and_unicode_note_text_truncates_on_char_boundaries() {
+        let long = "é".repeat(NOTE_PREVIEW_TEXT_LIMIT + 5);
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", &long),
+            ]),
+        );
+        let preview = touch_for(&touches, "b-1", AGENT_A)
+            .note_preview
+            .clone()
+            .unwrap();
+        assert!(preview.truncated);
+        assert_eq!(preview.text.chars().count(), NOTE_PREVIEW_TEXT_LIMIT);
+        assert_eq!(preview.text, "é".repeat(NOTE_PREVIEW_TEXT_LIMIT));
+
+        let exact = "x".repeat(NOTE_PREVIEW_TEXT_LIMIT);
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(OWNER, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", &exact),
+            ]),
+        );
+        let preview = touch_for(&touches, "b-1", AGENT_A)
+            .note_preview
+            .clone()
+            .unwrap();
+        assert!(!preview.truncated);
+        assert_eq!(preview.text, exact);
+    }
+
+    #[test]
+    fn a_schema_one_index_is_a_miss_until_the_rebuild() {
+        let store = Store::new();
+        store.write_stream(
+            "b-1",
+            &[
+                created(OWNER, "b-1", "One", "task", "2026-01-01T00:00:00Z"),
+                note_entry(AGENT_A, "b-1", "2026-01-01T00:01:00Z", "hello"),
+            ],
+        );
+        store.refresh();
+        // Hand back the file to the pre-preview schema: the query must miss
+        // and the next refresh must rebuild with the preview attached.
+        let raw = fs::read(&store.index_path).unwrap();
+        let mut value: Value = serde_json::from_slice(&raw).unwrap();
+        value["schema_version"] = json!(1);
+        if let Some(touches) =
+            value.get_mut("touches").and_then(Value::as_array_mut)
+        {
+            for touch in touches {
+                touch.as_object_mut().unwrap().remove("current_note_count");
+                touch.as_object_mut().unwrap().remove("note_preview");
+            }
+        }
+        fs::write(&store.index_path, serde_json::to_vec(&value).unwrap())
+            .unwrap();
+
+        assert_eq!(store.query(None).touches, Vec::new());
+        assert_eq!(
+            store.status().state,
+            BeadTouchIndexStateWire::SchemaMismatch
+        );
+        assert_eq!(store.status().index_schema_version, Some(1));
+
+        let outcome = store.refresh();
+        assert!(outcome.full_rebuild && outcome.wrote);
+        let query = store.query(None);
+        let touch = touch_for(&query.touches, "b-1", AGENT_A);
+        assert_eq!(touch.current_note_count, 1);
+        assert_eq!(touch.note_preview.as_ref().unwrap().text, "hello");
     }
 
     #[test]
