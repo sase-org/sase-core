@@ -189,7 +189,10 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains(r#""service":"sase_gateway""#));
-        assert!(response.contains(r#""supported_protocol_versions":[1]"#));
+        assert!(response.contains(&format!(
+            r#""supported_protocol_versions":[{}]"#,
+            crate::wire::FLEET_PROTOCOL_VERSION
+        )));
         handle.abort();
     }
 

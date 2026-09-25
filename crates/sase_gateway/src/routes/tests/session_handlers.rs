@@ -4,7 +4,10 @@ use crate::push::PushConfig;
 use axum::body::Body;
 use axum::http::StatusCode;
 
-use crate::wire::GATEWAY_WIRE_SCHEMA_VERSION;
+use crate::wire::{
+    FLEET_API_WIRE_SCHEMA_VERSION, FLEET_PROTOCOL_VERSION,
+    GATEWAY_WIRE_SCHEMA_VERSION,
+};
 
 use axum::http::Request;
 
@@ -30,7 +33,11 @@ async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let (enroll_status, enrolled) = json_response_with_state(
         state.clone(),
-        fleet_enroll_request(fleet_enroll_body(&bootstrap, &[], vec![1])),
+        fleet_enroll_request(fleet_enroll_body(
+            &bootstrap,
+            &[],
+            vec![FLEET_PROTOCOL_VERSION],
+        )),
     )
     .await;
     assert_eq!(enroll_status, StatusCode::OK);
@@ -43,8 +50,8 @@ async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
             "/api/fleet/v1/credential/rotate",
             Some(&old_token),
             Some(json!({
-                "schema_version": 1,
-                "supported_protocol_versions": [1]
+                "schema_version": GATEWAY_WIRE_SCHEMA_VERSION,
+                "supported_protocol_versions": [FLEET_PROTOCOL_VERSION]
             })),
         ),
     )
@@ -73,7 +80,7 @@ async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
             "/api/fleet/v1/credential/revoke",
             Some(&new_token),
             Some(json!({
-                "schema_version": 1,
+                "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
                 "reason": "controller retired"
             })),
         ),
@@ -104,11 +111,15 @@ async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let (status, enrolled) = json_response_with_state(
         state.clone(),
-        fleet_enroll_request(fleet_enroll_body(&bootstrap, &[], vec![2, 1])),
+        fleet_enroll_request(fleet_enroll_body(
+            &bootstrap,
+            &[],
+            vec![FLEET_PROTOCOL_VERSION + 1, FLEET_PROTOCOL_VERSION],
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(enrolled["protocol_version"], 1);
+    assert_eq!(enrolled["protocol_version"], FLEET_PROTOCOL_VERSION);
     let token = enrolled["token"].as_str().unwrap().to_string();
 
     let (hello_status, hello) = json_response_with_state(
@@ -116,7 +127,10 @@ async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
         Request::builder()
             .uri("/api/fleet/v1/hello")
             .header("authorization", format!("Bearer {token}"))
-            .header(FLEET_PROTOCOL_VERSIONS_HEADER, "2")
+            .header(
+                FLEET_PROTOCOL_VERSIONS_HEADER,
+                (FLEET_PROTOCOL_VERSION + 1).to_string(),
+            )
             .body(Body::empty())
             .unwrap(),
     )
@@ -130,7 +144,7 @@ async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
         fleet_enroll_request(fleet_enroll_body(
             &incompatible_bootstrap,
             &[],
-            vec![2],
+            vec![FLEET_PROTOCOL_VERSION + 1],
         )),
     )
     .await;
@@ -143,7 +157,8 @@ async fn fleet_installation_pin_mismatch_returns_quarantine_response() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
-    let mut body = fleet_enroll_body(&bootstrap, &[], vec![1]);
+    let mut body =
+        fleet_enroll_body(&bootstrap, &[], vec![FLEET_PROTOCOL_VERSION]);
     body["pinned_installation_id"] = json!("sase_inst_v1_deadbeef");
 
     let (status, value) =
@@ -164,7 +179,7 @@ async fn fleet_enrollment_attempts_are_rate_limited() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let invalid_body = json!({
-        "schema_version": 1,
+        "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
         "bootstrap_id": "missing",
         "bootstrap_secret": "wrong",
         "controller": {
@@ -175,7 +190,7 @@ async fn fleet_enrollment_attempts_are_rate_limited() {
             "app_version": null
         },
         "requested_scopes": [],
-        "supported_protocol_versions": [1],
+        "supported_protocol_versions": [FLEET_PROTOCOL_VERSION],
         "pinned_installation_id": "sase_inst_v1_deadbeef"
     });
 
@@ -200,7 +215,7 @@ async fn fleet_request_body_limit_rejects_large_enrollment_payloads() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let oversized = json!({
-        "schema_version": 1,
+        "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
         "bootstrap_id": "missing",
         "bootstrap_secret": "x".repeat(FLEET_REQUEST_BODY_LIMIT_BYTES + 1),
         "controller": {
@@ -211,7 +226,7 @@ async fn fleet_request_body_limit_rejects_large_enrollment_payloads() {
             "app_version": null
         },
         "requested_scopes": [],
-        "supported_protocol_versions": [1],
+        "supported_protocol_versions": [FLEET_PROTOCOL_VERSION],
         "pinned_installation_id": "sase_inst_v1_deadbeef"
     });
 

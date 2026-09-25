@@ -11,7 +11,8 @@ use crate::fleet_auth::{
 };
 
 use crate::wire::{
-    EventPayloadWire, FleetHelloResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    EventPayloadWire, FleetHelloResponseWire, FLEET_API_WIRE_SCHEMA_VERSION,
+    FLEET_PROTOCOL_VERSION, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 use axum::http::Request;
@@ -36,14 +37,14 @@ async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_HELLO, FLEET_SCOPE_ROTATE, FLEET_SCOPE_REVOKE],
-            vec![99, 1],
+            vec![99, FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(enrolled["outcome"], "enrolled");
-    assert_eq!(enrolled["protocol_version"], 1);
+    assert_eq!(enrolled["protocol_version"], FLEET_PROTOCOL_VERSION);
     assert_eq!(enrolled["machine_selector"], "test-host");
     assert_eq!(
         enrolled["installation"]["installation_id"],
@@ -62,15 +63,24 @@ async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
         Request::builder()
             .uri("/api/fleet/v1/hello")
             .header("authorization", format!("Bearer {token}"))
-            .header(FLEET_PROTOCOL_VERSIONS_HEADER, "2, 1")
+            .header(
+                FLEET_PROTOCOL_VERSIONS_HEADER,
+                format!(
+                    "{}, {FLEET_PROTOCOL_VERSION}",
+                    FLEET_PROTOCOL_VERSION + 1
+                ),
+            )
             .body(Body::empty())
             .unwrap(),
     )
     .await;
     assert_eq!(hello_status, StatusCode::OK);
-    assert_eq!(hello["protocol_version"], 1);
+    assert_eq!(hello["protocol_version"], FLEET_PROTOCOL_VERSION);
     assert_eq!(hello["schema_version"], GATEWAY_WIRE_SCHEMA_VERSION);
-    assert_eq!(hello["capabilities"]["schema_version"], 1);
+    assert_eq!(
+        hello["capabilities"]["schema_version"],
+        FLEET_API_WIRE_SCHEMA_VERSION
+    );
     assert_eq!(
         hello["fleet_contract_schema_version"],
         sase_core::FLEET_CONTRACT_SCHEMA_VERSION
@@ -113,7 +123,10 @@ async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
     let parsed: FleetHelloResponseWire =
         serde_json::from_value(old_hello).unwrap();
     assert_eq!(parsed.fleet_contract_schema_version, None);
-    assert_eq!(parsed.capabilities.schema_version, 1);
+    assert_eq!(
+        parsed.capabilities.schema_version,
+        FLEET_API_WIRE_SCHEMA_VERSION
+    );
     assert_eq!(parsed.schema_version, GATEWAY_WIRE_SCHEMA_VERSION);
 }
 
@@ -122,7 +135,7 @@ async fn fleet_enrollment_rejects_replayed_and_expired_bootstrap_secrets() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
-    let body = fleet_enroll_body(&bootstrap, &[], vec![1]);
+    let body = fleet_enroll_body(&bootstrap, &[], vec![FLEET_PROTOCOL_VERSION]);
     let (first_status, _first) = json_response_with_state(
         state.clone(),
         fleet_enroll_request(body.clone()),
@@ -139,7 +152,11 @@ async fn fleet_enrollment_rejects_replayed_and_expired_bootstrap_secrets() {
     let expired = fleet_bootstrap_at(&state, 2.0, 1.0);
     let (expired_status, expired_response) = json_response_with_state(
         state,
-        fleet_enroll_request(fleet_enroll_body(&expired, &[], vec![1])),
+        fleet_enroll_request(fleet_enroll_body(
+            &expired,
+            &[],
+            vec![FLEET_PROTOCOL_VERSION],
+        )),
     )
     .await;
     assert_eq!(expired_status, StatusCode::BAD_REQUEST);
@@ -156,7 +173,7 @@ async fn fleet_routes_enforce_declared_scopes() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_HELLO],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -180,8 +197,8 @@ async fn fleet_routes_enforce_declared_scopes() {
             "/api/fleet/v1/credential/rotate",
             Some(token),
             Some(json!({
-                "schema_version": 1,
-                "supported_protocol_versions": [1]
+                "schema_version": GATEWAY_WIRE_SCHEMA_VERSION,
+                "supported_protocol_versions": [FLEET_PROTOCOL_VERSION]
             })),
         ),
     )
@@ -201,7 +218,7 @@ async fn fleet_launch_accepts_scoped_request_and_returns_receipt() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_LAUNCH],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -266,7 +283,7 @@ async fn fleet_launch_omits_bridge_name_when_prompt_has_id() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_LAUNCH],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -324,7 +341,7 @@ async fn fleet_launch_replays_delayed_launch_and_reconciles_visible_row() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_LAUNCH, FLEET_SCOPE_MUTATE],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -431,7 +448,7 @@ async fn fleet_launch_failure_settles_failed_without_raw_bridge_output() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_LAUNCH],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -467,7 +484,7 @@ async fn fleet_launch_recovers_pending_reservation_after_gateway_restart() {
         fleet_enroll_request(fleet_enroll_body(
             &bootstrap,
             &[FLEET_SCOPE_LAUNCH],
-            vec![1],
+            vec![FLEET_PROTOCOL_VERSION],
         )),
     )
     .await;
@@ -573,7 +590,7 @@ async fn post_mutate(
     );
     request.headers_mut().insert(
         FLEET_PROTOCOL_VERSIONS_HEADER,
-        HeaderValue::from_static("1"),
+        HeaderValue::from(FLEET_PROTOCOL_VERSION),
     );
     json_response_with_state(state, request).await
 }
@@ -591,7 +608,7 @@ async fn post_fleet_launch(
     );
     request.headers_mut().insert(
         FLEET_PROTOCOL_VERSIONS_HEADER,
-        HeaderValue::from_static("1"),
+        HeaderValue::from(FLEET_PROTOCOL_VERSION),
     );
     json_response_with_state(state, request).await
 }

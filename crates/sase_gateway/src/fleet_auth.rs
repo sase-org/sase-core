@@ -1046,7 +1046,7 @@ mod tests {
                 .iter()
                 .map(|scope| scope.to_string())
                 .collect(),
-            supported_protocol_versions: vec![1],
+            supported_protocol_versions: vec![FLEET_PROTOCOL_VERSION],
             expires_at_unix: None,
             installation_pin: None,
         }
@@ -1071,7 +1071,7 @@ mod tests {
                 .iter()
                 .map(|scope| scope.to_string())
                 .collect(),
-            supported_protocol_versions: vec![1],
+            supported_protocol_versions: vec![FLEET_PROTOCOL_VERSION],
             pinned_installation_id: bootstrap.pinned_installation_id.clone(),
         }
     }

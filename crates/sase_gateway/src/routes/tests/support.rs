@@ -238,12 +238,14 @@ pub(crate) fn fleet_bootstrap(
         .fleet_store()
         .issue_bootstrap(
             crate::wire::FleetBootstrapIssueRequestWire {
-                schema_version: 1,
+                schema_version: crate::wire::FLEET_API_WIRE_SCHEMA_VERSION,
                 requested_scopes: scopes
                     .iter()
                     .map(|scope| scope.to_string())
                     .collect(),
-                supported_protocol_versions: vec![1],
+                supported_protocol_versions: vec![
+                    crate::wire::FLEET_PROTOCOL_VERSION,
+                ],
                 expires_at_unix,
                 installation_pin: None,
             },
@@ -261,9 +263,11 @@ pub(crate) fn fleet_bootstrap_at(
         .fleet_store()
         .issue_bootstrap(
             crate::wire::FleetBootstrapIssueRequestWire {
-                schema_version: 1,
+                schema_version: crate::wire::FLEET_API_WIRE_SCHEMA_VERSION,
                 requested_scopes: Vec::new(),
-                supported_protocol_versions: vec![1],
+                supported_protocol_versions: vec![
+                    crate::wire::FLEET_PROTOCOL_VERSION,
+                ],
                 expires_at_unix: Some(expires_at_unix),
                 installation_pin: None,
             },
@@ -278,7 +282,7 @@ pub(crate) fn fleet_enroll_body(
     versions: Vec<u32>,
 ) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": crate::wire::FLEET_API_WIRE_SCHEMA_VERSION,
         "bootstrap_id": bootstrap.bootstrap_id.clone(),
         "bootstrap_secret": bootstrap.bootstrap_secret.clone(),
         "controller": {
@@ -1117,7 +1121,11 @@ pub(crate) async fn enroll_mutate(
     let bootstrap = fleet_bootstrap(state, scopes, None);
     let (enroll_status, enrolled) = json_response_with_state(
         state.clone(),
-        fleet_enroll_request(fleet_enroll_body(&bootstrap, scopes, vec![1])),
+        fleet_enroll_request(fleet_enroll_body(
+            &bootstrap,
+            scopes,
+            vec![crate::wire::FLEET_PROTOCOL_VERSION],
+        )),
     )
     .await;
     assert_eq!(enroll_status, StatusCode::OK);

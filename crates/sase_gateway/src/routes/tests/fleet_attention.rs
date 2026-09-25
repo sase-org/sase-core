@@ -21,7 +21,7 @@ use crate::host_bridge::{
     DynNotificationHostBridge, HostBridgeError, NotificationHostBridge,
 };
 
-use crate::wire::EventPayloadWire;
+use crate::wire::{EventPayloadWire, FLEET_PROTOCOL_VERSION};
 
 use chrono::Duration;
 
@@ -216,7 +216,7 @@ async fn post_attention_read(
     );
     request.headers_mut().insert(
         FLEET_PROTOCOL_VERSIONS_HEADER,
-        HeaderValue::from_static("1"),
+        HeaderValue::from(FLEET_PROTOCOL_VERSION),
     );
     json_response_with_state(state, request).await
 }
@@ -234,7 +234,7 @@ async fn post_attention_inventory(
     );
     request.headers_mut().insert(
         FLEET_PROTOCOL_VERSIONS_HEADER,
-        HeaderValue::from_static("1"),
+        HeaderValue::from(FLEET_PROTOCOL_VERSION),
     );
     json_response_with_state(state, request).await
 }
@@ -286,7 +286,7 @@ async fn post_attention_resolve(
     );
     request.headers_mut().insert(
         FLEET_PROTOCOL_VERSIONS_HEADER,
-        HeaderValue::from_static("1"),
+        HeaderValue::from(FLEET_PROTOCOL_VERSION),
     );
     json_response_with_state(state, request).await
 }
