@@ -1,6 +1,6 @@
 //! Eligibility evaluation for host-sealed conditional completion.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -131,26 +131,39 @@ pub fn evaluate_conditional_completion(
     if request.workspace_identity != request.original_workspace_identity {
         reasons.push("workspace_identity_mismatch".to_string());
     }
-    if request.observations.iter().any(|repo| !repo.complete) {
+    let decided: BTreeSet<&str> = intent
+        .repository_decisions
+        .iter()
+        .map(|decision| decision.repo_id.as_str())
+        .collect();
+    if request
+        .observations
+        .iter()
+        .filter(|repo| decided.contains(repo.repo_id.as_str()))
+        .any(|repo| !repo.complete)
+    {
         reasons.push("incomplete_observations".to_string());
     }
-    if request.observations.iter().any(|repo| {
-        repo.head.trim().is_empty() || repo.head == "<unknown-head>"
-    }) {
+    if request
+        .observations
+        .iter()
+        .filter(|repo| decided.contains(repo.repo_id.as_str()))
+        .any(|repo| {
+            repo.head.trim().is_empty() || repo.head == "<unknown-head>"
+        })
+    {
         reasons.push("unknown_head".to_string());
     }
-    let current_fingerprint = worktree_fingerprint(&request.observations)?;
+    let current_fingerprint = worktree_fingerprint(
+        &request.observations,
+        &intent.repository_decisions,
+    )?;
     if current_fingerprint != intent.seal.worktree_fingerprint {
         reasons.push("stale_worktree_fingerprint".to_string());
     }
     if request.current_plan_digest != intent.seal.plan_digest {
         reasons.push("changed_finalizer_requirements".to_string());
     }
-    let decided: std::collections::BTreeSet<&str> = intent
-        .repository_decisions
-        .iter()
-        .map(|decision| decision.repo_id.as_str())
-        .collect();
     for obligation_id in &request.current_obligation_ids {
         if !decided.contains(obligation_id.as_str()) {
             reasons.push(format!("new_repository_obligation:{obligation_id}"));
@@ -560,5 +573,136 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.starts_with("unsupported_executor:")));
+    }
+
+    fn sidecar_observation() -> RepositoryObservationWire {
+        RepositoryObservationWire {
+            repo_id: "repo-sidecar".to_string(),
+            kind: "sidecar".to_string(),
+            name: "agents".to_string(),
+            head: digest64("sidecar-head"),
+            head_tree: digest64("sidecar-head-tree"),
+            index_tree: digest64("sidecar-index-tree"),
+            paths: vec![ObservedPathWire {
+                path: "files/objects/sha256/40/40de62d8".to_string(),
+                xy: Some("??".to_string()),
+                content_hash: Some(digest64("sidecar-object")),
+                mode: Some("100644".to_string()),
+                kind: ObservedPathKindWire::Untracked,
+                protected: false,
+                foreign: false,
+            }],
+            complete: true,
+        }
+    }
+
+    fn two_repo_evaluate_request() -> ConditionalCompletionEvaluateRequestWire {
+        let mut prepare = prepare_request();
+        prepare.observations.push(sidecar_observation());
+        let prepared = seal_conditional_completion(prepare).unwrap();
+        let bound =
+            bind_conditional_completion(ConditionalCompletionBindRequestWire {
+                schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+                intent: prepared,
+                monitor_id: "monitor-1".to_string(),
+                command: vec!["just".to_string(), "check-full".to_string()],
+                request_fingerprint: "sha256:abc".to_string(),
+            })
+            .unwrap();
+        let mut request = evaluate_request();
+        request.intent = bound;
+        request.observations.push(sidecar_observation());
+        request
+    }
+
+    #[test]
+    fn undecided_head_and_path_changes_do_not_go_stale() {
+        let mut request = two_repo_evaluate_request();
+        request.observations[1].head = digest64("other-sidecar-head");
+        request.observations[1].paths[0].content_hash =
+            Some(digest64("changed-object"));
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(
+            !decision
+                .reasons
+                .iter()
+                .any(|reason| reason == "stale_worktree_fingerprint"),
+            "undecided changes must not go stale: {:?}",
+            decision.reasons
+        );
+        assert!(decision.eligible);
+    }
+
+    #[test]
+    fn decided_change_goes_stale() {
+        let mut request = two_repo_evaluate_request();
+        request.observations[0].head = digest64("other-head");
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "stale_worktree_fingerprint"));
+    }
+
+    #[test]
+    fn undecided_incomplete_and_unknown_head_do_not_recover() {
+        let mut request = two_repo_evaluate_request();
+        request.observations[1].complete = false;
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(
+            !decision
+                .reasons
+                .iter()
+                .any(|reason| reason == "incomplete_observations"),
+            "undecided incomplete must not recover: {:?}",
+            decision.reasons
+        );
+
+        let mut request = two_repo_evaluate_request();
+        request.observations[1].head = "<unknown-head>".to_string();
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(
+            !decision
+                .reasons
+                .iter()
+                .any(|reason| reason == "unknown_head"),
+            "undecided unknown HEAD must not recover: {:?}",
+            decision.reasons
+        );
+    }
+
+    #[test]
+    fn new_undecided_obligation_reports_new_repository_obligation() {
+        let mut request = two_repo_evaluate_request();
+        request
+            .current_obligation_ids
+            .push("repo-sidecar".to_string());
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(!decision.eligible);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "new_repository_obligation:repo-sidecar"));
+        assert!(
+            !decision
+                .reasons
+                .iter()
+                .any(|reason| reason == "stale_worktree_fingerprint"),
+            "new undecided obligation must not also go stale: {:?}",
+            decision.reasons
+        );
+    }
+
+    #[test]
+    fn missing_decided_observation_goes_stale() {
+        let mut request = two_repo_evaluate_request();
+        request
+            .observations
+            .retain(|repo| repo.repo_id == "repo-sidecar");
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "stale_worktree_fingerprint"));
     }
 }

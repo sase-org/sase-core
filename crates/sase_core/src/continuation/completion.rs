@@ -236,7 +236,10 @@ pub fn validate_conditional_completion_intent(
             "conditional completion seal digest does not match bound material",
         ));
     }
-    let worktree = worktree_fingerprint(&intent.observations)?;
+    let worktree = worktree_fingerprint(
+        &intent.observations,
+        &intent.repository_decisions,
+    )?;
     if intent.seal.worktree_fingerprint != worktree {
         return Err(ContinuationError::conflict(
             "conditional completion worktree fingerprint does not match observations",
@@ -259,20 +262,6 @@ pub fn seal_conditional_completion(
     validate_observations(&request.observations)?;
     validate_executors(&request.executors)?;
 
-    if request.observations.iter().any(|repo| !repo.complete) {
-        return Err(ContinuationError::validation(
-            "incomplete or unstable repository observation makes the intent ineligible",
-        ));
-    }
-    if let Some(repo) = request.observations.iter().find(|repo| {
-        repo.head.trim().is_empty() || repo.head == "<unknown-head>"
-    }) {
-        return Err(ContinuationError::validation(format!(
-            "repository {} has an unknown HEAD; the intent is ineligible",
-            repo.repo_id
-        )));
-    }
-
     let verification = verification_contract(&request.verification_command)?;
     let repository_decisions =
         repository_decisions_from_declaration(&request.declaration)?;
@@ -280,7 +269,34 @@ pub fn seal_conditional_completion(
         &request.context.obligation_ids,
         &repository_decisions,
     )?;
-    reject_protected_or_foreign(&request.observations)?;
+    let decided: BTreeSet<&str> = repository_decisions
+        .iter()
+        .map(|decision| decision.repo_id.as_str())
+        .collect();
+    if request
+        .observations
+        .iter()
+        .filter(|repo| decided.contains(repo.repo_id.as_str()))
+        .any(|repo| !repo.complete)
+    {
+        return Err(ContinuationError::validation(
+            "incomplete or unstable repository observation makes the intent ineligible",
+        ));
+    }
+    if let Some(repo) = request
+        .observations
+        .iter()
+        .filter(|repo| decided.contains(repo.repo_id.as_str()))
+        .find(|repo| {
+            repo.head.trim().is_empty() || repo.head == "<unknown-head>"
+        })
+    {
+        return Err(ContinuationError::validation(format!(
+            "repository {} has an unknown HEAD; the intent is ineligible",
+            repo.repo_id
+        )));
+    }
+    reject_protected_or_foreign(&request.observations, &decided)?;
 
     let declaration_digest = sha256_json(&request.declaration)?;
     if let Some(declared) = request
@@ -306,7 +322,8 @@ pub fn seal_conditional_completion(
         }
     }
 
-    let worktree = worktree_fingerprint(&request.observations)?;
+    let worktree =
+        worktree_fingerprint(&request.observations, &repository_decisions)?;
     let digest = compute_seal_digest(&SealMaterial {
         creator: &request.creator,
         plan_digest: &request.context.plan_digest,
@@ -834,19 +851,27 @@ fn validate_observations(
 
 fn reject_protected_or_foreign(
     observations: &[RepositoryObservationWire],
+    decided: &BTreeSet<&str>,
 ) -> Result<(), ContinuationError> {
     for repo in observations {
+        if !decided.contains(repo.repo_id.as_str()) {
+            continue;
+        }
         for path in &repo.paths {
             if path.protected {
                 return Err(ContinuationError::validation(format!(
-                    "protected path {} in {} makes the intent ineligible",
-                    path.path, repo.repo_id
+                    "protected path {} in {} ({}) was dirty before this run and is unchanged; \
+                    prepare cannot seal a repository with pre-existing dirt — \
+                    clean or commit it, or finish with sase final submit",
+                    path.path, repo.repo_id, repo.name
                 )));
             }
             if path.foreign {
                 return Err(ContinuationError::validation(format!(
-                    "foreign path {} in {} makes the intent ineligible",
-                    path.path, repo.repo_id
+                    "foreign path {} in {} ({}) was dirty before this run and is unchanged; \
+                    prepare cannot seal a repository with pre-existing dirt — \
+                    clean or commit it, or finish with sase final submit",
+                    path.path, repo.repo_id, repo.name
                 )));
             }
         }
@@ -991,8 +1016,18 @@ fn normalize_command(
 
 pub(crate) fn worktree_fingerprint(
     observations: &[RepositoryObservationWire],
+    decisions: &[RepositoryDecisionWire],
 ) -> Result<String, ContinuationError> {
-    sha256_json(&serde_json::to_value(observations).map_err(|error| {
+    let decided: BTreeSet<&str> = decisions
+        .iter()
+        .map(|decision| decision.repo_id.as_str())
+        .collect();
+    let mut scoped: Vec<&RepositoryObservationWire> = observations
+        .iter()
+        .filter(|repo| decided.contains(repo.repo_id.as_str()))
+        .collect();
+    scoped.sort_by(|left, right| left.repo_id.cmp(&right.repo_id));
+    sha256_json(&serde_json::to_value(&scoped).map_err(|error| {
         ContinuationError::validation(format!(
             "unable to encode observations for fingerprint: {error}"
         ))
@@ -1361,5 +1396,119 @@ mod tests {
         req.observations[0].complete = false;
         let error = seal_conditional_completion(req).unwrap_err();
         assert!(error.message.contains("incomplete"));
+    }
+
+    fn sidecar_observation() -> RepositoryObservationWire {
+        RepositoryObservationWire {
+            repo_id: "repo-sidecar".to_string(),
+            kind: "sidecar".to_string(),
+            name: "agents".to_string(),
+            head: digest64("sidecar-head"),
+            head_tree: digest64("sidecar-head-tree"),
+            index_tree: digest64("sidecar-index-tree"),
+            paths: vec![ObservedPathWire {
+                path: "files/objects/sha256/40/40de62d8".to_string(),
+                xy: Some("??".to_string()),
+                content_hash: None,
+                mode: None,
+                kind: ObservedPathKindWire::Untracked,
+                protected: false,
+                foreign: false,
+            }],
+            complete: true,
+        }
+    }
+
+    #[test]
+    fn undecided_protected_and_foreign_paths_do_not_block_seal() {
+        let mut req = request();
+        let mut sidecar = sidecar_observation();
+        sidecar.paths[0].protected = true;
+        req.observations.push(sidecar);
+        let intent = seal_conditional_completion(req).unwrap();
+        assert_eq!(intent.observations.len(), 2);
+
+        let mut req = request();
+        let mut sidecar = sidecar_observation();
+        sidecar.paths[0].foreign = true;
+        req.observations.push(sidecar);
+        seal_conditional_completion(req).unwrap();
+    }
+
+    #[test]
+    fn decided_protected_path_names_repository() {
+        let mut req = request();
+        req.observations[0].paths[0].protected = true;
+        let error = seal_conditional_completion(req).unwrap_err();
+        assert!(error.message.contains("protected path"));
+        assert!(error.message.contains("repo-main"));
+        assert!(error.message.contains("main"));
+        assert!(error.message.contains("was dirty before this run"));
+        assert!(error.message.contains("sase final submit"));
+    }
+
+    #[test]
+    fn undecided_incomplete_and_unknown_head_do_not_block_seal() {
+        let mut req = request();
+        let mut sidecar = sidecar_observation();
+        sidecar.complete = false;
+        req.observations.push(sidecar);
+        seal_conditional_completion(req).unwrap();
+
+        let mut req = request();
+        let mut sidecar = sidecar_observation();
+        sidecar.head = "<unknown-head>".to_string();
+        req.observations.push(sidecar);
+        seal_conditional_completion(req).unwrap();
+    }
+
+    #[test]
+    fn scoped_fingerprint_ignores_undecided_and_orders_deterministically() {
+        let mut req = request();
+        req.observations.push(sidecar_observation());
+        let first = seal_conditional_completion(req.clone()).unwrap();
+        let mut swapped = req;
+        swapped.observations.swap(0, 1);
+        let second = seal_conditional_completion(swapped).unwrap();
+        assert_eq!(
+            first.seal.worktree_fingerprint,
+            second.seal.worktree_fingerprint
+        );
+
+        let mut changed = first.clone();
+        changed.observations[1].head = digest64("other-sidecar-head");
+        let rescoped = worktree_fingerprint(
+            &changed.observations,
+            &changed.repository_decisions,
+        )
+        .unwrap();
+        assert_eq!(rescoped, first.seal.worktree_fingerprint);
+    }
+
+    #[test]
+    fn old_all_repository_fingerprint_fails_closed() {
+        let mut req = request();
+        req.observations.push(sidecar_observation());
+        let intent = seal_conditional_completion(req.clone()).unwrap();
+        let old_fingerprint =
+            sha256_json(&serde_json::to_value(&intent.observations).unwrap())
+                .unwrap();
+        assert_ne!(old_fingerprint, intent.seal.worktree_fingerprint);
+        let digest = compute_seal_digest(&SealMaterial {
+            creator: &intent.seal.creator,
+            plan_digest: &intent.seal.plan_digest,
+            context_digest: &intent.seal.context_digest,
+            worktree_fingerprint: &old_fingerprint,
+            declaration_digest: &intent.seal.declaration_digest,
+            verification: &intent.verification,
+            success_message: &intent.success_message,
+            repository_decisions: &intent.repository_decisions,
+        })
+        .unwrap();
+        let mut legacy = intent;
+        legacy.seal.worktree_fingerprint = old_fingerprint;
+        legacy.seal.digest = digest;
+        let error = validate_conditional_completion_intent(legacy).unwrap_err();
+        assert!(error.message.contains("worktree fingerprint"));
     }
 }
