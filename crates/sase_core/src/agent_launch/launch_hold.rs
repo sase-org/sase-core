@@ -149,6 +149,7 @@ mod tests {
             workspace_explicit: false,
             selected_project: None,
             queue_capacity: None,
+            queue_capacity_multiplier: None,
             wait_priority: None,
             queue_weight: None,
             queue_weight_explicit: false,

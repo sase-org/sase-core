@@ -108,7 +108,7 @@ fn contract_covers_the_audited_directive_matrix() {
             .iter()
             .map(|value| value.value.as_str())
             .collect::<Vec<_>>(),
-        ["1", "100"]
+        ["1", "100", "1.5x"]
     );
     assert_eq!(
         on_queue
@@ -119,6 +119,15 @@ fn contract_covers_the_audited_directive_matrix() {
         Some(DirectiveValueRole::PositiveInt)
     );
     assert!(on_queue.description.contains("capacity budget"));
+    assert!(on_queue.description.contains("<M>x"));
+    assert!(on_queue.argument_hint.contains("<M>x"));
+    assert!(on_queue
+        .keywords
+        .iter()
+        .find(|keyword| keyword.name == "capacity")
+        .map(|keyword| keyword.description.as_str())
+        .unwrap_or_default()
+        .contains("<M>x"));
     assert_eq!(
         queue
             .keywords
@@ -713,7 +722,7 @@ fn queue_name_completion_uses_flag_aware_documentation() {
     assert_eq!(
         on_queue.documentation.as_deref(),
         Some(
-            "Set this launch's capacity budget, priority, and capacity weight"
+            "Set this launch's capacity budget, <M>x multiplier of this machine's max_running_agents budget, priority, and capacity weight"
         )
     );
 }

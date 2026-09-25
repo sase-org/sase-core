@@ -1,8 +1,9 @@
 use super::*;
 use crate::agent_launch::{
-    py_collect_queue_fields, py_format_queue_directive,
-    py_normalize_persisted_queue_capacity, py_parse_queue_capacity,
-    py_queue_directive_flag_key,
+    py_collect_queue_fields, py_format_queue_capacity_multiplier,
+    py_format_queue_directive, py_normalize_persisted_queue_capacity,
+    py_parse_queue_capacity, py_parse_queue_capacity_value,
+    py_queue_directive_flag_key, py_resolve_queue_capacity_multiplier,
 };
 use crate::json_bridge::{json_value_to_py, py_to_json_value};
 use crate::provider_policy::{
@@ -413,7 +414,55 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         let collected = py_to_json_value(collected.bind(py)).unwrap();
         assert_eq!(collected["fields"]["queue_capacity"], json!(5));
         assert_eq!(collected["fields"]["weight"], json!(0.25));
+        assert!(collected["fields"]
+            .get("queue_capacity_multiplier")
+            .is_none());
         assert!(collected["errors"].as_array().unwrap().is_empty());
+        let multiplier_occurrences = json_value_to_py(
+            py,
+            &json!([{
+                "source": "%q(1.5x, w=0.25)",
+                "source_span": [0, 16],
+                "args": [{"value": "1.5x"}, {"name": "w", "value": "0.25"}],
+                "has_plus_suffix": false
+            }]),
+        )
+        .unwrap();
+        let multiplier_collected =
+            py_collect_queue_fields(py, multiplier_occurrences.bind(py), None)
+                .unwrap();
+        let multiplier_collected =
+            py_to_json_value(multiplier_collected.bind(py)).unwrap();
+        assert!(multiplier_collected["fields"]
+            .get("queue_capacity")
+            .is_none());
+        assert_eq!(
+            multiplier_collected["fields"]["queue_capacity_multiplier"],
+            json!(1.5)
+        );
+        let multiplier_formatted = py_format_queue_directive(
+            json_value_to_py(
+                py,
+                &json!({"queue_capacity_multiplier": 1.5, "weight": 0.25}),
+            )
+            .unwrap()
+            .bind(py),
+        )
+        .unwrap();
+        assert_eq!(
+            multiplier_formatted.as_deref(),
+            Some("%queue(capacity=1.5x, weight=0.25)")
+        );
+        let parsed_value =
+            py_parse_queue_capacity_value(py, "1.5x", None).unwrap();
+        let parsed_value = py_to_json_value(parsed_value.bind(py)).unwrap();
+        assert!(parsed_value.get("queue_capacity").is_none());
+        assert_eq!(parsed_value["queue_capacity_multiplier"], json!(1.5));
+        assert_eq!(
+            py_format_queue_capacity_multiplier(1.5).as_deref(),
+            Some("1.5x")
+        );
+        assert_eq!(py_resolve_queue_capacity_multiplier(1.5, 5.0), Some(7.5));
         let formatted = py_format_queue_directive(
             json_value_to_py(
                 py,
@@ -462,7 +511,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             .iter()
             .map(|value| value["value"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(suggestions, ["1", "100"]);
+        assert_eq!(suggestions, ["1", "100", "1.5x"]);
         assert!(!suggestions.contains(&"0"));
         let capacity_kw = on_queue["keywords"]
             .as_array()

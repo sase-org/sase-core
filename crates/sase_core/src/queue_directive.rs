@@ -239,10 +239,32 @@ pub struct QueueFieldsWire {
         skip_serializing_if = "Option::is_none"
     )]
     pub queue_capacity: Option<u32>,
+    #[serde(
+        default,
+        alias = "capacity_multiplier",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub queue_capacity_multiplier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
+}
+
+/// One authored capacity form: an integer budget or a `<M>x` multiplier.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct QueueCapacityValueWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueCapacityKind {
+    Absolute(u32),
+    MultiplierHundredths(u32),
 }
 
 /// Actionable queue parse failure with the source span of the occurrence.
@@ -326,6 +348,11 @@ pub fn format_queue_directive(fields: &QueueFieldsWire) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(capacity) = fields.queue_capacity {
         parts.push(format!("capacity={capacity}"));
+    } else if let Some(formatted) = fields
+        .queue_capacity_multiplier
+        .and_then(format_queue_capacity_multiplier)
+    {
+        parts.push(format!("capacity={formatted}"));
     }
     if let Some(priority) = fields.priority {
         parts.push(format!("priority={priority}"));
@@ -372,11 +399,59 @@ pub fn parse_queue_capacity_with_flags(
     raw: &str,
     enabled_feature_flags: &[String],
 ) -> Result<u32, QueueParseErrorWire> {
-    parse_capacity(
+    parse_capacity_absolute(
         raw,
         None,
         queue_capacity_budget_enabled(enabled_feature_flags),
     )
+}
+
+/// Validate an integer capacity or `<M>x` multiplier through the same
+/// contract as `%queue(capacity=...)`.
+pub fn parse_queue_capacity_value(
+    raw: &str,
+) -> Result<QueueCapacityValueWire, QueueParseErrorWire> {
+    parse_queue_capacity_value_with_flags(raw, &[])
+}
+
+pub fn parse_queue_capacity_value_with_flags(
+    raw: &str,
+    enabled_feature_flags: &[String],
+) -> Result<QueueCapacityValueWire, QueueParseErrorWire> {
+    Ok(capacity_kind_to_wire(parse_capacity(
+        raw,
+        None,
+        queue_capacity_budget_enabled(enabled_feature_flags),
+    )?))
+}
+
+/// Return whether `value` is a finite multiplier greater than zero, with at
+/// most two decimal places under a small rounding tolerance, and hundredths
+/// that fit in `u32`.
+pub fn queue_capacity_multiplier_is_valid(value: f64) -> bool {
+    queue_capacity_multiplier_hundredths(value).is_some()
+}
+
+/// Canonical `<M>x` spelling with trailing zeros trimmed (`1.5x`, `2x`).
+pub fn format_queue_capacity_multiplier(value: f64) -> Option<String> {
+    queue_capacity_multiplier_hundredths(value)
+        .map(format_multiplier_hundredths)
+}
+
+/// Round `hundredths × effective_limit / 100` to two decimal places.
+pub fn resolve_queue_capacity_multiplier(
+    multiplier: f64,
+    effective_limit: f64,
+) -> Option<f64> {
+    if !effective_limit.is_finite() || effective_limit < 0.0 {
+        return None;
+    }
+    let hundredths = queue_capacity_multiplier_hundredths(multiplier)?;
+    let product = f64::from(hundredths) * effective_limit / 100.0;
+    if !product.is_finite() {
+        return None;
+    }
+    Some((product * 100.0).round() / 100.0)
 }
 
 /// Legacy diagnostic message from the temporary migration window.
@@ -431,15 +506,11 @@ fn parse_colon_occurrence(
     if positionals.len() > 1 {
         return Err(extra_positional_error(span));
     }
-    Ok(QueueFieldsWire {
-        queue_capacity: Some(parse_capacity(
-            &positionals[0].value,
-            span,
-            capacity_budget,
-        )?),
-        priority: None,
-        weight: None,
-    })
+    Ok(capacity_kind_to_fields(parse_capacity(
+        &positionals[0].value,
+        span,
+        capacity_budget,
+    )?))
 }
 
 fn parse_parenthesized_occurrence(
@@ -532,7 +603,7 @@ fn parse_parenthesized_occurrence(
             }
         }
     }
-    if fields.queue_capacity.is_none()
+    if !queue_fields_has_capacity(&fields)
         && fields.priority.is_none()
         && fields.weight.is_none()
     {
@@ -547,10 +618,10 @@ fn assign_capacity(
     span: Option<[usize; 2]>,
     capacity_budget: bool,
 ) -> Result<(), QueueParseErrorWire> {
-    if fields.queue_capacity.is_some() {
+    if queue_fields_has_capacity(fields) {
         return Err(duplicate_field_error("capacity", span));
     }
-    fields.queue_capacity = Some(parse_capacity(raw, span, capacity_budget)?);
+    apply_capacity_kind(fields, parse_capacity(raw, span, capacity_budget)?);
     Ok(())
 }
 
@@ -583,11 +654,12 @@ fn merge_queue_part(
     part: QueueFieldsWire,
     span: [usize; 2],
 ) -> Result<(), QueueParseErrorWire> {
-    if let Some(capacity) = part.queue_capacity {
-        if fields.queue_capacity.is_some() {
+    if queue_fields_has_capacity(&part) {
+        if queue_fields_has_capacity(fields) {
             return Err(duplicate_field_error("capacity", Some(span)));
         }
-        fields.queue_capacity = Some(capacity);
+        fields.queue_capacity = part.queue_capacity;
+        fields.queue_capacity_multiplier = part.queue_capacity_multiplier;
     }
     if let Some(priority) = part.priority {
         if fields.priority.is_some() {
@@ -605,6 +677,22 @@ fn merge_queue_part(
 }
 
 fn parse_capacity(
+    raw: &str,
+    span: Option<[usize; 2]>,
+    capacity_budget: bool,
+) -> Result<QueueCapacityKind, QueueParseErrorWire> {
+    if raw.ends_with('x') {
+        return parse_capacity_multiplier(raw, span)
+            .map(QueueCapacityKind::MultiplierHundredths);
+    }
+    if raw.ends_with('X') {
+        return Err(invalid_capacity_multiplier_error(span));
+    }
+    parse_capacity_absolute(raw, span, capacity_budget)
+        .map(QueueCapacityKind::Absolute)
+}
+
+fn parse_capacity_absolute(
     raw: &str,
     span: Option<[usize; 2]>,
     capacity_budget: bool,
@@ -627,11 +715,188 @@ fn parse_capacity(
     Ok(value)
 }
 
+fn parse_capacity_multiplier(
+    raw: &str,
+    span: Option<[usize; 2]>,
+) -> Result<u32, QueueParseErrorWire> {
+    let body = raw.strip_suffix('x').unwrap_or(raw);
+    match parse_multiplier_hundredths(body) {
+        Ok(hundredths) => Ok(hundredths),
+        Err(MultiplierParseError::TooManyDecimals) => Err(queue_error(
+            "invalid-queue-capacity-multiplier",
+            "%queue(capacity=...) multiplier <M>x allows at most two decimal places.",
+            span,
+        )),
+        Err(MultiplierParseError::Zero) => Err(queue_error(
+            "invalid-queue-capacity-multiplier",
+            "%queue(capacity=...) multiplier <M>x must be greater than zero.",
+            span,
+        )),
+        Err(MultiplierParseError::Overflow) => Err(queue_error(
+            "queue-overflow-capacity-multiplier",
+            &format!(
+                "%queue(capacity=...) multiplier hundredths exceed the u32 maximum of {}.",
+                u32::MAX
+            ),
+            span,
+        )),
+        Err(MultiplierParseError::Invalid) => {
+            Err(invalid_capacity_multiplier_error(span))
+        }
+    }
+}
+
+enum MultiplierParseError {
+    Invalid,
+    TooManyDecimals,
+    Zero,
+    Overflow,
+}
+
+fn parse_multiplier_hundredths(
+    body: &str,
+) -> Result<u32, MultiplierParseError> {
+    if body.is_empty()
+        || body.starts_with('+')
+        || body.starts_with('-')
+        || body.contains(['e', 'E'])
+    {
+        return Err(MultiplierParseError::Invalid);
+    }
+    let (int_part, frac_part) = match body.split_once('.') {
+        Some((int_part, frac_part)) => (int_part, Some(frac_part)),
+        None => (body, None),
+    };
+    if let Some(frac_part) = frac_part {
+        if frac_part.is_empty() {
+            return Err(MultiplierParseError::Invalid);
+        }
+        if frac_part.len() > 2 {
+            return Err(MultiplierParseError::TooManyDecimals);
+        }
+        if !frac_part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(MultiplierParseError::Invalid);
+        }
+        if !int_part.is_empty()
+            && !int_part.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(MultiplierParseError::Invalid);
+        }
+    } else if int_part.is_empty()
+        || !int_part.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(MultiplierParseError::Invalid);
+    }
+    let whole = if int_part.is_empty() {
+        0
+    } else {
+        int_part
+            .parse::<u32>()
+            .map_err(|_| MultiplierParseError::Overflow)?
+    };
+    let frac_hundredths = match frac_part {
+        None => 0,
+        Some(frac) if frac.len() == 1 => {
+            frac.parse::<u32>().expect("fractional digit") * 10
+        }
+        Some(frac) => frac.parse::<u32>().expect("fractional digits"),
+    };
+    let hundredths = whole
+        .checked_mul(100)
+        .and_then(|value| value.checked_add(frac_hundredths))
+        .ok_or(MultiplierParseError::Overflow)?;
+    if hundredths == 0 {
+        return Err(MultiplierParseError::Zero);
+    }
+    Ok(hundredths)
+}
+
+const MULTIPLIER_HUNDREDTHS_TOLERANCE: f64 = 1e-6;
+
+fn queue_capacity_multiplier_hundredths(value: f64) -> Option<u32> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    let scaled = value * 100.0;
+    if !scaled.is_finite() {
+        return None;
+    }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > MULTIPLIER_HUNDREDTHS_TOLERANCE {
+        return None;
+    }
+    if rounded < 1.0 || rounded > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(rounded as u32)
+}
+
+fn format_multiplier_hundredths(hundredths: u32) -> String {
+    let whole = hundredths / 100;
+    let frac = hundredths % 100;
+    if frac == 0 {
+        format!("{whole}x")
+    } else if frac.is_multiple_of(10) {
+        format!("{whole}.{}x", frac / 10)
+    } else {
+        format!("{whole}.{frac:02}x")
+    }
+}
+
+fn hundredths_to_multiplier(hundredths: u32) -> f64 {
+    f64::from(hundredths) / 100.0
+}
+
+fn queue_fields_has_capacity(fields: &QueueFieldsWire) -> bool {
+    fields.queue_capacity.is_some()
+        || fields.queue_capacity_multiplier.is_some()
+}
+
+fn apply_capacity_kind(fields: &mut QueueFieldsWire, kind: QueueCapacityKind) {
+    match kind {
+        QueueCapacityKind::Absolute(capacity) => {
+            fields.queue_capacity = Some(capacity);
+            fields.queue_capacity_multiplier = None;
+        }
+        QueueCapacityKind::MultiplierHundredths(hundredths) => {
+            fields.queue_capacity = None;
+            fields.queue_capacity_multiplier =
+                Some(hundredths_to_multiplier(hundredths));
+        }
+    }
+}
+
+fn capacity_kind_to_fields(kind: QueueCapacityKind) -> QueueFieldsWire {
+    let mut fields = QueueFieldsWire::default();
+    apply_capacity_kind(&mut fields, kind);
+    fields
+}
+
+fn capacity_kind_to_wire(kind: QueueCapacityKind) -> QueueCapacityValueWire {
+    match kind {
+        QueueCapacityKind::Absolute(capacity) => QueueCapacityValueWire {
+            queue_capacity: Some(capacity),
+            queue_capacity_multiplier: None,
+        },
+        QueueCapacityKind::MultiplierHundredths(hundredths) => {
+            QueueCapacityValueWire {
+                queue_capacity: None,
+                queue_capacity_multiplier: Some(hundredths_to_multiplier(
+                    hundredths,
+                )),
+            }
+        }
+    }
+}
+
 fn validate_queue_budget_fields(
     fields: &QueueFieldsWire,
     capacity_budget: bool,
 ) -> Result<(), QueueParseErrorWire> {
     if !capacity_budget {
+        return Ok(());
+    }
+    if fields.queue_capacity_multiplier.is_some() {
         return Ok(());
     }
     if let (Some(capacity), Some(weight)) =
@@ -721,11 +986,17 @@ fn integer_error(
         "priority" => "invalid-queue-priority",
         _ => "invalid-queue-capacity",
     };
-    let message = match kind {
-        InvalidInt::Empty => format!(
+    let message = match (field, kind) {
+        ("capacity", InvalidInt::Empty) => {
+            "%queue(capacity=...) requires a non-negative integer or a multiplier of the form <M>x.".to_string()
+        }
+        ("capacity", InvalidInt::Invalid) => {
+            "%queue(capacity=...) requires a non-negative decimal integer or a multiplier of the form <M>x (at most two decimal places); negative, fractional, signed-plus, boolean, and nonnumeric values are rejected.".to_string()
+        }
+        (_, InvalidInt::Empty) => format!(
             "%queue({field}=...) requires a non-negative integer."
         ),
-        InvalidInt::Invalid => format!(
+        (_, InvalidInt::Invalid) => format!(
             "%queue({field}=...) requires a non-negative decimal integer; negative, fractional, signed-plus, boolean, and nonnumeric values are rejected."
         ),
     };
@@ -786,6 +1057,16 @@ fn invalid_capacity_zero_error(
     queue_error(
         "invalid-queue-capacity-zero",
         "%queue capacity is this launch's capacity budget and must be at least 1; use %q:1 to run alone.",
+        span,
+    )
+}
+
+fn invalid_capacity_multiplier_error(
+    span: Option<[usize; 2]>,
+) -> QueueParseErrorWire {
+    queue_error(
+        "invalid-queue-capacity-multiplier",
+        "%queue(capacity=...) multiplier <M>x requires a positive number with at most two decimal places, followed by lowercase x. Signs, exponents, inf/nan, uppercase X, a bare x, and trailing dots are rejected.",
         span,
     )
 }
@@ -1388,5 +1669,216 @@ mod tests {
             normalize_persisted_queue_capacity(Some(0), true, 0.0, 8.0, true);
         assert_eq!(zero_weight.admission_limit, 0.0);
         assert!(zero_weight.legacy_zero);
+    }
+
+    fn collect_ok_with_flags(
+        occurrences: &[QueueOccurrenceWire],
+        flags: &[String],
+    ) -> QueueFieldsWire {
+        let result = collect_queue_fields_with_flags(occurrences, flags);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        result.fields.expect("fields")
+    }
+
+    #[test]
+    fn accepts_capacity_multiplier_spellings_in_both_flag_states() {
+        for flags in [Vec::new(), capacity_budget_flags()] {
+            for (source, args, expected, formatted) in [
+                ("%q:1x", vec![positional("1x")], 1.0, "1x"),
+                ("%q:2x", vec![positional("2x")], 2.0, "2x"),
+                ("%q:0.5x", vec![positional("0.5x")], 0.5, "0.5x"),
+                ("%q:.5x", vec![positional(".5x")], 0.5, "0.5x"),
+                ("%q:1.25x", vec![positional("1.25x")], 1.25, "1.25x"),
+                ("%q:1.50x", vec![positional("1.50x")], 1.5, "1.5x"),
+                ("%q(1.5x)", vec![positional("1.5x")], 1.5, "1.5x"),
+                (
+                    "%q(capacity=1.5x)",
+                    vec![named("capacity", "1.5x")],
+                    1.5,
+                    "1.5x",
+                ),
+                (
+                    "%q(capacity=.5x)",
+                    vec![named("capacity", ".5x")],
+                    0.5,
+                    "0.5x",
+                ),
+            ] {
+                let fields =
+                    collect_ok_with_flags(&[occ(source, args)], &flags);
+                assert_eq!(fields.queue_capacity, None, "{source}");
+                assert_eq!(
+                    fields.queue_capacity_multiplier,
+                    Some(expected),
+                    "{source}"
+                );
+                assert_eq!(
+                    format_queue_directive(&fields),
+                    Some(format!("%queue(capacity={formatted})")),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_capacity_multipliers_in_both_flag_states() {
+        for flags in [Vec::new(), capacity_budget_flags()] {
+            for (value, code, needle) in [
+                ("1.125x", "invalid-queue-capacity-multiplier", "two decimal"),
+                (
+                    "0x",
+                    "invalid-queue-capacity-multiplier",
+                    "greater than zero",
+                ),
+                (
+                    "0.00x",
+                    "invalid-queue-capacity-multiplier",
+                    "greater than zero",
+                ),
+                ("-1x", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("+1x", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("1e2x", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("infx", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("nanx", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("1.5X", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("x", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("1.x", "invalid-queue-capacity-multiplier", "<M>x"),
+                ("42949673x", "queue-overflow-capacity-multiplier", "u32"),
+            ] {
+                let errors = collect_err_with_flags(
+                    &[occ("%q(capacity=x)", vec![named("capacity", value)])],
+                    &flags,
+                );
+                assert_eq!(errors[0].code, code, "{value}");
+                assert!(
+                    errors[0].message.contains(needle),
+                    "{value}: {}",
+                    errors[0].message
+                );
+            }
+        }
+        let missing_x = collect_err(&[occ(
+            "%q(capacity=1.5)",
+            vec![named("capacity", "1.5")],
+        )]);
+        assert_eq!(missing_x[0].code, "invalid-queue-capacity");
+        assert!(missing_x[0].message.contains("<M>x"), "{missing_x:?}");
+        assert_eq!(
+            parse_queue_capacity("1.5x").unwrap_err().code,
+            "invalid-queue-capacity"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_integer_and_multiplier_capacity() {
+        for occurrences in [
+            vec![occ(
+                "%q(2, capacity=1.5x)",
+                vec![positional("2"), named("capacity", "1.5x")],
+            )],
+            vec![occ(
+                "%q(1.5x, capacity=2)",
+                vec![positional("1.5x"), named("capacity", "2")],
+            )],
+            vec![
+                occ("%q:2", vec![positional("2")]),
+                occ("%q(1.5x)", vec![positional("1.5x")]),
+            ],
+            vec![
+                occ("%q:1.5x", vec![positional("1.5x")]),
+                occ("%queue(capacity=2)", vec![named("capacity", "2")]),
+            ],
+        ] {
+            let errors = collect_err(&occurrences);
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.code == "duplicate-queue-field"),
+                "{errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiplier_skips_parse_time_weight_capacity_check() {
+        let occurrence = occ(
+            "%q(1.5x, w=100)",
+            vec![positional("1.5x"), named("w", "100")],
+        );
+        for flags in [Vec::new(), capacity_budget_flags()] {
+            let fields = collect_ok_with_flags(
+                std::slice::from_ref(&occurrence),
+                &flags,
+            );
+            assert_eq!(fields.queue_capacity_multiplier, Some(1.5));
+            assert_eq!(fields.weight, Some(100.0));
+        }
+    }
+
+    #[test]
+    fn capacity_multiplier_helpers_validate_format_and_resolve() {
+        assert!(queue_capacity_multiplier_is_valid(1.5));
+        assert!(queue_capacity_multiplier_is_valid(0.5));
+        assert!(queue_capacity_multiplier_is_valid(1.25));
+        assert!(!queue_capacity_multiplier_is_valid(0.0));
+        assert!(!queue_capacity_multiplier_is_valid(-1.0));
+        assert!(!queue_capacity_multiplier_is_valid(1.125));
+        assert!(!queue_capacity_multiplier_is_valid(f64::NAN));
+        assert!(!queue_capacity_multiplier_is_valid(f64::INFINITY));
+        assert_eq!(
+            format_queue_capacity_multiplier(1.5).as_deref(),
+            Some("1.5x")
+        );
+        assert_eq!(
+            format_queue_capacity_multiplier(2.0).as_deref(),
+            Some("2x")
+        );
+        assert_eq!(
+            format_queue_capacity_multiplier(0.25).as_deref(),
+            Some("0.25x")
+        );
+        assert_eq!(
+            format_queue_capacity_multiplier(1.05).as_deref(),
+            Some("1.05x")
+        );
+        assert_eq!(resolve_queue_capacity_multiplier(1.5, 5.0), Some(7.5));
+        assert_eq!(resolve_queue_capacity_multiplier(0.5, 5.0), Some(2.5));
+        assert_eq!(resolve_queue_capacity_multiplier(1.15, 3.0), Some(3.45));
+        assert_eq!(resolve_queue_capacity_multiplier(1.125, 5.0), None);
+        assert_eq!(
+            parse_queue_capacity_value("1.5x").unwrap(),
+            QueueCapacityValueWire {
+                queue_capacity: None,
+                queue_capacity_multiplier: Some(1.5),
+            }
+        );
+        assert_eq!(
+            parse_queue_capacity_value("3").unwrap(),
+            QueueCapacityValueWire {
+                queue_capacity: Some(3),
+                queue_capacity_multiplier: None,
+            }
+        );
+        let flags = capacity_budget_flags();
+        assert_eq!(
+            parse_queue_capacity_value_with_flags("0", &flags)
+                .unwrap_err()
+                .code,
+            "invalid-queue-capacity-zero"
+        );
+    }
+
+    #[test]
+    fn queue_fields_read_capacity_multiplier_alias() {
+        let fields: QueueFieldsWire = serde_json::from_value(
+            serde_json::json!({"capacity_multiplier": 1.5}),
+        )
+        .unwrap();
+        assert_eq!(fields.queue_capacity_multiplier, Some(1.5));
+        assert_eq!(
+            serde_json::to_value(fields).unwrap(),
+            serde_json::json!({"queue_capacity_multiplier": 1.5})
+        );
     }
 }

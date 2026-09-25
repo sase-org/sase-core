@@ -14,7 +14,9 @@ use super::wires::{
 use crate::agent_identity::agent_name_in_hood;
 use crate::fenced_code::fenced_block_ranges;
 use crate::hold_directive::{format_hold_directive, HoldFieldsWire};
-use crate::queue_directive::format_queue_weight;
+use crate::queue_directive::{
+    format_queue_capacity_multiplier, format_queue_weight,
+};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -695,6 +697,11 @@ fn proc_queue_preview(proc_unit: &ProcUnitWire) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(capacity) = proc_unit.queue_capacity {
         parts.push(format!("capacity={capacity}"));
+    } else if let Some(formatted) = proc_unit
+        .queue_capacity_multiplier
+        .and_then(format_queue_capacity_multiplier)
+    {
+        parts.push(format!("capacity={formatted}"));
     }
     if let Some(priority) = proc_unit.wait_priority {
         parts.push(format!("priority={priority}"));

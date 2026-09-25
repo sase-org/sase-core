@@ -731,7 +731,7 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
     assert_eq!(labels_at(server, "%wait(time=").await, vec!["5m", "1430"]);
     assert!(labels_at(server, "%wait(runners=").await.is_empty());
     assert!(labels_at(server, "%wait(priority=").await.is_empty());
-    assert_eq!(labels_at(server, "%q:").await, vec!["1", "100"]);
+    assert_eq!(labels_at(server, "%q:").await, vec!["1", "100", "1.5x"]);
     assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
     assert_eq!(
         labels_at(server, "%q(weight=").await,
@@ -758,7 +758,16 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
     );
     assert_eq!(
         labels_at(server, "%queue(").await,
-        vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
+        vec![
+            "capacity=",
+            "p=",
+            "priority=",
+            "w=",
+            "weight=",
+            "1",
+            "100",
+            "1.5x"
+        ]
     );
     assert_eq!(
         labels_at(server, "%q(weight=").await,
@@ -788,7 +797,7 @@ async fn directive_name_completion_documents_queue_capacity_flag_state() {
     assert_eq!(
         markdown_documentation(queue),
         Some(
-            "Set this launch's capacity budget, priority, and capacity weight"
+            "Set this launch's capacity budget, <M>x multiplier of this machine's max_running_agents budget, priority, and capacity weight"
         )
     );
 
@@ -829,9 +838,18 @@ async fn queue_completion_avoids_agent_targets() {
 
     assert_eq!(
         labels_at(server, "%q(").await,
-        vec!["capacity=", "p=", "priority=", "w=", "weight=", "1", "100"]
+        vec![
+            "capacity=",
+            "p=",
+            "priority=",
+            "w=",
+            "weight=",
+            "1",
+            "100",
+            "1.5x"
+        ]
     );
-    assert_eq!(labels_at(server, "%q:").await, vec!["1", "100"]);
+    assert_eq!(labels_at(server, "%q:").await, vec!["1", "100", "1.5x"]);
     assert_eq!(
         labels_at(server, "%q(5, ").await,
         vec!["p=", "priority=", "w=", "weight="]
@@ -839,7 +857,7 @@ async fn queue_completion_avoids_agent_targets() {
     assert_eq!(labels_at(server, "%q(p=").await, vec!["10", "1"]);
     assert_eq!(
         labels_at(server, "%queue(capacity=").await,
-        vec!["1", "100"]
+        vec!["1", "100", "1.5x"]
     );
     assert_eq!(
         labels_at(server, "%wait(").await,

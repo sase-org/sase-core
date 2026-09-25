@@ -289,6 +289,8 @@ pub struct AgentUnitWire {
     pub finalizers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
     #[serde(default, skip_serializing)]
     pub(crate) wait_runners: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,6 +475,8 @@ pub struct ProcUnitWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_capacity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_capacity_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_priority: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_weight: Option<f64>,
@@ -485,6 +489,7 @@ pub struct ProcUnitWire {
 impl ProcUnitWire {
     pub fn has_authored_queue_fields(&self) -> bool {
         self.queue_capacity.is_some()
+            || self.queue_capacity_multiplier.is_some()
             || self.wait_priority.is_some()
             || self.queue_weight.is_some()
             || self.queue_weight_explicit

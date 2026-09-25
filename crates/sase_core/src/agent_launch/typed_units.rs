@@ -611,6 +611,7 @@ fn classify_typed_launch_unit(
         );
         let proc_queue_weight = wait_queue.weight.or_else(|| {
             (wait_queue.queue_capacity.is_some()
+                || wait_queue.queue_capacity_multiplier.is_some()
                 || wait_queue.priority.is_some())
             .then_some(0.0)
         });
@@ -631,6 +632,7 @@ fn classify_typed_launch_unit(
             workspace_explicit: proc_options.contains_key("workspace"),
             selected_project: unit_project,
             queue_capacity: wait_queue.queue_capacity,
+            queue_capacity_multiplier: wait_queue.queue_capacity_multiplier,
             wait_priority: wait_queue.priority,
             queue_weight: proc_queue_weight,
             queue_weight_explicit: wait_queue.weight.is_some(),
@@ -667,6 +669,7 @@ fn classify_typed_launch_unit(
             auto_mode,
             finalizers,
             queue_capacity: wait_queue.queue_capacity,
+            queue_capacity_multiplier: wait_queue.queue_capacity_multiplier,
             wait_runners: None,
             wait_priority: wait_queue.priority,
             queue_weight: wait_queue.weight,

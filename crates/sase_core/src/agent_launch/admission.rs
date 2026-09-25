@@ -485,6 +485,7 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     }
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
         queue_capacity: agent.authored_queue_capacity(),
+        queue_capacity_multiplier: agent.queue_capacity_multiplier,
         priority: agent.wait_priority,
         weight: if agent.queue_weight_explicit {
             agent.queue_weight
@@ -660,6 +661,7 @@ mod tests {
                 workspace_explicit: false,
                 selected_project: Some("sase".to_string()),
                 queue_capacity: None,
+                queue_capacity_multiplier: None,
                 wait_priority: None,
                 queue_weight: None,
                 queue_weight_explicit: false,
@@ -1129,6 +1131,16 @@ mod tests {
         assert!(prompt.contains("%final:commit"));
         assert!(prompt.contains("%hide"));
         assert!(prompt.contains("%queue(capacity=2, priority=1, weight=2)"));
+        let multiplier_prompt = agent_unit_dispatch_prompt(&AgentUnitWire {
+            prompt: "Review the diff".to_string(),
+            queue_capacity_multiplier: Some(1.5),
+            queue_weight: Some(0.25),
+            queue_weight_explicit: true,
+            ..Default::default()
+        });
+        assert!(
+            multiplier_prompt.contains("%queue(capacity=1.5x, weight=0.25)")
+        );
         assert!(!prompt.contains("%wait(runners="));
         assert!(!prompt.contains("%queue(runners="));
         assert!(!prompt.contains("%wait(priority="));
@@ -1239,6 +1251,7 @@ mod tests {
             workspace_explicit: false,
             selected_project: Some("sase".to_string()),
             queue_capacity: None,
+            queue_capacity_multiplier: None,
             wait_priority: None,
             queue_weight: None,
             queue_weight_explicit: false,

@@ -831,6 +831,42 @@ fn typed_launch_parses_queue_spellings_and_round_trips() {
 }
 
 #[test]
+fn typed_launch_parses_capacity_multiplier_for_agent_and_proc() {
+    let plan = plan_queue("%q(1.5x, w=0.25)\nDo work");
+    match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => {
+            assert_eq!(agent.authored_queue_capacity(), None);
+            assert_eq!(agent.queue_capacity_multiplier, Some(1.5));
+            assert_eq!(agent.queue_weight, Some(0.25));
+            assert!(agent.queue_weight_explicit);
+            let rebuilt = crate::agent_unit_dispatch_prompt_with_flags(
+                agent,
+                &["queue_capacity_budget".to_string()],
+            );
+            assert!(rebuilt.contains("%queue(capacity=1.5x, weight=0.25)"));
+        }
+        other => panic!("expected agent payload, got {other:?}"),
+    }
+
+    let proc_plan = plan_queue("%q(capacity=1.5x)\n%proc(\"just check\")");
+    match &proc_plan.units[0].payload {
+        LaunchUnitPayloadWire::Proc(proc_unit) => {
+            assert_eq!(proc_unit.queue_capacity, None);
+            assert_eq!(proc_unit.queue_capacity_multiplier, Some(1.5));
+            assert_eq!(proc_unit.queue_weight, Some(0.0));
+            assert!(!proc_unit.queue_weight_explicit);
+        }
+        other => panic!("expected proc payload, got {other:?}"),
+    }
+    assert!(
+        proc_plan.approval_preview[1]
+            .contains("queue=(capacity=1.5x, weight=0 implicit)"),
+        "{:?}",
+        proc_plan.approval_preview
+    );
+}
+
+#[test]
 fn typed_launch_parses_explicit_zero_queue_weight() {
     let plan = plan_queue("%q(w=0)\nDo work");
     let (runners, priority, weight, weight_explicit, cleaned) =

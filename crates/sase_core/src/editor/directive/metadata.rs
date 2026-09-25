@@ -134,6 +134,11 @@ const WAIT_CAPACITY_BUDGET_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
         documentation:
             "Capacity budget of 100: replace max_running_agents for this launch",
     },
+    DirectiveSuggestedValue {
+        value: "1.5x",
+        documentation:
+            "1.5× this machine's effective max_running_agents budget",
+    },
 ];
 
 const WAIT_PRIORITY_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
@@ -449,8 +454,8 @@ pub(super) const QUEUE_DIRECTIVE_ON: DirectiveMetadata = DirectiveMetadata {
     name: "queue",
     alias: Some("q"),
     description:
-        "Set this launch's capacity budget, priority, and capacity weight",
-    argument_hint: ":N or (N, capacity=, priority=, p=, weight=, w=)",
+        "Set this launch's capacity budget, <M>x multiplier of this machine's max_running_agents budget, priority, and capacity weight",
+    argument_hint: ":N or <M>x or (N, <M>x, capacity=, priority=, p=, weight=, w=)",
     takes_argument: true,
     allows_multiple: true,
     syntax_forms: COLON_PAREN,
@@ -464,7 +469,7 @@ const QUEUE_BUDGET_KEYWORDS: &[DirectiveKeywordSpec] = &[
     DirectiveKeywordSpec {
         name: "capacity",
         description:
-            "This launch's capacity budget, replacing max_running_agents",
+            "This launch's capacity budget, replacing max_running_agents, or <M>x multiplier of this machine's max_running_agents budget",
         value_role: DirectiveValueRole::PositiveInt,
         repeatable: false,
         conflicts_with: &[],

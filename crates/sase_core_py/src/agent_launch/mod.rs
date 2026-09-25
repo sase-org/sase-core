@@ -511,6 +511,46 @@ pub(crate) fn py_parse_queue_capacity(
 }
 
 #[pyfunction]
+#[pyo3(name = "parse_queue_capacity_value")]
+#[pyo3(signature = (raw, enabled_feature_flags = None))]
+pub(crate) fn py_parse_queue_capacity_value<'py>(
+    py: Python<'py>,
+    raw: &str,
+    enabled_feature_flags: Option<Vec<String>>,
+) -> PyResult<PyObject> {
+    let flags = enabled_feature_flags.unwrap_or_default();
+    let value =
+        sase_core::queue_directive::parse_queue_capacity_value_with_flags(
+            raw, &flags,
+        )
+        .map_err(|error| PyValueError::new_err(error.message))?;
+    let json = serde_json::to_value(&value).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
+#[pyfunction]
+#[pyo3(name = "format_queue_capacity_multiplier")]
+pub(crate) fn py_format_queue_capacity_multiplier(
+    value: f64,
+) -> Option<String> {
+    sase_core::queue_directive::format_queue_capacity_multiplier(value)
+}
+
+#[pyfunction]
+#[pyo3(name = "resolve_queue_capacity_multiplier")]
+pub(crate) fn py_resolve_queue_capacity_multiplier(
+    multiplier: f64,
+    effective_limit: f64,
+) -> Option<f64> {
+    sase_core::queue_directive::resolve_queue_capacity_multiplier(
+        multiplier,
+        effective_limit,
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "queue_directive_flag_key")]
 pub(crate) fn py_queue_directive_flag_key() -> &'static str {
     core_queue_directive_flag_key()
@@ -1097,6 +1137,9 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_format_hold_directive, m)?)?;
     m.add_function(wrap_pyfunction!(py_hold_fields_to_selectors, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_queue_capacity, m)?)?;
+    m.add_function(wrap_pyfunction!(py_parse_queue_capacity_value, m)?)?;
+    m.add_function(wrap_pyfunction!(py_format_queue_capacity_multiplier, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_queue_capacity_multiplier, m)?)?;
     m.add_function(wrap_pyfunction!(py_queue_directive_flag_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_launch_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_agent_launch, m)?)?;
