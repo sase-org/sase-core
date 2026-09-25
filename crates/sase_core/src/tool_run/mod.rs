@@ -14,7 +14,8 @@ pub use handoff_wire::*;
 pub use store::{
     append_event, begin, claim, finish, list_runs, observe, reconcile,
     request_stop, retention_apply, retention_preview, show_run, store_stats,
-    summarize, triage_record, triage_show,
+    summarize, tool_run_failures, triage_record, triage_settle, triage_show,
+    triage_stage,
 };
 pub use triage::*;
 pub use triage::{

@@ -9,11 +9,13 @@ use std::time::Duration;
 
 use super::super::canonical::canonical_digest;
 use super::super::triage::{
-    ToolRunTriageClassWire, ToolRunTriageItemWire, ToolRunTriageLabelWire,
-    ToolRunTriageRecordRequestWire, ToolRunTriageRecordResultWire,
-    ToolRunTriageRefusalWire, ToolRunTriageRunFactsWire,
-    ToolRunTriageShowRequestWire, ToolRunTriageShowResultWire,
-    ToolRunTriageStageFactsWire, TOOL_RUN_TRIAGE_DISPLAY_MAX_CHARS,
+    tool_run_triage_verdict, ToolRunTriageClassWire, ToolRunTriageItemWire,
+    ToolRunTriageLabelWire, ToolRunTriageRecordRequestWire,
+    ToolRunTriageRecordResultWire, ToolRunTriageRefusalWire,
+    ToolRunTriageRunFactsWire, ToolRunTriageShowRequestWire,
+    ToolRunTriageShowResultWire, ToolRunTriageStageFactsWire,
+    ToolRunTriageVerdictItemWire, ToolRunTriageVerdictRequestWire,
+    TOOL_RUN_TRIAGE_DISPLAY_MAX_CHARS, TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT,
 };
 use super::super::triage::{
     ToolRunTriageContinuationModeWire, ToolRunTriageDecisionKindWire,
@@ -22,8 +24,8 @@ use super::super::triage::{
 use super::super::wire::TOOL_RUN_WIRE_SCHEMA_VERSION;
 use super::super::ToolRunError;
 use super::connection::{
-    touch_write_meta, unix_now, validate_schema, with_read_store,
-    with_write_store,
+    runs_column_set, touch_write_meta, unix_now, validate_schema,
+    with_read_store, with_write_store,
 };
 
 pub fn triage_tables_present(conn: &Connection) -> Result<bool, ToolRunError> {
@@ -43,6 +45,75 @@ pub fn triage_tables_present(conn: &Connection) -> Result<bool, ToolRunError> {
     }
     Ok(true)
 }
+
+fn verdict_for_unstored(
+    state: &str,
+    exit_code: Option<i64>,
+    terminal_cause: Option<String>,
+    signal: Option<i64>,
+    interruption: Option<String>,
+    lost: Option<String>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let has_terminal = terminal_cause.is_some();
+    let request = ToolRunTriageVerdictRequestWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        exit_code: exit_code.map(|code| code as i32),
+        terminal_cause,
+        legacy_state: if has_terminal {
+            None
+        } else {
+            Some(state.to_string())
+        },
+        legacy_exit_code: if has_terminal {
+            None
+        } else {
+            exit_code.map(|code| code as i32)
+        },
+        legacy_signal: if has_terminal {
+            None
+        } else {
+            signal.map(|code| code as i32)
+        },
+        legacy_interruption_reason: if has_terminal {
+            None
+        } else {
+            interruption
+        },
+        legacy_lost_reason: if has_terminal { None } else { lost },
+        has_completed_stage: false,
+        has_setup_marker: false,
+        has_failed_stage: state == "failed",
+        all_stages_complete: false,
+        recipe_finished: false,
+        is_stageful_tool: true,
+        triaged: false,
+        has_unparsed_failed_stage: false,
+        items: Vec::new(),
+    };
+    match tool_run_triage_verdict(request) {
+        Ok(result) => (
+            Some(result.kind.as_str().to_string()),
+            Some(result.verdict.as_str().to_string()),
+            Some(result.reason),
+            result.remedy,
+        ),
+        Err(_) => (None, None, None, None),
+    }
+}
+
+type StoredRunRow = (
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+);
 
 fn is_hex64(value: &str) -> bool {
     value.len() == 64
@@ -499,26 +570,95 @@ pub fn triage_show(
             run_facts: None,
             stages: Vec::new(),
             items: Vec::new(),
+            failure_kind: None,
+            verdict: None,
+            verdict_reason: None,
+            remedy: None,
             diagnostics: vec!["tool run store does not exist".to_string()],
         });
     }
     with_read_store(store_path, busy_timeout, |conn| {
-        let run_found: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM runs WHERE run_id = ?1",
-                [&request.run_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)?;
+        // Newest-run lookup by (owner_kind, owner_id) when run_id is empty.
+        let resolved_run_id = if request.run_id.trim().is_empty() {
+            match (request.owner_kind.as_deref(), request.owner_id.as_deref()) {
+                (Some(kind), Some(id))
+                    if !kind.trim().is_empty() && !id.trim().is_empty() =>
+                {
+                    let found: Option<String> = conn
+                        .query_row(
+                            "SELECT run_id FROM runs
+                                 WHERE owner_kind = ?1 AND owner_id = ?2
+                                 ORDER BY created_ts DESC, run_id DESC LIMIT 1",
+                            [kind, id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    found.unwrap_or_default()
+                }
+                _ => String::new(),
+            }
+        } else {
+            request.run_id.clone()
+        };
+        let columns = runs_column_set(conn)?;
+        let terminal_projection = if columns.contains("terminal_cause") {
+            "terminal_cause".to_string()
+        } else {
+            "NULL".to_string()
+        };
+        let sql = format!(
+            "SELECT state, exit_code, {terminal_projection}, signal,
+                    interruption_reason, lost_reason
+             FROM runs WHERE run_id = ?1"
+        );
+        let stored_run: Option<StoredRunRow> = conn
+            .query_row(&sql, [&resolved_run_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .optional()?;
+        let run_found = stored_run.is_some();
         if !triage_tables_present(conn)? {
+            let (failure_kind, verdict, verdict_reason, remedy) = stored_run
+                .as_ref()
+                .map(
+                    |(
+                        state,
+                        exit_code,
+                        terminal_cause,
+                        signal,
+                        interruption,
+                        lost,
+                    )| {
+                        verdict_for_unstored(
+                            state,
+                            *exit_code,
+                            terminal_cause.clone(),
+                            *signal,
+                            interruption.clone(),
+                            lost.clone(),
+                        )
+                    },
+                )
+                .unwrap_or((None, None, None, None));
             return Ok(ToolRunTriageShowResultWire {
                 schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-                run_id: request.run_id.clone(),
+                run_id: resolved_run_id,
                 run_found,
                 triaged: false,
                 run_facts: None,
                 stages: Vec::new(),
                 items: Vec::new(),
+                failure_kind,
+                verdict,
+                verdict_reason,
+                remedy,
                 diagnostics: Vec::new(),
             });
         }
@@ -533,7 +673,7 @@ pub fn triage_show(
                  FROM tool_triage_stages WHERE run_id = ?1
                  ORDER BY created_ts, stage_key",
             )?;
-            let rows = stmt.query_map([&request.run_id], |row| {
+            let rows = stmt.query_map([&resolved_run_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -615,7 +755,7 @@ pub fn triage_show(
                  FROM tool_triage_items WHERE run_id = ?1
                  ORDER BY stage_key, created_ts, extractor, signature",
             )?;
-            let rows = stmt.query_map([&request.run_id], |row| {
+            let rows = stmt.query_map([&resolved_run_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -727,7 +867,7 @@ pub fn triage_show(
                         first_continued_exit_code, continuation_extra_ms,
                         repeat_of_run_id, triaged_ts, diagnostics_json
                  FROM tool_triage_runs WHERE run_id = ?1",
-                [&request.run_id],
+                [&resolved_run_id],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -776,14 +916,108 @@ pub fn triage_show(
                 )
             }
         };
+        let (failure_kind, verdict, verdict_reason, remedy) = match stored_run
+            .as_ref()
+        {
+            None => (None, None, None, None),
+            Some((
+                state,
+                exit_code,
+                terminal_cause,
+                signal,
+                interruption,
+                lost,
+            )) => {
+                let has_terminal = terminal_cause.is_some();
+                let has_completed_stage = stages.iter().any(|stage| {
+                    stage.stage_key != TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT
+                });
+                let has_setup_marker =
+                    items.iter().any(|item| item.extractor == "environment");
+                let has_failed_stage = state == "failed"
+                    && (has_completed_stage || !items.is_empty());
+                let has_unparsed = stages.iter().any(|stage| {
+                        !matches!(
+                            stage.extraction_status,
+                            super::super::triage::ToolRunTriageExtractionStatusWire::Parsed
+                        )
+                    });
+                let is_stageful = !(stages.iter().all(|stage| {
+                    stage.stage_key == TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT
+                }) && !stages.is_empty());
+                let request = ToolRunTriageVerdictRequestWire {
+                    schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                    exit_code: exit_code.map(|code| code as i32),
+                    terminal_cause: terminal_cause.clone(),
+                    legacy_state: if has_terminal {
+                        None
+                    } else {
+                        Some(state.clone())
+                    },
+                    legacy_exit_code: if has_terminal {
+                        None
+                    } else {
+                        exit_code.map(|code| code as i32)
+                    },
+                    legacy_signal: if has_terminal {
+                        None
+                    } else {
+                        signal.map(|code| code as i32)
+                    },
+                    legacy_interruption_reason: if has_terminal {
+                        None
+                    } else {
+                        interruption.clone()
+                    },
+                    legacy_lost_reason: if has_terminal {
+                        None
+                    } else {
+                        lost.clone()
+                    },
+                    has_completed_stage,
+                    has_setup_marker,
+                    has_failed_stage,
+                    all_stages_complete: true,
+                    recipe_finished: run_facts.as_ref().is_some_and(|facts| {
+                        facts.recipe_finished_ts.is_some()
+                    }),
+                    is_stageful_tool: is_stageful,
+                    triaged,
+                    has_unparsed_failed_stage: has_unparsed
+                        && state == "failed",
+                    items: items
+                        .iter()
+                        .map(|item| ToolRunTriageVerdictItemWire {
+                            class: item
+                                .label
+                                .as_ref()
+                                .map(|label| label.class.as_str().to_string()),
+                        })
+                        .collect(),
+                };
+                match tool_run_triage_verdict(request) {
+                    Ok(result) => (
+                        Some(result.kind.as_str().to_string()),
+                        Some(result.verdict.as_str().to_string()),
+                        Some(result.reason),
+                        result.remedy,
+                    ),
+                    Err(_) => (None, None, None, None),
+                }
+            }
+        };
         Ok(ToolRunTriageShowResultWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
-            run_id: request.run_id.clone(),
+            run_id: resolved_run_id.clone(),
             run_found,
             triaged,
             run_facts,
             stages,
             items,
+            failure_kind,
+            verdict,
+            verdict_reason,
+            remedy,
             diagnostics,
         })
     })

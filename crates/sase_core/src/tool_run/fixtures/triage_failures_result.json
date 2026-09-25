@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "schema_version": 1,
+      "project": "sase",
+      "tool": "check",
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "display": "src/foo.py: Bad thing [attr-defined]",
+      "runs": 2,
+      "agents": 2,
+      "workspaces": 2,
+      "first_seen_ts": 1000,
+      "last_seen_ts": 1500,
+      "last_run_id": "triage-2",
+      "newest_class": "known",
+      "newest_owners": []
+    }
+  ],
+  "diagnostics": []
+}

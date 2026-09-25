@@ -28,6 +28,7 @@ mod compat;
 mod handoff;
 mod reconcile_owner;
 mod triage;
+mod triage_stage;
 
 fn definition() -> ToolDefinitionWire {
     ToolDefinitionWire {

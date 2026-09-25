@@ -441,6 +441,8 @@ fn old_store_without_triage_tables_show_empty_and_record_creates() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: "old-triage-1".into(),
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )
@@ -596,6 +598,8 @@ fn old_queries_load_store_with_triage_rows() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: "with-triage-1".into(),
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )

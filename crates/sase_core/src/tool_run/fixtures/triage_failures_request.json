@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "project": "sase",
+  "all_projects": false,
+  "tool": "check",
+  "class": null,
+  "days": 7,
+  "limit": 50,
+  "now_ts": 2000
+}

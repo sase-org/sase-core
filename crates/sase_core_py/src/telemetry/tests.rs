@@ -678,3 +678,233 @@ fn tool_run_triage_bindings_round_trip() {
         assert_eq!(replayed["items_existing"], json!(1));
     });
 }
+
+#[test]
+fn tool_run_triage_classification_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        let begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "workspace": "ws-a",
+                "now_ts": 10,
+                "commit_running": true
+            }),
+        )
+        .unwrap();
+        let begin_request = begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let started =
+            py_tool_run_begin(py, path.to_str().unwrap(), begin_request, 1_000)
+                .unwrap();
+        let started = py_to_json_value(started.bind(py)).unwrap();
+        let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+        let observe_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "child_pid": 1,
+                "fingerprint_before": {
+                    "schema_version": 1,
+                    "repos": [{
+                        "identity": "sase",
+                        "head": "head-3",
+                        "dirty_paths": [],
+                    }],
+                    "inputs": [],
+                    "env": {},
+                    "toolchain": {},
+                    "completeness": {"complete": true, "missing": []},
+                }
+            }),
+        )
+        .unwrap();
+        let observe_request =
+            observe_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_tool_run_observe(py, path.to_str().unwrap(), observe_request, 1_000)
+            .unwrap();
+        let finish_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "state": "failed",
+                "exit_code": 1,
+                "duration_ms": 5,
+                "terminal_cause": "exited",
+                "now_ts": 20
+            }),
+        )
+        .unwrap();
+        let finish_request = finish_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_tool_run_finish(py, path.to_str().unwrap(), finish_request, 1_000)
+            .unwrap();
+        // Pure classify: untouched with no evidence -> UNKNOWN.
+        let classify_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "subject_run": {
+                    "run_id": "subject-1",
+                    "project": "sase",
+                    "tool": "check",
+                    "extra_args_digest": "args-1",
+                    "workspace": "ws-a",
+                    "base_head": "head-3",
+                    "dirty_paths": [],
+                    "complete_fingerprint": true,
+                    "fingerprint_digest": "fp-1",
+                    "ad_hoc": false
+                },
+                "subjects": [{
+                    "stage_key": "lint (mypy)",
+                    "extractor": "mypy",
+                    "extractor_version": 1,
+                    "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "locator_paths": ["src/foo.py"]
+                }],
+                "evidence_runs": [],
+                "ancestry": ["head-3"],
+                "knobs": {"min_witnesses": 1, "touched_requires_clean_witness": false},
+                "now_ts": 30
+            }),
+        )
+        .unwrap();
+        let classify_request =
+            classify_obj.bind(py).downcast::<PyDict>().unwrap();
+        let classified =
+            py_tool_run_triage_classify(py, classify_request).unwrap();
+        let classified = py_to_json_value(classified.bind(py)).unwrap();
+        assert_eq!(classified["labels"][0]["class"], json!("unknown"));
+        // Pure verdict: verification with UNKNOWN -> undetermined.
+        let verdict_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "exit_code": 1,
+                "terminal_cause": "exited",
+                "has_completed_stage": true,
+                "has_failed_stage": true,
+                "all_stages_complete": true,
+                "recipe_finished": true,
+                "is_stageful_tool": true,
+                "triaged": true,
+                "items": [{"class": "unknown"}]
+            }),
+        )
+        .unwrap();
+        let verdict_request =
+            verdict_obj.bind(py).downcast::<PyDict>().unwrap();
+        let verdict = py_tool_run_triage_verdict(py, verdict_request).unwrap();
+        let verdict = py_to_json_value(verdict.bind(py)).unwrap();
+        assert_eq!(verdict["verdict"], json!("undetermined"));
+        // Store stage: extract + classify + persist one stage.
+        let stage_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "stage": {
+                    "stage_key": "lint (mypy)",
+                    "stage_id": "stage-1",
+                    "output": "src/foo.py:10:5: error: Bad thing  [attr-defined]\n",
+                },
+                "ancestry": ["head-3"],
+                "now_ts": 31
+            }),
+        )
+        .unwrap();
+        let stage_request = stage_obj.bind(py).downcast::<PyDict>().unwrap();
+        let staged = py_tool_run_triage_stage(
+            py,
+            path.to_str().unwrap(),
+            stage_request,
+            1_000,
+        )
+        .unwrap();
+        let staged = py_to_json_value(staged.bind(py)).unwrap();
+        assert_eq!(staged["items"].as_array().unwrap().len(), 1);
+        // Store settle: returns kind/verdict and triaged items.
+        let settle_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "stages": [],
+                "ancestry": ["head-3"],
+                "recipe_finished_ts": 40,
+                "now_ts": 41
+            }),
+        )
+        .unwrap();
+        let settle_request = settle_obj.bind(py).downcast::<PyDict>().unwrap();
+        let settled = py_tool_run_triage_settle(
+            py,
+            path.to_str().unwrap(),
+            settle_request,
+            1_000,
+        )
+        .unwrap();
+        let settled = py_to_json_value(settled.bind(py)).unwrap();
+        assert_eq!(settled["triaged"], json!(true));
+        assert!(settled["verdict"].is_string());
+        // Show carries kind and verdict.
+        let show_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "run_id": run_id}),
+        )
+        .unwrap();
+        let show_request = show_obj.bind(py).downcast::<PyDict>().unwrap();
+        let shown = py_tool_run_triage_show(
+            py,
+            path.to_str().unwrap(),
+            show_request,
+            1_000,
+        )
+        .unwrap();
+        let shown = py_to_json_value(shown.bind(py)).unwrap();
+        assert!(shown["failure_kind"].is_string());
+        assert!(shown["verdict"].is_string());
+        // Failures aggregation lists the group.
+        let failures_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "project": "sase",
+                "tool": "check",
+                "days": 7,
+                "limit": 50,
+                "now_ts": 50
+            }),
+        )
+        .unwrap();
+        let failures_request =
+            failures_obj.bind(py).downcast::<PyDict>().unwrap();
+        let failures = py_tool_run_failures(
+            py,
+            path.to_str().unwrap(),
+            failures_request,
+            1_000,
+        )
+        .unwrap();
+        let failures = py_to_json_value(failures.bind(py)).unwrap();
+        assert_eq!(failures["groups"].as_array().unwrap().len(), 1);
+    });
+}

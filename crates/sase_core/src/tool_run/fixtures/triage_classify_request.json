@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "subject_run": {
+    "run_id": "subject-1",
+    "project": "sase",
+    "tool": "check",
+    "extra_args_digest": "args-1",
+    "workspace": "ws-a",
+    "machine": "athena",
+    "base_head": "head-3",
+    "dirty_paths": [],
+    "complete_fingerprint": true,
+    "fingerprint_digest": "fp-1",
+    "ad_hoc": false
+  },
+  "subjects": [
+    {
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "locator_paths": ["src/foo.py"]
+    }
+  ],
+  "evidence_runs": [
+    {
+      "run_id": "witness-1",
+      "project": "sase",
+      "tool": "check",
+      "extra_args_digest": "args-1",
+      "workspace": "ws-b",
+      "agent": "agent-1",
+      "machine": "athena",
+      "settled_ts": 1000,
+      "base_head": "head-2",
+      "complete_fingerprint": true,
+      "fingerprint_digest": "fp-0",
+      "dirty_paths": [],
+      "dirty_unknown": false,
+      "clean_tree": true,
+      "ad_hoc": false,
+      "failed": true,
+      "stage_completions": ["lint (mypy)"],
+      "items": [
+        {
+          "extractor": "mypy",
+          "extractor_version": 1,
+          "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "stage_key": "lint (mypy)"
+        }
+      ],
+      "selection_source": false
+    }
+  ],
+  "selection_records": [],
+  "ancestry": ["head-3", "head-2", "head-1"],
+  "flake_baseline": [],
+  "owner_candidates": [
+    {
+      "node_id": "sase-123",
+      "location": "src/foo.py",
+      "title": "Fix foo",
+      "status": "open"
+    }
+  ],
+  "knobs": {
+    "min_witnesses": 1,
+    "touched_requires_clean_witness": false
+  },
+  "now_ts": 2000
+}

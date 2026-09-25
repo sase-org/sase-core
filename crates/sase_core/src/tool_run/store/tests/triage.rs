@@ -191,6 +191,8 @@ fn record_then_show_round_trip() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: run.run_id.clone(),
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )
@@ -255,6 +257,8 @@ fn idempotent_replay_changes_nothing() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: run.run_id,
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )
@@ -309,6 +313,8 @@ fn label_first_writer_wins() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: run.run_id,
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )
@@ -510,6 +516,8 @@ fn show_on_missing_store_and_old_store() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: "x".to_string(),
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )
@@ -536,6 +544,8 @@ fn show_on_missing_store_and_old_store() {
         ToolRunTriageShowRequestWire {
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: run.run_id,
+            owner_kind: None,
+            owner_id: None,
         },
         Duration::from_secs(1),
     )

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "run_id": "triage-1",
+  "stage": {
+    "stage_key": "lint (mypy)",
+    "stage_id": "stage-1",
+    "output": "src/foo.py:10:5: error: Bad thing  [attr-defined]\n",
+    "truncated": false,
+    "output_path": "logs/stage.log"
+  },
+  "project_root": null,
+  "workspace_roots": [],
+  "ancestry": [],
+  "flake_baseline": [],
+  "selection_records": [],
+  "owner_candidates": [],
+  "knobs": {
+    "min_witnesses": 1,
+    "touched_requires_clean_witness": false
+  },
+  "now_ts": 100
+}

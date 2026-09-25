@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "labels": [
+    {
+      "schema_version": 1,
+      "stage_key": "lint (mypy)",
+      "extractor": "mypy",
+      "extractor_version": 1,
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "class": "known",
+      "touched": false,
+      "rule_version": 1,
+      "knobs": {
+        "min_witnesses": 1,
+        "touched_requires_clean_witness": false
+      },
+      "evidence": {
+        "witness_run_ids": ["witness-1"],
+        "selection_record_ids": [],
+        "distinct_agents": 1,
+        "distinct_workspaces": 1,
+        "first_seen_ts": 1000,
+        "clearing_run_id": null,
+        "baseline_source": null,
+        "touched": false,
+        "rejection_reasons": []
+      },
+      "possible_owners": [
+        {
+          "id": "sase-123",
+          "status": "open",
+          "reason": "possible owner"
+        }
+      ],
+      "classified_ts": 2000
+    }
+  ],
+  "repeat_of": null,
+  "diagnostics": []
+}

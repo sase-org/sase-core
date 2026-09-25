@@ -333,7 +333,12 @@ pub struct ToolRunTriageRecordResultWire {
 pub struct ToolRunTriageShowRequestWire {
     #[serde(default = "schema_version")]
     pub schema_version: u32,
+    #[serde(default)]
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +354,14 @@ pub struct ToolRunTriageShowResultWire {
     pub stages: Vec<ToolRunTriageStageFactsWire>,
     #[serde(default)]
     pub items: Vec<ToolRunTriageItemWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }
