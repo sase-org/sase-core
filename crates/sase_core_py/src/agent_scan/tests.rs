@@ -502,3 +502,61 @@ fn reconcile_dismissed_members_binding_is_canonical_only() {
         assert_eq!(new_value["dry_run"], json!(true));
     });
 }
+
+#[test]
+fn gate_turn_lookup_bindings_agree_under_both_names() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        let dir = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260812100000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            serde_json::to_string(&json!({
+                "name": "proj--gate",
+                "agent_session": "approvals",
+                "agent_session_role": "gate",
+                "gate_id": "gate-1",
+                "gate_kind": "approval",
+                "gate_state": "pending",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let index_str = index.to_string_lossy().into_owned();
+
+        let new = py_find_gate_turn_by_gate_id(
+            py,
+            &index_str,
+            Some("proj"),
+            "gate-1",
+        )
+        .unwrap();
+        let legacy = py_find_gate_shell_by_gate_id(
+            py,
+            &index_str,
+            Some("proj"),
+            "gate-1",
+        )
+        .unwrap();
+        let new_value = py_to_json_value(new.bind(py)).unwrap();
+        let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
+        assert_eq!(new_value, legacy_value);
+        assert_eq!(
+            new_value["agent_meta"]["agent_session_shell"]["id"],
+            json!("gate-1")
+        );
+    });
+}

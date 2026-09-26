@@ -250,8 +250,8 @@ pub fn project_resolved_agent_summary(
     let queue_capacity_multiplier =
         queue_capacity_multiplier_for_record(&request.record);
     let agent_session = meta
-        .and_then(|value| value.agent_session_shell.as_ref())
-        .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()));
+        .and_then(|value| value.agent_session_turn.as_ref())
+        .or_else(|| done.and_then(|value| value.agent_session_turn.as_ref()));
     let parent_timestamp = facts.parent_timestamp.clone().or_else(|| {
         meta.and_then(|value| {
             first_non_empty([

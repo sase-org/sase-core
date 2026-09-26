@@ -48,7 +48,7 @@ pub(super) struct RecordSummary {
     pub(super) model_alias_origin: Option<String>,
     pub(super) source_machine: Option<String>,
     pub(super) imported_owner_machine: Option<String>,
-    pub(super) gate_shell_id: Option<String>,
+    pub(super) gate_turn_id: Option<String>,
 }
 
 impl RecordSummary {
@@ -144,19 +144,19 @@ impl RecordSummary {
             model_alias_origin: meta.and_then(|m| m.model_alias_origin.clone()),
             source_machine: machines.source_machine,
             imported_owner_machine: machines.imported_owner_machine,
-            gate_shell_id: gate_shell_id_from_record(record),
+            gate_turn_id: gate_turn_id_from_record(record),
         }
     }
 }
 
-/// Return the durable gate id iff *record* is a real gate-shell member.
+/// Return the durable gate id iff *record* is a real gate-turn member.
 ///
 /// `gate_id` alone is inherited by later gate-associated follow-ups, so
 /// indexing it unconditionally would let a successor shadow the shell that
 /// actually owns the gate. Only [`is_real_gate_member_record`] rows project
-/// a value here, which is what makes an exact `gate_shell_id` match resolve
+/// a value here, which is what makes an exact `gate_turn_id` match resolve
 /// the owning shell instead of an inheritor.
-pub(super) fn gate_shell_id_from_record(
+pub(super) fn gate_turn_id_from_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
     if !is_real_gate_member_record(record) {
@@ -165,7 +165,7 @@ pub(super) fn gate_shell_id_from_record(
     record
         .agent_meta
         .as_ref()
-        .and_then(|meta| meta.agent_session_shell.as_ref())
+        .and_then(|meta| meta.agent_session_turn.as_ref())
         .and_then(|shell| shell.id.clone())
 }
 

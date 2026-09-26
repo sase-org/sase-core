@@ -114,7 +114,7 @@ fn content_path_candidates(
         push_path(
             &mut candidates,
             ContentHandleKindWire::Log,
-            meta.agent_session_shell
+            meta.agent_session_turn
                 .as_ref()
                 .and_then(|shell| shell.output_path.as_deref()),
             true,
@@ -142,7 +142,7 @@ fn content_path_candidates(
         push_path(
             &mut candidates,
             ContentHandleKindWire::Log,
-            done.agent_session_shell
+            done.agent_session_turn
                 .as_ref()
                 .and_then(|shell| shell.output_path.as_deref()),
             false,

@@ -20,7 +20,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_scan::{AgentArtifactRecordWire, AgentSessionShellWire};
+use crate::agent_scan::{AgentArtifactRecordWire, AgentSessionTurnWire};
 use crate::fleet_agent_session::agent_session_shell;
 use crate::fleet_contract::{
     reject_secretish, trim_to_limit, validate_label, validate_timestamp,
@@ -494,7 +494,7 @@ pub fn derive_owner_record_facts(
 
 fn apply_shell_facts(
     facts: &mut OwnerPresentationFactsWire,
-    shell: &AgentSessionShellWire,
+    shell: &AgentSessionTurnWire,
 ) {
     let kind = shell.kind.trim().to_ascii_lowercase();
     let id = label(shell.id.as_deref());
@@ -540,7 +540,7 @@ mod tests {
     use super::*;
     use crate::agent_scan::wire::PendingQuestionMarkerWire;
     use crate::agent_scan::{
-        AgentMetaWire, AgentSessionShellGateWire, AgentSessionShellMonitorWire,
+        AgentMetaWire, AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
         DoneMarkerWire, WaitingMarkerWire,
     };
 
@@ -714,13 +714,13 @@ mod tests {
     #[test]
     fn gate_monitor_and_proc_shell_facts() {
         let gate = record(AgentMetaWire {
-            agent_session_shell: Some(AgentSessionShellWire {
+            agent_session_turn: Some(AgentSessionTurnWire {
                 kind: "gate".into(),
                 id: Some("g1".into()),
                 state: Some("pending".into()),
                 label: Some("plan review".into()),
                 start_status: Some("PLAN REVIEW".into()),
-                gate: Some(AgentSessionShellGateWire {
+                gate: Some(AgentSessionTurnGateWire {
                     kind: Some("approval".into()),
                     accent: Some("blue".into()),
                     ..Default::default()
@@ -739,11 +739,11 @@ mod tests {
         assert!(facts.monitor_id.is_none());
 
         let monitor = record(AgentMetaWire {
-            agent_session_shell: Some(AgentSessionShellWire {
+            agent_session_turn: Some(AgentSessionTurnWire {
                 kind: "monitor".into(),
                 id: Some("m1".into()),
                 state: Some("running".into()),
-                monitor: Some(AgentSessionShellMonitorWire {
+                monitor: Some(AgentSessionTurnMonitorWire {
                     command: Some("sleep 1".into()),
                     ..Default::default()
                 }),
@@ -757,7 +757,7 @@ mod tests {
 
         let proc = record(AgentMetaWire {
             proc_id: Some("p1".into()),
-            agent_session_shell: Some(AgentSessionShellWire {
+            agent_session_turn: Some(AgentSessionTurnWire {
                 kind: "proc".into(),
                 state: Some("running".into()),
                 label: Some("build".into()),

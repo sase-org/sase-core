@@ -15,6 +15,7 @@ use super::refresh::{
 use super::storage::{
     open_index, open_index_for_rebuild, open_index_with_busy_timeout,
     resolve_index_artifact_dir, DEFAULT_INDEX_BUSY_TIMEOUT,
+    GATE_TURN_INDEX_COLUMN,
 };
 use crate::agent_scan::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
@@ -544,7 +545,8 @@ pub(super) fn upsert_record(
     let record_json =
         serde_json::to_string(record).map_err(|e| e.to_string())?;
     conn.execute(
-        r#"
+        &format!(
+            r#"
         INSERT INTO agent_artifacts (
             artifact_dir, projects_root, project_name, project_dir, project_file,
             workflow_dir_name, workflow_name, agent_clan, agent_session, timestamp,
@@ -558,7 +560,7 @@ pub(super) fn upsert_record(
             workflow_state_sig, plan_path_sig, prompt_steps_sig, xprompts_sig,
             agent_clan_generation, clan_tribe, clan_summary, record_json,
             model_alias_origin, done_outcome, source_machine,
-            imported_owner_machine, gate_shell_id, indexed_at
+            imported_owner_machine, {GATE_TURN_INDEX_COLUMN}, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
@@ -614,9 +616,10 @@ pub(super) fn upsert_record(
             done_outcome = excluded.done_outcome,
             source_machine = excluded.source_machine,
             imported_owner_machine = excluded.imported_owner_machine,
-            gate_shell_id = excluded.gate_shell_id,
+            {GATE_TURN_INDEX_COLUMN} = excluded.{GATE_TURN_INDEX_COLUMN},
             indexed_at = CURRENT_TIMESTAMP
         "#,
+        ),
         params![
             record.artifact_dir,
             projects_root.to_string_lossy().as_ref(),
@@ -666,7 +669,7 @@ pub(super) fn upsert_record(
             done_outcome,
             summary.source_machine,
             summary.imported_owner_machine,
-            summary.gate_shell_id,
+            summary.gate_turn_id,
         ],
     )
     .map_err(|e| e.to_string())?;

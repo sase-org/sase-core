@@ -519,7 +519,7 @@ fn only_monitors_filters_to_monitor_agent_session_role() {
         indexed.records[0]
             .agent_meta
             .as_ref()
-            .and_then(|meta| meta.agent_session_shell.as_ref())
+            .and_then(|meta| meta.agent_session_turn.as_ref())
             .and_then(|shell| shell.id.as_deref()),
         Some("m4kq")
     );

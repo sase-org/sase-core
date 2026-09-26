@@ -620,8 +620,8 @@ mod tests {
             .get("monitor_id")
             .and_then(|value| value.as_str())
         {
-            meta.agent_session_shell =
-                Some(crate::agent_scan::AgentSessionShellWire {
+            meta.agent_session_turn =
+                Some(crate::agent_scan::AgentSessionTurnWire {
                     kind: "monitor".to_string(),
                     id: Some(monitor_id.to_string()),
                     ..Default::default()
@@ -637,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_serial_agent_session_shells_count_as_one_slot() {
+    fn overlapping_serial_agent_session_turns_count_as_one_slot() {
         let mut builder = RunnerStatsBuilder::default();
         let live = |_: &AgentArtifactRecordWire| false;
         builder.add_record(

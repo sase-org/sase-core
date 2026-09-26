@@ -59,7 +59,7 @@ pub use maintenance::{
 pub use output_variables::query_agent_output_variable_history;
 
 pub use query::{
-    agent_artifact_index_status, find_gate_shell_by_gate_id,
+    agent_artifact_index_status, find_gate_turn_by_gate_id,
     load_agent_artifact_records, query_agent_artifact_index,
     read_agent_artifact_index_meta, vacuum_agent_artifact_index,
     write_agent_artifact_index_meta,
@@ -94,24 +94,24 @@ fn last_index_sql_statements() -> u64 {
 #[cfg(test)]
 thread_local! {
     /// Records decoded (`record_json` parses) by the last
-    /// [`find_gate_shell_by_gate_id`] call. A warm-cache lookup that stays
+    /// [`find_gate_turn_by_gate_id`] call. A warm-cache lookup that stays
     /// fast could still be decoding every historical row in Rust after an
     /// unfiltered SQL scan; this proves the `WHERE gate_shell_id = ?`
     /// predicate — not warm caches or an incidentally fast host — is what
     /// keeps the lookup bounded as unrelated history grows.
-    static LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED: std::cell::Cell<u64> =
+    static LAST_GATE_TURN_LOOKUP_RECORDS_DECODED: std::cell::Cell<u64> =
         const { std::cell::Cell::new(0) };
 }
 
-fn record_gate_shell_lookup_records_decoded(count: u64) {
+fn record_gate_turn_lookup_records_decoded(count: u64) {
     let _ = count;
     #[cfg(test)]
-    LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED.with(|cell| cell.set(count));
+    LAST_GATE_TURN_LOOKUP_RECORDS_DECODED.with(|cell| cell.set(count));
 }
 
 #[cfg(test)]
-fn last_gate_shell_lookup_records_decoded() -> u64 {
-    LAST_GATE_SHELL_LOOKUP_RECORDS_DECODED.with(|cell| cell.get())
+fn last_gate_turn_lookup_records_decoded() -> u64 {
+    LAST_GATE_TURN_LOOKUP_RECORDS_DECODED.with(|cell| cell.get())
 }
 
 fn placeholders(len: usize) -> String {

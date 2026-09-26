@@ -173,7 +173,7 @@ pub(crate) use sase_core::agent_scan::{
     collect_workflow_artifact_candidates as core_collect_workflow_artifact_candidates,
     delete_agent_artifact_index_row as core_delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout as core_delete_agent_artifact_index_row_with_busy_timeout,
-    find_gate_shell_by_gate_id as core_find_gate_shell_by_gate_id,
+    find_gate_turn_by_gate_id as core_find_gate_turn_by_gate_id,
     load_agent_artifact_records as core_load_agent_artifact_records,
     parse_agent_artifact_path as core_parse_agent_artifact_path,
     parse_output_variable_selector as core_parse_output_variable_selector,

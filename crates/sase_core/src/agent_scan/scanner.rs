@@ -30,8 +30,8 @@ use super::wire::{
     is_supported_workflow_dir, AgentArtifactRecordShapeWire,
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
-    AgentSessionShellGateWire, AgentSessionShellMonitorWire,
-    AgentSessionShellWire, DoneMarkerWire, ImportedSourceOwnerWire,
+    AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
+    AgentSessionTurnWire, DoneMarkerWire, ImportedSourceOwnerWire,
     OutputVariableValue, PendingQuestionMarkerWire, PlanPathMarkerWire,
     PromptStepMarkerWire, RunningMarkerWire, UsedXPromptWire,
     WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
@@ -1247,7 +1247,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         retried_as_timestamp: coerce_str(data.get("retried_as_timestamp")),
         retry_terminal: coerce_bool_truthy(data.get("retry_terminal")),
         retry_error_category: coerce_str(data.get("retry_error_category")),
-        agent_session_shell: agent_session_shell_from_object(data),
+        agent_session_turn: agent_session_turn_from_object(data),
         monitor_diagnostic_manifest_ref: coerce_str(
             data.get("monitor_diagnostic_manifest_ref"),
         ),
@@ -1270,35 +1270,53 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         monitor_followup_budget_decision_path: coerce_str(
             data.get("monitor_followup_budget_decision_path"),
         ),
-        shell_kind: coerce_str(data.get("shell_kind")),
+        turn_kind: turn_kind_from_object(data),
         proc_id: coerce_str(data.get("proc_id")),
     }
 }
 
 /// Fold the flat `monitor_*` / `gate_*` marker keys into one
-/// [`AgentSessionShellWire`], the compatibility projection for on-disk
+/// [`AgentSessionTurnWire`], the compatibility projection for on-disk
 /// `agent_meta.json` / `done.json` files, which still carry the flat shape.
 ///
-/// An agent session shell is either a monitor or a gate, never both -- the
+/// An agent session turn is either a monitor or a gate, never both -- the
 /// two are independent inheritance chains keyed off different launch
 /// mechanisms. If both prefixes are somehow present, `agent_session_role`
 /// disambiguates rather than silently dropping one side.
 ///
-/// A nested `agent_session_shell` object (falling back to a legacy nested
-/// `family_shell` object) wins over the flat keys when present, so newer
-/// writers can emit the folded shape directly.
-fn agent_session_shell_from_object(
+/// A nested `agent_session_turn` object (falling back to a legacy nested
+/// `agent_session_shell` object, then to `family_shell`) wins over the flat
+/// keys when present, so newer writers can emit the folded shape directly.
+/// When several keys are present, the newest spelling wins.
+fn nested_turn_object(
     data: &Map<String, Value>,
-) -> Option<AgentSessionShellWire> {
-    if let Some(nested) = data
-        .get("agent_session_shell")
+) -> Option<&Map<String, Value>> {
+    data.get("agent_session_turn")
+        .or_else(|| data.get("agent_session_shell"))
         .or_else(|| data.get("family_shell"))
         .and_then(|value| value.as_object())
-    {
-        if let Ok(shell) = serde_json::from_value::<AgentSessionShellWire>(
+}
+
+/// Read the metadata member kind, preferring `turn_kind` over the legacy
+/// `shell_kind`. A `monitor` input is stored as the legacy `proc` value.
+fn turn_kind_from_object(data: &Map<String, Value>) -> Option<String> {
+    let kind = coerce_str(data.get("turn_kind"))
+        .or_else(|| coerce_str(data.get("shell_kind")))?;
+    if kind == "monitor" {
+        Some("proc".to_string())
+    } else {
+        Some(kind)
+    }
+}
+
+fn agent_session_turn_from_object(
+    data: &Map<String, Value>,
+) -> Option<AgentSessionTurnWire> {
+    if let Some(nested) = nested_turn_object(data) {
+        if let Ok(turn) = serde_json::from_value::<AgentSessionTurnWire>(
             Value::Object(nested.clone()),
         ) {
-            return Some(shell);
+            return Some(turn);
         }
     }
     let mut has_monitor = data.keys().any(|k| k.starts_with("monitor_"));
@@ -1311,7 +1329,7 @@ fn agent_session_shell_from_object(
         has_gate = !has_monitor;
     }
     if has_monitor {
-        return Some(AgentSessionShellWire {
+        return Some(AgentSessionTurnWire {
             kind: "monitor".to_string(),
             id: coerce_str(data.get("monitor_id")),
             state: coerce_str(data.get("monitor_state")),
@@ -1367,7 +1385,7 @@ fn agent_session_shell_from_object(
             host_completion_reason: coerce_str(
                 data.get("monitor_host_completion_reason"),
             ),
-            monitor: Some(AgentSessionShellMonitorWire {
+            monitor: Some(AgentSessionTurnMonitorWire {
                 command: coerce_str(data.get("monitor_command")),
                 cwd: coerce_str(data.get("monitor_cwd")),
                 exit_code: coerce_int(data.get("monitor_exit_code")),
@@ -1386,7 +1404,7 @@ fn agent_session_shell_from_object(
         });
     }
     if has_gate {
-        return Some(AgentSessionShellWire {
+        return Some(AgentSessionTurnWire {
             kind: "gate".to_string(),
             id: coerce_str(data.get("gate_id")),
             state: coerce_str(data.get("gate_state")),
@@ -1437,7 +1455,7 @@ fn agent_session_shell_from_object(
             host_completion_message: None,
             host_completion_reason: None,
             monitor: None,
-            gate: Some(AgentSessionShellGateWire {
+            gate: Some(AgentSessionTurnGateWire {
                 kind: coerce_str(data.get("gate_kind")),
                 accent: coerce_str(data.get("gate_accent")),
                 creator_agent: coerce_str(data.get("gate_creator_agent")),
@@ -1496,7 +1514,7 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
             data.get("imported_source_owner"),
         ),
         status_label: coerce_str(data.get("status_label")),
-        agent_session_shell: agent_session_shell_from_object(data),
+        agent_session_turn: agent_session_turn_from_object(data),
         monitor_diagnostic_manifest_ref: coerce_str(
             data.get("monitor_diagnostic_manifest_ref"),
         ),
@@ -1737,27 +1755,27 @@ mod tests {
         );
         assert_eq!(snapshot.records.len(), 1);
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
-        let shell = meta.agent_session_shell.as_ref().unwrap();
-        assert_eq!(shell.kind, "monitor");
-        assert_eq!(shell.next_action.as_deref(), Some("Reply to the user."));
-        assert_eq!(shell.next_model.as_deref(), Some("@small"));
-        assert_eq!(shell.next_output.as_deref(), Some("auto"));
-        assert_eq!(shell.completion_ref.as_deref(), Some("cci:test"));
-        assert_eq!(shell.profile.as_deref(), Some("verify"));
-        assert_eq!(shell.policy_digest.as_deref(), Some("sha256:policy"));
-        assert_eq!(shell.followup_agent.as_deref(), Some("acme--next"));
+        let turn = meta.agent_session_turn.as_ref().unwrap();
+        assert_eq!(turn.kind, "monitor");
+        assert_eq!(turn.next_action.as_deref(), Some("Reply to the user."));
+        assert_eq!(turn.next_model.as_deref(), Some("@small"));
+        assert_eq!(turn.next_output.as_deref(), Some("auto"));
+        assert_eq!(turn.completion_ref.as_deref(), Some("cci:test"));
+        assert_eq!(turn.profile.as_deref(), Some("verify"));
+        assert_eq!(turn.policy_digest.as_deref(), Some("sha256:policy"));
+        assert_eq!(turn.followup_agent.as_deref(), Some("acme--next"));
         assert_eq!(
-            shell.followup_degraded_reason.as_deref(),
+            turn.followup_degraded_reason.as_deref(),
             Some("workspace 0 fallback")
         );
-        assert_eq!(shell.followup_prompt_path.as_deref(), Some("followup.md"));
-        assert_eq!(shell.host_completion_status.as_deref(), Some("finalizing"));
+        assert_eq!(turn.followup_prompt_path.as_deref(), Some("followup.md"));
+        assert_eq!(turn.host_completion_status.as_deref(), Some("finalizing"));
         assert_eq!(
-            shell.host_completion_message.as_deref(),
+            turn.host_completion_message.as_deref(),
             Some("running finalizers")
         );
         assert_eq!(
-            shell.host_completion_reason.as_deref(),
+            turn.host_completion_reason.as_deref(),
             Some("verification succeeded")
         );
         assert_eq!(
@@ -1811,9 +1829,9 @@ mod tests {
         );
         assert_eq!(snapshot.records.len(), 1);
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
-        let shell = meta.agent_session_shell.as_ref().unwrap();
-        assert_eq!(shell.id.as_deref(), Some("oldmon"));
-        assert_eq!(shell.next_model, None);
+        let turn = meta.agent_session_turn.as_ref().unwrap();
+        assert_eq!(turn.id.as_deref(), Some("oldmon"));
+        assert_eq!(turn.next_model, None);
     }
 
     #[test]
@@ -1846,9 +1864,44 @@ mod tests {
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
         assert_eq!(meta.agent_session.as_deref(), Some("acme"));
         assert_eq!(meta.agent_session_role.as_deref(), Some("code"));
-        let shell = meta.agent_session_shell.as_ref().unwrap();
-        assert_eq!(shell.kind, "monitor");
-        assert_eq!(shell.id.as_deref(), Some("m9"));
+        let turn = meta.agent_session_turn.as_ref().unwrap();
+        assert_eq!(turn.kind, "monitor");
+        assert_eq!(turn.id.as_deref(), Some("m9"));
+    }
+
+    #[test]
+    fn scanner_prefers_turn_keys_and_stores_monitor_kind_as_proc() {
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let artifact = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20260822120111");
+        write_json(
+            &artifact.join("agent_meta.json"),
+            json!({
+                "name": "acme--mon",
+                "agent_session_turn": {"kind": "monitor", "id": "new"},
+                "agent_session_shell": {"kind": "monitor", "id": "stale"},
+                "family_shell": {"kind": "monitor", "id": "staler"},
+                "turn_kind": "monitor",
+                "shell_kind": "gate",
+            }),
+        );
+
+        let snapshot = scan_agent_artifacts(
+            &projects,
+            AgentArtifactScanOptionsWire::default(),
+        );
+        assert_eq!(snapshot.records.len(), 1);
+        let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
+        let turn = meta.agent_session_turn.as_ref().unwrap();
+        assert_eq!(turn.id.as_deref(), Some("new"));
+        assert_eq!(meta.turn_kind.as_deref(), Some("proc"));
+        let encoded = serde_json::to_value(meta).unwrap();
+        assert_eq!(encoded["agent_session_shell"]["id"], "new");
+        assert_eq!(encoded["shell_kind"], "proc");
     }
 
     #[test]
@@ -2031,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn scanner_round_trips_gate_shell_metadata() {
+    fn scanner_round_trips_gate_turn_metadata() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let artifact = projects
@@ -2108,31 +2161,31 @@ mod tests {
         assert_eq!(snapshot.records.len(), 1);
         let record = &snapshot.records[0];
         let meta = record.agent_meta.as_ref().unwrap();
-        let meta_shell = meta.agent_session_shell.as_ref().unwrap();
-        assert_eq!(meta_shell.kind, "gate");
-        assert_eq!(meta_shell.id.as_deref(), Some("gate-1"));
-        assert_eq!(meta_shell.state.as_deref(), Some("pending"));
-        assert_eq!(meta_shell.next_model.as_deref(), Some("@large"));
-        assert_eq!(meta_shell.followup_attempt_id.as_deref(), Some("att-1"));
+        let meta_turn = meta.agent_session_turn.as_ref().unwrap();
+        assert_eq!(meta_turn.kind, "gate");
+        assert_eq!(meta_turn.id.as_deref(), Some("gate-1"));
+        assert_eq!(meta_turn.state.as_deref(), Some("pending"));
+        assert_eq!(meta_turn.next_model.as_deref(), Some("@large"));
+        assert_eq!(meta_turn.followup_attempt_id.as_deref(), Some("att-1"));
         assert_eq!(
-            meta_shell.followup_attempt_stage.as_deref(),
+            meta_turn.followup_attempt_stage.as_deref(),
             Some("launched")
         );
-        assert_eq!(meta_shell.followup_error_type.as_deref(), Some("OSError"));
-        assert!(meta_shell.output_truncated);
-        let meta_gate = meta_shell.gate.as_ref().unwrap();
+        assert_eq!(meta_turn.followup_error_type.as_deref(), Some("OSError"));
+        assert!(meta_turn.output_truncated);
+        let meta_gate = meta_turn.gate.as_ref().unwrap();
         assert_eq!(
             meta_gate.decision_path.as_deref(),
             Some("gate_decision.md")
         );
-        assert_eq!(meta.shell_kind.as_deref(), Some("gate"));
+        assert_eq!(meta.turn_kind.as_deref(), Some("gate"));
         let done = record.done.as_ref().unwrap();
-        let done_shell = done.agent_session_shell.as_ref().unwrap();
-        assert_eq!(done_shell.state.as_deref(), Some("answered"));
-        assert_eq!(done_shell.elapsed_seconds, Some(2.5));
-        assert!(done_shell.output_truncated);
+        let done_turn = done.agent_session_turn.as_ref().unwrap();
+        assert_eq!(done_turn.state.as_deref(), Some("answered"));
+        assert_eq!(done_turn.elapsed_seconds, Some(2.5));
+        assert!(done_turn.output_truncated);
         assert_eq!(
-            done_shell.followup_prompt_path.as_deref(),
+            done_turn.followup_prompt_path.as_deref(),
             Some("gate_followup.md")
         );
     }

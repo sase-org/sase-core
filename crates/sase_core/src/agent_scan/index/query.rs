@@ -21,8 +21,9 @@ use super::selection::{
 use super::storage::{
     count_table_rows, open_index, open_index_read_only,
     read_index_schema_version, resolve_index_artifact_dir,
+    GATE_TURN_INDEX_COLUMN,
 };
-use super::{placeholders, record_gate_shell_lookup_records_decoded};
+use super::{placeholders, record_gate_turn_lookup_records_decoded};
 use crate::agent_scan::context::represented_clan_keys;
 use crate::agent_scan::scanner::project_filter_for_scan;
 use crate::agent_scan::wire::{
@@ -113,21 +114,21 @@ pub fn load_agent_artifact_records(
         .collect())
 }
 
-/// Return the newest real gate-shell member matching `gate_id`, if any.
+/// Return the newest real gate-turn member matching `gate_id`, if any.
 ///
 /// Uses the indexed `gate_shell_id` column for a single-row `WHERE` lookup
 /// instead of decoding every historical record, the cost that made the
 /// previous full-history scan take seconds on a long-lived host. Only rows
-/// projected from a genuine gate-shell member carry a `gate_shell_id`
-/// (see [`gate_shell_id_from_record`]), so a later descendant that merely
-/// inherited the gate id can never shadow the owning shell here.
+/// projected from a genuine gate-turn member carry a `gate_shell_id`
+/// (see [`gate_turn_id_from_record`]), so a later descendant that merely
+/// inherited the gate id can never shadow the owning turn here.
 ///
 /// `project_name` of `None` searches every project, the same unscoped
 /// sweep the historical Python lookup performed for the reclaim chop.
 /// Ties (which should not occur for a durable gate id, but are possible
 /// for a replayed/duplicated bundle) resolve to the newest row by
 /// `timestamp`, then `artifact_dir`, mirroring the prior newest-first sort.
-pub fn find_gate_shell_by_gate_id(
+pub fn find_gate_turn_by_gate_id(
     index_path: &Path,
     project_name: Option<&str>,
     gate_id: &str,
@@ -136,9 +137,11 @@ pub fn find_gate_shell_by_gate_id(
     let record_json: Option<String> = match project_name {
         Some(project) => conn
             .query_row(
-                "SELECT record_json FROM agent_artifacts \
-                 WHERE gate_shell_id = ?1 AND project_name = ?2 \
-                 ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1",
+                &format!(
+                    "SELECT record_json FROM agent_artifacts \
+                     WHERE {GATE_TURN_INDEX_COLUMN} = ?1 AND project_name = ?2 \
+                     ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1"
+                ),
                 params![gate_id, project],
                 |row| row.get(0),
             )
@@ -146,16 +149,18 @@ pub fn find_gate_shell_by_gate_id(
             .map_err(|e| e.to_string())?,
         None => conn
             .query_row(
-                "SELECT record_json FROM agent_artifacts \
-                 WHERE gate_shell_id = ?1 \
-                 ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1",
+                &format!(
+                    "SELECT record_json FROM agent_artifacts \
+                     WHERE {GATE_TURN_INDEX_COLUMN} = ?1 \
+                     ORDER BY timestamp DESC, artifact_dir DESC LIMIT 1"
+                ),
                 params![gate_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|e| e.to_string())?,
     };
-    record_gate_shell_lookup_records_decoded(record_json.is_some() as u64);
+    record_gate_turn_lookup_records_decoded(record_json.is_some() as u64);
     record_json
         .map(|json| decode_agent_artifact_record_json(&json))
         .transpose()

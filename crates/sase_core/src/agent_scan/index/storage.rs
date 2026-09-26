@@ -3,7 +3,7 @@ use super::maintenance::{
     upsert_model_aliases_for_record, upsert_output_variables_for_record,
 };
 use super::record_summary::{
-    gate_shell_id_from_record, machine_projection_from_marker_files,
+    gate_turn_id_from_record, machine_projection_from_marker_files,
     machine_projection_from_record, source_machine_from_marker_files,
     source_machine_from_record, MachineProjection, RecordSummary,
 };
@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(super) const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Indexed `agent_artifacts` column projecting the owning gate-turn id.
+// legacy sase-shell spelling; flips in contract-flip
+pub(super) const GATE_TURN_INDEX_COLUMN: &str = "gate_shell_id";
 
 pub(super) fn open_index(index_path: &Path) -> Result<Connection, String> {
     open_index_with_busy_timeout(index_path, DEFAULT_INDEX_BUSY_TIMEOUT)
@@ -30,7 +34,7 @@ pub(super) fn open_index_with_busy_timeout(
     }
     let mut conn = Connection::open(index_path).map_err(|e| e.to_string())?;
     conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
@@ -63,7 +67,7 @@ pub(super) fn open_index_with_busy_timeout(
             done_outcome TEXT,
             source_machine TEXT,
             imported_owner_machine TEXT,
-            gate_shell_id TEXT,
+            {GATE_TURN_INDEX_COLUMN} TEXT,
             has_done_marker INTEGER NOT NULL,
             has_running_marker INTEGER NOT NULL,
             has_waiting_marker INTEGER NOT NULL,
@@ -169,8 +173,8 @@ pub(super) fn open_index_with_busy_timeout(
         );
         CREATE INDEX IF NOT EXISTS idx_agent_artifact_model_aliases_alias
             ON agent_artifact_model_aliases(alias, artifact_dir);
-        "#,
-    )
+        "#
+    ))
     .map_err(|e| e.to_string())?;
 
     let prior_version: Option<u32> = conn
@@ -278,7 +282,7 @@ pub(super) fn open_index_with_busy_timeout(
         migrate_imported_owner_machine_projection_v30(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 31) {
-        ensure_agent_artifacts_column(&conn, "gate_shell_id", "TEXT")?;
+        ensure_agent_artifacts_column(&conn, GATE_TURN_INDEX_COLUMN, "TEXT")?;
         migrate_gate_shell_id_projection_v31(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 32) {
@@ -287,7 +291,7 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_none_or(|v| v < 33) {
         migrate_agent_session_column_v33(&conn)?;
     }
-    conn.execute_batch(
+    conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_clan \
@@ -300,9 +304,9 @@ pub(super) fn open_index_with_busy_timeout(
          ON agent_artifacts(imported_owner_machine); \
          CREATE INDEX IF NOT EXISTS idx_agent_artifacts_clan_context \
          ON agent_artifacts(agent_clan, agent_clan_generation, timestamp); \
-         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_gate_shell_id \
-         ON agent_artifacts(gate_shell_id, project_name, timestamp);",
-    )
+         CREATE INDEX IF NOT EXISTS idx_agent_artifacts_{GATE_TURN_INDEX_COLUMN} \
+         ON agent_artifacts({GATE_TURN_INDEX_COLUMN}, project_name, timestamp);",
+    ))
     .map_err(|e| e.to_string())?;
 
     // Every open used to rewrite this row unconditionally, including opens
@@ -931,7 +935,7 @@ pub(super) fn migrate_imported_owner_machine_projection_v30(
 
 /// v31 adds the indexed `gate_shell_id` projection so an exact gate-id
 /// lookup can use `WHERE gate_shell_id = ?` instead of decoding every
-/// historical row. Only rows that are a real gate-shell member (not a
+/// historical row. Only rows that are a real gate-turn member (not a
 /// descendant that merely inherited the gate id) get a non-null value.
 pub(super) fn migrate_gate_shell_id_projection_v31(
     conn: &mut Connection,
@@ -946,18 +950,20 @@ pub(super) fn migrate_gate_shell_id_projection_v31(
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let artifact_dir: String = row.get(0).map_err(|e| e.to_string())?;
             let record_json: String = row.get(1).map_err(|e| e.to_string())?;
-            let gate_shell_id = decode_agent_artifact_record_json(&record_json)
+            let gate_turn_id = decode_agent_artifact_record_json(&record_json)
                 .ok()
-                .and_then(|record| gate_shell_id_from_record(&record));
-            projected.push((artifact_dir, gate_shell_id));
+                .and_then(|record| gate_turn_id_from_record(&record));
+            projected.push((artifact_dir, gate_turn_id));
         }
         projected
     };
-    for (artifact_dir, gate_shell_id) in rows {
+    for (artifact_dir, gate_turn_id) in rows {
         tx.execute(
-            "UPDATE agent_artifacts SET gate_shell_id = ?1 \
-             WHERE artifact_dir = ?2",
-            params![gate_shell_id, artifact_dir],
+            &format!(
+                "UPDATE agent_artifacts SET {GATE_TURN_INDEX_COLUMN} = ?1 \
+                 WHERE artifact_dir = ?2"
+            ),
+            params![gate_turn_id, artifact_dir],
         )
         .map_err(|e| e.to_string())?;
     }

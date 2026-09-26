@@ -1,7 +1,7 @@
 use super::super::*;
 use super::support::{
     artifact, artifact_for_project, timestamps_from_artifact_dirs,
-    write_gate_shell_artifact, write_json,
+    write_gate_turn_artifact, write_json,
 };
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_scan::wire::AgentArtifactScanOptionsWire;
@@ -274,18 +274,18 @@ fn wait_completed_records_are_indexed_as_running() {
 }
 
 #[test]
-fn find_gate_shell_by_gate_id_uses_indexed_lookup_not_full_decode() {
+fn find_gate_turn_by_gate_id_uses_indexed_lookup_not_full_decode() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
     for n in 0..40 {
-        write_gate_shell_artifact(
+        write_gate_turn_artifact(
             &projects,
             "proj",
             &format!("2026081210{n:04}"),
             &format!("unrelated-{n}"),
         );
     }
-    let target = write_gate_shell_artifact(
+    let target = write_gate_turn_artifact(
         &projects,
         "proj",
         "20260812999999",
@@ -300,23 +300,23 @@ fn find_gate_shell_by_gate_id_uses_indexed_lookup_not_full_decode() {
     )
     .unwrap();
 
-    let found = find_gate_shell_by_gate_id(&index, Some("proj"), "gate-target")
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-target")
         .unwrap()
         .expect("gate-target must resolve");
     assert_eq!(found.artifact_dir, target.to_string_lossy());
     assert_eq!(
-        last_gate_shell_lookup_records_decoded(),
+        last_gate_turn_lookup_records_decoded(),
         1,
         "an indexed exact lookup must decode only the matched row, \
-         regardless of how many unrelated gate shells are indexed"
+         regardless of how many unrelated gate turns are indexed"
     );
 }
 
 #[test]
-fn find_gate_shell_by_gate_id_returns_none_for_unknown_id() {
+fn find_gate_turn_by_gate_id_returns_none_for_unknown_id() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
-    write_gate_shell_artifact(&projects, "proj", "20260812100000", "gate-1");
+    write_gate_turn_artifact(&projects, "proj", "20260812100000", "gate-1");
     let index = tmp.path().join("agent_artifact_index.sqlite");
     rebuild_agent_artifact_index(
         &index,
@@ -325,25 +325,20 @@ fn find_gate_shell_by_gate_id_returns_none_for_unknown_id() {
     )
     .unwrap();
 
-    let found =
-        find_gate_shell_by_gate_id(&index, Some("proj"), "no-such-gate")
-            .unwrap();
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "no-such-gate")
+        .unwrap();
     assert!(found.is_none());
-    assert_eq!(last_gate_shell_lookup_records_decoded(), 0);
+    assert_eq!(last_gate_turn_lookup_records_decoded(), 0);
 }
 
 #[test]
-fn find_gate_shell_by_gate_id_ignores_inherited_id_on_descendant() {
+fn find_gate_turn_by_gate_id_ignores_inherited_id_on_descendant() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
-    let owner = write_gate_shell_artifact(
-        &projects,
-        "proj",
-        "20260812100000",
-        "gate-1",
-    );
+    let owner =
+        write_gate_turn_artifact(&projects, "proj", "20260812100000", "gate-1");
     // A follow-up agent launched after the gate settles inherits the
-    // same on-disk `gate_id` but is not itself a gate-shell member: its
+    // same on-disk `gate_id` but is not itself a gate-turn member: its
     // `agent_session_role` is not "gate".
     write_json(
         &artifact_for_project(&projects, "proj", "20260812100100")
@@ -366,23 +361,23 @@ fn find_gate_shell_by_gate_id_ignores_inherited_id_on_descendant() {
     )
     .unwrap();
 
-    let found = find_gate_shell_by_gate_id(&index, Some("proj"), "gate-1")
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-1")
         .unwrap()
         .expect("gate-1 must resolve to its owning shell");
     assert_eq!(found.artifact_dir, owner.to_string_lossy());
 }
 
 #[test]
-fn find_gate_shell_by_gate_id_respects_project_scoping() {
+fn find_gate_turn_by_gate_id_respects_project_scoping() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
-    let alpha = write_gate_shell_artifact(
+    let alpha = write_gate_turn_artifact(
         &projects,
         "alpha",
         "20260812100000",
         "gate-shared",
     );
-    write_gate_shell_artifact(
+    write_gate_turn_artifact(
         &projects,
         "beta",
         "20260812200000",
@@ -398,13 +393,13 @@ fn find_gate_shell_by_gate_id_respects_project_scoping() {
     .unwrap();
 
     let scoped =
-        find_gate_shell_by_gate_id(&index, Some("alpha"), "gate-shared")
+        find_gate_turn_by_gate_id(&index, Some("alpha"), "gate-shared")
             .unwrap()
             .expect("alpha's gate must resolve even though beta's is newer");
     assert_eq!(scoped.artifact_dir, alpha.to_string_lossy());
     assert_eq!(scoped.project_name, "alpha");
 
-    let unscoped = find_gate_shell_by_gate_id(&index, None, "gate-shared")
+    let unscoped = find_gate_turn_by_gate_id(&index, None, "gate-shared")
         .unwrap()
         .expect("an unscoped search must still resolve one match");
     assert_eq!(
@@ -414,11 +409,11 @@ fn find_gate_shell_by_gate_id_respects_project_scoping() {
 }
 
 #[test]
-fn find_gate_shell_by_gate_id_prefers_newest_real_shell() {
+fn find_gate_turn_by_gate_id_prefers_newest_real_turn() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
-    write_gate_shell_artifact(&projects, "proj", "20260812100000", "gate-dup");
-    let newest = write_gate_shell_artifact(
+    write_gate_turn_artifact(&projects, "proj", "20260812100000", "gate-dup");
+    let newest = write_gate_turn_artifact(
         &projects,
         "proj",
         "20260812200000",
@@ -433,17 +428,17 @@ fn find_gate_shell_by_gate_id_prefers_newest_real_shell() {
     )
     .unwrap();
 
-    let found = find_gate_shell_by_gate_id(&index, Some("proj"), "gate-dup")
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-dup")
         .unwrap()
         .expect("gate-dup must resolve");
     assert_eq!(found.artifact_dir, newest.to_string_lossy());
 }
 
 #[test]
-fn schema_v30_upgrade_adds_and_backfills_gate_shell_id_projection() {
+fn schema_v30_upgrade_adds_and_backfills_gate_turn_id_projection() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");
-    let owner = write_gate_shell_artifact(
+    let owner = write_gate_turn_artifact(
         &projects,
         "proj",
         "20260812100000",
@@ -467,7 +462,7 @@ fn schema_v30_upgrade_adds_and_backfills_gate_shell_id_projection() {
         .unwrap();
     }
 
-    let found = find_gate_shell_by_gate_id(&index, Some("proj"), "gate-legacy")
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-legacy")
         .unwrap()
         .expect(
             "an index predating the gate_shell_id column must \

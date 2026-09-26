@@ -1,13 +1,13 @@
 //! Shared agent session-root versus concrete-shell classification.
 //!
-//! Modern owner records often carry `agent_session_id` / `agent_session_shell` / a
+//! Modern owner records often carry `agent_session_id` / `agent_session_turn` / a
 //! plan-chain name suffix without `parent_timestamp`. A concrete `--plan`
 //! gate with `agent_session_id` and a null parent is a nested shell, never an
 //! agent session root. Gateway presentation, catalog projection, and owner listing
 //! must share this classifier.
 
 use crate::agent_scan::{
-    AgentArtifactRecordWire, AgentMetaWire, AgentSessionShellWire,
+    AgentArtifactRecordWire, AgentMetaWire, AgentSessionTurnWire,
     DoneMarkerWire,
 };
 
@@ -87,7 +87,7 @@ pub fn record_is_concrete_agent_session_shell(
 }
 
 /// Classify a record as a concrete agent session shell from modern facts, in
-/// this order: `agent_session_shell.kind`, `agent_session_role` / `role_suffix`,
+/// this order: `agent_session_turn.kind`, `agent_session_role` / `role_suffix`,
 /// plan-chain name suffix, then `parent_timestamp`. `agent_session_id` alone
 /// does not make a root into a shell.
 pub fn concrete_agent_session_shell_kind(
@@ -122,13 +122,13 @@ pub fn concrete_agent_session_shell_kind(
 pub fn agent_session_shell<'a>(
     meta: Option<&'a AgentMetaWire>,
     done: Option<&'a DoneMarkerWire>,
-) -> Option<&'a AgentSessionShellWire> {
-    meta.and_then(|value| value.agent_session_shell.as_ref())
-        .or_else(|| done.and_then(|value| value.agent_session_shell.as_ref()))
+) -> Option<&'a AgentSessionTurnWire> {
+    meta.and_then(|value| value.agent_session_turn.as_ref())
+        .or_else(|| done.and_then(|value| value.agent_session_turn.as_ref()))
 }
 
 fn kind_from_agent_session_shell(
-    shell: &AgentSessionShellWire,
+    shell: &AgentSessionTurnWire,
 ) -> Option<ConcreteAgentSessionShellKind> {
     match shell.kind.trim().to_ascii_lowercase().as_str() {
         "monitor" | "mon" => Some(ConcreteAgentSessionShellKind::Monitor),
@@ -218,7 +218,7 @@ mod tests {
     use super::*;
     use crate::agent_scan::{
         AgentArtifactRecordShapeWire, AgentArtifactRecordWire, AgentMetaWire,
-        AgentSessionShellWire,
+        AgentSessionTurnWire,
     };
 
     fn record_named(name: &str) -> AgentArtifactRecordWire {
@@ -252,10 +252,10 @@ mod tests {
         let mut record = record_named("0n--plan");
         record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
-        record.agent_meta.as_mut().unwrap().agent_session_shell =
-            Some(AgentSessionShellWire {
+        record.agent_meta.as_mut().unwrap().agent_session_turn =
+            Some(AgentSessionTurnWire {
                 kind: "gate".to_string(),
-                ..AgentSessionShellWire::default()
+                ..AgentSessionTurnWire::default()
             });
         assert_eq!(
             concrete_agent_session_shell_kind(&record),

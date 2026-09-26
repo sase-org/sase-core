@@ -273,14 +273,14 @@ pub(crate) fn is_real_monitor_member_record(
         .as_deref()
         .is_some_and(|role| role.trim() == MONITOR_AGENT_SESSION_ROLE)
         && meta
-            .agent_session_shell
+            .agent_session_turn
             .as_ref()
             .filter(|shell| shell.kind == MONITOR_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
-/// Return whether *record* is the durable gate-shell member for its agent session.
+/// Return whether *record* is the durable gate-turn member for its agent session.
 ///
 /// `gate_id` may be inherited by later gate-associated follow-ups, so a real
 /// gate member must carry both the explicit gate role and a durable gate id.
@@ -294,7 +294,7 @@ pub(crate) fn is_real_gate_member_record(
         .as_deref()
         .is_some_and(|role| role.trim() == GATE_AGENT_SESSION_ROLE)
         && meta
-            .agent_session_shell
+            .agent_session_turn
             .as_ref()
             .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.id.as_deref())
@@ -354,7 +354,7 @@ pub fn is_runner_slot_occupying_record(
     let gate = is_real_gate_member_record(record);
     if gate
         && meta
-            .agent_session_shell
+            .agent_session_turn
             .as_ref()
             .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
             .and_then(|shell| shell.state.as_deref())

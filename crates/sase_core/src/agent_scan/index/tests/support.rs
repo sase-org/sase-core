@@ -303,7 +303,7 @@ pub(super) fn write_completed_artifact(dir: &Path, name: &str) {
     );
 }
 
-pub(super) fn write_gate_shell_artifact(
+pub(super) fn write_gate_turn_artifact(
     projects: &Path,
     project: &str,
     ts: &str,
