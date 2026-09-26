@@ -367,6 +367,10 @@ fn model_alias_shortcut_completion_item(
     let expansion = edit.replacement.trim_end().to_string();
     let range = edit.edit.range;
     candidate.replacement = Some(edit.edit);
+    candidate.additional_edits = merge_coincident_edits(
+        &mut candidate.replacement,
+        edit.additional_edits,
+    );
     // `candidate.replacement` is always `Some` here, so `completion_item`
     // never falls back to this `replacement_range` argument.
     let mut item = completion_item(candidate, range);
@@ -433,6 +437,10 @@ fn model_shortcut_completion_item(
         });
     }
     candidate.replacement = Some(edit.edit);
+    candidate.additional_edits = merge_coincident_edits(
+        &mut candidate.replacement,
+        edit.additional_edits,
+    );
     let mut item = completion_item(candidate, range);
     item.kind = Some(match edit.kind {
         ModelShortcutKind::Alias => CompletionItemKind::ENUM_MEMBER,
@@ -1091,6 +1099,32 @@ fn vcs_repo_badges(entry: &VcsRepoEntry) -> Vec<String> {
     badges
 }
 
+/// Fold shortcut `additional` edits against the primary edit.
+///
+/// The shared planner emits nonoverlapping ranges, so this is a defensive
+/// pass only: an additional edit coincident with the primary range is merged
+/// into the primary text (its text first — the multi-edit primary is a bare
+/// shortcut deletion) instead of producing an invalid overlapping
+/// `additionalTextEdits` entry.
+fn merge_coincident_edits(
+    primary: &mut Option<EditorTextEdit>,
+    additional: Vec<EditorTextEdit>,
+) -> Vec<EditorTextEdit> {
+    let Some(primary_edit) = primary.as_mut() else {
+        return additional;
+    };
+    let mut rest = Vec::with_capacity(additional.len());
+    for edit in additional {
+        if edit.range == primary_edit.range {
+            primary_edit.new_text =
+                format!("{}{}", edit.new_text, primary_edit.new_text);
+        } else {
+            rest.push(edit);
+        }
+    }
+    rest
+}
+
 /// Map the candidate's secondary edits (the prepend/replace-at-start tag edit)
 /// to LSP `additionalTextEdits`, returning `None` when there are none.
 fn additional_text_edits(edits: Vec<EditorTextEdit>) -> Option<Vec<TextEdit>> {
@@ -1215,6 +1249,251 @@ mod tests {
             panic!("expected array response");
         };
         assert!(items[0].text_edit.is_some());
+    }
+
+    fn editor_range(
+        start_line: u32,
+        start_char: u32,
+        end_line: u32,
+        end_char: u32,
+    ) -> EditorRange {
+        EditorRange {
+            start: EditorPosition {
+                line: start_line,
+                character: start_char,
+            },
+            end: EditorPosition {
+                line: end_line,
+                character: end_char,
+            },
+        }
+    }
+
+    fn shortcut_candidate(display: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            display: display.to_string(),
+            insertion: display.to_string(),
+            detail: None,
+            documentation: None,
+            is_dir: false,
+            name: display.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: "user_alias".to_string(),
+            project: String::new(),
+            status: "user".to_string(),
+        }
+    }
+
+    /// Every LSP range in a shortcut item, primary first, as comparable
+    /// line/character tuples.
+    fn item_ranges(item: &CompletionItem) -> Vec<(u32, u32, u32, u32)> {
+        let mut ranges = Vec::new();
+        if let Some(CompletionTextEdit::Edit(primary)) = &item.text_edit {
+            ranges.push(lsp_range_tuple(&primary.range));
+        }
+        for extra in item.additional_text_edits.clone().unwrap_or_default() {
+            ranges.push(lsp_range_tuple(&extra.range));
+        }
+        ranges
+    }
+
+    fn lsp_range_tuple(range: &Range) -> (u32, u32, u32, u32) {
+        (
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+        )
+    }
+
+    #[test]
+    fn model_alias_shortcut_item_carries_multi_edits_as_additional() {
+        // `%model:old Use =la` accepting `@large`: the primary edit deletes
+        // the shortcut token while the destination replacement and the extra
+        // removal ride along as nonoverlapping `additionalTextEdits`.
+        let trigger = editor_range(0, 15, 0, 18);
+        let edit = ModelAliasShortcutEditWire {
+            schema_version: 1,
+            alias: "@large".to_string(),
+            replacement: "%m:@large ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: String::new(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 10,
+            },
+            additional_edits: vec![
+                EditorTextEdit {
+                    range: editor_range(0, 0, 0, 11),
+                    new_text: "%m:@large ".to_string(),
+                },
+                EditorTextEdit {
+                    range: editor_range(0, 24, 0, 33),
+                    new_text: String::new(),
+                },
+            ],
+        };
+        let context = ModelAliasShortcutContextWire {
+            schema_version: 1,
+            query: "la".to_string(),
+            token: "=la".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 18,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) =
+            model_alias_shortcut_completion_response(
+                vec![(shortcut_candidate("@large"), edit)],
+                &context,
+            )
+        else {
+            panic!("expected list response");
+        };
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.filter_text.as_deref(), Some("=la"));
+        assert_eq!(
+            item_ranges(item),
+            vec![(0, 15, 0, 18), (0, 0, 0, 11), (0, 24, 0, 33)]
+        );
+        let primary_new_text = match &item.text_edit {
+            Some(CompletionTextEdit::Edit(primary)) => primary.new_text.clone(),
+            _ => panic!("expected primary edit"),
+        };
+        assert_eq!(primary_new_text, String::new());
+        let extra_texts: Vec<&str> = item
+            .additional_text_edits
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|extra| extra.new_text.as_str())
+            .collect();
+        assert_eq!(extra_texts, vec!["%m:@large ", ""]);
+    }
+
+    #[test]
+    fn model_shortcut_item_carries_multi_edits_as_additional() {
+        // `Use ==op then %m:old` accepting `opus`: same split for the
+        // concrete-model kind, with model detail labels intact.
+        let trigger = editor_range(0, 15, 0, 19);
+        let edit = ModelShortcutEditWire {
+            schema_version: 1,
+            kind: ModelShortcutKind::Model,
+            value: "opus".to_string(),
+            replacement: "%m:opus ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: String::new(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 8,
+            },
+            additional_edits: vec![EditorTextEdit {
+                range: editor_range(0, 0, 0, 8),
+                new_text: "%m:opus ".to_string(),
+            }],
+        };
+        let context = ModelShortcutContextWire {
+            schema_version: 1,
+            kind: ModelShortcutKind::Model,
+            query: "op".to_string(),
+            token: "==op".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 19,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) = model_shortcut_completion_response(
+            vec![(shortcut_candidate("opus"), edit)],
+            &context,
+        ) else {
+            panic!("expected list response");
+        };
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.filter_text.as_deref(), Some("==op"));
+        assert_eq!(item_ranges(item), vec![(0, 15, 0, 19), (0, 0, 0, 8)]);
+        assert!(item.label_details.as_ref().is_some_and(
+            |label| label.detail == Some(" → %m:opus".to_string())
+        ));
+    }
+
+    #[test]
+    fn single_edit_shortcut_items_have_no_additional_edits() {
+        // Token-local expansion keeps the previous shape: one primary edit
+        // and no `additionalTextEdits` key.
+        let trigger = editor_range(0, 4, 0, 7);
+        let edit = ModelAliasShortcutEditWire {
+            schema_version: 1,
+            alias: "@large".to_string(),
+            replacement: "%m:@large ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: "%m:@large ".to_string(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 14,
+            },
+            additional_edits: Vec::new(),
+        };
+        let context = ModelAliasShortcutContextWire {
+            schema_version: 1,
+            query: "la".to_string(),
+            token: "=la".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 7,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) =
+            model_alias_shortcut_completion_response(
+                vec![(shortcut_candidate("@large"), edit)],
+                &context,
+            )
+        else {
+            panic!("expected list response");
+        };
+        assert_eq!(item_ranges(&list.items[0]), vec![(0, 4, 0, 7)]);
+        assert_eq!(list.items[0].additional_text_edits, None);
+    }
+
+    #[test]
+    fn coincident_additional_edits_merge_into_primary() {
+        let mut primary = Some(EditorTextEdit {
+            range: editor_range(0, 4, 0, 7),
+            new_text: String::new(),
+        });
+        let rest = merge_coincident_edits(
+            &mut primary,
+            vec![
+                EditorTextEdit {
+                    range: editor_range(0, 4, 0, 7),
+                    new_text: "%m:@large ".to_string(),
+                },
+                EditorTextEdit {
+                    range: editor_range(1, 0, 1, 10),
+                    new_text: String::new(),
+                },
+            ],
+        );
+        assert_eq!(
+            primary.unwrap().new_text,
+            "%m:@large ".to_string(),
+            "coincident text folds into the primary"
+        );
+        assert_eq!(rest.len(), 1);
     }
 
     #[test]

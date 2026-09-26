@@ -720,6 +720,108 @@ fn model_alias_shortcut_bindings_return_plain_dict_shapes() {
 }
 
 #[test]
+fn model_shortcut_edit_binding_reports_segment_replacement_edits() {
+    // `%model:old Use =la` accepting `@large`: the binding round-trips the
+    // multi-edit wire (trigger deletion plus destination replacement) as
+    // plain dicts, and the `==` kind does the same for concrete models.
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_model_shortcut_edit, &module).unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_model_alias_shortcut_edit, &module)
+                    .unwrap(),
+            )
+            .unwrap();
+        let entries = json_value_to_py(
+            py,
+            &json!([
+                model_completion_entry_json("@large", "user_alias", "", [], 0,),
+                model_completion_entry_json("opus", "model", "claude", [], 0,),
+            ]),
+        )
+        .unwrap();
+
+        let alias_position =
+            json_value_to_py(py, &json!({"line": 0, "character": 18})).unwrap();
+        let alias_edit = module
+            .getattr("model_alias_shortcut_edit")
+            .unwrap()
+            .call1((
+                "%model:old Use =la",
+                alias_position,
+                entries.clone_ref(py),
+                "@large",
+            ))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&alias_edit).unwrap(),
+            json!({
+                "schema_version": 1,
+                "alias": "@large",
+                "replacement": "%m:@large ",
+                "edit": {
+                    "range": {
+                        "start": {"line": 0, "character": 15},
+                        "end": {"line": 0, "character": 18}
+                    },
+                    "new_text": ""
+                },
+                "caret": {"line": 0, "character": 10},
+                "additional_edits": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 11}
+                        },
+                        "new_text": "%m:@large "
+                    }
+                ]
+            })
+        );
+
+        let model_position =
+            json_value_to_py(py, &json!({"line": 0, "character": 19})).unwrap();
+        let model_edit = module
+            .getattr("model_shortcut_edit")
+            .unwrap()
+            .call1(("%model:old Use ==op", model_position, entries, "opus"))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&model_edit).unwrap(),
+            json!({
+                "schema_version": 1,
+                "kind": "model",
+                "value": "opus",
+                "replacement": "%m:opus ",
+                "edit": {
+                    "range": {
+                        "start": {"line": 0, "character": 15},
+                        "end": {"line": 0, "character": 19}
+                    },
+                    "new_text": ""
+                },
+                "caret": {"line": 0, "character": 8},
+                "additional_edits": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 11}
+                        },
+                        "new_text": "%m:opus "
+                    }
+                ]
+            })
+        );
+    });
+}
+
+#[test]
 fn model_alias_shortcut_binding_rejects_malformed_position() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -25,5 +25,8 @@ pub use wire::{
     ProjectTagTriggerWire,
 };
 
-pub(crate) use accept::{project_tag_selection_edits, ProjectTagSelectionEdit};
+pub(crate) use accept::{
+    orphan_strip_region, project_tag_selection_edits, ranges_overlap,
+    segment_containing, trigger_strip_region, ProjectTagSelectionEdit,
+};
 pub use scan::is_tag_name;

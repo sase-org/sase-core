@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent_launch::directive_occurrences;
 use crate::bead::validate_model_value;
 use crate::model_completion::{
     filter_model_completion_entries, ModelCompletionEntryWire,
 };
+use crate::project_tag::{
+    orphan_strip_region, ranges_overlap, segment_containing,
+    trigger_strip_region,
+};
 
+use super::alternation::{
+    alternation_body_ranges, position_in_alternation, span_in_alternation,
+};
 use super::directive::detect_directive_context_at_position;
 use super::exclusion::{
     excluded_literal_and_definition_ranges, position_in_ranges,
@@ -58,12 +66,25 @@ pub struct ModelAliasShortcutContextWire {
     pub replacement_range: EditorRange,
 }
 
-/// One validated edit that expands a model shortcut to an inline `%m:` directive.
+/// One validated edit set that expands a model shortcut to an inline `%m:`
+/// directive.
 ///
 /// `value` is the selected canonical alias (`@alias`) or concrete model value.
-/// `replacement` matches `edit.new_text`, including any spacer. The
-/// `edit.range` uses the original document's UTF-16 editor positions and may
-/// consume one following ASCII space, mirroring [`ModelAliasShortcutEditWire`].
+/// `edit` always covers the typed shortcut token: when no eligible standalone
+/// `%model`/`%m` directive exists in the shortcut's `---` segment it expands
+/// the token in place (then `additional_edits` is empty and `replacement`
+/// matches `edit.new_text`, including any spacer); otherwise `edit` deletes
+/// the token and `additional_edits[0]` replaces the earliest eligible
+/// directive with the selected value while the rest delete the remaining
+/// eligible directives. Every `edit.range` uses the original document's UTF-16
+/// editor positions, and the set never overlaps. `caret` is the post-edit
+/// document's UTF-16 editor position: the end of the applied `edit` in the
+/// single-edit case, the end of the destination replacement otherwise.
+///
+/// `additional_edits` is serde-defaulted and skipped when empty, so responses
+/// planned before this field existed deserialize unchanged and old readers
+/// that apply only `edit` keep working (they delete the shortcut token and
+/// leave any pre-existing directives in place).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelShortcutEditWire {
     pub schema_version: u32,
@@ -72,19 +93,26 @@ pub struct ModelShortcutEditWire {
     pub replacement: String,
     pub edit: EditorTextEdit,
     pub caret: EditorPosition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_edits: Vec<EditorTextEdit>,
 }
 
-/// One validated edit that expands a `=alias` shortcut to `%m:@alias`.
+/// One validated edit set that expands a `=alias` shortcut to `%m:@alias`.
 ///
 /// The `edit.range` uses the original document's UTF-16 editor positions.
-/// It usually equals the detected context's `replacement_range`, but when
-/// the shortcut token is immediately followed by one ASCII space, the range
-/// deliberately extends one character beyond it to consume that space (a
+/// In the single-edit case (no eligible standalone directive elsewhere in the
+/// segment) it usually equals the detected context's `replacement_range`, but
+/// when the shortcut token is immediately followed by one ASCII space, the
+/// range deliberately extends one character beyond it to consume that space (a
 /// space is then reinserted at the end of `edit.new_text`). This keeps the
 /// edit self-contained: applying `edit` alone reproduces the same final
 /// document a naive whitespace-preserving expansion would, and `caret`
 /// (the post-edit document's UTF-16 editor position) is always exactly the
-/// position at the end of the applied `edit`.
+/// position at the end of the applied `edit`. With an eligible standalone
+/// directive elsewhere in the segment, `edit` deletes the shortcut token and
+/// `additional_edits` carries the destination replacement plus the remaining
+/// removals, mirroring [`ModelShortcutEditWire`]; `additional_edits` is
+/// serde-defaulted and skipped when empty so older responses keep working.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelAliasShortcutEditWire {
     pub schema_version: u32,
@@ -92,6 +120,8 @@ pub struct ModelAliasShortcutEditWire {
     pub replacement: String,
     pub edit: EditorTextEdit,
     pub caret: EditorPosition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_edits: Vec<EditorTextEdit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,11 +198,29 @@ pub fn model_shortcut_edit(
         selected_value,
     )?;
     let replacement = model_directive_replacement(&value);
+    let trigger_end = clamp_trigger_end(text, detected.start, detected.end);
+    if let Some(planned) = plan_segment_model_accept(
+        text,
+        &document,
+        &detected,
+        trigger_end,
+        &replacement,
+    ) {
+        return Some(ModelShortcutEditWire {
+            schema_version: MODEL_SHORTCUT_WIRE_SCHEMA_VERSION,
+            kind: detected.wire.kind,
+            value,
+            replacement: planned.destination_text,
+            edit: planned.primary,
+            caret: planned.caret,
+            additional_edits: planned.additional,
+        });
+    }
     let (new_text, edit_text, edit_end, caret_byte) =
         apply_replacement_preview(
             text,
             detected.start,
-            detected.end,
+            trigger_end,
             &replacement,
         )?;
     let caret =
@@ -189,6 +237,7 @@ pub fn model_shortcut_edit(
             new_text: edit_text,
         },
         caret,
+        additional_edits: Vec::new(),
     })
 }
 
@@ -208,7 +257,205 @@ pub fn plan_model_alias_shortcut_edit(
         replacement: edit.replacement,
         edit: edit.edit,
         caret: edit.caret,
+        additional_edits: edit.additional_edits,
     })
+}
+
+/// A planned multi-edit acceptance: the trigger deletion plus the
+/// destination replacement and the remaining removals, all in
+/// original-document coordinates.
+struct PlannedSegmentAccept {
+    primary: EditorTextEdit,
+    additional: Vec<EditorTextEdit>,
+    destination_text: String,
+    caret: EditorPosition,
+}
+
+/// Plan the segment-scoped acceptance for a validated shortcut value.
+///
+/// When the shortcut's `---` segment holds at least one eligible standalone
+/// `%model`/`%m` directive, the earliest becomes the destination: the typed
+/// shortcut token is deleted, the destination is replaced with `replacement`
+/// at its own position, and every further eligible directive in the segment
+/// is removed so the segment keeps exactly one model directive. Returns
+/// `None` when the token-local expansion applies instead: the trigger sits
+/// inside an alternation body (an independent edit boundary), or no eligible
+/// directive exists.
+///
+/// Eligibility mirrors the launch directive grammar (colon and parenthesized
+/// values, `%m` through the canonical alias table) rather than matching
+/// arbitrary `%m` text. Directives inside alternation bodies, literal zones
+/// (fenced/inline code, disabled regions), frontmatter, Jinja tags, other
+/// `---` segments, or overlapping the trigger token are never targets.
+/// Clamp the trigger token's edit end so a token glued to an alternation
+/// body never deletes body text. Returns `end` unchanged unless a body
+/// starts strictly inside `[start, end)`; the boundary itself is ASCII, so
+/// the clamped offset stays a character boundary.
+fn clamp_trigger_end(text: &str, start: usize, end: usize) -> usize {
+    alternation_body_ranges(text)
+        .into_iter()
+        .filter(|(body_start, _)| *body_start > start && *body_start < end)
+        .map(|(body_start, _)| body_start)
+        .min()
+        .unwrap_or(end)
+}
+
+fn plan_segment_model_accept(
+    text: &str,
+    document: &DocumentSnapshot,
+    detected: &DetectedShortcut,
+    trigger_end: usize,
+    replacement: &str,
+) -> Option<PlannedSegmentAccept> {
+    if position_in_alternation(text, detected.start) {
+        return None;
+    }
+    let (segment_start, segment_end) = segment_containing(text, detected.start);
+    let ignored = excluded_literal_and_definition_ranges(text);
+    let mut targets: Vec<(usize, usize)> = directive_occurrences(text)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|occurrence| occurrence.canonical_name == "model")
+        .map(|occurrence| (occurrence.start, occurrence.end))
+        .filter(|(start, end)| {
+            *start >= segment_start
+                && *end <= segment_end
+                && !span_touches_ranges(*start, *end, &ignored)
+                && !span_in_alternation(text, *start, *end)
+                && !ranges_overlap(*start, *end, detected.start, detected.end)
+        })
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    let (dest_start, dest_end) = targets.first().copied()?;
+
+    let (delete_start, delete_end) =
+        trigger_strip_region(text, detected.start, trigger_end);
+    let (dest_text, dest_end) =
+        destination_replacement(text, dest_end, replacement);
+    let dest_start_range = (dest_start, dest_end);
+    if ranges_overlap(
+        dest_start_range.0,
+        dest_start_range.1,
+        delete_start,
+        delete_end,
+    ) {
+        return None;
+    }
+    let primary_range =
+        document.byte_range_to_range(delete_start, delete_end)?;
+    let dest_range = document.byte_range_to_range(dest_start, dest_end)?;
+    let mut additional = vec![EditorTextEdit {
+        range: dest_range,
+        new_text: dest_text.clone(),
+    }];
+    for (start, end) in targets.into_iter().skip(1) {
+        let (del_start, del_end) = orphan_strip_region(text, start, end);
+        if span_in_alternation(text, del_start, del_end)
+            || ranges_overlap(del_start, del_end, delete_start, delete_end)
+            || ranges_overlap(del_start, del_end, dest_start, dest_end)
+            || additional.iter().any(|edit: &EditorTextEdit| {
+                byte_range_of(document, &edit.range)
+                    .map(|(exist_start, exist_end)| {
+                        ranges_overlap(
+                            del_start,
+                            del_end,
+                            exist_start,
+                            exist_end,
+                        )
+                    })
+                    .unwrap_or(true)
+            })
+        {
+            continue;
+        }
+        let range = document.byte_range_to_range(del_start, del_end)?;
+        additional.push(EditorTextEdit {
+            range,
+            new_text: String::new(),
+        });
+    }
+    additional[1..].sort_by_key(|edit| {
+        byte_range_of(document, &edit.range).unwrap_or((usize::MAX, usize::MAX))
+    });
+
+    let mut ordered: Vec<(usize, usize, String, bool)> =
+        vec![(delete_start, delete_end, String::new(), false)];
+    ordered.push((dest_start, dest_end, dest_text.clone(), true));
+    for edit in additional.iter().skip(1) {
+        let (start, end) = byte_range_of(document, &edit.range)?;
+        ordered.push((start, end, String::new(), false));
+    }
+    ordered.sort_by_key(|(start, end, _, _)| (*start, *end));
+    let mut out = String::with_capacity(text.len() + replacement.len());
+    let mut pos = 0;
+    let mut caret_byte = delete_start.min(text.len());
+    let mut saw_destination = false;
+    for (start, end, new_text, is_destination) in &ordered {
+        if *start < pos {
+            return None;
+        }
+        out.push_str(text.get(pos..*start).unwrap_or_default());
+        if *is_destination && !saw_destination {
+            caret_byte = out.len() + new_text.len();
+            saw_destination = true;
+        }
+        out.push_str(new_text);
+        pos = (*end).max(pos);
+    }
+    out.push_str(text.get(pos..).unwrap_or_default());
+    if !saw_destination {
+        return None;
+    }
+    let caret =
+        DocumentSnapshot::new(&out).byte_offset_to_position(caret_byte)?;
+
+    Some(PlannedSegmentAccept {
+        primary: EditorTextEdit {
+            range: primary_range,
+            new_text: String::new(),
+        },
+        additional,
+        destination_text: dest_text,
+        caret,
+    })
+}
+
+/// The destination's `new_text` and possibly extended end byte offset.
+///
+/// Mirrors the token-local expansion's trailing-space policy at the
+/// destination site: one following ASCII space is consumed into the edit and
+/// reinserted, a tab is left alone, and end-of-line/segment appends a spacer
+/// so neighbors never join.
+fn destination_replacement(
+    text: &str,
+    dest_end: usize,
+    replacement: &str,
+) -> (String, usize) {
+    match text.get(dest_end..).and_then(|tail| tail.chars().next()) {
+        Some(' ') => (format!("{replacement} "), dest_end + 1),
+        Some('\t') => (replacement.to_string(), dest_end),
+        Some('\n') | Some('\r') | None => (format!("{replacement} "), dest_end),
+        Some(_) => (replacement.to_string(), dest_end),
+    }
+}
+
+fn span_touches_ranges(
+    start: usize,
+    end: usize,
+    ranges: &[(usize, usize)],
+) -> bool {
+    ranges.iter().any(|(low, high)| start < *high && *low < end)
+}
+
+fn byte_range_of(
+    document: &DocumentSnapshot,
+    range: &EditorRange,
+) -> Option<(usize, usize)> {
+    Some((
+        document.position_to_byte_offset(range.start)?,
+        document.position_to_byte_offset(range.end)?,
+    ))
 }
 
 fn detect_model_shortcut_in_document(
@@ -425,7 +672,24 @@ fn excluded_position(
         return true;
     }
     detect_placeholder_context_at_position(document, position).is_some()
-        || detect_directive_context_at_position(document, position).is_some()
+        || directive_value_covers_trigger(document, position)
+}
+
+/// Whether the cursor sits inside a directive value token.
+///
+/// A whitespace-separated shortcut token that merely follows a directive on
+/// the same line (`%model:old Use =la`) or inside `%alt(...)` arguments
+/// (`%alt(a =la, b)`) is its own token, not a continuation of the directive
+/// value, so the directive context there must not suppress the shortcut.
+/// The reported context token runs from the value start to the cursor, so a
+/// token containing whitespace proves the cursor left the value.
+fn directive_value_covers_trigger(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+) -> bool {
+    detect_directive_context_at_position(document, position)
+        .and_then(|context| context.token)
+        .is_some_and(|token| !token.text.chars().any(char::is_whitespace))
 }
 
 fn previous_char_boundary(text: &str, mut byte_idx: usize) -> Option<usize> {
@@ -1026,5 +1290,350 @@ mod tests {
 
     fn values(entries: Vec<ModelCompletionEntryWire>) -> Vec<String> {
         entries.into_iter().map(|entry| entry.value).collect()
+    }
+
+    fn both_entries() -> Vec<ModelCompletionEntryWire> {
+        vec![
+            entry("@large", "user_alias"),
+            entry("@small", "implicit_alias"),
+            model_entry("gpt-5.6-sol", "codex", &["gpt56sol"]),
+            model_entry("opus", "claude", &[]),
+            provider_entry("codex/", "codex"),
+        ]
+    }
+
+    fn accept(
+        text: &str,
+        line: u32,
+        character: u32,
+        selected: &str,
+    ) -> ModelShortcutEditWire {
+        model_shortcut_edit(
+            text,
+            pos(line, character),
+            &both_entries(),
+            selected,
+        )
+        .unwrap_or_else(|| panic!("expected accept for {text:?}"))
+    }
+
+    /// Apply the primary edit plus every additional edit, asserting the set
+    /// is pairwise disjoint in original-document bytes.
+    fn apply_all(text: &str, planned: &ModelShortcutEditWire) -> String {
+        let document = DocumentSnapshot::new(text);
+        let mut edits: Vec<(usize, usize, &str)> = vec![(
+            byte_offset(&document, planned.edit.range.start),
+            byte_offset(&document, planned.edit.range.end),
+            planned.edit.new_text.as_str(),
+        )];
+        for edit in &planned.additional_edits {
+            edits.push((
+                byte_offset(&document, edit.range.start),
+                byte_offset(&document, edit.range.end),
+                edit.new_text.as_str(),
+            ));
+        }
+        edits.sort_by_key(|(start, end, _)| (*start, *end));
+        for pair in edits.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].0,
+                "edits overlap in {text:?}: {edits:?}"
+            );
+        }
+        let mut out = String::new();
+        let mut cursor = 0;
+        for (start, end, new_text) in edits {
+            out.push_str(&text[cursor..start]);
+            out.push_str(new_text);
+            cursor = end;
+        }
+        out.push_str(&text[cursor..]);
+        out
+    }
+
+    fn byte_offset(document: &DocumentSnapshot, pos: EditorPosition) -> usize {
+        document.position_to_byte_offset(pos).unwrap()
+    }
+
+    /// Assert the applied document, the post-edit caret, and the invariant
+    /// that the caret sits at the end of the destination replacement (the
+    /// multi-edit `replacement`) or, for single edits, at the end of the
+    /// applied edit.
+    fn assert_accept(
+        text: &str,
+        line: u32,
+        character: u32,
+        selected: &str,
+        expected_doc: &str,
+        expected_caret: EditorPosition,
+    ) {
+        let planned = accept(text, line, character, selected);
+        let applied = apply_all(text, &planned);
+        assert_eq!(applied, expected_doc, "accept: {text:?}");
+        assert_eq!(planned.caret, expected_caret, "caret: {text:?}");
+        let applied_doc = DocumentSnapshot::new(&applied);
+        let caret_byte = byte_offset(&applied_doc, planned.caret);
+        if planned.additional_edits.is_empty() {
+            assert_eq!(
+                planned.caret,
+                end_of_edit(&planned.edit),
+                "single-edit caret: {text:?}"
+            );
+        } else {
+            assert!(
+                planned.edit.new_text.is_empty(),
+                "multi-edit primary deletes the trigger: {text:?}"
+            );
+            assert!(
+                applied[..caret_byte].ends_with(&planned.replacement),
+                "caret ends the destination: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn replaces_earliest_directive_before_and_after_trigger() {
+        assert_accept(
+            "%model:old Use =la",
+            0,
+            18,
+            "@large",
+            "%m:@large Use ",
+            pos(0, 10),
+        );
+        assert_accept(
+            "Use =la then %m:old",
+            0,
+            7,
+            "@large",
+            "Use then %m:@large ",
+            pos(0, 19),
+        );
+        assert_accept(
+            "Use =la now %model:old end",
+            0,
+            7,
+            "@large",
+            "Use now %m:@large end",
+            pos(0, 18),
+        );
+    }
+
+    #[test]
+    fn replaces_explicit_model_and_paren_forms_at_their_position() {
+        assert_accept(
+            "Use ==gpt then %m:old",
+            0,
+            9,
+            "gpt-5.6-sol",
+            "Use then %m:gpt-5.6-sol ",
+            pos(0, 24),
+        );
+        assert_accept(
+            "%model(old) Use =la",
+            0,
+            19,
+            "@large",
+            "%m:@large Use ",
+            pos(0, 10),
+        );
+        assert_accept(
+            "%m(old) Use =la",
+            0,
+            15,
+            "@large",
+            "%m:@large Use ",
+            pos(0, 10),
+        );
+        assert_accept(
+            "%model:old Use ==op",
+            0,
+            19,
+            "opus",
+            "%m:opus Use ",
+            pos(0, 8),
+        );
+    }
+
+    #[test]
+    fn removes_further_directives_leaving_one() {
+        assert_accept(
+            "%m:a one %model:b two =la",
+            0,
+            25,
+            "@large",
+            "%m:@large one two ",
+            pos(0, 10),
+        );
+    }
+
+    #[test]
+    fn destination_spacing_mirrors_token_expansion_policy() {
+        assert_accept(
+            "%model:old\tUse =la",
+            0,
+            17,
+            "@large",
+            "%m:@large\tUse ",
+            pos(0, 9),
+        );
+        assert_accept(
+            "%model:old\nUse =la",
+            1,
+            7,
+            "@large",
+            "%m:@large \nUse ",
+            pos(0, 10),
+        );
+    }
+
+    #[test]
+    fn unicode_offsets_use_utf16_for_destination_and_caret() {
+        assert_accept(
+            "🙂 %model:old =la",
+            0,
+            17,
+            "@large",
+            "🙂 %m:@large ",
+            pos(0, 13),
+        );
+    }
+
+    #[test]
+    fn directives_in_other_segments_are_not_targets() {
+        assert_accept(
+            "%model:seg\n---\nUse =la",
+            2,
+            7,
+            "@large",
+            "%model:seg\n---\nUse %m:@large ",
+            pos(2, 14),
+        );
+        assert_accept(
+            "Use =la\n---\n%m:seg",
+            0,
+            7,
+            "@large",
+            "Use %m:@large \n---\n%m:seg",
+            pos(0, 14),
+        );
+    }
+
+    #[test]
+    fn alternation_branches_are_never_targets() {
+        for text in [
+            "%{%m:opus | %m:sonnet} Use =la",
+            "%alt(%m:opus, %m:sonnet) Use =la",
+            "%(%m:opus, %m:sonnet) Use =la",
+            "%{doc=%m:opus | code=%m:sonnet} Use =la",
+            "%alt(foo(%m:opus), %m:sonnet) Use =la",
+        ] {
+            let len = text.encode_utf16().count() as u32;
+            let planned = accept(text, 0, len, "@large");
+            assert!(
+                planned.additional_edits.is_empty(),
+                "token-local for {text:?}"
+            );
+            let applied = apply_all(text, &planned);
+            assert!(
+                applied.starts_with(&text[..text.find(" Use ").unwrap()]),
+                "branches intact for {text:?}"
+            );
+            assert!(
+                applied.ends_with("Use %m:@large "),
+                "applied: {applied:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trigger_inside_alternation_stays_local() {
+        assert_accept(
+            "%{Use =la | other} %model:old",
+            0,
+            8,
+            "@large",
+            "%{Use %m:@large | other} %model:old",
+            pos(0, 16),
+        );
+        assert_accept(
+            "%alt(a =la, b) %model:old",
+            0,
+            10,
+            "@large",
+            "%alt(a %m:@large b) %model:old",
+            pos(0, 17),
+        );
+        assert_accept(
+            "%{Use ==gpt | other} %m:old",
+            0,
+            10,
+            "gpt-5.6-sol",
+            "%{Use %m:gpt-5.6-sol | other} %m:old",
+            pos(0, 21),
+        );
+    }
+
+    #[test]
+    fn branch_tags_and_outside_text_survive_model_accept() {
+        assert_accept(
+            "%model:old %{+sase | +notes} Use =la",
+            0,
+            34,
+            "@large",
+            "%m:@large %{+sase | +notes} Use ",
+            pos(0, 10),
+        );
+    }
+
+    #[test]
+    fn literal_zones_are_never_targets() {
+        assert_accept(
+            "```text\n%model:old\n```\nUse =la",
+            3,
+            7,
+            "@large",
+            "```text\n%model:old\n```\nUse %m:@large ",
+            pos(3, 14),
+        );
+        assert_accept(
+            "---\ntitle: %model:old\n---\nUse =la",
+            3,
+            7,
+            "@large",
+            "---\ntitle: %model:old\n---\nUse %m:@large ",
+            pos(3, 14),
+        );
+        assert_accept(
+            "%xprompts_enabled:false\n%model:old\n%xprompts_enabled:true\nUse =la",
+            3,
+            7,
+            "@large",
+            "%xprompts_enabled:false\n%model:old\n%xprompts_enabled:true\nUse %m:@large ",
+            pos(3, 14),
+        );
+    }
+
+    #[test]
+    fn jinja_open_after_percent_is_an_alternation_not_a_zone() {
+        // Without the `%{` carve-out in the Jinja scan, the `{` would read
+        // as an unclosed `{%` and swallow the shortcut trigger.
+        let planned = accept("%{a | b} Use =la", 0, 16, "@large");
+        assert!(planned.additional_edits.is_empty());
+        assert_eq!(
+            apply_all("%{a | b} Use =la", &planned),
+            "%{a | b} Use %m:@large "
+        );
+    }
+
+    #[test]
+    fn trigger_token_overlapping_a_body_keeps_body_text() {
+        // The shared alternation grammar still sees `%{` after `(` inside
+        // the whitespace token, so the expansion stops at the body start.
+        let planned = accept("Use =la(%{x | y})", 0, 7, "@large");
+        assert_eq!(
+            apply_all("Use =la(%{x | y})", &planned),
+            "Use %m:@large%{x | y})"
+        );
     }
 }

@@ -228,12 +228,84 @@ async fn stdio_jsonrpc_model_shortcut_completion_transitions() {
         "legacy star text should not produce a model shortcut edit"
     );
 
-    write_message(
+    // A standalone `%model` directive in the segment becomes the accept
+    // destination: the primary edit deletes the shortcut token while the
+    // replacement rides along as a nonoverlapping `additionalTextEdits`.
+    did_change(&mut client_writer, uri, 8, "%model:old Use ==op").await;
+    let replaced = request_completion(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+        &mut client_reader,
+        uri,
+        9,
+        19,
+        json!({"triggerKind": 3}),
     )
     .await;
-    read_response(&mut client_reader, 9).await;
+    assert_eq!(labels(&replaced), vec!["opus"]);
+    let replaced_item = &replaced["items"][0];
+    assert_eq!(
+        replaced_item["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 0, "character": 15},
+                "end": {"line": 0, "character": 19}
+            },
+            "newText": ""
+        })
+    );
+    assert_eq!(
+        replaced_item["additionalTextEdits"],
+        json!([{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 11}
+            },
+            "newText": "%m:opus "
+        }])
+    );
+
+    // Directives inside alternation branches are never destinations: the
+    // same trigger falls back to the token-local expansion.
+    did_change(
+        &mut client_writer,
+        uri,
+        9,
+        "%{%m:opus | %m:sonnet} Use ==op",
+    )
+    .await;
+    let branched = request_completion(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        10,
+        31,
+        json!({"triggerKind": 3}),
+    )
+    .await;
+    assert_eq!(labels(&branched), vec!["opus"]);
+    let branched_item = &branched["items"][0];
+    assert_eq!(
+        branched_item["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 0, "character": 27},
+                "end": {"line": 0, "character": 31}
+            },
+            "newText": "%m:opus "
+        })
+    );
+    assert_eq!(
+        branched_item.get("additionalTextEdits"),
+        None,
+        "branch directives stay intact with no additional edits"
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 11, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response(&mut client_reader, 11).await;
     write_message(
         &mut client_writer,
         json!({"jsonrpc": "2.0", "method": "exit", "params": null}),

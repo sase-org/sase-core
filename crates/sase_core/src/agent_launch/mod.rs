@@ -43,7 +43,10 @@ pub use conditional::{
     ConditionalLaunchSegmentWire,
     CONDITIONAL_LAUNCH_SEGMENT_FILTER_SCHEMA_VERSION,
 };
-pub(crate) use directive_scan::launch_literal_zone_ranges;
+pub(crate) use directive_scan::{
+    alt_directive_starts, directive_occurrences, find_matching_delimiter,
+    launch_literal_zone_ranges,
+};
 pub use fanout::{bind_batch_predecessor_waits, plan_agent_launch_fanout};
 pub use launch_hold::{launch_unit_hold_armer, launch_unit_hold_key};
 pub use launch_prep::{prepare_agent_launch, safe_launch_name};

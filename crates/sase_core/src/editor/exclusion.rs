@@ -49,7 +49,21 @@ fn next_jinja_tag(text: &str, offset: usize) -> Option<(usize, &'static str)> {
     let tail = text.get(offset..)?;
     [("{{", "}}"), ("{%", "%}"), ("{#", "#}")]
         .into_iter()
-        .filter_map(|(open, close)| tail.find(open).map(|start| (start, close)))
+        .filter_map(|(open, close)| {
+            let mut search_from = 0;
+            loop {
+                let relative = tail.get(search_from..)?.find(open)?;
+                let start = search_from + relative;
+                // `%{` opens an alternation brace, not a Jinja tag: without
+                // this, the `{` in `%{...}` reads as an unclosed `{%` and the
+                // zone swallows the rest of the document.
+                if open == "{%" && tail[..start].ends_with('%') {
+                    search_from = start + 1;
+                    continue;
+                }
+                return Some((start, close));
+            }
+        })
         .min_by_key(|(start, _)| *start)
 }
 

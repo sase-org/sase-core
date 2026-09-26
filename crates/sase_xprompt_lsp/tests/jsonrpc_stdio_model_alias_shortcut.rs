@@ -201,16 +201,79 @@ async fn stdio_jsonrpc_model_alias_shortcut_completion() {
         "legacy star text should not produce a model shortcut edit"
     );
 
+    // A standalone `%model` directive in the segment becomes the accept
+    // destination: the primary edit deletes the shortcut token while the
+    // replacement rides along as a nonoverlapping `additionalTextEdits`.
     write_message(
         &mut client_writer,
-        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{"text": "%model:old Use =la"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 18}
+            }
+        }),
+    )
+    .await;
+    let mut replaced_result = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            replaced_result = Some(message["result"].clone());
+            break;
+        }
+    }
+    let replaced = replaced_result.expect("expected replacement response");
+    assert_eq!(replaced["isIncomplete"], json!(true));
+    let replaced_items =
+        replaced["items"].as_array().expect("completion items");
+    assert_eq!(replaced_items.len(), 1);
+    let replaced_item = &replaced_items[0];
+    assert_eq!(
+        replaced_item["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 0, "character": 15},
+                "end": {"line": 0, "character": 18}
+            },
+            "newText": ""
+        })
+    );
+    assert_eq!(
+        replaced_item["additionalTextEdits"],
+        json!([{
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 11}
+            },
+            "newText": "%m:@large "
+        }])
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
     )
     .await;
     while read_message(&mut client_reader)
         .await
         .get("id")
         .and_then(Value::as_i64)
-        != Some(4)
+        != Some(5)
     {}
     write_message(
         &mut client_writer,

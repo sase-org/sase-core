@@ -14,6 +14,10 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::editor::alternation::{
+    alternation_body_ranges, position_in_alternation,
+};
+
 use super::resolve::resolve_project_tag;
 use super::scan::{
     is_left_boundary, project_tag_literal_zones, scan_project_tags,
@@ -161,6 +165,19 @@ pub(crate) fn project_tag_selection_edits(
     }
     let (delete_start, delete_end) =
         trigger_strip_region(text, trigger_start, trigger_end);
+    // A trigger inside an alternation body is an independent edit boundary:
+    // it expands at its own token without rewriting sibling branches or
+    // standalone targets outside the body.
+    if position_in_alternation(text, trigger_start) {
+        return (
+            ProjectTagSelectionEdit {
+                start: delete_start,
+                end: delete_end,
+                new_text: insertion.to_string(),
+            },
+            Vec::new(),
+        );
+    }
     // `base` is the prompt with the typed trigger removed. Destinations are
     // located in `base` so the earliest-target and leading-position logic
     // never sees the query, then mapped back to original coordinates.
@@ -178,6 +195,11 @@ pub(crate) fn project_tag_selection_edits(
     let (segment_start, segment_end) =
         segment_containing(&base, offset_in_base);
     let zones = removal_literal_zones(&base);
+    // Alternation bodies are independent edit boundaries: branch tags and
+    // refs stay intact when a row is accepted elsewhere. The trigger token
+    // carries no alternation syntax, so rescanning `base` is equivalent to
+    // mapping the original ranges through the trigger deletion.
+    let alt_bodies = alternation_body_ranges(&base);
 
     let mut target_spans: Vec<(usize, usize)> = Vec::new();
     for (start, end) in workspace_ref_deletions(
@@ -186,7 +208,9 @@ pub(crate) fn project_tag_selection_edits(
         segment_end,
         workflow_names,
     ) {
-        if span_in_zones(start, end, &zones) {
+        if span_in_zones(start, end, &zones)
+            || span_in_bodies(start, end, &alt_bodies)
+        {
             continue;
         }
         target_spans.push((start, end));
@@ -195,6 +219,7 @@ pub(crate) fn project_tag_selection_edits(
         if span.end <= segment_start
             || span.start >= segment_end
             || span_in_zones(span.start, span.end, &zones)
+            || span_in_bodies(span.start, span.end, &alt_bodies)
             || !is_workspace_target(&span.name, targets)
         {
             continue;
@@ -291,9 +316,18 @@ pub(crate) fn project_tag_selection_edits(
         (primary, additional)
     } else {
         // No existing target: insert at the segment's leading project-tag
-        // position (after leading whitespace and `%directive` tokens).
-        let insert_at_base =
+        // position (after leading whitespace and `%directive` tokens). The
+        // leading-directive rule would otherwise land inside an alternation
+        // body when the segment opens with one, splitting a branch, so an
+        // offset inside a body falls back to that body's start (which often
+        // merges with the trigger deletion below).
+        let mut insert_at_base =
             segment_leading_insert_offset(&base, segment_start, segment_end);
+        for (body_start, body_end) in &alt_bodies {
+            if *body_start < insert_at_base && insert_at_base < *body_end {
+                insert_at_base = *body_start;
+            }
+        }
         let insert_at = to_original(insert_at_base);
         if insert_at == delete_start {
             // The trigger occupies the destination: merge into one edit so
@@ -332,7 +366,7 @@ fn is_workspace_target(name: &str, targets: &[ProjectTagTargetWire]) -> bool {
     )
 }
 
-fn valid_trigger_span(text: &str, start: usize, end: usize) -> bool {
+pub(crate) fn valid_trigger_span(text: &str, start: usize, end: usize) -> bool {
     start <= end
         && end <= text.len()
         && text.is_char_boundary(start)
@@ -346,7 +380,7 @@ fn valid_trigger_span(text: &str, start: usize, end: usize) -> bool {
 /// always kept as the separator. Mirrors the historical
 /// `_strip_trigger_token` except in the end-of-line case, where the space is
 /// no longer orphaned once the insertion lands.
-fn trigger_strip_region(
+pub(crate) fn trigger_strip_region(
     text: &str,
     start: usize,
     end: usize,
@@ -365,7 +399,11 @@ fn trigger_strip_region(
 /// eaten: a ref at end of line keeps its newline so neighbors never join.
 /// A ref alone on its line removes the whole line (with its line break)
 /// instead of leaving a blank line behind.
-fn orphan_strip_region(text: &str, start: usize, end: usize) -> (usize, usize) {
+pub(crate) fn orphan_strip_region(
+    text: &str,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
     if let Some(region) = lone_line_region(text, start, end) {
         return region;
     }
@@ -550,7 +588,7 @@ fn is_ref_left_boundary(text: &str, hash: usize) -> bool {
 /// Separators are lines matching `^---\s*$` (the same rule as the Python
 /// `_SEGMENT_SEPARATOR_RE`). Frontmatter delimiters split segments too, but
 /// frontmatter is a literal zone so nothing is ever removed there.
-fn segment_containing(text: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn segment_containing(text: &str, offset: usize) -> (usize, usize) {
     let mut seg_start = 0;
     let mut seg_end = text.len();
     let mut line_start = 0;
@@ -586,7 +624,11 @@ fn span_in_zones(start: usize, end: usize, zones: &[(usize, usize)]) -> bool {
     zones.iter().any(|(s, e)| start < *e && *s < end)
 }
 
-fn ranges_overlap(
+fn span_in_bodies(start: usize, end: usize, bodies: &[(usize, usize)]) -> bool {
+    bodies.iter().any(|(s, e)| start < *e && *s < end)
+}
+
+pub(crate) fn ranges_overlap(
     left_start: usize,
     left_end: usize,
     right_start: usize,

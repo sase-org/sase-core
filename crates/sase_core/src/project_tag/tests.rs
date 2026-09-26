@@ -671,3 +671,35 @@ fn accept_handles_multibyte_text() {
     // offsets still land on character boundaries.
     assert_eq!(apply("é +sa‸", "+sase "), "+sase é ");
 }
+
+#[test]
+fn accept_keeps_alternation_branches_intact() {
+    // A trigger inside an alternation body expands at its own token;
+    // sibling branches and standalone targets outside stay as they are.
+    assert_eq!(apply("%{a | +sa‸}", "+sase "), "%{a | +sase }");
+    assert_eq!(
+        apply("%alt(a, +sa‸) +notes", "+sase "),
+        "%alt(a, +sase ) +notes"
+    );
+    assert_eq!(
+        apply("%(a | +sa‸, b) #git:foo", "+sase "),
+        "%(a | +sase , b) #git:foo"
+    );
+    // Branch tags and refs are never destinations or deletions for a
+    // trigger elsewhere; the row below lands at the segment's leading
+    // position instead.
+    assert_eq!(
+        apply("Fix +sa‸ %{+notes | +bob-cli}", "+sase "),
+        "+sase Fix %{+notes | +bob-cli}"
+    );
+    assert_eq!(
+        apply("Fix +sa‸ %{#git:foo | #git:notes}", "+sase "),
+        "+sase Fix %{#git:foo | #git:notes}"
+    );
+    // A segment that opens with an alternation does not split a branch for
+    // the leading insertion: the row merges at the trigger instead.
+    assert_eq!(
+        apply("+sa‸ %{+notes | +bob-cli}", "+sase "),
+        "+sase %{+notes | +bob-cli}"
+    );
+}
