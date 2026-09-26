@@ -1237,3 +1237,109 @@ pub struct ToolRunReceiptLookupResultWire {
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunReceiptsReportRequestWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub project: String,
+    pub days: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+    pub project_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportWindowWire {
+    pub days: i64,
+    pub since_ts: i64,
+    pub now_ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportItemWire {
+    pub receipt_id: String,
+    pub run_id: String,
+    pub tool: String,
+    pub verdict: String,
+    pub age_seconds: i64,
+    pub expired: bool,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportReceiptsWire {
+    pub count: usize,
+    pub active: usize,
+    pub expired: usize,
+    pub superseded: usize,
+    #[serde(default)]
+    pub items: Vec<ToolRunReceiptsReportItemWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportGroupWire {
+    pub group_id: usize,
+    pub tool: String,
+    pub run_ids: Vec<String>,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub runs: usize,
+    pub repeat_runs: usize,
+    pub repeat_duration_ms: i64,
+    pub spans_commits: bool,
+    #[serde(default)]
+    pub repos: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportTopToolWire {
+    pub tool: String,
+    pub groups: usize,
+    pub repeat_runs: usize,
+    pub repeat_duration_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportOpportunitiesWire {
+    pub group_count: usize,
+    pub repeat_runs: usize,
+    pub repeat_duration_ms: i64,
+    pub repeat_hours: f64,
+    #[serde(default)]
+    pub groups: Vec<ToolRunReceiptsReportGroupWire>,
+    #[serde(default)]
+    pub top_tools: Vec<ToolRunReceiptsReportTopToolWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportUncomparableRunWire {
+    pub run_id: String,
+    pub tool: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportUncomparableWire {
+    pub count: usize,
+    pub truncated: bool,
+    #[serde(default)]
+    pub runs: Vec<ToolRunReceiptsReportUncomparableRunWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunReceiptsReportResultWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub project: String,
+    pub window: ToolRunReceiptsReportWindowWire,
+    pub receipts: ToolRunReceiptsReportReceiptsWire,
+    pub opportunities: ToolRunReceiptsReportOpportunitiesWire,
+    pub uncomparable: ToolRunReceiptsReportUncomparableWire,
+    pub runs_scanned: usize,
+    pub runs_truncated: bool,
+    pub note: String,
+    #[serde(default = "empty_diagnostics")]
+    pub diagnostics: Vec<String>,
+}

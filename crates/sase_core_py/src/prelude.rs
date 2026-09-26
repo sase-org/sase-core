@@ -1035,12 +1035,14 @@ pub(crate) use sase_core::tool_run::{
     retention_preview as core_tool_run_retention_preview,
     show_run as core_tool_run_show, store_stats as core_tool_run_store_stats,
     summarize as core_tool_run_summary,
+    tool_run_receipts_report as core_tool_run_receipts_report,
     unknown_evidence as core_tool_run_unknown_evidence, ToolDefinitionWire,
     ToolFingerprintWire, ToolRunAppendRequestWire, ToolRunBeginRequestWire,
     ToolRunFinishRequestWire, ToolRunListRequestWire,
-    ToolRunObserveRequestWire, ToolRunReconcileRequestWire,
-    ToolRunRetentionRequestWire, ToolRunShowRequestWire,
-    ToolRunSummaryRequestWire, TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolRunObserveRequestWire, ToolRunReceiptsReportRequestWire,
+    ToolRunReconcileRequestWire, ToolRunRetentionRequestWire,
+    ToolRunShowRequestWire, ToolRunSummaryRequestWire,
+    TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::vcs_log::{
     aggregate_commit_log as core_aggregate_commit_log,

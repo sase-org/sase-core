@@ -1071,3 +1071,83 @@ fn tool_run_receipt_bindings_round_trip() {
         assert_eq!(looked["outcome"], json!("covered"));
     });
 }
+
+#[test]
+fn tool_run_receipts_report_round_trip_and_rejects_bad_schema() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        let missing = temp.path().join("missing.sqlite");
+        // Empty store: zero report with the missing-store diagnostic.
+        let empty_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "project": "sase",
+                "days": 7,
+                "now_ts": 1_700_000_000,
+                "project_root": temp.path().to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let empty_request = empty_obj.bind(py).downcast::<PyDict>().unwrap();
+        let empty = py_tool_run_receipts_report(
+            py,
+            missing.to_str().unwrap(),
+            empty_request,
+            1_000,
+        )
+        .unwrap();
+        let empty = py_to_json_value(empty.bind(py)).unwrap();
+        assert_eq!(empty["schema_version"], json!(1));
+        assert_eq!(empty["receipts"]["count"], json!(0));
+        assert_eq!(empty["opportunities"]["group_count"], json!(0));
+        assert_eq!(empty["runs_scanned"], json!(0));
+        assert!(empty["note"].as_str().unwrap().contains("measurement only"));
+        assert!(empty["diagnostics"][0]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"));
+
+        // Negative days must fail; invalid schema versions must fail.
+        let bad_days_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "project": "sase",
+                "days": -1,
+                "now_ts": 10,
+                "project_root": temp.path().to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let bad_days = bad_days_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_receipts_report(
+            py,
+            path.to_str().unwrap(),
+            bad_days,
+            1_000
+        )
+        .is_err());
+        let bad_schema_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 999,
+                "project": "sase",
+                "days": 7,
+                "now_ts": 10,
+                "project_root": temp.path().to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let bad_schema = bad_schema_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_receipts_report(
+            py,
+            path.to_str().unwrap(),
+            bad_schema,
+            1_000
+        )
+        .is_err());
+    });
+}

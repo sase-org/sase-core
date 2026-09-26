@@ -26,7 +26,8 @@ pub use store::{
     append_event, begin, claim, finish, list_runs, observe, receipt_lookup,
     receipt_settle, reconcile, request_stop, retention_apply,
     retention_preview, show_run, store_stats, summarize, tool_run_failures,
-    triage_record, triage_settle, triage_show, triage_stage,
+    tool_run_receipts_report, triage_record, triage_settle, triage_show,
+    triage_stage,
 };
 pub use triage::*;
 pub use triage::{
