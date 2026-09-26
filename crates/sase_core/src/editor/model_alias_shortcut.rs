@@ -320,7 +320,9 @@ fn plan_segment_model_accept(
         .filter(|(start, end)| {
             *start >= segment_start
                 && *end <= segment_end
-                && !span_touches_ranges(*start, *end, &ignored)
+                && !ignored.iter().any(|(low, high)| {
+                    ranges_overlap(*start, *end, *low, *high)
+                })
                 && !span_in_alternation(text, *start, *end)
                 && !ranges_overlap(*start, *end, detected.start, detected.end)
         })
@@ -350,23 +352,47 @@ fn plan_segment_model_accept(
         new_text: dest_text.clone(),
     }];
     for (start, end) in targets.into_iter().skip(1) {
-        let (del_start, del_end) = orphan_strip_region(text, start, end);
-        if span_in_alternation(text, del_start, del_end)
-            || ranges_overlap(del_start, del_end, delete_start, delete_end)
-            || ranges_overlap(del_start, del_end, dest_start, dest_end)
-            || additional.iter().any(|edit: &EditorTextEdit| {
-                byte_range_of(document, &edit.range)
-                    .map(|(exist_start, exist_end)| {
-                        ranges_overlap(
-                            del_start,
-                            del_end,
-                            exist_start,
-                            exist_end,
-                        )
-                    })
-                    .unwrap_or(true)
-            })
-        {
+        let (mut del_start, mut del_end) =
+            orphan_strip_region(text, start, end);
+        if span_in_alternation(text, del_start, del_end) {
+            continue;
+        }
+        // Adjacent directives share the single space between them: the
+        // destination consumes one following space while the strip eats one
+        // neighboring space, so the raw removal can overlap the trigger
+        // deletion, the destination, or an earlier removal. Shrink the
+        // shared padding instead of dropping the removal, keeping every
+        // edit pairwise disjoint. Planned spans only ever cover padding
+        // around this directive, never its core, so the core always
+        // survives the shrink; anything else fails closed below.
+        let mut planned: Vec<(usize, usize)> =
+            Vec::with_capacity(additional.len() + 1);
+        planned.push((delete_start, delete_end));
+        planned.push((dest_start, dest_end));
+        let mut ranges_valid = true;
+        for edit in additional.iter().skip(1) {
+            match byte_range_of(document, &edit.range) {
+                Some(span) => planned.push(span),
+                None => {
+                    ranges_valid = false;
+                    break;
+                }
+            }
+        }
+        if !ranges_valid {
+            continue;
+        }
+        for (span_start, span_end) in planned {
+            if !ranges_overlap(del_start, del_end, span_start, span_end) {
+                continue;
+            }
+            if span_start <= del_start {
+                del_start = del_start.max(span_end);
+            } else {
+                del_end = del_end.min(span_start);
+            }
+        }
+        if del_start >= del_end || del_start > start || del_end < end {
             continue;
         }
         let range = document.byte_range_to_range(del_start, del_end)?;
@@ -438,14 +464,6 @@ fn destination_replacement(
         Some('\n') | Some('\r') | None => (format!("{replacement} "), dest_end),
         Some(_) => (replacement.to_string(), dest_end),
     }
-}
-
-fn span_touches_ranges(
-    start: usize,
-    end: usize,
-    ranges: &[(usize, usize)],
-) -> bool {
-    ranges.iter().any(|(low, high)| start < *high && *low < end)
 }
 
 fn byte_range_of(
@@ -1464,6 +1482,92 @@ mod tests {
             "@large",
             "%m:@large one two ",
             pos(0, 10),
+        );
+    }
+
+    #[test]
+    fn removes_adjacent_trailing_directives_at_end_of_line() {
+        // The destination consumes the space after `%m:a` while the strip
+        // eats the space before `%m:b`: the shared space shrinks the second
+        // removal instead of skipping it.
+        assert_accept(
+            "=la %m:a %m:b",
+            0,
+            3,
+            "@large",
+            "%m:@large ",
+            pos(0, 10),
+        );
+        assert_accept(
+            "Use ==op %m:a %m:b",
+            0,
+            7,
+            "opus",
+            "Use %m:opus ",
+            pos(0, 12),
+        );
+    }
+
+    #[test]
+    fn removes_adjacent_trailing_directives_before_newline() {
+        assert_accept(
+            "Use =la %m:a %m:b\ntail",
+            0,
+            7,
+            "@large",
+            "Use %m:@large \ntail",
+            pos(0, 14),
+        );
+        assert_accept(
+            "Use ==op %m:a %m:b\ntail",
+            0,
+            7,
+            "opus",
+            "Use %m:opus \ntail",
+            pos(0, 12),
+        );
+    }
+
+    #[test]
+    fn removes_trailing_directives_on_their_own_lines() {
+        assert_accept(
+            "%m:a\n%m:b\nUse =la",
+            2,
+            7,
+            "@large",
+            "%m:@large \nUse ",
+            pos(0, 10),
+        );
+        assert_accept(
+            "%m:a\n%m:b\nUse ==op",
+            2,
+            8,
+            "opus",
+            "%m:opus \nUse ",
+            pos(0, 8),
+        );
+    }
+
+    #[test]
+    fn adjacent_cleanup_keeps_protected_branch_targets() {
+        // Alternation branches are never targets even when an eligible
+        // directive sits directly beside them, and the eligible neighbor
+        // is still removed.
+        assert_accept(
+            "%alt(%m:opus, %m:sonnet) %m:a %m:b =la",
+            0,
+            38,
+            "@large",
+            "%alt(%m:opus, %m:sonnet) %m:@large ",
+            pos(0, 35),
+        );
+        assert_accept(
+            "%alt(%m:opus, %m:sonnet) %m:a %m:b ==op",
+            0,
+            39,
+            "opus",
+            "%alt(%m:opus, %m:sonnet) %m:opus ",
+            pos(0, 33),
         );
     }
 

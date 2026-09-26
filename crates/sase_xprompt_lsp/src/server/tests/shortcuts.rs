@@ -365,6 +365,106 @@ async fn model_alias_shortcut_text_edit_covers_every_trailing_whitespace_case()
     }
 }
 
+/// Apply one shortcut item's primary edit plus its additional edits,
+/// asserting the set stays pairwise disjoint on its single line.
+fn apply_shortcut_item_edits(text: &str, item: &CompletionItem) -> String {
+    let Some(CompletionTextEdit::Edit(primary)) = item.text_edit.as_ref()
+    else {
+        panic!("expected a primary text edit");
+    };
+    let mut edits: Vec<(u32, u32, &str)> = vec![(
+        primary.range.start.character,
+        primary.range.end.character,
+        primary.new_text.as_str(),
+    )];
+    for edit in item.additional_text_edits.as_deref().unwrap_or_default() {
+        edits.push((
+            edit.range.start.character,
+            edit.range.end.character,
+            edit.new_text.as_str(),
+        ));
+    }
+    for (first, second) in edits
+        .iter()
+        .enumerate()
+        .flat_map(|(i, _)| ((i + 1)..edits.len()).map(move |j| (i, j)))
+    {
+        let (a_start, a_end, _) = edits[first];
+        let (b_start, b_end, _) = edits[second];
+        assert!(
+            !(a_start < b_end && b_start < a_end),
+            "shortcut edits overlap in {text:?}: {edits:?}",
+        );
+    }
+    edits.sort();
+    let mut applied = String::new();
+    let mut cursor = 0;
+    for (start, end, new_text) in edits {
+        applied.push_str(&text[cursor..start as usize]);
+        applied.push_str(new_text);
+        cursor = end as usize;
+    }
+    applied.push_str(&text[cursor..]);
+    applied
+}
+
+#[tokio::test]
+async fn model_alias_shortcut_adjacent_directives_remove_second_and_stay_disjoint(
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("model_catalog.json");
+    write_enriched_model_catalog(&catalog_path);
+    let service = model_alias_shortcut_service(Some(&catalog_path));
+    let server = service.inner();
+
+    // The destination consumes the space after `%m:a` while the second
+    // removal eats the space before `%m:b`: the shared space shrinks the
+    // removal instead of dropping it, so the second directive still
+    // crosses the wire and every edit stays disjoint.
+    let text = "=sc %m:a %m:b";
+    let items = shortcut_items_at(server, text, 0, 3).await;
+    let item = items
+        .iter()
+        .find(|item| item.label == "@scout")
+        .expect("expected a @scout row");
+    let Some(CompletionTextEdit::Edit(primary)) = item.text_edit.as_ref()
+    else {
+        panic!("expected a primary text edit");
+    };
+    assert_eq!(primary.new_text, "");
+    let additional = item.additional_text_edits.as_ref().unwrap();
+    assert_eq!(additional.len(), 2);
+    assert_eq!(additional[0].new_text, "%m:@scout ");
+    assert_eq!(additional[1].new_text, "");
+    assert_eq!(apply_shortcut_item_edits(text, item), "%m:@scout ");
+}
+
+#[tokio::test]
+async fn model_shortcut_adjacent_directives_remove_second_and_stay_disjoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("model_catalog.json");
+    write_enriched_model_catalog(&catalog_path);
+    let service = model_alias_shortcut_service(Some(&catalog_path));
+    let server = service.inner();
+
+    let text = "==gpt %m:a %m:b";
+    let items = shortcut_items_at(server, text, 0, 5).await;
+    let item = items
+        .iter()
+        .find(|item| item.label == "gpt-5.6-sol")
+        .expect("expected a gpt-5.6-sol row");
+    let Some(CompletionTextEdit::Edit(primary)) = item.text_edit.as_ref()
+    else {
+        panic!("expected a primary text edit");
+    };
+    assert_eq!(primary.new_text, "");
+    let additional = item.additional_text_edits.as_ref().unwrap();
+    assert_eq!(additional.len(), 2);
+    assert_eq!(additional[0].new_text, "%m:gpt-5.6-sol ");
+    assert_eq!(additional[1].new_text, "");
+    assert_eq!(apply_shortcut_item_edits(text, item), "%m:gpt-5.6-sol ");
+}
+
 #[tokio::test]
 async fn model_alias_shortcut_no_match_returns_empty_list_not_fallback() {
     let temp = tempfile::tempdir().unwrap();
