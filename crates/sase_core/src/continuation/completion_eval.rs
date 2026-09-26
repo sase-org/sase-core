@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::completion::{
     consume_conditional_completion, invalidate_conditional_completion,
     render_conditional_completion_message, status_name, worktree_fingerprint,
-    ConditionalCompletionIntentWire, ConditionalCompletionStatusWire,
-    ExecutorCapabilityWire, RepositoryObservationWire, FIRST_PARTY_PROVIDERS,
+    CompletionAcceptPolicyWire, ConditionalCompletionIntentWire,
+    ConditionalCompletionStatusWire, ExecutorCapabilityWire,
+    RepositoryObservationWire, FIRST_PARTY_PROVIDERS,
 };
 use super::schema::{
     validate_command_part, validate_non_empty_text, validate_schema,
@@ -111,15 +112,27 @@ pub fn evaluate_conditional_completion(
         request.intent,
     )?;
     let mut reasons = Vec::new();
+    // An explicit `no_new_failures` intent may complete a failed verification
+    // with a nonzero exit; the covering verdict receipt (checked host-side)
+    // proves the failures are all known. Every other check still applies.
+    let no_new = intent.accept == CompletionAcceptPolicyWire::NoNew;
 
     if intent.status != ConditionalCompletionStatusWire::Bound {
         reasons.push(format!("intent_status_{}", status_name(intent.status)));
     }
-    if request.outcome != MonitorOutcomeWire::Completed {
-        reasons.push("outcome_not_completed".to_string());
-    }
-    if request.exit_code != Some(0) {
-        reasons.push("host_exit_not_zero".to_string());
+    if no_new {
+        if request.outcome != MonitorOutcomeWire::Completed
+            && request.outcome != MonitorOutcomeWire::Failed
+        {
+            reasons.push("outcome_not_completed".to_string());
+        }
+    } else {
+        if request.outcome != MonitorOutcomeWire::Completed {
+            reasons.push("outcome_not_completed".to_string());
+        }
+        if request.exit_code != Some(0) {
+            reasons.push("host_exit_not_zero".to_string());
+        }
     }
     if request.command != intent.verification.command {
         reasons
@@ -181,10 +194,15 @@ pub fn evaluate_conditional_completion(
                 .push(format!("unsupported_executor:{}", executor.instance_id));
         }
     }
-    reasons.extend(stage_reasons(
-        &intent.verification.required_stages,
-        &request.stages,
-    ));
+    // For `no_new_failures` the per-stage pass/fail signal is superseded by
+    // the host-side verdict-receipt check, which proves every failure is
+    // known. The default `pass` path keeps its existing stage gate.
+    if !no_new {
+        reasons.extend(stage_reasons(
+            &intent.verification.required_stages,
+            &request.stages,
+        ));
+    }
 
     if reasons.is_empty() {
         let rendered = render_conditional_completion_message(
@@ -412,7 +430,22 @@ mod tests {
                 durable_replay: true,
                 requires_model: false,
             }],
+            accept: CompletionAcceptPolicyWire::Pass,
         }
+    }
+
+    fn no_new_bound_intent() -> ConditionalCompletionIntentWire {
+        let mut req = prepare_request();
+        req.accept = CompletionAcceptPolicyWire::NoNew;
+        let prepared = seal_conditional_completion(req).unwrap();
+        bind_conditional_completion(ConditionalCompletionBindRequestWire {
+            schema_version: CONTINUATION_WIRE_SCHEMA_VERSION,
+            intent: prepared,
+            monitor_id: "monitor-1".to_string(),
+            command: vec!["just".to_string(), "check-full".to_string()],
+            request_fingerprint: "sha256:abc".to_string(),
+        })
+        .unwrap()
     }
 
     fn bound_intent() -> ConditionalCompletionIntentWire {
@@ -561,6 +594,55 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "host_exit_not_zero"));
+    }
+
+    #[test]
+    fn no_new_failed_nonzero_stays_eligible_without_stage_gate() {
+        let mut request = evaluate_request();
+        request.intent = no_new_bound_intent();
+        request.outcome = MonitorOutcomeWire::Failed;
+        request.exit_code = Some(1);
+        request.stages = vec![];
+        let decision = evaluate_conditional_completion(request).unwrap();
+        assert!(decision.eligible, "reasons: {:?}", decision.reasons);
+        assert_eq!(decision.action, "complete");
+    }
+
+    #[test]
+    fn no_new_still_refuses_drift_timeout_and_unbound() {
+        let mut drifted = evaluate_request();
+        drifted.intent = no_new_bound_intent();
+        drifted.outcome = MonitorOutcomeWire::Failed;
+        drifted.exit_code = Some(1);
+        drifted.stages = vec![];
+        drifted.observations[0].head = digest64("other-head");
+        let decision = evaluate_conditional_completion(drifted).unwrap();
+        assert!(!decision.eligible);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "stale_worktree_fingerprint"));
+
+        let mut timed_out = evaluate_request();
+        timed_out.intent = no_new_bound_intent();
+        timed_out.outcome = MonitorOutcomeWire::Timeout;
+        timed_out.exit_code = None;
+        let decision = evaluate_conditional_completion(timed_out).unwrap();
+        assert!(!decision.eligible);
+
+        let mut unbound = evaluate_request();
+        let mut prepared_req = prepare_request();
+        prepared_req.accept = CompletionAcceptPolicyWire::NoNew;
+        unbound.intent = seal_conditional_completion(prepared_req).unwrap();
+        unbound.outcome = MonitorOutcomeWire::Failed;
+        unbound.exit_code = Some(1);
+        unbound.stages = vec![];
+        let decision = evaluate_conditional_completion(unbound).unwrap();
+        assert!(!decision.eligible);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("intent_status_")));
     }
 
     #[test]

@@ -85,6 +85,10 @@ pub struct ContinuationPolicyResolutionRequestWire {
     pub inherited_effort: Option<String>,
     #[serde(default)]
     pub prepared_completion_ref: Option<String>,
+    /// Sealed completion acceptance (`pass` or `no_new_failures`); older
+    /// requests without this field resolve as `pass`.
+    #[serde(default)]
+    pub prepared_completion_accept: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +116,10 @@ pub struct ContinuationPolicyFreezeRequestWire {
     pub inherited_effort: Option<String>,
     #[serde(default)]
     pub prepared_completion_ref: Option<String>,
+    /// Sealed completion acceptance (`pass` or `no_new_failures`); older
+    /// requests without this field freeze as `pass`.
+    #[serde(default)]
+    pub prepared_completion_accept: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,7 +248,10 @@ pub fn resolve_continuation_policy(
     coerce_cancelled_outcome(&mut selected, request.outcome, &mut reasons);
     validate_resolved_branch(&selected, &branch)?;
     if selected.action == ContinuationActionWire::Complete {
-        if request.outcome != MonitorOutcomeWire::Completed {
+        let no_new_failed = request.outcome == MonitorOutcomeWire::Failed
+            && request.prepared_completion_accept.as_deref()
+                == Some("no_new_failures");
+        if request.outcome != MonitorOutcomeWire::Completed && !no_new_failed {
             return Err(ContinuationError::validation(
                 "complete action is legal only for completed monitor results",
             ));
@@ -297,6 +308,8 @@ fn normalize_freeze_request(
         normalize_optional_text(request.inherited_effort);
     request.prepared_completion_ref =
         normalize_optional_text(request.prepared_completion_ref);
+    request.prepared_completion_accept =
+        normalize_completion_accept(request.prepared_completion_accept)?;
     if let Some(policy) = request.explicit_policy.take() {
         request.explicit_policy = Some(validate_continuation_policy(policy)?);
     }
@@ -317,7 +330,27 @@ fn normalize_resolution_request(
         normalize_optional_text(request.inherited_effort);
     request.prepared_completion_ref =
         normalize_optional_text(request.prepared_completion_ref);
+    request.prepared_completion_accept =
+        normalize_completion_accept(request.prepared_completion_accept)?;
     Ok(request)
+}
+
+/// Normalize a sealed completion acceptance token.
+///
+/// `None` (or blank) stays `None` and resolves as `pass`. Any other value
+/// must be `pass` or `no_new_failures`.
+fn normalize_completion_accept(
+    value: Option<String>,
+) -> Result<Option<String>, ContinuationError> {
+    match normalize_optional_text(value) {
+        None => Ok(None),
+        Some(token) if token == "pass" || token == "no_new_failures" => {
+            Ok(Some(token))
+        }
+        Some(token) => Err(ContinuationError::validation(format!(
+            "prepared_completion_accept {token:?} must be pass or no_new_failures"
+        ))),
+    }
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -349,6 +382,7 @@ fn resolution_request(
         inherited_model: request.inherited_model.clone(),
         inherited_effort: request.inherited_effort.clone(),
         prepared_completion_ref: request.prepared_completion_ref.clone(),
+        prepared_completion_accept: request.prepared_completion_accept.clone(),
     }
 }
 
@@ -592,16 +626,48 @@ fn verify_profile_branch(
                 }
             }
         }
-        MonitorOutcomeWire::Failed
-        | MonitorOutcomeWire::Timeout
-        | MonitorOutcomeWire::Unknown => ContinuationPolicyBranchWire {
-            action: ContinuationActionWire::Continue,
-            next_action: Some(recovery_next),
-            model: None,
-            effort: None,
-            evidence_policy: None,
-            completion_ref: None,
-        },
+        MonitorOutcomeWire::Failed => {
+            // An explicit prepared `no_new_failures` intent may enter host
+            // completion on a failed verification; the covering verdict
+            // receipt is checked host-side before any commit. Every other
+            // failure (including timeout, stopped, lost, raw, and unrelated
+            // runs) routes to ordinary recovery.
+            let no_new_ref = if request.prepared_completion_accept.as_deref()
+                == Some("no_new_failures")
+            {
+                request.prepared_completion_ref.clone()
+            } else {
+                None
+            };
+            match no_new_ref {
+                Some(completion_ref) => ContinuationPolicyBranchWire {
+                    action: ContinuationActionWire::Complete,
+                    next_action: None,
+                    model: None,
+                    effort: None,
+                    evidence_policy: None,
+                    completion_ref: Some(completion_ref),
+                },
+                None => ContinuationPolicyBranchWire {
+                    action: ContinuationActionWire::Continue,
+                    next_action: Some(recovery_next),
+                    model: None,
+                    effort: None,
+                    evidence_policy: None,
+                    completion_ref: None,
+                },
+            }
+        }
+        MonitorOutcomeWire::Timeout | MonitorOutcomeWire::Unknown => {
+            ContinuationPolicyBranchWire {
+                action: ContinuationActionWire::Continue,
+                next_action: Some(recovery_next),
+                model: None,
+                effort: None,
+                evidence_policy: None,
+                completion_ref: None,
+            }
+        }
         MonitorOutcomeWire::Stopped | MonitorOutcomeWire::Lost => {
             ContinuationPolicyBranchWire {
                 action: ContinuationActionWire::None,
@@ -728,6 +794,7 @@ mod tests {
             inherited_model: Some("gpt-5-codex".to_string()),
             inherited_effort: Some("high".to_string()),
             prepared_completion_ref: None,
+            prepared_completion_accept: None,
         }
     }
 
@@ -804,6 +871,64 @@ mod tests {
         assert!(decision.next_action.unwrap().contains("repair"));
         assert_eq!(decision.model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(decision.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn verify_profile_failed_no_new_enters_host_completion() {
+        let mut req = request(MonitorOutcomeWire::Failed);
+        req.profile = Some("verify".to_string());
+        req.prepared_completion_ref =
+            Some("file:explicit:completion".to_string());
+        req.prepared_completion_accept = Some("no_new_failures".to_string());
+
+        let decision = resolve_continuation_policy(req).unwrap();
+
+        assert_eq!(decision.action, ContinuationActionWire::Complete);
+        assert!(!decision.launchable);
+        assert_eq!(
+            decision.completion_ref,
+            Some("file:explicit:completion".to_string())
+        );
+    }
+
+    #[test]
+    fn verify_profile_no_new_keeps_pass_and_non_failed_on_recovery() {
+        // Pass acceptance on a failed verify run still recovers.
+        let mut failed_pass = request(MonitorOutcomeWire::Failed);
+        failed_pass.profile = Some("verify".to_string());
+        failed_pass.prepared_completion_ref =
+            Some("file:explicit:completion".to_string());
+        failed_pass.prepared_completion_accept = Some("pass".to_string());
+        let decision = resolve_continuation_policy(failed_pass).unwrap();
+        assert_eq!(decision.action, ContinuationActionWire::Continue);
+
+        // Timeout, stopped, lost, and unknown never complete, even no-new.
+        for outcome in [
+            MonitorOutcomeWire::Timeout,
+            MonitorOutcomeWire::Stopped,
+            MonitorOutcomeWire::Lost,
+            MonitorOutcomeWire::Unknown,
+        ] {
+            let mut req = request(outcome);
+            req.profile = Some("verify".to_string());
+            req.prepared_completion_ref =
+                Some("file:explicit:completion".to_string());
+            req.prepared_completion_accept =
+                Some("no_new_failures".to_string());
+            let decision = resolve_continuation_policy(req).unwrap();
+            assert_ne!(
+                decision.action,
+                ContinuationActionWire::Complete,
+                "outcome {outcome:?} must not complete"
+            );
+        }
+
+        // Unknown accept tokens are rejected, not defaulted.
+        let mut bad = request(MonitorOutcomeWire::Failed);
+        bad.profile = Some("verify".to_string());
+        bad.prepared_completion_accept = Some("no-new".to_string());
+        let err = resolve_continuation_policy(bad).unwrap_err();
+        assert!(err.message.contains("prepared_completion_accept"));
     }
 
     #[test]
@@ -944,6 +1069,7 @@ mod tests {
             inherited_model: Some("gpt-5-codex".to_string()),
             inherited_effort: Some("high".to_string()),
             prepared_completion_ref: None,
+            prepared_completion_accept: None,
         };
 
         let frozen = freeze_continuation_policy(request.clone()).unwrap();
@@ -990,6 +1116,7 @@ mod tests {
             inherited_model: None,
             inherited_effort: None,
             prepared_completion_ref: None,
+            prepared_completion_accept: None,
         };
         let first = freeze_continuation_policy(request.clone()).unwrap();
         request.explicit_policy = Some(policy_with(

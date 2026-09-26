@@ -47,6 +47,30 @@ pub enum VerificationLevelWire {
     CheckFull,
 }
 
+/// Sealed completion acceptance policy version.
+pub const COMPLETION_POLICY_VERSION: u32 = 1;
+
+/// Which verification outcomes a prepared completion may consume.
+///
+/// `pass` (the default for older intents) completes only a zero-exit
+/// verification. `no_new_failures` is an explicit sealed opt-in that lets
+/// host completion proceed on a nonzero exit once a covering verdict receipt
+/// proves the failures are all known.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
+pub enum CompletionAcceptPolicyWire {
+    #[default]
+    #[serde(rename = "pass")]
+    Pass,
+    #[serde(rename = "no_new_failures")]
+    NoNew,
+}
+
+pub fn default_completion_policy_version() -> u32 {
+    COMPLETION_POLICY_VERSION
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedPathKindWire {
@@ -142,6 +166,8 @@ pub struct ConditionalCompletionSealWire {
     pub context_digest: String,
     pub worktree_fingerprint: String,
     pub declaration_digest: String,
+    #[serde(default = "default_completion_policy_version")]
+    pub policy_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +185,9 @@ pub struct ConditionalCompletionIntentWire {
     pub seal: ConditionalCompletionSealWire,
     #[serde(default)]
     pub binding: ConditionalCompletionBindingWire,
+    /// Sealed acceptance policy; older intents without this field read as `pass`.
+    #[serde(default)]
+    pub accept: CompletionAcceptPolicyWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +201,9 @@ pub struct ConditionalCompletionPrepareRequestWire {
     pub observations: Vec<RepositoryObservationWire>,
     #[serde(default)]
     pub executors: Vec<ExecutorCapabilityWire>,
+    /// Requested acceptance policy; defaults to `pass` when omitted.
+    #[serde(default)]
+    pub accept: CompletionAcceptPolicyWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,7 +253,7 @@ pub fn validate_conditional_completion_intent(
     validate_observations(&intent.observations)?;
     validate_seal(&intent.seal)?;
     validate_binding(&intent.binding, intent.status)?;
-    let expected = compute_seal_digest(&SealMaterial {
+    let material = SealMaterial {
         creator: &intent.seal.creator,
         plan_digest: &intent.seal.plan_digest,
         context_digest: &intent.seal.context_digest,
@@ -230,8 +262,13 @@ pub fn validate_conditional_completion_intent(
         verification: &intent.verification,
         success_message: &intent.success_message,
         repository_decisions: &intent.repository_decisions,
-    })?;
-    if intent.seal.digest != expected {
+        accept: &intent.accept,
+        policy_version: intent.seal.policy_version,
+    };
+    let expected = compute_seal_digest(&material)?;
+    if intent.seal.digest != expected
+        && !is_legacy_pass_seal(&intent, &material)
+    {
         return Err(ContinuationError::conflict(
             "conditional completion seal digest does not match bound material",
         ));
@@ -333,6 +370,8 @@ pub fn seal_conditional_completion(
         verification: &verification,
         success_message: &request.success_message,
         repository_decisions: &repository_decisions,
+        accept: &request.accept,
+        policy_version: COMPLETION_POLICY_VERSION,
     })?;
     let intent_id = format!("cci:{}", &digest[..16]);
     let intent = ConditionalCompletionIntentWire {
@@ -352,12 +391,14 @@ pub fn seal_conditional_completion(
             context_digest: request.context.context_digest,
             worktree_fingerprint: worktree,
             declaration_digest,
+            policy_version: COMPLETION_POLICY_VERSION,
         },
         binding: ConditionalCompletionBindingWire {
             monitor_id: None,
             request_fingerprint: None,
             bound_command: None,
         },
+        accept: request.accept,
     };
     validate_conditional_completion_intent(intent)
 }
@@ -951,7 +992,89 @@ fn validate_seal(
     validate_sha256(&seal.plan_digest, "seal.plan_digest")?;
     validate_sha256(&seal.context_digest, "seal.context_digest")?;
     validate_sha256(&seal.worktree_fingerprint, "seal.worktree_fingerprint")?;
-    validate_sha256(&seal.declaration_digest, "seal.declaration_digest")
+    validate_sha256(&seal.declaration_digest, "seal.declaration_digest")?;
+    if seal.policy_version != COMPLETION_POLICY_VERSION {
+        return Err(ContinuationError::validation(format!(
+            "seal.policy_version {} is not the supported completion policy {}",
+            seal.policy_version, COMPLETION_POLICY_VERSION,
+        )));
+    }
+    Ok(())
+}
+
+/// Accept a pre-accept-policy seal whose digest predates the sealed `accept`
+/// and `policy_version` fields.
+///
+/// Older intents deserialize with `accept: pass` and `policy_version: 1` via
+/// serde defaults, but their stored digest covers only the original material.
+/// Recompute that legacy digest and accept the seal when it matches, so
+/// upgrading the core never invalidates an already-sealed pass intent.
+fn is_legacy_pass_seal(
+    intent: &ConditionalCompletionIntentWire,
+    material: &SealMaterial<'_>,
+) -> bool {
+    if intent.accept != CompletionAcceptPolicyWire::Pass
+        || intent.seal.policy_version != COMPLETION_POLICY_VERSION
+    {
+        return false;
+    }
+    match compute_legacy_seal_digest(material) {
+        Ok(legacy) => legacy == intent.seal.digest,
+        Err(_) => false,
+    }
+}
+
+fn compute_legacy_seal_digest(
+    material: &SealMaterial<'_>,
+) -> Result<String, ContinuationError> {
+    let mut encoded = serde_json::Map::new();
+    encoded.insert(
+        "creator".to_string(),
+        serde_json::to_value(material.creator).map_err(|error| {
+            ContinuationError::validation(format!(
+                "unable to encode creator: {error}"
+            ))
+        })?,
+    );
+    encoded.insert(
+        "plan_digest".to_string(),
+        Value::String(material.plan_digest.to_string()),
+    );
+    encoded.insert(
+        "context_digest".to_string(),
+        Value::String(material.context_digest.to_string()),
+    );
+    encoded.insert(
+        "worktree_fingerprint".to_string(),
+        Value::String(material.worktree_fingerprint.to_string()),
+    );
+    encoded.insert(
+        "declaration_digest".to_string(),
+        Value::String(material.declaration_digest.to_string()),
+    );
+    encoded.insert(
+        "verification".to_string(),
+        serde_json::to_value(material.verification).map_err(|error| {
+            ContinuationError::validation(format!(
+                "unable to encode verification: {error}"
+            ))
+        })?,
+    );
+    encoded.insert(
+        "success_message".to_string(),
+        Value::String(material.success_message.to_string()),
+    );
+    encoded.insert(
+        "repository_decisions".to_string(),
+        serde_json::to_value(material.repository_decisions).map_err(
+            |error| {
+                ContinuationError::validation(format!(
+                    "unable to encode repository decisions: {error}"
+                ))
+            },
+        )?,
+    );
+    sha256_json(&Value::Object(encoded))
 }
 
 fn validate_binding(
@@ -1043,6 +1166,8 @@ struct SealMaterial<'a> {
     verification: &'a VerificationContractWire,
     success_message: &'a str,
     repository_decisions: &'a [RepositoryDecisionWire],
+    accept: &'a CompletionAcceptPolicyWire,
+    policy_version: u32,
 }
 
 fn compute_seal_digest(
@@ -1094,6 +1219,18 @@ fn compute_seal_digest(
                 ))
             },
         )?,
+    );
+    encoded.insert(
+        "accept".to_string(),
+        serde_json::to_value(material.accept).map_err(|error| {
+            ContinuationError::validation(format!(
+                "unable to encode accept: {error}"
+            ))
+        })?,
+    );
+    encoded.insert(
+        "policy_version".to_string(),
+        Value::Number(serde_json::Number::from(material.policy_version)),
     );
     sha256_json(&Value::Object(encoded))
 }
@@ -1223,6 +1360,7 @@ mod tests {
                 durable_replay: true,
                 requires_model: false,
             }],
+            accept: CompletionAcceptPolicyWire::Pass,
         }
     }
 
@@ -1236,9 +1374,90 @@ mod tests {
             vec!["formatting", "ruff", "mypy", "validation", "full_tests"]
         );
         assert!(intent.intent_id.starts_with("cci:"));
+        assert_eq!(intent.accept, CompletionAcceptPolicyWire::Pass);
+        assert_eq!(intent.seal.policy_version, COMPLETION_POLICY_VERSION);
         let preview = preview_conditional_completion(intent).unwrap();
         assert_eq!(preview.success_action, "complete");
         assert!(preview.eligible);
+    }
+
+    #[test]
+    fn accept_defaults_to_pass_for_older_requests() {
+        let raw = serde_json::to_value(request()).unwrap();
+        let mut map = raw.as_object().unwrap().clone();
+        map.remove("accept");
+        let legacy: ConditionalCompletionPrepareRequestWire =
+            serde_json::from_value(Value::Object(map)).unwrap();
+        assert_eq!(legacy.accept, CompletionAcceptPolicyWire::Pass);
+        let intent = seal_conditional_completion(legacy).unwrap();
+        assert_eq!(intent.accept, CompletionAcceptPolicyWire::Pass);
+    }
+
+    #[test]
+    fn no_new_seal_round_trips_and_differs_from_pass() {
+        let mut req = request();
+        req.accept = CompletionAcceptPolicyWire::NoNew;
+        let intent = seal_conditional_completion(req).unwrap();
+        assert_eq!(intent.accept, CompletionAcceptPolicyWire::NoNew);
+        assert_eq!(intent.seal.policy_version, COMPLETION_POLICY_VERSION);
+        let pass = seal_conditional_completion(request()).unwrap();
+        assert_ne!(intent.seal.digest, pass.seal.digest);
+        assert_ne!(intent.intent_id, pass.intent_id);
+        // The pass preview stays byte-identical: no accept signal leaks in.
+        let pass_preview = preview_conditional_completion(pass).unwrap();
+        let no_new_preview =
+            preview_conditional_completion(intent.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&pass_preview).unwrap()["required_checks"],
+            serde_json::to_value(&no_new_preview).unwrap()["required_checks"],
+        );
+        assert_eq!(pass_preview.success_action, no_new_preview.success_action);
+        let restored = validate_conditional_completion_intent(intent).unwrap();
+        assert_eq!(restored.accept, CompletionAcceptPolicyWire::NoNew);
+    }
+
+    #[test]
+    fn tampered_accept_or_policy_version_fails_closed() {
+        let mut req = request();
+        req.accept = CompletionAcceptPolicyWire::NoNew;
+        let mut intent = seal_conditional_completion(req).unwrap();
+        intent.accept = CompletionAcceptPolicyWire::Pass;
+        let error =
+            validate_conditional_completion_intent(intent.clone()).unwrap_err();
+        assert!(error.message.contains("seal digest"));
+        let mut intent = intent;
+        intent.accept = CompletionAcceptPolicyWire::NoNew;
+        intent.seal.policy_version = COMPLETION_POLICY_VERSION + 1;
+        let error = validate_conditional_completion_intent(intent).unwrap_err();
+        assert!(error.message.contains("policy_version"));
+    }
+
+    #[test]
+    fn legacy_pass_seal_without_accept_fields_still_validates() {
+        let intent = seal_conditional_completion(request()).unwrap();
+        let mut raw = serde_json::to_value(&intent).unwrap();
+        let map = raw.as_object_mut().unwrap();
+        map.remove("accept");
+        let seal = map["seal"].as_object_mut().unwrap();
+        seal.remove("policy_version");
+        let legacy_digest = compute_legacy_seal_digest(&SealMaterial {
+            creator: &intent.seal.creator,
+            plan_digest: &intent.seal.plan_digest,
+            context_digest: &intent.seal.context_digest,
+            worktree_fingerprint: &intent.seal.worktree_fingerprint,
+            declaration_digest: &intent.seal.declaration_digest,
+            verification: &intent.verification,
+            success_message: &intent.success_message,
+            repository_decisions: &intent.repository_decisions,
+            accept: &CompletionAcceptPolicyWire::Pass,
+            policy_version: COMPLETION_POLICY_VERSION,
+        })
+        .unwrap();
+        seal["digest"] = Value::String(legacy_digest);
+        let legacy: ConditionalCompletionIntentWire =
+            serde_json::from_value(raw).unwrap();
+        assert_eq!(legacy.accept, CompletionAcceptPolicyWire::Pass);
+        validate_conditional_completion_intent(legacy).unwrap();
     }
 
     #[test]
@@ -1503,6 +1722,8 @@ mod tests {
             verification: &intent.verification,
             success_message: &intent.success_message,
             repository_decisions: &intent.repository_decisions,
+            accept: &intent.accept,
+            policy_version: intent.seal.policy_version,
         })
         .unwrap();
         let mut legacy = intent;

@@ -22,10 +22,10 @@ pub use budget::{
 };
 pub use completion::{
     bind_conditional_completion, consume_conditional_completion,
-    invalidate_conditional_completion, preview_conditional_completion,
-    render_conditional_completion_message,
+    default_completion_policy_version, invalidate_conditional_completion,
+    preview_conditional_completion, render_conditional_completion_message,
     rollback_conditional_completion_binding, seal_conditional_completion,
-    validate_conditional_completion_intent,
+    validate_conditional_completion_intent, CompletionAcceptPolicyWire,
     ConditionalCompletionBindRequestWire, ConditionalCompletionBindingWire,
     ConditionalCompletionContextWire, ConditionalCompletionIntentWire,
     ConditionalCompletionPrepareRequestWire, ConditionalCompletionPreviewWire,
@@ -33,6 +33,7 @@ pub use completion::{
     ConditionalCompletionStatusWire, ExecutorCapabilityWire,
     ObservedPathKindWire, ObservedPathWire, RepositoryDecisionWire,
     RepositoryObservationWire, VerificationContractWire, VerificationLevelWire,
+    COMPLETION_POLICY_VERSION,
 };
 pub use completion_eval::{
     consume_conditional_completion_request, evaluate_conditional_completion,
