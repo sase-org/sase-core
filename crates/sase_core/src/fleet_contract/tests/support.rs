@@ -40,7 +40,7 @@ pub(super) fn exact(
     AgentInstanceLocatorWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical: logical(hex, agent),
-        shell_id: "shell-1".to_string(),
+        turn_id: "shell-1".to_string(),
         run_id: run.to_string(),
         attempt_id: "attempt-1".to_string(),
     }
@@ -243,7 +243,7 @@ pub(super) fn projection_request(
             clan_tribe: None,
             tribe: None,
             presentation: Default::default(),
-            row_kind: FleetRowKindWire::AgentShell,
+            row_kind: FleetRowKindWire::AgentTurn,
             current_instance: true,
             dismissable: false,
             needs_attention: false,

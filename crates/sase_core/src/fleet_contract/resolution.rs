@@ -7,6 +7,7 @@ use super::error::FleetContractError;
 use super::error::FLEET_CONTRACT_SCHEMA_VERSION;
 use super::error::MAX_INTENT_BYTES;
 use super::error::MAX_LABEL_BYTES;
+use super::locators::instance_key_matches;
 use super::locators::instance_key_unchecked;
 use super::locators::logical_key_unchecked;
 use super::locators::AgentInstanceLocatorWire;
@@ -266,7 +267,7 @@ pub fn project_resolved_agent_summary(
         lifecycle,
         facts.liveness,
         parent_timestamp.is_some()
-            || crate::fleet_agent_session::record_is_concrete_agent_session_shell(
+            || crate::fleet_agent_session::record_is_concrete_agent_session_turn(
                 &request.record,
             ),
     );
@@ -377,12 +378,15 @@ pub fn validate_resolved_agent_summary(
             "summary logical_key does not match logical locator".to_string(),
         ));
     }
-    if summary.exact_key
-        != summary.exact_locator.as_ref().map(instance_key_unchecked)
-    {
-        return Err(FleetContractError::Validation(
-            "summary exact_key does not match exact locator".to_string(),
-        ));
+    match (&summary.exact_key, &summary.exact_locator) {
+        (Some(stored), Some(locator))
+            if instance_key_matches(stored, locator) => {}
+        (None, None) => {}
+        _ => {
+            return Err(FleetContractError::Validation(
+                "summary exact_key does not match exact locator".to_string(),
+            ));
+        }
     }
     summary.row_revision.validate()?;
     if summary.row_revision.logical_key != summary.logical_key {
@@ -522,13 +526,13 @@ pub fn validate_resolved_agent_summary(
         FleetRowKindWire::Gate => {
             summary.agent_session_role == FleetAgentSessionRoleWire::Gate
         }
-        FleetRowKindWire::AgentShell
+        FleetRowKindWire::AgentTurn
         | FleetRowKindWire::ContainerHeader
-        | FleetRowKindWire::HistoricalShell => matches!(
+        | FleetRowKindWire::HistoricalTurn => matches!(
             summary.agent_session_role,
             FleetAgentSessionRoleWire::Root
                 | FleetAgentSessionRoleWire::Member
-                | FleetAgentSessionRoleWire::HistoricalShell
+                | FleetAgentSessionRoleWire::HistoricalTurn
         ),
     };
     if !agent_session_role_matches_row_kind {

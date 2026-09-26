@@ -148,8 +148,8 @@ fn zero_weight_claim_is_not_reusable_by_a_serial_successor() {
     let mut monitor = running("monitor", Some(0.0));
     monitor.agent_session = Some("fam".to_string());
     monitor.agent_session_role = Some("monitor".to_string());
-    monitor.agent_session_shell_kind = Some("monitor".to_string());
-    monitor.agent_session_shell_id = Some("mon-1".to_string());
+    monitor.agent_session_turn_kind = Some("monitor".to_string());
+    monitor.agent_session_turn_id = Some("mon-1".to_string());
     monitor.parent_timestamp = Some("starter".to_string());
     monitor.pid = Some(99);
     monitor.run_started_at = None;

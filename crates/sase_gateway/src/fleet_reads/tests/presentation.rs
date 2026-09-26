@@ -370,7 +370,7 @@ async fn history_rows_inherit_owner_presentation_facts_from_agent_session_root()
     assert_eq!(child.status, "CHILD-DONE");
     assert_eq!(
         child.agent_session_role,
-        sase_core::fleet_contract::FleetAgentSessionRoleWire::HistoricalShell
+        sase_core::fleet_contract::FleetAgentSessionRoleWire::HistoricalTurn
     );
     assert_eq!(
         child.logical_locator.agent_session_id.as_deref(),

@@ -167,6 +167,7 @@ pub(crate) use error::{
     MAX_INTENT_BYTES, MAX_LABEL_BYTES, MAX_LAUNCH_PROMPT_BYTES,
 };
 pub(crate) use locators::canonical_logical_key;
+pub use locators::fallback_turn_shell_ids_equal;
 pub(crate) use locators::logical_key_unchecked;
 pub use status::{
     ConnectionHealthWire, FleetAgentSessionRoleWire, FleetLifecycleWire,

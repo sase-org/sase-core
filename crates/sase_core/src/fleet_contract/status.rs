@@ -6,25 +6,29 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum FleetRowKindWire {
-    AgentShell,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(rename = "agent_shell", alias = "agent_turn")]
+    AgentTurn,
     ContainerHeader,
     Monitor,
     Gate,
     Proc,
-    HistoricalShell,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(rename = "historical_shell", alias = "historical_turn")]
+    HistoricalTurn,
 }
 
 pub(crate) fn default_row_kind() -> FleetRowKindWire {
-    FleetRowKindWire::AgentShell
+    FleetRowKindWire::AgentTurn
 }
 
 /// Normalized agent session role for viewer folding.
 ///
 /// Independent of `row_kind`: it distinguishes an agent session root from an
-/// ordinary member for `AgentShell` rows, carries `Monitor`/`Gate`/`Proc`
+/// ordinary member for `AgentTurn` rows, carries `Monitor`/`Gate`/`Proc`
 /// straight through from their matching row kinds, and marks any row whose
 /// presentation is terminal (genuinely completed, or a demoted dead-active
-/// leftover) as `HistoricalShell` so a viewer can render "was running"
+/// leftover) as `HistoricalTurn` so a viewer can render "was running"
 /// uniformly once agent session topology stops mattering.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
@@ -36,7 +40,9 @@ pub enum FleetAgentSessionRoleWire {
     Monitor,
     Gate,
     Proc,
-    HistoricalShell,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(rename = "historical_shell", alias = "historical_turn")]
+    HistoricalTurn,
 }
 
 /// Lifecycle status observed in the artifact record.
@@ -103,4 +109,52 @@ pub enum FleetStatusBucketWire {
     Queued,
     Waiting,
     Done,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_kinds_accept_new_spelling_but_emit_legacy() {
+        let legacy: FleetRowKindWire =
+            serde_json::from_value(serde_json::json!("agent_shell")).unwrap();
+        let new: FleetRowKindWire =
+            serde_json::from_value(serde_json::json!("agent_turn")).unwrap();
+        assert_eq!(legacy, new);
+        assert_eq!(legacy, FleetRowKindWire::AgentTurn);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("agent_shell")
+        );
+
+        let legacy: FleetRowKindWire =
+            serde_json::from_value(serde_json::json!("historical_shell"))
+                .unwrap();
+        let new: FleetRowKindWire =
+            serde_json::from_value(serde_json::json!("historical_turn"))
+                .unwrap();
+        assert_eq!(legacy, new);
+        assert_eq!(legacy, FleetRowKindWire::HistoricalTurn);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("historical_shell")
+        );
+    }
+
+    #[test]
+    fn session_roles_accept_new_spelling_but_emit_legacy() {
+        let legacy: FleetAgentSessionRoleWire =
+            serde_json::from_value(serde_json::json!("historical_shell"))
+                .unwrap();
+        let new: FleetAgentSessionRoleWire =
+            serde_json::from_value(serde_json::json!("historical_turn"))
+                .unwrap();
+        assert_eq!(legacy, new);
+        assert_eq!(legacy, FleetAgentSessionRoleWire::HistoricalTurn);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("historical_shell")
+        );
+    }
 }

@@ -73,12 +73,27 @@ pub struct RunnerCapacityRecordWire {
     pub agent_session_parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_claim_owner_key: Option<String>,
-    #[serde(default)]
-    pub agent_session_shell_kind: Option<String>,
-    #[serde(default)]
-    pub agent_session_shell_id: Option<String>,
-    #[serde(default)]
-    pub agent_session_shell_state: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "agent_session_shell_kind",
+        alias = "agent_session_turn_kind"
+    )]
+    pub agent_session_turn_kind: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "agent_session_shell_id",
+        alias = "agent_session_turn_id"
+    )]
+    pub agent_session_turn_id: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "agent_session_shell_state",
+        alias = "agent_session_turn_state"
+    )]
+    pub agent_session_turn_state: Option<String>,
     #[serde(default)]
     pub queue_weight: Option<f64>,
     #[serde(default)]

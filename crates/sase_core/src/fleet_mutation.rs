@@ -605,7 +605,7 @@ fn mutation_already_terminal(
                 )
         }
         FleetMutationKindWire::Retry | FleetMutationKindWire::Fork => {
-            summary.row_kind != FleetRowKindWire::AgentShell
+            summary.row_kind != FleetRowKindWire::AgentTurn
                 && matches!(
                     summary.lifecycle,
                     FleetLifecycleWire::Terminal | FleetLifecycleWire::Failed
@@ -664,7 +664,7 @@ mod tests {
         AgentInstanceLocatorWire {
             schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
             logical: logical(hex, agent),
-            shell_id: "shell-1".to_string(),
+            turn_id: "shell-1".to_string(),
             run_id: run.to_string(),
             attempt_id: "attempt-1".to_string(),
         }
@@ -732,7 +732,7 @@ mod tests {
             exact_locator: Some(intent.target.clone()),
             logical_key: logical_key_unchecked(&intent.target.logical),
             exact_key: Some("exact-1".to_string()),
-            row_kind: FleetRowKindWire::AgentShell,
+            row_kind: FleetRowKindWire::AgentTurn,
             agent_session_role: FleetAgentSessionRoleWire::Root,
             parent_timestamp: None,
             labels: HumanDisplayLabelsWire {

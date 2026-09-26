@@ -904,9 +904,9 @@ pub use finalizer::{
 };
 pub use fleet_agent_session::{
     agent_session_id_for_record, agent_session_key_for_record,
-    agent_session_shell, concrete_agent_session_shell_kind,
-    record_is_concrete_agent_session_shell, tracked_parent_timestamp,
-    ConcreteAgentSessionShellKind,
+    agent_session_turn, concrete_agent_session_turn_kind,
+    record_is_concrete_agent_session_turn, tracked_parent_timestamp,
+    ConcreteAgentSessionTurnKind,
 };
 pub use fleet_attention::{
     decide_attention_notices, decide_fleet_attention_replay,

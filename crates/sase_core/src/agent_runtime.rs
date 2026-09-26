@@ -248,7 +248,7 @@ pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
 ///
 /// Unlike [`is_runner_eligible_record`], this ignores lineage
 /// (`parent_timestamp`). A live serial child, monitor member, or post-handoff
-/// follow-up can be the shell currently holding an agent session's slot. Terminal
+/// follow-up can be the turn currently holding an agent session's slot. Terminal
 /// rows stay included so historical occupancy can reconstruct their
 /// intervals. Mirrors the record-kind half of Python
 /// `is_runner_slot_occupying_record`.
@@ -275,8 +275,8 @@ pub(crate) fn is_real_monitor_member_record(
         && meta
             .agent_session_turn
             .as_ref()
-            .filter(|shell| shell.kind == MONITOR_AGENT_SESSION_ROLE)
-            .and_then(|shell| shell.id.as_deref())
+            .filter(|turn| turn.kind == MONITOR_AGENT_SESSION_ROLE)
+            .and_then(|turn| turn.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
@@ -296,8 +296,8 @@ pub(crate) fn is_real_gate_member_record(
         && meta
             .agent_session_turn
             .as_ref()
-            .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
-            .and_then(|shell| shell.id.as_deref())
+            .filter(|turn| turn.kind == GATE_AGENT_SESSION_ROLE)
+            .and_then(|turn| turn.id.as_deref())
             .is_some_and(|id| !id.trim().is_empty())
 }
 
@@ -356,8 +356,8 @@ pub fn is_runner_slot_occupying_record(
         && meta
             .agent_session_turn
             .as_ref()
-            .filter(|shell| shell.kind == GATE_AGENT_SESSION_ROLE)
-            .and_then(|shell| shell.state.as_deref())
+            .filter(|turn| turn.kind == GATE_AGENT_SESSION_ROLE)
+            .and_then(|turn| turn.state.as_deref())
             .is_some_and(|state| state.trim() == "pending")
     {
         return false;
@@ -1167,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_question_on_sessions_only_live_shell_frees_its_slot() {
+    fn pending_question_on_sessions_only_live_turn_frees_its_slot() {
         let mut records = [occupancy_record(
             "/root",
             serde_json::json!({ "agent_family": "fam" }),

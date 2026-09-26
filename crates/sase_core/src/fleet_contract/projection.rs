@@ -81,7 +81,7 @@ pub(crate) fn current_instance_locator_schema(
     AgentInstanceLocatorWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical: current_logical_locator_schema(&exact.logical),
-        shell_id: exact.shell_id.clone(),
+        turn_id: exact.turn_id.clone(),
         run_id: exact.run_id.clone(),
         attempt_id: exact.attempt_id.clone(),
     }
@@ -297,10 +297,10 @@ pub(crate) fn reject_inconsistent_projection(
         .as_ref()
         .and_then(|meta| meta.proc_id.as_ref())
         .is_some()
-        && facts.row_kind == FleetRowKindWire::AgentShell
+        && facts.row_kind == FleetRowKindWire::AgentTurn
     {
         return Err(FleetContractError::Validation(
-            "proc artifact records must not be projected as agent shells"
+            "proc artifact records must not be projected as agent turns"
                 .to_string(),
         ));
     }
@@ -359,11 +359,11 @@ pub(crate) fn agent_session_role_for_projection(
         FleetRowKindWire::Proc => FleetAgentSessionRoleWire::Proc,
         FleetRowKindWire::Monitor => FleetAgentSessionRoleWire::Monitor,
         FleetRowKindWire::Gate => FleetAgentSessionRoleWire::Gate,
-        FleetRowKindWire::AgentShell
+        FleetRowKindWire::AgentTurn
         | FleetRowKindWire::ContainerHeader
-        | FleetRowKindWire::HistoricalShell => {
+        | FleetRowKindWire::HistoricalTurn => {
             if presentation_is_historical(lifecycle, liveness) {
-                FleetAgentSessionRoleWire::HistoricalShell
+                FleetAgentSessionRoleWire::HistoricalTurn
             } else if has_parent {
                 FleetAgentSessionRoleWire::Member
             } else {

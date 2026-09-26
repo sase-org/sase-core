@@ -77,7 +77,7 @@ fn dual_written_capacity_fields_prefer_canonical_without_duplicate_error() {
 
 #[test]
 fn agent_session_request_uses_canonical_keys() {
-    let new: RunnerCapacityRecordWire =
+    let legacy: RunnerCapacityRecordWire =
         serde_json::from_value(serde_json::json!({
             "artifact_dir": "/tmp/a",
             "project_name": "proj",
@@ -89,7 +89,23 @@ fn agent_session_request_uses_canonical_keys() {
             "agent_session_shell_state": "running"
         }))
         .unwrap();
+    let new: RunnerCapacityRecordWire =
+        serde_json::from_value(serde_json::json!({
+            "artifact_dir": "/tmp/a",
+            "project_name": "proj",
+            "timestamp": "a",
+            "agent_session": "fam",
+            "agent_session_role": "monitor",
+            "agent_session_turn_kind": "monitor",
+            "agent_session_turn_id": "m1",
+            "agent_session_turn_state": "running"
+        }))
+        .unwrap();
+    assert_eq!(legacy, new);
     assert_eq!(new.agent_session.as_deref(), Some("fam"));
+    assert_eq!(new.agent_session_turn_kind.as_deref(), Some("monitor"));
+    assert_eq!(new.agent_session_turn_id.as_deref(), Some("m1"));
+    assert_eq!(new.agent_session_turn_state.as_deref(), Some("running"));
     let encoded = serde_json::to_value(&new).unwrap();
     assert_eq!(encoded["agent_session"], "fam");
     assert_eq!(encoded["agent_session_role"], "monitor");
@@ -98,6 +114,9 @@ fn agent_session_request_uses_canonical_keys() {
     assert_eq!(encoded["agent_session_shell_state"], "running");
     assert!(encoded.get("agent_family").is_none());
     assert!(encoded.get("family_shell_kind").is_none());
+    assert!(encoded.get("agent_session_turn_kind").is_none());
+    assert!(encoded.get("agent_session_turn_id").is_none());
+    assert!(encoded.get("agent_session_turn_state").is_none());
 }
 
 #[test]

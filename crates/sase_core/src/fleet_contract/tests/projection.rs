@@ -150,7 +150,7 @@ fn projection_applies_owner_resolved_lineage_and_normalizes_locator_schemas() {
     let exact_locator = AgentInstanceLocatorWire {
         schema_version: 1,
         logical: resolved_locator.clone(),
-        shell_id: "shell-1".to_string(),
+        turn_id: "shell-1".to_string(),
         run_id: "run-1".to_string(),
         attempt_id: "attempt-1".to_string(),
     };
@@ -204,7 +204,7 @@ fn projection_applies_owner_resolved_lineage_and_normalizes_locator_schemas() {
     assert_eq!(summary.parent_timestamp.as_deref(), Some("20260906115900"));
     assert_eq!(
         summary.agent_session_role,
-        FleetAgentSessionRoleWire::HistoricalShell
+        FleetAgentSessionRoleWire::HistoricalTurn
     );
     assert_eq!(summary.tribe.as_deref(), Some("review"));
     assert_eq!(summary.clan_tribe.as_deref(), Some("parity"));
@@ -587,15 +587,15 @@ fn agent_session_role_distinguishes_root_member_and_historical_shell() {
     assert_eq!(plan.agent_session_role, FleetAgentSessionRoleWire::Member);
     assert_eq!(plan.parent_timestamp, None);
 
-    // A genuinely completed record is a historical shell.
+    // A genuinely completed record is a historical turn.
     let done = summary_done('a', "done", 1, 1000.0);
     assert_eq!(
         done.agent_session_role,
-        FleetAgentSessionRoleWire::HistoricalShell
+        FleetAgentSessionRoleWire::HistoricalTurn
     );
 
     // A Dead active-tier record (not yet done, not protected) demotes
-    // into a historical shell and a stopped bucket, never running.
+    // into a historical turn and a stopped bucket, never running.
     let mut demoted_request = projection_request(
         logical('a', "demoted"),
         Some(exact('a', "demoted", "run-1")),
@@ -609,7 +609,7 @@ fn agent_session_role_distinguishes_root_member_and_historical_shell() {
     let demoted = project_resolved_agent_summary(&demoted_request).unwrap();
     assert_eq!(
         demoted.agent_session_role,
-        FleetAgentSessionRoleWire::HistoricalShell
+        FleetAgentSessionRoleWire::HistoricalTurn
     );
     assert_eq!(demoted.status_bucket, FleetStatusBucketWire::Stopped);
     assert_eq!(demoted.lifecycle, FleetLifecycleWire::Running);

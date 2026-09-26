@@ -111,8 +111,8 @@ fn nested_monitor_successor_reuses_starter_lineage() {
     let mut monitor = running("monitor", Some(2.0));
     monitor.agent_session = Some("fam".to_string());
     monitor.agent_session_role = Some("monitor".to_string());
-    monitor.agent_session_shell_kind = Some("monitor".to_string());
-    monitor.agent_session_shell_id = Some("mon-1".to_string());
+    monitor.agent_session_turn_kind = Some("monitor".to_string());
+    monitor.agent_session_turn_id = Some("mon-1".to_string());
     monitor.parent_timestamp = Some("starter".to_string());
     monitor.pid = Some(99);
     monitor.run_started_at = None;
@@ -145,9 +145,9 @@ fn nested_gate_successor_reuses_starter_lineage() {
     let mut gate = running("gate", Some(2.0));
     gate.agent_session = Some("fam".to_string());
     gate.agent_session_role = Some("gate".to_string());
-    gate.agent_session_shell_kind = Some("gate".to_string());
-    gate.agent_session_shell_id = Some("gate-1".to_string());
-    gate.agent_session_shell_state = Some("approved".to_string());
+    gate.agent_session_turn_kind = Some("gate".to_string());
+    gate.agent_session_turn_id = Some("gate-1".to_string());
+    gate.agent_session_turn_state = Some("approved".to_string());
     gate.parent_timestamp = Some("starter".to_string());
     let mut successor = waiting("successor", "2026-09-10T00:00:00Z", Some(2.0));
     successor.agent_session = Some("fam".to_string());

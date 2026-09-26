@@ -1,7 +1,7 @@
 //! Owner-resolved presentation facts for fleet rows.
 //!
 //! Mirrors the per-record half of the owner's agent enrichment
-//! (`enrich_agent_from_meta_wire`): a rich base status plus the shell, plan,
+//! (`enrich_agent_from_meta_wire`): a rich base status plus the turn, plan,
 //! question, retry, and lifecycle facts the agent session status pass consumes. The
 //! agent-session-level policy (`TALE DONE`, `EPIC CREATED`, root mirroring, ...) stays
 //! with the viewer's shared status pipeline; this module only supplies the
@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::agent_scan::{AgentArtifactRecordWire, AgentSessionTurnWire};
-use crate::fleet_agent_session::agent_session_shell;
+use crate::fleet_agent_session::agent_session_turn;
 use crate::fleet_contract::{
     reject_secretish, trim_to_limit, validate_label, validate_timestamp,
     FleetContractError, OwnerLivenessWire, MAX_LABEL_BYTES,
@@ -200,10 +200,16 @@ pub struct OwnerPresentationFactsWire {
     pub proc_status: Option<String>,
     #[serde(default)]
     pub proc_label: Option<String>,
-    #[serde(default)]
-    pub shell_start_status: Option<String>,
-    #[serde(default)]
-    pub shell_stop_status: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "shell_start_status",
+        alias = "turn_start_status"
+    )]
+    pub turn_start_status: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(default, rename = "shell_stop_status", alias = "turn_stop_status")]
+    pub turn_stop_status: Option<String>,
 }
 
 impl OwnerPresentationFactsWire {
@@ -265,8 +271,8 @@ impl OwnerPresentationFactsWire {
             &mut self.proc_id,
             &mut self.proc_status,
             &mut self.proc_label,
-            &mut self.shell_start_status,
-            &mut self.shell_stop_status,
+            &mut self.turn_start_status,
+            &mut self.turn_stop_status,
         ]
     }
 }
@@ -486,26 +492,26 @@ pub fn derive_owner_record_facts(
     facts.retry_terminal = meta.retry_terminal;
     facts.reasoning_effort = label(meta.reasoning_effort.as_deref());
     facts.proc_id = label(meta.proc_id.as_deref());
-    if let Some(shell) = agent_session_shell(Some(meta), record.done.as_ref()) {
-        apply_shell_facts(&mut facts, shell);
+    if let Some(turn) = agent_session_turn(Some(meta), record.done.as_ref()) {
+        apply_turn_facts(&mut facts, turn);
     }
     OwnerRecordFacts { status, facts }
 }
 
-fn apply_shell_facts(
+fn apply_turn_facts(
     facts: &mut OwnerPresentationFactsWire,
-    shell: &AgentSessionTurnWire,
+    turn: &AgentSessionTurnWire,
 ) {
-    let kind = shell.kind.trim().to_ascii_lowercase();
-    let id = label(shell.id.as_deref());
-    let state = label(shell.state.as_deref());
-    let shell_label = label(shell.label.as_deref());
+    let kind = turn.kind.trim().to_ascii_lowercase();
+    let id = label(turn.id.as_deref());
+    let state = label(turn.state.as_deref());
+    let turn_label = label(turn.label.as_deref());
     match kind.as_str() {
         "monitor" | "mon" => {
             facts.monitor_id = id;
             facts.monitor_state = state;
-            facts.monitor_label = shell_label;
-            facts.monitor_command = shell
+            facts.monitor_label = turn_label;
+            facts.monitor_command = turn
                 .monitor
                 .as_ref()
                 .and_then(|monitor| label(monitor.command.as_deref()))
@@ -516,8 +522,8 @@ fn apply_shell_facts(
         "gate" => {
             facts.gate_id = id;
             facts.gate_state = state;
-            facts.gate_label = shell_label;
-            let gate = shell.gate.as_ref();
+            facts.gate_label = turn_label;
+            let gate = turn.gate.as_ref();
             facts.gate_kind = gate.and_then(|gate| label(gate.kind.as_deref()));
             facts.gate_accent =
                 gate.and_then(|gate| label(gate.accent.as_deref()));
@@ -527,12 +533,12 @@ fn apply_shell_facts(
                 facts.proc_id = id;
             }
             facts.proc_status = state;
-            facts.proc_label = shell_label;
+            facts.proc_label = turn_label;
         }
         _ => return,
     }
-    facts.shell_start_status = label(shell.start_status.as_deref());
-    facts.shell_stop_status = label(shell.stop_status.as_deref());
+    facts.turn_start_status = label(turn.start_status.as_deref());
+    facts.turn_stop_status = label(turn.stop_status.as_deref());
 }
 
 #[cfg(test)]
@@ -712,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_monitor_and_proc_shell_facts() {
+    fn gate_monitor_and_proc_turn_facts() {
         let gate = record(AgentMetaWire {
             agent_session_turn: Some(AgentSessionTurnWire {
                 kind: "gate".into(),
@@ -734,7 +740,7 @@ mod tests {
         assert_eq!(facts.gate_id.as_deref(), Some("g1"));
         assert_eq!(facts.gate_kind.as_deref(), Some("approval"));
         assert_eq!(facts.gate_accent.as_deref(), Some("blue"));
-        assert_eq!(facts.shell_start_status.as_deref(), Some("PLAN REVIEW"));
+        assert_eq!(facts.turn_start_status.as_deref(), Some("PLAN REVIEW"));
         assert_eq!(facts.role_suffix.as_deref(), Some("plan"));
         assert!(facts.monitor_id.is_none());
 
@@ -768,6 +774,30 @@ mod tests {
         let facts = derive(&proc, &Files::default()).facts;
         assert_eq!(facts.proc_id.as_deref(), Some("p1"));
         assert_eq!(facts.proc_label.as_deref(), Some("build"));
+    }
+
+    #[test]
+    fn turn_status_keys_accept_new_spelling_but_emit_legacy() {
+        let legacy: OwnerPresentationFactsWire =
+            serde_json::from_value(serde_json::json!({
+                "shell_start_status": "GO",
+                "shell_stop_status": "STOP",
+            }))
+            .unwrap();
+        let new: OwnerPresentationFactsWire =
+            serde_json::from_value(serde_json::json!({
+                "turn_start_status": "GO",
+                "turn_stop_status": "STOP",
+            }))
+            .unwrap();
+        assert_eq!(legacy, new);
+        assert_eq!(new.turn_start_status.as_deref(), Some("GO"));
+        assert_eq!(new.turn_stop_status.as_deref(), Some("STOP"));
+        let encoded = serde_json::to_value(&new).unwrap();
+        assert_eq!(encoded["shell_start_status"], "GO");
+        assert_eq!(encoded["shell_stop_status"], "STOP");
+        assert!(encoded.get("turn_start_status").is_none());
+        assert!(encoded.get("turn_stop_status").is_none());
     }
 
     #[test]

@@ -17,7 +17,7 @@ fn sample_mutation_request(installation_id: &str) -> FleetMutationRequestWire {
             agent_id: "alpha".to_string(),
             agent_session_id: None,
         },
-        shell_id: "ace-run".to_string(),
+        turn_id: "ace-run".to_string(),
         run_id: "20260906120000".to_string(),
         attempt_id: "attempt-0".to_string(),
     };

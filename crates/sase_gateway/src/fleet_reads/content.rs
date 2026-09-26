@@ -116,7 +116,7 @@ fn content_path_candidates(
             ContentHandleKindWire::Log,
             meta.agent_session_turn
                 .as_ref()
-                .and_then(|shell| shell.output_path.as_deref()),
+                .and_then(|turn| turn.output_path.as_deref()),
             true,
         );
     }
@@ -144,7 +144,7 @@ fn content_path_candidates(
             ContentHandleKindWire::Log,
             done.agent_session_turn
                 .as_ref()
-                .and_then(|shell| shell.output_path.as_deref()),
+                .and_then(|turn| turn.output_path.as_deref()),
             false,
         );
     }

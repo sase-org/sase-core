@@ -20,9 +20,9 @@ use crate::agent_scan::{
 };
 use crate::fleet_agent_session::{
     agent_session_id_for_record, agent_session_key_for_record,
-    agent_session_shell, concrete_agent_session_shell_kind,
-    record_is_concrete_agent_session_shell, tracked_parent_timestamp,
-    ConcreteAgentSessionShellKind,
+    agent_session_turn, concrete_agent_session_turn_kind,
+    record_is_concrete_agent_session_turn, tracked_parent_timestamp,
+    ConcreteAgentSessionTurnKind,
 };
 use crate::fleet_contract::{
     ensure_installation_identity, instance_locator_key, logical_locator_key,
@@ -103,7 +103,7 @@ impl PresentationContext {
                         .or_insert_with(|| clan_tribe.clone());
                 }
             }
-            if !record_is_concrete_agent_session_shell(record)
+            if !record_is_concrete_agent_session_turn(record)
                 && facts.parent_timestamp.is_none()
             {
                 if let Some(agent_session_id) = &facts.agent_session_id {
@@ -155,7 +155,7 @@ impl PresentationContext {
                 related.and_then(|value| value.agent_session_id.clone());
         }
         if facts.parent_timestamp.is_none()
-            && record_is_concrete_agent_session_shell(record)
+            && record_is_concrete_agent_session_turn(record)
         {
             if let Some(root) = agent_session_root.as_ref().filter(|root| {
                 root.timestamp != record.timestamp
@@ -221,14 +221,10 @@ pub fn select_fleet_presentation(
                 .get(&record.artifact_dir)
                 .copied()
                 .unwrap_or(false),
-            agent_session_member: record_is_concrete_agent_session_shell(
-                record,
-            ),
+            agent_session_member: record_is_concrete_agent_session_turn(record),
             agent_session_key: agent_session_key_for_record(record),
-            agent_session_anchor: record_is_concrete_agent_session_shell(
-                record,
-            ) && tracked_parent_timestamp(record)
-                .is_none(),
+            agent_session_anchor: record_is_concrete_agent_session_turn(record)
+                && tracked_parent_timestamp(record).is_none(),
             process_identity_mismatch: observation.process_identity_mismatch(),
             lifecycle_evidence: record_has_lifecycle_evidence(record),
         });
@@ -520,10 +516,10 @@ fn project_summary_for_record(
                 tribe: presentation.tribe.clone(),
                 row_kind,
                 current_instance: !presentation_terminal
-                    && row_kind == FleetRowKindWire::AgentShell,
+                    && row_kind == FleetRowKindWire::AgentTurn,
                 dismissable: presentation_terminal,
                 needs_attention: record.pending_question.is_some(),
-                occupied_runner_slot: row_kind == FleetRowKindWire::AgentShell
+                occupied_runner_slot: row_kind == FleetRowKindWire::AgentTurn
                     && liveness == OwnerLivenessWire::Alive,
                 container_projected_concrete_agent: false,
                 capabilities: CapabilitySetWire {
@@ -544,13 +540,13 @@ fn project_summary_for_record(
 pub fn row_kind_for_record(
     record: &AgentArtifactRecordWire,
 ) -> FleetRowKindWire {
-    match concrete_agent_session_shell_kind(record) {
-        Some(ConcreteAgentSessionShellKind::Proc) => FleetRowKindWire::Proc,
-        Some(ConcreteAgentSessionShellKind::Monitor) => {
+    match concrete_agent_session_turn_kind(record) {
+        Some(ConcreteAgentSessionTurnKind::Proc) => FleetRowKindWire::Proc,
+        Some(ConcreteAgentSessionTurnKind::Monitor) => {
             FleetRowKindWire::Monitor
         }
-        Some(ConcreteAgentSessionShellKind::Gate) => FleetRowKindWire::Gate,
-        _ => FleetRowKindWire::AgentShell,
+        Some(ConcreteAgentSessionTurnKind::Gate) => FleetRowKindWire::Gate,
+        _ => FleetRowKindWire::AgentTurn,
     }
 }
 
@@ -574,7 +570,7 @@ fn logical_locator_for_record(
                 meta.and_then(|value| value.artifact_agent_id.as_deref()),
                 meta.and_then(|value| value.name.as_deref()),
                 record.done.as_ref().and_then(|value| value.name.as_deref()),
-                agent_session_shell(meta, record.done.as_ref())
+                agent_session_turn(meta, record.done.as_ref())
                     .and_then(|value| value.id.as_deref()),
                 Some(record.timestamp.as_str()),
             ])
@@ -599,7 +595,7 @@ fn exact_locator_for_record(
     AgentInstanceLocatorWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical,
-        shell_id: safe_identifier(&record.workflow_dir_name, "shell"),
+        turn_id: safe_identifier(&record.workflow_dir_name, "shell"),
         run_id: safe_identifier(&record.timestamp, "run"),
         attempt_id: safe_identifier(&attempt, "attempt"),
     }

@@ -1,8 +1,8 @@
-//! Shared agent session-root versus concrete-shell classification.
+//! Shared agent session-root versus concrete-turn classification.
 //!
 //! Modern owner records often carry `agent_session_id` / `agent_session_turn` / a
 //! plan-chain name suffix without `parent_timestamp`. A concrete `--plan`
-//! gate with `agent_session_id` and a null parent is a nested shell, never an
+//! gate with `agent_session_id` and a null parent is a nested turn, never an
 //! agent session root. Gateway presentation, catalog projection, and owner listing
 //! must share this classifier.
 
@@ -11,10 +11,10 @@ use crate::agent_scan::{
     DoneMarkerWire,
 };
 
-/// Kind of a concrete agent session shell, independent of whether a parent
+/// Kind of a concrete agent session turn, independent of whether a parent
 /// timestamp is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConcreteAgentSessionShellKind {
+pub enum ConcreteAgentSessionTurnKind {
     Plan,
     Code,
     Monitor,
@@ -23,7 +23,7 @@ pub enum ConcreteAgentSessionShellKind {
     Member,
 }
 
-impl ConcreteAgentSessionShellKind {
+impl ConcreteAgentSessionTurnKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
@@ -48,14 +48,14 @@ pub fn tracked_parent_timestamp(
     })
 }
 
-/// Agent session id used to group a root with its shells.
+/// Agent session id used to group a root with its turns.
 pub fn agent_session_id_for_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
     let meta = record.agent_meta.as_ref();
     first_non_empty([
         meta.and_then(|value| value.agent_session.as_deref()),
-        agent_session_shell(meta, record.done.as_ref())
+        agent_session_turn(meta, record.done.as_ref())
             .and_then(|value| value.label.as_deref()),
     ])
     .map(str::to_string)
@@ -79,26 +79,26 @@ pub fn agent_session_key_for_record(
 }
 
 /// Whether this record is a concrete plan/code/monitor/gate/proc/member
-/// shell rather than an agent session root or standalone agent.
-pub fn record_is_concrete_agent_session_shell(
+/// turn rather than an agent session root or standalone agent.
+pub fn record_is_concrete_agent_session_turn(
     record: &AgentArtifactRecordWire,
 ) -> bool {
-    concrete_agent_session_shell_kind(record).is_some()
+    concrete_agent_session_turn_kind(record).is_some()
 }
 
-/// Classify a record as a concrete agent session shell from modern facts, in
+/// Classify a record as a concrete agent session turn from modern facts, in
 /// this order: `agent_session_turn.kind`, `agent_session_role` / `role_suffix`,
 /// plan-chain name suffix, then `parent_timestamp`. `agent_session_id` alone
-/// does not make a root into a shell.
-pub fn concrete_agent_session_shell_kind(
+/// does not make a root into a turn.
+pub fn concrete_agent_session_turn_kind(
     record: &AgentArtifactRecordWire,
-) -> Option<ConcreteAgentSessionShellKind> {
+) -> Option<ConcreteAgentSessionTurnKind> {
     let meta = record.agent_meta.as_ref();
     if meta.and_then(|value| value.proc_id.as_deref()).is_some() {
-        return Some(ConcreteAgentSessionShellKind::Proc);
+        return Some(ConcreteAgentSessionTurnKind::Proc);
     }
-    if let Some(kind) = agent_session_shell(meta, record.done.as_ref())
-        .and_then(kind_from_agent_session_shell)
+    if let Some(kind) = agent_session_turn(meta, record.done.as_ref())
+        .and_then(kind_from_agent_session_turn)
     {
         return Some(kind);
     }
@@ -114,12 +114,12 @@ pub fn concrete_agent_session_shell_kind(
         return Some(kind);
     }
     if tracked_parent_timestamp(record).is_some() {
-        return Some(ConcreteAgentSessionShellKind::Member);
+        return Some(ConcreteAgentSessionTurnKind::Member);
     }
     None
 }
 
-pub fn agent_session_shell<'a>(
+pub fn agent_session_turn<'a>(
     meta: Option<&'a AgentMetaWire>,
     done: Option<&'a DoneMarkerWire>,
 ) -> Option<&'a AgentSessionTurnWire> {
@@ -127,41 +127,41 @@ pub fn agent_session_shell<'a>(
         .or_else(|| done.and_then(|value| value.agent_session_turn.as_ref()))
 }
 
-fn kind_from_agent_session_shell(
-    shell: &AgentSessionTurnWire,
-) -> Option<ConcreteAgentSessionShellKind> {
-    match shell.kind.trim().to_ascii_lowercase().as_str() {
-        "monitor" | "mon" => Some(ConcreteAgentSessionShellKind::Monitor),
-        "gate" => Some(ConcreteAgentSessionShellKind::Gate),
-        "proc" => Some(ConcreteAgentSessionShellKind::Proc),
-        "plan" => Some(ConcreteAgentSessionShellKind::Plan),
-        "code" => Some(ConcreteAgentSessionShellKind::Code),
+fn kind_from_agent_session_turn(
+    turn: &AgentSessionTurnWire,
+) -> Option<ConcreteAgentSessionTurnKind> {
+    match turn.kind.trim().to_ascii_lowercase().as_str() {
+        "monitor" | "mon" => Some(ConcreteAgentSessionTurnKind::Monitor),
+        "gate" => Some(ConcreteAgentSessionTurnKind::Gate),
+        "proc" => Some(ConcreteAgentSessionTurnKind::Proc),
+        "plan" => Some(ConcreteAgentSessionTurnKind::Plan),
+        "code" => Some(ConcreteAgentSessionTurnKind::Code),
         _ => None,
     }
 }
 
-fn kind_from_role(raw: Option<&str>) -> Option<ConcreteAgentSessionShellKind> {
+fn kind_from_role(raw: Option<&str>) -> Option<ConcreteAgentSessionTurnKind> {
     let value = raw?.trim().trim_start_matches('-').to_ascii_lowercase();
     match value.as_str() {
-        "plan" => Some(ConcreteAgentSessionShellKind::Plan),
-        "code" => Some(ConcreteAgentSessionShellKind::Code),
-        "monitor" | "mon" => Some(ConcreteAgentSessionShellKind::Monitor),
-        "gate" => Some(ConcreteAgentSessionShellKind::Gate),
-        "proc" => Some(ConcreteAgentSessionShellKind::Proc),
-        "member" => Some(ConcreteAgentSessionShellKind::Member),
+        "plan" => Some(ConcreteAgentSessionTurnKind::Plan),
+        "code" => Some(ConcreteAgentSessionTurnKind::Code),
+        "monitor" | "mon" => Some(ConcreteAgentSessionTurnKind::Monitor),
+        "gate" => Some(ConcreteAgentSessionTurnKind::Gate),
+        "proc" => Some(ConcreteAgentSessionTurnKind::Proc),
+        "member" => Some(ConcreteAgentSessionTurnKind::Member),
         "root" | "epic" | "commit" | "feedback" => None,
         _ => None,
     }
 }
 
-fn kind_from_name(name: &str) -> Option<ConcreteAgentSessionShellKind> {
+fn kind_from_name(name: &str) -> Option<ConcreteAgentSessionTurnKind> {
     let lower = name.to_ascii_lowercase();
     for (suffix, kind) in [
-        ("--plan", ConcreteAgentSessionShellKind::Plan),
-        ("--code", ConcreteAgentSessionShellKind::Code),
-        ("--gate", ConcreteAgentSessionShellKind::Gate),
-        ("--mon", ConcreteAgentSessionShellKind::Monitor),
-        ("--proc", ConcreteAgentSessionShellKind::Proc),
+        ("--plan", ConcreteAgentSessionTurnKind::Plan),
+        ("--code", ConcreteAgentSessionTurnKind::Code),
+        ("--gate", ConcreteAgentSessionTurnKind::Gate),
+        ("--mon", ConcreteAgentSessionTurnKind::Monitor),
+        ("--proc", ConcreteAgentSessionTurnKind::Proc),
     ] {
         if name_has_plan_chain_suffix(&lower, suffix) {
             return Some(kind);
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_without_parent_timestamp_is_a_shell_not_a_root() {
+    fn plan_without_parent_timestamp_is_a_turn_not_a_root() {
         let mut record = record_named("0n--plan");
         record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
@@ -258,8 +258,8 @@ mod tests {
                 ..AgentSessionTurnWire::default()
             });
         assert_eq!(
-            concrete_agent_session_shell_kind(&record),
-            Some(ConcreteAgentSessionShellKind::Gate)
+            concrete_agent_session_turn_kind(&record),
+            Some(ConcreteAgentSessionTurnKind::Gate)
         );
         assert!(tracked_parent_timestamp(&record).is_none());
         assert_eq!(
@@ -269,13 +269,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_id_alone_does_not_make_a_root_a_shell() {
+    fn agent_session_id_alone_does_not_make_a_root_a_turn() {
         let mut record = record_named("lane");
         record.agent_meta.as_mut().unwrap().agent_session =
             Some("lane".to_string());
         record.agent_meta.as_mut().unwrap().agent_session_role =
             Some("root".to_string());
-        assert_eq!(concrete_agent_session_shell_kind(&record), None);
+        assert_eq!(concrete_agent_session_turn_kind(&record), None);
         assert_eq!(
             agent_session_key_for_record(&record).as_deref(),
             Some("lane")
@@ -283,22 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn name_suffix_classifies_code_and_monitor_shells() {
+    fn name_suffix_classifies_code_and_monitor_turns() {
         assert_eq!(
-            concrete_agent_session_shell_kind(&record_named("0k--code")),
-            Some(ConcreteAgentSessionShellKind::Code)
+            concrete_agent_session_turn_kind(&record_named("0k--code")),
+            Some(ConcreteAgentSessionTurnKind::Code)
         );
         assert_eq!(
-            concrete_agent_session_shell_kind(&record_named("lane--mon")),
-            Some(ConcreteAgentSessionShellKind::Monitor)
+            concrete_agent_session_turn_kind(&record_named("lane--mon")),
+            Some(ConcreteAgentSessionTurnKind::Monitor)
         );
         assert_eq!(
-            concrete_agent_session_shell_kind(&record_named("lane--gate-0")),
-            Some(ConcreteAgentSessionShellKind::Gate)
+            concrete_agent_session_turn_kind(&record_named("lane--gate-0")),
+            Some(ConcreteAgentSessionTurnKind::Gate)
         );
         assert_eq!(
-            concrete_agent_session_shell_kind(&record_named("lane--proc")),
-            Some(ConcreteAgentSessionShellKind::Proc)
+            concrete_agent_session_turn_kind(&record_named("lane--proc")),
+            Some(ConcreteAgentSessionTurnKind::Proc)
         );
     }
 
@@ -308,8 +308,32 @@ mod tests {
         record.agent_meta.as_mut().unwrap().parent_timestamp =
             Some("20260919100000".to_string());
         assert_eq!(
-            concrete_agent_session_shell_kind(&record),
-            Some(ConcreteAgentSessionShellKind::Member)
+            concrete_agent_session_turn_kind(&record),
+            Some(ConcreteAgentSessionTurnKind::Member)
+        );
+    }
+
+    #[test]
+    fn turn_object_monitor_and_proc_kinds_classify() {
+        let mut monitor = record_named("worker");
+        monitor.agent_meta.as_mut().unwrap().agent_session_turn =
+            Some(AgentSessionTurnWire {
+                kind: "monitor".to_string(),
+                ..AgentSessionTurnWire::default()
+            });
+        assert_eq!(
+            concrete_agent_session_turn_kind(&monitor),
+            Some(ConcreteAgentSessionTurnKind::Monitor)
+        );
+        let mut proc = record_named("worker");
+        proc.agent_meta.as_mut().unwrap().agent_session_turn =
+            Some(AgentSessionTurnWire {
+                kind: "proc".to_string(),
+                ..AgentSessionTurnWire::default()
+            });
+        assert_eq!(
+            concrete_agent_session_turn_kind(&proc),
+            Some(ConcreteAgentSessionTurnKind::Proc)
         );
     }
 }

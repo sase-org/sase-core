@@ -205,7 +205,7 @@ pub fn count_logical_agents(
         BTreeMap::new();
     for summary in &request.summaries {
         let summary = validate_resolved_agent_summary(summary)?;
-        if summary.row_kind != FleetRowKindWire::AgentShell {
+        if summary.row_kind != FleetRowKindWire::AgentTurn {
             continue;
         }
         if !summary.current_instance {

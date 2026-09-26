@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use sase_core::{
     agent_scan::AgentArtifactRecordWire,
-    fleet_agent_session::{agent_session_id_for_record, agent_session_shell},
+    fleet_agent_session::{agent_session_id_for_record, agent_session_turn},
     fleet_attention::{
         FLEET_ATTENTION_CAPABILITY_ANSWER_QUESTION,
         FLEET_ATTENTION_CAPABILITY_APPROVE_GATE,
@@ -139,10 +139,10 @@ pub(super) fn resolve_record(
                 tribe: presentation.tribe.clone(),
                 row_kind,
                 current_instance: !presentation_terminal
-                    && row_kind == FleetRowKindWire::AgentShell,
+                    && row_kind == FleetRowKindWire::AgentTurn,
                 dismissable: presentation_terminal,
                 needs_attention: record.pending_question.is_some(),
-                occupied_runner_slot: row_kind == FleetRowKindWire::AgentShell
+                occupied_runner_slot: row_kind == FleetRowKindWire::AgentTurn
                     && liveness == OwnerLivenessWire::Alive,
                 container_projected_concrete_agent: false,
                 capabilities: CapabilitySetWire {
@@ -184,7 +184,7 @@ fn logical_locator_for_record(
                 meta.and_then(|value| value.artifact_agent_id.as_deref()),
                 meta.and_then(|value| value.name.as_deref()),
                 record.done.as_ref().and_then(|value| value.name.as_deref()),
-                agent_session_shell(meta, record.done.as_ref())
+                agent_session_turn(meta, record.done.as_ref())
                     .and_then(|value| value.id.as_deref()),
                 Some(record.timestamp.as_str()),
             ])
@@ -209,7 +209,7 @@ fn exact_locator_for_record(
     AgentInstanceLocatorWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical,
-        shell_id: safe_identifier(&record.workflow_dir_name, "shell"),
+        turn_id: safe_identifier(&record.workflow_dir_name, "shell"),
         run_id: safe_identifier(&record.timestamp, "run"),
         attempt_id: safe_identifier(&attempt, "attempt"),
     }
@@ -223,7 +223,7 @@ fn lifecycle_and_content_capabilities(
     has_pending_question: bool,
 ) -> Vec<String> {
     let mut caps = Vec::new();
-    if row_kind == FleetRowKindWire::AgentShell && !is_terminal {
+    if row_kind == FleetRowKindWire::AgentTurn && !is_terminal {
         caps.push(FLEET_MUTATION_CAPABILITY_RETRY.to_string());
         caps.push(FLEET_MUTATION_CAPABILITY_FORK.to_string());
         if liveness == OwnerLivenessWire::Alive {

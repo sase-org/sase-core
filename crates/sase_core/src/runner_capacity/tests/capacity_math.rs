@@ -19,9 +19,9 @@ fn default_weights_match_serial_and_parallel_lane_counting() {
     pending_question.pending_question = true;
     let mut pending_gate = running("gate", Some(4.0));
     pending_gate.agent_session_role = Some("gate".to_string());
-    pending_gate.agent_session_shell_kind = Some("gate".to_string());
-    pending_gate.agent_session_shell_id = Some("gate-1".to_string());
-    pending_gate.agent_session_shell_state = Some("pending".to_string());
+    pending_gate.agent_session_turn_kind = Some("gate".to_string());
+    pending_gate.agent_session_turn_id = Some("gate-1".to_string());
+    pending_gate.agent_session_turn_state = Some("pending".to_string());
     let mut hidden_workflow = running("workflow", Some(4.0));
     hidden_workflow.workflow_dir_name = "workflow-build".to_string();
 
