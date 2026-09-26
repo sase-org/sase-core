@@ -2504,7 +2504,7 @@ mod tests {
 
     #[test]
     fn capacity_only_keeps_active_dir_without_running_or_waiting_marker() {
-        // A shell can occupy a runner slot via `agent_meta.run_started_at`
+        // A turn can occupy a runner slot via `agent_meta.run_started_at`
         // alone (home-mode runs only write `running.json`); capacity_only
         // must not drop such dirs just because neither marker file exists.
         let tmp = tempdir().unwrap();

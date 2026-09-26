@@ -5,7 +5,7 @@
 //! label that may change. An installation ID is an opaque per-user origin ID;
 //! it is not a hostname, configured `id.machine_name`, provider reference, or
 //! display alias. Logical agent and agent session locators identify durable work
-//! threads, while exact instance locators identify one shell/run/attempt and
+//! threads, while exact instance locators identify one turn/run/attempt and
 //! are required for mutations. Lifecycle, owner-resolved process liveness,
 //! connection health, and viewer freshness are distinct states because only
 //! the owner can resolve local PIDs and content availability. Feed cursors

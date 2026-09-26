@@ -544,7 +544,7 @@ fn projection_rejects_inconsistent_owner_facts_and_handles() {
     assert!(project_resolved_agent_summary(&wrong_revision).is_err());
 }
 #[test]
-fn agent_session_role_distinguishes_root_member_and_historical_shell() {
+fn agent_session_role_distinguishes_root_member_and_historical_turn() {
     // A live root: no tracked parent.
     let root_request = projection_request(
         logical('a', "root"),
@@ -571,7 +571,7 @@ fn agent_session_role_distinguishes_root_member_and_historical_shell() {
     assert_eq!(member.agent_session_role, FleetAgentSessionRoleWire::Member);
     assert_eq!(member.parent_timestamp, Some("20260906110000".to_string()));
 
-    // A live --plan shell with agent_session_id and no parent_timestamp is a
+    // A live --plan turn with agent_session_id and no parent_timestamp is a
     // nested member, never a root.
     let mut plan_record = record_running();
     plan_record.agent_meta.as_mut().unwrap().name =

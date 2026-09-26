@@ -2250,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn hood_matching_honors_component_boundaries_and_shell_suffixes() {
+    fn hood_matching_honors_component_boundaries_and_turn_suffixes() {
         let mut record = AgentHoldRecordWire {
             schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
             armer: armer("holder"),

@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_names_to_selectors_without_shell_agent_session() {
+    fn expands_names_to_selectors_without_turn_agent_session() {
         let fields = collect_ok(&[occ(
             "%hold(builder, builder--mon, hood=sase-11l, pending, future)",
             vec![

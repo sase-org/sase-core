@@ -57,7 +57,7 @@ fn is_failed_live_runner(target: &AgentCleanupTargetWire) -> bool {
 }
 
 /// True for any child row: workflow steps, sequential agent session members, and
-/// monitor proc shells. The wire's `is_workflow_child` flag is a historical
+/// monitor proc turns. The wire's `is_workflow_child` flag is a historical
 /// alias for this broader predicate.
 fn is_child_row(target: &AgentCleanupTargetWire) -> bool {
     target.is_workflow_child
@@ -66,7 +66,7 @@ fn is_child_row(target: &AgentCleanupTargetWire) -> bool {
 }
 
 /// Mirrors `AgentChildLinkage::WORKFLOW_STEP`: only a workflow step child is
-/// covered by its parent's cascade. Agent session members and monitor proc shells
+/// covered by its parent's cascade. Agent session members and monitor proc turns
 /// carry a `parent_timestamp` but are independent agent rows with their own
 /// PID, artifacts, and dismissal record.
 fn is_workflow_step_child(target: &AgentCleanupTargetWire) -> bool {

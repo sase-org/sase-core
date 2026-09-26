@@ -818,7 +818,7 @@ pub struct AgentSessionTurnGateWire {
 /// One durable agent-session-turn member: a monitor or a gate, never both.
 ///
 /// `kind` discriminates `"monitor"` / `"gate"`. The fields below `kind` are
-/// the ones both shells carry (mirroring the two flat `monitor_*` /
+/// the ones both turns carry (mirroring the two flat `monitor_*` /
 /// `gate_*` prefixes they replace); `monitor` / `gate` hold whichever
 /// kind's own fields, with the other left `None`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

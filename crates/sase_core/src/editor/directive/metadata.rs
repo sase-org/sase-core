@@ -570,7 +570,7 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
     },
     DirectiveKeywordSpec {
         name: "proc",
-        description: "Wait for a proc ID or shell name",
+        description: "Wait for a proc ID or proc name",
         value_role: DirectiveValueRole::FreeText,
         repeatable: false,
         conflicts_with: &[],

@@ -87,7 +87,7 @@ pub struct OwnerResolutionFactsWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
-    /// Owner-derived shell, plan, question, retry, and lifecycle facts.
+    /// Owner-derived turn, plan, question, retry, and lifecycle facts.
     #[serde(default)]
     pub presentation: OwnerPresentationFactsWire,
     #[serde(default = "default_row_kind")]
@@ -174,7 +174,7 @@ pub struct ResolvedAgentSummaryWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
-    /// Owner-derived shell, plan, question, retry, and lifecycle facts. Never
+    /// Owner-derived turn, plan, question, retry, and lifecycle facts. Never
     /// carries paths; omitted when empty so legacy consumers see no change.
     #[serde(
         default,

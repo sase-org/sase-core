@@ -24,11 +24,11 @@ use crate::fleet_contract::{
     MAX_LAUNCH_PROMPT_BYTES,
 };
 
-/// Capability advertised for owner-side stop of a live agent-shell instance.
+/// Capability advertised for owner-side stop of a live agent-turn instance.
 pub const FLEET_MUTATION_CAPABILITY_STOP: &str = "lifecycle.stop";
-/// Capability advertised for owner-side retry of an agent-shell row.
+/// Capability advertised for owner-side retry of an agent-turn row.
 pub const FLEET_MUTATION_CAPABILITY_RETRY: &str = "lifecycle.retry";
-/// Capability advertised for owner-side fork of an agent-shell row.
+/// Capability advertised for owner-side fork of an agent-turn row.
 pub const FLEET_MUTATION_CAPABILITY_FORK: &str = "lifecycle.fork";
 
 /// Closed mutation kinds the fleet mutation journal accepts.

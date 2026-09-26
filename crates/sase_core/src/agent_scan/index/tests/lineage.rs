@@ -363,7 +363,7 @@ fn find_gate_turn_by_gate_id_ignores_inherited_id_on_descendant() {
 
     let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-1")
         .unwrap()
-        .expect("gate-1 must resolve to its owning shell");
+        .expect("gate-1 must resolve to its owning turn");
     assert_eq!(found.artifact_dir, owner.to_string_lossy());
 }
 

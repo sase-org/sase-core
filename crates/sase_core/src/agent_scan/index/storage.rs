@@ -747,7 +747,7 @@ pub(super) fn migrate_model_alias_projection_v22(
     Ok(())
 }
 
-/// v23 refreshes `record_json` with flat gate-shell metadata projected from
+/// v23 refreshes `record_json` with flat gate-turn metadata projected from
 /// `agent_meta.json` and `done.json`.
 pub(super) fn migrate_record_json_refresh_v23(
     conn: &mut Connection,

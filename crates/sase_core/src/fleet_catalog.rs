@@ -1,6 +1,6 @@
 //! Catalog-from-index assembly shared by the gateway and Python oracle.
 //!
-//! Selection, root-versus-shell classification, bounded agent session context, and
+//! Selection, root-versus-turn classification, bounded agent session context, and
 //! row projection inputs live here. The gateway stays an observer/cache
 //! wrapper; Python invokes the same builder without standing up HTTP.
 

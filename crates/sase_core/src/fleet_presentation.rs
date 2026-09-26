@@ -61,7 +61,7 @@ pub struct FleetPresentationCandidateWire {
     /// protection or apparent liveness.
     #[serde(alias = "family_root_dismissed")]
     pub agent_session_root_dismissed: bool,
-    /// Whether this candidate is a concrete agent session shell rather than a
+    /// Whether this candidate is a concrete agent session turn rather than a
     /// agent session root. Live and unknown members stay current. Pending
     /// (protected) dead members stay current. Other dead members of a
     /// presented agent sessions are served in the bounded terminal window so the
@@ -70,15 +70,15 @@ pub struct FleetPresentationCandidateWire {
     pub agent_session_member: bool,
     /// Grouping key for "currently presented agent session". An agent session is
     /// presented when a root or a live/unknown/pending member is already
-    /// current, or a non-member terminal or an anchored terminal shell of
+    /// current, or a non-member terminal or an anchored terminal turn of
     /// the same key is inside the recent window.
     #[serde(default, alias = "family_key")]
     pub agent_session_key: Option<String>,
-    /// Whether this concrete shell carries no tracked parent, making it the
+    /// Whether this concrete turn carries no tracked parent, making it the
     /// agent session's own origin record. Modern plan-chain agent sessions have no
-    /// separate root record: the `--plan` shell is the agent session's first
-    /// record and every later shell points back at it. A terminal anchor
-    /// inside the recent window presents its agent session; a shell whose parent
+    /// separate root record: the `--plan` turn is the agent session's first
+    /// record and every later turn points back at it. A terminal anchor
+    /// inside the recent window presents its agent session; a turn whose parent
     /// no record supplies is an orphan and never does.
     #[serde(default, alias = "family_anchor")]
     pub agent_session_anchor: bool,
@@ -170,7 +170,7 @@ pub fn decide_fleet_presentation(
             continue;
         }
         // Liveness is definitively `Dead` or `NotProcess`. A pending
-        // agent session shell whose creator PID is dead is not obsolete: keep
+        // agent session turn whose creator PID is dead is not obsolete: keep
         // it current. Standalone protected leftovers still take the
         // bounded terminal path.
         if candidate.agent_session_member && candidate.protected {
@@ -184,7 +184,7 @@ pub fn decide_fleet_presentation(
         terminal_candidates.push(candidate);
     }
 
-    // A non-member terminal, or an anchored shell that stands in for the
+    // A non-member terminal, or an anchored turn that stands in for the
     // root of a root-less plan-chain agent session, presents its agent session while it is
     // inside the recent window. Unanchored members never do: their parent is
     // missing, so they are orphans of an agent session nothing else vouches for.

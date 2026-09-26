@@ -851,10 +851,10 @@ pub fn directive_snippet_recipes_with_flags(
             recipe(
                 "%wait(proc=...)",
                 "typed launch unit snippet",
-                "%wait(proc=${1:proc-id-or-shell-name})$0",
+                "%wait(proc=${1:proc-id-or-proc-name})$0",
                 "%wait(proc=$1)$0",
-                "%wait(proc=proc-id-or-shell-name)",
-                "Wait for a prompt-owned proc by ID or shell name.",
+                "%wait(proc=proc-id-or-proc-name)",
+                "Wait for a prompt-owned proc by ID or proc name.",
             ),
             recipe(
                 "%wait(hood=...)",

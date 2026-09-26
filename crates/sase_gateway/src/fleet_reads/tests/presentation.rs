@@ -185,7 +185,7 @@ async fn terminal_agent_session_root_represents_completed_members() {
 }
 
 #[tokio::test]
-async fn root_less_completed_plan_chain_agent_session_is_presented_through_its_plan_shell(
+async fn root_less_completed_plan_chain_agent_session_is_presented_through_its_plan_turn(
 ) {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
@@ -198,8 +198,8 @@ async fn root_less_completed_plan_chain_agent_session_is_presented_through_its_p
     let plan_ts = plan_finished.format("%Y%m%d%H%M%S").to_string();
     let gate_ts = gate_finished.format("%Y%m%d%H%M%S").to_string();
     let code_ts = code_finished.format("%Y%m%d%H%M%S").to_string();
-    // Production shape: no separate root record. The plan shell is the
-    // agent session's first record (no parent) and later shells point at it.
+    // Production shape: no separate root record. The plan turn is the
+    // agent session's first record (no parent) and later turns point at it.
     seed_done_agent_session_agent(
         &projects,
         &plan_ts,
@@ -238,7 +238,7 @@ async fn root_less_completed_plan_chain_agent_session_is_presented_through_its_p
 }
 
 #[tokio::test]
-async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
+async fn plan_turn_without_parent_timestamp_is_nested_not_a_root() {
     let temp = tempdir().unwrap();
     let home = temp.path().to_path_buf();
     let projects = home.join("projects");
@@ -276,7 +276,7 @@ async fn plan_shell_without_parent_timestamp_is_nested_not_a_root() {
         .rows
         .iter()
         .find(|row| row.labels.agent_label.as_deref() == Some("lane--plan"))
-        .expect("plan shell served for nesting");
+        .expect("plan turn served for nesting");
     assert_ne!(
         plan.agent_session_role,
         sase_core::fleet_contract::FleetAgentSessionRoleWire::Root

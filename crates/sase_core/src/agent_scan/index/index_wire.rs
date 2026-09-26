@@ -196,7 +196,7 @@ pub struct AgentArtifactIndexQueryWire {
     pub freshness: AgentArtifactIndexFreshnessWire,
     /// Restrict results to real monitor agent session members
     /// (`agent_meta.agent_session_role == "monitor"` and a non-empty
-    /// `agent_meta.agent_session_turn.id` on a `"monitor"`-kind shell).
+    /// `agent_meta.agent_session_turn.id` on a `"monitor"`-kind turn).
     #[serde(default)]
     pub only_monitors: bool,
     #[serde(default)]

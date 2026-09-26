@@ -152,10 +152,10 @@ impl RecordSummary {
 /// Return the durable gate id iff *record* is a real gate-turn member.
 ///
 /// `gate_id` alone is inherited by later gate-associated follow-ups, so
-/// indexing it unconditionally would let a successor shadow the shell that
+/// indexing it unconditionally would let a successor shadow the turn that
 /// actually owns the gate. Only [`is_real_gate_member_record`] rows project
 /// a value here, which is what makes an exact `gate_turn_id` match resolve
-/// the owning shell instead of an inheritor.
+/// the owning turn instead of an inheritor.
 pub(super) fn gate_turn_id_from_record(
     record: &AgentArtifactRecordWire,
 ) -> Option<String> {
@@ -166,7 +166,7 @@ pub(super) fn gate_turn_id_from_record(
         .agent_meta
         .as_ref()
         .and_then(|meta| meta.agent_session_turn.as_ref())
-        .and_then(|shell| shell.id.clone())
+        .and_then(|turn| turn.id.clone())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
