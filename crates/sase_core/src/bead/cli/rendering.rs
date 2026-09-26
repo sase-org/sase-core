@@ -140,6 +140,7 @@ fn search_field_display_value(
         "changespec_name" => Some(issue.changespec_name.clone()),
         "changespec_bug_id" => Some(issue.changespec_bug_id.clone()),
         "external_ref" => Some(issue.external_ref.clone()),
+        "creation_reason" => Some(issue.creation_reason.clone()),
         "status" => Some(status_value(&issue.status).to_string()),
         "type" => Some(issue_type_value(&issue.issue_type).to_string()),
         "tier" => issue.tier.as_ref().map(|tier| tier_value(tier).to_string()),

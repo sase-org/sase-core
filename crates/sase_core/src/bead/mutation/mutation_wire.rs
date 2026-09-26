@@ -48,6 +48,11 @@ pub struct BeadCreateRequestWire {
     pub changespec_bug_id: String,
     #[serde(default)]
     pub external_ref: String,
+    /// Why this bead is filed. `None` is the historical empty-reason state
+    /// kept for released clients whose wire predates the field; an explicit
+    /// blank or overlong reason is rejected, never stored.
+    #[serde(default)]
+    pub creation_reason: Option<String>,
     #[serde(default)]
     pub now: Option<String>,
 }

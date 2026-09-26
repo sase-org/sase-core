@@ -1,12 +1,14 @@
 use super::super::*;
 use super::support::*;
 use crate::bead::events::BeadEventPayloadWire;
+use crate::bead::jsonl::event_streams_dir;
 use crate::bead::jsonl::read_event_store;
 use crate::bead::mutation::store::MutableStore;
 use crate::bead::read::read_store_issues;
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::PhaseSizeWire;
 use crate::bead::wire::StatusWire;
+use crate::bead::wire::CREATION_REASON_MAX_LEN;
 use std::collections::BTreeMap;
 use std::fs;
 use tempfile::tempdir;
@@ -617,6 +619,118 @@ fn external_ref_create_update_clear_and_batch_conflicts_are_atomic() {
             .external_ref,
         ""
     );
+}
+
+#[test]
+fn create_persists_creation_reason_through_projection_and_replay() {
+    let temp = tempdir().unwrap();
+    init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+
+    let issue = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Retry race".to_string(),
+            issue_type: IssueTypeWire::Task,
+            size: Some(PhaseSizeWire::Small),
+            task_type: Some("bug".to_string()),
+            creation_reason: Some(
+                "  A second agent reproduced dropped retries  ".to_string(),
+            ),
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    assert_eq!(
+        issue.creation_reason,
+        "A second agent reproduced dropped retries"
+    );
+
+    // The normal projection persists the reason verbatim.
+    let raw = fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+    assert!(raw.contains(
+        "\"creation_reason\":\"A second agent reproduced dropped retries\""
+    ));
+
+    // The reason is immutable through normal updates, in both the
+    // projection and the event replay.
+    let updated = update_issue(
+        &beads_dir,
+        &issue.id,
+        BeadUpdateFieldsWire {
+            title: Some("Retry race (renamed)".to_string()),
+            now: Some("2026-01-01T00:01:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    assert_eq!(updated.creation_reason, issue.creation_reason);
+    assert_reprojection_byte_stable(&beads_dir, "reasoned update");
+    assert_reopen_parity(&beads_dir, &issue.id, "creation reason");
+}
+
+#[test]
+fn create_rejects_blank_and_overlong_reasons_without_writing() {
+    let temp = tempdir().unwrap();
+    init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+
+    for reason in [Some(String::new()), Some("   ".to_string())] {
+        let error = create_issue(
+            &beads_dir,
+            BeadCreateRequestWire {
+                title: "Blank reason".to_string(),
+                issue_type: IssueTypeWire::Plan,
+                creation_reason: reason,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("cannot be empty or blank"));
+    }
+
+    let error = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Overlong reason".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            creation_reason: Some("r".repeat(CREATION_REASON_MAX_LEN + 1)),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, "validation");
+    assert!(error.message.contains("at most 2000 characters"));
+
+    // Rejected reasons never reach the store or the event streams.
+    assert_eq!(fs::read(beads_dir.join("issues.jsonl")).unwrap(), before);
+    let streams_dir = event_streams_dir(&beads_dir);
+    assert!(
+        !streams_dir.exists()
+            || fs::read_dir(&streams_dir).unwrap().next().is_none()
+    );
+
+    // An absent reason stays the historical empty state for older clients.
+    let legacy = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Reasonless".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    assert!(legacy.creation_reason.is_empty());
+    assert_reopen_parity(&beads_dir, &legacy.id, "reasonless create");
 }
 
 #[test]

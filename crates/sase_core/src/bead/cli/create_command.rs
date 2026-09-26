@@ -23,6 +23,7 @@ pub(super) struct CreateArgs {
     parent_id: Option<String>,
     plan_path: Option<String>,
     description: String,
+    creation_reason: Option<String>,
     assignee: String,
     tier: Option<BeadTierWire>,
     changespec_name: String,
@@ -89,6 +90,7 @@ pub(super) fn handle_create(
         tier: parsed.tier,
         parent_id: parsed.parent_id,
         description: parsed.description,
+        creation_reason: parsed.creation_reason,
         design,
         model: parsed.model,
         assignee: parsed.assignee,
@@ -276,6 +278,7 @@ pub(super) fn parse_create_args(
     let mut title = None;
     let mut type_arg = None;
     let mut description = String::new();
+    let mut creation_reason = None;
     let mut assignee = String::new();
     let mut tier = None;
     let mut changespec_name = String::new();
@@ -293,6 +296,8 @@ pub(super) fn parse_create_args(
                 | "--type"
                 | "-d"
                 | "--description"
+                | "-w"
+                | "--reason"
                 | "-a"
                 | "--assignee"
                 | "-r"
@@ -322,6 +327,7 @@ pub(super) fn parse_create_args(
             "-t" | "--title" => title = Some(value),
             "-T" | "--type" => type_arg = Some(value),
             "-d" | "--description" => description = value,
+            "-w" | "--reason" => creation_reason = Some(value),
             "-a" | "--assignee" => assignee = value,
             "-r" | "--tier" => {
                 tier =
@@ -348,6 +354,7 @@ pub(super) fn parse_create_args(
         parent_id: parsed_type.parent_id,
         plan_path: parsed_type.plan_path,
         description,
+        creation_reason,
         assignee,
         tier,
         changespec_name,

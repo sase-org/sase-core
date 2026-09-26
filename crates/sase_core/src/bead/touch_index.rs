@@ -52,7 +52,13 @@ use super::wire::{BeadError, BeadResolutionWire, IssueTypeWire, StatusWire};
 ///
 /// Bumping it makes every existing index a cache miss: the next refresh
 /// rebuilds from the streams and the query returns nothing until then.
-pub const BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION: u32 = 4;
+
+/// Bound on the creation reason stored in a [`BeadTouchWire`], in Unicode
+/// scalar values (`char`s). The indexed row carries only this prefix (with
+/// `creation_reason_truncated` marking the cut); the full stored reason
+/// stays on the bead for detail views.
+pub const CREATION_REASON_PREVIEW_LIMIT: usize = 512;
 
 /// Bound on the note text stored in a [`BeadNotePreviewWire`], in Unicode
 /// scalar values (`char`s). One pathological note cannot grow the shared
@@ -119,6 +125,16 @@ pub struct BeadTouchWire {
     /// actor has no surviving notes here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_preview: Option<BeadNotePreviewWire>,
+    /// Bounded preview of why this bead was filed, taken from the original
+    /// `issue_created` event. Present only on the creating actor's row:
+    /// no other actor's row may imply it filed the bead. `None` on rows
+    /// whose bead predates the reason. The full text stays on the stored
+    /// bead for detail views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_reason: Option<String>,
+    /// True when `creation_reason` was shortened for the cache.
+    #[serde(default)]
+    pub creation_reason_truncated: bool,
     /// This actor's latest credited close for this bead, in stream order.
     /// `None` when the actor has no credited close here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,6 +344,11 @@ pub fn reduce_stream_touches(
     // payload or the legacy same-instant note author), not a borrow of the
     // event, so it cannot live in a borrowed-key map.
     let mut accs: BTreeMap<(String, String), TouchAcc> = BTreeMap::new();
+    // The creation reason per `(bead, creator)`, first `issue_created`
+    // wins: the reason belongs to the original filing, and only the
+    // credited creator's row may carry it.
+    let mut creation_reasons: HashMap<(String, String), (String, bool)> =
+        HashMap::new();
     let mut notes: HashMap<String, BTreeMap<String, LiveNote>> = HashMap::new();
     // The actor's latest credited close for that bead, in stream order:
     // `((bead_id, actor), (stream index, close detail, display timestamp))`.
@@ -368,6 +389,13 @@ pub fn reduce_stream_touches(
         accs.entry((event.issue_id.clone(), actor.to_string()))
             .or_default()
             .record(verb, event);
+        if event.operation == BeadEventOperationWire::IssueCreated {
+            if let Some(reason) = &event.creation_reason {
+                creation_reasons
+                    .entry((event.issue_id.clone(), actor.to_string()))
+                    .or_insert_with(|| truncate_creation_reason(reason));
+            }
+        }
     }
 
     accs.into_iter()
@@ -376,6 +404,10 @@ pub fn reduce_stream_touches(
             let meta = metas.get(bead_id.as_str()).cloned().unwrap_or_default();
             let (current_note_count, note_preview) =
                 note_preview_for(&bead_id, &actor, &notes);
+            let (creation_reason, creation_reason_truncated) = creation_reasons
+                .remove(&(bead_id.clone(), actor.clone()))
+                .map(|(text, truncated)| (Some(text), truncated))
+                .unwrap_or((None, false));
             let close = latest_close
                 .get(&(bead_id.clone(), actor.clone()))
                 .map(|(idx, detail, at_text)| {
@@ -410,6 +442,8 @@ pub fn reduce_stream_touches(
                 last_at: last.text,
                 current_note_count,
                 note_preview,
+                creation_reason,
+                creation_reason_truncated,
                 close,
                 stream_id: stream_id.to_string(),
             })
@@ -579,6 +613,39 @@ fn truncate_preview_text(text: &str) -> (String, bool) {
         return (text.to_string(), false);
     }
     (text.chars().take(NOTE_PREVIEW_TEXT_LIMIT).collect(), true)
+}
+
+/// Read the trimmed creation reason off an `issue_created` payload.
+///
+/// Untyped on purpose, like [`meta_update`]: a reasonless legacy payload
+/// simply yields `None` instead of failing the whole stream, and a blank
+/// reason is indistinguishable from no reason.
+fn creation_reason_of(
+    operation: BeadEventOperationWire,
+    payload: &Value,
+) -> Option<String> {
+    if operation != BeadEventOperationWire::IssueCreated {
+        return None;
+    }
+    payload
+        .get("issue")
+        .and_then(|issue| issue.get("creation_reason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
+/// Cut a creation reason to [`CREATION_REASON_PREVIEW_LIMIT`] Unicode
+/// scalar values.
+fn truncate_creation_reason(text: &str) -> (String, bool) {
+    if text.chars().nth(CREATION_REASON_PREVIEW_LIMIT).is_none() {
+        return (text.to_string(), false);
+    }
+    (
+        text.chars().take(CREATION_REASON_PREVIEW_LIMIT).collect(),
+        true,
+    )
 }
 
 /// Bring the index at `index_path` up to date with `beads_dir`'s streams.
@@ -910,6 +977,9 @@ struct ParsedEvent {
     meta_update: MetaUpdate,
     note_detail: NoteDetail,
     close_detail: CloseDetail,
+    /// Trimmed `creation_reason` from an `issue_created` payload, `None`
+    /// when the operation is anything else or the reason is blank.
+    creation_reason: Option<String>,
 }
 
 /// Close facts carried by an `issue_closed` event's payload.
@@ -988,6 +1058,7 @@ impl ParsedEvent {
             meta_update: meta_update(operation, payload),
             note_detail,
             close_detail,
+            creation_reason: creation_reason_of(operation, payload),
         })
     }
 }
@@ -1353,17 +1424,32 @@ mod tests {
         issue_type: &str,
         timestamp: &str,
     ) -> String {
+        created_with_reason(actor, issue_id, title, issue_type, timestamp, None)
+    }
+
+    fn created_with_reason(
+        actor: &str,
+        issue_id: &str,
+        title: &str,
+        issue_type: &str,
+        timestamp: &str,
+        reason: Option<&str>,
+    ) -> String {
+        let mut issue = json!({
+            "id": issue_id,
+            "title": title,
+            "status": "open",
+            "issue_type": issue_type,
+        });
+        if let Some(reason) = reason {
+            issue["creation_reason"] = json!(reason);
+        }
         event(
             actor,
             "issue_created",
             issue_id,
             timestamp,
-            json!({"issue": {
-                "id": issue_id,
-                "title": title,
-                "status": "open",
-                "issue_type": issue_type,
-            }}),
+            json!({"issue": issue}),
         )
     }
 
@@ -2235,6 +2321,7 @@ mod tests {
                     "text": "text",
                     "truncated": false,
                 },
+                "creation_reason_truncated": false,
                 "stream_id": "b-1",
             })
         );
@@ -2635,6 +2722,192 @@ mod tests {
         assert_eq!(touches[0].actor, AGENT_A);
         assert_eq!(touches[0].verbs, verbs(&[("noted", 1)]));
         assert_eq!(touches[0].close, None);
+    }
+
+    #[test]
+    fn creation_reason_lands_only_on_the_creator_row() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created_with_reason(
+                    AGENT_A,
+                    "b-1",
+                    "Bead",
+                    "task",
+                    "2026-01-01T00:00:00Z",
+                    Some("a second agent reproduced the flake"),
+                ),
+                note(AGENT_B, "b-1", "2026-01-01T00:01:00Z"),
+            ]),
+        );
+        let creator = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(creator.verbs, verbs(&[("created", 1)]));
+        assert_eq!(
+            creator.creation_reason.as_deref(),
+            Some("a second agent reproduced the flake")
+        );
+        assert!(!creator.creation_reason_truncated);
+        // The noter never filed this bead, so its row carries no reason.
+        let noter = touch_for(&touches, "b-1", AGENT_B);
+        assert_eq!(noter.verbs, verbs(&[("noted", 1)]));
+        assert_eq!(noter.creation_reason, None);
+        assert!(!noter.creation_reason_truncated);
+    }
+
+    #[test]
+    fn reasonless_and_blank_reasons_index_as_absent() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created(AGENT_A, "b-1", "Bead", "task", "2026-01-01T00:00:00Z"),
+                created_with_reason(
+                    AGENT_A,
+                    "b-2",
+                    "Bead",
+                    "task",
+                    "2026-01-01T00:00:00Z",
+                    Some("   "),
+                ),
+            ]),
+        );
+        for bead_id in ["b-1", "b-2"] {
+            let touch = touch_for(&touches, bead_id, AGENT_A);
+            assert_eq!(touch.creation_reason, None);
+            assert!(!touch.creation_reason_truncated);
+        }
+        // Absent reasons stay out of the serialized row entirely.
+        let value = serde_json::to_value(&touches[0]).unwrap();
+        assert!(value.get("creation_reason").is_none());
+    }
+
+    #[test]
+    fn long_creation_reason_truncates_with_a_marker() {
+        let exact = "é".repeat(CREATION_REASON_PREVIEW_LIMIT);
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[created_with_reason(
+                AGENT_A,
+                "b-1",
+                "Bead",
+                "task",
+                "2026-01-01T00:00:00Z",
+                Some(&exact),
+            )]),
+        );
+        let touch = touch_for(&touches, "b-1", AGENT_A);
+        assert_eq!(touch.creation_reason.as_deref(), Some(exact.as_str()));
+        assert!(!touch.creation_reason_truncated);
+
+        let long = "é".repeat(CREATION_REASON_PREVIEW_LIMIT + 5);
+        let touches = reduce_stream_touches(
+            "b-2",
+            &lines(&[created_with_reason(
+                AGENT_A,
+                "b-2",
+                "Bead",
+                "task",
+                "2026-01-01T00:00:00Z",
+                Some(&long),
+            )]),
+        );
+        let touch = touch_for(&touches, "b-2", AGENT_A);
+        assert_eq!(touch.creation_reason.as_deref(), Some(exact.as_str()));
+        assert!(touch.creation_reason_truncated);
+    }
+
+    #[test]
+    fn created_plus_closed_row_keeps_both_reason_and_close() {
+        let touches = reduce_stream_touches(
+            "b-1",
+            &lines(&[
+                created_with_reason(
+                    AGENT_A,
+                    "b-1",
+                    "Bead",
+                    "task",
+                    "2026-01-01T00:00:00Z",
+                    Some("filed from the flake triage"),
+                ),
+                event(
+                    AGENT_A,
+                    "issue_closed",
+                    "b-1",
+                    "2026-01-01T00:01:00Z",
+                    json!({
+                        "closed_by": AGENT_A,
+                        "close_reason": "verified",
+                        "resolution": "done",
+                    }),
+                ),
+            ]),
+        );
+        assert_eq!(touches.len(), 1);
+        let touch = &touches[0];
+        assert_eq!(touch.verbs, verbs(&[("created", 1), ("closed", 1)]));
+        assert_eq!(
+            touch.creation_reason.as_deref(),
+            Some("filed from the flake triage")
+        );
+        let close = touch.close.clone().expect("close record");
+        assert_eq!(close.reason.as_deref(), Some("verified"));
+        assert!(close.standing);
+    }
+
+    #[test]
+    fn refresh_rebuilds_reasons_from_streams_end_to_end() {
+        let store = Store::new();
+        store.write_stream(
+            "b-1",
+            &[
+                created_with_reason(
+                    AGENT_A,
+                    "b-1",
+                    "Bead",
+                    "task",
+                    "2026-01-01T00:00:00Z",
+                    Some("filed from the flake triage"),
+                ),
+                created(
+                    AGENT_B,
+                    "b-2",
+                    "Reasonless",
+                    "task",
+                    "2026-01-01T00:00:00Z",
+                ),
+            ],
+        );
+        let refreshed = store.refresh();
+        assert!(refreshed.full_rebuild);
+        assert_eq!(refreshed.touch_count, 2);
+
+        let queried = store.query(None);
+        assert_eq!(
+            queried.schema_version,
+            BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION
+        );
+        let reasoned = touch_for(&queried.touches, "b-1", AGENT_A);
+        assert_eq!(
+            reasoned.creation_reason.as_deref(),
+            Some("filed from the flake triage")
+        );
+        let reasonless = touch_for(&queried.touches, "b-2", AGENT_B);
+        assert_eq!(reasonless.creation_reason, None);
+
+        // A v3 cache is a miss under the bumped schema and rebuilds with
+        // reasons instead of reusing stale rows.
+        let mut stale = store.read_index();
+        stale.schema_version = BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION - 1;
+        stale.touches.clear();
+        store.write_index(&stale);
+        let rebuilt = store.refresh();
+        assert!(rebuilt.full_rebuild);
+        let queried = store.query(None);
+        assert_eq!(
+            touch_for(&queried.touches, "b-1", AGENT_A)
+                .creation_reason
+                .as_deref(),
+            Some("filed from the flake triage")
+        );
     }
 
     #[test]

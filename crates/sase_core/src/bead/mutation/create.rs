@@ -14,6 +14,7 @@ use crate::bead::config::default_config;
 use crate::bead::config::save_config;
 use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
+use crate::bead::wire::normalize_creation_reason;
 use crate::bead::wire::validate_unique_external_refs;
 use crate::bead::wire::BeadError;
 use crate::bead::wire::BeadTierWire;
@@ -56,6 +57,11 @@ pub fn create_issue(
             "new task issue creation requires an explicit task type",
         ));
     }
+    // Gate the reason before the lock opens a mutation: a blank or
+    // overlong value never reaches the store, while an absent one stays
+    // the historical empty-reason state for older clients.
+    let creation_reason =
+        normalize_creation_reason(request.creation_reason.as_deref())?;
     with_bead_mutation_lock(beads_dir, "create", || {
         let mut store = MutableStore::load(beads_dir)?;
         let tier = default_create_tier(&request);
@@ -125,6 +131,7 @@ pub fn create_issue(
             changespec_name: request.changespec_name,
             changespec_bug_id: request.changespec_bug_id,
             external_ref: request.external_ref,
+            creation_reason: creation_reason.clone(),
             dependencies: Vec::new(),
         };
         issue.validate()?;

@@ -2303,6 +2303,7 @@ fn issue(
         changespec_name: String::new(),
         changespec_bug_id: String::new(),
         external_ref: String::new(),
+        creation_reason: String::new(),
         dependencies: Vec::new(),
     }
 }

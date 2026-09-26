@@ -100,14 +100,15 @@ pub use touch_index::{
     BeadStreamSignatureWire, BeadTouchIndexStateWire, BeadTouchIndexStatusWire,
     BeadTouchIndexWire, BeadTouchQueryWire, BeadTouchRefreshWire,
     BeadTouchWire, BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION,
-    NOTE_PREVIEW_TEXT_LIMIT,
+    CREATION_REASON_PREVIEW_LIMIT, NOTE_PREVIEW_TEXT_LIMIT,
 };
 pub use wire::{
-    flag_thresholds_due, notes_text, parse_snooze_timestamp,
-    validate_model_value, BeadCloseRecordWire, BeadError, BeadNoteWire,
-    BeadReopenCauseWire, BeadResolutionWire, BeadSearchMatchWire,
-    BeadSnoozeWire, BeadTierWire, DependencyWire, IssueTypeWire, IssueWire,
-    PhaseSizeWire, StatusWire, TaskPlusOneEvidenceWire,
+    flag_thresholds_due, normalize_creation_reason, notes_text,
+    parse_snooze_timestamp, validate_model_value, BeadCloseRecordWire,
+    BeadError, BeadNoteWire, BeadReopenCauseWire, BeadResolutionWire,
+    BeadSearchMatchWire, BeadSnoozeWire, BeadTierWire, DependencyWire,
+    IssueTypeWire, IssueWire, PhaseSizeWire, StatusWire,
+    TaskPlusOneEvidenceWire, CREATION_REASON_MAX_LEN,
 };
 pub use work::{
     build_epic_work_plan, build_epic_work_plan_from_issues, EpicWorkPlanWire,

@@ -56,7 +56,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
-        assert_eq!(py_bead_touch_index_wire_schema_version(), 3);
+        assert_eq!(py_bead_touch_index_wire_schema_version(), 4);
 
         let dir = tempdir().unwrap();
         let beads_dir = dir.path().join("beads");
@@ -83,7 +83,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                     "owner@example.com",
                     "issue_created",
                     "2026-01-01T00:00:00Z",
-                    json!({"issue": {"id": "b-1", "title": "Bead", "status": "open", "issue_type": "task"}}),
+                    json!({"issue": {"id": "b-1", "title": "Bead", "status": "open", "issue_type": "task", "creation_reason": "filed from triage"}}),
                 ),
                 event(
                     "2",
@@ -122,7 +122,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         let miss = py_to_json_value(miss.bind(py)).unwrap();
         assert_eq!(
             miss,
-            json!({"schema_version": 3, "generation": "", "touches": []})
+            json!({"schema_version": 4, "generation": "", "touches": []})
         );
 
         let refresh =
@@ -132,7 +132,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             refresh,
             json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "generation": generation,
                 "full_rebuild": true,
                 "wrote": true,
@@ -149,7 +149,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             query,
             json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "generation": generation,
                 "touches": [
                     {
@@ -169,6 +169,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                             "text": "y",
                             "truncated": false,
                         },
+                        "creation_reason_truncated": false,
                         "stream_id": "b-1",
                     },
                     {
@@ -188,6 +189,7 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
                             "text": "x",
                             "truncated": false,
                         },
+                        "creation_reason_truncated": false,
                         "stream_id": "b-1",
                     },
                 ],
@@ -209,9 +211,9 @@ fn bead_touch_index_bindings_round_trip_the_complete_snapshot() {
         assert_eq!(
             fresh,
             json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "state": "fresh",
-                "index_schema_version": 3,
+                "index_schema_version": 4,
                 "generation": generation,
                 "indexed_streams": 1,
                 "current_streams": 1,
@@ -1179,6 +1181,95 @@ fn bead_create_binding_round_trips_task_type_and_fields() {
             value["issue"]["task_type_fields"]["evidence"],
             "failed then passed"
         );
+    });
+}
+
+#[test]
+fn bead_create_binding_round_trips_creation_reason() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+    let beads_dir = temp.path().join("beads");
+
+    Python::with_gil(|py| {
+        let path = beads_dir.to_str().unwrap();
+        // An explicit reason is trimmed, stored, and read back intact.
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "title": "Retry race",
+                "issue_type": "task",
+                "size": "small",
+                "task_type": "bug",
+                "creation_reason": "  a second agent reproduced dropped retries  ",
+                "now": "2026-01-01T00:00:00Z"
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let created = py_bead_create(py, path, request).unwrap();
+        let value = py_to_json_value(created.bind(py)).unwrap();
+        assert_eq!(
+            value["issue"]["creation_reason"],
+            "a second agent reproduced dropped retries"
+        );
+        let issue_id = value["issue"]["id"].as_str().unwrap().to_string();
+
+        let shown = py_bead_show(py, path, &issue_id).unwrap();
+        let shown = py_to_json_value(shown.bind(py)).unwrap();
+        assert_eq!(
+            shown["creation_reason"],
+            "a second agent reproduced dropped retries"
+        );
+
+        // A request from a released client predates the field: the reason
+        // stays absent rather than failing or fabricating one.
+        let legacy = json_value_to_py(
+            py,
+            &json!({
+                "title": "Reasonless",
+                "issue_type": "plan",
+                "now": "2026-01-01T00:01:00Z"
+            }),
+        )
+        .unwrap();
+        let legacy = legacy.bind(py).downcast::<PyDict>().unwrap();
+        let created = py_bead_create(py, path, legacy).unwrap();
+        let value = py_to_json_value(created.bind(py)).unwrap();
+        assert!(value["issue"].get("creation_reason").is_none());
+
+        // Blank and overlong reasons are rejected before any mutation.
+        for reason in [json!(""), json!("   ")] {
+            let bad = json_value_to_py(
+                py,
+                &json!({
+                    "title": "Bad reason",
+                    "issue_type": "plan",
+                    "creation_reason": reason,
+                    "now": "2026-01-01T00:02:00Z"
+                }),
+            )
+            .unwrap();
+            let bad = bad.bind(py).downcast::<PyDict>().unwrap();
+            let error = py_bead_create(py, path, bad).unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be empty or blank"),
+                "{error}"
+            );
+        }
+        let bad = json_value_to_py(
+            py,
+            &json!({
+                "title": "Overlong reason",
+                "issue_type": "plan",
+                "creation_reason": "r".repeat(2001),
+                "now": "2026-01-01T00:03:00Z"
+            }),
+        )
+        .unwrap();
+        let bad = bad.bind(py).downcast::<PyDict>().unwrap();
+        let error = py_bead_create(py, path, bad).unwrap_err();
+        assert!(error.to_string().contains("at most"), "{error}");
     });
 }
 

@@ -125,6 +125,45 @@ fn create_and_remove_are_handled_with_mutation_summaries() {
 }
 
 #[test]
+fn create_reason_passes_through_and_blank_is_rejected() {
+    let store = seed_issues(Vec::new());
+    let plan_path = store.beads_dir.parent().unwrap().join("plan.md");
+    fs::write(&plan_path, "# Plan\n").unwrap();
+
+    let created = execute_search(
+        &store.beads_dir,
+        &[
+            "create",
+            "--title",
+            "Reasoned plan",
+            "--type",
+            &format!("plan({})", plan_path.display()),
+            "-w",
+            "  filed from the flake triage  ",
+        ],
+    );
+    assert_eq!(created.exit_code, 0);
+    let issue = read_store_issues(&store.beads_dir).unwrap().remove(0);
+    assert_eq!(issue.creation_reason, "filed from the flake triage");
+
+    let rejected = execute_search(
+        &store.beads_dir,
+        &[
+            "create",
+            "--title",
+            "Blank reason",
+            "--type",
+            &format!("plan({})", plan_path.display()),
+            "--reason",
+            "   ",
+        ],
+    );
+    assert_eq!(rejected.exit_code, 1);
+    assert!(rejected.stderr.contains("cannot be empty or blank"));
+    assert_eq!(read_store_issues(&store.beads_dir).unwrap().len(), 1);
+}
+
+#[test]
 fn create_show_and_ref_verbs_honor_the_reference_contract() {
     let store = seed_issues(Vec::new());
     let plan_path = store.beads_dir.parent().unwrap().join("plan.md");

@@ -166,6 +166,42 @@ pub fn validate_model_value(model: &str) -> Result<(), BeadError> {
     Ok(())
 }
 
+/// Bound on a bead creation reason, in Unicode scalar values (`char`s).
+///
+/// A reason is one or two sentences explaining why the bead was filed, not
+/// an essay: file-backed reasons (`@<path>`) stay well under this, while a
+/// pasted design doc does not belong here.
+pub const CREATION_REASON_MAX_LEN: usize = 2000;
+
+/// Normalize an explicitly supplied bead creation reason.
+///
+/// `None` is the historical empty-reason state: beads filed before the
+/// reason existed, and requests from released clients whose wire predates
+/// the field, carry no reason and must keep loading. A supplied reason is
+/// trimmed and must be non-blank and within [`CREATION_REASON_MAX_LEN`].
+/// Stored issues are not re-validated here so pre-feature rows always load;
+/// the creation mutation is the single gate.
+pub fn normalize_creation_reason(
+    value: Option<&str>,
+) -> Result<String, BeadError> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(BeadError::validation(
+            "bead creation_reason cannot be empty or blank",
+        ));
+    }
+    let len = trimmed.chars().count();
+    if len > CREATION_REASON_MAX_LEN {
+        return Err(BeadError::validation(format!(
+            "bead creation_reason must be at most {CREATION_REASON_MAX_LEN} characters: got {len}"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 pub(crate) fn deserialize_option_non_empty_string<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
@@ -841,6 +877,14 @@ pub struct IssueWire {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub external_ref: String,
+    /// Why this bead was filed. Immutable: no update request carries it.
+    /// Empty on pre-feature beads; never fabricated from title/description.
+    #[serde(
+        default = "empty_string",
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub creation_reason: String,
     #[serde(default)]
     pub dependencies: Vec<DependencyWire>,
 }
@@ -945,6 +989,11 @@ struct IssueWireRaw {
         deserialize_with = "deserialize_string_default_empty"
     )]
     pub external_ref: String,
+    #[serde(
+        default = "empty_string",
+        deserialize_with = "deserialize_string_default_empty"
+    )]
+    pub creation_reason: String,
     #[serde(default)]
     pub dependencies: Vec<DependencyWire>,
 }
@@ -996,6 +1045,7 @@ impl<'de> Deserialize<'de> for IssueWire {
             changespec_name: raw.changespec_name,
             changespec_bug_id: raw.changespec_bug_id,
             external_ref: raw.external_ref,
+            creation_reason: raw.creation_reason,
             dependencies: raw.dependencies,
         })
     }
@@ -1221,6 +1271,7 @@ mod tests {
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             external_ref: String::new(),
+            creation_reason: String::new(),
             dependencies: vec![],
         }
     }
@@ -1394,6 +1445,7 @@ mod tests {
         assert!(issue.plus_one_evidence.is_empty());
         assert_eq!(issue.changespec_name, "");
         assert_eq!(issue.external_ref, "");
+        assert_eq!(issue.creation_reason, "");
         assert_eq!(issue.dependencies[0].created_at, "");
     }
 
@@ -1409,6 +1461,48 @@ mod tests {
         let decoded: IssueWire = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded.external_ref, "bug:sase#42");
         decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn creation_reason_round_trips_and_stays_absent_when_empty() {
+        let mut issue = phase(Some("test-0"));
+        assert!(issue.creation_reason.is_empty());
+        let without_reason = serde_json::to_value(&issue).unwrap();
+        assert!(without_reason.get("creation_reason").is_none());
+
+        issue.creation_reason =
+            "A second agent reproduced dropped retries".to_string();
+        issue.validate().unwrap();
+        let encoded = serde_json::to_value(&issue).unwrap();
+        assert_eq!(
+            encoded["creation_reason"],
+            "A second agent reproduced dropped retries"
+        );
+        let decoded: IssueWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, issue);
+
+        // A row written before this change carries no key at all.
+        let legacy =
+            serde_json::from_value::<IssueWire>(without_reason).unwrap();
+        assert!(legacy.creation_reason.is_empty());
+        legacy.validate().unwrap();
+    }
+
+    #[test]
+    fn normalize_creation_reason_keeps_history_readable_but_gates_writes() {
+        assert_eq!(normalize_creation_reason(None).unwrap(), "");
+        assert_eq!(normalize_creation_reason(Some("  why  ")).unwrap(), "why");
+        for blank in ["", "   ", "\n\t "] {
+            let error = normalize_creation_reason(Some(blank)).unwrap_err();
+            assert_eq!(error.kind, "validation");
+            assert!(error.message.contains("cannot be empty or blank"));
+        }
+        let exact = "x".repeat(CREATION_REASON_MAX_LEN);
+        assert_eq!(normalize_creation_reason(Some(&exact)).unwrap(), exact);
+        let overlong = "y".repeat(CREATION_REASON_MAX_LEN + 1);
+        let error = normalize_creation_reason(Some(&overlong)).unwrap_err();
+        assert_eq!(error.kind, "validation");
+        assert!(error.message.contains("at most 2000 characters"));
     }
 
     #[test]

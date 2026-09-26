@@ -28,6 +28,7 @@ pub const BEAD_SEARCH_FIELD_NAMES: &[&str] = &[
     "changespec_name",
     "changespec_bug_id",
     "external_ref",
+    "creation_reason",
     "status",
     "type",
     "tier",
@@ -331,6 +332,7 @@ fn searchable_fields(issue: &IssueWire) -> Vec<SearchField<'_>> {
         field("changespec_name", issue.changespec_name.as_str()),
         field("changespec_bug_id", issue.changespec_bug_id.as_str()),
         field("external_ref", issue.external_ref.as_str()),
+        field("creation_reason", issue.creation_reason.as_str()),
         field("status", status_value(&issue.status)),
         field("type", issue_type_value(&issue.issue_type)),
     ];
@@ -523,6 +525,14 @@ mod tests {
                     issue.external_ref = "bug:sase#42".to_string();
                 }),
                 "sase#42",
+            ),
+            (
+                "creation_reason",
+                task_issue_with(|issue| {
+                    issue.creation_reason =
+                        "a second agent reproduced the flake".to_string();
+                }),
+                "reproduced",
             ),
             (
                 "status",
@@ -1054,6 +1064,7 @@ mod tests {
             changespec_name: String::new(),
             changespec_bug_id: String::new(),
             external_ref: String::new(),
+            creation_reason: String::new(),
             dependencies: Vec::new(),
         };
         update(&mut issue);
