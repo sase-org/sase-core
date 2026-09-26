@@ -454,8 +454,14 @@ impl AgentUnitWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcUnitWire {
     pub code: CodeValueWire,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_name: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "shell_name",
+        alias = "proc_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub proc_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

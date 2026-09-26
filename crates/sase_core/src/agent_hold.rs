@@ -223,8 +223,9 @@ pub struct AgentHoldCandidateWire {
     pub artifact_dirs: Vec<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub proc_shell: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(default, rename = "proc_shell", alias = "named_proc")]
+    pub named_proc: Option<String>,
     #[serde(default, alias = "family")]
     pub agent_session: Option<String>,
     #[serde(default)]
@@ -734,7 +735,7 @@ fn capture_identity_as_candidate(
         },
         artifact_dirs: identity.artifact_dir.clone().into_iter().collect(),
         agent_name: identity.agent_name.clone(),
-        proc_shell: None,
+        named_proc: None,
         agent_session: identity.agent_session.clone(),
         clan: identity.clan.clone(),
         workflow: None,
@@ -1047,9 +1048,9 @@ fn validate_and_normalize_candidate(
         "candidate.agent_name",
         candidate.agent_name.take(),
     )?;
-    candidate.proc_shell = normalize_optional_agent_name(
-        "candidate.proc_shell",
-        candidate.proc_shell.take(),
+    candidate.named_proc = normalize_optional_agent_name(
+        "candidate.named_proc",
+        candidate.named_proc.take(),
     )?;
     candidate.agent_session = normalize_optional_agent_session(
         "candidate.agent_session",
@@ -1306,12 +1307,13 @@ fn selector_matches(
     if let Some(agent_name) = &candidate.agent_name {
         push_exact_matches(&mut matches, "name", &selectors.names, agent_name);
     }
-    if let Some(proc_shell) = &candidate.proc_shell {
+    if let Some(named_proc) = &candidate.named_proc {
         push_exact_matches(
             &mut matches,
+            // legacy sase-shell spelling; flips in contract-flip
             "proc_shell",
             &selectors.names,
-            proc_shell,
+            named_proc,
         );
     }
     if let Some(agent_session) = candidate_agent_session(candidate).as_deref() {
@@ -1336,9 +1338,9 @@ fn selector_matches(
             }
         }
     }
-    if let Some(proc_shell) = &candidate.proc_shell {
+    if let Some(named_proc) = &candidate.named_proc {
         for hood in &selectors.hoods {
-            if agent_name_in_hood(proc_shell, hood).unwrap_or(false) {
+            if agent_name_in_hood(named_proc, hood).unwrap_or(false) {
                 matches.push(AgentHoldSelectorMatchWire {
                     kind: "hood".to_string(),
                     value: hood.clone(),
@@ -1376,6 +1378,15 @@ fn selector_matches(
         });
     }
     matches
+}
+
+/// Whether a selector-match kind denotes the named-proc selector.
+///
+/// Emitted matches still use the legacy `proc_shell` spelling; readers also
+/// accept the new `named_proc` spelling.
+// legacy sase-shell spelling; flips in contract-flip
+pub fn hold_selector_match_is_named_proc(kind: &str) -> bool {
+    matches!(kind, "proc_shell" | "named_proc")
 }
 
 fn push_intersection_matches(
@@ -1544,7 +1555,7 @@ mod tests {
             created_at: NOW + 5.0,
             artifact_dirs: vec!["artifacts/old".to_string()],
             agent_name: Some("target.agent--code".to_string()),
-            proc_shell: None,
+            named_proc: None,
             agent_session: None,
             clan: Some("blocked-clan".to_string()),
             workflow: Some("wf".to_string()),
@@ -2270,7 +2281,7 @@ mod tests {
     }
 
     #[test]
-    fn proc_shell_matches_name_and_hood_selectors_without_agent_session_kin() {
+    fn named_proc_matches_name_and_hood_selectors_without_agent_session_kin() {
         let mut record = AgentHoldRecordWire {
             schema_version: AGENT_HOLD_WIRE_SCHEMA_VERSION,
             armer: armer("holder"),
@@ -2291,7 +2302,7 @@ mod tests {
         target.clan = None;
         target.workflow = None;
         target.tribe = None;
-        target.proc_shell = Some("build.check".to_string());
+        target.named_proc = Some("build.check".to_string());
 
         let block = hold_blocks_candidate(&record, &target).unwrap().unwrap();
         assert_eq!(
@@ -2306,6 +2317,33 @@ mod tests {
         record.selectors.names = vec!["other".to_string()];
         record.selectors.hoods = vec!["other".to_string()];
         assert!(hold_blocks_candidate(&record, &target).unwrap().is_none());
+    }
+
+    #[test]
+    fn candidate_accepts_named_proc_spelling_and_emits_proc_shell() {
+        let mut wire = candidate();
+        wire.artifact_dirs.clear();
+        wire.agent_name = None;
+        wire.named_proc = Some("build.check".to_string());
+        let emitted = serde_json::to_value(&wire).unwrap();
+        assert_eq!(emitted["proc_shell"], json!("build.check"));
+        assert!(emitted.get("named_proc").is_none());
+
+        let legacy: AgentHoldCandidateWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(legacy, wire);
+
+        let mut renamed_value = emitted;
+        let object = renamed_value.as_object_mut().unwrap();
+        let value = object.remove("proc_shell").unwrap();
+        object.insert("named_proc".to_string(), value);
+        let renamed: AgentHoldCandidateWire =
+            serde_json::from_value(renamed_value).unwrap();
+        assert_eq!(renamed, wire);
+
+        assert!(hold_selector_match_is_named_proc("proc_shell"));
+        assert!(hold_selector_match_is_named_proc("named_proc"));
+        assert!(!hold_selector_match_is_named_proc("session"));
     }
 
     #[test]

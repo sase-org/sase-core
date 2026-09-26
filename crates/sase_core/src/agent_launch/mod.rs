@@ -52,7 +52,7 @@ pub use proc_runtime::{
     cleanup_proc_private_inputs, parse_proc_duration_seconds,
     prepare_proc_script, proc_script_argv, resolve_proc_execution_cwd,
     sanitized_proc_env, validate_proc_workspace_intent,
-    validate_standalone_proc_shell_name, ProcDispatchPreparedWire,
+    validate_standalone_named_proc_name, ProcDispatchPreparedWire,
     ProcDispatchRequestWire, PROC_DISPATCH_WIRE_SCHEMA_VERSION,
     PROC_PHASE_ACQUIRING_WORKSPACE, PROC_PHASE_CHECKING,
     PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING, PROC_PHASE_SETTLING,

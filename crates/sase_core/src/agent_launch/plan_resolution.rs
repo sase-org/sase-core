@@ -1,5 +1,5 @@
 //! Typed-plan resolution: wait binding, hold-cycle validation, proc
-//! shell/workspace/project policy, dispatch validation, and the approval
+//! name/workspace/project policy, dispatch validation, and the approval
 //! preview plus content digest rendered from the resolved plan.
 use super::directive_scan::{
     directive_occurrences, disabled_region_ranges,
@@ -40,11 +40,9 @@ pub(crate) fn resolve_typed_waits(
                 }
             }
             LaunchUnitPayloadWire::Proc(proc_unit) => {
-                if let Some(shell_name) = proc_unit.shell_name.as_ref() {
-                    proc_names.insert(
-                        shell_name.clone(),
-                        raw.unit.logical_id.clone(),
-                    );
+                if let Some(proc_name) = proc_unit.proc_name.as_ref() {
+                    proc_names
+                        .insert(proc_name.clone(), raw.unit.logical_id.clone());
                 }
             }
         }
@@ -241,7 +239,7 @@ fn unit_hold_facts(raw: &RawLaunchUnit) -> UnitHoldFacts {
             }
         }
         LaunchUnitPayloadWire::Proc(proc_unit) => UnitHoldFacts {
-            identity: proc_unit.shell_name.clone(),
+            identity: proc_unit.proc_name.clone(),
             agent_session: None,
             clan: None,
             tribe: None,
@@ -311,15 +309,15 @@ fn wait_cycle_visit(
     None
 }
 
-pub(crate) fn validate_proc_shell_name(
-    shell_name: Option<&str>,
+pub(crate) fn validate_named_proc_name(
+    proc_name: Option<&str>,
     logical_id: &str,
     diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
 ) {
-    let Some(shell_name) = shell_name else {
+    let Some(proc_name) = proc_name else {
         return;
     };
-    if shell_name.contains("--") {
+    if proc_name.contains("--") {
         diagnostics.push(typed_unit_diagnostic(
             "invalid-proc-shell-name",
             "Proc %id names cannot use the agent-session `--` convention.",
@@ -327,7 +325,7 @@ pub(crate) fn validate_proc_shell_name(
             None,
         ));
     }
-    if !is_valid_proc_shell_name(shell_name) {
+    if !is_valid_named_proc_name(proc_name) {
         diagnostics.push(typed_unit_diagnostic(
             "invalid-proc-shell-name",
             "Proc %id names must be bare identifiers containing only letters, digits, `_`, `.`, or `-`.",
@@ -337,7 +335,7 @@ pub(crate) fn validate_proc_shell_name(
     }
 }
 
-fn is_valid_proc_shell_name(value: &str) -> bool {
+fn is_valid_named_proc_name(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -664,9 +662,9 @@ pub(crate) fn render_launch_approval_preview(
                 agent.prompt
             )),
             LaunchUnitPayloadWire::Proc(proc_unit) => lines.push(format!(
-                "{} proc shell={} project={} workspace={}{} waits={}{}{} code={}:{} preview={:?}",
+                "{} proc name={} project={} workspace={}{} waits={}{}{} code={}:{} preview={:?}",
                 unit.logical_id,
-                proc_unit.shell_name.as_deref().unwrap_or("auto"),
+                proc_unit.proc_name.as_deref().unwrap_or("auto"),
                 proc_unit.selected_project.as_deref().unwrap_or("none"),
                 proc_unit.workspace,
                 proc_queue_preview(proc_unit)

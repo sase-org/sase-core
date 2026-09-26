@@ -769,11 +769,27 @@ fn py_proc_script_argv(
 
 #[pyfunction]
 #[pyo3(
+    name = "validate_standalone_named_proc_name",
+    signature = (name = None)
+)]
+fn py_validate_standalone_named_proc_name(name: Option<&str>) -> PyResult<()> {
+    validate_standalone_named_proc_name_impl(name)
+}
+
+// legacy binding name; removed in contract-flip
+#[pyfunction]
+#[pyo3(
     name = "validate_standalone_proc_shell_name",
     signature = (name = None)
 )]
 fn py_validate_standalone_proc_shell_name(name: Option<&str>) -> PyResult<()> {
-    core_validate_standalone_proc_shell_name(name)
+    validate_standalone_named_proc_name_impl(name)
+}
+
+fn validate_standalone_named_proc_name_impl(
+    name: Option<&str>,
+) -> PyResult<()> {
+    core_validate_standalone_named_proc_name(name)
         .map_err(PyValueError::new_err)
 }
 
@@ -1187,6 +1203,10 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_prepare_proc_script, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_proc_duration_seconds, m)?)?;
     m.add_function(wrap_pyfunction!(py_proc_script_argv, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_validate_standalone_named_proc_name,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(
         py_validate_standalone_proc_shell_name,
         m

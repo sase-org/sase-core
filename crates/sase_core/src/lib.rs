@@ -248,7 +248,7 @@ pub use agent_launch::{
     reconcile_admission_journal, resolve_proc_execution_cwd, safe_launch_name,
     sanitize_safe_inputs, sanitized_condition_env, sanitized_proc_env,
     summarize_admission, validate_proc_workspace_intent,
-    validate_standalone_proc_shell_name, wait_target_key,
+    validate_standalone_named_proc_name, wait_target_key,
     AgentLaunchPreparationError, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, AgentUnitWire, BatchPredecessorContextWire,
     BatchPredecessorWaitBindingWire, ConditionCheckWire, ConditionContextWire,

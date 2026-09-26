@@ -194,3 +194,74 @@ fn proc_runtime_retention_binding_requires_trustworthy_store_snapshot() {
         assert!(!runtime_dir.exists());
     });
 }
+
+#[test]
+fn reserve_proc_accepts_proc_name_spelling_like_shell_name() {
+    pyo3::prepare_freethreaded_python();
+    fn reserve_payload(proc_id: &str, fingerprint: &str) -> serde_json::Value {
+        json!({
+            "schema_version": 3,
+            "proc_id": proc_id,
+            "label": "Binding proc",
+            "kind": "detached",
+            "argv": ["sleep", "1"],
+            "cwd": "/tmp",
+            "project": "sase",
+            "workspace_num": 16,
+            "session_id": null,
+            "session_label": null,
+            "origin": "test",
+            "cl_name": null,
+            "tags": ["binding"],
+            "created_at": "2026-07-25T12:00:10Z",
+            "log_path": "/tmp/proc-binding.log",
+            "log_owner": "proc-store",
+            "concurrency_keys": [],
+            "request_fingerprint": fingerprint,
+            "reserved_by": "agent-one",
+            "timeout_seconds": null,
+            "idle_timeout_seconds": null
+        })
+    }
+    Python::with_gil(|py| {
+        let mut legacy_payload = reserve_payload("proc-legacy", "fp-legacy");
+        legacy_payload["shell_name"] = json!("gateway");
+        legacy_payload["shell_kind"] = json!("proc");
+        let mut renamed_payload = reserve_payload("proc-renamed", "fp-renamed");
+        renamed_payload["proc_name"] = json!("gateway");
+        renamed_payload["proc_role"] = json!("proc");
+
+        let temp = tempfile::tempdir().unwrap();
+        let legacy_path = temp
+            .path()
+            .join("legacy.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let legacy_dict = json_value_to_py(py, &legacy_payload).unwrap();
+        let legacy_dict = legacy_dict.bind(py).downcast::<PyDict>().unwrap();
+        let legacy_outcome =
+            py_reserve_proc(py, &legacy_path, legacy_dict, 10).unwrap();
+        let legacy_outcome = py_to_json_value(legacy_outcome.bind(py)).unwrap();
+
+        let renamed_path = temp
+            .path()
+            .join("renamed.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let renamed_dict = json_value_to_py(py, &renamed_payload).unwrap();
+        let renamed_dict = renamed_dict.bind(py).downcast::<PyDict>().unwrap();
+        let renamed_outcome =
+            py_reserve_proc(py, &renamed_path, renamed_dict, 10).unwrap();
+        let renamed_outcome =
+            py_to_json_value(renamed_outcome.bind(py)).unwrap();
+
+        // Both spellings validate the same; emitted rows keep legacy keys.
+        assert_eq!(
+            renamed_outcome["proc"]["shell_name"],
+            legacy_outcome["proc"]["shell_name"]
+        );
+        assert_eq!(renamed_outcome["proc"]["shell_name"], json!("gateway"));
+        assert!(renamed_outcome["proc"].get("proc_name").is_none());
+        assert_eq!(renamed_outcome["proc"]["shell_kind"], json!("proc"));
+    });
+}

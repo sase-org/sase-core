@@ -36,7 +36,7 @@ fn hold_candidate(record: &RunnerCapacityRecordWire) -> AgentHoldCandidateWire {
         created_at: record.created_at.unwrap_or(1.0),
         artifact_dirs: vec![record.artifact_dir.clone()],
         agent_name: record.agent_name.clone(),
-        proc_shell: None,
+        named_proc: None,
         agent_session: record.agent_session.clone(),
         clan: record.clan.clone(),
         workflow: record.workflow.clone(),

@@ -172,7 +172,7 @@ fn typed_launch_plan_resolves_forward_proc_wait() {
     );
     match &plan.units[1].payload {
         LaunchUnitPayloadWire::Proc(proc_unit) => {
-            assert_eq!(proc_unit.shell_name.as_deref(), Some("build"));
+            assert_eq!(proc_unit.proc_name.as_deref(), Some("build"));
         }
         other => panic!("expected proc payload, got {other:?}"),
     }

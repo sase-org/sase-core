@@ -49,10 +49,12 @@ pub struct ProcWire {
     pub log_path: String,
     #[serde(default = "default_log_owner")]
     pub log_owner: String,
-    #[serde(default)]
-    pub shell_name: Option<String>,
-    #[serde(default)]
-    pub shell_kind: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(default, rename = "shell_name", alias = "proc_name")]
+    pub proc_name: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(default, rename = "shell_kind", alias = "proc_role")]
+    pub proc_role: Option<String>,
     #[serde(default)]
     pub concurrency_keys: Vec<String>,
     #[serde(default)]
@@ -91,15 +93,21 @@ pub struct ProcWire {
     pub service: Option<ProcServiceWire>,
 }
 
-/// Additive `%proc` launch metadata stored on a native proc-shell row.
+/// Additive `%proc` launch metadata stored on a native named-proc row.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct XpromptProcMetaWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_name: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "shell_name",
+        alias = "proc_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub proc_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,9 +176,16 @@ pub struct ProcReserveWire {
     pub log_path: String,
     #[serde(default = "default_log_owner")]
     pub log_owner: String,
-    pub shell_name: Option<String>,
-    #[serde(default = "default_shell_kind")]
-    pub shell_kind: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(rename = "shell_name", alias = "proc_name")]
+    pub proc_name: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default = "default_proc_role",
+        rename = "shell_kind",
+        alias = "proc_role"
+    )]
+    pub proc_role: Option<String>,
     #[serde(default)]
     pub concurrency_keys: Vec<String>,
     pub request_fingerprint: String,
@@ -337,18 +352,24 @@ pub struct ProcUpdateWire {
     pub log_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_owner: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
     #[serde(
         default,
+        rename = "shell_name",
+        alias = "proc_name",
         deserialize_with = "deserialize_present_option",
         skip_serializing_if = "Option::is_none"
     )]
-    pub shell_name: Option<Option<String>>,
+    pub proc_name: Option<Option<String>>,
+    // legacy sase-shell spelling; flips in contract-flip
     #[serde(
         default,
+        rename = "shell_kind",
+        alias = "proc_role",
         deserialize_with = "deserialize_present_option",
         skip_serializing_if = "Option::is_none"
     )]
-    pub shell_kind: Option<Option<String>>,
+    pub proc_role: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_keys: Option<Vec<String>>,
     #[serde(
@@ -528,6 +549,6 @@ fn default_log_owner() -> String {
     "proc-store".to_string()
 }
 
-fn default_shell_kind() -> Option<String> {
+fn default_proc_role() -> Option<String> {
     Some("proc".to_string())
 }

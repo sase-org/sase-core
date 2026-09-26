@@ -69,3 +69,34 @@ fn hold_directive_bindings_collect_format_and_expand() {
         assert_eq!(selectors_value["artifact_dirs"], json!(["artifact/a"]));
     });
 }
+
+#[test]
+fn standalone_named_proc_validators_agree_across_binding_names() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(
+            module
+                .getattr("validate_standalone_named_proc_name")
+                .is_ok(),
+            "missing validate_standalone_named_proc_name"
+        );
+        assert!(
+            module
+                .getattr("validate_standalone_proc_shell_name")
+                .is_ok(),
+            "missing validate_standalone_proc_shell_name"
+        );
+
+        py_validate_standalone_named_proc_name(Some("checks")).unwrap();
+        py_validate_standalone_proc_shell_name(Some("checks")).unwrap();
+        let new_err =
+            py_validate_standalone_named_proc_name(Some("agent--checks"))
+                .unwrap_err();
+        let legacy_err =
+            py_validate_standalone_proc_shell_name(Some("agent--checks"))
+                .unwrap_err();
+        assert_eq!(new_err.to_string(), legacy_err.to_string());
+    });
+}

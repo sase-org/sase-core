@@ -28,9 +28,10 @@ use super::wire::{
 
 /// Every proc kind the store accepts on write.
 const PROC_KINDS: [&str; 3] = ["command", "tui", "detached"];
-const PROC_LIFECYCLES: [&str; 2] = ["legacy", "proc-shell"];
+const PROC_LIFECYCLES: [&str; 3] = ["legacy", "proc-shell", "named-proc"];
 const STORE_LOG_OWNER: &str = "proc-store";
-const PROC_SHELL_LIFECYCLE: &str = "proc-shell";
+// legacy sase-shell spelling; flips in contract-flip
+const PROC_LIFECYCLE_NAMED_PROC: &str = "proc-shell";
 pub const SERVICE_PROC_HISTORY_LIMIT: usize = 20;
 /// Tag marking finished procs submitted from the TUI Command Line.
 pub const COMMAND_LINE_PROC_TAG: &str = "command-line";
@@ -139,7 +140,7 @@ pub fn append_proc(
     result
 }
 
-/// Atomically reserve a proc-shell row or replay an identical active request.
+/// Atomically reserve a named-proc row or replay an identical active request.
 pub fn reserve_proc(
     path: &Path,
     request: &ProcReserveWire,
@@ -188,7 +189,7 @@ pub fn reserve_proc(
     result
 }
 
-/// Mark a reserved proc-shell as claimed by one supervisor identity.
+/// Mark a reserved named-proc as claimed by one supervisor identity.
 pub fn claim_proc_supervisor(
     path: &Path,
     claim: &ProcSupervisorClaimWire,
@@ -202,7 +203,7 @@ pub fn claim_proc_supervisor(
         },
     )?;
     mutate_proc(path, "claim_proc_supervisor", &claim.proc_id, |proc| {
-        ensure_proc_shell(proc)?;
+        ensure_named_proc(proc)?;
         ensure_not_terminal(proc, "claim supervisor")?;
         ensure_supervisor_owner(proc, &claim.supervisor_id)?;
         proc.supervisor_id = Some(claim.supervisor_id.clone());
@@ -232,7 +233,7 @@ pub fn request_proc_stop(
             reason,
         })?;
     mutate_proc(path, "request_proc_stop", &request.proc_id, |proc| {
-        ensure_proc_shell(proc)?;
+        ensure_named_proc(proc)?;
         ensure_not_terminal(proc, "request stop")?;
         if proc.stop_requested_at.is_none() {
             proc.stop_requested_by = Some(request.requested_by.clone());
@@ -256,7 +257,7 @@ pub fn begin_proc_settlement(
             reason,
         })?;
     mutate_proc(path, "begin_proc_settlement", &settlement.proc_id, |proc| {
-        ensure_proc_shell(proc)?;
+        ensure_named_proc(proc)?;
         ensure_not_terminal(proc, "begin settlement")?;
         ensure_supervisor_matches(proc, &settlement.supervisor_id)?;
         proc.status = "settling".to_string();
@@ -296,7 +297,7 @@ pub fn finish_proc(
             reason,
         })?;
     mutate_proc(path, "finish_proc", &finish.proc_id, |proc| {
-        ensure_proc_shell(proc)?;
+        ensure_named_proc(proc)?;
         ensure_supervisor_matches(proc, &finish.supervisor_id)?;
         if is_terminal_status(&proc.status) {
             if proc.finished_by.as_deref()
@@ -431,7 +432,7 @@ where
         mutate(&mut rows[index])?;
         normalize_and_validate_proc(
             &mut rows[index],
-            ValidationMode::ProcShellWrite,
+            ValidationMode::NamedProcWrite,
         )?;
         let proc = rows[index].clone();
         write_procs_atomic(path, &rows)?;
@@ -734,7 +735,7 @@ fn proc_from_reserve_request(
         label: request.label.trim().to_string(),
         kind: request.kind.trim().to_string(),
         status: "pending".to_string(),
-        lifecycle: PROC_SHELL_LIFECYCLE.to_string(),
+        lifecycle: PROC_LIFECYCLE_NAMED_PROC.to_string(),
         argv: request.argv.clone(),
         command: request.argv.clone(),
         cwd: request.cwd.trim().to_string(),
@@ -755,8 +756,8 @@ fn proc_from_reserve_request(
         finished_at: None,
         log_path: request.log_path.trim().to_string(),
         log_owner: request.log_owner.trim().to_string(),
-        shell_name: request.shell_name.clone(),
-        shell_kind: request.shell_kind.clone(),
+        proc_name: request.proc_name.clone(),
+        proc_role: request.proc_role.clone(),
         concurrency_keys: request.concurrency_keys.clone(),
         request_fingerprint: Some(
             request.request_fingerprint.trim().to_string(),
@@ -778,7 +779,7 @@ fn proc_from_reserve_request(
         xprompt_proc: request.xprompt_proc.clone(),
         service: request.service.clone(),
     };
-    normalize_and_validate_proc(&mut proc, ValidationMode::ProcShellWrite)?;
+    normalize_and_validate_proc(&mut proc, ValidationMode::NamedProcWrite)?;
     Ok(proc)
 }
 
@@ -793,7 +794,7 @@ fn find_idempotent_replay(
                     row.project.as_deref(),
                     request.project.as_deref(),
                 )
-                && row.shell_name.as_deref() == request.shell_name.as_deref()
+                && row.proc_name.as_deref() == request.proc_name.as_deref()
                 && row.request_fingerprint.as_deref()
                     == Some(request.request_fingerprint.as_str())
         })
@@ -806,7 +807,7 @@ fn reject_reserve_conflicts(
 ) -> ProcStoreResult<()> {
     let request_keys = normalized_conflict_keys(
         request.project.as_deref(),
-        request.shell_name.as_deref(),
+        request.proc_name.as_deref(),
         &request.concurrency_keys,
     );
     for row in rows.iter().filter(|row| is_active_status(&row.status)) {
@@ -822,25 +823,29 @@ fn reject_reserve_conflicts(
             continue;
         }
         if let (Some(existing), Some(requested)) =
-            (row.shell_name.as_deref(), request.shell_name.as_deref())
+            (row.proc_name.as_deref(), request.proc_name.as_deref())
         {
             if existing == requested {
                 return Err(ProcStoreError::Conflict {
                     proc_id: row.proc_id.clone(),
                     field: "shell_name".to_string(),
                     value: requested.to_string(),
-                    reason: "active shell name is already reserved".to_string(),
+                    reason: "active proc name is already reserved".to_string(),
                 });
             }
         }
         let row_keys = normalized_conflict_keys(
             row.project.as_deref(),
-            row.shell_name.as_deref(),
+            row.proc_name.as_deref(),
             &row.concurrency_keys,
         );
-        if let Some(key) =
-            request_keys.iter().find(|key| row_keys.contains(*key))
-        {
+        let row_canonical: std::collections::HashSet<String> = row_keys
+            .iter()
+            .map(|key| canonical_conflict_key(key))
+            .collect();
+        if let Some(key) = request_keys.iter().find(|key| {
+            row_canonical.contains(canonical_conflict_key(key).as_str())
+        }) {
             return Err(ProcStoreError::Conflict {
                 proc_id: row.proc_id.clone(),
                 field: "concurrency_key".to_string(),
@@ -854,7 +859,7 @@ fn reject_reserve_conflicts(
 
 fn normalized_conflict_keys(
     project: Option<&str>,
-    shell_name: Option<&str>,
+    proc_name: Option<&str>,
     keys: &[String],
 ) -> Vec<String> {
     let mut values: Vec<String> = keys
@@ -863,18 +868,27 @@ fn normalized_conflict_keys(
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
         .collect();
-    if let Some(shell_name) = shell_name {
-        if !shell_name.trim().is_empty() {
+    if let Some(proc_name) = proc_name {
+        if !proc_name.trim().is_empty() {
             values.push(format!(
+                // legacy sase-shell spelling; flips in contract-flip
                 "shell:{}:{}",
                 project.unwrap_or(""),
-                shell_name.trim()
+                proc_name.trim()
             ));
         }
     }
     values.sort();
     values.dedup();
     values
+}
+
+/// Canonicalize a conflict key so the legacy `shell:` prefix and the new
+/// `named-proc:` prefix compare equal for the same project and name.
+fn canonical_conflict_key(key: &str) -> String {
+    key.strip_prefix("named-proc:")
+        .map(|rest| format!("shell:{rest}"))
+        .unwrap_or_else(|| key.to_string())
 }
 
 fn same_project(left: Option<&str>, right: Option<&str>) -> bool {
@@ -885,7 +899,7 @@ fn same_project(left: Option<&str>, right: Option<&str>) -> bool {
 enum ValidationMode {
     Read,
     LegacyWrite,
-    ProcShellWrite,
+    NamedProcWrite,
 }
 
 fn apply_update(
@@ -907,7 +921,7 @@ fn apply_update(
         // The first terminal status is final. Later terminal reports may
         // refine outcome fields, but cannot change the recorded disposition.
         if !was_terminal {
-            if is_proc_shell(proc)
+            if is_named_proc(proc)
                 && is_terminal_status(status)
                 && proc.status != "settling"
             {
@@ -933,13 +947,13 @@ fn apply_update(
         proc.lifecycle.clone_from(value);
     }
     if let Some(value) = &update.argv {
-        if is_proc_shell(proc) && *value != proc.argv {
+        if is_named_proc(proc) && *value != proc.argv {
             return Err(invalid_proc(proc, "argv is immutable".to_string()));
         }
         proc.argv.clone_from(value);
     }
     if let Some(value) = &update.command {
-        if is_proc_shell(proc) && *value != proc.command {
+        if is_named_proc(proc) && *value != proc.command {
             return Err(invalid_proc(proc, "command is immutable".to_string()));
         }
         proc.command.clone_from(value);
@@ -1000,11 +1014,11 @@ fn apply_update(
     if let Some(value) = &update.log_owner {
         proc.log_owner.clone_from(value);
     }
-    if let Some(value) = &update.shell_name {
-        proc.shell_name.clone_from(value);
+    if let Some(value) = &update.proc_name {
+        proc.proc_name.clone_from(value);
     }
-    if let Some(value) = &update.shell_kind {
-        proc.shell_kind.clone_from(value);
+    if let Some(value) = &update.proc_role {
+        proc.proc_role.clone_from(value);
     }
     if let Some(value) = &update.concurrency_keys {
         proc.concurrency_keys.clone_from(value);
@@ -1074,6 +1088,12 @@ fn normalize_and_validate_proc(
     if proc.lifecycle.is_empty() {
         proc.lifecycle = "legacy".to_string();
     }
+    if proc.lifecycle == "named-proc" {
+        // New writers may send the renamed lifecycle; storage keeps the
+        // legacy sase-shell spelling so emitted rows stay byte-identical.
+        // Flips in contract-flip.
+        proc.lifecycle = PROC_LIFECYCLE_NAMED_PROC.to_string();
+    }
     if proc.log_owner.is_empty() {
         proc.log_owner = STORE_LOG_OWNER.to_string();
     }
@@ -1083,8 +1103,8 @@ fn normalize_and_validate_proc(
     if proc.command.is_empty() && !proc.argv.is_empty() {
         proc.command.clone_from(&proc.argv);
     }
-    normalize_optional_string(&mut proc.shell_name);
-    normalize_optional_string(&mut proc.shell_kind);
+    normalize_optional_string(&mut proc.proc_name);
+    normalize_optional_string(&mut proc.proc_role);
     normalize_optional_string(&mut proc.request_fingerprint);
     normalize_optional_string(&mut proc.reserved_by);
     normalize_optional_string(&mut proc.reserved_at);
@@ -1123,7 +1143,7 @@ fn normalize_and_validate_proc(
         .map_err(|reason| invalid_proc(proc, reason))?;
     validate_status(&proc.status)
         .map_err(|reason| invalid_proc(proc, reason))?;
-    if mode == ValidationMode::ProcShellWrite || is_proc_shell(proc) {
+    if mode == ValidationMode::NamedProcWrite || is_named_proc(proc) {
         if proc.argv.is_empty() {
             return Err(invalid_proc(
                 proc,
@@ -1145,7 +1165,7 @@ fn normalize_and_validate_proc(
         if is_terminal_status(&proc.status) && proc.settled_at.is_none() {
             return Err(invalid_proc(
                 proc,
-                "terminal proc-shell rows must be settled first".to_string(),
+                "terminal named-proc rows must be settled first".to_string(),
             ));
         }
     }
@@ -1212,8 +1232,9 @@ fn is_terminal_status(status: &str) -> bool {
     matches!(status, "success" | "error" | "killed")
 }
 
-fn is_proc_shell(proc: &ProcWire) -> bool {
-    proc.lifecycle == PROC_SHELL_LIFECYCLE
+fn is_named_proc(proc: &ProcWire) -> bool {
+    proc.lifecycle == PROC_LIFECYCLE_NAMED_PROC
+        || proc.lifecycle == "named-proc"
 }
 
 fn normalize_optional_string(value: &mut Option<String>) {
@@ -1259,11 +1280,11 @@ fn validate_non_empty(field: &str, value: &str) -> ProcStoreResult<()> {
     Ok(())
 }
 
-fn ensure_proc_shell(proc: &ProcWire) -> ProcStoreResult<()> {
-    if !is_proc_shell(proc) {
+fn ensure_named_proc(proc: &ProcWire) -> ProcStoreResult<()> {
+    if !is_named_proc(proc) {
         return Err(invalid_proc(
             proc,
-            "operation requires a proc-shell lifecycle row".to_string(),
+            "operation requires a named-proc lifecycle row".to_string(),
         ));
     }
     Ok(())
@@ -1493,8 +1514,8 @@ mod tests {
             finished_at: None,
             log_path: format!("/tmp/{proc_id}.log"),
             log_owner: STORE_LOG_OWNER.to_string(),
-            shell_name: None,
-            shell_kind: None,
+            proc_name: None,
+            proc_role: None,
             concurrency_keys: Vec::new(),
             request_fingerprint: None,
             reserved_by: None,
@@ -1518,7 +1539,7 @@ mod tests {
 
     fn reserve_request(
         proc_id: &str,
-        shell_name: &str,
+        proc_name: &str,
         fingerprint: &str,
     ) -> ProcReserveWire {
         ProcReserveWire {
@@ -1538,8 +1559,8 @@ mod tests {
             created_at: "2026-07-25T12:00:00Z".to_string(),
             log_path: format!("/tmp/{proc_id}.log"),
             log_owner: STORE_LOG_OWNER.to_string(),
-            shell_name: Some(shell_name.to_string()),
-            shell_kind: Some("proc".to_string()),
+            proc_name: Some(proc_name.to_string()),
+            proc_role: Some("proc".to_string()),
             concurrency_keys: vec!["shared".to_string()],
             request_fingerprint: fingerprint.to_string(),
             reserved_by: "agent-one".to_string(),
@@ -1666,14 +1687,14 @@ mod tests {
         request.xprompt_proc = Some(XpromptProcMetaWire {
             logical_id: Some("unit-1".to_string()),
             label: Some("Verify docs".to_string()),
-            shell_name: Some("checks".to_string()),
+            proc_name: Some("checks".to_string()),
             ..XpromptProcMetaWire::default()
         });
 
         let reserved = reserve_proc(&path, &request, 10).unwrap().proc;
         let meta = reserved.xprompt_proc.unwrap();
         assert_eq!(meta.label.as_deref(), Some("Verify docs"));
-        assert_eq!(meta.shell_name.as_deref(), Some("checks"));
+        assert_eq!(meta.proc_name.as_deref(), Some("checks"));
 
         let updated = update_proc(
             &path,
@@ -1682,7 +1703,7 @@ mod tests {
                 xprompt_proc: Some(Some(XpromptProcMetaWire {
                     logical_id: Some("unit-1".to_string()),
                     label: Some("Verify docs".to_string()),
-                    shell_name: Some("checks".to_string()),
+                    proc_name: Some("checks".to_string()),
                     code_preview: Some("just check".to_string()),
                     ..XpromptProcMetaWire::default()
                 })),
@@ -1694,7 +1715,7 @@ mod tests {
         .unwrap();
         let meta = updated.xprompt_proc.unwrap();
         assert_eq!(meta.label.as_deref(), Some("Verify docs"));
-        assert_eq!(meta.shell_name.as_deref(), Some("checks"));
+        assert_eq!(meta.proc_name.as_deref(), Some("checks"));
         assert_eq!(meta.code_preview.as_deref(), Some("just check"));
     }
 
@@ -2022,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn reserve_replays_identical_shell_request_and_rejects_conflicts() {
+    fn reserve_replays_identical_proc_request_and_rejects_conflicts() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("procs.jsonl");
         let first = reserve_proc(
@@ -2034,7 +2055,7 @@ mod tests {
         assert!(first.reserved);
         assert!(!first.replayed);
         assert_eq!(first.proc.status, "pending");
-        assert_eq!(first.proc.lifecycle, PROC_SHELL_LIFECYCLE);
+        assert_eq!(first.proc.lifecycle, PROC_LIFECYCLE_NAMED_PROC);
         assert_eq!(first.proc.argv, vec!["sleep".to_string(), "1".to_string()]);
         assert_eq!(first.proc.command, first.proc.argv);
 
@@ -2048,14 +2069,14 @@ mod tests {
         assert!(replay.replayed);
         assert_eq!(replay.proc.proc_id, "first");
 
-        let shell_conflict = reserve_proc(
+        let name_conflict = reserve_proc(
             &path,
             &reserve_request("second", "agent--build", "fp-2"),
             10,
         )
         .unwrap_err();
         assert!(matches!(
-            shell_conflict,
+            name_conflict,
             ProcStoreError::Conflict { ref field, .. } if field == "shell_name"
         ));
 
@@ -2069,7 +2090,156 @@ mod tests {
     }
 
     #[test]
-    fn proc_shell_lifecycle_requires_settlement_and_single_supervisor_finish() {
+    fn proc_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+        let mut wire = proc("proc-one", "running", "2026-07-25T12:00:00Z");
+        wire.proc_name = Some("agent--build".to_string());
+        wire.proc_role = Some("proc".to_string());
+        let emitted = serde_json::to_value(&wire).unwrap();
+        assert_eq!(emitted["shell_name"], json!("agent--build"));
+        assert_eq!(emitted["shell_kind"], json!("proc"));
+        assert!(emitted.get("proc_name").is_none());
+        assert!(emitted.get("proc_role").is_none());
+
+        let legacy: ProcWire = serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(legacy, wire);
+
+        let mut renamed_value = emitted;
+        let object = renamed_value.as_object_mut().unwrap();
+        let name = object.remove("shell_name").unwrap();
+        let kind = object.remove("shell_kind").unwrap();
+        object.insert("proc_name".to_string(), name);
+        object.insert("proc_role".to_string(), kind);
+        let renamed: ProcWire = serde_json::from_value(renamed_value).unwrap();
+        assert_eq!(renamed, wire);
+    }
+
+    #[test]
+    fn proc_reserve_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+        let request = reserve_request("proc-one", "agent--build", "fp-1");
+        let emitted = serde_json::to_value(&request).unwrap();
+        assert_eq!(emitted["shell_name"], json!("agent--build"));
+        assert_eq!(emitted["shell_kind"], json!("proc"));
+        assert!(emitted.get("proc_name").is_none());
+        assert!(emitted.get("proc_role").is_none());
+
+        let mut renamed_value = emitted;
+        let object = renamed_value.as_object_mut().unwrap();
+        let name = object.remove("shell_name").unwrap();
+        let kind = object.remove("shell_kind").unwrap();
+        object.insert("proc_name".to_string(), name);
+        object.insert("proc_role".to_string(), kind);
+        let renamed: ProcReserveWire =
+            serde_json::from_value(renamed_value).unwrap();
+        assert_eq!(renamed, request);
+    }
+
+    #[test]
+    fn proc_update_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+        let update = ProcUpdateWire {
+            proc_id: "proc-one".to_string(),
+            proc_name: Some(Some("agent--build".to_string())),
+            proc_role: Some(Some("proc".to_string())),
+            ..ProcUpdateWire::default()
+        };
+        let emitted = serde_json::to_value(&update).unwrap();
+        assert_eq!(emitted["shell_name"], json!("agent--build"));
+        assert_eq!(emitted["shell_kind"], json!("proc"));
+        assert!(emitted.get("proc_name").is_none());
+        assert!(emitted.get("proc_role").is_none());
+
+        let legacy: ProcUpdateWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(legacy, update);
+
+        let renamed: ProcUpdateWire = serde_json::from_value(json!({
+            "proc_id": "proc-one",
+            "proc_name": "agent--build",
+            "proc_role": "proc",
+        }))
+        .unwrap();
+        assert_eq!(renamed, update);
+    }
+
+    #[test]
+    fn xprompt_proc_meta_emits_legacy_name_key_and_accepts_new_spelling() {
+        let meta = XpromptProcMetaWire {
+            proc_name: Some("agent--build".to_string()),
+            ..XpromptProcMetaWire::default()
+        };
+        let emitted = serde_json::to_value(&meta).unwrap();
+        assert_eq!(emitted["shell_name"], json!("agent--build"));
+        assert!(emitted.get("proc_name").is_none());
+
+        let renamed: XpromptProcMetaWire = serde_json::from_value(json!({
+            "proc_name": "agent--build",
+        }))
+        .unwrap();
+        assert_eq!(renamed, meta);
+    }
+
+    #[test]
+    fn named_proc_lifecycle_spelling_stores_legacy_value() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut row = proc("named", "running", "2026-07-25T12:00:00Z");
+        row.lifecycle = "named-proc".to_string();
+        row.request_fingerprint = Some("fp-1".to_string());
+        row.reserved_by = Some("agent-one".to_string());
+        row.reserved_at = Some("2026-07-25T12:00:00Z".to_string());
+        let outcome = append_proc(&path, &row, 10).unwrap();
+        let stored = outcome
+            .snapshot
+            .procs
+            .iter()
+            .find(|proc| proc.proc_id == "named")
+            .unwrap();
+        assert_eq!(stored.lifecycle, PROC_LIFECYCLE_NAMED_PROC);
+        assert!(is_named_proc(stored));
+    }
+
+    #[test]
+    fn conflict_keys_treat_named_proc_prefix_as_shell_prefix() {
+        assert_eq!(
+            canonical_conflict_key("named-proc:sase:checks"),
+            "shell:sase:checks"
+        );
+        assert_eq!(
+            canonical_conflict_key("shell:sase:checks"),
+            "shell:sase:checks"
+        );
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("procs.jsonl");
+        let mut first = reserve_request("first", "agent--build", "fp-1");
+        first.concurrency_keys = vec!["named-proc:sase:shared".to_string()];
+        reserve_proc(&path, &first, 10).unwrap();
+
+        // A stored new-prefix key collides with a legacy-prefix request key.
+        let mut legacy_request =
+            reserve_request("second", "agent--other", "fp-2");
+        legacy_request.concurrency_keys = vec!["shell:sase:shared".to_string()];
+        let legacy_conflict =
+            reserve_proc(&path, &legacy_request, 10).unwrap_err();
+        assert!(matches!(
+            legacy_conflict,
+            ProcStoreError::Conflict { ref field, .. } if field == "concurrency_key"
+        ));
+
+        // A stored legacy name key collides with a new-prefix request key.
+        let mut renamed_request =
+            reserve_request("third", "agent--third", "fp-3");
+        renamed_request.concurrency_keys =
+            vec!["named-proc:sase:agent--build".to_string()];
+        let renamed_conflict =
+            reserve_proc(&path, &renamed_request, 10).unwrap_err();
+        assert!(matches!(
+            renamed_conflict,
+            ProcStoreError::Conflict { ref field, .. } if field == "concurrency_key"
+        ));
+    }
+
+    #[test]
+    fn named_proc_lifecycle_requires_settlement_and_single_supervisor_finish() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("procs.jsonl");
         reserve_proc(

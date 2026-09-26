@@ -44,7 +44,7 @@ fn py_append_proc<'py>(
     proc_store_result_to_py(py, &outcome.map_err(proc_store_error_to_pyerr)?)
 }
 
-/// Reserve one proc-shell row, replaying an identical active request.
+/// Reserve one named-proc row, replaying an identical active request.
 #[pyfunction]
 #[pyo3(name = "reserve_proc")]
 fn py_reserve_proc<'py>(

@@ -93,7 +93,7 @@ fn agent_armer_identity(
 
 fn proc_label(proc_unit: &ProcUnitWire, logical_id: &str) -> String {
     proc_unit
-        .shell_name
+        .proc_name
         .clone()
         .unwrap_or_else(|| logical_id.to_string())
 }
@@ -105,6 +105,7 @@ mod tests {
         AgentUnitWire, LaunchUnitPayloadWire, ProcUnitWire,
     };
     use crate::fenced_code::CodeValueWire;
+    use serde_json::json;
 
     fn agent_unit(agent: AgentUnitWire) -> LaunchUnitWire {
         LaunchUnitWire {
@@ -127,7 +128,7 @@ mod tests {
     }
 
     fn proc_payload(
-        shell_name: Option<&str>,
+        proc_name: Option<&str>,
         label: Option<&str>,
     ) -> ProcUnitWire {
         ProcUnitWire {
@@ -140,7 +141,7 @@ mod tests {
                 digest: "digest".to_string(),
                 preview: "just check".to_string(),
             },
-            shell_name: shell_name.map(str::to_string),
+            proc_name: proc_name.map(str::to_string),
             label: label.map(str::to_string),
             timeout: None,
             idle_timeout: None,
@@ -155,6 +156,26 @@ mod tests {
             queue_weight_explicit: false,
             hold: None,
         }
+    }
+
+    #[test]
+    fn proc_unit_emits_legacy_shell_name_and_accepts_proc_name() {
+        let unit = proc_payload(Some("build"), None);
+        let emitted = serde_json::to_value(&unit).unwrap();
+        assert_eq!(emitted["shell_name"], json!("build"));
+        assert!(emitted.get("proc_name").is_none());
+
+        let legacy: ProcUnitWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(legacy, unit);
+
+        let mut renamed_value = emitted;
+        let object = renamed_value.as_object_mut().unwrap();
+        let name = object.remove("shell_name").unwrap();
+        object.insert("proc_name".to_string(), name);
+        let renamed: ProcUnitWire =
+            serde_json::from_value(renamed_value).unwrap();
+        assert_eq!(renamed, unit);
     }
 
     #[test]

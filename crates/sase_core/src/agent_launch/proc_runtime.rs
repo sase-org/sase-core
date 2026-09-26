@@ -57,8 +57,14 @@ pub struct ProcDispatchRequestWire {
     pub timeout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_name: Option<String>,
+    // legacy sase-shell spelling; flips in contract-flip
+    #[serde(
+        default,
+        rename = "shell_name",
+        alias = "proc_name",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub proc_name: Option<String>,
     /// Caller-supplied executable environment to overlay proc context onto.
     /// Absent on older persisted requests; falls back to the system PATH.
     #[serde(default)]
@@ -103,7 +109,7 @@ pub fn validate_proc_workspace_intent(
 }
 
 /// Validate an optional bare stand-alone proc `%id` name.
-pub fn validate_standalone_proc_shell_name(
+pub fn validate_standalone_named_proc_name(
     name: Option<&str>,
 ) -> Result<(), String> {
     let Some(name) = name.map(str::trim).filter(|value| !value.is_empty())
@@ -312,7 +318,7 @@ pub fn prepare_proc_script(
         request.selected_project.as_deref(),
         request.declared_cwd.as_deref(),
     )?;
-    validate_standalone_proc_shell_name(request.shell_name.as_deref())?;
+    validate_standalone_named_proc_name(request.proc_name.as_deref())?;
     let timeout_seconds = optional_duration(request.timeout.as_deref())?;
     let idle_timeout_seconds =
         optional_duration(request.idle_timeout.as_deref())?;
@@ -433,6 +439,7 @@ fn ensure_contained(path: &Path, root: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use crate::fenced_code::{CodeLanguage, CodeValue};
+    use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -478,7 +485,7 @@ mod tests {
             proc_id: Some("proc-one".to_string()),
             timeout: Some("20m".to_string()),
             idle_timeout: Some("5m".to_string()),
-            shell_name: Some("checks".to_string()),
+            proc_name: Some("checks".to_string()),
             base_env: BTreeMap::new(),
         }
     }
@@ -720,11 +727,32 @@ mod tests {
     }
 
     #[test]
-    fn shell_names_reject_agent_session_qualification() {
-        validate_standalone_proc_shell_name(Some("checks")).unwrap();
-        let error = validate_standalone_proc_shell_name(Some("agent--checks"))
+    fn proc_names_reject_agent_session_qualification() {
+        validate_standalone_named_proc_name(Some("checks")).unwrap();
+        let error = validate_standalone_named_proc_name(Some("agent--checks"))
             .unwrap_err();
         assert!(error.contains("`--`"));
+    }
+
+    #[test]
+    fn dispatch_request_emits_legacy_shell_name_and_accepts_proc_name() {
+        let temp = TempDir::new().unwrap();
+        let wire = request(&temp, bash_code("echo ready"));
+        let emitted = serde_json::to_value(&wire).unwrap();
+        assert_eq!(emitted["shell_name"], json!("checks"));
+        assert!(emitted.get("proc_name").is_none());
+
+        let legacy: ProcDispatchRequestWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(legacy, wire);
+
+        let mut renamed_value = emitted;
+        let object = renamed_value.as_object_mut().unwrap();
+        let name = object.remove("shell_name").unwrap();
+        object.insert("proc_name".to_string(), name);
+        let renamed: ProcDispatchRequestWire =
+            serde_json::from_value(renamed_value).unwrap();
+        assert_eq!(renamed, wire);
     }
 
     #[test]

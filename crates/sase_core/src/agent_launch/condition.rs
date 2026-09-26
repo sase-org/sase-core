@@ -143,7 +143,7 @@ pub fn build_condition_context(
     let _ = share_workspace;
     let identity = match &unit.payload {
         LaunchUnitPayloadWire::Agent(agent) => agent.identity.clone(),
-        LaunchUnitPayloadWire::Proc(proc_unit) => proc_unit.shell_name.clone(),
+        LaunchUnitPayloadWire::Proc(proc_unit) => proc_unit.proc_name.clone(),
     };
     ConditionContextWire {
         schema_version: CONDITION_CONTEXT_SCHEMA_VERSION,

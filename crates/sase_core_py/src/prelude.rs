@@ -129,7 +129,7 @@ pub(crate) use sase_core::agent_launch::{
     sanitized_proc_env as core_sanitized_proc_env,
     summarize_admission as core_summarize_admission,
     validate_proc_workspace_intent as core_validate_proc_workspace_intent,
-    validate_standalone_proc_shell_name as core_validate_standalone_proc_shell_name,
+    validate_standalone_named_proc_name as core_validate_standalone_named_proc_name,
     wait_target_key as core_wait_target_key, AgentLaunchPreparedWire,
     AgentLaunchRequestWire, AgentUnitWire, BatchPredecessorContextWire,
     ConditionEvalRequestWire, LaunchAdmissionHoldBlockWire,

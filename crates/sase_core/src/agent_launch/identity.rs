@@ -694,7 +694,7 @@ pub(crate) fn validate_typed_unit_identities(
         let identity = match &raw.unit.payload {
             LaunchUnitPayloadWire::Agent(agent) => agent.effective_identity(),
             LaunchUnitPayloadWire::Proc(proc_unit) => {
-                proc_unit.shell_name.clone()
+                proc_unit.proc_name.clone()
             }
         };
         let Some(identity) = identity else {

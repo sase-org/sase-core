@@ -17,8 +17,8 @@ use super::plan_resolution::{
     project_ref_captures, render_launch_approval_preview, resolve_typed_waits,
     strip_prompt_regions, typed_directive_ignored_ranges,
     typed_plan_diagnostic, typed_unit_diagnostic,
-    validate_dispatch_combinations, validate_proc_project_policy,
-    validate_proc_shell_name, validate_typed_wait_cycles, with_logical_id,
+    validate_dispatch_combinations, validate_named_proc_name,
+    validate_proc_project_policy, validate_typed_wait_cycles, with_logical_id,
     DispatchCombinationFacts,
 };
 use super::wires::{
@@ -581,18 +581,18 @@ fn classify_typed_launch_unit(
                 None,
             ));
         }
-        let shell_name = agent_identity.clone();
+        let proc_name = agent_identity.clone();
         validate_hold_self(
             hold_fields.as_ref(),
             &logical_id,
-            shell_name.as_deref(),
+            proc_name.as_deref(),
             agent_identity_explicit,
             None,
             None,
             diagnostics,
         );
-        validate_proc_shell_name(
-            shell_name.as_deref(),
+        validate_named_proc_name(
+            proc_name.as_deref(),
             &logical_id,
             diagnostics,
         );
@@ -617,7 +617,7 @@ fn classify_typed_launch_unit(
         });
         LaunchUnitPayloadWire::Proc(ProcUnitWire {
             code,
-            shell_name,
+            proc_name,
             label: proc_options.get("label").cloned().filter(|v| !v.is_empty()),
             timeout: proc_options
                 .get("timeout")
