@@ -692,39 +692,39 @@ fn accept_sase_via_builder(marked: &str) -> String {
 }
 #[test]
 fn vcs_project_golden_vectors() {
-    // Ported parity table: the same inputs as the historical
-    // `apply_vcs_project_selection` goldens, now with in-place `+sase`
-    // insertion instead of prepend/replace. `‸` marks the cursor.
+    // Restored placement: the selected row lands at the earliest existing
+    // workspace target in the trigger's `---` segment, or at the segment's
+    // leading position when no target exists. `‸` marks the cursor.
     for (marked, expected) in [
-        ("Describe this repo. +‸", "Describe this repo. +sase "),
+        ("Describe this repo. +‸", "+sase Describe this repo. "),
         ("+‸", "+sase "),
         ("+sa‸", "+sase "),
-        ("+s‸\n", "+sase \n"),
-        ("+s‸\nmore text", "+sase \nmore text"),
-        ("#git:foo Fix bug +‸", "Fix bug +sase "),
-        ("#gh!!:foo do X +‸", "do X +sase "),
+        ("+s‸\n", "\n+sase "),
+        ("+s‸\nmore text", "\n+sase more text"),
+        ("#git:foo Fix bug +‸", "+sase Fix bug "),
+        ("#gh!!:foo do X +‸", "+sase do X "),
         ("#gh:sase +‸", "+sase "),
         ("#gh:sase +sa‸", "+sase "),
         ("#git:foo +‸", "+sase "),
-        ("Fix +sa‸ here", "Fix +sase here"),
-        ("Line one\n +‸", "Line one\n +sase "),
+        ("Fix +sa‸ here", "+sase Fix here"),
+        ("Line one\n +‸", "+sase Line one\n "),
         (
             "---\nname: x\n---\nBody +‸",
-            "---\nname: x\n---\nBody +sase ",
+            "---\nname: x\n---\n+sase Body ",
         ),
-        ("%model:opus Body +‸", "%model:opus Body +sase "),
+        ("%model:opus Body +‸", "%model:opus +sase Body "),
         ("+sa‸ Fix", "+sase Fix"),
         // The cursor-local query is `sa`, while selection consumes the
-        // entire `+sase` token.
-        ("Fix +sa‸se now", "Fix +sase now"),
+        // entire `+sase` token; with no other target the row goes leading.
+        ("Fix +sa‸se now", "+sase Fix now"),
     ] {
         assert_eq!(accept_sase_via_builder(marked), expected, "{marked:?}");
     }
 }
 #[test]
-fn vcs_project_accept_switches_projects_in_place() {
-    // Accepting a row removes every other workspace target in the same
-    // `---` segment and inserts in place.
+fn vcs_project_accept_switches_projects_at_target_position() {
+    // Accepting a row puts it at the earliest workspace target in the same
+    // `---` segment and removes every other target there.
     let text = "+sase do it +bo";
     let doc = DocumentSnapshot::new(text);
     let position = doc.byte_offset_to_position(text.len()).unwrap();
@@ -740,13 +740,13 @@ fn vcs_project_accept_switches_projects_in_place() {
     assert_eq!(list.candidates[0].insertion, "+bob-cli ");
     assert_eq!(
         apply_candidate_edits(text, &list.candidates[0]),
-        "do it +bob-cli "
+        "+bob-cli do it "
     );
 
-    // Other segments keep their targets.
+    // Other segments keep their targets; the Body segment inserts leading.
     assert_eq!(
         accept_sase_via_builder("#gh:sase\n---\nBody +‸"),
-        "#gh:sase\n---\nBody +sase "
+        "#gh:sase\n---\n+sase Body "
     );
 }
 #[test]
@@ -765,9 +765,11 @@ fn vcs_project_accept_inserts_patch_spelling() {
     assert_eq!(list.candidates.len(), 1);
     let candidate = &list.candidates[0];
     assert_eq!(candidate.insertion, "#gh:ship-completion ");
+    // No existing target, so the `#` spelling lands at the leading
+    // position with the typed trigger removed.
     assert_eq!(
         apply_candidate_edits(text, candidate),
-        "Review #gh:ship-completion "
+        "#gh:ship-completion Review "
     );
 }
 #[test]
@@ -881,12 +883,16 @@ fn trailing_trigger_emits_primary_plus_additional_edit() {
     );
 
     let candidate = &list.candidates[0];
-    // The primary edit replaces the trigger token in place; the additional
-    // edit deletes the existing `#git:foo` workspace target.
-    assert_eq!(candidate.replacement.as_ref().unwrap().new_text, "+sase ");
+    // The primary edit removes the trailing trigger token; the additional
+    // edit replaces the existing `#git:foo` workspace target with the row.
+    assert_eq!(candidate.replacement.as_ref().unwrap().new_text, "");
     assert_eq!(candidate.additional_edits.len(), 1);
-    assert_eq!(candidate.additional_edits[0].new_text, "");
+    assert_eq!(candidate.additional_edits[0].new_text, "+sase ");
     assert_eq!(apply_candidate_edits("#git:foo +", candidate), "+sase ");
+    // The applied result keeps exactly one target at the earliest position.
+    let applied = apply_candidate_edits("#git:foo +", candidate);
+    assert_eq!(applied.matches("+sase ").count(), 1);
+    assert!(!applied.contains("#git:foo"));
 }
 #[test]
 fn vcs_project_candidates_filter_preserves_catalog_order() {

@@ -611,11 +611,13 @@ pub fn placeholder_completion_response(
 ///
 /// Project rows render as tags: the label and `filter_text` are the `+name`
 /// trigger spelling (so typing `+sa` keeps the `+sase` item), and the detail
-/// is `provider · #workflow:name`. The primary `text_edit` (the in-place
-/// insertion) and `additional_text_edits` (same-segment target deletions)
-/// are carried over from the candidate's `replacement` / `additional_edits`,
-/// so PR rows keep their behavior while also becoming in-place edits.
-/// `sort_text` preserves catalog order.
+/// is `provider · #workflow:name`. The primary `text_edit` (the trigger
+/// removal, or the merged insertion when the trigger occupies the
+/// destination) and `additional_text_edits` (the target-position replacement
+/// or leading insertion plus same-segment target deletions) are carried over
+/// from the candidate's `replacement` / `additional_edits`, so PR rows keep
+/// their spelling while following the same placement. `sort_text` preserves
+/// catalog order.
 pub fn vcs_project_completion_response(
     list: CompletionList,
     replacement_range: EditorRange,

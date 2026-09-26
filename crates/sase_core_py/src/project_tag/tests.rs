@@ -164,6 +164,8 @@ fn project_tag_apply_selection_binding_returns_char_cursor() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let targets = targets(py);
+        // No live target, so the row lands at the leading position with the
+        // caret just past it; `é` keeps char offsets distinct from bytes.
         let applied = py_project_tag_apply_selection(
             py,
             "é +sa",
@@ -174,7 +176,30 @@ fn project_tag_apply_selection_binding_returns_char_cursor() {
         )
         .unwrap();
         let value = py_to_json_value(applied.bind(py)).unwrap();
-        assert_eq!(value["text"], json!("é +sase "));
-        assert_eq!(value["cursor"], json!(8));
+        assert_eq!(value["text"], json!("+sase é "));
+        assert_eq!(value["cursor"], json!(6));
+    });
+}
+
+#[test]
+fn project_tag_apply_selection_binding_replaces_target_position() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let targets = targets(py);
+        // The existing `+notes` target receives the row; the typed trigger
+        // is removed and the caret lands after the replacement.
+        let text = "+notes +sa";
+        let applied = py_project_tag_apply_selection(
+            py,
+            text,
+            (7, 10),
+            "+sase ",
+            vec!["gh".to_string(), "git".to_string()],
+            &targets,
+        )
+        .unwrap();
+        let value = py_to_json_value(applied.bind(py)).unwrap();
+        assert_eq!(value["text"], json!("+sase "));
+        assert_eq!(value["cursor"], json!(6));
     });
 }

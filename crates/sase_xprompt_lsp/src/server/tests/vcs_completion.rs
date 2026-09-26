@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lsp_types::{
-    CompletionContext, CompletionItemKind, CompletionResponse,
+    CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
     CompletionTextEdit, CompletionTriggerKind, Documentation, Position,
     TextDocumentIdentifier, TextDocumentPositionParams,
 };
@@ -9,6 +9,41 @@ use lsp_types::{
 use super::super::*;
 
 use super::support::*;
+
+/// Apply a completion item's primary + additional edits to single-line
+/// ASCII `text` (all target-position cases here are single-line) and return
+/// the result. Positions are `(line, character)` with `line == 0`, so the
+/// character offset is the byte offset.
+fn apply_item_edits(text: &str, item: &CompletionItem) -> String {
+    let offset = |pos: Position| pos.character as usize;
+    let mut edits: Vec<(usize, usize, &str)> = Vec::new();
+    if let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() {
+        edits.push((
+            offset(edit.range.start),
+            offset(edit.range.end),
+            edit.new_text.as_str(),
+        ));
+    }
+    if let Some(additional) = item.additional_text_edits.as_ref() {
+        for edit in additional {
+            edits.push((
+                offset(edit.range.start),
+                offset(edit.range.end),
+                edit.new_text.as_str(),
+            ));
+        }
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
+    let mut out = String::new();
+    let mut pos = 0;
+    for (start, end, new_text) in edits {
+        out.push_str(&text[pos..start]);
+        out.push_str(new_text);
+        pos = end;
+    }
+    out.push_str(&text[pos..]);
+    out
+}
 
 #[tokio::test]
 async fn completes_vcs_project_with_primary_and_additional_edits() {
@@ -59,22 +94,31 @@ async fn completes_vcs_project_with_primary_and_additional_edits() {
     };
     assert_eq!(documentation.value, "SASE repo\n\n`#gh:sase`");
 
-    // The primary edit replaces the `+` trigger token in place with the
-    // project tag; nothing else in the segment needs deleting.
+    // No live target: the primary edit removes the `+` trigger token and
+    // the additional edit inserts the project tag at the segment's leading
+    // position. Applying both yields one target at the front.
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
         panic!("expected primary text edit");
     };
-    assert_eq!(edit.new_text, "+sase ");
+    assert_eq!(edit.new_text, "");
     assert_eq!(edit.range.start, Position::new(0, 20));
     assert_eq!(edit.range.end, Position::new(0, 21));
-    assert!(item.additional_text_edits.is_none());
+    let additional = item.additional_text_edits.as_ref().unwrap();
+    assert_eq!(additional.len(), 1);
+    assert_eq!(additional[0].new_text, "+sase ");
+    assert_eq!(additional[0].range.start, Position::new(0, 0));
+    assert_eq!(additional[0].range.end, Position::new(0, 0));
+    assert_eq!(
+        apply_item_edits("Describe this repo. +", item),
+        "+sase Describe this repo. "
+    );
 }
 
 #[tokio::test]
 async fn completes_vcs_project_replacing_existing_tag_at_eof() {
     // `#git:foo +` -- an existing leading VCS tag immediately followed by
-    // the `+` trigger at end-of-input. Selecting a project inserts the tag
-    // in place and deletes the existing `#git:foo` workspace target, so the
+    // the `+` trigger at end-of-input. Selecting a project removes the
+    // trigger and replaces `#git:foo` with the tag at its position, so the
     // prompt never carries two targets.
     let temp = tempfile::tempdir().unwrap();
     let catalog_path = temp.path().join("vcs_project_catalog.json");
@@ -109,21 +153,22 @@ async fn completes_vcs_project_replacing_existing_tag_at_eof() {
     let item = &items[0];
     assert_eq!(item.label, "+sase");
 
-    // Primary edit replaces the trailing `+` trigger span (byte 9..10)
-    // in place with the project tag.
+    // Primary edit removes the trailing `+` trigger span (byte 9..10).
     let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
         panic!("expected primary text edit");
     };
-    assert_eq!(edit.new_text, "+sase ");
+    assert_eq!(edit.new_text, "");
     assert_eq!(edit.range.start, Position::new(0, 9));
     assert_eq!(edit.range.end, Position::new(0, 10));
 
-    // Additional edit deletes the existing `#git:foo ` (bytes 0..9) target.
+    // Additional edit replaces the existing `#git:foo ` (bytes 0..9) target
+    // with the project tag at its position.
     let additional = item.additional_text_edits.as_ref().unwrap();
     assert_eq!(additional.len(), 1);
-    assert_eq!(additional[0].new_text, "");
+    assert_eq!(additional[0].new_text, "+sase ");
     assert_eq!(additional[0].range.start, Position::new(0, 0));
     assert_eq!(additional[0].range.end, Position::new(0, 9));
+    assert_eq!(apply_item_edits("#git:foo +", item), "+sase ");
 }
 
 #[tokio::test]
@@ -165,13 +210,20 @@ async fn vcs_project_completion_without_tags_falls_back_to_entries() {
     assert_eq!(item.label, "+bob-cli");
     assert_eq!(item.detail.as_deref(), Some("Git · #git:bob-cli"));
 
-    // Additional edit deletes the existing `+sase ` (bytes 0..6) target
-    // even though the catalog has no `project_tags`.
+    // Additional edit replaces the existing `+sase ` (bytes 0..6) target
+    // with the selected row even though the catalog has no `project_tags`;
+    // the primary edit removes the `+bo` trigger.
+    let Some(CompletionTextEdit::Edit(primary)) = item.text_edit.as_ref()
+    else {
+        panic!("expected primary text edit");
+    };
+    assert_eq!(primary.new_text, "");
     let additional = item.additional_text_edits.as_ref().unwrap();
     assert_eq!(additional.len(), 1);
-    assert_eq!(additional[0].new_text, "");
+    assert_eq!(additional[0].new_text, "+bob-cli ");
     assert_eq!(additional[0].range.start, Position::new(0, 0));
     assert_eq!(additional[0].range.end, Position::new(0, 6));
+    assert_eq!(apply_item_edits(text, item), "+bob-cli do it ");
 }
 
 #[tokio::test]
@@ -209,7 +261,7 @@ async fn completes_vcs_patch_with_pr_label_details() {
     let item = &items[0];
     assert_eq!(item.label, "ship-completion");
     assert_eq!(item.kind, Some(CompletionItemKind::EVENT));
-    // PR rows keep their `#` spelling: `detail` mirrors the in-place
+    // PR rows keep their `#` spelling: `detail` mirrors the target-position
     // insertion (with its trailing space) while project rows render tags.
     assert_eq!(item.detail.as_deref(), Some("#gh:ship-completion "));
     assert_eq!(item.filter_text.as_deref(), Some("+ship-completion"));

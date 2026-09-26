@@ -385,71 +385,210 @@ fn cursor_of(marked: &str) -> usize {
     marked.find('‸').unwrap()
 }
 
+fn apply_full(marked: &str, insertion: &str) -> (String, usize) {
+    let cursor = cursor_of(marked);
+    let text = marked.replace('‸', "");
+    let trigger = project_tag_trigger(&text, cursor)
+        .unwrap_or_else(|| panic!("expected trigger for {marked:?}"));
+    let applied = apply_project_tag_selection(
+        &text,
+        (trigger.start, trigger.end),
+        insertion,
+        &["gh".to_string(), "git".to_string()],
+        &catalog(),
+    );
+    (applied.text, applied.cursor)
+}
+
 #[test]
-fn accept_inserts_tags_in_place() {
-    // Ported golden vectors: same inputs as the historical VCS-tag parity
-    // table, now with in-place `+sase` insertion instead of prepend/replace.
+fn accept_puts_selection_at_earliest_target_or_leading_position() {
+    // Restored placement: the selected row lands at the earliest existing
+    // workspace target in the trigger's `---` segment (other targets in
+    // that segment go away), or at the segment's leading project-tag
+    // position when no target exists.
     for (marked, expected) in [
-        ("Describe this repo. +‸", "Describe this repo. +sase "),
+        // No existing target: leading insertion.
+        ("Describe this repo. +‸", "+sase Describe this repo. "),
         ("+‸", "+sase "),
         ("+sa‸", "+sase "),
-        ("+s‸\n", "+sase \n"),
-        ("+s‸\nmore text", "+sase \nmore text"),
-        ("#git:foo Fix bug +‸", "Fix bug +sase "),
-        ("#gh!!:foo do X +‸", "do X +sase "),
+        ("+s‸\n", "\n+sase "),
+        ("+s‸\nmore text", "\n+sase more text"),
+        // Existing `#` ref before the trigger: replace it at its position.
+        ("#git:foo Fix bug +‸", "+sase Fix bug "),
+        ("#gh!!:foo do X +‸", "+sase do X "),
         ("#gh:sase +‸", "+sase "),
         ("#gh:sase +foo‸", "+sase "),
         ("#git:foo +‸", "+sase "),
-        ("Fix +bug‸ here", "Fix +sase here"),
-        ("Line one\n +‸", "Line one\n +sase "),
+        // No target (typed query only): leading insertion.
+        ("Fix +bug‸ here", "+sase Fix here"),
+        ("Line one\n +‸", "+sase Line one\n "),
+        // Later `---` segments keep their own leading position; the
+        // frontmatter block is never touched.
         (
             "---\nname: x\n---\nBody +‸",
-            "---\nname: x\n---\nBody +sase ",
+            "---\nname: x\n---\n+sase Body ",
         ),
-        ("%model:opus Body +‸", "%model:opus Body +sase "),
+        // Leading `%directive` tokens stay before the inserted tag.
+        ("%model:opus Body +‸", "%model:opus +sase Body "),
+        // The trigger already occupies the leading destination: merged.
         ("+sa‸ Fix", "+sase Fix"),
-        ("Fix +sa‸se now", "Fix +sase now"),
+        // The trigger's own token is removed; with no other target the
+        // selection lands at the leading position.
+        ("Fix +sa‸se now", "+sase Fix now"),
     ] {
         assert_eq!(apply(marked, "+sase "), expected, "accept: {marked:?}");
     }
 }
 
 #[test]
+fn accept_targets_existing_tag_before_and_after_trigger() {
+    // An existing `+tag` before the trigger wins over the typed position.
+    assert_eq!(
+        apply("+notes do it +sa‸", "+sase "),
+        "+sase do it ",
+        "tag before trigger"
+    );
+    // An existing `+tag` after the trigger is replaced where it stands;
+    // surrounding words stay in order.
+    assert_eq!(
+        apply("+sa‸ do +notes", "+sase "),
+        "do +sase ",
+        "tag after trigger"
+    );
+    // An existing `#` ref after the trigger likewise receives the row.
+    assert_eq!(
+        apply("+sa‸ do #git:foo", "+sase "),
+        "do +sase ",
+        "ref after trigger"
+    );
+}
+
+#[test]
+fn accept_removes_multiple_targets_leaving_one() {
+    // The earliest target keeps the row; every further target in the same
+    // segment (tags and refs alike) is deleted.
+    assert_eq!(
+        apply("#git:foo +notes +sa‸", "+sase "),
+        "+sase ",
+        "ref plus tag collapse to one"
+    );
+    assert_eq!(
+        apply("+notes +home +sa‸", "+sase "),
+        "+sase ",
+        "several tags collapse to one"
+    );
+}
+
+#[test]
+fn accept_uses_leading_position_with_frontmatter_and_directives() {
+    // Frontmatter delimiters split segments; the Body segment's leading
+    // position follows them without touching the frontmatter itself.
+    assert_eq!(
+        apply("---\ntitle: x\n---\nBody +sa‸", "+sase "),
+        "---\ntitle: x\n---\n+sase Body ",
+        "frontmatter leading"
+    );
+    // Stacked directives stay before the inserted tag.
+    assert_eq!(
+        apply("%auto %m:opus Body +sa‸", "+sase "),
+        "%auto %m:opus +sase Body ",
+        "directive leading"
+    );
+    // A later `---` segment inserts at its own leading position.
+    assert_eq!(
+        apply("First\n---\nSecond +sa‸", "+sase "),
+        "First\n---\n+sase Second ",
+        "later segment leading"
+    );
+}
+
+#[test]
+fn accept_keeps_pr_spelling_at_target_or_leading() {
+    // PR rows keep their `#` spelling but follow the same placement: at
+    // the existing target, or at the leading position when none exists.
+    assert_eq!(
+        apply("#git:foo Review +sh‸", "#gh:ship "),
+        "#gh:ship Review ",
+        "PR row at ref target"
+    );
+    assert_eq!(
+        apply("Review +sh‸", "#gh:ship "),
+        "#gh:ship Review ",
+        "PR row at leading position"
+    );
+}
+
+#[test]
+fn accept_preserves_whitespace_newlines_and_unicode() {
+    // A following space on the destination is consumed (the insertion
+    // carries its own separator); newlines are never consumed.
+    assert_eq!(
+        apply("Fix +notes now +sa‸", "+sase "),
+        "Fix +sase now ",
+        "destination space collapsed"
+    );
+    // Blank lines around other-target deletions survive.
+    assert_eq!(
+        apply("a #gh:foo\n\nb +sa‸", "+sase "),
+        "a +sase \n\nb ",
+        "blank lines survive"
+    );
+    // Unicode text before the trigger shifts byte offsets but not behavior.
+    let (text, cursor) = apply_full("é +notes +sa‸", "+sase ");
+    assert_eq!(text, "é +sase ", "unicode target replacement");
+    assert_eq!(&text[..cursor], "é +sase ", "unicode caret");
+}
+
+#[test]
+fn accept_reports_caret_just_after_insertion() {
+    // Leading insertion: the caret sits after the inserted row at the
+    // front, not at the removed trigger.
+    let (text, cursor) = apply_full("Body +sa‸", "+sase ");
+    assert_eq!(text, "+sase Body ");
+    assert_eq!(&text[..cursor], "+sase ");
+    // Target replacement: the caret sits after the replaced target.
+    let (text, cursor) = apply_full("#git:foo Body +sa‸", "+sase ");
+    assert_eq!(text, "+sase Body ");
+    assert_eq!(&text[..cursor], "+sase ");
+}
+
+#[test]
 fn accept_removes_mid_line_refs_like_the_python_guard() {
     // The Python one-target guard counts mid-line refs
     // (`find_vcs_workflow_tag_span("fix in #gh:foo now")`), so accept
-    // must remove them too, leaving exactly one workspace target.
+    // replaces the earliest one and leaves exactly one workspace target.
     assert_eq!(
         apply("fix in #gh:foo now +sa‸", "+sase "),
-        "fix in now +sase ",
-        "mid-line ref is removed"
+        "fix in +sase now ",
+        "mid-line ref is replaced"
     );
     assert_eq!(
         apply("fix in #gh:foo now +sase do it +bo‸", "+bob-cli "),
-        "fix in now do it +bob-cli ",
+        "fix in +bob-cli now do it ",
         "mid-line ref plus tag both go away"
     );
-    // A `#` that is not at a token boundary is not a ref.
+    // A `#` that is not at a token boundary is not a ref: with no target
+    // the row goes to the leading position and the glued text stays.
     assert_eq!(
         apply("a#gh:foo +sa‸", "+sase "),
-        "a#gh:foo +sase ",
+        "+sase a#gh:foo ",
         "glued hash stays"
     );
 }
 
 #[test]
 fn accept_keeps_line_breaks_around_end_of_line_refs() {
-    // A ref at end of line deletes up to the ref itself, never its
-    // newline, so neighbors never join and blank lines survive. A ref
-    // alone on its line removes that line without joining its neighbors.
+    // The destination replacement never consumes its newline, so neighbors
+    // never join and blank lines survive. Other-target deletions still
+    // collapse a lone line instead of leaving a blank line behind.
     for (marked, expected) in [
         (
             "fix in #gh:foo\nmore stuff +sa‸",
-            "fix in\nmore stuff +sase ",
+            "fix in +sase \nmore stuff ",
         ),
-        ("a #gh:foo\n\nb +sa‸", "a\n\nb +sase "),
-        ("line one #gh:foo\n+sa‸", "line one\n+sase "),
-        ("body\n#gh:foo\nmore +sa‸", "body\nmore +sase "),
+        ("a #gh:foo\n\nb +sa‸", "a +sase \n\nb "),
+        ("line one #gh:foo\n+sa‸", "line one +sase \n"),
+        ("body\n#gh:foo\nmore +sa‸", "body\n+sase \nmore "),
     ] {
         assert_eq!(apply(marked, "+sase "), expected, "accept: {marked:?}");
     }
@@ -462,14 +601,15 @@ fn accept_counts_refs_inside_rejected_glued_matches() {
     // ref inside it: the Python guard counts `#gh:foo` here too.
     assert_eq!(
         apply("x#gh(a #gh:foo) now +sa‸", "+sase "),
-        "x#gh(a now +sase ",
-        "inner ref of a glued match is removed"
+        "x#gh(a +sase now ",
+        "inner ref of a glued match is replaced"
     );
 }
 
 #[test]
 fn accept_with_empty_workflow_names_matches_nothing() {
-    // An empty alternation must never match `# Heading` and delete it.
+    // An empty alternation must never match `# Heading` and delete it: with
+    // no VCS targets the row goes to the leading position.
     let text = "# Heading +sa";
     let cursor = text.find("+sa").unwrap() + 3;
     let trigger = project_tag_trigger(text, cursor).unwrap();
@@ -480,63 +620,54 @@ fn accept_with_empty_workflow_names_matches_nothing() {
         &[],
         &catalog(),
     );
-    assert_eq!(applied.text, "# Heading +sase ");
+    assert_eq!(applied.text, "+sase # Heading ");
 }
 
 #[test]
 fn accept_keeps_heading_lines() {
-    // `# Heading` is not a workspace ref for any known workflow.
+    // `# Heading` is not a workspace ref for any known workflow, so the row
+    // goes to the leading position and the heading line stays.
     assert_eq!(
         apply("# Heading +sa‸", "+sase "),
-        "# Heading +sase ",
+        "+sase # Heading ",
         "heading line stays"
     );
 }
 
 #[test]
-fn accept_reports_cursor_past_insertion() {
-    let text = "Fix +sa";
-    let trigger = project_tag_trigger(text, 7).unwrap();
-    let applied = apply_project_tag_selection(
-        text,
-        (trigger.start, trigger.end),
-        "+sase ",
-        &["gh".to_string()],
-        &catalog(),
-    );
-    assert_eq!(applied.text, "Fix +sase ");
-    assert_eq!(applied.cursor, applied.text.len());
-    assert_eq!(&applied.text[..applied.cursor], "Fix +sase ");
-}
-
-#[test]
 fn accept_switches_projects_within_one_segment() {
-    // The accepted project replaces the trigger and every other workspace
-    // target in the same segment goes away.
-    assert_eq!(apply("+sase do it +bo‸", "+bob-cli "), "do it +bob-cli ");
+    // The accepted project lands at the earliest workspace target in the
+    // same segment; every other target there goes away.
+    assert_eq!(apply("+sase do it +bo‸", "+bob-cli "), "+bob-cli do it ");
     assert_eq!(apply("#git:notes +sa‸", "+sase "), "+sase ");
-    // Other segments keep their targets.
+    // Other segments keep their targets; the Body segment has none, so the
+    // row goes to its leading position.
     assert_eq!(
         apply("#gh:sase\n---\nBody +sa‸", "+sase "),
-        "#gh:sase\n---\nBody +sase "
+        "#gh:sase\n---\n+sase Body "
     );
-    // PR-style insertion keeps its `#` spelling.
-    assert_eq!(apply("Review +sh‸", "#gh:ship "), "Review #gh:ship ");
+    // PR-style insertion keeps its `#` spelling at the leading position.
+    assert_eq!(apply("Review +sh‸", "#gh:ship "), "#gh:ship Review ");
 }
 
 #[test]
 fn accept_skips_literal_zones() {
+    // Tags inside fenced code and frontmatter are inert: they are neither
+    // destinations nor deletions. With no live target the row goes to the
+    // segment's leading position.
     assert_eq!(
         apply("```\n+bob-cli\n```\nBody +sa‸", "+sase "),
-        "```\n+bob-cli\n```\nBody +sase "
+        "+sase ```\n+bob-cli\n```\nBody "
     );
     assert_eq!(
         apply("---\ntitle: +bob-cli\n---\nBody +sa‸", "+sase "),
-        "---\ntitle: +bob-cli\n---\nBody +sase "
+        "---\ntitle: +bob-cli\n---\n+sase Body "
     );
 }
 
 #[test]
 fn accept_handles_multibyte_text() {
-    assert_eq!(apply("é +sa‸", "+sase "), "é +sase ");
+    // No live target, so the row goes to the leading position; byte
+    // offsets still land on character boundaries.
+    assert_eq!(apply("é +sa‸", "+sase "), "+sase é ");
 }

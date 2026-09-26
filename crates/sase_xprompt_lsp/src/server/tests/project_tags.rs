@@ -81,7 +81,9 @@ async fn completes_v5_project_rows_as_tags_in_catalog_order() {
     assert_eq!(notes.detail.as_deref(), Some("Bare Git · #git:notes"));
     assert_eq!(notes.sort_text.as_deref(), Some("0001"));
 
-    // Patch rows keep their `#` spelling and in-place edits.
+    // Patch rows keep their `#` spelling and target-position edits: the
+    // primary removes the trigger while the additional inserts the `#`
+    // spelling at the segment's leading position.
     let patch = &items[2];
     assert_eq!(patch.label, "ship");
     assert_eq!(patch.kind, Some(CompletionItemKind::EVENT));
@@ -90,7 +92,10 @@ async fn completes_v5_project_rows_as_tags_in_catalog_order() {
     let Some(CompletionTextEdit::Edit(edit)) = patch.text_edit.as_ref() else {
         panic!("expected patch text edit");
     };
-    assert_eq!(edit.new_text, "#gh:ship ");
+    assert_eq!(edit.new_text, "");
+    let additional = patch.additional_text_edits.as_ref().unwrap();
+    assert_eq!(additional.len(), 1);
+    assert_eq!(additional[0].new_text, "#gh:ship ");
 }
 
 #[test]

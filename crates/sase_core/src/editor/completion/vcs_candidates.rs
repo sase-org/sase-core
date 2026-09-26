@@ -524,11 +524,13 @@ fn previous_char_boundary(text: &str, byte_idx: usize) -> Option<usize> {
 ///
 /// Each candidate applies the shared project-tag accept algorithm (see
 /// [`crate::project_tag::apply_project_tag_selection`]): the primary edit
-/// replaces the typed `+query` token in place with the row's insertion — a
-/// project row inserts `+<name> ` (or `#<workflow>:<name> ` when the name is
-/// not in the tag grammar), a PR row inserts its `#` spelling — while
-/// `additional_edits` delete every other workspace target in the trigger's
-/// `---` segment. The edits never overlap.
+/// removes the typed `+query` token (or, when the trigger already occupies
+/// the destination, carries the merged insertion) — a project row inserts
+/// `+<name> ` (or `#<workflow>:<name> ` when the name is not in the tag
+/// grammar), a PR row inserts its `#` spelling — while `additional_edits`
+/// put the row at the earliest workspace target in the trigger's `---`
+/// segment (or at the segment's leading position) and delete every other
+/// workspace target there. The edits never overlap.
 ///
 /// `entries` drive the visible rows (enabled projects plus patches);
 /// `targets` is the catalog's tag-resolution set (every non-sibling project
