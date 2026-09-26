@@ -7,6 +7,14 @@ use crate::continuation::optional_wire_to_py;
 use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 
 use pyo3::wrap_pyfunction;
+use sase_core::prompt_stash::{
+    purge_prompt_stash as core_purge_prompt_stash,
+    read_prompt_stash_lifecycle as core_read_prompt_stash_lifecycle,
+    reconcile_prompt_stash_trash as core_reconcile_prompt_stash_trash,
+    restore_prompt_stash as core_restore_prompt_stash,
+    trash_prompt_stash as core_trash_prompt_stash,
+    PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION,
+};
 
 /// Return the schema version for source-language binding payloads.
 #[pyfunction]
@@ -377,6 +385,122 @@ fn prompt_stash_entries_from_py_list(
     Ok(values)
 }
 
+// --- Prompt stash trash lifecycle bindings ------------------------------
+
+/// Return the wire schema version for the trash lifecycle endpoints.
+///
+/// Versioned separately from the v1 stash bindings so existing callers keep
+/// their shape while lifecycle results evolve.
+#[pyfunction]
+#[pyo3(name = "prompt_stash_lifecycle_wire_schema_version")]
+fn py_prompt_stash_lifecycle_wire_schema_version() -> u32 {
+    PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION
+}
+
+/// Read both stash collections and return a lifecycle snapshot dict.
+///
+/// The GIL is released while Rust performs filesystem work.
+#[pyfunction]
+#[pyo3(name = "read_prompt_stash_lifecycle")]
+fn py_read_prompt_stash_lifecycle(
+    py: Python<'_>,
+    path: &str,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot = py.allow_threads(|| core_read_prompt_stash_lifecycle(&path));
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Move active rows to Trash and return the lifecycle outcome dict.
+///
+/// `trashed_at` is the UTC deletion time shared by the whole batch;
+/// `trash_limit` is enforced in the same transaction.
+#[pyfunction]
+#[pyo3(name = "trash_prompt_stash")]
+fn py_trash_prompt_stash(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+    trash_limit: u64,
+    trashed_at: &str,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let trashed_at = trashed_at.to_string();
+    let outcome = py.allow_threads(|| {
+        core_trash_prompt_stash(&path, &ids, trash_limit, &trashed_at)
+    });
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Move trashed rows back to Stash and return the lifecycle outcome dict.
+#[pyfunction]
+#[pyo3(name = "restore_prompt_stash")]
+fn py_restore_prompt_stash(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_restore_prompt_stash(&path, &ids));
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Permanently delete trashed rows and return the lifecycle outcome dict.
+#[pyfunction]
+#[pyo3(name = "purge_prompt_stash")]
+fn py_purge_prompt_stash(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| core_purge_prompt_stash(&path, &ids));
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Enforce the trash limit and return the lifecycle outcome dict.
+///
+/// The reconciliation path for a lowered configured limit: over-limit trash
+/// rows are permanently deleted and reported in `evicted`, oldest first.
+#[pyfunction]
+#[pyo3(name = "reconcile_prompt_stash_trash")]
+fn py_reconcile_prompt_stash_trash(
+    py: Python<'_>,
+    path: &str,
+    trash_limit: u64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome = py.allow_threads(|| {
+        core_reconcile_prompt_stash_trash(&path, trash_limit)
+    });
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Canonical project/home content layout -------------------------------
 /// Return the shared canonical/legacy SASE content layout and xprompt order.
 #[pyfunction]
@@ -596,6 +720,15 @@ pub(crate) fn register_editor_content(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_pop_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_set_prompt_stash_pinned, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_prompt_stash_lifecycle_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_read_prompt_stash_lifecycle, m)?)?;
+    m.add_function(wrap_pyfunction!(py_trash_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_restore_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_purge_prompt_stash, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reconcile_prompt_stash_trash, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;

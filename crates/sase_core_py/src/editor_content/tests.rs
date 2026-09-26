@@ -3,6 +3,125 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value};
 use serde_json::json;
 
 #[test]
+fn prompt_stash_lifecycle_bindings_are_registered_and_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        assert_eq!(
+            py_prompt_stash_lifecycle_wire_schema_version(),
+            PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION
+        );
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_editor_content(&module).unwrap();
+        for name in [
+            "prompt_stash_lifecycle_wire_schema_version",
+            "read_prompt_stash_lifecycle",
+            "trash_prompt_stash",
+            "restore_prompt_stash",
+            "purge_prompt_stash",
+            "reconcile_prompt_stash_trash",
+        ] {
+            assert!(module.hasattr(name).unwrap(), "missing binding {name}");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("prompt_stash.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let entry = json_value_to_py(
+            py,
+            &json!({
+                "id": "bound",
+                "created_at": "2026-06-16T01:02:03+00:00",
+                "text": "bound draft",
+                "frontmatter": "model: claude\n",
+                "project": "proj-a",
+                "source": "all",
+                "pane_index": 1,
+                "pinned": true,
+                "cursor": {"pane_index": 1, "row": 2, "column": 3},
+            }),
+        )
+        .unwrap();
+        let entry = entry.bind(py).downcast::<PyDict>().unwrap();
+        module
+            .getattr("append_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), entry))
+            .unwrap();
+
+        let trashed_at = "2026-09-26T14:00:00+00:00";
+        let outcome = module
+            .getattr("trash_prompt_stash")
+            .unwrap()
+            .call1((
+                path.clone(),
+                vec!["bound".to_string()],
+                20_u64,
+                trashed_at,
+            ))
+            .unwrap();
+        let outcome = py_to_json_value(&outcome).unwrap();
+        assert_eq!(outcome["schema_version"], json!(1));
+        assert_eq!(outcome["changed"], json!(["bound"]));
+        assert_eq!(outcome["evicted"], json!([]));
+        assert_eq!(outcome["snapshot"]["active"], json!([]));
+        assert_eq!(
+            outcome["snapshot"]["trash"][0]["trashed_at"],
+            json!(trashed_at)
+        );
+        assert_eq!(
+            outcome["snapshot"]["trash"][0]["entry"]["cursor"],
+            json!({"pane_index": 1, "row": 2, "column": 3})
+        );
+
+        let snapshot = module
+            .getattr("read_prompt_stash_lifecycle")
+            .unwrap()
+            .call1((path.clone(),))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(snapshot["trash"][0]["entry"]["id"], json!("bound"));
+
+        let outcome = module
+            .getattr("restore_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), vec!["bound".to_string()]))
+            .unwrap();
+        let outcome = py_to_json_value(&outcome).unwrap();
+        assert_eq!(outcome["changed"], json!(["bound"]));
+        assert_eq!(outcome["snapshot"]["active"][0]["id"], json!("bound"));
+
+        let outcome = module
+            .getattr("reconcile_prompt_stash_trash")
+            .unwrap()
+            .call1((path.clone(), 0_u64))
+            .unwrap();
+        assert_eq!(py_to_json_value(&outcome).unwrap()["evicted"], json!([]));
+
+        module
+            .getattr("trash_prompt_stash")
+            .unwrap()
+            .call1((
+                path.clone(),
+                vec!["bound".to_string()],
+                20_u64,
+                trashed_at,
+            ))
+            .unwrap();
+        let outcome = module
+            .getattr("purge_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), vec!["bound".to_string()]))
+            .unwrap();
+        let outcome = py_to_json_value(&outcome).unwrap();
+        assert_eq!(outcome["changed"], json!(["bound"]));
+        assert_eq!(outcome["snapshot"]["trash"], json!([]));
+    });
+}
+
+#[test]
 fn source_language_bindings_round_trip_wire_payloads() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
