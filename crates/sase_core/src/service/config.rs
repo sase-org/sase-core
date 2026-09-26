@@ -105,17 +105,22 @@ pub struct ServiceConfigCompositionWire {
     pub ignored_layers: Vec<String>,
 }
 
-fn layer_label(layer: &ConfigLayerInputWire) -> String {
+/// `name:path` declaration label shared with AXE inventory origins.
+pub(crate) fn layer_label(layer: &ConfigLayerInputWire) -> String {
     match layer.path.as_deref() {
         Some(path) => format!("{}:{path}", layer.name),
         None => layer.name.clone(),
     }
 }
 
-const ALLOWED_LAYER_KINDS: [&str; 5] =
+/// Layer kinds that may declare entities. Shared with AXE inventory origins.
+pub(crate) const ALLOWED_LAYER_KINDS: [&str; 5] =
     ["builtin", "plugin", "user", "overlay", "local"];
 
-fn classify_source(layer_kind: &str) -> &'static str {
+/// Classify a layer kind into a declaring source. Shared with AXE inventory
+/// origins so service procs, routines, and jobs never diverge on origin
+/// rules.
+pub(crate) fn classify_source(layer_kind: &str) -> &'static str {
     match layer_kind {
         "builtin" => "builtin",
         "plugin" => "plugin",

@@ -953,6 +953,7 @@ fn axe_composition_accepts_public_routine_job_aliases_with_source_provenance() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
             "name": "user",
+            "kind": "user",
             "path": "/tmp/sase.yml",
             "writable": true,
             "value": {"axe": {
@@ -1017,6 +1018,7 @@ fn axe_composition_merges_disjoint_same_layer_aliases_and_rejects_conflicts() {
     let disjoint: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
             "name": "user",
+            "kind": "user",
             "value": {"axe": {
                 "lumberjacks": {"legacy": {"description": "Legacy lane"}},
                 "routines": {"canonical": {"description": "Canonical lane"}}
@@ -1045,6 +1047,7 @@ fn axe_composition_merges_disjoint_same_layer_aliases_and_rejects_conflicts() {
         serde_json::from_value(json!([
             {
                 "name": "user",
+                "kind": "user",
                 "value": {"axe": {"lumberjacks": {"checks": {
                     "chop_timeout": "30s",
                     "job_timeout": "45s"
@@ -1105,6 +1108,7 @@ fn axe_mutation_writes_new_entries_to_canonical_paths() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
             "name": "user",
+            "kind": "user",
             "path": "/tmp/sase.yml",
             "writable": true,
             "value": {"axe": {"lumberjacks": {"checks": {
@@ -1147,8 +1151,8 @@ fn axe_mutation_writes_new_entries_to_canonical_paths() {
 fn axe_mutation_promotes_target_legacy_list_without_dropping_entries() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
-            "name": "user", "path": "/tmp/sase.yml", "writable": true,
-            "list_strategy": "replace",
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "replace",
             "value": {"axe": {"lumberjacks": {"checks": {
                 "chops": ["base", {"name": "other", "enabled": true}]
             }}}}
@@ -1177,7 +1181,8 @@ fn axe_mutation_promotes_target_legacy_list_without_dropping_entries() {
 fn axe_inventory_marks_generated_instances_as_base_owned() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
-            "name": "user", "path": "/tmp/sase.yml", "writable": true,
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true,
             "value": {"axe": {"lumberjacks": {"checks": {
                 "chops": {"fan.out": {
                     "script": "fan",
@@ -1231,13 +1236,14 @@ fn axe_inventory_marks_generated_instances_as_base_owned() {
 fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
-            "name": "default", "writable": false,
+            "name": "default", "kind": "builtin", "writable": false,
             "value": {"axe": {"lumberjacks": {"checks": {
                 "chops": ["duplicate"]
             }}}}
         },
         {
-            "name": "overlay:test.yml", "path": "/tmp/test.yml", "writable": true,
+            "name": "overlay:test.yml", "kind": "overlay",
+            "path": "/tmp/test.yml", "writable": true,
             "value": {"axe": {"lumberjacks": {"checks": {
                 "chops": ["duplicate", 42, {"name": "duplicate"}]
             }, "other": {
@@ -1270,7 +1276,8 @@ fn axe_composition_reports_attributed_legacy_and_identity_diagnostics() {
 fn axe_composition_remaps_required_diagnostics_to_authored_public_paths() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
-            "name": "user", "path": "/tmp/sase.yml", "writable": true,
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true,
             "value": {"axe": {"routines": {"chop-watch": {
                 "jobs": ["chop-test", "chop-test"]
             }}}}
@@ -1323,6 +1330,7 @@ fn axe_description_requirements_validate_only_the_merged_config() {
     let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
         {
             "name": "default",
+            "kind": "builtin",
             "value": {"axe": {"lumberjacks": {"checks": {
                 "description": "Run checks on a short cadence",
                 "interval": 10,
@@ -1334,6 +1342,7 @@ fn axe_description_requirements_validate_only_the_merged_config() {
         },
         {
             "name": "overlay",
+            "kind": "overlay",
             "value": {"axe": {"lumberjacks": {"checks": {
                 "interval": 5
             }}}}
@@ -1426,4 +1435,446 @@ fn axe_entry_mutation_propagates_description_shape_to_diagnostics() {
                     "axe.lumberjacks.checks.main.chops.release.check.description",
                 )
     }));
+}
+
+fn origin_layers() -> Vec<ConfigLayerInputWire> {
+    serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks",
+                "interval": 10,
+                "chops": {"release": {
+                    "description": "Check release",
+                    "script": "run-release"
+                }}
+            }}}}
+        },
+        {
+            "name": "plugin:1", "kind": "plugin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"hooks": {
+                "description": "Advance hooks",
+                "interval": 5,
+                "chops": {"apply": {
+                    "description": "Apply hooks",
+                    "script": "run-hooks"
+                }}
+            }}}}
+        },
+        {
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "replace",
+            "value": {"axe": {"lumberjacks": {
+                "checks": {"interval": 30},
+                "hooks": {"interval": 60},
+                "telegram": {
+                    "description": "Send messages",
+                    "interval": 15,
+                    "chops": {"outbound": {
+                        "description": "Send outbound",
+                        "script": "send"
+                    }}
+                }
+            }}}
+        }
+    ]))
+    .unwrap()
+}
+
+fn routine_entry<'a>(
+    result: &'a sase_core::config::AxeConfigCompositionWire,
+    name: &str,
+) -> &'a sase_core::config::AxeInventoryEntryWire {
+    result
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.selector.lumberjack == name && entry.selector.chop.is_none()
+        })
+        .unwrap()
+}
+
+fn job_entry<'a>(
+    result: &'a sase_core::config::AxeConfigCompositionWire,
+    routine: &str,
+    job: &str,
+) -> &'a sase_core::config::AxeInventoryEntryWire {
+    result
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.selector.lumberjack == routine
+                && entry.selector.chop.as_deref() == Some(job)
+                && !entry.generated
+        })
+        .unwrap()
+}
+
+#[test]
+fn axe_inventory_reports_first_declaration_after_later_override() {
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: origin_layers(),
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    // Effective values come from the user override ...
+    assert_eq!(
+        result.effective_config["axe"]["lumberjacks"]["checks"]["interval"],
+        json!(30)
+    );
+    // ... but the declaring source stays with the builtin layer.
+    let routine = routine_entry(&result, "checks");
+    assert_eq!(routine.source, "builtin");
+    assert_eq!(routine.declared_by, "default");
+    let job = job_entry(&result, "checks", "release");
+    assert_eq!(job.source, "builtin");
+    assert_eq!(job.declared_by, "default");
+}
+
+#[test]
+fn axe_inventory_reports_plugin_declaration_overridden_by_user() {
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: origin_layers(),
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    assert_eq!(
+        result.effective_config["axe"]["lumberjacks"]["hooks"]["interval"],
+        json!(60)
+    );
+    let routine = routine_entry(&result, "hooks");
+    assert_eq!(routine.source, "plugin");
+    assert_eq!(routine.declared_by, "plugin:1");
+    let job = job_entry(&result, "hooks", "apply");
+    assert_eq!(job.source, "plugin");
+    assert_eq!(job.declared_by, "plugin:1");
+}
+
+#[test]
+fn axe_inventory_reports_user_declaration() {
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: origin_layers(),
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    let routine = routine_entry(&result, "telegram");
+    assert_eq!(routine.source, "user");
+    assert_eq!(routine.declared_by, "user:/tmp/sase.yml");
+    let job = job_entry(&result, "telegram", "outbound");
+    assert_eq!(job.source, "user");
+    assert_eq!(job.declared_by, "user:/tmp/sase.yml");
+}
+
+#[test]
+fn axe_inventory_reports_overlay_and_local_declarations_as_user() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "overlay:work.yml", "kind": "overlay",
+            "path": "/tmp/work.yml", "writable": true,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"overlay_job": {
+                "description": "Overlay routine",
+                "chops": {"run": {
+                    "description": "Overlay job",
+                    "script": "run-overlay"
+                }}
+            }}}}
+        },
+        {
+            "name": "local", "kind": "local", "path": "/tmp/sase.local.yml",
+            "writable": true, "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"local_job": {
+                "description": "Local routine",
+                "chops": {"run": {
+                    "description": "Local job",
+                    "script": "run-local"
+                }}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    let routine = routine_entry(&result, "overlay_job");
+    assert_eq!(routine.source, "user");
+    assert_eq!(routine.declared_by, "overlay:work.yml:/tmp/work.yml");
+    let job = job_entry(&result, "overlay_job", "run");
+    assert_eq!(job.source, "user");
+    assert_eq!(job.declared_by, "overlay:work.yml:/tmp/work.yml");
+    let routine = routine_entry(&result, "local_job");
+    assert_eq!(routine.source, "user");
+    assert_eq!(routine.declared_by, "local:/tmp/sase.local.yml");
+}
+
+#[test]
+fn axe_inventory_reports_job_newly_added_under_builtin_routine() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks",
+                "chops": {"release": {
+                    "description": "Check release",
+                    "script": "run-release"
+                }}
+            }}}}
+        },
+        {
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": {"nightly": {
+                    "description": "Nightly check",
+                    "script": "run-nightly"
+                }}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    let routine = routine_entry(&result, "checks");
+    assert_eq!(routine.source, "builtin");
+    assert_eq!(routine.declared_by, "default");
+    let base_job = job_entry(&result, "checks", "release");
+    assert_eq!(base_job.source, "builtin");
+    assert_eq!(base_job.declared_by, "default");
+    let added_job = job_entry(&result, "checks", "nightly");
+    assert_eq!(added_job.source, "user");
+    assert_eq!(added_job.declared_by, "user:/tmp/sase.yml");
+}
+
+#[test]
+fn axe_inventory_resolves_first_declaration_across_legacy_and_public_spellings()
+{
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks",
+                "chops": {"release": {
+                    "description": "Check release",
+                    "script": "run-release"
+                }}
+            }}}}
+        },
+        {
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "replace",
+            "value": {"axe": {"routines": {"checks": {
+                "interval": 30,
+                "jobs": {"release": {"interval": 45}}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    // The public spelling overrides fields, but first declaration stays
+    // with the legacy spelling in the builtin layer.
+    assert_eq!(
+        result.effective_config["axe"]["lumberjacks"]["checks"]["interval"],
+        json!(30)
+    );
+    let routine = routine_entry(&result, "checks");
+    assert_eq!(routine.source, "builtin");
+    assert_eq!(routine.declared_by, "default");
+    let job = job_entry(&result, "checks", "release");
+    assert_eq!(job.source, "builtin");
+    assert_eq!(job.declared_by, "default");
+}
+
+#[test]
+fn axe_inventory_marks_public_declarations_with_legacy_override() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "replace",
+            "value": {"axe": {"routines": {"telegram": {
+                "description": "Send messages",
+                "jobs": {"outbound": {
+                    "description": "Send outbound",
+                    "script": "send"
+                }}
+            }}}}
+        },
+        {
+            "name": "overlay:work.yml", "kind": "overlay",
+            "path": "/tmp/work.yml", "writable": true,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"telegram": {
+                "interval": 15
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    let routine = routine_entry(&result, "telegram");
+    assert_eq!(routine.source, "user");
+    assert_eq!(routine.declared_by, "user:/tmp/sase.yml");
+    let job = job_entry(&result, "telegram", "outbound");
+    assert_eq!(job.source, "user");
+    assert_eq!(job.declared_by, "user:/tmp/sase.yml");
+}
+
+#[test]
+fn axe_inventory_generated_jobs_inherit_base_origin() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks",
+                "chops": {"fan.out": {
+                    "description": "Fan out",
+                    "script": "fan",
+                    "for_each": [
+                        {"target": {"name": "one"}}
+                    ]
+                }}
+            }}}}
+        },
+        {
+            "name": "user", "kind": "user", "path": "/tmp/sase.yml",
+            "writable": true, "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "chops": {"fan.out": {"description": "Patched fan"}}
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    let base = job_entry(&result, "checks", "fan.out");
+    assert_eq!(base.source, "builtin");
+    assert_eq!(base.declared_by, "default");
+    let generated = result
+        .entries
+        .iter()
+        .find(|entry| entry.selector.chop.as_deref() == Some("fan.out[one]"))
+        .unwrap();
+    assert!(generated.generated);
+    assert_eq!(generated.source, "builtin");
+    assert_eq!(generated.declared_by, "default");
+}
+
+#[test]
+fn axe_inventory_assigns_origin_to_every_entry() {
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers: origin_layers(),
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    assert!(!result.entries.is_empty());
+    for entry in &result.entries {
+        assert!(
+            ["builtin", "plugin", "user"].contains(&entry.source.as_str()),
+            "entry `{}` has unexpected source `{}`",
+            entry.path,
+            entry.source,
+        );
+        assert!(
+            !entry.declared_by.is_empty(),
+            "entry `{}` is missing its declaring layer",
+            entry.path,
+        );
+    }
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|item| { item.code == "axe_config_missing_origin" }));
+}
+
+#[test]
+fn axe_composition_diagnoses_unknown_layer_kind_and_ignores_its_section() {
+    let layers: Vec<ConfigLayerInputWire> = serde_json::from_value(json!([
+        {
+            "name": "default", "kind": "builtin", "writable": false,
+            "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"checks": {
+                "description": "Run checks"
+            }}}}
+        },
+        {
+            "name": "mystery", "kind": "other", "path": "/tmp/mystery.yml",
+            "writable": true, "list_strategy": "concatenate",
+            "value": {"axe": {"lumberjacks": {"sneaky": {
+                "description": "Unknown-kind routine"
+            }}}}
+        }
+    ]))
+    .unwrap();
+    let result = compose_axe_config(&AxeConfigComposeRequestWire {
+        layers,
+        require_descriptions: false,
+        require_description_shape: false,
+        routine_job_contract: false,
+    })
+    .unwrap();
+
+    assert!(result.diagnostics.iter().any(|item| {
+        item.code == "axe_config_unknown_layer_kind"
+            && item.layer.as_deref() == Some("mystery:/tmp/mystery.yml")
+    }));
+    assert!(result.effective_config["axe"]["lumberjacks"]
+        .as_object()
+        .unwrap()
+        .contains_key("checks"));
+    assert!(!result.effective_config["axe"]["lumberjacks"]
+        .as_object()
+        .unwrap()
+        .contains_key("sneaky"));
+    assert!(!result
+        .entries
+        .iter()
+        .any(|entry| entry.selector.lumberjack == "sneaky"));
+    let routine = routine_entry(&result, "checks");
+    assert_eq!(routine.source, "builtin");
 }

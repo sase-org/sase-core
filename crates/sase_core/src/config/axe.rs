@@ -22,6 +22,9 @@ use super::wire::{
     ConfigDiagnosticWire, ConfigError, ConfigLayerInputWire,
     ConfigWritePlanWire, ListStrategy, CONFIG_WIRE_SCHEMA_VERSION,
 };
+use crate::service::config::{
+    classify_source, layer_label, ALLOWED_LAYER_KINDS,
+};
 
 const AXE: &str = "axe";
 const LUMBERJACKS: &str = "lumberjacks";
@@ -109,6 +112,12 @@ pub struct AxeRawContributionWire {
 }
 
 /// One effective lumberjack, base chop, or generated chop instance.
+///
+/// `source` is the declaring source (`builtin` | `plugin` | `user`) and
+/// `declared_by` is the `name:path` label of the earliest ordered layer
+/// that declared the entity. A builtin routine with a user field override
+/// stays `builtin`; generated jobs inherit their base job's origin. Both
+/// fields are required: core never silently defaults an origin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AxeInventoryEntryWire {
     pub selector: AxeEntrySelectorWire,
@@ -118,6 +127,8 @@ pub struct AxeInventoryEntryWire {
     pub enabled: bool,
     pub mutable: bool,
     pub generated: bool,
+    pub source: String,
+    pub declared_by: String,
     #[serde(default)]
     pub base_selector: Option<AxeEntrySelectorWire>,
     #[serde(default)]
@@ -207,7 +218,7 @@ type ExactProvenance = BTreeMap<Vec<String>, SourcePath>;
 pub fn compose_axe_config(
     request: &AxeConfigComposeRequestWire,
 ) -> Result<AxeConfigCompositionWire, ConfigError> {
-    let (effective_config, exact_provenance, diagnostics) = compose_values(
+    let (effective_config, exact_provenance, mut diagnostics) = compose_values(
         &request.layers,
         request.require_descriptions,
         request.require_description_shape,
@@ -218,8 +229,14 @@ pub fn compose_axe_config(
     } else {
         (effective_config.clone(), provenance.clone())
     };
-    let entries =
-        build_inventory(&effective_config, &request.layers, &exact_provenance);
+    let mut entries = Vec::new();
+    build_inventory(
+        &effective_config,
+        &request.layers,
+        &exact_provenance,
+        &mut diagnostics,
+        &mut entries,
+    );
     Ok(AxeConfigCompositionWire {
         schema_version: CONFIG_WIRE_SCHEMA_VERSION,
         effective_config,
@@ -629,10 +646,23 @@ fn compose_values(
     let mut diagnostics = Vec::new();
 
     for layer in layers {
+        let label = layer_label(layer);
+        if !ALLOWED_LAYER_KINDS.contains(&layer.kind.as_str()) {
+            diagnostics.push(ConfigDiagnosticWire {
+                severity: "error".to_string(),
+                code: "axe_config_unknown_layer_kind".to_string(),
+                message: format!(
+                    "layer `{label}` has unknown kind `{}`;                      ignoring its `axe` section",
+                    layer.kind,
+                ),
+                path: Some(AXE.to_string()),
+                layer: Some(label.clone()),
+            });
+            continue;
+        }
         let Some(raw_axe) = layer.value.get(AXE) else {
             continue;
         };
-        let label = layer_label(layer);
         detect_cross_layer_list_duplicates(
             &merged,
             raw_axe,
@@ -701,13 +731,6 @@ fn compose_values(
     diagnostics.extend(final_diagnostics);
     dedupe_diagnostics(&mut diagnostics);
     Ok((merged, provenance, diagnostics))
-}
-
-fn layer_label(layer: &ConfigLayerInputWire) -> String {
-    match layer.path.as_deref() {
-        Some(path) => format!("{}:{path}", layer.name),
-        None => layer.name.clone(),
-    }
 }
 
 fn remap_diagnostics_to_source_paths(
@@ -1901,15 +1924,16 @@ fn build_inventory(
     effective: &Value,
     layers: &[ConfigLayerInputWire],
     provenance: &ExactProvenance,
-) -> Vec<AxeInventoryEntryWire> {
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+    entries: &mut Vec<AxeInventoryEntryWire>,
+) {
     let Some(lumberjacks) = effective
         .get(AXE)
         .and_then(|axe| axe.get(LUMBERJACKS))
         .and_then(Value::as_object)
     else {
-        return Vec::new();
+        return;
     };
-    let mut entries = Vec::new();
     for (lumberjack_name, lumberjack) in lumberjacks {
         let selector = AxeEntrySelectorWire {
             kind: "lumberjack".to_string(),
@@ -1917,6 +1941,8 @@ fn build_inventory(
             chop: None,
         };
         let path = selector.key_path();
+        let (source, declared_by) =
+            entity_origin(layers, &selector, &path, diagnostics);
         entries.push(AxeInventoryEntryWire {
             selector: selector.clone(),
             key_path: path.clone(),
@@ -1925,6 +1951,8 @@ fn build_inventory(
             enabled: true,
             mutable: true,
             generated: false,
+            source,
+            declared_by,
             base_selector: None,
             target_key: None,
             field_provenance: entity_provenance(provenance, &path),
@@ -1946,6 +1974,8 @@ fn build_inventory(
                 chop.get("enabled").and_then(Value::as_bool).unwrap_or(true);
             let contributions = writable_contributions(layers, &selector);
             let field_provenance = entity_provenance(provenance, &path);
+            let (source, declared_by) =
+                entity_origin(layers, &selector, &path, diagnostics);
             entries.push(AxeInventoryEntryWire {
                 selector: selector.clone(),
                 key_path: path.clone(),
@@ -1954,6 +1984,8 @@ fn build_inventory(
                 enabled,
                 mutable: true,
                 generated: false,
+                source: source.clone(),
+                declared_by: declared_by.clone(),
                 base_selector: None,
                 target_key: None,
                 field_provenance: field_provenance.clone(),
@@ -1965,11 +1997,66 @@ fn build_inventory(
                     chop,
                     &field_provenance,
                     &contributions,
+                    &source,
+                    &declared_by,
                 ));
             }
         }
     }
-    entries
+}
+
+/// Resolve the declaring source of one inventory entry: the earliest ordered
+/// layer whose raw entity value exists. Raw lookup reuses
+/// [`raw_routine_value`] and [`raw_contribution`], so legacy
+/// (`lumberjacks`/`chops`) and public (`routines`/`jobs`) spellings share
+/// one first-declaration rule. Layers with unknown kinds were already
+/// excluded from the merge, so they cannot declare here either.
+fn declaring_origin(
+    layers: &[ConfigLayerInputWire],
+    selector: &AxeEntrySelectorWire,
+) -> Option<(String, String)> {
+    for layer in layers {
+        if !ALLOWED_LAYER_KINDS.contains(&layer.kind.as_str()) {
+            continue;
+        }
+        let declared = if selector.chop.is_some() {
+            raw_contribution(layer, selector).1.is_some()
+        } else {
+            raw_routine_value(layer, &selector.lumberjack).0.is_some()
+        };
+        if declared {
+            return Some((
+                classify_source(&layer.kind).to_string(),
+                layer_label(layer),
+            ));
+        }
+    }
+    None
+}
+
+fn entity_origin(
+    layers: &[ConfigLayerInputWire],
+    selector: &AxeEntrySelectorWire,
+    path: &[String],
+    diagnostics: &mut Vec<ConfigDiagnosticWire>,
+) -> (String, String) {
+    if let Some(origin) = declaring_origin(layers, selector) {
+        return origin;
+    }
+    // Unreachable: every effective entry is merged from a layer with a known
+    // kind, so a declaring layer always exists. Report explicitly rather
+    // than silently assigning `user`.
+    diagnostics.push(ConfigDiagnosticWire {
+        severity: "error".to_string(),
+        code: "axe_config_missing_origin".to_string(),
+        message: format!(
+            "no declaring layer found for `{}`; reporting `user` origin",
+            display_path(path),
+        ),
+        path: Some(display_path(path)),
+        layer: None,
+    });
+    ("user".to_string(), "unknown".to_string())
 }
 
 fn entity_provenance(
@@ -2120,6 +2207,8 @@ fn generated_entries(
     chop: &Value,
     provenance: &[AxeFieldProvenanceWire],
     contributions: &[AxeRawContributionWire],
+    source: &str,
+    declared_by: &str,
 ) -> Vec<AxeInventoryEntryWire> {
     let Some(for_each) = chop.get("for_each") else {
         return Vec::new();
@@ -2192,6 +2281,8 @@ fn generated_entries(
                     .unwrap_or(true),
                 mutable: false,
                 generated: true,
+                source: source.to_string(),
+                declared_by: declared_by.to_string(),
                 base_selector: Some(base_selector.clone()),
                 target_key: Some(instance.target_key),
                 field_provenance: generated_provenance,
