@@ -4,18 +4,29 @@ mod canonical;
 mod catalog;
 mod fingerprint;
 mod handoff_wire;
+pub mod receipt;
 mod store;
 mod triage;
 mod wire;
 
-pub use catalog::normalize_tool_definition;
+pub use catalog::{
+    normalize_receipt_policy, normalize_tool_definition, parse_receipt_ttl,
+    receipt_ttl_seconds,
+};
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
 pub use handoff_wire::*;
+pub use receipt::{
+    build_receipt_proof, diff_proof_against_fingerprint, is_safe_relative_path,
+    proof_from_json, proof_to_json, receipt_id_for_run, sha256_hex,
+    ReceiptProofDirtyWire, ReceiptProofInputMatchWire, ReceiptProofInputWire,
+    ReceiptProofRepoWire, ReceiptProofToolchainWire, ReceiptProofWire,
+    RECEIPT_MAX_CHANGED_PATHS, RECEIPT_MAX_TTL_SECONDS, RECEIPT_POLICY_VERSION,
+};
 pub use store::{
-    append_event, begin, claim, finish, list_runs, observe, reconcile,
-    request_stop, retention_apply, retention_preview, show_run, store_stats,
-    summarize, tool_run_failures, triage_record, triage_settle, triage_show,
-    triage_stage,
+    append_event, begin, claim, finish, list_runs, observe, receipt_lookup,
+    receipt_settle, reconcile, request_stop, retention_apply,
+    retention_preview, show_run, store_stats, summarize, tool_run_failures,
+    triage_record, triage_settle, triage_show, triage_stage,
 };
 pub use triage::*;
 pub use triage::{

@@ -14,6 +14,10 @@ use super::connection::{
     touch_write_meta, unix_now, validate_schema, with_read_store,
     with_write_store,
 };
+use super::receipt::{
+    count_deletable_receipts, delete_deletable_receipts,
+    tombstone_unreadable_for_runs,
+};
 use super::triage::triage_tables_present;
 use rusqlite::{Connection, TransactionBehavior};
 use std::collections::HashSet;
@@ -163,8 +167,13 @@ fn retention(
         } else {
             0
         };
-        let detail_rows: i64 =
-            base_detail_rows + triage_detail_rows + triage_summary_extra;
+        let receipt_detail_rows: i64 =
+            count_deletable_receipts(conn, summary_cut, now).unwrap_or(0)
+                as i64;
+        let detail_rows: i64 = base_detail_rows
+            + triage_detail_rows
+            + triage_summary_extra
+            + receipt_detail_rows;
         let mut file_candidates = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT run_id, log_stdout_path, log_stderr_path, events_path
@@ -364,6 +373,23 @@ fn retention(
                 [summary_cut],
             )?;
         }
+        let summary_run_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT run_id FROM runs
+                 WHERE state NOT IN ('created', 'running')
+                   AND settled_ts IS NOT NULL
+                   AND settled_ts < ?1",
+            )?;
+            let rows =
+                stmt.query_map([summary_cut], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        tombstone_unreadable_for_runs(&tx, &summary_run_ids)?;
+        delete_deletable_receipts(&tx, summary_cut, now)?;
         tx.execute(
             "DELETE FROM runs
              WHERE state NOT IN ('created', 'running')

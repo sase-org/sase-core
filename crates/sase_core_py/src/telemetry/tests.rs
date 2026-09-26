@@ -908,3 +908,166 @@ fn tool_run_triage_classification_bindings_round_trip() {
         assert_eq!(failures["groups"].as_array().unwrap().len(), 1);
     });
 }
+
+#[test]
+fn tool_run_receipt_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        let fp = json!({
+            "schema_version": 1,
+            "repos": [{
+                "identity": "sase",
+                "head": "head-1",
+                "index_tree": "tree-1",
+                "dirty_paths": []
+            }],
+            "inputs": [],
+            "env": {},
+            "toolchain": {},
+            "completeness": {"complete": true, "missing": []},
+            "diagnostics": []
+        });
+        let begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "now_ts": 100,
+                "commit_running": true
+            }),
+        )
+        .unwrap();
+        let begin_request = begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let started =
+            py_tool_run_begin(py, path.to_str().unwrap(), begin_request, 1_000)
+                .unwrap();
+        let started = py_to_json_value(started.bind(py)).unwrap();
+        let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+        let definition_digest = started["run"]["definition_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let extra_args_digest = started["run"]["extra_args_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let observe_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "child_pid": 1,
+                "child_pgid": 1,
+                "fingerprint_before": fp
+            }),
+        )
+        .unwrap();
+        let observe_request =
+            observe_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_tool_run_observe(py, path.to_str().unwrap(), observe_request, 1_000)
+            .unwrap();
+        let finish_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "state": "succeeded",
+                "exit_code": 0,
+                "duration_ms": 5,
+                "fingerprint_after": fp,
+                "mutated_input": false,
+                "terminal_cause": "exited",
+                "now_ts": 110
+            }),
+        )
+        .unwrap();
+        let finish_request = finish_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_tool_run_finish(py, path.to_str().unwrap(), finish_request, 1_000)
+            .unwrap();
+        let settle_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "recipe_finished_ts": 111,
+                "now_ts": 112
+            }),
+        )
+        .unwrap();
+        let settle_request = settle_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_tool_run_triage_settle(
+            py,
+            path.to_str().unwrap(),
+            settle_request,
+            1_000,
+        )
+        .unwrap();
+        let receipt_settle_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "policy": {
+                    "schema_version": 1,
+                    "accept": ["pass"],
+                    "ttl": "2h"
+                },
+                "bypassed": false,
+                "now_ts": 120
+            }),
+        )
+        .unwrap();
+        let receipt_settle_request =
+            receipt_settle_obj.bind(py).downcast::<PyDict>().unwrap();
+        let settled = py_tool_run_receipt_settle(
+            py,
+            path.to_str().unwrap(),
+            receipt_settle_request,
+            1_000,
+        )
+        .unwrap();
+        let settled = py_to_json_value(settled.bind(py)).unwrap();
+        assert_eq!(settled["schema_version"], json!(1));
+        assert_eq!(settled["minted"], json!(true));
+        let lookup_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "project": "sase",
+                "tool_name": "check",
+                "definition_digest": definition_digest,
+                "extra_args_digest": extra_args_digest,
+                "fingerprint": fp,
+                "accept": ["pass"],
+                "now_ts": 130
+            }),
+        )
+        .unwrap();
+        let lookup_request = lookup_obj.bind(py).downcast::<PyDict>().unwrap();
+        let looked = py_tool_run_receipt_lookup(
+            py,
+            path.to_str().unwrap(),
+            lookup_request,
+            1_000,
+        )
+        .unwrap();
+        let looked = py_to_json_value(looked.bind(py)).unwrap();
+        assert_eq!(looked["schema_version"], json!(1));
+        assert_eq!(looked["outcome"], json!("covered"));
+    });
+}

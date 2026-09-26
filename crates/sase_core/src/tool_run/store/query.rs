@@ -260,6 +260,7 @@ pub fn store_stats(
             sample_count: 0,
             unsettled_count: 0,
             last_write_ts: None,
+            receipt_count: 0,
             diagnostics: vec!["tool run store does not exist".to_string()],
         });
     }
@@ -282,6 +283,7 @@ pub fn store_stats(
                 |row| row.get::<_, i64>(0),
             )? as u64,
             last_write_ts: read_meta_i64(conn, "last_write_ts")?,
+            receipt_count: super::receipt::receipt_count_inner(conn).unwrap_or(0),
             diagnostics: Vec::new(),
         })
     })

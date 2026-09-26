@@ -11,7 +11,7 @@ use crate::tool_run::wire::{
 use rusqlite::Connection;
 use std::time::Duration;
 
-const OLD_RUN_COLUMNS: &str =
+pub(crate) const OLD_RUN_COLUMNS: &str =
     "run_id, state, source, executor, attempt, tool_name,
     definition_digest, extra_args_digest, display_argv_json,
     private_argv_json, project, agent, workspace, bead,
@@ -24,7 +24,7 @@ const OLD_RUN_COLUMNS: &str =
     log_stdout_path, log_stderr_path, events_path, evidence_json,
     diagnostics_json";
 
-const OLD_SCHEMA_SQL: &str = r#"
+pub(crate) const OLD_SCHEMA_SQL: &str = r#"
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,

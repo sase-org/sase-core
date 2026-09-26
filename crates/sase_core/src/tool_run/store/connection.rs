@@ -159,6 +159,39 @@ CREATE INDEX IF NOT EXISTS idx_tool_triage_items_run
     ON tool_triage_items(run_id, stage_key);
 CREATE INDEX IF NOT EXISTS idx_tool_triage_items_signature
     ON tool_triage_items(signature, extractor_version);
+CREATE TABLE IF NOT EXISTS tool_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL UNIQUE,
+    project TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    definition_digest TEXT NOT NULL,
+    extra_args_digest TEXT NOT NULL,
+    fingerprint_digest TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    signature_refs_json TEXT NOT NULL,
+    proof_json TEXT NOT NULL,
+    issue_ts INTEGER NOT NULL,
+    mint_ts INTEGER NOT NULL,
+    expiry_ts INTEGER NOT NULL,
+    policy_version INTEGER NOT NULL,
+    ttl_seconds INTEGER NOT NULL,
+    accept_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    superseded_by_run_id TEXT,
+    superseded_ts INTEGER,
+    explanation TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_receipts_one_active
+    ON tool_receipts(
+        project, tool_name, definition_digest,
+        extra_args_digest, fingerprint_digest
+    )
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_tool_receipts_lookup
+    ON tool_receipts(
+        project, tool_name, definition_digest,
+        extra_args_digest, fingerprint_digest, mint_ts
+    );
 "#;
 
 pub(super) fn validate_schema(version: u32) -> Result<(), ToolRunError> {

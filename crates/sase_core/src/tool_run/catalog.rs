@@ -5,7 +5,8 @@ use serde::Serialize;
 use super::canonical::canonical_digest;
 use super::wire::{
     ToolDefinitionNormalizeResultWire, ToolDefinitionWire,
-    ToolFingerprintSpecWire, TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolFingerprintSpecWire, ToolReceiptPolicyWire,
+    TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::ToolRunError;
 
@@ -76,6 +77,10 @@ pub fn normalize_tool_definition(
         }
     }
     definition.fingerprint.toolchain = toolchain;
+    if let Some(policy) = definition.receipt.take() {
+        let normalized = normalize_receipt_policy(policy)?;
+        definition.receipt = Some(normalized);
+    }
     let digest = definition_digest(&definition)?;
     definition.diagnostics = diagnostics.clone();
     diagnostics.push(format!("normalized definition digest {digest}"));
@@ -106,6 +111,92 @@ pub fn extra_args_digest(
     extra_args: &[String],
 ) -> Result<String, ToolRunError> {
     canonical_digest(&extra_args).map_err(ToolRunError::invalid)
+}
+
+pub fn normalize_receipt_policy(
+    policy: ToolReceiptPolicyWire,
+) -> Result<ToolReceiptPolicyWire, ToolRunError> {
+    if policy.schema_version != TOOL_RUN_WIRE_SCHEMA_VERSION {
+        return Err(ToolRunError::SchemaVersion {
+            expected: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            actual: policy.schema_version,
+        });
+    }
+    let mut accept: Vec<String> = Vec::new();
+    for token in &policy.accept {
+        let normalized = token.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(ToolRunError::invalid(
+                "receipt accept entries must not be empty",
+            ));
+        }
+        if normalized != "pass" && normalized != "no_new_failures" {
+            return Err(ToolRunError::invalid(format!(
+                "unknown receipt accept token {token:?}"
+            )));
+        }
+        if !accept.iter().any(|existing| existing == &normalized) {
+            accept.push(normalized);
+        }
+    }
+    if !accept.iter().any(|token| token == "pass") {
+        accept.push("pass".to_string());
+    }
+    accept.sort();
+    accept.dedup();
+    let _ttl_seconds = parse_receipt_ttl(&policy.ttl)?;
+    Ok(ToolReceiptPolicyWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        accept,
+        ttl: policy.ttl.trim().to_string(),
+    })
+}
+
+pub fn parse_receipt_ttl(raw: &str) -> Result<i64, ToolRunError> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err(ToolRunError::invalid("receipt ttl must not be empty"));
+    }
+    let (digits, suffix) = if let Some(body) = text.strip_suffix('s') {
+        (body, "s")
+    } else if let Some(body) = text.strip_suffix('m') {
+        (body, "m")
+    } else if let Some(body) = text.strip_suffix('h') {
+        (body, "h")
+    } else {
+        return Err(ToolRunError::invalid(format!(
+            "receipt ttl {raw:?} must match ^[1-9][0-9]*(s|m|h)$"
+        )));
+    };
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ToolRunError::invalid(format!(
+            "receipt ttl {raw:?} must match ^[1-9][0-9]*(s|m|h)$"
+        )));
+    }
+    let amount: i64 = digits.parse().map_err(|_| {
+        ToolRunError::invalid(format!("receipt ttl {raw:?} is not a number"))
+    })?;
+    let seconds = match suffix {
+        "s" => amount,
+        "m" => amount.saturating_mul(60),
+        "h" => amount.saturating_mul(3600),
+        _ => amount,
+    };
+    if !(1..=7200).contains(&seconds) {
+        return Err(ToolRunError::invalid(format!(
+            "receipt ttl {raw:?} must be from 1 second through 7200 seconds"
+        )));
+    }
+    Ok(seconds)
+}
+
+pub fn receipt_ttl_seconds(
+    policy: &ToolReceiptPolicyWire,
+) -> Result<i64, ToolRunError> {
+    parse_receipt_ttl(&policy.ttl)
 }
 
 fn normalize_string_list(
@@ -191,6 +282,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             },
+            receipt: None,
             diagnostics: Vec::new(),
         }
     }

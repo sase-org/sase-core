@@ -26,6 +26,7 @@ use tempfile::tempdir;
 
 mod compat;
 mod handoff;
+mod receipt;
 mod reconcile_owner;
 mod triage;
 mod triage_stage;
@@ -41,6 +42,7 @@ fn definition() -> ToolDefinitionWire {
         env: Vec::new(),
         args: ToolArgsPolicyWire::Deny,
         fingerprint: ToolFingerprintSpecWire::default(),
+        receipt: None,
         diagnostics: Vec::new(),
     }
 }
