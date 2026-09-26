@@ -593,7 +593,7 @@
       "identity": "logical and optional exact locators plus logical/exact keys",
       "path_privacy": "never includes local paths, PIDs, process groups, bearer tokens, or auth headers",
       "published_fields": {
-        "agent_clan": "string|null; owner-projected clan name for remote clan/family rendering",
+        "agent_clan": "string|null; owner-projected clan name for remote clan/session rendering",
         "agent_clan_generation": "string|null; owner-projected clan generation identity",
         "clan_tribe": "string|null; owner-resolved clan tribe label",
         "labels.project_label": "string; owner human project display label, falling back to the portable project id",

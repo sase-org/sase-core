@@ -1630,7 +1630,7 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                     "stopped_at_unix": "f64|null; owner lifecycle stop time",
                     "workspace_num": "u32|null; owner workspace number",
                     "labels.project_label": "string; owner human project display label, falling back to the portable project id",
-                    "agent_clan": "string|null; owner-projected clan name for remote clan/family rendering",
+                    "agent_clan": "string|null; owner-projected clan name for remote clan/session rendering",
                     "agent_clan_generation": "string|null; owner-projected clan generation identity",
                     "clan_tribe": "string|null; owner-resolved clan tribe label",
                     "tribe": "string|null; owner-resolved agent tribe label",
