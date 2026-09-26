@@ -26,6 +26,16 @@ pub const TOOL_RUN_TRIAGE_RULE_VERSION: u32 = 1;
 pub const TOOL_RUN_TRIAGE_LOOKBACK_SECS: i64 = 7 * 24 * 3600;
 /// Extractors whose same-fingerprint disagreement implies flake.
 pub const TOOL_RUN_TRIAGE_TEST_EXTRACTORS: [&str; 2] = ["pytest", "cargo_test"];
+/// File names too generic to identify an owner by title alone.
+const GENERIC_OWNER_FILENAMES: &[&str] = &[
+    "__init__.py",
+    "conftest.py",
+    "mod.rs",
+    "lib.rs",
+    "main.rs",
+    "main.py",
+    "Justfile",
+];
 
 fn is_test_extractor(name: &str) -> bool {
     TOOL_RUN_TRIAGE_TEST_EXTRACTORS.contains(&name)
@@ -225,36 +235,157 @@ fn validate_schema(version: u32) -> Result<(), ToolRunError> {
     Ok(())
 }
 
-fn locator_tokens(paths: &[String]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for path in paths {
-        for token in path
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .map(str::to_lowercase)
-            .filter(|token| token.len() >= 3)
+fn is_generic_owner_filename(name: &str) -> bool {
+    GENERIC_OWNER_FILENAMES
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(name))
+}
+
+fn split_location_list(raw: &str) -> Vec<String> {
+    raw.replace(" and ", ", ")
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn strip_lines_note(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some(start) = trimmed.rfind('(') else {
+        return trimmed;
+    };
+    if !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let inner = trimmed[start + 1..trimmed.len() - 1].trim();
+    if inner.to_ascii_lowercase().starts_with("line") {
+        return trimmed[..start].trim_end();
+    }
+    trimmed
+}
+
+fn strip_pytest_node(raw: &str) -> &str {
+    raw.split("::").next().unwrap_or(raw)
+}
+
+fn strip_line_column(raw: &str) -> &str {
+    let mut path = raw;
+    loop {
+        let Some(colon) = path.rfind(':') else {
+            return path;
+        };
+        let suffix = &path[colon + 1..];
+        if suffix.is_empty()
+            || !suffix.bytes().all(|byte| byte.is_ascii_digit())
         {
-            out.insert(token);
+            return path;
         }
-        // File stem without extension is a strong signal.
-        if let Some(stem) = path.rsplit('/').next() {
-            let stem = stem.split('.').next().unwrap_or(stem).to_lowercase();
-            if stem.len() >= 3 {
-                out.insert(stem);
+        path = &path[..colon];
+    }
+}
+
+fn normalize_one_location(raw: &str) -> Option<String> {
+    let without_note = strip_lines_note(raw);
+    let without_node = strip_pytest_node(without_note);
+    let without_lines = strip_line_column(without_node);
+    let trimmed = without_lines.trim().trim_end_matches('/');
+    let stripped = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped.to_string())
+}
+
+fn candidate_location_paths(location: Option<&str>) -> Vec<String> {
+    let Some(raw) = location else {
+        return Vec::new();
+    };
+    split_location_list(raw)
+        .into_iter()
+        .filter_map(|part| normalize_one_location(&part))
+        .collect()
+}
+
+fn location_covers_locator(location: &str, locator: &str) -> bool {
+    locator == location || locator.starts_with(&format!("{location}/"))
+}
+
+fn owner_location_hit(
+    locator_paths: &[String],
+    candidate_paths: &[String],
+) -> bool {
+    for locator in locator_paths {
+        let normalized =
+            normalize_one_location(locator).unwrap_or_else(|| locator.clone());
+        for location in candidate_paths {
+            if location_covers_locator(location, locator)
+                || location_covers_locator(location, &normalized)
+            {
+                return true;
             }
         }
     }
-    out
+    false
 }
 
-fn candidate_text(candidate: &ToolRunTriageOwnerCandidateWire) -> String {
-    let mut parts = vec![candidate.node_id.clone()];
-    if let Some(location) = candidate.location.as_deref() {
-        parts.push(location.to_string());
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
     }
-    if let Some(title) = candidate.title.as_deref() {
-        parts.push(title.to_string());
+    let hay = haystack.as_bytes();
+    let ned = needle.as_bytes();
+    let mut start = 0;
+    while start + ned.len() <= hay.len() {
+        if hay[start..start + ned.len()].eq_ignore_ascii_case(ned) {
+            let before_ok = start == 0 || !is_word_byte(hay[start - 1]);
+            let after = start + ned.len();
+            let after_ok = after == hay.len() || !is_word_byte(hay[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        start += 1;
     }
-    parts.join(" ").to_lowercase()
+    false
+}
+
+fn file_name_title_match(title: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let looks_like_file = name.contains('.') || is_generic_owner_filename(name);
+    if !looks_like_file || is_generic_owner_filename(name) {
+        return false;
+    }
+    contains_whole_word(title, name)
+}
+
+fn owner_title_hit(locator_paths: &[String], title: &str) -> bool {
+    for locator in locator_paths {
+        if locator.contains('/') && title.contains(locator.as_str()) {
+            return true;
+        }
+        let Some(path) = normalize_one_location(locator) else {
+            continue;
+        };
+        if path.contains('/')
+            && path != *locator
+            && title.contains(path.as_str())
+        {
+            return true;
+        }
+        if let Some(name) = path.rsplit('/').next() {
+            if file_name_title_match(title, name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn match_owners(
@@ -262,42 +393,50 @@ fn match_owners(
     candidates: &[ToolRunTriageOwnerCandidateWire],
     now_ts: i64,
 ) -> Vec<serde_json::Value> {
-    let tokens = locator_tokens(locator_paths);
-    if tokens.is_empty() || candidates.is_empty() {
+    if locator_paths.is_empty() || candidates.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(u8, &ToolRunTriageOwnerCandidateWire)> = Vec::new();
+    let mut scored: Vec<(u8, &str, &ToolRunTriageOwnerCandidateWire)> =
+        Vec::new();
     for candidate in candidates {
-        // Never match by bead/title alone without a locator token hit:
-        // require a token from the item's locators to appear in the
-        // candidate's id/location/title text.
-        let text = candidate_text(candidate);
-        let hit = tokens.iter().any(|token| text.contains(token.as_str()));
-        if !hit {
+        let location_paths =
+            candidate_location_paths(candidate.location.as_deref());
+        let matched_on = if owner_location_hit(locator_paths, &location_paths) {
+            Some("location")
+        } else if candidate
+            .title
+            .as_deref()
+            .is_some_and(|title| owner_title_hit(locator_paths, title))
+        {
+            Some("title")
+        } else {
+            None
+        };
+        let Some(matched_on) = matched_on else {
             continue;
-        }
+        };
         let status = candidate.status.to_lowercase();
         if status == "open" {
-            scored.push((0, candidate));
+            scored.push((0, matched_on, candidate));
         } else if status == "closed" {
             // Only recently closed fixes are suggested.
             let recent = candidate.closed_ts.is_none_or(|ts| {
                 now_ts.saturating_sub(ts) <= TOOL_RUN_TRIAGE_LOOKBACK_SECS
             });
             if recent {
-                scored.push((1, candidate));
+                scored.push((1, matched_on, candidate));
             }
         }
     }
     scored.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
-            .then(left.1.node_id.cmp(&right.1.node_id))
+            .then(left.2.node_id.cmp(&right.2.node_id))
     });
     scored
         .into_iter()
         .take(2)
-        .map(|(_, candidate)| {
+        .map(|(_, matched_on, candidate)| {
             let status = candidate.status.to_lowercase();
             let reason = if status == "open" {
                 "possible owner"
@@ -308,6 +447,7 @@ fn match_owners(
                 "id": candidate.node_id,
                 "status": status,
                 "reason": reason,
+                "matched_on": matched_on,
             })
         })
         .collect()

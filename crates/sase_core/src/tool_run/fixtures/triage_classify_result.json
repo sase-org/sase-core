@@ -29,7 +29,8 @@
         {
           "id": "sase-123",
           "status": "open",
-          "reason": "possible owner"
+          "reason": "possible owner",
+          "matched_on": "location"
         }
       ],
       "classified_ts": 2000

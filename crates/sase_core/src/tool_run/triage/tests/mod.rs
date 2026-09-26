@@ -13,6 +13,7 @@ use crate::tool_run::triage::{
     ToolRunTriageShowResultWire, ToolRunTriageSubjectItemWire,
     ToolRunTriageSubjectRunWire, ToolRunTriageVerdictItemWire,
     ToolRunTriageVerdictRequestWire, TOOL_RUN_TRIAGE_DISPLAY_MAX_CHARS,
+    TOOL_RUN_TRIAGE_LOOKBACK_SECS,
 };
 use crate::tool_run::wire::TOOL_RUN_WIRE_SCHEMA_VERSION;
 
@@ -903,7 +904,317 @@ fn owner_matching_at_most_two_open_first() {
     let owners = result.labels[0].possible_owners.as_array().unwrap();
     assert_eq!(owners.len(), 2);
     assert_eq!(owners[0]["id"], serde_json::json!("sase-1"));
+    assert_eq!(owners[0]["matched_on"], serde_json::json!("location"));
     assert_eq!(owners[1]["id"], serde_json::json!("sase-3"));
+    assert_eq!(owners[1]["matched_on"], serde_json::json!("location"));
+}
+
+fn owner_candidate(
+    node_id: &str,
+    location: Option<&str>,
+    title: Option<&str>,
+    status: &str,
+    closed_ts: Option<i64>,
+) -> ToolRunTriageOwnerCandidateWire {
+    ToolRunTriageOwnerCandidateWire {
+        node_id: node_id.to_string(),
+        location: location.map(str::to_string),
+        title: title.map(str::to_string),
+        status: status.to_string(),
+        closed_ts,
+    }
+}
+
+fn classify_owners(
+    locators: Vec<&str>,
+    candidates: Vec<ToolRunTriageOwnerCandidateWire>,
+    now_ts: i64,
+) -> crate::tool_run::triage::ToolRunTriageClassifyResultWire {
+    tool_run_triage_classify(ToolRunTriageClassifyRequestWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        subject_run: subject_run(vec![], "fp-1", "head-3"),
+        subjects: vec![subject_item("lint (mypy)", "mypy", sig(20), locators)],
+        evidence_runs: Vec::new(),
+        selection_records: Vec::new(),
+        ancestry: vec!["head-3".to_string()],
+        flake_baseline: Vec::new(),
+        owner_candidates: candidates,
+        knobs: ToolRunTriageKnobsWire::default(),
+        now_ts: Some(now_ts),
+    })
+    .unwrap()
+}
+
+fn owner_ids(
+    result: &crate::tool_run::triage::ToolRunTriageClassifyResultWire,
+) -> Vec<(String, String, String)> {
+    result.labels[0]
+        .possible_owners
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|owner| {
+            (
+                owner["id"].as_str().unwrap().to_string(),
+                owner["reason"].as_str().unwrap().to_string(),
+                owner["matched_on"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn owner_match_sase_191_3_probe_yields_no_owners() {
+    // Locator src/sase/tool/executor.py used to match sase-106 / sase-10a
+    // because every sase-* bead id contains the token "sase".
+    let result = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![
+            owner_candidate(
+                "sase-106",
+                Some(
+                    "src/sase/gate_shell/handoff.py and __init__.py; agent/launch_request.py; main/gate_handler.py; xprompt/workflow_hitl_gate.py",
+                ),
+                Some(
+                    "Restore gate creator handoff exports removed by coder-recovery refactor",
+                ),
+                "open",
+                None,
+            ),
+            owner_candidate(
+                "sase-10a",
+                Some(
+                    "crates/sase_gateway/src/routes.rs::routes::tests::fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure",
+                ),
+                Some(
+                    "sase_gateway fleet mutate/launch route tests fail at sase-core 17947a0",
+                ),
+                "open",
+                None,
+            ),
+            owner_candidate("sase-999", None, None, "open", None),
+        ],
+        2000,
+    );
+    assert!(result.labels[0]
+        .possible_owners
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn owner_match_location_and_title_cases() {
+    let pytest_node = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-loc",
+            Some("src/sase/tool/executor.py::test_timeout"),
+            Some("unrelated title"),
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&pytest_node),
+        vec![(
+            "sase-loc".to_string(),
+            "possible owner".to_string(),
+            "location".to_string()
+        )]
+    );
+
+    let prefix = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-dir",
+            Some("src/sase/tool"),
+            None,
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&prefix),
+        vec![(
+            "sase-dir".to_string(),
+            "possible owner".to_string(),
+            "location".to_string()
+        )]
+    );
+
+    let listed = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-list",
+            Some("src/other.py and src/sase/tool/executor.py:42 (lines 10-20)"),
+            None,
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&listed),
+        vec![(
+            "sase-list".to_string(),
+            "possible owner".to_string(),
+            "location".to_string()
+        )]
+    );
+
+    let title_path = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-title-path",
+            None,
+            Some("Fix src/sase/tool/executor.py timeout"),
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&title_path),
+        vec![(
+            "sase-title-path".to_string(),
+            "possible owner".to_string(),
+            "title".to_string()
+        )]
+    );
+
+    let title_file = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-title-file",
+            None,
+            Some("Fix executor.py timeout"),
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&title_file),
+        vec![(
+            "sase-title-file".to_string(),
+            "possible owner".to_string(),
+            "title".to_string()
+        )]
+    );
+
+    let both = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-both",
+            Some("src/sase/tool/executor.py"),
+            Some("Fix executor.py timeout"),
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert_eq!(
+        owner_ids(&both),
+        vec![(
+            "sase-both".to_string(),
+            "possible owner".to_string(),
+            "location".to_string()
+        )]
+    );
+}
+
+#[test]
+fn owner_match_generic_filename_stoplist() {
+    for (locator, title) in [
+        ("src/sase/__init__.py", "touch __init__.py"),
+        ("tests/conftest.py", "rewrite conftest.py"),
+        ("crates/sase_core/src/lib.rs", "export from lib.rs"),
+        ("crates/sase_core/src/mod.rs", "split mod.rs"),
+        ("src/main.py", "rewrite main.py"),
+        ("src/main.rs", "rewrite main.rs"),
+        ("Justfile", "update the Justfile"),
+    ] {
+        let result = classify_owners(
+            vec![locator],
+            vec![owner_candidate(
+                "sase-generic",
+                None,
+                Some(title),
+                "open",
+                None,
+            )],
+            2000,
+        );
+        assert!(
+            result.labels[0]
+                .possible_owners
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "generic title match for {locator}"
+        );
+    }
+
+    let subword = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-subword",
+            None,
+            Some("touch my_executor.py backup"),
+            "open",
+            None,
+        )],
+        2000,
+    );
+    assert!(subword.labels[0]
+        .possible_owners
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn owner_match_closed_within_lookback_is_possibly_fixed() {
+    let now = 10_000_000;
+    let recent = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-closed",
+            Some("src/sase/tool/executor.py"),
+            None,
+            "closed",
+            Some(now - 60),
+        )],
+        now,
+    );
+    assert_eq!(
+        owner_ids(&recent),
+        vec![(
+            "sase-closed".to_string(),
+            "possibly fixed".to_string(),
+            "location".to_string()
+        )]
+    );
+
+    let stale = classify_owners(
+        vec!["src/sase/tool/executor.py"],
+        vec![owner_candidate(
+            "sase-stale",
+            Some("src/sase/tool/executor.py"),
+            None,
+            "closed",
+            Some(now - TOOL_RUN_TRIAGE_LOOKBACK_SECS - 1),
+        )],
+        now,
+    );
+    assert!(stale.labels[0]
+        .possible_owners
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
