@@ -153,10 +153,23 @@ impl RecordIdentityProbe for FilesystemRecordIdentityProbe {
         if record.project_name == "home" {
             return match_home_marker(pid, home_marker_pid(record));
         }
-        let claims = self.claims_for(record);
-        match claims.as_deref() {
-            Some(claims) => match_project_claims(record, pid, claims),
-            None => RecordIdentityMatch::NotApplicable,
+        let Some(cached) = self.claims_for(record) else {
+            return RecordIdentityMatch::NotApplicable;
+        };
+        let first = match_project_claims(record, pid, &cached);
+        if first != RecordIdentityMatch::Mismatch {
+            return first;
+        }
+        // A cached mismatch may be a stale workspace-claims snapshot: one
+        // long-lived probe serves every catalog build while agents claim,
+        // transfer, and release workspaces constantly. A live row excluded on
+        // a stale cache never rejoins presentation until it dies or the
+        // gateway restarts. Re-read once before excluding so a claim written
+        // after the cache fill matches, while a genuinely foreign PID still
+        // mismatches (fail closed).
+        match self.refresh_claims(record) {
+            Some(fresh) => match_project_claims(record, pid, &fresh),
+            None => RecordIdentityMatch::Mismatch,
         }
     }
 }
@@ -173,12 +186,28 @@ impl FilesystemRecordIdentityProbe {
         };
         cache
             .entry(project_file.clone())
-            .or_insert_with(|| {
-                fs::read_to_string(&project_file)
-                    .ok()
-                    .map(|content| list_workspace_claims_from_content(&content))
-            })
+            .or_insert_with(|| Self::read_claims(&project_file))
             .clone()
+    }
+
+    /// Re-read one project file's workspace claims, replacing the cached
+    /// entry. Used to double-check a cached mismatch before a live row is
+    /// excluded from fleet presentation.
+    fn refresh_claims(
+        &self,
+        record: &AgentArtifactRecordWire,
+    ) -> Option<Vec<WorkspaceClaimWire>> {
+        let project_file = PathBuf::from(&record.project_file);
+        let fresh = Self::read_claims(&project_file)?;
+        let mut cache = self.project_claims.lock().ok()?;
+        cache.insert(project_file, Some(fresh.clone()));
+        Some(fresh)
+    }
+
+    fn read_claims(project_file: &Path) -> Option<Vec<WorkspaceClaimWire>> {
+        fs::read_to_string(project_file)
+            .ok()
+            .map(|content| list_workspace_claims_from_content(&content))
     }
 }
 
@@ -508,6 +537,47 @@ mod tests {
         assert_eq!(observation, OwnerProcessObservation::IdentityMismatch);
         assert_eq!(observation.liveness(), OwnerLivenessWire::Dead);
         assert!(observation.process_identity_mismatch());
+    }
+
+    #[test]
+    fn filesystem_probe_rechecks_stale_claims_before_mismatch() {
+        let dir = tempdir().unwrap();
+        let project_file = dir.path().join("proj.sase");
+        fs::write(
+            &project_file,
+            "RUNNING:\n  #7 | 9999 | run | demo | 20260722010101\n",
+        )
+        .unwrap();
+        let record = record_from(json!({
+            "project_name": "proj",
+            "project_dir": "/tmp/proj",
+            "project_file": project_file.to_string_lossy(),
+            "workflow_dir_name": "ace-run",
+            "artifact_dir": "/tmp/proj/artifacts/ace-run/20260722010101",
+            "timestamp": "20260722010101",
+            "agent_meta": {"name": "agent", "pid": 4242, "workspace_num": 7},
+            "running": {"pid": 4242}
+        }));
+        let probe = FilesystemRecordIdentityProbe::default();
+        let live = &|_| HostProcessObservation::LiveAgent;
+        // The cached stale claim still excludes (fail closed): a re-read of
+        // the unchanged file disagrees with this PID all the same.
+        assert_eq!(
+            observe_owner_process(&record, live, &probe),
+            OwnerProcessObservation::IdentityMismatch
+        );
+        // A claim written after the cache fill (workspace claimed by this
+        // PID) must match once the probe re-reads instead of excluding the
+        // live row until the gateway restarts.
+        fs::write(
+            &project_file,
+            "RUNNING:\n  #7 | 4242 | run | demo | 20260722010101\n",
+        )
+        .unwrap();
+        assert_eq!(
+            observe_owner_process(&record, live, &probe),
+            OwnerProcessObservation::Alive
+        );
     }
 
     #[test]
