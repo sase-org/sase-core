@@ -177,6 +177,7 @@ fn finalizer_bindings_round_trip_json_shapes() {
             "validate_finalizer_submission",
             "finalizer_json_digest",
             "aggregate_finalizer_outcomes",
+            "project_finalizer_node_view",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }
@@ -314,6 +315,50 @@ fn finalizer_bindings_round_trip_json_shapes() {
         let associated_digest =
             py_finalizer_context_digest(associated).unwrap();
         assert_ne!(without_bead, associated_digest);
+    });
+}
+
+#[test]
+fn node_view_binding_round_trips_a_planned_run() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("project_finalizer_node_view").is_ok());
+
+        let request_value = json!({
+            "schema_version": 1,
+            "tail_lines": 12,
+            "runs": [{
+                "run_id": "run-1",
+                "number": 1,
+                "label": "agent turn",
+                "kind": "agent",
+                "turn_terminal": false,
+                "plan": {
+                    "text": null,
+                    "size": 0,
+                    "too_large": false,
+                },
+                "instances": [],
+                "recovery_files": [],
+            }],
+        });
+        let request_obj = json_value_to_py(py, &request_value).unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        // A missing plan makes the run unavailable, never an error.
+        let view = py_project_finalizer_node_view(py, request).unwrap();
+        let view = py_to_json_value(view.bind(py)).unwrap();
+        assert_eq!(view["schema_version"], json!(1));
+        assert_eq!(view["runs"][0]["disposition"], json!("unavailable"));
+
+        let malformed_obj =
+            json_value_to_py(py, &json!({"schema_version": 1})).unwrap();
+        assert!(py_project_finalizer_node_view(
+            py,
+            malformed_obj.bind(py).downcast::<PyDict>().unwrap()
+        )
+        .is_err());
     });
 }
 

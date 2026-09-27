@@ -2,7 +2,7 @@
 
 use crate::prelude::*;
 
-use crate::json_bridge::{json_value_to_py, py_to_json_value};
+use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 
 use pyo3::wrap_pyfunction;
 
@@ -111,6 +111,10 @@ fn py_plan_status_transition<'py>(
 }
 
 fn finalizer_error_to_pyerr(error: FinalizerError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+fn run_view_error_to_pyerr(error: RunViewError) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
@@ -310,6 +314,25 @@ fn py_validate_finalizer_submission<'py>(
 fn py_finalizer_json_digest(value: &Bound<'_, PyAny>) -> PyResult<String> {
     let value = py_to_json_value(value)?;
     core_finalizer_digest_json_value(&value).map_err(finalizer_error_to_pyerr)
+}
+
+/// Project one finalizer node view from collected artifact text.
+///
+/// *request* must be a `FinalizerNodeViewRequestWire`-shape dict. The
+/// projection runs off the GIL because callers invoke it off the event
+/// loop. Structurally invalid requests surface as `ValueError`.
+#[pyfunction]
+#[pyo3(name = "project_finalizer_node_view")]
+fn py_project_finalizer_node_view<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: FinalizerNodeViewRequestWire =
+        finalizer_wire_from_pydict(request, "node view request")?;
+    let view = py
+        .allow_threads(|| core_project_finalizer_node_view(&request))
+        .map_err(run_view_error_to_pyerr)?;
+    serialize_to_py(py, &view)
 }
 
 /// Aggregate per-instance finalizer results into a terminal run status.
@@ -690,6 +713,7 @@ pub(crate) fn register_bead_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_finalizer_json_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_finalizer_outcomes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_project_finalizer_node_view, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_action_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_bead_action_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_decide_bead_action, m)?)?;

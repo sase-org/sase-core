@@ -8,6 +8,7 @@
 pub mod digest;
 pub mod outcome;
 pub mod remaining;
+pub mod run_view;
 pub mod selection;
 pub mod submission;
 pub mod wire;
@@ -28,6 +29,16 @@ pub use remaining::{
     REPAIR_HANDOFF_CODE_MISSING_DECISION,
     REPAIR_HANDOFF_CODE_MISSING_HOST_IDENTITY,
     REPAIR_HANDOFF_CODE_STALE_DIGEST,
+};
+pub use run_view::{
+    classify_evidence_kind, project_finalizer_node_view,
+    FinalizerNodeViewRequestWire, FinalizerNodeViewWire, RunViewAppearanceWire,
+    RunViewDeclarationWire, RunViewDispositionWire, RunViewDriftWire,
+    RunViewError, RunViewEvidenceWire, RunViewFileInputWire,
+    RunViewInstanceInputWire, RunViewNodeInstanceWire, RunViewRecoveryTurnWire,
+    RunViewRunInputWire, RunViewRunInstanceWire, RunViewRunKindWire,
+    RunViewRunWire, RunViewTextInputWire, RunViewUnselectedWire,
+    RUN_VIEW_MAX_BYTES, RUN_VIEW_TEXT_CAP_CHARS, RUN_VIEW_WIRE_SCHEMA_VERSION,
 };
 pub use selection::{
     authenticate_finalizer_plan, finalizer_instance_spec_digest,

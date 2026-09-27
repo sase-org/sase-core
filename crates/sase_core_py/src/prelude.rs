@@ -614,6 +614,7 @@ pub(crate) use sase_core::finalizer::{
     finalizer_instance_spec_digest as core_finalizer_instance_spec_digest,
     finalizer_plan_digest as core_finalizer_plan_digest,
     finalizer_provider_spec_digest as core_finalizer_provider_spec_digest,
+    project_finalizer_node_view as core_project_finalizer_node_view,
     resolve_finalizer_plan as core_resolve_finalizer_plan,
     select_remaining_commit_obligations as core_select_remaining_commit_obligations,
     validate_finalizer_context as core_validate_finalizer_context,
@@ -623,8 +624,9 @@ pub(crate) use sase_core::finalizer::{
     validate_finalizer_submission as core_validate_finalizer_submission,
     FinalizerAssignedBeadWire, FinalizerContextWire, FinalizerError,
     FinalizerInstanceResultWire, FinalizerInstanceSpecWire,
-    FinalizerPlanInputWire, FinalizerPlanWire, FinalizerProviderSpecWire,
-    FinalizerSubmissionEnvelopeWire, RemainingCommitWorkRequestWire,
+    FinalizerNodeViewRequestWire, FinalizerPlanInputWire, FinalizerPlanWire,
+    FinalizerProviderSpecWire, FinalizerSubmissionEnvelopeWire,
+    RemainingCommitWorkRequestWire, RunViewError,
     FINALIZER_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::fleet_attention::{
