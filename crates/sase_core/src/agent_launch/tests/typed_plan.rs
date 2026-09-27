@@ -977,3 +977,242 @@ fn typed_launch_composes_disjoint_queue_and_fanout() {
         other => panic!("expected agent payload, got {other:?}"),
     }
 }
+
+#[test]
+fn typed_launch_parses_tab_and_reemits_after_hide() {
+    let plan = plan_typed_launch_units(
+        "%tab:Blog\n%hide\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let agent = match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent,
+        other => panic!("expected agent payload, got {other:?}"),
+    };
+    assert_eq!(agent.agent_tab.as_deref(), Some("blog"));
+    assert_eq!(agent.prompt, "Do work");
+    assert!(!agent.prompt.contains("%tab"));
+    let rebuilt = agent_unit_dispatch_prompt(agent);
+    let hide = rebuilt.find("%hide").expect("rebuilt hides");
+    let tab = rebuilt.find("%tab:blog").expect("rebuilt tabs");
+    assert!(hide < tab, "{rebuilt}");
+}
+
+#[test]
+fn typed_launch_tab_paren_form_and_main_store_absent() {
+    let plan = plan_typed_launch_units(
+        "%tab(blog)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let agent = match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent,
+        other => panic!("expected agent payload, got {other:?}"),
+    };
+    assert_eq!(agent.agent_tab.as_deref(), Some("blog"));
+
+    let main = plan_typed_launch_units(
+        "%tab:main\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let agent = match &main.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent,
+        other => panic!("expected agent payload, got {other:?}"),
+    };
+    assert_eq!(agent.agent_tab, None);
+    let rebuilt = agent_unit_dispatch_prompt(agent);
+    assert!(!rebuilt.contains("%tab"), "{rebuilt}");
+}
+
+#[test]
+fn typed_launch_rejects_duplicate_tab() {
+    let err = plan_typed_launch_units(
+        "%tab:a\n%tab:b\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    match err {
+        AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+            assert!(diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "duplicate-tab"));
+        }
+        other => panic!("expected typed launch diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_launch_rejects_invalid_tab_values() {
+    for prompt in [
+        "%tab\nDo work",
+        "%tab:\nDo work",
+        "%tab:local\nDo work",
+        "%tab:all\nDo work",
+        "%tab(has space)\nDo work",
+        "%tab:-blog\nDo work",
+        "%tab:blog, extra\nDo work",
+        "%tab(name=blog)\nDo work",
+        "%tab+\nDo work",
+    ] {
+        let err = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap_err();
+        match err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "invalid-tab"),
+                    "expected invalid-tab for {prompt:?}"
+                );
+            }
+            other => {
+                panic!("expected typed launch diagnostic, got {other:?}")
+            }
+        }
+    }
+    let local = plan_typed_launch_units(
+        "%tab:local\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    assert!(local.to_string().contains("derived"), "{local}");
+    let all = plan_typed_launch_units(
+        "%tab:all\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    assert!(all.to_string().contains('o'), "{all}");
+}
+
+#[test]
+fn typed_launch_rejects_tab_on_proc_with_specific_code() {
+    let err = plan_typed_launch_units(
+        "%tab:blog\n%proc(\"just check\")",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    match err {
+        AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "tab-on-proc"),
+                "{diagnostics:?}"
+            );
+            assert!(
+                diagnostics.iter().all(|diagnostic| diagnostic.code
+                    != "proc-residual-prompt"),
+                "{diagnostics:?}"
+            );
+        }
+        other => panic!("expected typed launch diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn typed_launch_keeps_fenced_tab_inert() {
+    let plan = plan_typed_launch_units(
+        "```text\n%tab:blog\n```\n%id:reviewer\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let agent = match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => agent,
+        other => panic!("expected agent payload, got {other:?}"),
+    };
+    assert_eq!(agent.agent_tab, None);
+    assert!(agent.prompt.contains("%tab:blog"));
+}
+
+#[test]
+fn typed_launch_rejects_clan_tab_mismatch() {
+    let err = plan_typed_launch_units(
+        "%id:lead\n%clan(research)\n%tab:sase\nLead\n---\n%id(worker, clan=research)\n%tab:blog\nJoin",
+        Some("multi_prompt"),
+        Some("sase"),
+    )
+    .unwrap_err();
+    match err {
+        AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "tab-mismatch"),
+                "{diagnostics:?}"
+            );
+        }
+        other => panic!("expected typed launch diagnostic, got {other:?}"),
+    }
+
+    let agreeing = plan_typed_launch_units(
+        "%id:lead\n%clan(research)\n%tab:sase\nLead\n---\n%id(worker, clan=research)\n%tab:sase\nJoin",
+        Some("multi_prompt"),
+        Some("sase"),
+    )
+    .unwrap();
+    for unit in &agreeing.units {
+        let agent = match &unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => agent,
+            other => panic!("expected agent payload, got {other:?}"),
+        };
+        assert_eq!(agent.agent_tab.as_deref(), Some("sase"));
+    }
+
+    let inheriting = plan_typed_launch_units(
+        "%id:lead\n%clan(research)\n%tab:sase\nLead\n---\n%id(worker, clan=research)\nJoin",
+        Some("multi_prompt"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert_eq!(inheriting.units.len(), 2);
+}
+
+#[test]
+fn typed_launch_fanout_branches_may_use_different_tabs() {
+    let plan = plan_typed_launch_units(
+        "%{%tab:sase Write docs | %tab:blog Fix bug}",
+        Some("alternatives"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert_eq!(plan.units.len(), 2);
+    let tabs: Vec<Option<&str>> = plan
+        .units
+        .iter()
+        .map(|unit| match &unit.payload {
+            LaunchUnitPayloadWire::Agent(agent) => agent.agent_tab.as_deref(),
+            other => panic!("expected agent payload, got {other:?}"),
+        })
+        .collect();
+    assert!(tabs.contains(&Some("sase")), "{tabs:?}");
+    assert!(tabs.contains(&Some("blog")), "{tabs:?}");
+}
+
+#[test]
+fn typed_launch_tab_changes_content_digest() {
+    let plain =
+        plan_typed_launch_units("Do work", Some("auto"), Some("sase")).unwrap();
+    let tabbed = plan_typed_launch_units(
+        "%tab:blog\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let retabbed = plan_typed_launch_units(
+        "%tab(blog)\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    assert_ne!(plain.content_digest, tabbed.content_digest);
+    assert_eq!(tabbed.content_digest, retabbed.content_digest);
+}

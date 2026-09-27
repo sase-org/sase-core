@@ -340,10 +340,8 @@ async fn snippet_clients_receive_identity_and_clan_forms() {
     let CompletionResponse::Array(items) = response else {
         panic!("expected completion array");
     };
-    assert!(
-        items.is_empty(),
-        "removed %t directive completed: {items:?}"
-    );
+    assert_snippet_item(&items, "%tab:...", "%tab:${1:name}$0");
+    assert_snippet_item(&items, "%tab(...)", "%tab(${1:name}) $0");
 
     for token in ["%f", "%final"] {
         let response = server

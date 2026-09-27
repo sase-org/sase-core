@@ -375,6 +375,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
                 "queue",
                 "hold",
                 "dispatch",
+                "tab",
                 "if",
                 "proc",
                 "auto",

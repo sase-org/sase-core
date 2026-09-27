@@ -107,7 +107,7 @@ async fn removed_identity_directives_do_not_complete() {
     });
     let server = service.inner();
 
-    for token in ["%name", "%n", "%family", "%group", "%g", "%tribe", "%t"] {
+    for token in ["%name", "%n", "%family", "%group", "%g", "%tribe"] {
         let response = server
             .completion_for_text(
                 token.to_string(),
@@ -120,6 +120,24 @@ async fn removed_identity_directives_do_not_complete() {
         };
         assert!(items.is_empty(), "{token}: {items:?}");
     }
+
+    // `%t` prefix-matches the `tab` directive name without resolving as a
+    // retired identity directive.
+    let response = server
+        .completion_for_text("%t".to_string(), Position::new(0, 2))
+        .await
+        .unwrap();
+    let CompletionResponse::Array(items) = response else {
+        panic!("expected completion array");
+    };
+    assert!(
+        items.iter().any(|item| item.label == "%tab"),
+        "%t should complete %tab: {items:?}"
+    );
+    assert!(
+        items.iter().all(|item| item.label.starts_with("%tab")),
+        "%t should complete only tab rows: {items:?}"
+    );
 }
 
 #[tokio::test]

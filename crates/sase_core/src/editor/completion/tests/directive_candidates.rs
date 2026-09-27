@@ -358,3 +358,39 @@ fn directive_keyword_completion_stays_out_of_positional_and_value_positions() {
         )));
     }
 }
+
+fn tab_insertions(
+    text: &str,
+    cursor: u32,
+    inventories: &DirectiveCompletionInventories,
+) -> Vec<String> {
+    let document = DocumentSnapshot::new(text);
+    let context =
+        classify_completion_context(&document, pos(cursor), &entries())
+            .unwrap();
+    build_directive_clause_candidates(&context, inventories)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.insertion)
+        .collect()
+}
+
+#[test]
+fn tab_directive_completes_inventory_tabs_plus_main() {
+    let inventories = DirectiveCompletionInventories {
+        agents: vec![
+            agent_target("sase", "tab", 0, ""),
+            agent_target("blog", "tab", 0, ""),
+            agent_target("reviewer", "agent", 0, ""),
+        ],
+        ..Default::default()
+    };
+    assert_eq!(
+        tab_insertions("%tab:", 5, &inventories),
+        vec!["blog", "main", "sase"]
+    );
+    assert_eq!(tab_insertions("%tab:s", 6, &inventories), vec!["sase"]);
+    assert_eq!(tab_insertions("%tab:m", 6, &inventories), vec!["main"]);
+    // The paren form classifies the same positional role.
+    assert_eq!(tab_insertions("%tab(s", 6, &inventories), vec!["sase"]);
+}

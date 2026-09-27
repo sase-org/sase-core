@@ -57,6 +57,7 @@ pub(super) fn needs_agent_entries(
                 | DirectiveValueRole::Session
                 | DirectiveValueRole::Hood
                 | DirectiveValueRole::Tribe
+                | DirectiveValueRole::Tab
         )
     )
 }

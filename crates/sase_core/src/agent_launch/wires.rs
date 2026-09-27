@@ -309,6 +309,10 @@ pub struct AgentUnitWire {
     /// unset so admission never treats leftover prompt text as routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_target: Option<String>,
+    /// Canonical named agent tab from `%tab:<name>`. `None` is the default
+    /// tab, including the explicit `%tab:main` placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tab: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<HoldFieldsWire>,
 }

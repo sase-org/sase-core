@@ -483,6 +483,11 @@ pub fn agent_unit_dispatch_prompt_with_flags(
     if agent.hidden {
         lines.push("%hide".to_string());
     }
+    if let Some(tab) = agent.agent_tab.as_deref() {
+        if !tab.is_empty() {
+            lines.push(format!("%tab:{tab}"));
+        }
+    }
     if let Some(directive) = format_queue_directive(&QueueFieldsWire {
         queue_capacity: agent.authored_queue_capacity(),
         queue_capacity_multiplier: agent.queue_capacity_multiplier,

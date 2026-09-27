@@ -525,6 +525,7 @@ pub enum DirectiveValueRole {
     Duration,
     Language,
     Machine,
+    Tab,
 }
 
 /// Which part of a directive argument clause the cursor is in.
@@ -738,6 +739,10 @@ pub fn directive_examples(name: &str) -> &'static [&'static str] {
             "%dispatch:apollo Build and test the current project",
             "%dispatch(apollo) Review the active Patch",
         ],
+        "tab" => &[
+            "%tab:sase Build and test the current project",
+            "%tab(blog) Review the active Patch",
+        ],
         "queue" => &[
             "%q:5",
             "%queue(capacity=5)",
@@ -895,6 +900,17 @@ pub fn directive_snippet_recipes_with_flags(
                 "Send this launch to an enrolled remote machine.",
             ),
         ],
+        "tab" => vec![
+            colon_recipe("tab", "name"),
+            recipe(
+                "%tab(...)",
+                "agent tab snippet",
+                "%tab(${1:name}) $0",
+                "%tab($1) $0",
+                "%tab(name)",
+                "Place this launch's presentation root on a named agent tab.",
+            ),
+        ],
         "id" => vec![
             colon_recipe("id", "agent-id"),
             recipe(
@@ -1036,6 +1052,7 @@ fn directive_metadata_supports_colon(name: &str) -> bool {
             | "auto"
             | "final"
             | "dispatch"
+            | "tab"
             | "xprompts_enabled"
     )
 }

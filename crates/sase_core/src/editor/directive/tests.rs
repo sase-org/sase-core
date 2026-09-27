@@ -55,6 +55,7 @@ fn contract_covers_the_audited_directive_matrix() {
             "queue",
             "hold",
             "dispatch",
+            "tab",
             "if",
             "proc",
             "auto",
@@ -64,6 +65,32 @@ fn contract_covers_the_audited_directive_matrix() {
             "xprompts_enabled",
         ]
     );
+
+    let tab = contract
+        .iter()
+        .find(|entry| entry.name == "tab")
+        .expect("tab contract");
+    assert_eq!(tab.alias, None);
+    assert_eq!(
+        tab.description,
+        "Place this launch's presentation root on a named agent tab"
+    );
+    assert!(tab.takes_argument);
+    assert!(!tab.allows_multiple);
+    assert!(tab
+        .syntax_forms
+        .contains(&DirectiveSyntaxForm::Parenthesized));
+    assert!(tab.syntax_forms.contains(&DirectiveSyntaxForm::Colon));
+    assert_eq!(tab.positional_role, Some(DirectiveValueRole::Tab));
+    assert!(tab.keywords.is_empty());
+    assert_eq!(tab.dynamic_keyword_role, None);
+    assert!(tab.examples.iter().any(
+        |example| example == "%tab:sase Build and test the current project"
+    ));
+    assert!(tab
+        .recipes
+        .iter()
+        .any(|recipe| recipe.plain_text == "%tab:name"));
 
     let wait = contract
         .iter()
@@ -537,6 +564,8 @@ fn removed_identity_directives_do_not_resolve_or_complete() {
     for name in ["family", "group", "g", "tribe", "t"] {
         assert_eq!(canonical_directive_name(name), None, "{name}");
         assert!(directive_metadata(name).is_none(), "{name}");
+    }
+    for name in ["family", "group", "g", "tribe"] {
         assert!(
             build_directive_completion_candidates(&format!("%{name}"))
                 .candidates
@@ -544,6 +573,16 @@ fn removed_identity_directives_do_not_resolve_or_complete() {
             "{name}"
         );
     }
+    // `%t` prefix-matches the `tab` directive name in completion without
+    // resolving as a directive.
+    assert_eq!(
+        build_directive_completion_candidates("%t")
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tab"]
+    );
 }
 
 #[test]
@@ -610,11 +649,23 @@ fn final_directive_is_public_in_name_completion() {
 }
 
 #[test]
-fn directive_completion_t_prefix_is_empty() {
-    let t_completions = build_directive_completion_candidates("%t");
-    assert!(t_completions.candidates.is_empty());
-
-    for token in ["%ta", "%ti", "%time"] {
+fn directive_completion_t_prefix_completes_tab_only() {
+    // `%t` is not a `tab` alias (it keeps the retired-tribe migration error
+    // at parse time), but it prefix-matches the `tab` directive name in
+    // completion, like `%a` matches `alt` and `auto`.
+    for token in ["%t", "%ta", "%tab"] {
+        let completions = build_directive_completion_candidates(token);
+        assert_eq!(
+            completions
+                .candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["tab"],
+            "{token} completion"
+        );
+    }
+    for token in ["%ti", "%time"] {
         assert!(
             build_directive_completion_candidates(token)
                 .candidates
@@ -636,9 +687,14 @@ fn removed_auto_approve_aliases_do_not_resolve_or_complete() {
     assert!(build_directive_completion_candidates("%p")
         .candidates
         .is_empty());
-    assert!(build_directive_completion_candidates("%ta")
-        .candidates
-        .is_empty());
+    assert_eq!(
+        build_directive_completion_candidates("%ta")
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect::<Vec<_>>(),
+        ["tab"]
+    );
     let a_completions = build_directive_completion_candidates("%a");
     let a_names: Vec<&str> = a_completions
         .candidates

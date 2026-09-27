@@ -716,6 +716,20 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         keywords: &[],
         dynamic_keyword_role: None,
     },
+    DirectiveMetadata {
+        name: "tab",
+        alias: None,
+        description:
+            "Place this launch's presentation root on a named agent tab",
+        argument_hint: ":name or (name)",
+        takes_argument: true,
+        allows_multiple: false,
+        syntax_forms: COLON_PAREN,
+        positional_role: Some(DirectiveValueRole::Tab),
+        positional_suggestions: &[],
+        keywords: &[],
+        dynamic_keyword_role: None,
+    },
     IF_DIRECTIVE_OFF,
     DirectiveMetadata {
         name: "proc",

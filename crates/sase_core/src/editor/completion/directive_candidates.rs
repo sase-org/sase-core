@@ -14,10 +14,11 @@ use crate::editor::directive::{
     directive_metadata_with_flags, wait_queue_keyword_retired,
 };
 use crate::editor::wire::{
-    CompletionCandidate, CompletionContext, CompletionContextKind,
-    CompletionList, DirectiveClauseKind, DirectiveCompletionInventories,
-    DirectiveFinalizerEntry, DirectiveModelEntry, DirectiveSyntaxForm,
-    DirectiveValueRole, EditorRange, EditorTextEdit,
+    AgentCompletionEntry, CompletionCandidate, CompletionContext,
+    CompletionContextKind, CompletionList, DirectiveClauseKind,
+    DirectiveCompletionInventories, DirectiveFinalizerEntry,
+    DirectiveModelEntry, DirectiveSyntaxForm, DirectiveValueRole, EditorRange,
+    EditorTextEdit,
 };
 
 pub fn build_directive_clause_candidates(
@@ -164,6 +165,14 @@ pub fn build_directive_clause_candidates(
     if metadata.positional_role == Some(DirectiveValueRole::Machine) {
         return machine_value_candidates(token, inventories, replacement);
     }
+    if metadata.positional_role == Some(DirectiveValueRole::Tab) {
+        return tab_value_candidates(
+            token,
+            inventories,
+            replacement,
+            &context.selected_values,
+        );
+    }
     // Keyword names are offered only in `DirectiveArgumentKeyword` (and the
     // wait positional mix above). Clan/id positional slots stay free-form.
     build_directive_static_value_candidates(
@@ -256,6 +265,12 @@ fn build_directive_value_candidates(
         Some(DirectiveValueRole::Machine) => {
             machine_value_candidates(token, inventories, replacement)
         }
+        Some(DirectiveValueRole::Tab) => tab_value_candidates(
+            token,
+            inventories,
+            replacement,
+            &context.selected_values,
+        ),
         _ => {
             let Some(metadata) =
                 context.directive_name.as_deref().and_then(|name| {
@@ -334,6 +349,62 @@ fn machine_value_candidates(
     CompletionList {
         shared_extension: shared_extension(&candidates, token),
         candidates,
+    }
+}
+fn tab_value_candidates(
+    token: &str,
+    inventories: &DirectiveCompletionInventories,
+    replacement: Option<EditorRange>,
+    selected_values: &[String],
+) -> CompletionList {
+    let tab_entries: Vec<AgentCompletionEntry> = inventories
+        .agents
+        .iter()
+        .filter(|entry| entry.kind.as_str() == "tab")
+        .cloned()
+        .collect();
+    let mut list = build_agent_completion_candidates(
+        token,
+        replacement,
+        &tab_entries,
+        selected_values,
+    );
+    let partial = token.to_lowercase();
+    let already_selected = selected_values.iter().any(|value| value == "main");
+    let already_listed = list
+        .candidates
+        .iter()
+        .any(|candidate| candidate.name == "main");
+    if !already_selected
+        && !already_listed
+        && "main".starts_with(partial.as_str())
+    {
+        list.candidates.push(CompletionCandidate {
+            display: "main".to_string(),
+            insertion: "main".to_string(),
+            detail: Some("Default agent tab".to_string()),
+            documentation: Some(
+                "The explicit default: stored as absent and opts out of view and lineage inheritance."
+                    .to_string(),
+            ),
+            is_dir: false,
+            name: "main".to_string(),
+            replacement: replacement.map(|range| EditorTextEdit {
+                range,
+                new_text: "main".to_string(),
+            }),
+            additional_edits: Vec::new(),
+            kind: "tab".to_string(),
+            project: String::new(),
+            status: String::new(),
+        });
+    }
+    list.candidates.sort_by(|left, right| {
+        left.name.to_lowercase().cmp(&right.name.to_lowercase())
+    });
+    CompletionList {
+        shared_extension: shared_extension(&list.candidates, token),
+        candidates: list.candidates,
     }
 }
 const FINALIZER_KIND_ADD: &str = "finalizer";

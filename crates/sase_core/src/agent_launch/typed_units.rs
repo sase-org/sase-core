@@ -27,6 +27,7 @@ use super::wires::{
     LaunchUnitPayloadWire, LaunchUnitWire, ProcUnitWire,
     LAUNCH_PLAN_WIRE_SCHEMA_VERSION,
 };
+use crate::agent_tab::{canonicalize_agent_tab_name, AgentTabNameWire};
 use crate::effort::split_model_effort;
 use crate::fenced_code::{
     language_from_info_string, scan_directive_owned_fences, CodeLanguage,
@@ -77,6 +78,7 @@ pub fn plan_typed_launch_units_with_flags(
         ));
     }
     validate_typed_unit_identities(&raw_units, &mut diagnostics);
+    validate_typed_unit_agent_tab_agreement(&raw_units, &mut diagnostics);
     resolve_typed_waits(&mut raw_units, &mut diagnostics);
     validate_typed_wait_cycles(&raw_units, &mut diagnostics);
 
@@ -157,6 +159,8 @@ fn classify_typed_launch_unit(
         None => (None, None),
     };
     let mut dispatch_target: Option<String> = None;
+    let mut agent_tab: Option<String> = None;
+    let mut saw_tab_directive = false;
     let mut condition: Option<LaunchConditionWire> = None;
     let mut proc_code: Option<CodeValueWire> = None;
     let mut proc_options: BTreeMap<String, String> = BTreeMap::new();
@@ -461,6 +465,24 @@ fn classify_typed_launch_unit(
                     }
                 }
             }
+            "tab" => {
+                regions_to_remove.push((directive.start, directive.end));
+                if saw_tab_directive {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-tab",
+                        "Only one %tab directive is allowed per launch unit.",
+                        &logical_id,
+                        Some(span),
+                    ));
+                } else {
+                    saw_tab_directive = true;
+                    match parse_tab_target(&directive) {
+                        Ok(tab) => agent_tab = tab,
+                        Err(diagnostic) => diagnostics
+                            .push(with_logical_id(diagnostic, &logical_id)),
+                    }
+                }
+            }
             "repeat" => {
                 regions_to_remove.push((directive.start, directive.end));
                 saw_repeat_directive = true;
@@ -581,6 +603,14 @@ fn classify_typed_launch_unit(
                 None,
             ));
         }
+        if saw_tab_directive {
+            diagnostics.push(typed_unit_diagnostic(
+                "tab-on-proc",
+                "%tab is not valid on %proc launch units in v1; agent tabs only place agent units.",
+                &logical_id,
+                None,
+            ));
+        }
         let proc_name = agent_identity.clone();
         validate_hold_self(
             hold_fields.as_ref(),
@@ -677,6 +707,7 @@ fn classify_typed_launch_unit(
             workspace_provider,
             workspace_reference,
             dispatch_target,
+            agent_tab,
             hold: hold_fields,
         })
     };
@@ -690,6 +721,99 @@ fn classify_typed_launch_unit(
             payload,
         },
         raw_waits,
+    }
+}
+
+/// Parse one `%tab` occurrence into the unit's stored tab.
+///
+/// `%tab:main` is the explicit default and stores as absent (`None`).
+/// Empty values, keyword args, multiple positionals, and `+` forms are
+/// errors, as are reserved and invalid names (with the canonicalizer's
+/// user-facing guidance).
+fn parse_tab_target(
+    directive: &DirectiveOccurrence,
+) -> Result<Option<String>, LaunchPlanDiagnosticWire> {
+    let span = [directive.start, directive.end];
+    if directive.has_plus_suffix {
+        return Err(typed_plan_diagnostic(
+            "invalid-tab",
+            "%tab does not support '+'; use %tab:<name> or %tab(<name>).",
+            Some(span),
+        ));
+    }
+    let values: Vec<&str> = directive
+        .args
+        .iter()
+        .map(|arg| arg.trim())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    if values.iter().any(|value| value.contains('=')) {
+        return Err(typed_plan_diagnostic(
+            "invalid-tab",
+            "%tab takes a single positional tab name; use %tab:<name> or %tab(<name>).",
+            Some(span),
+        ));
+    }
+    if values.len() > 1 {
+        return Err(typed_plan_diagnostic(
+            "invalid-tab",
+            "Only one %tab name is allowed per launch unit; use fan-out %{%tab:a | %tab:b} to place branches on different tabs.",
+            Some(span),
+        ));
+    }
+    let raw = values.first().copied().unwrap_or("");
+    match canonicalize_agent_tab_name(raw) {
+        Ok(AgentTabNameWire::Default) => Ok(None),
+        Ok(AgentTabNameWire::Named { name }) => Ok(Some(name)),
+        Err(error) => Err(typed_plan_diagnostic(
+            "invalid-tab",
+            &error.to_string(),
+            Some(span),
+        )),
+    }
+}
+
+/// Enforce clan-generation tab agreement: agent units that share a clan
+/// (a declarer and its joiners, or joiners across fan-out branches) must
+/// agree on one explicit tab. Units without a clan — including fan-out
+/// branches on different tabs — may always differ.
+fn validate_typed_unit_agent_tab_agreement(
+    raw_units: &[RawLaunchUnit],
+    diagnostics: &mut Vec<LaunchPlanDiagnosticWire>,
+) {
+    let mut generations: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for raw in raw_units {
+        let LaunchUnitPayloadWire::Agent(agent) = &raw.unit.payload else {
+            continue;
+        };
+        let (Some(clan), Some(tab)) =
+            (agent.clan.as_deref(), agent.agent_tab.as_deref())
+        else {
+            continue;
+        };
+        generations
+            .entry(clan)
+            .or_default()
+            .entry(tab)
+            .or_insert(raw.unit.logical_id.as_str());
+    }
+    for (clan, tabs) in &generations {
+        if tabs.len() < 2 {
+            continue;
+        }
+        let mut tabs: Vec<(&&str, &&str)> = tabs.iter().collect();
+        tabs.sort();
+        let (first_tab, first_unit) = tabs[0];
+        for (tab, logical_id) in tabs.into_iter().skip(1) {
+            diagnostics.push(typed_unit_diagnostic(
+                "tab-mismatch",
+                &format!(
+                    "Clan {clan:?} shares one agent tab: {first_unit} places {first_tab:?} but {logical_id} places {tab:?}. An explicit joiner %tab that differs from its generation is an error.",
+                ),
+                logical_id,
+                None,
+            ));
+        }
     }
 }
 

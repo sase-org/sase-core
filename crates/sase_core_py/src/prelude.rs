@@ -211,6 +211,13 @@ pub(crate) use sase_core::agent_stats::{
     query_run_stats as core_query_run_stats, AgentActivityStatsRequestWire,
     AgentRunStatsRequestWire,
 };
+pub(crate) use sase_core::agent_tab::{
+    build_agent_tab_catalog as core_build_agent_tab_catalog,
+    canonicalize_agent_tab_name as core_canonicalize_agent_tab_name,
+    resolve_effective_agent_tab as core_resolve_effective_agent_tab,
+    AgentTabCatalogOptionsWire, AgentTabError as AgentTabDomainError,
+    AgentTabRootWire,
+};
 pub(crate) use sase_core::agent_tribe::{
     agent_tribe_display_key as core_agent_tribe_display_key,
     canonicalize_agent_tribe_metadata as core_canonicalize_agent_tribe_metadata,

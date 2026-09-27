@@ -27,6 +27,7 @@ pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_session;
 pub mod agent_stats;
+pub mod agent_tab;
 pub mod agent_tribe;
 pub mod artifact_consumption;
 pub mod artifact_file;
