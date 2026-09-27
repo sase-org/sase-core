@@ -176,3 +176,52 @@ fn legacy_agent_family_column_migrates_in_place() {
         .unwrap();
     assert_eq!(lane, "lane-b");
 }
+
+#[test]
+fn legacy_agent_family_column_beside_agent_session_merges_in_place() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let lane_a = artifact(&projects, "20260924100000");
+    let lane_b = artifact(&projects, "20260924100100");
+    write_json(
+        &lane_a.join("agent_meta.json"),
+        json!({"name": "lane-a--plan", "agent_session": "lane-a"}),
+    );
+    write_json(
+        &lane_b.join("agent_meta.json"),
+        json!({"name": "lane-b--plan", "agent_session": "lane-b"}),
+    );
+    let index = rebuild_index(tmp.path(), &projects);
+    // A v32 core re-added `agent_family` beside `agent_session` and kept only
+    // the legacy column current.
+    Connection::open(&index)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE agent_artifacts ADD COLUMN agent_family TEXT;
+             UPDATE agent_artifacts
+                 SET agent_family = agent_session, agent_session = NULL;
+             CREATE INDEX idx_agent_artifacts_agent_family
+                 ON agent_artifacts(agent_family, timestamp);
+             UPDATE meta SET value = '32' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+
+    // Renaming onto the existing column would fail this open; the legacy
+    // lanes must land in `agent_session` instead.
+    assert_eq!(
+        query_timestamps(&index, &projects, session_query("lane-a")),
+        BTreeSet::from(["20260924100000".to_string()])
+    );
+
+    let conn = Connection::open(&index).unwrap();
+    let columns = sqlite_names(
+        &conn,
+        "SELECT name FROM pragma_table_info('agent_artifacts')",
+    );
+    assert!(columns.contains("agent_session"));
+    assert!(!columns.contains("agent_family"));
+    assert_eq!(
+        read_index_schema_version(&conn).unwrap(),
+        AGENT_ARTIFACT_INDEX_SCHEMA_VERSION
+    );
+}

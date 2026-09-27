@@ -288,13 +288,13 @@ pub(super) fn open_index_with_busy_timeout(
         migrate_record_json_refresh_v32(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 33) {
-        migrate_agent_session_column_v33(&conn)?;
+        migrate_agent_session_column_v33(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 34) {
         migrate_record_json_refresh_v34(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 35) {
-        migrate_gate_turn_id_column_v35(&conn)?;
+        migrate_gate_turn_id_column_v35(&mut conn)?;
     }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
@@ -878,22 +878,18 @@ pub(super) fn migrate_record_json_refresh_v34(
 /// column, so it is dropped; the caller recreates the index under its new
 /// name.
 pub(super) fn migrate_gate_turn_id_column_v35(
-    conn: &Connection,
+    conn: &mut Connection,
 ) -> Result<(), String> {
     const LEGACY_GATE_TURN_INDEX_COLUMN: &str = "gate_shell_id";
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_agent_artifacts_gate_shell_id",
     )
     .map_err(|e| e.to_string())?;
-    if !agent_artifacts_has_column(conn, LEGACY_GATE_TURN_INDEX_COLUMN)? {
-        return Ok(());
-    }
-    conn.execute(
-        "ALTER TABLE agent_artifacts RENAME COLUMN gate_shell_id TO gate_turn_id",
-        [],
+    rename_legacy_agent_artifacts_column(
+        conn,
+        LEGACY_GATE_TURN_INDEX_COLUMN,
+        GATE_TURN_INDEX_COLUMN,
     )
-    .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// v33 renames the legacy `agent_family` column to `agent_session` in place,
@@ -901,24 +897,53 @@ pub(super) fn migrate_gate_turn_id_column_v35(
 /// to open. The legacy index would follow the rename onto the new column, so
 /// it is dropped; the caller recreates the index under its new name.
 pub(super) fn migrate_agent_session_column_v33(
-    conn: &Connection,
+    conn: &mut Connection,
 ) -> Result<(), String> {
     const LEGACY_AGENT_SESSION_INDEX_COLUMN: &str = "agent_family";
     conn.execute_batch("DROP INDEX IF EXISTS idx_agent_artifacts_agent_family")
         .map_err(|e| e.to_string())?;
-    if !agent_artifacts_has_column(conn, LEGACY_AGENT_SESSION_INDEX_COLUMN)? {
+    rename_legacy_agent_artifacts_column(
+        conn,
+        LEGACY_AGENT_SESSION_INDEX_COLUMN,
+        super::AGENT_SESSION_INDEX_COLUMN,
+    )
+}
+
+/// Rename the `legacy` `agent_artifacts` column to `canonical` in place.
+///
+/// Mixed-version use can leave an index with both columns: a core that still
+/// writes the legacy name adds that column back to an index that already has
+/// the canonical one, then stamps its own older schema version, so the
+/// rename runs again. Renaming onto an existing column fails every later open
+/// with `duplicate column name`, so instead the canonical column takes each
+/// non-null legacy value (the older core kept those current) and the legacy
+/// column is dropped.
+fn rename_legacy_agent_artifacts_column(
+    conn: &mut Connection,
+    legacy: &str,
+    canonical: &str,
+) -> Result<(), String> {
+    if !agent_artifacts_has_column(conn, legacy)? {
         return Ok(());
     }
-    conn.execute(
-        &format!(
-            "ALTER TABLE agent_artifacts RENAME COLUMN \
-             {LEGACY_AGENT_SESSION_INDEX_COLUMN} TO {}",
-            super::AGENT_SESSION_INDEX_COLUMN
-        ),
-        [],
-    )
+    if !agent_artifacts_has_column(conn, canonical)? {
+        conn.execute(
+            &format!(
+                "ALTER TABLE agent_artifacts RENAME COLUMN {legacy} TO {canonical}"
+            ),
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute_batch(&format!(
+        "UPDATE agent_artifacts SET {canonical} = {legacy} \
+         WHERE {legacy} IS NOT NULL; \
+         ALTER TABLE agent_artifacts DROP COLUMN {legacy};"
+    ))
     .map_err(|e| e.to_string())?;
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// v30 adds the imported-owner machine projection so candidate filters can
