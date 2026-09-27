@@ -1016,10 +1016,11 @@ async fn fleet_stop_retains_row_with_retry_and_fork() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(mutate["receipt"]["state"], "settled");
-    let captured = kills.lock().unwrap();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].retain_for_retry, Some(true));
-    drop(captured);
+    {
+        let captured = kills.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].retain_for_retry, Some(true));
+    }
     let page = state
         .fleet_reads
         .catalog(sase_core::FleetCatalogQueryWire {
