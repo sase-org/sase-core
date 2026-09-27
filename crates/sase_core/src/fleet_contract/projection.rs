@@ -169,6 +169,7 @@ pub(crate) fn normalized_owner_facts(
         ),
         ("clan_tribe", facts.clan_tribe.as_deref()),
         ("tribe", facts.tribe.as_deref()),
+        ("agent_tab", facts.agent_tab.as_deref()),
     ] {
         if let Some(value) = value {
             validate_label(field, value, MAX_LABEL_BYTES)?;
@@ -230,6 +231,10 @@ pub(crate) fn normalized_owner_facts(
             .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
         tribe: facts
             .tribe
+            .as_ref()
+            .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
+        agent_tab: facts
+            .agent_tab
             .as_ref()
             .map(|value| trim_to_limit(value, MAX_LABEL_BYTES)),
         presentation: facts.presentation.sanitized()?,

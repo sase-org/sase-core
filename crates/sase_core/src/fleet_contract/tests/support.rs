@@ -242,6 +242,7 @@ pub(super) fn projection_request(
             agent_clan_generation: None,
             clan_tribe: None,
             tribe: None,
+            agent_tab: None,
             presentation: Default::default(),
             row_kind: FleetRowKindWire::AgentTurn,
             current_instance: true,

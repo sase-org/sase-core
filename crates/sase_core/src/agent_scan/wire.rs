@@ -580,6 +580,10 @@ pub struct AgentMetaWire {
     #[serde(default, alias = "tag")]
     pub tribe: Option<String>,
     #[serde(default)]
+    pub agent_tab: Option<String>,
+    #[serde(default)]
+    pub agent_tab_source: Option<String>,
+    #[serde(default)]
     pub output_variables: BTreeMap<String, OutputVariableValue>,
     #[serde(default)]
     pub output_path: Option<String>,

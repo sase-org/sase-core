@@ -56,6 +56,7 @@ pub struct PresentationRecordFacts {
     pub agent_clan_generation: Option<String>,
     pub clan_tribe: Option<String>,
     pub tribe: Option<String>,
+    pub agent_tab: Option<String>,
     pub started_at_unix: Option<f64>,
     pub run_started_at_unix: Option<f64>,
     pub display_status: Option<String>,
@@ -166,6 +167,9 @@ impl PresentationContext {
         }
         if facts.tribe.is_none() {
             facts.tribe = related.and_then(|value| value.tribe.clone());
+        }
+        if facts.agent_tab.is_none() {
+            facts.agent_tab = related.and_then(|value| value.agent_tab.clone());
         }
         if facts.clan_tribe.is_none() {
             facts.clan_tribe = related
@@ -514,6 +518,7 @@ fn project_summary_for_record(
                     .and_then(|value| value.agent_clan_generation.clone()),
                 clan_tribe: presentation.clan_tribe.clone(),
                 tribe: presentation.tribe.clone(),
+                agent_tab: presentation.agent_tab.clone(),
                 row_kind,
                 current_instance: !presentation_terminal
                     && row_kind == FleetRowKindWire::AgentTurn,
@@ -617,6 +622,7 @@ pub fn direct_presentation_facts_for_record(
             .and_then(|value| value.agent_clan_generation.clone()),
         clan_tribe: meta.and_then(|value| value.clan_tribe.clone()),
         tribe: meta.and_then(|value| value.tribe.clone()),
+        agent_tab: meta.and_then(|value| value.agent_tab.clone()),
         started_at_unix: started_at_unix_for_record(record),
         run_started_at_unix: run_started_at_unix_for_record(record),
         display_status: Some(derived.status),
@@ -777,7 +783,7 @@ fn parse_observation(value: &str) -> Option<OwnerProcessObservation> {
 }
 
 /// Row revision over the raw record and every resolved presentation fact, so
-/// a change in a derived fact (inherited tribe, parent linkage, answered
+/// a change in a derived fact (inherited tribe/tab, parent linkage, answered
 /// question, plan tier, rich status) invalidates cached rows. Both inputs are
 /// deterministic, so an unchanged row keeps its revision across refreshes.
 pub fn stable_revision(
@@ -797,6 +803,7 @@ pub fn stable_revision(
         &presentation.parent_timestamp,
         &presentation.clan_tribe,
         &presentation.tribe,
+        &presentation.agent_tab,
         presentation.started_at_unix,
         presentation.run_started_at_unix,
         &presentation.display_status,
@@ -839,4 +846,121 @@ fn wall_clock_unix() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tabbed_record(
+        dir: &str,
+        timestamp: &str,
+        tab: Option<&str>,
+        parent: Option<&str>,
+    ) -> AgentArtifactRecordWire {
+        serde_json::from_value(serde_json::json!({
+            "project_name": "sase",
+            "project_dir": "/tmp/project",
+            "project_file": "/tmp/project.sase",
+            "workflow_dir_name": "ace-run",
+            "artifact_dir": dir,
+            "timestamp": timestamp,
+            "agent_meta": {
+                "name": "probe",
+                "agent_session": "fam-1",
+                "agent_tab": tab,
+                "parent_timestamp": parent,
+            },
+        }))
+        .unwrap()
+    }
+
+    fn tabbed_context(
+        records: &[AgentArtifactRecordWire],
+    ) -> PresentationContext {
+        let served: BTreeSet<String> = records
+            .iter()
+            .map(|record| record.artifact_dir.clone())
+            .collect();
+        PresentationContext::from_records(
+            records,
+            &served,
+            &BTreeMap::new(),
+            &InjectedOwnerFilesWire::default(),
+        )
+    }
+
+    #[test]
+    fn agent_tab_inherits_from_root_for_members() {
+        let root = tabbed_record(
+            "/tmp/artifacts/root",
+            "20260906120000",
+            Some("sase"),
+            None,
+        );
+        let member = tabbed_record(
+            "/tmp/artifacts/member",
+            "20260906120100",
+            None,
+            Some("20260906120000"),
+        );
+        let records = vec![root.clone(), member.clone()];
+        let context = tabbed_context(&records);
+
+        assert_eq!(
+            context.facts_for_record(&root).agent_tab.as_deref(),
+            Some("sase")
+        );
+        assert_eq!(
+            context.facts_for_record(&member).agent_tab.as_deref(),
+            Some("sase")
+        );
+
+        // An explicit member tab wins over the root's.
+        let override_member = tabbed_record(
+            "/tmp/artifacts/member",
+            "20260906120100",
+            Some("blog"),
+            Some("20260906120000"),
+        );
+        let context = tabbed_context(&[root.clone(), override_member.clone()]);
+        assert_eq!(
+            context
+                .facts_for_record(&override_member)
+                .agent_tab
+                .as_deref(),
+            Some("blog")
+        );
+
+        // A root without a tab leaves members without one.
+        let plain_root =
+            tabbed_record("/tmp/artifacts/root", "20260906120000", None, None);
+        let context = tabbed_context(&[plain_root, member]);
+        // Rebuild the member handle against the plain root's timestamp.
+        let orphan = tabbed_record(
+            "/tmp/artifacts/member",
+            "20260906120100",
+            None,
+            Some("20260906120000"),
+        );
+        assert_eq!(context.facts_for_record(&orphan).agent_tab, None);
+    }
+
+    #[test]
+    fn stable_revision_changes_when_agent_tab_changes() {
+        let record =
+            tabbed_record("/tmp/artifacts/root", "20260906120000", None, None);
+        let files = InjectedOwnerFilesWire::default();
+        let presentation = direct_presentation_facts_for_record(
+            &record,
+            OwnerLivenessWire::Alive,
+            &files,
+        );
+        let before = stable_revision(&record, &presentation);
+        let mut changed = presentation.clone();
+        changed.agent_tab = Some("sase".to_string());
+        let after = stable_revision(&record, &changed);
+        assert_ne!(before, after);
+        assert_eq!(after, stable_revision(&record, &changed));
+    }
 }

@@ -137,6 +137,7 @@ pub(super) fn resolve_record(
                     .and_then(|value| value.agent_clan_generation.clone()),
                 clan_tribe: presentation.clan_tribe.clone(),
                 tribe: presentation.tribe.clone(),
+                agent_tab: presentation.agent_tab.clone(),
                 row_kind,
                 current_instance: !presentation_terminal
                     && row_kind == FleetRowKindWire::AgentTurn,

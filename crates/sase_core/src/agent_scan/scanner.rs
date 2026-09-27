@@ -1235,6 +1235,19 @@ fn finalizer_status_from_value(
     })
 }
 
+/// Read and validate the stored `%tab` placement for one meta object.
+///
+/// The raw value is canonicalized (trimmed, lowercased) through
+/// `canonicalize_agent_tab_name`. The explicit `%tab:main` placeholder is
+/// stored as absent, and invalid values are dropped so one bad meta never
+/// fails the whole scan.
+fn agent_tab_from_object(data: &Map<String, Value>) -> Option<String> {
+    let raw = coerce_str(data.get("agent_tab"))?;
+    crate::agent_tab::canonicalize_agent_tab_name(&raw)
+        .ok()
+        .and_then(|canonical| canonical.stored_name().map(str::to_string))
+}
+
 fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
     let legacy_parallel = coerce_bool_truthy(data.get("agent_family_parallel"));
     let raw_agent_session =
@@ -1300,6 +1313,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         plan_chain_root: coerce_bool_truthy(data.get("plan_chain_root")),
         tribe: coerce_str(data.get("tribe"))
             .or_else(|| coerce_str(data.get("tag"))),
+        agent_tab: agent_tab_from_object(data),
+        agent_tab_source: coerce_str(data.get("agent_tab_source")),
         output_variables: coerce_output_variable_map(
             data.get("output_variables"),
         )
@@ -3054,5 +3069,48 @@ mod tests {
         // A missing summary is None.
         let bare = agent_meta_from_object(&Map::new());
         assert_eq!(bare.finalizer_status, None);
+    }
+
+    fn meta_with_agent_tab(tab: Value, source: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("agent_tab".to_string(), tab);
+        data.insert("agent_tab_source".to_string(), source);
+        agent_meta_from_object(&data)
+    }
+
+    #[test]
+    fn scanner_canonicalizes_agent_tab_and_drops_invalid_values() {
+        let valid = meta_with_agent_tab(json!("Blog"), json!("prompt"));
+        assert_eq!(valid.agent_tab.as_deref(), Some("blog"));
+        assert_eq!(valid.agent_tab_source.as_deref(), Some("prompt"));
+
+        // The explicit default is stored as absent.
+        for raw in [json!("main"), json!("MAIN"), json!("  Main  ")] {
+            let meta = meta_with_agent_tab(raw, json!("prompt"));
+            assert_eq!(meta.agent_tab, None);
+        }
+
+        // Reserved, empty, and malformed names are dropped, never fatal.
+        for raw in [
+            json!("local"),
+            json!("all"),
+            json!(""),
+            json!("  "),
+            json!("Bad Name!"),
+            json!("-leading-dash"),
+            json!("a".repeat(33)),
+            json!(42),
+            json!(null),
+        ] {
+            let meta = meta_with_agent_tab(raw, json!("prompt"));
+            assert_eq!(meta.name.as_deref(), Some("probe"));
+            assert_eq!(meta.agent_tab, None);
+        }
+
+        // A missing tab is None.
+        let bare = agent_meta_from_object(&Map::new());
+        assert_eq!(bare.agent_tab, None);
+        assert_eq!(bare.agent_tab_source, None);
     }
 }

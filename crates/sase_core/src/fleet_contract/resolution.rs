@@ -87,6 +87,8 @@ pub struct OwnerResolutionFactsWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tab: Option<String>,
     /// Owner-derived turn, plan, question, retry, and lifecycle facts.
     #[serde(default)]
     pub presentation: OwnerPresentationFactsWire,
@@ -174,6 +176,8 @@ pub struct ResolvedAgentSummaryWire {
     pub clan_tribe: Option<String>,
     #[serde(default)]
     pub tribe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tab: Option<String>,
     /// Owner-derived turn, plan, question, retry, and lifecycle facts. Never
     /// carries paths; omitted when empty so legacy consumers see no change.
     #[serde(
@@ -320,6 +324,7 @@ pub fn project_resolved_agent_summary(
         agent_clan_generation: facts.agent_clan_generation.clone(),
         clan_tribe: facts.clan_tribe.clone(),
         tribe: facts.tribe.clone(),
+        agent_tab: facts.agent_tab.clone(),
         presentation: facts.presentation.clone(),
         row_revision: facts.row_revision.clone(),
         lifecycle,
@@ -446,6 +451,7 @@ pub fn validate_resolved_agent_summary(
         ),
         ("clan_tribe", summary.clan_tribe.as_deref()),
         ("tribe", summary.tribe.as_deref()),
+        ("agent_tab", summary.agent_tab.as_deref()),
         ("labels.agent_label", summary.labels.agent_label.as_deref()),
         (
             "labels.agent_session_label",

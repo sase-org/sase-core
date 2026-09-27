@@ -1635,11 +1635,12 @@ pub fn fleet_api_v1_contract_snapshot() -> Value {
                     "agent_clan_generation": "string|null; owner-projected clan generation identity",
                     "clan_tribe": "string|null; owner-resolved clan tribe label",
                     "tribe": "string|null; owner-resolved agent tribe label",
+                    "agent_tab": "string|null; owner-resolved agent tab name, absent for the default tab",
                     "queue_capacity": "u32|null; canonical owner-projected queue capacity, normalized from queue_capacity or legacy wait_runners",
                     "queue_capacity_explicit": "bool; true when queue_capacity was explicitly authored",
                     "queue_capacity_multiplier": "f64|null; authored multiplier of the machine's effective runner-capacity budget"
                 },
-                "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, lifecycle timestamps, workspace number, clan/tribe identity, queue capacity and multiplier, capabilities, content metadata",
+                "state": "lifecycle, liveness, connection health, freshness, status bucket, labels, lifecycle timestamps, workspace number, clan/tribe/tab identity, queue capacity and multiplier, capabilities, content metadata",
                 "session": "normalized agent_session_role (root/member/monitor/gate/proc/historical_turn) plus optional parent_timestamp lineage, for viewer folding"
             },
             "ResolvedAgentDetailWire": {

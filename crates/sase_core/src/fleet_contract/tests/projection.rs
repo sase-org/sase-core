@@ -674,3 +674,94 @@ fn dead_or_not_process_liveness_never_counts_as_running() {
     assert_eq!(counts.logical_agent_total, 2);
     assert_eq!(counts.running, 1);
 }
+
+#[test]
+fn projection_carries_agent_tab_from_owner_facts() {
+    let locator = logical('a', "worker");
+    let request = projection_request(
+        locator,
+        Some(exact('a', "worker", "run-1")),
+        1,
+        record_running(),
+    );
+    // An absent tab stays absent and is omitted from the wire.
+    let summary = project_resolved_agent_summary(&request).unwrap();
+    assert_eq!(summary.agent_tab, None);
+    let value = serde_json::to_value(&summary).unwrap();
+    assert!(value.get("agent_tab").is_none());
+
+    let mut with_tab = request;
+    with_tab.owner_facts.agent_tab = Some("sase".to_string());
+    let summary = project_resolved_agent_summary(&with_tab).unwrap();
+    assert_eq!(summary.agent_tab.as_deref(), Some("sase"));
+    let value = serde_json::to_value(&summary).unwrap();
+    assert_eq!(value["agent_tab"], json!("sase"));
+    assert_eq!(validate_resolved_agent_summary(&summary).unwrap(), summary);
+}
+
+#[test]
+fn contract_v6_rows_decode_without_agent_tab_and_v7_rows_round_trip() {
+    let locator = logical('a', "worker");
+    let request = projection_request(
+        locator,
+        Some(exact('a', "worker", "run-1")),
+        1,
+        record_running(),
+    );
+    let summary = project_resolved_agent_summary(&request).unwrap();
+    let mut value = serde_json::to_value(&summary).unwrap();
+    // A v6 payload carries no `agent_tab` key at all.
+    assert!(value.get("agent_tab").is_none());
+    value["schema_version"] = json!(6);
+    let legacy: ResolvedAgentSummaryWire =
+        serde_json::from_value(value).unwrap();
+    assert_eq!(legacy.agent_tab, None);
+    assert_eq!(validate_resolved_agent_summary(&legacy).unwrap(), legacy);
+
+    let facts_value = serde_json::to_value(&request.owner_facts).unwrap();
+    assert!(facts_value.get("agent_tab").is_none());
+    let legacy_facts: OwnerResolutionFactsWire =
+        serde_json::from_value(facts_value).unwrap();
+    assert_eq!(legacy_facts.agent_tab, None);
+
+    // A v7 row with a tab round-trips.
+    let mut with_tab = request;
+    with_tab.owner_facts.agent_tab = Some("sase".to_string());
+    let summary = project_resolved_agent_summary(&with_tab).unwrap();
+    assert_eq!(summary.schema_version, FLEET_CONTRACT_SCHEMA_VERSION);
+    let decoded: ResolvedAgentSummaryWire =
+        serde_json::from_value(serde_json::to_value(&summary).unwrap())
+            .unwrap();
+    assert_eq!(decoded, summary);
+}
+
+#[test]
+fn newer_than_known_contract_rows_are_rejected() {
+    // A v6 reader rejects v7 rows through this same window check, so pin
+    // the mechanism: anything outside 1..=CURRENT fails, keeping old
+    // readers loud instead of silently misreading new rows.
+    let locator = logical('a', "worker");
+    let request = projection_request(
+        locator,
+        Some(exact('a', "worker", "run-1")),
+        1,
+        record_running(),
+    );
+    let mut summary = project_resolved_agent_summary(&request).unwrap();
+    for version in [1, 6, FLEET_CONTRACT_SCHEMA_VERSION] {
+        summary.schema_version = version;
+        assert_eq!(validate_resolved_agent_summary(&summary).unwrap(), summary);
+    }
+    for version in [0, FLEET_CONTRACT_SCHEMA_VERSION + 1] {
+        summary.schema_version = version;
+        let err = validate_resolved_agent_summary(&summary).unwrap_err();
+        assert!(err.to_string().contains("is not supported"));
+    }
+
+    // Strict structs also reject unknown fields on the wire, which is how
+    // a v6 binary refuses a v7 row carrying `agent_tab`.
+    let mut value = serde_json::to_value(&summary).unwrap();
+    value["schema_version"] = json!(FLEET_CONTRACT_SCHEMA_VERSION);
+    value["bogus_future_field"] = json!(true);
+    assert!(serde_json::from_value::<ResolvedAgentSummaryWire>(value).is_err());
+}
