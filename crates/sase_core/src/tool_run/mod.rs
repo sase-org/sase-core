@@ -4,6 +4,7 @@ mod canonical;
 mod catalog;
 mod fingerprint;
 mod handoff_wire;
+pub mod projection;
 pub mod receipt;
 mod store;
 mod triage;
@@ -15,6 +16,19 @@ pub use catalog::{
 };
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
 pub use handoff_wire::*;
+pub use projection::{
+    tool_run_briefs, tool_run_live_glance, tool_run_node_summaries,
+    ToolRunBriefOwnerWire, ToolRunBriefWire, ToolRunBriefsRequestWire,
+    ToolRunBriefsResultWire, ToolRunGlanceStageWire, ToolRunGlanceWire,
+    ToolRunLiveGlanceRequestWire, ToolRunLiveGlanceResultWire,
+    ToolRunNodeSelectorWire, ToolRunNodeSummariesRequestWire,
+    ToolRunNodeSummariesResultWire, ToolRunNodeSummaryWire,
+    ToolRunVerdictBucketWire, ToolRunVerdictSummaryWire,
+    TOOL_RUN_BRIEFS_DEFAULT_LIMIT, TOOL_RUN_BRIEFS_MAX_LIMIT,
+    TOOL_RUN_GLANCE_MAX_RUNS, TOOL_RUN_LABEL_MAX_CHARS,
+    TOOL_RUN_NODE_DEFAULT_LIMIT, TOOL_RUN_NODE_MAX_LIMIT,
+    TOOL_RUN_NODE_MAX_SELECTORS, TOOL_RUN_SILENT_AFTER_SECONDS,
+};
 pub use receipt::{
     build_receipt_proof, diff_proof_against_fingerprint, is_safe_relative_path,
     proof_from_json, proof_to_json, receipt_id_for_run, sha256_hex,

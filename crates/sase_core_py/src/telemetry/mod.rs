@@ -863,6 +863,90 @@ fn py_tool_run_failures<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// Every unsettled run on the machine, newest first and capped.
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_live_glance",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_live_glance<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunLiveGlanceRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunLiveGlanceRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_live_glance(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// The lean filtered run list.
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_briefs",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_briefs<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunBriefsRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunBriefsRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_briefs(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+/// Per-node history for selected TUI nodes.
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_node_summaries",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_node_summaries<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: ToolRunNodeSummariesRequestWire =
+        telemetry_request_from_pydict(
+            request,
+            "ToolRunNodeSummariesRequestWire",
+        )?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            core_tool_run_node_summaries(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
 pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_cleanup_matching_labels, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_record_batch, m)?)?;
@@ -897,6 +981,9 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_receipt_lookup, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_receipts_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_failures, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_live_glance, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_briefs, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_node_summaries, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_store_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_perf_logs_query, m)?)?;
     Ok(())

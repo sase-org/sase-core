@@ -1151,3 +1151,182 @@ fn tool_run_receipts_report_round_trip_and_rejects_bad_schema() {
         .is_err());
     });
 }
+
+#[test]
+fn tool_run_glance_projection_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        let missing = temp.path().join("missing.sqlite");
+        // A missing store reports itself on every projection.
+        for (name, request) in [
+            (
+                "glance",
+                json!({"schema_version": 1, "now_ts": 1_700_000_000}),
+            ),
+            ("briefs", json!({"schema_version": 1, "limit": 10})),
+            (
+                "nodes",
+                json!({
+                    "schema_version": 1,
+                    "nodes": [{"key": "k", "agents": ["a"]}],
+                    "per_node_limit": 5
+                }),
+            ),
+        ] {
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request_dict =
+                request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = match name {
+                "glance" => py_tool_run_live_glance(
+                    py,
+                    missing.to_str().unwrap(),
+                    request_dict,
+                    1_000,
+                ),
+                "briefs" => py_tool_run_briefs(
+                    py,
+                    missing.to_str().unwrap(),
+                    request_dict,
+                    1_000,
+                ),
+                _ => py_tool_run_node_summaries(
+                    py,
+                    missing.to_str().unwrap(),
+                    request_dict,
+                    1_000,
+                ),
+            }
+            .unwrap();
+            let result = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(result["store_exists"], json!(false));
+        }
+        // One live run round-trips through all three projections.
+        let begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "agent": "agent-1",
+                "now_ts": 1_700_000_000,
+                "commit_running": true
+            }),
+        )
+        .unwrap();
+        let begin_request = begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let started =
+            py_tool_run_begin(py, path.to_str().unwrap(), begin_request, 1_000)
+                .unwrap();
+        let started = py_to_json_value(started.bind(py)).unwrap();
+        let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+
+        let glance_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "now_ts": 1_700_000_100}),
+        )
+        .unwrap();
+        let glance_request = glance_obj.bind(py).downcast::<PyDict>().unwrap();
+        let glanced = py_tool_run_live_glance(
+            py,
+            path.to_str().unwrap(),
+            glance_request,
+            1_000,
+        )
+        .unwrap();
+        let glanced = py_to_json_value(glanced.bind(py)).unwrap();
+        assert_eq!(glanced["store_exists"], json!(true));
+        assert_eq!(glanced["silent_after_s"], json!(60));
+        assert_eq!(glanced["truncated"], json!(false));
+        assert_eq!(glanced["runs"][0]["run_id"], json!(run_id));
+        assert_eq!(glanced["runs"][0]["label"], json!("check"));
+        assert_eq!(glanced["runs"][0]["state"], json!("running"));
+
+        let briefs_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "project": "sase",
+                "agents": ["agent-1"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+        let briefs_request = briefs_obj.bind(py).downcast::<PyDict>().unwrap();
+        let briefed = py_tool_run_briefs(
+            py,
+            path.to_str().unwrap(),
+            briefs_request,
+            1_000,
+        )
+        .unwrap();
+        let briefed = py_to_json_value(briefed.bind(py)).unwrap();
+        assert_eq!(briefed["store_exists"], json!(true));
+        assert_eq!(briefed["runs"][0]["run_id"], json!(run_id));
+        assert_eq!(briefed["runs"][0]["verdict"]["bucket"], json!("running"));
+
+        let nodes_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "nodes": [{"key": "agent-1", "agents": ["agent-1"]}],
+                "per_node_limit": 5
+            }),
+        )
+        .unwrap();
+        let nodes_request = nodes_obj.bind(py).downcast::<PyDict>().unwrap();
+        let nodes = py_tool_run_node_summaries(
+            py,
+            path.to_str().unwrap(),
+            nodes_request,
+            1_000,
+        )
+        .unwrap();
+        let nodes = py_to_json_value(nodes.bind(py)).unwrap();
+        assert_eq!(nodes["store_exists"], json!(true));
+        assert_eq!(nodes["nodes"][0]["key"], json!("agent-1"));
+        assert_eq!(nodes["nodes"][0]["total_runs"], json!(1));
+        assert_eq!(nodes["nodes"][0]["live"][0]["run_id"], json!(run_id));
+        assert_eq!(
+            nodes["nodes"][0]["latest_by_tool"][0]["run_id"],
+            json!(run_id)
+        );
+
+        // Unknown request fields and bad limits fail closed.
+        let unknown_obj =
+            json_value_to_py(py, &json!({"schema_version": 1, "nope": true}))
+                .unwrap();
+        let unknown = unknown_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_live_glance(
+            py,
+            path.to_str().unwrap(),
+            unknown,
+            1_000
+        )
+        .is_err());
+        let bad_limit_obj =
+            json_value_to_py(py, &json!({"schema_version": 1, "limit": 501}))
+                .unwrap();
+        let bad_limit = bad_limit_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_briefs(
+            py,
+            path.to_str().unwrap(),
+            bad_limit,
+            1_000
+        )
+        .is_err());
+    });
+}

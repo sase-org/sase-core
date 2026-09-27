@@ -207,24 +207,22 @@ pub fn summarize(
                 |row| row.get::<_, String>(0),
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut durations = Vec::new();
         let mut breakdown = std::collections::BTreeMap::new();
         for id in ids {
             if let Some(run) = load_run(conn, &id)? {
                 *breakdown
                     .entry(run.state.as_str().to_string())
                     .or_insert(0) += 1;
-                if let Some(duration) = run.duration_ms {
-                    durations.push(duration);
-                }
             }
         }
-        durations.sort_unstable();
-        let typical = if durations.is_empty() {
-            None
-        } else {
-            Some(durations[durations.len() / 2])
-        };
+        let (typical, typical_samples) = typical_duration_for(
+            conn,
+            &request.project,
+            &request.tool_name,
+            &request.definition_digest,
+            &empty_extra,
+            now,
+        )?;
         let mut diagnostics = Vec::new();
         if typical.is_none() {
             diagnostics.push(
@@ -236,11 +234,61 @@ pub fn summarize(
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             last,
             typical_duration_ms: typical,
-            typical_sample_count: durations.len() as u32,
+            typical_sample_count: typical_samples,
             typical_status_breakdown: breakdown,
             diagnostics,
         })
     })
+}
+
+/// Median `duration_ms` over the same settled-run window `summarize` uses.
+///
+/// Shared by `summarize` and the `tool_run::projection` glance surfaces so
+/// the typical-duration rule lives in one place. Only rows with a recorded
+/// duration count as samples; a missing duration stays missing, never zero.
+pub(crate) fn typical_duration_for(
+    conn: &Connection,
+    project: &str,
+    tool_name: &str,
+    definition_digest: &str,
+    extra_args_digest: &str,
+    now: i64,
+) -> Result<(Option<i64>, u32), ToolRunError> {
+    let window_start =
+        now.saturating_sub(i64::from(TOOL_RUN_TYPICAL_WINDOW_DAYS) * 86400);
+    let mut stmt = conn.prepare(
+        "SELECT duration_ms FROM runs
+         WHERE project = ?1 AND tool_name = ?2
+           AND definition_digest = ?3
+           AND extra_args_digest = ?4
+           AND source = 'native'
+           AND state IN ('succeeded', 'failed')
+           AND created_ts >= ?5
+         ORDER BY created_ts DESC, run_id DESC
+         LIMIT ?6",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                project,
+                tool_name,
+                definition_digest,
+                extra_args_digest,
+                window_start,
+                TOOL_RUN_TYPICAL_SAMPLE_LIMIT
+            ],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut durations: Vec<i64> = rows.into_iter().flatten().collect();
+    durations.sort_unstable();
+    let count = durations.len() as u32;
+    let typical = if durations.is_empty() {
+        None
+    } else {
+        Some(durations[durations.len() / 2])
+    };
+    Ok((typical, count))
 }
 
 pub fn store_stats(

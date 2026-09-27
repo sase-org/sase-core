@@ -127,6 +127,12 @@ CREATE INDEX IF NOT EXISTS idx_tool_runs_project_tool
     ON runs(project, tool_name, created_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_runs_state
     ON runs(state, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_runs_agent_created
+    ON runs(agent, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_runs_owner_created
+    ON runs(owner_kind, owner_id, created_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_runs_reference
+    ON runs(project, tool_name, definition_digest, created_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tool_events_run
     ON events(run_id, created_ts);
 CREATE INDEX IF NOT EXISTS idx_tool_stages_run
@@ -194,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_tool_receipts_lookup
     );
 "#;
 
-pub(super) fn validate_schema(version: u32) -> Result<(), ToolRunError> {
+pub(crate) fn validate_schema(version: u32) -> Result<(), ToolRunError> {
     if version != TOOL_RUN_WIRE_SCHEMA_VERSION {
         return Err(ToolRunError::SchemaVersion {
             expected: TOOL_RUN_WIRE_SCHEMA_VERSION,
@@ -233,7 +239,7 @@ pub(super) fn ensure_child_observation_columns(
     Ok(())
 }
 
-pub(super) fn runs_column_set(
+pub(crate) fn runs_column_set(
     conn: &Connection,
 ) -> Result<std::collections::HashSet<String>, ToolRunError> {
     let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
@@ -245,7 +251,7 @@ pub(super) fn runs_column_set(
     Ok(set)
 }
 
-pub(super) fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -291,7 +297,7 @@ pub(super) fn with_write_store<T>(
     }
 }
 
-pub(super) fn with_read_store<T>(
+pub(crate) fn with_read_store<T>(
     store_path: &Path,
     busy_timeout: Duration,
     mut operation: impl FnMut(&Connection) -> Result<T, ToolRunError>,
