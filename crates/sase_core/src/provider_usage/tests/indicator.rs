@@ -626,3 +626,65 @@ fn indicator_projection_order_is_provider_then_weekly_all_then_window_key() {
         UsageAttentionKind::VeryLow
     );
 }
+
+#[test]
+fn indicator_classifies_claude_model_scoped_weekly_window_as_weekly() {
+    let snapshot = indicator_snapshot(
+        vec![usage_observation(
+            "claude",
+            "ctx-claude",
+            1,
+            NOW - 10.0,
+            UsageCompleteness::Complete,
+            vec![indicator_window(
+                "weekly:claude-fable-5",
+                10.0,
+                Some(NOW + WEEK_SECONDS),
+                None,
+                UsageApplicabilityWire::Models {
+                    model_ids: vec!["claude-fable-5".to_string()],
+                },
+                NOW - 10.0,
+            )],
+        )],
+        NOW,
+    );
+    let projection =
+        indicator_projection(snapshot, Some(json!({"default": "always"})), NOW);
+    assert_eq!(projection.entries.len(), 1);
+    let entry = &projection.entries[0];
+    assert_eq!(entry.period.kind, UsageIndicatorPeriodKind::Weekly);
+    assert_eq!(entry.scope.kind, UsageIndicatorScopeKind::Models);
+    assert!(!entry.weekly_all);
+}
+
+#[test]
+fn indicator_leaves_claude_model_scoped_non_weekly_window_unknown() {
+    let snapshot = indicator_snapshot(
+        vec![usage_observation(
+            "claude",
+            "ctx-claude",
+            1,
+            NOW - 10.0,
+            UsageCompleteness::Complete,
+            vec![indicator_window(
+                "window:something",
+                10.0,
+                Some(NOW + 3_600.0),
+                None,
+                UsageApplicabilityWire::Models {
+                    model_ids: vec!["claude-fable-5".to_string()],
+                },
+                NOW - 10.0,
+            )],
+        )],
+        NOW,
+    );
+    let projection =
+        indicator_projection(snapshot, Some(json!({"default": "always"})), NOW);
+    assert_eq!(projection.entries.len(), 1);
+    assert_eq!(
+        projection.entries[0].period.kind,
+        UsageIndicatorPeriodKind::Unknown
+    );
+}

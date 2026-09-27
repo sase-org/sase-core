@@ -841,8 +841,13 @@ fn is_weekly_window(provider: &str, window: &UsagePublicWindowWire) -> bool {
     }
     let key = window.key.as_str();
     (provider == "claude"
-        && (key == "weekly" || key.starts_with("weekly:"))
-        && is_claude_product_scope(window))
+        && ((key == "weekly" && is_claude_product_scope(window))
+            || (key.starts_with("weekly:")
+                && (is_claude_product_scope(window)
+                    || matches!(
+                        window.applicability,
+                        UsageApplicabilityWire::Models { .. }
+                    )))))
         || (provider == "grok"
             && key == "included_weekly"
             && matches!(window.applicability, UsageApplicabilityWire::Account))
