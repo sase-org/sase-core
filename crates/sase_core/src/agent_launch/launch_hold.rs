@@ -159,23 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn proc_unit_emits_legacy_shell_name_and_accepts_proc_name() {
+    fn proc_unit_emits_canonical_proc_name() {
         let unit = proc_payload(Some("build"), None);
         let emitted = serde_json::to_value(&unit).unwrap();
-        assert_eq!(emitted["shell_name"], json!("build"));
-        assert!(emitted.get("proc_name").is_none());
+        assert_eq!(emitted["proc_name"], json!("build"));
+        assert!(emitted.get("shell_name").is_none());
 
-        let legacy: ProcUnitWire =
-            serde_json::from_value(emitted.clone()).unwrap();
-        assert_eq!(legacy, unit);
-
-        let mut renamed_value = emitted;
-        let object = renamed_value.as_object_mut().unwrap();
-        let name = object.remove("shell_name").unwrap();
-        object.insert("proc_name".to_string(), name);
-        let renamed: ProcUnitWire =
-            serde_json::from_value(renamed_value).unwrap();
-        assert_eq!(renamed, unit);
+        let round_tripped: ProcUnitWire =
+            serde_json::from_value(emitted).unwrap();
+        assert_eq!(round_tripped, unit);
     }
 
     #[test]

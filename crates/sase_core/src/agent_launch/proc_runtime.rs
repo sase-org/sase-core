@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const XPROMPT_PROC_ORIGIN: &str = "xprompt-proc";
-pub const PROC_DISPATCH_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const PROC_DISPATCH_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const PROC_PHASE_WAITING: &str = "waiting";
 pub const PROC_PHASE_CHECKING: &str = "checking";
 pub const PROC_PHASE_ACQUIRING_WORKSPACE: &str = "acquiring-workspace";
@@ -57,13 +57,7 @@ pub struct ProcDispatchRequestWire {
     pub timeout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "shell_name",
-        alias = "proc_name",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proc_name: Option<String>,
     /// Caller-supplied executable environment to overlay proc context onto.
     /// Absent on older persisted requests; falls back to the system PATH.
@@ -735,24 +729,16 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_request_emits_legacy_shell_name_and_accepts_proc_name() {
+    fn dispatch_request_emits_canonical_proc_name() {
         let temp = TempDir::new().unwrap();
         let wire = request(&temp, bash_code("echo ready"));
         let emitted = serde_json::to_value(&wire).unwrap();
-        assert_eq!(emitted["shell_name"], json!("checks"));
-        assert!(emitted.get("proc_name").is_none());
+        assert_eq!(emitted["proc_name"], json!("checks"));
+        assert!(emitted.get("shell_name").is_none());
 
-        let legacy: ProcDispatchRequestWire =
-            serde_json::from_value(emitted.clone()).unwrap();
-        assert_eq!(legacy, wire);
-
-        let mut renamed_value = emitted;
-        let object = renamed_value.as_object_mut().unwrap();
-        let name = object.remove("shell_name").unwrap();
-        object.insert("proc_name".to_string(), name);
-        let renamed: ProcDispatchRequestWire =
-            serde_json::from_value(renamed_value).unwrap();
-        assert_eq!(renamed, wire);
+        let round_tripped: ProcDispatchRequestWire =
+            serde_json::from_value(emitted).unwrap();
+        assert_eq!(round_tripped, wire);
     }
 
     #[test]

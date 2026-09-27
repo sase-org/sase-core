@@ -30,8 +30,8 @@ use super::wire::{
 const PROC_KINDS: [&str; 3] = ["command", "tui", "detached"];
 const PROC_LIFECYCLES: [&str; 3] = ["legacy", "proc-shell", "named-proc"];
 const STORE_LOG_OWNER: &str = "proc-store";
-// legacy sase-shell spelling; flips in contract-flip
-const PROC_LIFECYCLE_NAMED_PROC: &str = "proc-shell";
+// `proc-shell` is a legacy sase-shell spelling, still accepted on read.
+const PROC_LIFECYCLE_NAMED_PROC: &str = "named-proc";
 pub const SERVICE_PROC_HISTORY_LIMIT: usize = 20;
 /// Tag marking finished procs submitted from the TUI Command Line.
 pub const COMMAND_LINE_PROC_TAG: &str = "command-line";
@@ -828,7 +828,7 @@ fn reject_reserve_conflicts(
             if existing == requested {
                 return Err(ProcStoreError::Conflict {
                     proc_id: row.proc_id.clone(),
-                    field: "shell_name".to_string(),
+                    field: "proc_name".to_string(),
                     value: requested.to_string(),
                     reason: "active proc name is already reserved".to_string(),
                 });
@@ -871,8 +871,7 @@ fn normalized_conflict_keys(
     if let Some(proc_name) = proc_name {
         if !proc_name.trim().is_empty() {
             values.push(format!(
-                // legacy sase-shell spelling; flips in contract-flip
-                "shell:{}:{}",
+                "named-proc:{}:{}",
                 project.unwrap_or(""),
                 proc_name.trim()
             ));
@@ -883,11 +882,12 @@ fn normalized_conflict_keys(
     values
 }
 
-/// Canonicalize a conflict key so the legacy `shell:` prefix and the new
-/// `named-proc:` prefix compare equal for the same project and name.
+/// Canonicalize a conflict key so the legacy `shell:` prefix and the
+/// canonical `named-proc:` prefix compare equal for the same project and
+/// name.
 fn canonical_conflict_key(key: &str) -> String {
-    key.strip_prefix("named-proc:")
-        .map(|rest| format!("shell:{rest}"))
+    key.strip_prefix("shell:")
+        .map(|rest| format!("named-proc:{rest}"))
         .unwrap_or_else(|| key.to_string())
 }
 
@@ -1088,10 +1088,9 @@ fn normalize_and_validate_proc(
     if proc.lifecycle.is_empty() {
         proc.lifecycle = "legacy".to_string();
     }
-    if proc.lifecycle == "named-proc" {
-        // New writers may send the renamed lifecycle; storage keeps the
-        // legacy sase-shell spelling so emitted rows stay byte-identical.
-        // Flips in contract-flip.
+    if proc.lifecycle == "proc-shell" {
+        // Legacy writers still send the sase-shell lifecycle spelling;
+        // storage keeps the canonical `named-proc` spelling.
         proc.lifecycle = PROC_LIFECYCLE_NAMED_PROC.to_string();
     }
     if proc.log_owner.is_empty() {
@@ -2077,7 +2076,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             name_conflict,
-            ProcStoreError::Conflict { ref field, .. } if field == "shell_name"
+            ProcStoreError::Conflict { ref field, .. } if field == "proc_name"
         ));
 
         let mut key_request = reserve_request("third", "agent--test", "fp-3");
@@ -2090,51 +2089,46 @@ mod tests {
     }
 
     #[test]
-    fn proc_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+    fn proc_wire_emits_canonical_name_keys_and_accepts_legacy_spellings() {
         let mut wire = proc("proc-one", "running", "2026-07-25T12:00:00Z");
         wire.proc_name = Some("agent--build".to_string());
         wire.proc_role = Some("proc".to_string());
         let emitted = serde_json::to_value(&wire).unwrap();
-        assert_eq!(emitted["shell_name"], json!("agent--build"));
-        assert_eq!(emitted["shell_kind"], json!("proc"));
-        assert!(emitted.get("proc_name").is_none());
-        assert!(emitted.get("proc_role").is_none());
+        assert_eq!(emitted["proc_name"], json!("agent--build"));
+        assert_eq!(emitted["proc_role"], json!("proc"));
+        assert!(emitted.get("shell_name").is_none());
+        assert!(emitted.get("shell_kind").is_none());
 
-        let legacy: ProcWire = serde_json::from_value(emitted.clone()).unwrap();
+        let round_tripped: ProcWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        assert_eq!(round_tripped, wire);
+
+        let mut legacy_value = emitted;
+        let object = legacy_value.as_object_mut().unwrap();
+        let name = object.remove("proc_name").unwrap();
+        let kind = object.remove("proc_role").unwrap();
+        object.insert("shell_name".to_string(), name);
+        object.insert("shell_kind".to_string(), kind);
+        let legacy: ProcWire = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(legacy, wire);
-
-        let mut renamed_value = emitted;
-        let object = renamed_value.as_object_mut().unwrap();
-        let name = object.remove("shell_name").unwrap();
-        let kind = object.remove("shell_kind").unwrap();
-        object.insert("proc_name".to_string(), name);
-        object.insert("proc_role".to_string(), kind);
-        let renamed: ProcWire = serde_json::from_value(renamed_value).unwrap();
-        assert_eq!(renamed, wire);
     }
 
     #[test]
-    fn proc_reserve_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+    fn proc_reserve_wire_emits_canonical_name_keys() {
         let request = reserve_request("proc-one", "agent--build", "fp-1");
         let emitted = serde_json::to_value(&request).unwrap();
-        assert_eq!(emitted["shell_name"], json!("agent--build"));
-        assert_eq!(emitted["shell_kind"], json!("proc"));
-        assert!(emitted.get("proc_name").is_none());
-        assert!(emitted.get("proc_role").is_none());
+        assert_eq!(emitted["proc_name"], json!("agent--build"));
+        assert_eq!(emitted["proc_role"], json!("proc"));
+        assert!(emitted.get("shell_name").is_none());
+        assert!(emitted.get("shell_kind").is_none());
 
-        let mut renamed_value = emitted;
-        let object = renamed_value.as_object_mut().unwrap();
-        let name = object.remove("shell_name").unwrap();
-        let kind = object.remove("shell_kind").unwrap();
-        object.insert("proc_name".to_string(), name);
-        object.insert("proc_role".to_string(), kind);
-        let renamed: ProcReserveWire =
-            serde_json::from_value(renamed_value).unwrap();
-        assert_eq!(renamed, request);
+        let round_tripped: ProcReserveWire =
+            serde_json::from_value(emitted).unwrap();
+        assert_eq!(round_tripped, request);
     }
 
     #[test]
-    fn proc_update_wire_emits_legacy_name_keys_and_accepts_new_spellings() {
+    fn proc_update_wire_emits_canonical_name_keys() {
         let update = ProcUpdateWire {
             proc_id: "proc-one".to_string(),
             proc_name: Some(Some("agent--build".to_string())),
@@ -2142,47 +2136,39 @@ mod tests {
             ..ProcUpdateWire::default()
         };
         let emitted = serde_json::to_value(&update).unwrap();
-        assert_eq!(emitted["shell_name"], json!("agent--build"));
-        assert_eq!(emitted["shell_kind"], json!("proc"));
-        assert!(emitted.get("proc_name").is_none());
-        assert!(emitted.get("proc_role").is_none());
+        assert_eq!(emitted["proc_name"], json!("agent--build"));
+        assert_eq!(emitted["proc_role"], json!("proc"));
+        assert!(emitted.get("shell_name").is_none());
+        assert!(emitted.get("shell_kind").is_none());
 
-        let legacy: ProcUpdateWire =
-            serde_json::from_value(emitted.clone()).unwrap();
-        assert_eq!(legacy, update);
-
-        let renamed: ProcUpdateWire = serde_json::from_value(json!({
-            "proc_id": "proc-one",
-            "proc_name": "agent--build",
-            "proc_role": "proc",
-        }))
-        .unwrap();
-        assert_eq!(renamed, update);
+        let round_tripped: ProcUpdateWire =
+            serde_json::from_value(emitted).unwrap();
+        assert_eq!(round_tripped, update);
     }
 
     #[test]
-    fn xprompt_proc_meta_emits_legacy_name_key_and_accepts_new_spelling() {
+    fn xprompt_proc_meta_emits_canonical_name_key_and_accepts_legacy() {
         let meta = XpromptProcMetaWire {
             proc_name: Some("agent--build".to_string()),
             ..XpromptProcMetaWire::default()
         };
         let emitted = serde_json::to_value(&meta).unwrap();
-        assert_eq!(emitted["shell_name"], json!("agent--build"));
-        assert!(emitted.get("proc_name").is_none());
+        assert_eq!(emitted["proc_name"], json!("agent--build"));
+        assert!(emitted.get("shell_name").is_none());
 
-        let renamed: XpromptProcMetaWire = serde_json::from_value(json!({
-            "proc_name": "agent--build",
+        let legacy: XpromptProcMetaWire = serde_json::from_value(json!({
+            "shell_name": "agent--build",
         }))
         .unwrap();
-        assert_eq!(renamed, meta);
+        assert_eq!(legacy, meta);
     }
 
     #[test]
-    fn named_proc_lifecycle_spelling_stores_legacy_value() {
+    fn legacy_proc_shell_lifecycle_spelling_stores_canonical_value() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("procs.jsonl");
         let mut row = proc("named", "running", "2026-07-25T12:00:00Z");
-        row.lifecycle = "named-proc".to_string();
+        row.lifecycle = "proc-shell".to_string();
         row.request_fingerprint = Some("fp-1".to_string());
         row.reserved_by = Some("agent-one".to_string());
         row.reserved_at = Some("2026-07-25T12:00:00Z".to_string());
@@ -2198,14 +2184,14 @@ mod tests {
     }
 
     #[test]
-    fn conflict_keys_treat_named_proc_prefix_as_shell_prefix() {
+    fn conflict_keys_treat_shell_prefix_as_named_proc_prefix() {
         assert_eq!(
             canonical_conflict_key("named-proc:sase:checks"),
-            "shell:sase:checks"
+            "named-proc:sase:checks"
         );
         assert_eq!(
             canonical_conflict_key("shell:sase:checks"),
-            "shell:sase:checks"
+            "named-proc:sase:checks"
         );
 
         let temp = tempdir().unwrap();

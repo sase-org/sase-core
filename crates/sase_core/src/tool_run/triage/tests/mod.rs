@@ -973,7 +973,7 @@ fn owner_match_sase_191_3_probe_yields_no_owners() {
             owner_candidate(
                 "sase-106",
                 Some(
-                    "src/sase/gate_shell/handoff.py and __init__.py; agent/launch_request.py; main/gate_handler.py; xprompt/workflow_hitl_gate.py",
+                    "src/sase/gate_turn/handoff.py and __init__.py; agent/launch_request.py; main/gate_handler.py; xprompt/workflow_hitl_gate.py",
                 ),
                 Some(
                     "Restore gate creator handoff exports removed by coder-recovery refactor",

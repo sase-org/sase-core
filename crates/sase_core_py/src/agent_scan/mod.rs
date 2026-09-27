@@ -527,7 +527,7 @@ fn py_load_agent_artifact_records<'py>(
 
 /// Return the newest real gate-turn record for `gate_id`, or `None`.
 ///
-/// Uses the persistent index's indexed `gate_shell_id` column, an O(1) SQL
+/// Uses the persistent index's indexed `gate_turn_id` column, an O(1) SQL
 /// lookup instead of decoding every historical record.
 #[pyfunction]
 #[pyo3(
@@ -535,21 +535,6 @@ fn py_load_agent_artifact_records<'py>(
     signature = (index_path, project_name, gate_id)
 )]
 fn py_find_gate_turn_by_gate_id<'py>(
-    py: Python<'py>,
-    index_path: &str,
-    project_name: Option<&str>,
-    gate_id: &str,
-) -> PyResult<PyObject> {
-    find_gate_turn_by_gate_id_impl(py, index_path, project_name, gate_id)
-}
-
-// legacy binding name; removed in contract-flip
-#[pyfunction]
-#[pyo3(
-    name = "find_gate_shell_by_gate_id",
-    signature = (index_path, project_name, gate_id)
-)]
-fn py_find_gate_shell_by_gate_id<'py>(
     py: Python<'py>,
     index_path: &str,
     project_name: Option<&str>,
@@ -1003,7 +988,6 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_query_agent_artifact_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_agent_artifact_records, m)?)?;
     m.add_function(wrap_pyfunction!(py_find_gate_turn_by_gate_id, m)?)?;
-    m.add_function(wrap_pyfunction!(py_find_gate_shell_by_gate_id, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_agent_output_variable_history_wire_schema_version,
         m

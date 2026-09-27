@@ -1421,12 +1421,12 @@ fn nested_turn_object(
 }
 
 /// Read the metadata member kind, preferring `turn_kind` over the legacy
-/// `shell_kind`. A `monitor` input is stored as the legacy `proc` value.
+/// `shell_kind` spelling. A legacy `proc` input is stored as `monitor`.
 fn turn_kind_from_object(data: &Map<String, Value>) -> Option<String> {
     let kind = coerce_str(data.get("turn_kind"))
         .or_else(|| coerce_str(data.get("shell_kind")))?;
-    if kind == "monitor" {
-        Some("proc".to_string())
+    if kind == "proc" {
+        Some("monitor".to_string())
     } else {
         Some(kind)
     }
@@ -1993,7 +1993,7 @@ mod tests {
     }
 
     #[test]
-    fn scanner_prefers_turn_keys_and_stores_monitor_kind_as_proc() {
+    fn scanner_prefers_turn_keys_and_stores_monitor_kind() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let artifact = projects
@@ -2021,10 +2021,10 @@ mod tests {
         let meta = snapshot.records[0].agent_meta.as_ref().unwrap();
         let turn = meta.agent_session_turn.as_ref().unwrap();
         assert_eq!(turn.id.as_deref(), Some("new"));
-        assert_eq!(meta.turn_kind.as_deref(), Some("proc"));
+        assert_eq!(meta.turn_kind.as_deref(), Some("monitor"));
         let encoded = serde_json::to_value(meta).unwrap();
-        assert_eq!(encoded["agent_session_shell"]["id"], "new");
-        assert_eq!(encoded["shell_kind"], "proc");
+        assert_eq!(encoded["agent_session_turn"]["id"], "new");
+        assert_eq!(encoded["turn_kind"], "monitor");
     }
 
     #[test]

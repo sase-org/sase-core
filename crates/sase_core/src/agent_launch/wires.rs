@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub const AGENT_LAUNCH_WIRE_SCHEMA_VERSION: u32 = 2;
-pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const LAUNCH_PLAN_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const BATCH_PREDECESSOR_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,13 +458,7 @@ impl AgentUnitWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcUnitWire {
     pub code: CodeValueWire,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "shell_name",
-        alias = "proc_name",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proc_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,

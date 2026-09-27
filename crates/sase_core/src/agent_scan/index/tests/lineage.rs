@@ -5,7 +5,7 @@ use super::support::{
 };
 use crate::agent_cleanup::AgentCleanupIdentityWire;
 use crate::agent_scan::wire::AgentArtifactScanOptionsWire;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -454,8 +454,8 @@ fn schema_v30_upgrade_adds_and_backfills_gate_turn_id_projection() {
     {
         let conn = Connection::open(&index).unwrap();
         conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_agent_artifacts_gate_shell_id;
-             ALTER TABLE agent_artifacts DROP COLUMN gate_shell_id;
+            "DROP INDEX IF EXISTS idx_agent_artifacts_gate_turn_id;
+             ALTER TABLE agent_artifacts DROP COLUMN gate_turn_id;
              INSERT OR REPLACE INTO meta(key, value)
              VALUES ('schema_version', '30');",
         )
@@ -465,7 +465,7 @@ fn schema_v30_upgrade_adds_and_backfills_gate_turn_id_projection() {
     let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-legacy")
         .unwrap()
         .expect(
-            "an index predating the gate_shell_id column must \
+            "an index predating the gate_turn_id column must \
                  self-migrate and still resolve the gate",
         );
     assert_eq!(found.artifact_dir, owner.to_string_lossy());
@@ -479,4 +479,73 @@ fn schema_v30_upgrade_adds_and_backfills_gate_turn_id_projection() {
         )
         .unwrap();
     assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+}
+
+#[test]
+fn schema_v34_upgrade_renames_gate_shell_id_column_in_place() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let owner = write_gate_turn_artifact(
+        &projects,
+        "proj",
+        "20260812100000",
+        "gate-rename",
+    );
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    {
+        let conn = Connection::open(&index).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_agent_artifacts_gate_turn_id;
+             ALTER TABLE agent_artifacts RENAME COLUMN gate_turn_id TO gate_shell_id;
+             CREATE INDEX idx_agent_artifacts_gate_shell_id
+             ON agent_artifacts(gate_shell_id, project_name, timestamp);
+             INSERT OR REPLACE INTO meta(key, value)
+             VALUES ('schema_version', '34');",
+        )
+        .unwrap();
+    }
+
+    let found = find_gate_turn_by_gate_id(&index, Some("proj"), "gate-rename")
+        .unwrap()
+        .expect(
+            "a v34 index must rename gate_shell_id in place and still \
+                 resolve the gate",
+        );
+    assert_eq!(found.artifact_dir, owner.to_string_lossy());
+
+    let conn = Connection::open(&index).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION.to_string());
+    let new_column: Option<String> = conn
+        .query_row(
+            "SELECT name FROM pragma_table_info('agent_artifacts')
+             WHERE name = 'gate_turn_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(new_column.as_deref(), Some("gate_turn_id"));
+    let legacy_column: Option<String> = conn
+        .query_row(
+            "SELECT name FROM pragma_table_info('agent_artifacts')
+             WHERE name = 'gate_shell_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(legacy_column, None);
 }

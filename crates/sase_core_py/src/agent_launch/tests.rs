@@ -71,7 +71,7 @@ fn hold_directive_bindings_collect_format_and_expand() {
 }
 
 #[test]
-fn standalone_named_proc_validators_agree_across_binding_names() {
+fn standalone_named_proc_validator_has_no_legacy_binding_name() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
@@ -85,18 +85,13 @@ fn standalone_named_proc_validators_agree_across_binding_names() {
         assert!(
             module
                 .getattr("validate_standalone_proc_shell_name")
-                .is_ok(),
-            "missing validate_standalone_proc_shell_name"
+                .is_err(),
+            "legacy validate_standalone_proc_shell_name must stay unregistered"
         );
 
         py_validate_standalone_named_proc_name(Some("checks")).unwrap();
-        py_validate_standalone_proc_shell_name(Some("checks")).unwrap();
-        let new_err =
-            py_validate_standalone_named_proc_name(Some("agent--checks"))
-                .unwrap_err();
-        let legacy_err =
-            py_validate_standalone_proc_shell_name(Some("agent--checks"))
-                .unwrap_err();
-        assert_eq!(new_err.to_string(), legacy_err.to_string());
+        let err = py_validate_standalone_named_proc_name(Some("agent--checks"))
+            .unwrap_err();
+        assert!(err.to_string().contains("`--`"));
     });
 }

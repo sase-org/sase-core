@@ -4,7 +4,7 @@ use crate::agent_hold::AgentHoldRecordWire;
 
 use crate::queue_directive::resolve_queue_capacity;
 
-pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 6;
+pub const RUNNER_CAPACITY_POLICY_SCHEMA_VERSION: u32 = 7;
 pub const DEFAULT_WAIT_PRIORITY: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,26 +73,11 @@ pub struct RunnerCapacityRecordWire {
     pub agent_session_parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_claim_owner_key: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "agent_session_shell_kind",
-        alias = "agent_session_turn_kind"
-    )]
+    #[serde(default)]
     pub agent_session_turn_kind: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "agent_session_shell_id",
-        alias = "agent_session_turn_id"
-    )]
+    #[serde(default)]
     pub agent_session_turn_id: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "agent_session_shell_state",
-        alias = "agent_session_turn_state"
-    )]
+    #[serde(default)]
     pub agent_session_turn_state: Option<String>,
     #[serde(default)]
     pub queue_weight: Option<f64>,

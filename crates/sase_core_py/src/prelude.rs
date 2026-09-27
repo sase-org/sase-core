@@ -825,7 +825,7 @@ pub(crate) use sase_core::procs::{
     ProcFinishWire, ProcReserveWire, ProcRuntimeRetentionRequestWire,
     ProcSettlementWire, ProcStopRequestWire, ProcStoreError,
     ProcSupervisorClaimWire, ProcUpdateWire, ProcWire,
-    PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION,
+    PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION, PROC_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::project_spec::{
     apply_project_aliases_update as core_apply_project_aliases_update,

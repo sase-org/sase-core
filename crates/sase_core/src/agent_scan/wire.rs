@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 10;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 11;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -257,12 +257,9 @@ pub struct DoneMarkerWire {
     pub status_label: Option<String>,
     /// Terminal monitor or gate-turn projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(
-        default,
-        rename = "agent_session_shell",
-        alias = "agent_session_turn",
-        alias = "family_shell"
-    )]
+    /// Emits the canonical `agent_session_turn` key; each alias is a
+    /// legacy sase-shell spelling.
+    #[serde(default, alias = "agent_session_shell", alias = "family_shell")]
     pub agent_session_turn: Option<AgentSessionTurnWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
@@ -688,12 +685,9 @@ pub struct AgentMetaWire {
     pub retry_error_category: Option<String>,
     /// Terminal monitor or gate-turn projection, folding the flat
     /// `monitor_*` / `gate_*` fields. `None` when the record is neither.
-    #[serde(
-        default,
-        rename = "agent_session_shell",
-        alias = "agent_session_turn",
-        alias = "family_shell"
-    )]
+    /// Emits the canonical `agent_session_turn` key; each alias is a
+    /// legacy sase-shell spelling.
+    #[serde(default, alias = "agent_session_shell", alias = "family_shell")]
     pub agent_session_turn: Option<AgentSessionTurnWire>,
     #[serde(default)]
     pub monitor_diagnostic_manifest_ref: Option<String>,
@@ -711,14 +705,12 @@ pub struct AgentMetaWire {
     pub continuation_budget_decision_path: Option<String>,
     #[serde(default)]
     pub monitor_followup_budget_decision_path: Option<String>,
-    /// Member kind for this metadata record: stored `proc` (a monitor) or
-    /// `gate`. Emits the legacy `shell_kind` key; accepts `turn_kind` too.
-    /// A `monitor` input value is stored as `proc`.
-    // legacy sase-shell spelling; flips in contract-flip
+    /// Member kind for this metadata record: `monitor` or `gate`. Emits
+    /// the canonical `turn_kind` key; `shell_kind` is a legacy sase-shell
+    /// spelling. A legacy `proc` input value is stored as `monitor`.
     #[serde(
         default,
-        rename = "shell_kind",
-        alias = "turn_kind",
+        alias = "shell_kind",
         deserialize_with = "deserialize_turn_kind"
     )]
     pub turn_kind: Option<String>,
@@ -797,8 +789,8 @@ pub struct FinalizerStatusSummaryWire {
     pub instance_count: Option<i64>,
 }
 
-/// Deserialize `turn_kind` / `shell_kind`, storing a `monitor` input as the
-/// legacy `proc` value so a round trip still emits `proc`.
+/// Deserialize `turn_kind` / `shell_kind`, storing a legacy `proc` input
+/// as the canonical `monitor` value so a round trip emits `monitor`.
 fn deserialize_turn_kind<'de, D>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error>
@@ -807,8 +799,8 @@ where
 {
     let value = Option::<String>::deserialize(deserializer)?;
     Ok(value.map(|kind| {
-        if kind == "monitor" {
-            "proc".to_string()
+        if kind == "proc" {
+            "monitor".to_string()
         } else {
             kind
         }
@@ -817,7 +809,8 @@ where
 
 /// Whether a metadata turn kind denotes a monitor member.
 ///
-/// Stored values use the legacy `proc`; fresh writers may send `monitor`.
+/// Stored values use the canonical `monitor`; the legacy `proc` spelling
+/// still reads as a monitor.
 pub fn turn_kind_is_monitor(kind: Option<&str>) -> bool {
     matches!(kind, Some("proc") | Some("monitor"))
 }
@@ -1524,7 +1517,7 @@ mod tests {
         let new: AgentMetaWire = serde_json::from_value(serde_json::json!({
             "agent_session": "fam",
             "agent_session_role": "monitor",
-            "agent_session_shell": {"kind": "monitor"},
+            "agent_session_turn": {"kind": "monitor"},
         }))
         .unwrap();
         assert_eq!(new, legacy);
@@ -1535,12 +1528,13 @@ mod tests {
         assert_eq!(encoded["agent_session_role"], "monitor");
         assert!(encoded.get("agent_family").is_none());
         assert!(encoded.get("agent_family_role").is_none());
-        assert_eq!(encoded["agent_session_shell"]["kind"], "monitor");
+        assert_eq!(encoded["agent_session_turn"]["kind"], "monitor");
+        assert!(encoded.get("agent_session_shell").is_none());
         assert!(encoded.get("family_shell").is_none());
     }
 
     #[test]
-    fn agent_meta_wire_accepts_all_three_member_keys_but_emits_legacy() {
+    fn agent_meta_wire_accepts_all_three_member_keys_but_emits_canonical() {
         let from_turn: AgentMetaWire =
             serde_json::from_value(serde_json::json!({
                 "agent_session_turn": {"kind": "gate", "id": "g1"},
@@ -1562,14 +1556,14 @@ mod tests {
         assert_eq!(member.kind, "gate");
         assert_eq!(member.id.as_deref(), Some("g1"));
         let encoded = serde_json::to_value(&from_turn).unwrap();
-        assert_eq!(encoded["agent_session_shell"]["kind"], "gate");
-        assert_eq!(encoded["agent_session_shell"]["id"], "g1");
-        assert!(encoded.get("agent_session_turn").is_none());
+        assert_eq!(encoded["agent_session_turn"]["kind"], "gate");
+        assert_eq!(encoded["agent_session_turn"]["id"], "g1");
+        assert!(encoded.get("agent_session_shell").is_none());
         assert!(encoded.get("family_shell").is_none());
     }
 
     #[test]
-    fn done_marker_wire_accepts_all_three_member_keys_but_emits_legacy() {
+    fn done_marker_wire_accepts_all_three_member_keys_but_emits_canonical() {
         let from_turn: DoneMarkerWire =
             serde_json::from_value(serde_json::json!({
                 "outcome": "gated",
@@ -1584,12 +1578,12 @@ mod tests {
             .unwrap();
         assert_eq!(from_turn, from_shell);
         let encoded = serde_json::to_value(&from_turn).unwrap();
-        assert_eq!(encoded["agent_session_shell"]["kind"], "gate");
-        assert!(encoded.get("agent_session_turn").is_none());
+        assert_eq!(encoded["agent_session_turn"]["kind"], "gate");
+        assert!(encoded.get("agent_session_shell").is_none());
     }
 
     #[test]
-    fn agent_meta_wire_maps_monitor_turn_kind_to_proc_but_emits_legacy() {
+    fn agent_meta_wire_maps_legacy_proc_turn_kind_to_monitor() {
         let from_legacy_proc: AgentMetaWire =
             serde_json::from_value(serde_json::json!({
                 "shell_kind": "proc",
@@ -1602,22 +1596,23 @@ mod tests {
             .unwrap();
         let from_gate: AgentMetaWire =
             serde_json::from_value(serde_json::json!({
-                "shell_kind": "gate",
+                "turn_kind": "gate",
             }))
             .unwrap();
-        assert_eq!(from_legacy_proc.turn_kind.as_deref(), Some("proc"));
-        assert_eq!(from_new_monitor.turn_kind.as_deref(), Some("proc"));
+        assert_eq!(from_legacy_proc.turn_kind.as_deref(), Some("monitor"));
+        assert_eq!(from_new_monitor.turn_kind.as_deref(), Some("monitor"));
         assert_eq!(from_new_monitor, from_legacy_proc);
         assert_eq!(from_gate.turn_kind.as_deref(), Some("gate"));
         assert!(turn_kind_is_monitor(from_new_monitor.turn_kind.as_deref()));
+        assert!(turn_kind_is_monitor(Some("proc")));
         assert!(turn_kind_is_monitor(Some("monitor")));
         assert!(!turn_kind_is_monitor(from_gate.turn_kind.as_deref()));
         assert!(!turn_kind_is_monitor(None));
         let encoded = serde_json::to_value(&from_new_monitor).unwrap();
-        assert_eq!(encoded["shell_kind"], "proc");
-        assert!(encoded.get("turn_kind").is_none());
+        assert_eq!(encoded["turn_kind"], "monitor");
+        assert!(encoded.get("shell_kind").is_none());
         let encoded_gate = serde_json::to_value(&from_gate).unwrap();
-        assert_eq!(encoded_gate["shell_kind"], "gate");
+        assert_eq!(encoded_gate["turn_kind"], "gate");
     }
 
     #[test]

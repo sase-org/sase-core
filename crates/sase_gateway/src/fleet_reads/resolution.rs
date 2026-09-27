@@ -209,7 +209,7 @@ fn exact_locator_for_record(
     AgentInstanceLocatorWire {
         schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
         logical,
-        turn_id: safe_identifier(&record.workflow_dir_name, "shell"),
+        turn_id: safe_identifier(&record.workflow_dir_name, "turn"),
         run_id: safe_identifier(&record.timestamp, "run"),
         attempt_id: safe_identifier(&attempt, "attempt"),
     }

@@ -29,7 +29,7 @@ fn scan_agent_artifacts_binding_preserves_canonical_and_legacy_capacity() {
             py_scan_agent_artifacts(py, root.to_string_lossy().as_ref(), None)
                 .unwrap();
         let snapshot = py_to_json_value(snapshot.bind(py)).unwrap();
-        assert_eq!(snapshot["schema_version"], json!(10));
+        assert_eq!(snapshot["schema_version"], json!(11));
         let record = &snapshot["records"][0];
         assert_eq!(record["agent_meta"]["queue_capacity"], json!(100));
         assert_eq!(
@@ -504,7 +504,7 @@ fn reconcile_dismissed_members_binding_is_canonical_only() {
 }
 
 #[test]
-fn gate_turn_lookup_bindings_agree_under_both_names() {
+fn gate_turn_lookup_binding_serves_turn_records_without_legacy_name() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let temp = tempfile::tempdir().unwrap();
@@ -537,25 +537,26 @@ fn gate_turn_lookup_bindings_agree_under_both_names() {
         .unwrap();
         let index_str = index.to_string_lossy().into_owned();
 
-        let new = py_find_gate_turn_by_gate_id(
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(
+            module.getattr("find_gate_turn_by_gate_id").is_ok(),
+            "missing find_gate_turn_by_gate_id"
+        );
+        assert!(
+            module.getattr("find_gate_shell_by_gate_id").is_err(),
+            "legacy find_gate_shell_by_gate_id must stay unregistered"
+        );
+        let found = py_find_gate_turn_by_gate_id(
             py,
             &index_str,
             Some("proj"),
             "gate-1",
         )
         .unwrap();
-        let legacy = py_find_gate_shell_by_gate_id(
-            py,
-            &index_str,
-            Some("proj"),
-            "gate-1",
-        )
-        .unwrap();
-        let new_value = py_to_json_value(new.bind(py)).unwrap();
-        let legacy_value = py_to_json_value(legacy.bind(py)).unwrap();
-        assert_eq!(new_value, legacy_value);
+        let found_value = py_to_json_value(found.bind(py)).unwrap();
         assert_eq!(
-            new_value["agent_meta"]["agent_session_shell"]["id"],
+            found_value["agent_meta"]["agent_session_turn"]["id"],
             json!("gate-1")
         );
     });

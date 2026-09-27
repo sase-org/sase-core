@@ -18,8 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(super) const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Indexed `agent_artifacts` column projecting the owning gate-turn id.
-// legacy sase-shell spelling; flips in contract-flip
-pub(super) const GATE_TURN_INDEX_COLUMN: &str = "gate_shell_id";
+pub(super) const GATE_TURN_INDEX_COLUMN: &str = "gate_turn_id";
 
 pub(super) fn open_index(index_path: &Path) -> Result<Connection, String> {
     open_index_with_busy_timeout(index_path, DEFAULT_INDEX_BUSY_TIMEOUT)
@@ -293,6 +292,9 @@ pub(super) fn open_index_with_busy_timeout(
     }
     if prior_version.is_none_or(|v| v < 34) {
         migrate_record_json_refresh_v34(&mut conn)?;
+    }
+    if prior_version.is_none_or(|v| v < 35) {
+        migrate_gate_turn_id_column_v35(&conn)?;
     }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
@@ -868,6 +870,30 @@ pub(super) fn migrate_record_json_refresh_v34(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v35 renames the legacy `gate_shell_id` column to `gate_turn_id` in
+/// place, so an upgraded index keeps every gate-turn projection instead of
+/// failing to open. The legacy index would follow the rename onto the new
+/// column, so it is dropped; the caller recreates the index under its new
+/// name.
+pub(super) fn migrate_gate_turn_id_column_v35(
+    conn: &Connection,
+) -> Result<(), String> {
+    const LEGACY_GATE_TURN_INDEX_COLUMN: &str = "gate_shell_id";
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_agent_artifacts_gate_shell_id",
+    )
+    .map_err(|e| e.to_string())?;
+    if !agent_artifacts_has_column(conn, LEGACY_GATE_TURN_INDEX_COLUMN)? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE agent_artifacts RENAME COLUMN gate_shell_id TO gate_turn_id",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// v33 renames the legacy `agent_family` column to `agent_session` in place,

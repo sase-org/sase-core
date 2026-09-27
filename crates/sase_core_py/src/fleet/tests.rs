@@ -660,7 +660,7 @@ fn fleet_issue_bootstrap_binding_delegates_to_store_without_persisting_secret()
                 "fleet.hello",
                 "fleet.hello"
             ],
-            "supported_protocol_versions": [99, 2],
+            "supported_protocol_versions": [99, sase_gateway::FLEET_PROTOCOL_VERSION],
             "expires_at_unix": null,
             "installation_pin": null
         });

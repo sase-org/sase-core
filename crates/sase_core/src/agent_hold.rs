@@ -22,7 +22,7 @@ use crate::store_lock::{
     StoreLockError,
 };
 
-pub const AGENT_HOLD_WIRE_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_HOLD_WIRE_SCHEMA_VERSION: u32 = 3;
 pub const AGENT_HOLD_STATE_FILENAME: &str = "agent_holds.json";
 pub const AGENT_HOLD_PRUNE_FILENAME: &str = "agent_holds.prune.json";
 pub const AGENT_HOLD_LOCK_FILENAME: &str = "agent_holds.lock";
@@ -223,8 +223,7 @@ pub struct AgentHoldCandidateWire {
     pub artifact_dirs: Vec<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(default, rename = "proc_shell", alias = "named_proc")]
+    #[serde(default)]
     pub named_proc: Option<String>,
     #[serde(default, alias = "family")]
     pub agent_session: Option<String>,
@@ -1310,8 +1309,7 @@ fn selector_matches(
     if let Some(named_proc) = &candidate.named_proc {
         push_exact_matches(
             &mut matches,
-            // legacy sase-shell spelling; flips in contract-flip
-            "proc_shell",
+            "named_proc",
             &selectors.names,
             named_proc,
         );
@@ -1382,9 +1380,8 @@ fn selector_matches(
 
 /// Whether a selector-match kind denotes the named-proc selector.
 ///
-/// Emitted matches still use the legacy `proc_shell` spelling; readers also
-/// accept the new `named_proc` spelling.
-// legacy sase-shell spelling; flips in contract-flip
+/// Emitted matches use the canonical `named_proc` spelling; the legacy
+/// `proc_shell` spelling still reads as a named-proc match.
 pub fn hold_selector_match_is_named_proc(kind: &str) -> bool {
     matches!(kind, "proc_shell" | "named_proc")
 }
@@ -2311,7 +2308,7 @@ mod tests {
                 .iter()
                 .map(|m| m.kind.as_str())
                 .collect::<Vec<_>>(),
-            ["proc_shell", "hood"]
+            ["named_proc", "hood"]
         );
 
         record.selectors.names = vec!["other".to_string()];
@@ -2320,26 +2317,18 @@ mod tests {
     }
 
     #[test]
-    fn candidate_accepts_named_proc_spelling_and_emits_proc_shell() {
+    fn candidate_emits_named_proc_spelling() {
         let mut wire = candidate();
         wire.artifact_dirs.clear();
         wire.agent_name = None;
         wire.named_proc = Some("build.check".to_string());
         let emitted = serde_json::to_value(&wire).unwrap();
-        assert_eq!(emitted["proc_shell"], json!("build.check"));
-        assert!(emitted.get("named_proc").is_none());
+        assert_eq!(emitted["named_proc"], json!("build.check"));
+        assert!(emitted.get("proc_shell").is_none());
 
-        let legacy: AgentHoldCandidateWire =
-            serde_json::from_value(emitted.clone()).unwrap();
-        assert_eq!(legacy, wire);
-
-        let mut renamed_value = emitted;
-        let object = renamed_value.as_object_mut().unwrap();
-        let value = object.remove("proc_shell").unwrap();
-        object.insert("named_proc".to_string(), value);
-        let renamed: AgentHoldCandidateWire =
-            serde_json::from_value(renamed_value).unwrap();
-        assert_eq!(renamed, wire);
+        let round_tripped: AgentHoldCandidateWire =
+            serde_json::from_value(emitted).unwrap();
+        assert_eq!(round_tripped, wire);
 
         assert!(hold_selector_match_is_named_proc("proc_shell"));
         assert!(hold_selector_match_is_named_proc("named_proc"));

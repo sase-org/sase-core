@@ -776,16 +776,6 @@ fn py_validate_standalone_named_proc_name(name: Option<&str>) -> PyResult<()> {
     validate_standalone_named_proc_name_impl(name)
 }
 
-// legacy binding name; removed in contract-flip
-#[pyfunction]
-#[pyo3(
-    name = "validate_standalone_proc_shell_name",
-    signature = (name = None)
-)]
-fn py_validate_standalone_proc_shell_name(name: Option<&str>) -> PyResult<()> {
-    validate_standalone_named_proc_name_impl(name)
-}
-
 fn validate_standalone_named_proc_name_impl(
     name: Option<&str>,
 ) -> PyResult<()> {
@@ -1205,10 +1195,6 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_proc_script_argv, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_validate_standalone_named_proc_name,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        py_validate_standalone_proc_shell_name,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_validate_proc_workspace_intent, m)?)?;

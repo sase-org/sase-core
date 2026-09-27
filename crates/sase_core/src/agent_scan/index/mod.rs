@@ -96,7 +96,7 @@ thread_local! {
     /// Records decoded (`record_json` parses) by the last
     /// [`find_gate_turn_by_gate_id`] call. A warm-cache lookup that stays
     /// fast could still be decoding every historical row in Rust after an
-    /// unfiltered SQL scan; this proves the `WHERE gate_shell_id = ?`
+    /// unfiltered SQL scan; this proves the `WHERE gate_turn_id = ?`
     /// predicate — not warm caches or an incidentally fast host — is what
     /// keeps the lookup bounded as unrelated history grows.
     static LAST_GATE_TURN_LOOKUP_RECORDS_DECODED: std::cell::Cell<u64> =

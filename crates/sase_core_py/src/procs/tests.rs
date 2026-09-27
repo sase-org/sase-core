@@ -103,7 +103,7 @@ fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
         let reserve = json_value_to_py(
             py,
             &json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "proc_id": "proc-service",
                 "label": "Service proc",
                 "kind": "detached",
@@ -119,8 +119,8 @@ fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
                 "created_at": "2026-07-25T12:00:10Z",
                 "log_path": "/tmp/proc-service.log",
                 "log_owner": "proc-store",
-                "shell_name": "gateway",
-                "shell_kind": "proc",
+                "proc_name": "gateway",
+                "proc_role": "proc",
                 "concurrency_keys": ["service:gateway"],
                 "request_fingerprint": "service-fingerprint",
                 "reserved_by": "agent-one",
@@ -196,11 +196,16 @@ fn proc_runtime_retention_binding_requires_trustworthy_store_snapshot() {
 }
 
 #[test]
-fn reserve_proc_accepts_proc_name_spelling_like_shell_name() {
+fn proc_wire_schema_version_binding_reports_current_version() {
+    assert_eq!(py_proc_wire_schema_version(), PROC_WIRE_SCHEMA_VERSION);
+}
+
+#[test]
+fn reserve_proc_uses_proc_name_spelling() {
     pyo3::prepare_freethreaded_python();
     fn reserve_payload(proc_id: &str, fingerprint: &str) -> serde_json::Value {
         json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "proc_id": proc_id,
             "label": "Binding proc",
             "kind": "detached",
@@ -224,44 +229,25 @@ fn reserve_proc_accepts_proc_name_spelling_like_shell_name() {
         })
     }
     Python::with_gil(|py| {
-        let mut legacy_payload = reserve_payload("proc-legacy", "fp-legacy");
-        legacy_payload["shell_name"] = json!("gateway");
-        legacy_payload["shell_kind"] = json!("proc");
-        let mut renamed_payload = reserve_payload("proc-renamed", "fp-renamed");
-        renamed_payload["proc_name"] = json!("gateway");
-        renamed_payload["proc_role"] = json!("proc");
+        let mut payload = reserve_payload("proc-renamed", "fp-renamed");
+        payload["proc_name"] = json!("gateway");
+        payload["proc_role"] = json!("proc");
 
         let temp = tempfile::tempdir().unwrap();
-        let legacy_path = temp
-            .path()
-            .join("legacy.jsonl")
-            .to_string_lossy()
-            .into_owned();
-        let legacy_dict = json_value_to_py(py, &legacy_payload).unwrap();
-        let legacy_dict = legacy_dict.bind(py).downcast::<PyDict>().unwrap();
-        let legacy_outcome =
-            py_reserve_proc(py, &legacy_path, legacy_dict, 10).unwrap();
-        let legacy_outcome = py_to_json_value(legacy_outcome.bind(py)).unwrap();
-
-        let renamed_path = temp
+        let store_path = temp
             .path()
             .join("renamed.jsonl")
             .to_string_lossy()
             .into_owned();
-        let renamed_dict = json_value_to_py(py, &renamed_payload).unwrap();
-        let renamed_dict = renamed_dict.bind(py).downcast::<PyDict>().unwrap();
-        let renamed_outcome =
-            py_reserve_proc(py, &renamed_path, renamed_dict, 10).unwrap();
-        let renamed_outcome =
-            py_to_json_value(renamed_outcome.bind(py)).unwrap();
+        let dict = json_value_to_py(py, &payload).unwrap();
+        let dict = dict.bind(py).downcast::<PyDict>().unwrap();
+        let outcome = py_reserve_proc(py, &store_path, dict, 10).unwrap();
+        let outcome = py_to_json_value(outcome.bind(py)).unwrap();
 
-        // Both spellings validate the same; emitted rows keep legacy keys.
-        assert_eq!(
-            renamed_outcome["proc"]["shell_name"],
-            legacy_outcome["proc"]["shell_name"]
-        );
-        assert_eq!(renamed_outcome["proc"]["shell_name"], json!("gateway"));
-        assert!(renamed_outcome["proc"].get("proc_name").is_none());
-        assert_eq!(renamed_outcome["proc"]["shell_kind"], json!("proc"));
+        // Emitted rows use the canonical keys.
+        assert_eq!(outcome["proc"]["proc_name"], json!("gateway"));
+        assert!(outcome["proc"].get("shell_name").is_none());
+        assert_eq!(outcome["proc"]["proc_role"], json!("proc"));
+        assert!(outcome["proc"].get("shell_kind").is_none());
     });
 }

@@ -52,8 +52,8 @@ pub struct LogicalAgentLocatorWire {
 pub struct AgentInstanceLocatorWire {
     pub schema_version: u32,
     pub logical: LogicalAgentLocatorWire,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(rename = "shell_id", alias = "turn_id")]
+    // `shell_id` is a legacy sase-shell spelling.
+    #[serde(alias = "shell_id")]
     pub turn_id: String,
     pub run_id: String,
     pub attempt_id: String,
@@ -159,7 +159,7 @@ impl AgentInstanceLocatorWire {
     pub fn validate(&self) -> Result<(), FleetContractError> {
         validate_schema("agent instance locator", self.schema_version)?;
         self.logical.validate()?;
-        validate_identifier("shell_id", &self.turn_id)?;
+        validate_identifier("turn_id", &self.turn_id)?;
         validate_identifier("run_id", &self.run_id)?;
         validate_identifier("attempt_id", &self.attempt_id)?;
         Ok(())
@@ -265,8 +265,7 @@ pub(crate) fn instance_key_unchecked(
         "{}|{}",
         logical_key_unchecked(&locator.logical),
         length_key([
-            // legacy sase-shell spelling; flips in contract-flip
-            ("shell", locator.turn_id.as_str()),
+            ("turn", locator.turn_id.as_str()),
             ("run", locator.run_id.as_str()),
             ("attempt", locator.attempt_id.as_str()),
         ])
@@ -275,9 +274,9 @@ pub(crate) fn instance_key_unchecked(
 
 /// Whether a stored instance key identifies `locator`.
 ///
-/// Emitted keys use the canonical `shell:` segment; a stored `turn:` segment
+/// Emitted keys use the canonical `turn:` segment; a stored `shell:` segment
 /// compares equal while durable fleet state is migrated. Fallback
-/// `turn-<hex>` ids compare equal to emitted `shell-<hex>` values.
+/// `shell-<hex>` ids compare equal to emitted `turn-<hex>` values.
 pub(crate) fn instance_key_matches(
     stored: &str,
     locator: &AgentInstanceLocatorWire,
@@ -286,8 +285,8 @@ pub(crate) fn instance_key_matches(
         || canonical_instance_key(stored) == instance_key_unchecked(locator)
 }
 
-/// Canonical form for comparing stored instance keys: `turn:` segments fold
-/// to `shell:`, and `turn-<hex>` fallback ids fold to `shell-<hex>`.
+/// Canonical form for comparing stored instance keys: `shell:` segments
+/// fold to `turn:`, and `shell-<hex>` fallback ids fold to `turn-<hex>`.
 /// Malformed keys compare exactly.
 ///
 /// An instance key is two concatenated length-keys:
@@ -302,12 +301,12 @@ pub(crate) fn canonical_instance_key(key: &str) -> String {
     };
     let mut out = String::from("v1");
     for (name, value) in segments {
-        let name = if name == "turn" {
-            "shell".to_string()
+        let name = if name == "shell" {
+            "turn".to_string()
         } else {
             name
         };
-        let value = if name == "shell" {
+        let value = if name == "turn" {
             canonical_turn_fallback_id(&value)
         } else {
             value
@@ -346,14 +345,14 @@ fn split_composite_instance_key(key: &str) -> Option<(&str, &str)> {
     Some((logical, instance_key))
 }
 
-/// Fold a `turn-<hex>` fallback id to canonical `shell-<hex>`.
+/// Fold a `shell-<hex>` fallback id to canonical `turn-<hex>`.
 /// Anything else compares exactly.
 pub(crate) fn canonical_turn_fallback_id(value: &str) -> String {
-    if let Some(digest) = value.strip_prefix("turn-") {
+    if let Some(digest) = value.strip_prefix("shell-") {
         if digest.len() == 16
             && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return format!("shell-{digest}");
+            return format!("turn-{digest}");
         }
     }
     value.to_string()
@@ -497,12 +496,12 @@ mod tests {
     }
 
     #[test]
-    fn instance_locator_accepts_turn_spelling_but_emits_shell() {
+    fn instance_locator_accepts_shell_spelling_but_emits_turn() {
         let legacy: AgentInstanceLocatorWire =
             serde_json::from_value(serde_json::json!({
                 "schema_version": FLEET_CONTRACT_SCHEMA_VERSION,
                 "logical": serde_json::to_value(locator(Some("session-1"))).unwrap(),
-                "shell_id": "shell-1",
+                "shell_id": "turn-1",
                 "run_id": "run-1",
                 "attempt_id": "attempt-0",
             }))
@@ -511,41 +510,42 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "schema_version": FLEET_CONTRACT_SCHEMA_VERSION,
                 "logical": serde_json::to_value(locator(Some("session-1"))).unwrap(),
-                "turn_id": "shell-1",
+                "turn_id": "turn-1",
                 "run_id": "run-1",
                 "attempt_id": "attempt-0",
             }))
             .unwrap();
         assert_eq!(legacy, new);
-        assert_eq!(new.turn_id, "shell-1");
+        assert_eq!(new.turn_id, "turn-1");
         let encoded = serde_json::to_value(&new).unwrap();
-        assert_eq!(encoded["shell_id"], "shell-1");
-        assert!(encoded.get("turn_id").is_none());
+        assert_eq!(encoded["turn_id"], "turn-1");
+        assert!(encoded.get("shell_id").is_none());
     }
 
     #[test]
-    fn instance_key_matches_accepts_turn_segment_and_fallback() {
-        let wire = instance_locator("shell-1");
+    fn instance_key_matches_accepts_shell_segment_and_fallback() {
+        let wire = instance_locator("turn-1");
         let emitted = instance_key_unchecked(&wire);
-        assert!(emitted.contains("|shell:"));
+        assert!(emitted.contains("|turn:"));
         assert!(instance_key_matches(&emitted, &wire));
-        // Stored `turn:` segment compares equal to the emitted `shell:`.
-        let turn_spelled = emitted.replacen("|shell:", "|turn:", 1);
-        assert_ne!(turn_spelled, emitted);
-        assert!(instance_key_matches(&turn_spelled, &wire));
-        assert_eq!(canonical_instance_key(&turn_spelled), emitted);
-        // Fallback `turn-<hex>` compares equal to `shell-<hex>`.
+        // Stored `shell:` segment compares equal to the emitted `turn:`.
+        let shell_spelled = emitted.replacen("|turn:", "|shell:", 1);
+        assert_ne!(shell_spelled, emitted);
+        assert!(instance_key_matches(&shell_spelled, &wire));
+        assert_eq!(canonical_instance_key(&shell_spelled), emitted);
+        // Fallback `shell-<hex>` compares equal to `turn-<hex>`.
         let digest = "0123456789abcdef";
-        let fallback_wire = instance_locator(&format!("shell-{digest}"));
-        let stored_turn_locator = instance_locator(&format!("turn-{digest}"));
-        let stored_turn_emitted = instance_key_unchecked(&stored_turn_locator);
+        let fallback_wire = instance_locator(&format!("turn-{digest}"));
+        let stored_shell_locator = instance_locator(&format!("shell-{digest}"));
+        let stored_shell_emitted =
+            instance_key_unchecked(&stored_shell_locator);
         // Re-spell only the segment name; the value keeps its own length.
-        let fallback_turn =
-            stored_turn_emitted.replacen("|shell:", "|turn:", 1);
-        assert_ne!(fallback_turn, instance_key_unchecked(&fallback_wire));
-        assert!(instance_key_matches(&fallback_turn, &fallback_wire));
+        let fallback_shell =
+            stored_shell_emitted.replacen("|turn:", "|shell:", 1);
+        assert_ne!(fallback_shell, instance_key_unchecked(&fallback_wire));
+        assert!(instance_key_matches(&fallback_shell, &fallback_wire));
         assert_eq!(
-            canonical_instance_key(&fallback_turn),
+            canonical_instance_key(&fallback_shell),
             instance_key_unchecked(&fallback_wire)
         );
         assert!(fallback_turn_shell_ids_equal(
@@ -553,8 +553,8 @@ mod tests {
             &format!("turn-{digest}"),
         ));
         assert!(!fallback_turn_shell_ids_equal(
-            &format!("shell-{digest}"),
-            "shell-abcdef0123456789",
+            &format!("turn-{digest}"),
+            "turn-abcdef0123456789",
         ));
         assert!(!instance_key_matches(&emitted, &instance_locator("other")));
         assert!(!instance_key_matches("not-a-key", &wire));

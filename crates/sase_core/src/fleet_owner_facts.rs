@@ -200,15 +200,11 @@ pub struct OwnerPresentationFactsWire {
     pub proc_status: Option<String>,
     #[serde(default)]
     pub proc_label: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(
-        default,
-        rename = "shell_start_status",
-        alias = "turn_start_status"
-    )]
+    // `shell_start_status` is a legacy sase-shell spelling.
+    #[serde(default, alias = "shell_start_status")]
     pub turn_start_status: Option<String>,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(default, rename = "shell_stop_status", alias = "turn_stop_status")]
+    // `shell_stop_status` is a legacy sase-shell spelling.
+    #[serde(default, alias = "shell_stop_status")]
     pub turn_stop_status: Option<String>,
 }
 
@@ -777,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_status_keys_accept_new_spelling_but_emit_legacy() {
+    fn turn_status_keys_accept_legacy_spelling_but_emit_canonical() {
         let legacy: OwnerPresentationFactsWire =
             serde_json::from_value(serde_json::json!({
                 "shell_start_status": "GO",
@@ -794,10 +790,10 @@ mod tests {
         assert_eq!(new.turn_start_status.as_deref(), Some("GO"));
         assert_eq!(new.turn_stop_status.as_deref(), Some("STOP"));
         let encoded = serde_json::to_value(&new).unwrap();
-        assert_eq!(encoded["shell_start_status"], "GO");
-        assert_eq!(encoded["shell_stop_status"], "STOP");
-        assert!(encoded.get("turn_start_status").is_none());
-        assert!(encoded.get("turn_stop_status").is_none());
+        assert_eq!(encoded["turn_start_status"], "GO");
+        assert_eq!(encoded["turn_stop_status"], "STOP");
+        assert!(encoded.get("shell_start_status").is_none());
+        assert!(encoded.get("shell_stop_status").is_none());
     }
 
     #[test]

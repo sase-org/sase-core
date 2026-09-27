@@ -19,6 +19,12 @@ fn proc_store_error_to_pyerr(error: ProcStoreError) -> PyErr {
     }
 }
 
+#[pyfunction]
+#[pyo3(name = "proc_wire_schema_version")]
+fn py_proc_wire_schema_version() -> u32 {
+    PROC_WIRE_SCHEMA_VERSION
+}
+
 /// Read the proc JSONL store and return a snapshot dict.
 #[pyfunction]
 #[pyo3(name = "read_procs_snapshot")]
@@ -306,6 +312,7 @@ where
 }
 
 pub(crate) fn register_procs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(py_proc_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_read_procs_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(py_append_proc, m)?)?;
     m.add_function(wrap_pyfunction!(py_reserve_proc, m)?)?;

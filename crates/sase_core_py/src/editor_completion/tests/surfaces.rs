@@ -492,7 +492,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         )
         .is_err());
         assert!(py_parse_queue_capacity("true", None).is_err());
-        assert_eq!(py_runner_capacity_policy_schema_version(), 6);
+        assert_eq!(py_runner_capacity_policy_schema_version(), 7);
         let on_contract = py_directive_contract(
             py,
             Some(vec!["queue_capacity_budget".to_string()]),
@@ -575,7 +575,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         let capacity =
             py_runner_capacity_snapshot(py, capacity_request.bind(py)).unwrap();
         let capacity = py_to_json_value(capacity.bind(py)).unwrap();
-        assert_eq!(capacity["schema_version"], json!(6));
+        assert_eq!(capacity["schema_version"], json!(7));
         assert_eq!(capacity["occupied_capacity"], json!(0.75));
         assert_eq!(
             capacity["first_eligible_artifact_dir"],
@@ -634,7 +634,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
             &json!({
                 "effective_limit": 1.0,
                 "holds": [{
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "armer": {
                         "kind": "agent",
                         "key": "agent:hold",

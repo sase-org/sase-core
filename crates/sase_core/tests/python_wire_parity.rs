@@ -246,15 +246,15 @@ fn python_fixture_deserializes_into_rust_type() {
 }
 
 const PROC_SNAPSHOT_FIXTURE: &str = r#"{
-    "schema_version": 3,
+    "schema_version": 4,
     "procs": [
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "proc_id": "proc-one",
             "label": "Proc one",
             "kind": "detached",
             "status": "running",
-            "lifecycle": "proc-shell",
+            "lifecycle": "named-proc",
             "argv": ["sleep", "1"],
             "command": ["sleep", "1"],
             "cwd": "/tmp",
@@ -275,8 +275,8 @@ const PROC_SNAPSHOT_FIXTURE: &str = r#"{
             "finished_at": null,
             "log_path": "/tmp/proc-one.log",
             "log_owner": "proc-store",
-            "shell_name": "agent--proc",
-            "shell_kind": "proc",
+            "proc_name": "agent--proc",
+            "proc_role": "proc",
             "concurrency_keys": ["build"],
             "request_fingerprint": "fingerprint",
             "reserved_by": "agent",
@@ -350,7 +350,7 @@ fn rust_proc_snapshot() -> ProcStoreSnapshotWire {
             label: "Proc one".to_string(),
             kind: "detached".to_string(),
             status: "running".to_string(),
-            lifecycle: "proc-shell".to_string(),
+            lifecycle: "named-proc".to_string(),
             argv: vec!["sleep".to_string(), "1".to_string()],
             command: vec!["sleep".to_string(), "1".to_string()],
             cwd: "/tmp".to_string(),

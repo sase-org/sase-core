@@ -6,15 +6,15 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum FleetRowKindWire {
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(rename = "agent_shell", alias = "agent_turn")]
+    // `agent_shell` is a legacy sase-shell spelling.
+    #[serde(alias = "agent_shell")]
     AgentTurn,
     ContainerHeader,
     Monitor,
     Gate,
     Proc,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(rename = "historical_shell", alias = "historical_turn")]
+    // `historical_shell` is a legacy sase-shell spelling.
+    #[serde(alias = "historical_shell")]
     HistoricalTurn,
 }
 
@@ -40,8 +40,8 @@ pub enum FleetAgentSessionRoleWire {
     Monitor,
     Gate,
     Proc,
-    // legacy sase-shell spelling; flips in contract-flip
-    #[serde(rename = "historical_shell", alias = "historical_turn")]
+    // `historical_shell` is a legacy sase-shell spelling.
+    #[serde(alias = "historical_shell")]
     HistoricalTurn,
 }
 
@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn row_kinds_accept_new_spelling_but_emit_legacy() {
+    fn row_kinds_accept_legacy_spelling_but_emit_canonical() {
         let legacy: FleetRowKindWire =
             serde_json::from_value(serde_json::json!("agent_shell")).unwrap();
         let new: FleetRowKindWire =
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(legacy, FleetRowKindWire::AgentTurn);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("agent_shell")
+            serde_json::json!("agent_turn")
         );
 
         let legacy: FleetRowKindWire =
@@ -138,12 +138,12 @@ mod tests {
         assert_eq!(legacy, FleetRowKindWire::HistoricalTurn);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("historical_shell")
+            serde_json::json!("historical_turn")
         );
     }
 
     #[test]
-    fn session_roles_accept_new_spelling_but_emit_legacy() {
+    fn session_roles_accept_legacy_spelling_but_emit_canonical() {
         let legacy: FleetAgentSessionRoleWire =
             serde_json::from_value(serde_json::json!("historical_shell"))
                 .unwrap();
@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(legacy, FleetAgentSessionRoleWire::HistoricalTurn);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("historical_shell")
+            serde_json::json!("historical_turn")
         );
     }
 }

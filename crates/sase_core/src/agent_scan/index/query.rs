@@ -116,10 +116,10 @@ pub fn load_agent_artifact_records(
 
 /// Return the newest real gate-turn member matching `gate_id`, if any.
 ///
-/// Uses the indexed `gate_shell_id` column for a single-row `WHERE` lookup
+/// Uses the indexed `gate_turn_id` column for a single-row `WHERE` lookup
 /// instead of decoding every historical record, the cost that made the
 /// previous full-history scan take seconds on a long-lived host. Only rows
-/// projected from a genuine gate-turn member carry a `gate_shell_id`
+/// projected from a genuine gate-turn member carry a `gate_turn_id`
 /// (see [`gate_turn_id_from_record`]), so a later descendant that merely
 /// inherited the gate id can never shadow the owning turn here.
 ///

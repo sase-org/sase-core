@@ -10,7 +10,7 @@ fn agent_hold_bindings_round_trip_and_predicate() {
     let home = temp.path().to_string_lossy();
     let now = 1_800_000_000.0;
     Python::with_gil(|py| {
-        assert_eq!(py_agent_hold_wire_schema_version(), 2);
+        assert_eq!(py_agent_hold_wire_schema_version(), 3);
         let armer_obj = json_value_to_py(
             py,
             &json!({

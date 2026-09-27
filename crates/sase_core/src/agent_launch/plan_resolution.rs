@@ -319,7 +319,7 @@ pub(crate) fn validate_named_proc_name(
     };
     if proc_name.contains("--") {
         diagnostics.push(typed_unit_diagnostic(
-            "invalid-proc-shell-name",
+            "invalid-named-proc-name",
             "Proc %id names cannot use the agent-session `--` convention.",
             logical_id,
             None,
@@ -327,7 +327,7 @@ pub(crate) fn validate_named_proc_name(
     }
     if !is_valid_named_proc_name(proc_name) {
         diagnostics.push(typed_unit_diagnostic(
-            "invalid-proc-shell-name",
+            "invalid-named-proc-name",
             "Proc %id names must be bare identifiers containing only letters, digits, `_`, `.`, or `-`.",
             logical_id,
             None,
