@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1](https://github.com/sase-org/sase-core/compare/v0.35.0...v0.35.1) - 2026-09-27
+
+### Added
+
+- *(snippets)* add #{project} substitution helper, Plan variables, and LSP resolution
+- *(finalizer)* implement core-run-view-detail projection content
+- *(finalizer)* implement core-run-view-model run_view module
+- *(agent-scan)* add tolerant finalizer_status summary to scan wire
+
 ## [0.35.0](https://github.com/sase-org/sase-core/compare/v0.34.73...v0.35.0) - 2026-09-27
 
 ### Added
