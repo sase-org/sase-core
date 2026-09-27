@@ -361,3 +361,51 @@ fn catalog_accumulation_uses_generations_and_snapshot_equality() {
     assert_eq!(replacement.state.total_matching_rows, 0);
     assert!(replacement.state.next_cursor.is_none());
 }
+
+#[test]
+fn catalog_settled_dispatch_row_needs_terminal_flag_not_identity() {
+    // Settled fleet-dispatched rows keep the dispatch key in their session
+    // label while landed turn rows carry a turn suffix in agent_id. Exact
+    // stop/retry resolves them by text query plus the terminal flag; the
+    // terminal filter is a presentation default, not an addressing rule.
+    let key = "dispatch-a464978fdf02d2e8a650a5242ec5fcce";
+    let mut settled =
+        summary_done('a', &format!("{key}--0"), 7, 1_790_000_000.0);
+    settled.labels.agent_label = Some(format!("{key}--0"));
+    settled.labels.agent_session_label = Some(key.to_string());
+    let base_query = FleetCatalogQueryWire {
+        schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+        scope: FleetCatalogScopeWire::Presentation,
+        snapshot_id: None,
+        cursor: None,
+        limit: Some(100),
+        project_ids: Vec::new(),
+        query: Some(key.to_string()),
+        status_buckets: Vec::new(),
+        include_terminal: true,
+    };
+    let page =
+        select_fleet_catalog_page(&base_query, &[settled.clone()]).unwrap();
+    assert_eq!(page.total_matching_rows, 1);
+    assert_eq!(page.rows.len(), 1);
+
+    let without_terminal = select_fleet_catalog_page(
+        &FleetCatalogQueryWire {
+            include_terminal: false,
+            ..base_query.clone()
+        },
+        &[settled.clone()],
+    )
+    .unwrap();
+    assert_eq!(without_terminal.total_matching_rows, 0);
+
+    let unrelated = select_fleet_catalog_page(
+        &FleetCatalogQueryWire {
+            query: Some("unrelated-agent".to_string()),
+            ..base_query
+        },
+        &[settled],
+    )
+    .unwrap();
+    assert_eq!(unrelated.total_matching_rows, 0);
+}

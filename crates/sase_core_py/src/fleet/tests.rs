@@ -528,6 +528,48 @@ fn fleet_contract_bindings_round_trip_nested_dicts() {
 }
 
 #[test]
+fn catalog_query_terminal_flag_defaults_to_presentation() {
+    // Exact stop/retry lookups must opt into settled rows explicitly: the
+    // wire default stays presentation-only so viewers never inherit
+    // lifecycle scope from a mutation caller, and old minimal lookups keep
+    // validating unchanged.
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let minimal = json!({
+            "schema_version": 1,
+            "limit": 100,
+            "query": "dispatch-a464978fdf02d2e8a650a5242ec5fcce",
+        });
+        let minimal =
+            json_value_to_py(py, &minimal).unwrap().into_bound(py);
+        let minimal = minimal.downcast::<PyDict>().unwrap();
+        let validated = py_to_json_value(
+            py_fleet_validate_catalog_query(py, minimal).unwrap().bind(py),
+        )
+        .unwrap();
+        assert_eq!(validated["include_terminal"], json!(false));
+
+        let with_terminal = json!({
+            "schema_version": 1,
+            "limit": 100,
+            "query": "dispatch-a464978fdf02d2e8a650a5242ec5fcce",
+            "include_terminal": true,
+        });
+        let with_terminal =
+            json_value_to_py(py, &with_terminal).unwrap().into_bound(py);
+        let with_terminal =
+            with_terminal.downcast::<PyDict>().unwrap();
+        let validated = py_to_json_value(
+            py_fleet_validate_catalog_query(py, with_terminal)
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(validated["include_terminal"], json!(true));
+    });
+}
+
+#[test]
 fn gateway_and_bootstrap_bindings_are_registered() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
