@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0](https://github.com/sase-org/sase-core/compare/v0.34.73...v0.35.0) - 2026-09-27
+
+### Added
+
+- *(prompt-stash)* transactional stash trash lifecycle in Rust core
+- *(tool-run)* add versioned receipts opportunity report in Rust core
+- *(continuation)* accept-policy wires for verdict completion (sase-1ah.6)
+- *(beads)* persist and index the bead creation reason
+- *(core)* alternation-aware model shortcut accept with protected branch targets
+- *(tool-run)* add schema-1 receipt contract and durable store
+- *(axe)* add declaring-source contract to AXE inventory entries
+- *(bead)* record close attribution and close facts in touch index
+- *(core)* [**breaking**] canonicalize agent-session contracts
+- *(queue)* resolve capacity multipliers at admission
+- *(queue)* parse and format %queue <M>x capacity multipliers
+- Rust queue contract accepts authored zero weight (sase-198.1)
+- *(bead)* add note_index touch index with note preview (schema 2)
+- *(triage)* pure classification, verdict, stage/settle, and failures aggregation
+- *(triage)* durable failure items, extractors, normalization, and extract/record/show bindings
+- *(agent-scan)* agent_session candidate filter for the artifact index (sase-18e.2)
+- *(cleanup)* add runner_is_live to cleanup target wire (schema 4->5)
+- *(command-line)* CommandLineGrammar resolver and sase adapter
+- *(procs)* command-line proc tag retention bucket in Rust store
+- *(tool-run)* add reservation, claim, stop requests, and owner-aware settlement
+- *(artifact-links)* add projection-only awaits/awaited-by relation
+- *(core)* additive agent-session rename for scan, runtime, lifecycle, runner, and stats wires
+- *(core)* additive agent-session rename for identity, launch, holds, and editor surfaces
+- *(provider-usage)* support per-provider minimum freshness floor in usage indicator projection
+- [**breaking**] adaptive admission policy for provider usage
+- *(core)* durable per-clan record store with scan overlay and bindings
+- [**breaking**] reason-aware adaptive refresh-attempt policy for provider usage
+- *(fleet)* settle exact mutate receipts, overlay fresh launches, retain killed rows
+
+### Fixed
+
+- *(fleet)* recheck stale workspace claims before excluding live rows
+- *(core)* remove adjacent model directives with disjoint edits
+- *(core)* restore target-position project-tag selection and LSP edits
+- *(triage)* match possible owners on file identity
+- *(editor)* offer session candidates for the %id session value role
+- *(core)* accept pre-contract v2 agent relationship batches
+- *(core)* keep pre-contract artifact indexes and saved groups readable
+- *(continuation)* scope seal checks to repos with a decision
+- *(bead)* keep published bead ids stable when relocating duplicate creations
+- *(core)* race-free clan record cache and keep-8 no-op merges
+- *(core)* project-tag accept line-join, macOS test, and tag cleanups
+- *(core)* project-tag core fixes for bead sase-16n.11.1
+
+### Other
+
+- *(fleet)* add catalog and binding terminal-flag coverage
+- *(core)* retarget editor text and classify remaining shell hits to turn vocabulary
+- *(core)* rename fleet runtime shell wires to turn vocabulary
+- *(core)* rename proc-shell store, launch, and hold wires to named-proc vocabulary
+- *(agent_scan)* rename session shell wires to session turn wires
+- *(agent-session)* drop the last agent-family prose in core contracts
+- *(core)* sweep remaining agent-family spellings to agent session
+- *(fleet)* rename family to agent session with session key acceptance
+
 ## [0.34.73](https://github.com/sase-org/sase-core/compare/v0.34.72...v0.34.73) - 2026-09-23
 
 ### Added
