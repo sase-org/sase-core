@@ -9,8 +9,15 @@ use std::{
 };
 
 use sase_core::{
+    agent_scan::{
+        AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
+        AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
+        AgentSessionDismissalLineageCandidateWire,
+    },
+    fleet_catalog::select_fleet_presentation,
     fleet_contract::{
-        fleet_content_read_limit, fleet_project_eligibility_limit,
+        ensure_installation_identity, fleet_content_read_limit,
+        fleet_project_eligibility_limit, logical_locator_key,
         select_fleet_catalog_page, select_fleet_logical_batch,
         validate_fleet_catalog_query, validate_fleet_content_read_request,
         validate_fleet_detail_request, validate_fleet_logical_batch_request,
@@ -29,7 +36,8 @@ use sase_core::{
     },
     fleet_owner_facts::{HostOwnerFileObserver, OwnerFileObserver},
     host_liveness::{HostOwnerLivenessObserver, OwnerLivenessObserver},
-    list_project_records,
+    list_project_records, query_agent_artifact_index,
+    resolve_agent_session_dismissal_lineage,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -38,13 +46,16 @@ use super::{
     errors::FleetReadError,
     invalidation::{FleetEventSubscription, FleetInvalidationHub},
     resolution::{
-        observation_freshness_for_age, safe_reason,
+        observation_freshness_for_age, resolve_record, safe_reason,
         FLEET_SNAPSHOT_STALE_SECONDS,
     },
     snapshot::{
         build_snapshot_blocking, BuildSnapshotRequest, CachedFleetSnapshot,
     },
 };
+
+use crate::fleet_auth::current_unix_time;
+use crate::fleet_launch::FleetLaunchStore;
 
 pub(super) const SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
 
@@ -150,12 +161,16 @@ impl FleetReadService {
         let query = validate_fleet_catalog_query(&query)
             .map_err(FleetReadError::from)?;
         let presentation = self.stamped_snapshot(false).await?;
-        let catalog_snapshot = match query.scope {
+        let mut catalog_snapshot = match query.scope {
             FleetCatalogScopeWire::Presentation => presentation.clone(),
             FleetCatalogScopeWire::History => {
                 self.stamped_history_snapshot(false).await?
             }
         };
+        if query.scope == FleetCatalogScopeWire::Presentation {
+            self.overlay_missing_into_snapshot(&mut catalog_snapshot)
+                .await;
+        }
         let page =
             select_fleet_catalog_page(&query, &catalog_snapshot.wire.summaries)
                 .map_err(FleetReadError::from)?;
@@ -195,7 +210,20 @@ impl FleetReadService {
     ) -> Result<FleetDetailResponseWire, FleetReadError> {
         let request = validate_fleet_detail_request(&request)
             .map_err(FleetReadError::from)?;
-        let snapshot = self.stamped_snapshot(false).await?;
+        let mut snapshot = self.stamped_snapshot(false).await?;
+        if let Some(detail) = snapshot
+            .details_by_logical_key
+            .get(&request.logical_key)
+            .cloned()
+        {
+            return Ok(FleetDetailResponseWire {
+                schema_version: FLEET_CONTRACT_SCHEMA_VERSION,
+                cursor: snapshot.wire.cursor,
+                freshness: snapshot.wire.freshness,
+                detail,
+            });
+        }
+        self.overlay_missing_into_snapshot(&mut snapshot).await;
         let detail = snapshot
             .details_by_logical_key
             .get(&request.logical_key)
@@ -629,6 +657,72 @@ impl FleetReadService {
         Ok(Some(snapshot))
     }
 
+    async fn overlay_missing_into_snapshot(
+        &self,
+        snapshot: &mut CachedFleetSnapshot,
+    ) {
+        let now_unix = current_unix_time();
+        let store = FleetLaunchStore::new(self.inner.sase_home.clone());
+        let settled = store.settled_unexpired(now_unix);
+        if settled.is_empty() {
+            return;
+        }
+        let mut missing: Vec<String> = Vec::new();
+        for receipt in &settled {
+            let Some(locator) = receipt.logical_locator.as_ref() else {
+                continue;
+            };
+            let Ok(key) = logical_locator_key(locator) else {
+                continue;
+            };
+            if !snapshot.summaries_by_logical_key.contains_key(&key)
+                && !missing.contains(&key)
+            {
+                missing.push(key);
+            }
+        }
+        if missing.is_empty() {
+            return;
+        }
+        let sase_home = self.inner.sase_home.clone();
+        let index_path = self.inner.index_path.clone();
+        let projects_root = self.inner.projects_root.clone();
+        let liveness = Arc::clone(&self.inner.liveness);
+        let owner_files = Arc::clone(&self.inner.owner_files);
+        let freshness = snapshot.wire.freshness.freshness;
+        let overlaid = tokio::task::spawn_blocking(move || {
+            overlay_missing_blocking(
+                &sase_home,
+                &index_path,
+                &projects_root,
+                liveness,
+                owner_files,
+                &missing,
+                freshness,
+            )
+        })
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .unwrap_or_default();
+        for detail in overlaid {
+            let key = detail.summary.logical_key.clone();
+            if snapshot.summaries_by_logical_key.contains_key(&key) {
+                continue;
+            }
+            snapshot.wire.summaries.push(detail.summary.clone());
+            snapshot
+                .summaries_by_logical_key
+                .insert(key.clone(), detail.summary.clone());
+            snapshot.details_by_logical_key.insert(key, detail);
+        }
+        snapshot.wire.summaries.sort_by(|left, right| {
+            left.logical_key
+                .cmp(&right.logical_key)
+                .then_with(|| left.exact_key.cmp(&right.exact_key))
+        });
+    }
+
     fn retain_previous_or_error(
         &self,
         previous: Option<CachedFleetSnapshot>,
@@ -662,6 +756,133 @@ impl FleetReadService {
         })? = Some(snapshot.clone());
         Ok(snapshot)
     }
+}
+
+fn overlay_missing_blocking(
+    sase_home: &Path,
+    index_path: &Path,
+    projects_root: &Path,
+    liveness: Arc<dyn OwnerLivenessObserver>,
+    owner_files: Arc<dyn OwnerFileObserver>,
+    missing: &[String],
+    freshness: ObservationFreshnessWire,
+) -> Result<
+    Vec<sase_core::fleet_contract::ResolvedAgentDetailWire>,
+    FleetReadError,
+> {
+    use sase_core::fleet_contract::FleetCatalogScopeWire;
+    use std::collections::BTreeMap;
+
+    let installation = ensure_installation_identity(sase_home)
+        .map_err(FleetReadError::from)?
+        .record;
+    let scan = query_agent_artifact_index(
+        index_path,
+        projects_root,
+        AgentArtifactIndexQueryWire {
+            include_active: true,
+            include_recent_completed: true,
+            include_full_history: false,
+            active_limit: None,
+            recent_completed_limit: Some(512),
+            include_hidden: false,
+            freshness: AgentArtifactIndexFreshnessWire::Cached,
+            only_monitors: false,
+            record_shape: AgentArtifactRecordShapeWire::Full,
+            window_limit: Some(512),
+            candidate_filter: None,
+            agents_list_projection: false,
+        },
+        AgentArtifactScanOptionsWire {
+            max_prompt_snippet_bytes: 512,
+            ..AgentArtifactScanOptionsWire::default()
+        },
+    )
+    .map_err(|_| FleetReadError::Backend("artifact_index".to_string()))?;
+    let now_unix = current_unix_time();
+    let project_labels = list_project_records(projects_root, &[], false, true)
+        .map_err(|_| FleetReadError::Backend("project_lifecycle".to_string()))?
+        .into_iter()
+        .map(|record| {
+            let name = record.project_name.clone();
+            let display = record.display_name.unwrap_or_else(|| name.clone());
+            (name, display)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let observation_by_identity: BTreeMap<String, _> = scan
+        .records
+        .iter()
+        .map(|record| (record.artifact_dir.clone(), liveness.observe(record)))
+        .collect();
+    let lineage_candidates: Vec<AgentSessionDismissalLineageCandidateWire> =
+        scan.records
+            .iter()
+            .map(|record| {
+                let seed_dead = matches!(
+                    observation_by_identity
+                        .get(&record.artifact_dir)
+                        .map(|observation| observation.liveness()),
+                    Some(
+                        OwnerLivenessWire::Dead | OwnerLivenessWire::NotProcess
+                    )
+                );
+                AgentSessionDismissalLineageCandidateWire {
+                    identity: record.artifact_dir.clone(),
+                    project_name: record.project_name.clone(),
+                    workflow_dir_name: record.workflow_dir_name.clone(),
+                    timestamp: record.timestamp.clone(),
+                    seed_definitively_dead: seed_dead,
+                }
+            })
+            .collect();
+    let dismissed_by_identity: BTreeMap<String, bool> =
+        resolve_agent_session_dismissal_lineage(
+            index_path,
+            &lineage_candidates,
+        )
+        .map_err(|_| {
+            FleetReadError::Backend(
+                "agent_session_dismissal_lineage".to_string(),
+            )
+        })?
+        .into_iter()
+        .map(|result| (result.identity, result.agent_session_root_dismissed))
+        .collect();
+    let selection = select_fleet_presentation(
+        &scan.records,
+        &observation_by_identity,
+        &dismissed_by_identity,
+        now_unix,
+        FleetCatalogScopeWire::Presentation,
+        owner_files.as_ref(),
+    )
+    .map_err(FleetReadError::from)?;
+    let mut overlaid = Vec::new();
+    for record in &scan.records {
+        if !selection.served.contains(&record.artifact_dir) {
+            continue;
+        }
+        let liveness_value = observation_by_identity
+            .get(&record.artifact_dir)
+            .map(|observation| observation.liveness())
+            .unwrap_or(OwnerLivenessWire::Unknown);
+        let Ok(mut resolved) = resolve_record(
+            &installation.installation_id,
+            record,
+            liveness_value,
+            now_unix,
+            &project_labels,
+            &selection.context.facts_for_record(record),
+        ) else {
+            continue;
+        };
+        if !missing.contains(&resolved.detail.summary.logical_key) {
+            continue;
+        }
+        resolved.detail.summary.freshness = freshness;
+        overlaid.push(resolved.detail);
+    }
+    Ok(overlaid)
 }
 
 fn project_eligibility_blocking(

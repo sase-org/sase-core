@@ -76,6 +76,21 @@ impl FleetMutationStore {
         }
     }
 
+    pub fn find(
+        &self,
+        key: &sase_core::ScopedOperationKeyWire,
+    ) -> Result<Option<DurableFleetMutationRecordWire>, FleetMutationStoreError>
+    {
+        let _lock = self.lock_file()?;
+        let file = self.read_unlocked()?;
+        let wanted = format!("{}\0{}", key.controller_id, key.operation_id);
+        Ok(file
+            .records
+            .iter()
+            .find(|record| operation_key(&record.receipt.key) == wanted)
+            .cloned())
+    }
+
     pub fn reserve(
         &self,
         request: &FleetMutationRequestWire,

@@ -190,6 +190,7 @@
     "MobileAgentKillRequestWire": {
       "device_id": "string|null; host-injected before bridge dispatch",
       "reason": "string|null",
+      "retain_for_retry": "bool|null",
       "schema_version": "u32"
     },
     "MobileAgentKillResultWire": {

@@ -540,11 +540,12 @@ fn catalog_query_terminal_flag_defaults_to_presentation() {
             "limit": 100,
             "query": "dispatch-a464978fdf02d2e8a650a5242ec5fcce",
         });
-        let minimal =
-            json_value_to_py(py, &minimal).unwrap().into_bound(py);
+        let minimal = json_value_to_py(py, &minimal).unwrap().into_bound(py);
         let minimal = minimal.downcast::<PyDict>().unwrap();
         let validated = py_to_json_value(
-            py_fleet_validate_catalog_query(py, minimal).unwrap().bind(py),
+            py_fleet_validate_catalog_query(py, minimal)
+                .unwrap()
+                .bind(py),
         )
         .unwrap();
         assert_eq!(validated["include_terminal"], json!(false));
@@ -557,8 +558,7 @@ fn catalog_query_terminal_flag_defaults_to_presentation() {
         });
         let with_terminal =
             json_value_to_py(py, &with_terminal).unwrap().into_bound(py);
-        let with_terminal =
-            with_terminal.downcast::<PyDict>().unwrap();
+        let with_terminal = with_terminal.downcast::<PyDict>().unwrap();
         let validated = py_to_json_value(
             py_fleet_validate_catalog_query(py, with_terminal)
                 .unwrap()

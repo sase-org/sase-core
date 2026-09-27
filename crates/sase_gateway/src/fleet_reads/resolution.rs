@@ -223,10 +223,10 @@ fn lifecycle_and_content_capabilities(
     has_pending_question: bool,
 ) -> Vec<String> {
     let mut caps = Vec::new();
-    if row_kind == FleetRowKindWire::AgentTurn && !is_terminal {
+    if row_kind == FleetRowKindWire::AgentTurn {
         caps.push(FLEET_MUTATION_CAPABILITY_RETRY.to_string());
         caps.push(FLEET_MUTATION_CAPABILITY_FORK.to_string());
-        if liveness == OwnerLivenessWire::Alive {
+        if !is_terminal && liveness == OwnerLivenessWire::Alive {
             caps.push(FLEET_MUTATION_CAPABILITY_STOP.to_string());
         }
     }

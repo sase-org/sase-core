@@ -242,6 +242,30 @@ impl FleetLaunchStore {
         Ok(failed)
     }
 
+    pub fn settled_unexpired(
+        &self,
+        now_unix: f64,
+    ) -> Vec<FleetLaunchReceiptWire> {
+        let now_ms = (now_unix * 1000.0) as u64;
+        let Ok(_lock) = self.lock_file() else {
+            return Vec::new();
+        };
+        let Ok(file) = self.read_unlocked() else {
+            return Vec::new();
+        };
+        file.records
+            .into_iter()
+            .filter(|record| {
+                record.tombstoned_at_unix_ms.is_none()
+                    && record.receipt.state
+                        == OperationReceiptStateWire::Settled
+                    && now_ms <= record.receipt.expires_at_unix_ms
+                    && record.receipt.logical_locator.is_some()
+            })
+            .map(|record| record.receipt)
+            .collect()
+    }
+
     fn reserve_in_flight(
         &self,
         key: &str,

@@ -397,6 +397,7 @@ impl AgentHostBridge for CommandAgentHostBridge {
                 "name": name,
                 "reason": request.reason.clone(),
                 "device_id": request.device_id.clone(),
+                "retain_for_retry": request.retain_for_retry,
             }),
         )
     }

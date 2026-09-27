@@ -592,6 +592,26 @@ pub(crate) async fn fleet_mutate(
         .fleet_store
         .ensure_installation_identity()
         .map_err(ApiError::from_fleet_store)?;
+    let now_unix = current_unix_time();
+    if let Ok(Some(existing)) = state.fleet_mutations.find(&payload.key) {
+        let now_ms = (now_unix * 1000.0) as u64;
+        if existing.tombstoned_at_unix_ms.is_none()
+            && now_ms <= existing.receipt.expires_at_unix_ms
+            && existing.receipt.payload_fingerprint
+                == payload.payload_fingerprint
+            && existing.receipt.target == payload.intent.target
+            && existing.receipt.resource_revision == payload.intent.row_revision
+            && existing.receipt.target_installation_id
+                == payload.target_installation_id
+        {
+            return Ok(Json(FleetMutationResponseWire {
+                schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
+                decision: sase_core::OperationDecisionKindWire::ReturnOriginalReceipt,
+                reason: sase_core::OperationDecisionReasonWire::SameScopedKeyAndPayload,
+                receipt: existing.receipt,
+            }));
+        }
+    }
     let logical_key =
         sase_core::logical_locator_key(&payload.intent.target.logical)
             .map_err(|error| {
@@ -714,6 +734,7 @@ pub(crate) fn execute_fleet_mutation(
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 reason: payload.intent.reason.clone(),
                 device_id: controller_id.map(str::to_string),
+                retain_for_retry: Some(true),
             };
             let result = state
                 .agent_bridge

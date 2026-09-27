@@ -743,6 +743,8 @@ pub struct MobileAgentKillRequestWire {
     pub schema_version: u32,
     pub reason: Option<String>,
     pub device_id: Option<String>,
+    #[serde(default)]
+    pub retain_for_retry: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

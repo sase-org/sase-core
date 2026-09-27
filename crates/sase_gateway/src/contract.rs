@@ -443,7 +443,8 @@ pub fn api_v1_contract_snapshot() -> Value {
             "MobileAgentKillRequestWire": {
                 "schema_version": "u32",
                 "reason": "string|null",
-                "device_id": "string|null; host-injected before bridge dispatch"
+                "device_id": "string|null; host-injected before bridge dispatch",
+                "retain_for_retry": "bool|null"
             },
             "MobileAgentKillResultWire": {
                 "schema_version": "u32",
