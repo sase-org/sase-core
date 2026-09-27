@@ -911,7 +911,9 @@ fn push_denied(denied: &mut Vec<PathBuf>, raw: &Path) {
     }
 }
 
-fn validate_reap_root(root: &Path) -> Result<PathBuf, ManagedTmpReapError> {
+pub(crate) fn validate_reap_root(
+    root: &Path,
+) -> Result<PathBuf, ManagedTmpReapError> {
     let resolved = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let cwd = std::env::current_dir()
         .map_err(|error| ManagedTmpReapError::CurrentDir(error.to_string()))?

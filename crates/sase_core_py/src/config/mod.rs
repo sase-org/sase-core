@@ -241,6 +241,61 @@ fn py_observe_launch_scratch_liveness<'py>(
     serialize_to_py(py, &result)
 }
 
+fn managed_tmp_roots_error_to_pyerr(
+    error: crate::core::managed_tmp_roots::ManagedTmpRootsError,
+) -> PyErr {
+    match error {
+        crate::core::managed_tmp_roots::ManagedTmpRootsError::LockTimeout => {
+            PyTimeoutError::new_err(error.to_string())
+        }
+        _ => PyValueError::new_err(error.to_string()),
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "managed_tmp_roots_wire_schema_version")]
+fn py_managed_tmp_roots_wire_schema_version() -> u32 {
+    crate::core::managed_tmp_roots::MANAGED_TMP_ROOTS_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "managed_tmp_roots_register")]
+#[pyo3(signature = (sase_home, path, now))]
+fn py_managed_tmp_roots_register<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+    path: &str,
+    now: f64,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            crate::core::managed_tmp_roots::register_managed_tmp_root(
+                std::path::Path::new(sase_home),
+                std::path::Path::new(path),
+                now,
+            )
+        })
+        .map_err(managed_tmp_roots_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(name = "managed_tmp_roots_list")]
+#[pyo3(signature = (sase_home,))]
+fn py_managed_tmp_roots_list<'py>(
+    py: Python<'py>,
+    sase_home: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            crate::core::managed_tmp_roots::list_managed_tmp_roots(
+                std::path::Path::new(sase_home),
+            )
+        })
+        .map_err(managed_tmp_roots_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
 // --- Config Center backend bindings ---------------------------------------
 //
 // JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
@@ -704,6 +759,12 @@ pub(crate) fn register_config(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_observe_launch_scratch_liveness, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_managed_tmp_roots_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_managed_tmp_roots_register, m)?)?;
+    m.add_function(wrap_pyfunction!(py_managed_tmp_roots_list, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
