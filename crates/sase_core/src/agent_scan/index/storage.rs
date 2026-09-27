@@ -291,6 +291,9 @@ pub(super) fn open_index_with_busy_timeout(
     if prior_version.is_none_or(|v| v < 33) {
         migrate_agent_session_column_v33(&conn)?;
     }
+    if prior_version.is_none_or(|v| v < 34) {
+        migrate_record_json_refresh_v34(&mut conn)?;
+    }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
          ON agent_artifacts(agent_session, timestamp); \
@@ -854,6 +857,14 @@ pub(super) fn migrate_record_json_refresh_v29(
 /// v32 refreshes `record_json` so indexed rows include authored
 /// `queue_capacity_multiplier` values from agent metadata and wait markers.
 pub(super) fn migrate_record_json_refresh_v32(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v34 refreshes `record_json` so indexed rows include the tolerant
+/// `agent_meta.finalizer_status` summary from the agent-scan wire.
+pub(super) fn migrate_record_json_refresh_v34(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())

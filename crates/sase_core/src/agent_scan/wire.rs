@@ -724,6 +724,77 @@ pub struct AgentMetaWire {
     pub turn_kind: Option<String>,
     #[serde(default)]
     pub proc_id: Option<String>,
+    /// Tolerant finalizer-execution row summary from
+    /// `agent_meta.json["finalizer_status"]` (plan §3.3 C5). Skipped when
+    /// absent so existing scan payloads stay byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalizer_status: Option<FinalizerStatusSummaryWire>,
+}
+
+/// Runner that executed the finalizer phase (plan §3.3 C5).
+///
+/// Strings and numbers only; every field has a default so partial
+/// summaries degrade instead of failing the scan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalizerStatusRunnerWire {
+    #[serde(default)]
+    pub pid: Option<i64>,
+    #[serde(default)]
+    pub identity: Option<String>,
+}
+
+/// One finalizer instance entry of the row summary (plan §3.3 C5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalizerStatusInstanceWire {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub attempt: Option<i64>,
+    #[serde(default)]
+    pub max_attempts: Option<i64>,
+    #[serde(default)]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub step: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<f64>,
+    #[serde(default)]
+    pub finished_at: Option<f64>,
+    #[serde(default)]
+    pub headline: Option<String>,
+    #[serde(default)]
+    pub warnings: Option<i64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Row summary of finalizer execution (plan §3.3 C5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalizerStatusSummaryWire {
+    #[serde(default)]
+    pub schema_version: Option<i64>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub plan_digest: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<f64>,
+    #[serde(default)]
+    pub updated_at: Option<f64>,
+    #[serde(default)]
+    pub runner: Option<FinalizerStatusRunnerWire>,
+    #[serde(default)]
+    pub instances: Vec<FinalizerStatusInstanceWire>,
+    #[serde(default)]
+    pub instance_count: Option<i64>,
 }
 
 /// Deserialize `turn_kind` / `shell_kind`, storing a `monitor` input as the
@@ -1727,5 +1798,53 @@ mod tests {
         assert_eq!(decoded.outcome.as_deref(), Some("completed"));
         assert_eq!(decoded.status_label, None);
         assert_eq!(decoded.agent_session_turn, None);
+    }
+
+    #[test]
+    fn agent_meta_wire_omits_absent_finalizer_status() {
+        let encoded = serde_json::to_value(AgentMetaWire::default()).unwrap();
+        assert!(encoded.get("finalizer_status").is_none());
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.finalizer_status, None);
+    }
+
+    #[test]
+    fn agent_meta_wire_round_trips_finalizer_status_summary() {
+        let meta = AgentMetaWire {
+            finalizer_status: Some(FinalizerStatusSummaryWire {
+                schema_version: Some(1),
+                phase: Some("executing".to_string()),
+                reason: None,
+                status: None,
+                plan_digest: Some("84a91c2d".to_string()),
+                run_id: Some("run-1".to_string()),
+                started_at: Some(1_727_440_000.0),
+                updated_at: Some(1_727_440_012.5),
+                runner: Some(FinalizerStatusRunnerWire {
+                    pid: Some(1234),
+                    identity: Some("boot-abc:1234".to_string()),
+                }),
+                instances: vec![FinalizerStatusInstanceWire {
+                    id: "commit".to_string(),
+                    status: Some("running".to_string()),
+                    attempt: Some(1),
+                    max_attempts: Some(1),
+                    op: Some("stitch main".to_string()),
+                    step: None,
+                    started_at: Some(1_727_440_001.0),
+                    finished_at: None,
+                    headline: None,
+                    warnings: Some(0),
+                    reason: None,
+                }],
+                instance_count: Some(1),
+            }),
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(encoded["finalizer_status"]["phase"], "executing");
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
     }
 }

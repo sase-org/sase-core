@@ -31,11 +31,12 @@ use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
     AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
-    AgentSessionTurnWire, DoneMarkerWire, ImportedSourceOwnerWire,
-    OutputVariableValue, PendingQuestionMarkerWire, PlanPathMarkerWire,
-    PromptStepMarkerWire, RunningMarkerWire, UsedXPromptWire,
-    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    AgentSessionTurnWire, DoneMarkerWire, FinalizerStatusInstanceWire,
+    FinalizerStatusRunnerWire, FinalizerStatusSummaryWire,
+    ImportedSourceOwnerWire, OutputVariableValue, PendingQuestionMarkerWire,
+    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
+    UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -1115,6 +1116,125 @@ fn agent_session_str(
     coerce_str(data.get(new_key)).or_else(|| coerce_str(data.get(legacy_key)))
 }
 
+/// Maximum characters kept for any `finalizer_status` string (plan §3.3
+/// C5).
+const FINALIZER_STATUS_STR_CAP: usize = 120;
+
+/// Maximum per-run instance entries kept on the scan wire (plan §3.3 C5).
+const FINALIZER_STATUS_MAX_INSTANCES: usize = 16;
+
+/// Truncate `value` to `FINALIZER_STATUS_STR_CAP` characters on char
+/// boundaries.
+fn cap_finalizer_status_str(value: String) -> String {
+    if value.chars().count() <= FINALIZER_STATUS_STR_CAP {
+        return value;
+    }
+    value.chars().take(FINALIZER_STATUS_STR_CAP).collect()
+}
+
+/// Coerce an optional string for the `finalizer_status` summary, capping
+/// it at the C5 string ceiling.
+fn coerce_finalizer_status_str(value: Option<&Value>) -> Option<String> {
+    coerce_str(value).map(cap_finalizer_status_str)
+}
+
+/// Coerce an optional timestamp for the `finalizer_status` summary,
+/// dropping negative, NaN, infinite and non-numeric values.
+fn coerce_finalizer_status_float(value: Option<&Value>) -> Option<f64> {
+    let number = coerce_float(value)?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    Some(number)
+}
+
+/// Coerce an optional count for the `finalizer_status` summary, dropping
+/// negative and non-numeric values.
+fn coerce_finalizer_status_int(value: Option<&Value>) -> Option<i64> {
+    let number = coerce_int(value)?;
+    if number < 0 {
+        return None;
+    }
+    Some(number)
+}
+
+/// Coerce the `runner` object of a `finalizer_status` summary. A
+/// non-object value gives `None`; unknown keys are ignored.
+fn finalizer_status_runner_from_value(
+    value: &Value,
+) -> Option<FinalizerStatusRunnerWire> {
+    let obj = value.as_object()?;
+    Some(FinalizerStatusRunnerWire {
+        pid: coerce_finalizer_status_int(obj.get("pid")),
+        identity: coerce_finalizer_status_str(obj.get("identity")),
+    })
+}
+
+/// Coerce one `finalizer_status` instance entry. Entries without a
+/// (non-empty) string `id` are dropped; unknown keys are ignored.
+fn finalizer_status_instance_from_value(
+    value: &Value,
+) -> Option<FinalizerStatusInstanceWire> {
+    let obj = value.as_object()?;
+    let id = coerce_finalizer_status_str(obj.get("id"))?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(FinalizerStatusInstanceWire {
+        id,
+        status: coerce_finalizer_status_str(obj.get("status")),
+        attempt: coerce_finalizer_status_int(obj.get("attempt")),
+        max_attempts: coerce_finalizer_status_int(obj.get("max_attempts")),
+        op: coerce_finalizer_status_str(obj.get("op")),
+        step: coerce_finalizer_status_str(obj.get("step")),
+        started_at: coerce_finalizer_status_float(obj.get("started_at")),
+        finished_at: coerce_finalizer_status_float(obj.get("finished_at")),
+        headline: coerce_finalizer_status_str(obj.get("headline")),
+        warnings: coerce_finalizer_status_int(obj.get("warnings")),
+        reason: coerce_finalizer_status_str(obj.get("reason")),
+    })
+}
+
+/// Coerce the `finalizer_status` row summary leniently (plan §3.3 C5).
+///
+/// A non-object value, or a missing or empty `phase` string, gives `None`.
+/// Strings are capped at 120 characters on char boundaries, at most 16
+/// instances are kept, negative/NaN/non-numeric numbers are dropped, and
+/// unknown keys are ignored. A malformed summary never fails the whole
+/// meta.
+fn finalizer_status_from_value(
+    value: Option<&Value>,
+) -> Option<FinalizerStatusSummaryWire> {
+    let obj = value?.as_object()?;
+    let phase = coerce_finalizer_status_str(obj.get("phase"))?;
+    if phase.is_empty() {
+        return None;
+    }
+    let instances = match obj.get("instances") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(finalizer_status_instance_from_value)
+            .take(FINALIZER_STATUS_MAX_INSTANCES)
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(FinalizerStatusSummaryWire {
+        schema_version: coerce_finalizer_status_int(obj.get("schema_version")),
+        phase: Some(phase),
+        reason: coerce_finalizer_status_str(obj.get("reason")),
+        status: coerce_finalizer_status_str(obj.get("status")),
+        plan_digest: coerce_finalizer_status_str(obj.get("plan_digest")),
+        run_id: coerce_finalizer_status_str(obj.get("run_id")),
+        started_at: coerce_finalizer_status_float(obj.get("started_at")),
+        updated_at: coerce_finalizer_status_float(obj.get("updated_at")),
+        runner: obj
+            .get("runner")
+            .and_then(finalizer_status_runner_from_value),
+        instances,
+        instance_count: coerce_finalizer_status_int(obj.get("instance_count")),
+    })
+}
+
 fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
     let legacy_parallel = coerce_bool_truthy(data.get("agent_family_parallel"));
     let raw_agent_session =
@@ -1272,6 +1392,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         ),
         turn_kind: turn_kind_from_object(data),
         proc_id: coerce_str(data.get("proc_id")),
+        finalizer_status: finalizer_status_from_value(
+            data.get("finalizer_status"),
+        ),
     }
 }
 
@@ -2806,5 +2929,130 @@ mod tests {
                 .queue_capacity_multiplier,
             None
         );
+    }
+
+    fn meta_with_finalizer_status(value: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("finalizer_status".to_string(), value);
+        agent_meta_from_object(&data)
+    }
+
+    #[test]
+    fn scanner_coerces_finalizer_status_tolerantly() {
+        // A valid summary survives with every field intact.
+        let valid = meta_with_finalizer_status(json!({
+            "schema_version": 1,
+            "phase": "executing",
+            "plan_digest": "84a91c2d",
+            "run_id": "run-1",
+            "started_at": 1_727_440_000.0,
+            "updated_at": 1_727_440_012.5,
+            "runner": {"pid": 1234, "identity": "boot-abc:1234"},
+            "instances": [{
+                "id": "commit",
+                "status": "running",
+                "attempt": 1,
+                "max_attempts": 1,
+                "op": "stitch main",
+                "started_at": 1_727_440_001.0,
+                "warnings": 0,
+            }],
+            "instance_count": 1,
+        }));
+        let summary = valid.finalizer_status.as_ref().unwrap();
+        assert_eq!(summary.phase.as_deref(), Some("executing"));
+        assert_eq!(summary.plan_digest.as_deref(), Some("84a91c2d"));
+        assert_eq!(summary.runner.as_ref().unwrap().pid, Some(1234));
+        assert_eq!(summary.instances.len(), 1);
+        assert_eq!(summary.instances[0].id, "commit");
+        assert_eq!(summary.instance_count, Some(1));
+
+        // Extra keys are ignored and never fail the meta.
+        let extra = meta_with_finalizer_status(json!({
+            "phase": "settled",
+            "status": "success",
+            "future_field": {"nested": [1, 2, 3]},
+            "instances": [{
+                "id": "check",
+                "status": "success",
+                "brand_new_key": true,
+            }],
+        }));
+        let summary = extra.finalizer_status.as_ref().unwrap();
+        assert_eq!(summary.phase.as_deref(), Some("settled"));
+        assert_eq!(summary.instances.len(), 1);
+        assert_eq!(summary.instances[0].id, "check");
+
+        // Malformed nested values degrade to None instead of failing.
+        let malformed = meta_with_finalizer_status(json!({
+            "phase": "executing",
+            "started_at": -5.0,
+            "updated_at": "not-a-number",
+            "runner": "not-an-object",
+            "attempt": "NaN",
+            "instances": [
+                {"status": "running"},
+                {"id": 42, "status": "running"},
+                {"id": "", "status": "running"},
+                "not-an-object",
+                {"id": "ok", "attempt": -2, "warnings": -1,
+                 "started_at": "NaN"},
+            ],
+            "instance_count": -3,
+        }));
+        assert_eq!(malformed.name.as_deref(), Some("probe"));
+        let summary = malformed.finalizer_status.as_ref().unwrap();
+        assert_eq!(summary.started_at, None);
+        assert_eq!(summary.updated_at, None);
+        assert_eq!(summary.runner, None);
+        assert_eq!(summary.instance_count, None);
+        assert_eq!(summary.instances.len(), 1);
+        assert_eq!(summary.instances[0].id, "ok");
+        assert_eq!(summary.instances[0].attempt, None);
+        assert_eq!(summary.instances[0].warnings, None);
+        assert_eq!(summary.instances[0].started_at, None);
+
+        // Oversize strings are capped at 120 characters on char boundaries.
+        let long = "é".repeat(200);
+        let capped = meta_with_finalizer_status(json!({
+            "phase": "executing",
+            "reason": long,
+            "instances": [{"id": "commit", "headline": long}],
+        }));
+        let summary = capped.finalizer_status.as_ref().unwrap();
+        let reason = summary.reason.as_deref().unwrap();
+        assert_eq!(reason.chars().count(), 120);
+        let headline = summary.instances[0].headline.as_deref().unwrap();
+        assert_eq!(headline.chars().count(), 120);
+
+        // At most 16 instances are kept.
+        let many: Vec<Value> = (0..17)
+            .map(|n| json!({"id": format!("instance-{n}")}))
+            .collect();
+        let crowded = meta_with_finalizer_status(json!({"phase": "planned",
+                                              "instances": many}));
+        let summary = crowded.finalizer_status.as_ref().unwrap();
+        assert_eq!(summary.instances.len(), 16);
+        assert_eq!(summary.instances[15].id, "instance-15");
+
+        // A non-object value, a missing phase and an empty phase all give
+        // None while the rest of the meta still parses.
+        for value in [
+            json!("executing"),
+            json!(42),
+            json!({"status": "success"}),
+            json!({"phase": ""}),
+            json!({"phase": 42}),
+            json!(null),
+        ] {
+            let meta = meta_with_finalizer_status(value);
+            assert_eq!(meta.name.as_deref(), Some("probe"));
+            assert_eq!(meta.finalizer_status, None);
+        }
+
+        // A missing summary is None.
+        let bare = agent_meta_from_object(&Map::new());
+        assert_eq!(bare.finalizer_status, None);
     }
 }

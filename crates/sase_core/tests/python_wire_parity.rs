@@ -495,6 +495,24 @@ fn agent_meta_clan_field_order_matches_python_wire() {
 }
 
 #[test]
+fn agent_meta_finalizer_status_field_order_matches_python_wire() {
+    // `finalizer_status` is the trailing field so existing scan payloads
+    // keep their key order, and it is omitted (not null) when absent so
+    // they stay byte-stable.
+    let absent = serde_json::to_string(&AgentMetaWire::default()).unwrap();
+    assert!(!absent.contains("finalizer_status"));
+    let present: AgentMetaWire = serde_json::from_str(
+        r#"{"proc_id":"p1","finalizer_status":{"phase":"settled"}}"#,
+    )
+    .unwrap();
+    let encoded = serde_json::to_string(&present).unwrap();
+    let proc_id = encoded.find("\"proc_id\"").unwrap();
+    let status = encoded.find("\"finalizer_status\"").unwrap();
+    assert!(proc_id < status);
+    assert!(encoded.ends_with("\"finalizer_status\":{\"schema_version\":null,\"phase\":\"settled\",\"reason\":null,\"status\":null,\"plan_digest\":null,\"run_id\":null,\"started_at\":null,\"updated_at\":null,\"runner\":null,\"instances\":[],\"instance_count\":null}}"));
+}
+
+#[test]
 fn agent_meta_parent_epic_plan_reference_round_trips() {
     let meta: AgentMetaWire = serde_json::from_str(
         r#"{"sdd_plan_path":"plans/authored.md","epic_plan_ref":"plans/parent.md"}"#,

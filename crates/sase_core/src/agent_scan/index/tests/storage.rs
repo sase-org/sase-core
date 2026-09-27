@@ -706,3 +706,36 @@ fn bounded_artifact_index_delete_skips_locked_database() {
     .unwrap();
     assert_eq!(snapshot.records.len(), 1);
 }
+
+#[test]
+fn schema_v33_index_migrates_to_current() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260827090000");
+    write_json(&dir.join("agent_meta.json"), json!({"name": "sized"}));
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Rewind to the on-disk shape the previous core left behind, then
+    // reopen: the no-op v34 record-json refresh must bring the schema to
+    // current without touching the indexed row.
+    Connection::open(&index)
+        .unwrap()
+        .execute(
+            "UPDATE meta SET value = '33' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(open_index(&index).unwrap());
+    let conn = Connection::open(&index).unwrap();
+    assert_eq!(
+        read_index_schema_version(&conn).unwrap(),
+        AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    );
+    assert_eq!(count_sql(&index, "SELECT COUNT(*) FROM agent_artifacts"), 1);
+}
