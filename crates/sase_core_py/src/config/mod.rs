@@ -216,6 +216,31 @@ fn py_reap_managed_tmpdir<'py>(
     serialize_to_py(py, &result)
 }
 
+#[pyfunction]
+#[pyo3(name = "launch_scratch_liveness_wire_schema_version")]
+fn py_launch_scratch_liveness_wire_schema_version() -> u32 {
+    LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "observe_launch_scratch_liveness")]
+fn py_observe_launch_scratch_liveness<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: LaunchScratchLivenessRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid LaunchScratchLivenessRequestWire dict: {error}"
+        ))
+    })?;
+    let result =
+        py.allow_threads(|| core_observe_launch_scratch_liveness(&request));
+    serialize_to_py(py, &result)
+}
+
 // --- Config Center backend bindings ---------------------------------------
 //
 // JSON-in / JSON-out wrappers over `sase_core::config`. Python supplies the
@@ -674,6 +699,11 @@ pub(crate) fn register_config(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_reap_managed_tmpdir, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_launch_scratch_liveness_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_observe_launch_scratch_liveness, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_field_model, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;

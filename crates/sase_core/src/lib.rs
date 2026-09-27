@@ -73,6 +73,7 @@ pub mod glossary;
 pub mod hold_directive;
 pub mod host_bridge;
 pub mod host_liveness;
+pub mod launch_scratch_liveness;
 pub mod machine_hood;
 pub mod machine_setup;
 pub mod managed_origin;

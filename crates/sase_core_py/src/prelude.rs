@@ -705,6 +705,11 @@ pub(crate) use sase_core::glossary::{
     GlossaryInputEntryWire,
 };
 pub(crate) use sase_core::inline_code_ranges as core_inline_code_ranges;
+pub(crate) use sase_core::launch_scratch_liveness::{
+    observe_launch_scratch_liveness as core_observe_launch_scratch_liveness,
+    LaunchScratchLivenessRequestWire,
+    LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
+};
 pub(crate) use sase_core::machine_hood::{
     machine_hood_of as core_machine_hood_of,
     qualify_machine_agent_name as core_qualify_machine_agent_name,

@@ -1069,3 +1069,50 @@ fn service_status_bindings_round_trip_python_dicts() {
         assert!(missing.is_none());
     });
 }
+
+#[test]
+fn launch_scratch_liveness_binding_round_trips_wire() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module
+            .getattr("launch_scratch_liveness_wire_schema_version")
+            .is_ok());
+        assert!(module.getattr("observe_launch_scratch_liveness").is_ok());
+
+        let version = module
+            .getattr("launch_scratch_liveness_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract::<u32>()
+            .unwrap();
+        assert_eq!(version, LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION);
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
+                "candidates": [
+                    {
+                        "scratch_key": "proj-ws7-260914_120000",
+                        "path": "/tmp/no-such-scratch-candidate",
+                    }
+                ],
+                "proc_root": "/tmp/no-such-proc-root",
+                "current_pid": 1,
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_observe_launch_scratch_liveness(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+
+        assert_eq!(result["schema_version"], json!(version));
+        assert_eq!(result["observer"], json!("unobservable"));
+        assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(result["candidates"][0]["live"], json!(false));
+        assert_eq!(result["candidates"][0]["complete"], json!(false));
+    });
+}
