@@ -18,6 +18,37 @@ pub struct RunViewEvidenceWire {
     pub display: Option<String>,
 }
 
+/// Build typed evidence wires from capped `(kind, value)` pairs.
+pub fn typed_evidence(pairs: &[(String, String)]) -> Vec<RunViewEvidenceWire> {
+    pairs
+        .iter()
+        .map(|(kind, value)| {
+            let evidence_type = classify_evidence_kind(kind).to_string();
+            RunViewEvidenceWire {
+                kind: kind.clone(),
+                evidence_type: Some(evidence_type),
+                value: value.clone(),
+                display: None,
+            }
+        })
+        .collect()
+}
+
+/// Headline priority: SHA, then URL, then bead id, then exit code. The
+/// ambiguous commit `result` kind classifies as `text` and never wins.
+pub fn select_headline(
+    evidence: &[RunViewEvidenceWire],
+) -> Option<RunViewEvidenceWire> {
+    for wanted in ["sha", "url", "bead", "exit_code"] {
+        if let Some(item) = evidence.iter().find(|item| {
+            item.evidence_type.as_deref().unwrap_or("text") == wanted
+        }) {
+            return Some(item.clone());
+        }
+    }
+    None
+}
+
 /// Classify an evidence kind suffix into its display type, following the
 /// §3.4 conventions. The ambiguous commit `result` kind stays `text`.
 pub fn classify_evidence_kind(kind: &str) -> &'static str {

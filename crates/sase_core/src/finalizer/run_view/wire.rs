@@ -198,10 +198,112 @@ pub struct RunViewUnselectedWire {
     pub reason: String,
 }
 
-/// Per-instance detail. Attempt, operation, and evidence content lands in
-/// `core-run-view-detail`; this layer fills identity, status, trigger, the
-/// declared payload summary, and the live journal position.
+/// One budgeted try of an instance, from result attempts plus journal
+/// attempt events. Timing comes from journal event times when present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewAttemptWire {
+    pub attempt: u32,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// One structured progress step inside an operation (the C3 step channel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewStepWire {
+    pub step: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// One log file backing an operation, named relative to the instance dir.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewLogWire {
+    /// `stdout`, `stderr`, or `live`.
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
+/// One unit of work inside an attempt, from C2 records (schema-v1 and
+/// legacy commit records) plus journal op events. Records and tails supply
+/// content only, never status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewOperationWire {
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default)]
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returncode: Option<i64>,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+    #[serde(default)]
+    pub logs: Vec<RunViewLogWire>,
+    #[serde(default)]
+    pub steps: Vec<RunViewStepWire>,
+    #[serde(default)]
+    pub steps_truncated: bool,
+    /// Carriage-return-collapsed last `tail_lines` lines, ANSI preserved.
+    #[serde(default)]
+    pub live_tail: Vec<String>,
+}
+
+/// One deduped instance diagnostic. `severity` is `error`, `warning`, or
+/// `info`, except errors from superseded attempts of an eventually
+/// successful instance, which report `superseded` and never paint red.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewInstanceDiagnosticWire {
+    pub code: String,
+    pub message: String,
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+}
+
+/// The typed deferral payload for a deferred instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunViewDeferralWire {
+    pub reason: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Per-instance detail: identity, status, trigger, the declared payload
+/// summary, and the live journal position, plus attempt, operation,
+/// evidence, and diagnostic content from the result and instance files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunViewRunInstanceWire {
     pub instance_id: String,
@@ -236,6 +338,26 @@ pub struct RunViewRunInstanceWire {
     pub evidence: Vec<super::evidence::RunViewEvidenceWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headline: Option<super::evidence::RunViewEvidenceWire>,
+    #[serde(default)]
+    pub attempts: Vec<RunViewAttemptWire>,
+    #[serde(default)]
+    pub operations: Vec<RunViewOperationWire>,
+    /// Deduped diagnostics with attempt-scoped severity.
+    #[serde(default)]
+    pub diagnostics: Vec<RunViewInstanceDiagnosticWire>,
+    /// Warn steps plus warning diagnostics in the latest attempt.
+    #[serde(default)]
+    pub warnings: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<RunViewDeferralWire>,
+    /// First error diagnostic, else the last non-blank stderr tail line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// Protocol-envelope file names for plugin instances.
+    #[serde(default)]
+    pub protocol_files: Vec<String>,
 }
 
 /// One run's projected view.

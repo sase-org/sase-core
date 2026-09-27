@@ -412,6 +412,34 @@ pub(crate) fn decode_submission_timeline(
     timeline
 }
 
+/// One budgeted try seen in journal attempt events, with event times for
+/// attempt timing when the writer supplied them.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct JournalAttemptFacts {
+    pub instance_id: String,
+    pub attempt: u32,
+    pub max_attempts: Option<u32>,
+    pub finished_status: Option<String>,
+    pub code: Option<String>,
+    pub started_t: Option<f64>,
+    pub finished_t: Option<f64>,
+}
+
+/// One operation seen in journal op events. Entries without a C2 record
+/// file still render from these facts; entries with one only fill gaps.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct JournalOpFacts {
+    pub instance_id: String,
+    pub attempt: Option<u32>,
+    pub op: String,
+    pub kind: Option<String>,
+    pub label: Option<String>,
+    pub returncode: Option<i64>,
+    pub duration_seconds: Option<f64>,
+    pub timed_out: bool,
+    pub finished: bool,
+}
+
 /// Facts from one journal segment (between `phase_started` records).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct JournalSegmentFacts {
@@ -431,6 +459,8 @@ pub(crate) struct JournalSegmentFacts {
     pub active_attempt: Option<u32>,
     pub active_max_attempts: Option<u32>,
     pub active_op: Option<String>,
+    pub attempt_events: Vec<JournalAttemptFacts>,
+    pub op_events: Vec<JournalOpFacts>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -451,6 +481,139 @@ fn journal_runner(row: &JsonValue) -> (Option<u64>, Option<String>) {
             .and_then(JsonValue::as_str)
             .map(str::to_string),
     )
+}
+
+fn record_attempt_started(
+    segment: &mut JournalSegmentFacts,
+    instance_id: &str,
+    attempt: u32,
+    max_attempts: Option<u32>,
+    started_t: Option<f64>,
+) {
+    if let Some(entry) = segment.attempt_events.iter_mut().find(|entry| {
+        entry.instance_id == instance_id && entry.attempt == attempt
+    }) {
+        if entry.max_attempts.is_none() {
+            entry.max_attempts = max_attempts;
+        }
+        if entry.started_t.is_none() {
+            entry.started_t = started_t;
+        }
+        return;
+    }
+    segment.attempt_events.push(JournalAttemptFacts {
+        instance_id: instance_id.to_string(),
+        attempt,
+        max_attempts,
+        finished_status: None,
+        code: None,
+        started_t,
+        finished_t: None,
+    });
+}
+
+fn record_attempt_finished(
+    segment: &mut JournalSegmentFacts,
+    instance_id: &str,
+    attempt: Option<u32>,
+    status: Option<String>,
+    code: Option<String>,
+    finished_t: Option<f64>,
+) {
+    let entry = match attempt {
+        Some(attempt) => segment.attempt_events.iter_mut().find(|entry| {
+            entry.instance_id == instance_id && entry.attempt == attempt
+        }),
+        None => segment
+            .attempt_events
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.instance_id == instance_id),
+    };
+    let Some(entry) = entry else {
+        return;
+    };
+    if entry.finished_status.is_none() {
+        entry.finished_status = status
+            .map(|status| cap_chars(&status, 32))
+            .filter(|status| !status.is_empty());
+    }
+    if entry.code.is_none() {
+        entry.code = code
+            .map(|code| cap_chars(&code, 120))
+            .filter(|code| !code.is_empty());
+    }
+    if entry.finished_t.is_none() {
+        entry.finished_t = finished_t;
+    }
+}
+
+fn record_op_started(
+    segment: &mut JournalSegmentFacts,
+    instance_id: &str,
+    attempt: Option<u32>,
+    op: &str,
+    kind: Option<String>,
+    label: Option<String>,
+) {
+    if segment.op_events.iter().any(|entry| {
+        entry.instance_id == instance_id
+            && entry.attempt == attempt
+            && entry.op == op
+    }) {
+        return;
+    }
+    segment.op_events.push(JournalOpFacts {
+        instance_id: instance_id.to_string(),
+        attempt,
+        op: cap_chars(op, 120),
+        kind: kind
+            .map(|kind| cap_chars(&kind, 32))
+            .filter(|kind| !kind.is_empty()),
+        label: label
+            .map(|label| cap_chars(&label, 120))
+            .filter(|label| !label.is_empty()),
+        returncode: None,
+        duration_seconds: None,
+        timed_out: false,
+        finished: false,
+    });
+}
+
+fn record_op_finished(
+    segment: &mut JournalSegmentFacts,
+    instance_id: &str,
+    attempt: Option<u32>,
+    op: &str,
+    returncode: Option<i64>,
+    duration_seconds: Option<f64>,
+    timed_out: bool,
+) {
+    let entry = segment.op_events.iter_mut().rev().find(|entry| {
+        entry.instance_id == instance_id
+            && entry.attempt == attempt
+            && entry.op == op
+            && !entry.finished
+    });
+    match entry {
+        Some(entry) => {
+            entry.returncode = returncode;
+            entry.duration_seconds = duration_seconds;
+            entry.timed_out = timed_out;
+            entry.finished = true;
+        }
+        None => segment.op_events.push(JournalOpFacts {
+            instance_id: instance_id.to_string(),
+            attempt,
+            op: cap_chars(op, 120),
+            kind: None,
+            label: None,
+            returncode,
+            duration_seconds,
+            timed_out,
+            finished: true,
+        }),
+    }
 }
 
 fn apply_journal_event(segment: &mut JournalSegmentFacts, row: &JsonValue) {
@@ -538,20 +701,85 @@ fn apply_journal_event(segment: &mut JournalSegmentFacts, row: &JsonValue) {
             }
         }
         "attempt_started" => {
-            segment.active_attempt = row
-                .get("attempt")
-                .and_then(JsonValue::as_u64)
-                .map(|attempt| attempt.min(u32::MAX as u64) as u32);
-            segment.active_max_attempts = row
-                .get("max_attempts")
-                .and_then(JsonValue::as_u64)
-                .map(|max| max.min(u32::MAX as u64) as u32);
+            segment.active_attempt = row.get("attempt").and_then(capped_u32);
+            segment.active_max_attempts =
+                row.get("max_attempts").and_then(capped_u32);
+            if let Some(attempt) = row.get("attempt").and_then(capped_u32) {
+                let instance_id = event_string(row, "instance_id")
+                    .or_else(|| segment.active_instance_id.clone())
+                    .unwrap_or_default();
+                if !instance_id.is_empty() {
+                    record_attempt_started(
+                        segment,
+                        &instance_id,
+                        attempt,
+                        row.get("max_attempts").and_then(capped_u32),
+                        event_time(row),
+                    );
+                }
+            }
+        }
+        "attempt_finished" => {
+            let instance_id = event_string(row, "instance_id")
+                .or_else(|| segment.active_instance_id.clone())
+                .unwrap_or_default();
+            if !instance_id.is_empty() {
+                record_attempt_finished(
+                    segment,
+                    &instance_id,
+                    row.get("attempt").and_then(capped_u32),
+                    event_string(row, "status"),
+                    event_string(row, "code"),
+                    event_time(row),
+                );
+            }
         }
         "op_started" => {
             let label =
                 event_string(row, "label").or_else(|| event_string(row, "op"));
             if let Some(label) = label.filter(|label| !label.is_empty()) {
                 segment.active_op = Some(cap_chars(&label, 120));
+            }
+            let op = event_string(row, "op").unwrap_or_default();
+            if !op.is_empty() {
+                let instance_id = event_string(row, "instance_id")
+                    .or_else(|| segment.active_instance_id.clone())
+                    .unwrap_or_default();
+                if !instance_id.is_empty() {
+                    record_op_started(
+                        segment,
+                        &instance_id,
+                        row.get("attempt").and_then(capped_u32),
+                        &op,
+                        event_string(row, "kind"),
+                        event_string(row, "label"),
+                    );
+                }
+            }
+        }
+        "op_finished" => {
+            let op = event_string(row, "op").unwrap_or_default();
+            if !op.is_empty() {
+                let instance_id = event_string(row, "instance_id")
+                    .or_else(|| segment.active_instance_id.clone())
+                    .unwrap_or_default();
+                if !instance_id.is_empty() {
+                    record_op_finished(
+                        segment,
+                        &instance_id,
+                        row.get("attempt").and_then(capped_u32),
+                        &op,
+                        row.get("returncode").and_then(JsonValue::as_i64),
+                        row.get("duration_seconds")
+                            .and_then(JsonValue::as_f64)
+                            .filter(|duration| {
+                                duration.is_finite() && *duration >= 0.0
+                            }),
+                        row.get("timed_out")
+                            .and_then(JsonValue::as_bool)
+                            .unwrap_or(false),
+                    );
+                }
             }
         }
         _ => {}
@@ -581,12 +809,22 @@ pub(crate) fn decode_journal(text: &str) -> JournalFacts {
     facts
 }
 
+/// One budgeted try of a result instance, with its diagnostic code.
+pub(crate) struct ResultAttemptFacts {
+    pub attempt: u32,
+    pub status: FinalizerInstanceStatusWire,
+    pub code: Option<String>,
+}
+
 /// One result instance outcome from the schema-v1 result artifact.
-/// Attempt rows belong to the detail layer; this layer reads only the
-/// terminal outcome per instance.
 pub(crate) struct ResultInstanceFacts {
     pub instance_id: String,
     pub status: FinalizerInstanceStatusWire,
+    pub attempts: Vec<ResultAttemptFacts>,
+    pub evidence: Vec<(String, String)>,
+    pub diagnostics: Vec<FinalizerDiagnosticWire>,
+    pub refusal_reason: Option<String>,
+    pub deferral: Option<(String, Vec<String>)>,
 }
 
 pub(crate) struct ResultFacts {
@@ -646,6 +884,104 @@ fn parse_result_diagnostic(
     })
 }
 
+fn capped_u32(value: &JsonValue) -> Option<u32> {
+    value
+        .as_u64()
+        .map(|number| number.min(u32::MAX as u64) as u32)
+}
+
+/// Attempt rows for one result instance, tolerant of missing rows.
+fn parse_result_attempts(item: &JsonValue) -> Vec<ResultAttemptFacts> {
+    let mut attempts = Vec::new();
+    let rows = match item.get("attempts").and_then(JsonValue::as_array) {
+        Some(rows) => rows,
+        None => return attempts,
+    };
+    for row in rows.iter().take(32) {
+        let attempt = match row.get("attempt").and_then(capped_u32) {
+            Some(attempt) => attempt,
+            None => continue,
+        };
+        let status =
+            match row.get("status").and_then(parse_result_instance_status) {
+                Some(status) => status,
+                None => continue,
+            };
+        attempts.push(ResultAttemptFacts {
+            attempt,
+            status,
+            code: row
+                .get("diagnostic_code")
+                .and_then(JsonValue::as_str)
+                .filter(|code| !code.is_empty())
+                .map(|code| cap_chars(code, 120)),
+        });
+    }
+    attempts
+}
+
+/// Typed evidence pairs for one result instance, capped.
+fn parse_result_evidence(item: &JsonValue) -> Vec<(String, String)> {
+    let mut evidence = Vec::new();
+    let rows = match item.get("evidence").and_then(JsonValue::as_array) {
+        Some(rows) => rows,
+        None => return evidence,
+    };
+    for row in rows.iter().take(128) {
+        let kind = row
+            .get("kind")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        let value = row
+            .get("value")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        if kind.is_empty() || value.is_empty() {
+            continue;
+        }
+        evidence.push((cap_chars(kind, 120), cap_output(value)));
+    }
+    evidence
+}
+
+/// Instance-scoped diagnostics for one result instance.
+fn parse_result_diagnostics(item: &JsonValue) -> Vec<FinalizerDiagnosticWire> {
+    let mut diagnostics = Vec::new();
+    let rows = match item.get("diagnostics").and_then(JsonValue::as_array) {
+        Some(rows) => rows,
+        None => return diagnostics,
+    };
+    for row in rows.iter().take(64) {
+        if let Some(diagnostic) = parse_result_diagnostic(row) {
+            diagnostics.push(diagnostic);
+        }
+    }
+    diagnostics
+}
+
+/// The typed deferral payload for one result instance, if present.
+fn parse_result_deferral(item: &JsonValue) -> Option<(String, Vec<String>)> {
+    let deferral = item.get("deferral")?.as_object()?;
+    let reason = deferral.get("reason").and_then(JsonValue::as_str)?;
+    if reason.is_empty() {
+        return None;
+    }
+    let paths = deferral
+        .get("paths")
+        .and_then(JsonValue::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|path| path.as_str())
+                .filter(|path| !path.is_empty())
+                .take(64)
+                .map(|path| cap_chars(path, 256))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((cap_chars(reason, 120), paths))
+}
+
 /// The result artifact has its own tolerant schema-v1 decoder: it is never
 /// parsed with the strict aggregate wire.
 pub(crate) fn decode_result(text: &str) -> Option<ResultFacts> {
@@ -680,6 +1016,15 @@ pub(crate) fn decode_result(text: &str) -> Option<ResultFacts> {
             instances.push(ResultInstanceFacts {
                 instance_id: instance_id.to_string(),
                 status: instance_status,
+                attempts: parse_result_attempts(item),
+                evidence: parse_result_evidence(item),
+                diagnostics: parse_result_diagnostics(item),
+                refusal_reason: item
+                    .get("refusal_reason")
+                    .and_then(JsonValue::as_str)
+                    .filter(|reason| !reason.is_empty())
+                    .map(|reason| cap_chars(reason, 120)),
+                deferral: parse_result_deferral(item),
             });
         }
     }

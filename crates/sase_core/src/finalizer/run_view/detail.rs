@@ -1,14 +1,20 @@
 //! The node-view projector: DAG order, timeline, cycles, drift,
-//! diagnostics, and the attention hint.
+//! diagnostics, per-instance detail, and the attention hint.
 //!
 //! `project_finalizer_node_view` is the single entry point behind the
 //! `project_finalizer_node_view` Python binding. Multi-run node
-//! composition beyond a latest-run aggregate (the D10 supersede rule)
-//! lands in `core-run-view-detail`.
+//! composition follows the D10 supersede rule: runs after the newest
+//! successful settled run decide the aggregate.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::decode::{RunViewError, SubmissionFacts};
+use super::detail_content::{
+    build_attempts, build_deferral, build_diagnostics, build_evidence,
+    build_failure_reason, build_operations, build_protocol_files,
+    collect_stderr_tails, count_warnings, instance_files, latest_attempt,
+    result_instance,
+};
 use super::precedence::{
     decide_instance_statuses, decide_run, DecidedRun, InstanceStatus,
     RunEvidence,
@@ -36,8 +42,9 @@ pub fn project_finalizer_node_view(
     }
     let mut runs = Vec::with_capacity(request.runs.len());
     for input in &request.runs {
-        runs.push(project_run(input));
+        runs.push(project_run(input, request.tail_lines));
     }
+    runs.sort_by_key(|run| run.number);
     let (status, glyph) = node_status_glyph(&runs);
     let attention_instance_id = runs
         .iter()
@@ -72,7 +79,10 @@ pub fn project_finalizer_node_view(
     })
 }
 
-fn project_run(input: &super::wire::RunViewRunInputWire) -> RunViewRunWire {
+fn project_run(
+    input: &super::wire::RunViewRunInputWire,
+    tail_lines: u32,
+) -> RunViewRunWire {
     let evidence = RunEvidence::collect(input);
     let decided = decide_run(&evidence);
     let order = dag_order(&evidence);
@@ -101,10 +111,12 @@ fn project_run(input: &super::wire::RunViewRunInputWire) -> RunViewRunWire {
         .map(|instance_id| {
             project_run_instance(
                 &evidence,
+                input,
                 instance_id,
                 statuses.get(instance_id.as_str()),
                 reasons.get(instance_id.as_str()),
                 waiting.get(instance_id.as_str()).cloned().flatten(),
+                tail_lines,
             )
         })
         .collect();
@@ -274,10 +286,12 @@ fn run_cycles(evidence: &RunEvidence, decided: &DecidedRun) -> u32 {
 
 fn project_run_instance(
     evidence: &RunEvidence,
+    input: &super::wire::RunViewRunInputWire,
     instance_id: &str,
     status: Option<&InstanceStatus>,
     reason: Option<&String>,
     waiting_on: Option<String>,
+    tail_lines: u32,
 ) -> RunViewRunInstanceWire {
     let plan_entry = evidence.plan.as_ref().ok().and_then(|plan| {
         plan.plan
@@ -294,6 +308,66 @@ fn project_run_instance(
     let status = status
         .cloned()
         .unwrap_or_else(|| InstanceStatus::new("planned"));
+    let result = evidence
+        .result
+        .as_ref()
+        .and_then(|result| result_instance(&result.instances, instance_id));
+    let segment = evidence.journal.segments.last();
+    let journal_attempts: Vec<_> = segment
+        .map(|segment| {
+            segment
+                .attempt_events
+                .iter()
+                .filter(|event| event.instance_id == instance_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let journal_ops: Vec<_> = segment
+        .map(|segment| {
+            segment
+                .op_events
+                .iter()
+                .filter(|event| event.instance_id == instance_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let files = instance_files(&input.instances, instance_id);
+    let attempts = build_attempts(result, &journal_attempts);
+    let latest = latest_attempt(result, &journal_attempts);
+    let operations = build_operations(files, &journal_ops, tail_lines);
+    let (typed_evidence, headline) = build_evidence(result);
+    let run_diagnostics: Vec<_> = evidence
+        .result
+        .as_ref()
+        .map(|result| {
+            result
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.instance_id.as_deref() == Some(instance_id)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let instance_diagnostics = result
+        .map(|result| result.diagnostics.as_slice())
+        .unwrap_or(&[]);
+    let terminal_success = status.status == "success";
+    let diagnostics = build_diagnostics(
+        instance_diagnostics,
+        &run_diagnostics,
+        terminal_success,
+        latest,
+    );
+    let warnings = count_warnings(&operations, &diagnostics, latest);
+    let failure_reason = build_failure_reason(
+        &status.status,
+        &diagnostics,
+        &collect_stderr_tails(files),
+    );
     RunViewRunInstanceWire {
         instance_id: instance_id.to_string(),
         provider_ref: plan_entry.map(|entry| entry.provider_ref.clone()),
@@ -315,8 +389,16 @@ fn project_run_instance(
         attempt: status.attempt,
         max_attempts: status.max_attempts,
         op: status.op,
-        evidence: Vec::new(),
-        headline: None,
+        evidence: typed_evidence,
+        headline,
+        attempts,
+        operations,
+        diagnostics,
+        warnings,
+        refusal_reason: result.and_then(|result| result.refusal_reason.clone()),
+        deferral: build_deferral(result),
+        failure_reason,
+        protocol_files: build_protocol_files(files),
     }
 }
 
@@ -371,8 +453,42 @@ fn lookup_submission_summary(
         .unwrap_or_default()
 }
 
-/// Node status/glyph from the runs: active wins, else the latest run's
-/// disposition word. D10 supersede composition lands in the detail phase.
+/// One run's status word for the node aggregate.
+fn run_status_word(run: &RunViewRunWire) -> String {
+    match run.disposition {
+        RunViewDispositionWire::Active => "running".to_string(),
+        RunViewDispositionWire::Ran => run
+            .result_status
+            .clone()
+            .unwrap_or_else(|| "success".to_string()),
+        RunViewDispositionWire::Skipped => "skipped".to_string(),
+        RunViewDispositionWire::NotReached => "not_reached".to_string(),
+        RunViewDispositionWire::Interrupted => "interrupted".to_string(),
+        RunViewDispositionWire::Unavailable => "unavailable".to_string(),
+    }
+}
+
+/// Severity rank for the aggregate: failed first, then refused,
+/// interrupted, and unavailable together, then deferred, skipped,
+/// not reached, and success last.
+fn run_severity(run: &RunViewRunWire) -> u32 {
+    match run_status_word(run).as_str() {
+        "running" => 70,
+        "failed" => 60,
+        "refused" => 50,
+        "interrupted" | "unavailable" => 45,
+        "deferred" => 40,
+        "pending" => 35,
+        "skipped" => 30,
+        "not_reached" => 20,
+        _ => 10,
+    }
+}
+
+/// Node status/glyph from the runs: active wins, else the D10 supersede
+/// rule decides — only runs after the newest successful settled run count,
+/// by highest severity with ties going to the latest run. A newest run
+/// that settled successful leaves no later runs and reports success.
 fn node_status_glyph(runs: &[RunViewRunWire]) -> (String, String) {
     if runs
         .iter()
@@ -380,18 +496,26 @@ fn node_status_glyph(runs: &[RunViewRunWire]) -> (String, String) {
     {
         return ("running".to_string(), "running".to_string());
     }
-    let latest = runs.iter().max_by_key(|run| run.number).expect("runs");
-    let status = match latest.disposition {
-        RunViewDispositionWire::Active => "running",
-        RunViewDispositionWire::Ran => {
-            latest.result_status.as_deref().unwrap_or("success")
-        }
-        RunViewDispositionWire::Skipped => "skipped",
-        RunViewDispositionWire::NotReached => "not_reached",
-        RunViewDispositionWire::Interrupted => "interrupted",
-        RunViewDispositionWire::Unavailable => "unavailable",
+    let newest_success = runs
+        .iter()
+        .filter(|run| {
+            matches!(run.disposition, RunViewDispositionWire::Ran)
+                && run.result_status.as_deref() == Some("success")
+        })
+        .map(|run| run.number)
+        .max();
+    let considered: Vec<&RunViewRunWire> = match newest_success {
+        Some(number) => runs.iter().filter(|run| run.number > number).collect(),
+        None => runs.iter().collect(),
     };
-    (status.to_string(), status.to_string())
+    let Some(winner) = considered
+        .into_iter()
+        .max_by_key(|run| (run_severity(run), run.number))
+    else {
+        return ("success".to_string(), "success".to_string());
+    };
+    let status = run_status_word(winner);
+    (status.clone(), status)
 }
 
 /// Attention: the first failing instance in DAG order, else refused,
