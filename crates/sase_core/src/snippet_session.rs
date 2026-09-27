@@ -1,7 +1,9 @@
 //! Snippet-expansion planning and session state.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+use crate::snippet_variables::substitute_snippet_variables;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnippetExpansionPlan {
@@ -369,6 +371,8 @@ pub enum SnippetSessionEvent {
         template: String,
         line_indent: String,
         indent_continuation_lines: bool,
+        #[serde(default)]
+        variables: BTreeMap<String, String>,
     },
     Expand {
         range_start: usize,
@@ -412,9 +416,12 @@ pub fn apply_session_event(
             template,
             line_indent,
             indent_continuation_lines,
+            variables,
         } => {
+            let substituted =
+                substitute_snippet_variables(&template, &variables);
             let planned = plan_snippet_expansion(
-                &template,
+                &substituted,
                 &line_indent,
                 indent_continuation_lines,
             );
@@ -1075,6 +1082,7 @@ mod session_tests {
                 template: "foo $1 bar $2 baz $3 buz".to_string(),
                 line_indent: String::new(),
                 indent_continuation_lines: true,
+                variables: BTreeMap::new(),
             },
         );
 
@@ -1082,6 +1090,31 @@ mod session_tests {
         assert_eq!(result.cursor_offset, None);
         assert_eq!(result.text, Some("foo  bar  baz  buz".to_string()));
         assert_eq!(result.tabstop_offsets, vec![4, 9, 14, 18]);
+    }
+
+    #[test]
+    fn apply_session_event_plan_substitutes_variables_before_planning() {
+        let state = SnippetSessionState::empty();
+        let variables =
+            BTreeMap::from([("project".to_string(), "sase".to_string())]);
+
+        let result = apply_session_event(
+            state.clone(),
+            SnippetSessionEvent::Plan {
+                template: "the #{project}-$1 epic bead".to_string(),
+                line_indent: String::new(),
+                indent_continuation_lines: true,
+                variables,
+            },
+        );
+
+        assert_eq!(result.state, state, "planning must not touch the session");
+        assert_eq!(result.text, Some("the sase- epic bead".to_string()));
+        assert_eq!(
+            result.tabstop_offsets,
+            vec![9, 19],
+            "$1 sits right after the dash, $0 at the end"
+        );
     }
 
     #[test]
@@ -1191,6 +1224,7 @@ mod session_tests {
                 template: "$1$0".to_string(),
                 line_indent: String::new(),
                 indent_continuation_lines: true,
+                variables: BTreeMap::new(),
             },
         );
 

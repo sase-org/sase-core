@@ -111,6 +111,7 @@ pub mod service;
 pub mod sidecar_publication;
 pub mod snippet_catalog;
 pub mod snippet_session;
+pub mod snippet_variables;
 pub mod source_language;
 pub mod status;
 mod store_lock;

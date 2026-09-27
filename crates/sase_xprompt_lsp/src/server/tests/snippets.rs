@@ -661,3 +661,87 @@ async fn identity_and_clan_editor_surfaces_use_current_metadata() {
         9
     );
 }
+
+async fn snippet_items_with_vcs_catalog(
+    text: &str,
+    catalog_path: &std::path::Path,
+) -> Vec<lsp_types::CompletionItem> {
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_and_snippets(
+                Vec::new(),
+                vec![snippet_entry(
+                    "epic",
+                    "the #{project}-$1 epic bead",
+                    "ace.snippets",
+                )],
+            )),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        *config = ServerConfig {
+            snippet_support: true,
+            vcs_project_catalog: Some(catalog_path.to_path_buf()),
+            ..ServerConfig::default()
+        };
+    }
+    let response = server
+        .completion_for_text(
+            text.to_string(),
+            Position::new(0, text.len() as u32),
+        )
+        .await
+        .unwrap();
+    let CompletionResponse::Array(items) = response else {
+        panic!("expected completion array");
+    };
+    items
+}
+
+#[tokio::test]
+async fn snippet_project_variable_resolves_from_a_leading_tag() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog(&catalog_path);
+
+    let items = snippet_items_with_vcs_catalog("+sase ep", &catalog_path).await;
+
+    assert_snippet_item(&items, "epic", "the sase-$1 epic bead");
+}
+
+#[tokio::test]
+async fn snippet_project_variable_resolves_from_a_leading_vcs_ref() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog(&catalog_path);
+
+    let items =
+        snippet_items_with_vcs_catalog("#gh:sase ep", &catalog_path).await;
+
+    assert_snippet_item(&items, "epic", "the sase-$1 epic bead");
+}
+
+#[tokio::test]
+async fn snippet_project_variable_falls_back_to_the_current_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_v5_project_tag_catalog(&catalog_path);
+
+    let items = snippet_items_with_vcs_catalog("ep", &catalog_path).await;
+
+    assert_snippet_item(&items, "epic", "the sase-$1 epic bead");
+}
+
+#[tokio::test]
+async fn snippet_project_variable_stays_literal_without_a_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("vcs_project_catalog.json");
+    write_vcs_project_catalog_without_tags(&catalog_path);
+
+    let items = snippet_items_with_vcs_catalog("ep", &catalog_path).await;
+
+    assert_snippet_item(&items, "epic", r"the #{project\}-$1 epic bead");
+}

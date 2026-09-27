@@ -497,6 +497,30 @@ pub(super) fn leading_vcs_project(
     })
 }
 
+/// Project display name behind the snippet `#{project}` variable: the
+/// document's leading project tag or VCS ref first, then the catalog's
+/// current project row. There is deliberately no `config.project`
+/// root-basename fallback: the working directory never makes a project
+/// current.
+pub(super) fn active_snippet_project(
+    document: &DocumentSnapshot,
+    vcs_catalog: &VcsProjectCatalog,
+) -> Option<String> {
+    if let Some(identity) = leading_vcs_project(
+        document.text(),
+        &vcs_catalog.entries,
+        &vcs_catalog.project_tags,
+    ) {
+        return Some(identity);
+    }
+    vcs_catalog.entries.iter().find_map(|entry| {
+        (entry.current == Some(true)
+            && !crate::project_tags::is_patch_entry(entry)
+            && !entry.name.is_empty())
+        .then(|| entry.name.clone())
+    })
+}
+
 pub(super) fn artifact_ref_project<'a>(
     catalog: &'a ArtifactRefCatalog,
     identity: &str,

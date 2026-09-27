@@ -1,7 +1,7 @@
 use super::catalogs::{
-    active_artifact_ref_project, at_reference_kind_inventory,
-    at_reference_path_inventory, file_history, known_at_reference_kinds,
-    load_machine_catalog, load_vcs_project_catalog,
+    active_artifact_ref_project, active_snippet_project,
+    at_reference_kind_inventory, at_reference_path_inventory, file_history,
+    known_at_reference_kinds, load_machine_catalog, load_vcs_project_catalog,
 };
 use super::completion_items::{
     bool_completion_list, directive_snippet_items, empty_completion_list,
@@ -21,6 +21,10 @@ use super::state::{
 };
 use super::*;
 use sase_core::editor::vcs_project_entry_targets;
+use sase_core::snippet_variables::{
+    substitute_snippet_variables, PROJECT_SNIPPET_VARIABLE,
+};
+use std::collections::BTreeMap;
 
 impl XpromptLspServer {
     pub async fn completion_for_text(
@@ -196,11 +200,34 @@ impl XpromptLspServer {
                 .as_ref()
                 .map(|token| token.text.as_str())
                 .unwrap_or_default();
-            let snippet_list = editor_build_snippet_completion_candidates(
+            let mut snippet_list = editor_build_snippet_completion_candidates(
                 token,
                 Some(context.replacement_range),
                 snippets.as_slice(),
             );
+            let variables: BTreeMap<String, String> =
+                active_snippet_project(&document, &vcs_catalog)
+                    .map(|name| {
+                        BTreeMap::from([(
+                            PROJECT_SNIPPET_VARIABLE.to_string(),
+                            name,
+                        )])
+                    })
+                    .unwrap_or_default();
+            if !variables.is_empty() {
+                for candidate in &mut snippet_list.candidates {
+                    candidate.insertion = substitute_snippet_variables(
+                        &candidate.insertion,
+                        &variables,
+                    );
+                    if let Some(replacement) = candidate.replacement.as_mut() {
+                        replacement.new_text = substitute_snippet_variables(
+                            &replacement.new_text,
+                            &variables,
+                        );
+                    }
+                }
+            }
             return Some(CompletionResponse::Array(sase_snippet_items(
                 snippet_list,
                 context.replacement_range,

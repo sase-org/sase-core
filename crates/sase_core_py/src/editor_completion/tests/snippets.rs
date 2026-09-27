@@ -1120,6 +1120,57 @@ fn apply_snippet_session_event_binding_drives_nesting_through_dicts() {
 }
 
 #[test]
+fn apply_snippet_session_event_binding_substitutes_variables_from_a_dict() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_apply_snippet_session_event, &module)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let empty_state: PyObject = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "stops": [],
+                "index": 0,
+                "sessions": [],
+                "next_session_id": 0
+            }),
+        )
+        .unwrap();
+        let state_dict = json_value_to_py(
+            py,
+            &py_to_json_value(empty_state.bind(py)).unwrap(),
+        )
+        .unwrap();
+        let event_dict = json_value_to_py(
+            py,
+            &json!({
+                "kind": "plan",
+                "template": "the #{project}-$1 epic bead",
+                "line_indent": "",
+                "indent_continuation_lines": true,
+                "variables": {"project": "sase"}
+            }),
+        )
+        .unwrap();
+        let result = module
+            .getattr("apply_snippet_session_event")
+            .unwrap()
+            .call1((state_dict, event_dict))
+            .unwrap();
+        let value = py_to_json_value(&result).unwrap();
+
+        assert_eq!(value["text"], json!("the sase- epic bead"));
+        assert_eq!(value["tabstop_offsets"], json!([9, 19]));
+    });
+}
+
+#[test]
 fn apply_snippet_session_event_binding_rejects_malformed_input() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
