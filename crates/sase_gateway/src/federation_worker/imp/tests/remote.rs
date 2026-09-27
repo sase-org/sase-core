@@ -317,15 +317,15 @@ async fn worker_catalog_hosts_continues_only_requested_hosts() {
 }
 
 /// Real worker + real per-host HTTPS fan-out deadline, using two genuinely
-/// real loopback TCP fixtures instead of a scripted/mocked response: one
-/// host accepts the connection (proving the worker actually reached it)
-/// and then never answers, so it can only resolve via the worker's real
-/// deadline timeout; the other has nothing listening, so it fails fast
-/// with a real connection-refused error. This exercises the actual
-/// `read_all`/`read_one_host`/`with_deadline` fan-out in production code,
-/// proving the fast host's result is not discarded by the outer envelope
-/// deadline racing the still-hanging host, and that the worker stays
-/// usable for a subsequent request afterward.
+/// real loopback fixtures instead of a scripted/mocked response: one host
+/// accepts the connection (proving the worker actually reached it) and
+/// then never answers, so it can only resolve via the worker's real
+/// deadline timeout; the other is a real authenticated HTTPS gateway
+/// fixture over pinned-CA TLS that returns usable rows. This exercises the
+/// actual `read_all`/`read_one_host`/`with_deadline` fan-out in production
+/// code, proving the healthy host's usable result is not discarded by the
+/// outer envelope deadline racing the still-hanging host, and that the
+/// worker stays usable for a subsequent request afterward.
 #[tokio::test]
 async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
     let tmp = tempfile::tempdir().unwrap();
@@ -351,12 +351,16 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
         }
     });
 
-    // Reserve a port, then drop the listener: nothing answers there, so
-    // connecting to it fails fast with a real connection-refused error.
-    let fast_port = {
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        probe.local_addr().unwrap().port()
-    };
+    // A genuinely healthy host beside the hung one: a real HTTPS gateway
+    // fixture over pinned-CA TLS that answers hello and summary with
+    // usable rows.
+    let healthy_pin = format!(
+        "{}{}",
+        sase_core::FLEET_INSTALLATION_ID_PREFIX,
+        "b".repeat(64)
+    );
+    let fixture =
+        start_https_fixture(tmp.path(), "loopback", &healthy_pin).await;
 
     let worker = tokio::spawn(run(config));
 
@@ -364,11 +368,6 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
         "{}{}",
         sase_core::FLEET_INSTALLATION_ID_PREFIX,
         "a".repeat(64)
-    );
-    let fast_pin = format!(
-        "{}{}",
-        sase_core::FLEET_INSTALLATION_ID_PREFIX,
-        "b".repeat(64)
     );
     let replace = request_worker(
         &socket_path,
@@ -395,32 +394,20 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
                     },
                     "bearer_token": "token-zeus",
                 },
-                {
-                    "schema_version": FEDERATION_IPC_SCHEMA_VERSION,
-                    "alias": "apollo",
-                    "plan": {
-                        "schema_version": 1,
-                        "provider_ref": "builtin:https",
-                        "endpoint": format!("https://127.0.0.1:{fast_port}"),
-                        "credential_ref": "cred-apollo",
-                        "pinned_installation_id": fast_pin,
-                        "connection_kind": "gateway",
-                        "tls": {
-                            "schema_version": 1,
-                            "mode": "system_roots",
-                            "ca_ref": null,
-                            "server_name_ref": null,
-                        },
-                    },
-                    "bearer_token": "token-apollo",
-                },
+                tls_host(
+                    "apollo",
+                    &healthy_pin,
+                    fixture.port,
+                    "pinned_ca",
+                    Some("loopback"),
+                ),
             ],
         }),
     )
     .await;
     assert_eq!(replace["configured_hosts"], json!(2), "{replace}");
 
-    let deadline_budget_ms = 400_u64;
+    let deadline_budget_ms = 700_u64;
     let deadline_unix_ms = unix_now_ms() + deadline_budget_ms;
     let started = std::time::Instant::now();
     let response = request_worker_with_deadline(
@@ -455,11 +442,11 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
     assert_eq!(zeus["status"], json!("deadline"), "{response}");
 
     let apollo = host_result(&response, "apollo");
-    assert_ne!(apollo["status"], json!("deadline"), "{response}");
-    assert_ne!(
-        apollo["status"],
-        json!("ok"),
-        "nothing is listening on the fast host's port: {response}",
+    assert_eq!(apollo["status"], json!("ok"), "{response}");
+    assert_eq!(
+        apollo["payload"]["counts"]["running"],
+        json!(1),
+        "the healthy host beside the hung host must return usable rows: {response}",
     );
 
     // The worker must remain usable for a subsequent request: the same
@@ -482,6 +469,21 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
     assert_eq!(
         host_result(&second_response, "zeus")["status"],
         json!("deadline"),
+    );
+    assert_eq!(
+        host_result(&second_response, "apollo")["status"],
+        json!("ok"),
+        "{second_response}"
+    );
+
+    let paths = request_paths(&fixture.requests);
+    assert!(
+        paths.iter().any(|path| path == "/api/fleet/v1/hello"),
+        "healthy fixture did not receive hello: {paths:?}",
+    );
+    assert!(
+        paths.iter().any(|path| path == "/api/fleet/v1/summary"),
+        "healthy fixture did not receive summary: {paths:?}",
     );
 
     let inventory_deadline_unix_ms = unix_now_ms() + deadline_budget_ms;

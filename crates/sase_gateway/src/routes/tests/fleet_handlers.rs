@@ -751,13 +751,43 @@ async fn fleet_mutate_changed_payload_conflicts() {
 #[tokio::test]
 async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
     let tmp = tempfile::tempdir().unwrap();
+    let old_artifact = seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
+    let old_state = state_for_agent_bridge(&tmp);
+    let (_, installation_id) =
+        enroll_mutate(&old_state, &[FLEET_SCOPE_MUTATE]).await;
+    // Capture the real old exact locator from the running fixture before
+    // the instance is replaced.
+    let old_summary = first_summary(&old_state).await;
+    let old_locator = old_summary.exact_locator.clone().expect("exact locator");
+
+    // Replace the fixture instance under the same logical key: remove the
+    // old artifact and seed a successor in a new timestamp bucket so its
+    // run_id genuinely differs from the captured locator.
+    std::fs::remove_dir_all(&old_artifact).unwrap();
+    let prior_bucket = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
+    while chrono::Utc::now().format("%Y%m%d%H%M%S").to_string() == prior_bucket
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let artifact = seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let running_path = artifact.join("running.json");
     let running_before = std::fs::read(&running_path).unwrap();
     let state = state_for_agent_bridge(&tmp);
-    let (token, installation_id) =
+    let (token, replacement_installation_id) =
         enroll_mutate(&state, &[FLEET_SCOPE_MUTATE]).await;
+    assert_eq!(replacement_installation_id, installation_id);
     let summary = first_summary(&state).await;
+    let new_locator = summary.exact_locator.clone().expect("exact locator");
+    assert_eq!(
+        summary.logical_key, old_summary.logical_key,
+        "the replacement must keep the same logical row so the captured \
+         locator is a genuinely superseded instance of it",
+    );
+    assert_ne!(
+        new_locator.run_id, old_locator.run_id,
+        "the replacement instance must carry a genuinely different run_id \
+         than the captured old locator",
+    );
     let stale = mutation_body(
         &summary,
         &installation_id,
@@ -768,15 +798,15 @@ async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
     let (status, body) = post_mutate(state.clone(), &token, stale).await;
     assert_eq!(status, StatusCode::GONE);
     assert_eq!(body["code"], "gone_stale");
-    // "other-run" reuses the seeded agent's logical name/PID but claims a
-    // different run_id, i.e. an exact locator for an instance that has
-    // since been replaced under the same logical key.
+    // The captured old locator reuses the replacement's logical key but
+    // names the superseded run_id, so it must be rejected as an instance
+    // mismatch with zero side effects.
     let superseded = mutation_body(
-        &summary,
+        &old_summary,
         &installation_id,
         "stop",
         "op-instance",
-        json!({"run_id": "other-run", "reason": "old"}),
+        json!({"reason": "old"}),
     );
     let (status, body) = post_mutate(state.clone(), &token, superseded).await;
     assert_eq!(status, StatusCode::CONFLICT);
