@@ -5,15 +5,32 @@
 //! reaper only removes files or whole directories whose own metadata and all
 //! descendants are stale, never follows symlinks, and refuses broad roots.
 
+use crate::launch_scratch_liveness::{
+    observe_launch_scratch_liveness, LaunchScratchCandidateLivenessWire,
+    LaunchScratchLivenessCandidateWire, LaunchScratchLivenessRequestWire,
+    LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
+    LAUNCH_SCRATCH_OBSERVER_PROCFS, LAUNCH_SCRATCH_OBSERVER_UNOBSERVABLE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION: u32 = 3;
+pub const MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION: u32 = 4;
+
+pub const DEAD_LAUNCH_OBSERVER_DISABLED: &str = "disabled";
 
 const TOP_LEVEL_BUCKET: &str = "<root>";
+
+const DEFAULT_DEAD_LAUNCH_GRACE_SECONDS: f64 = 7200.0;
+const DEFAULT_DEAD_LAUNCH_PROC_ROOT: &str = "/proc";
+
+/// Buckets whose children are per-launch directories the dead-launch
+/// backstop may reap once no live process holds them. `build-targets` is
+/// the legacy bucket the runner-exit pass no longer writes to.
+const DEAD_LAUNCH_BUCKETS: [&str; 3] =
+    ["agent-tmp", "cargo-targets", "build-targets"];
 
 #[derive(Debug, Error)]
 pub enum ManagedTmpReapError {
@@ -48,6 +65,22 @@ pub struct ManagedTmpReapRequestWire {
     pub filesystem_available_bytes: Option<u64>,
     #[serde(default)]
     pub launch_scratch: Option<ManagedTmpLaunchScratchRequestWire>,
+    #[serde(default)]
+    pub dead_launch: Option<ManagedTmpDeadLaunchRequestWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedTmpDeadLaunchRequestWire {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dead_launch_grace_seconds")]
+    pub grace_seconds: f64,
+    #[serde(default = "default_dead_launch_proc_root")]
+    pub proc_root: String,
+    #[serde(default)]
+    pub current_pid: Option<u32>,
+    #[serde(default)]
+    pub exempt_pids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +116,14 @@ pub struct ManagedTmpReapResultWire {
     pub launch_removed: u64,
     pub launch_reclaimable_bytes: u64,
     pub launch_reclaimed_bytes: u64,
+    pub dead_launch_scanned: u64,
+    pub dead_launch_selected: u64,
+    pub dead_launch_removed: u64,
+    pub dead_launch_reclaimable_bytes: u64,
+    pub dead_launch_reclaimed_bytes: u64,
+    pub dead_launch_preserved_live: u64,
+    pub dead_launch_preserved_incomplete: u64,
+    pub dead_launch_observer: String,
     pub pressure_selected: u64,
     pub pressure_removed: u64,
     pub pressure_reclaimable_bytes: u64,
@@ -167,6 +208,15 @@ struct PressureCandidate {
     bucket: String,
     size_bytes: u64,
     latest_mtime: f64,
+    cutoff: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SizedPressureEntry {
+    path: PathBuf,
+    bucket: String,
+    size_bytes: u64,
+    latest_mtime: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +273,28 @@ struct LaunchScratchReapResult {
 }
 
 #[derive(Debug, Default)]
+struct DeadLaunchReapResult {
+    scanned: u64,
+    selected: u64,
+    removed: u64,
+    selected_by_subdir: BTreeMap<String, u64>,
+    removed_by_subdir: BTreeMap<String, u64>,
+    selected_directories: Vec<PathBuf>,
+    removed_directories: Vec<PathBuf>,
+    reclaimable_bytes: u64,
+    reclaimed_bytes: u64,
+    preserved_live: u64,
+    preserved_incomplete: u64,
+    observer: String,
+    capped: bool,
+    skipped: u64,
+    failed: u64,
+    incomplete_observations: u64,
+    skip_reasons: Vec<String>,
+    removal_errors: Vec<String>,
+}
+
+#[derive(Debug, Default)]
 struct CleanupDiagnostics {
     skipped: u64,
     failed: u64,
@@ -260,10 +332,26 @@ impl CleanupDiagnostics {
         self.skip_reasons.append(&mut launch.skip_reasons);
         self.removal_errors.append(&mut launch.removal_errors);
     }
+
+    fn merge_dead_launch(&mut self, dead_launch: &mut DeadLaunchReapResult) {
+        self.skipped += dead_launch.skipped;
+        self.failed += dead_launch.failed;
+        self.incomplete_observations += dead_launch.incomplete_observations;
+        self.skip_reasons.append(&mut dead_launch.skip_reasons);
+        self.removal_errors.append(&mut dead_launch.removal_errors);
+    }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_dead_launch_grace_seconds() -> f64 {
+    DEFAULT_DEAD_LAUNCH_GRACE_SECONDS
+}
+
+fn default_dead_launch_proc_root() -> String {
+    DEFAULT_DEAD_LAUNCH_PROC_ROOT.to_string()
 }
 
 pub fn reap_managed_tmpdir(
@@ -394,6 +482,32 @@ pub fn reap_managed_tmpdir(
         capped = true;
     }
 
+    let mut dead_launch = DeadLaunchReapResult {
+        observer: DEAD_LAUNCH_OBSERVER_DISABLED.to_string(),
+        ..DeadLaunchReapResult::default()
+    };
+    if budget > 0 {
+        dead_launch = reap_dead_launch(&root, request, budget);
+        budget = budget.saturating_sub(dead_launch.selected);
+        scanned += dead_launch.scanned;
+        capped = capped || dead_launch.capped;
+        selected_directories.extend(dead_launch.selected_directories.clone());
+        removed_directories.extend(dead_launch.removed_directories.clone());
+        for (bucket, count) in &dead_launch.selected_by_subdir {
+            *selected_by_subdir.entry(bucket.clone()).or_insert(0) += *count;
+        }
+        for (bucket, count) in &dead_launch.removed_by_subdir {
+            *removed_by_subdir.entry(bucket.clone()).or_insert(0) += *count;
+        }
+        diagnostics.merge_dead_launch(&mut dead_launch);
+    } else if request
+        .dead_launch
+        .as_ref()
+        .is_some_and(|dead| dead.enabled)
+    {
+        capped = true;
+    }
+
     let mut pressure = PressureReapResult::default();
     if request.pressure_reap && budget > 0 {
         pressure = reap_pressure_candidates(&root, request, budget);
@@ -421,9 +535,11 @@ pub fn reap_managed_tmpdir(
     let removed = removed_by_subdir.values().sum();
     let selected_bytes = ordinary_reclaimable_bytes
         .saturating_add(launch.reclaimable_bytes)
+        .saturating_add(dead_launch.reclaimable_bytes)
         .saturating_add(pressure.reclaimable_bytes);
     let removed_bytes = ordinary_reclaimed_bytes
         .saturating_add(launch.reclaimed_bytes)
+        .saturating_add(dead_launch.reclaimed_bytes)
         .saturating_add(pressure.reclaimed_bytes);
     Ok(ManagedTmpReapResultWire {
         schema_version: MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
@@ -453,6 +569,14 @@ pub fn reap_managed_tmpdir(
         launch_removed: launch.removed,
         launch_reclaimable_bytes: launch.reclaimable_bytes,
         launch_reclaimed_bytes: launch.reclaimed_bytes,
+        dead_launch_scanned: dead_launch.scanned,
+        dead_launch_selected: dead_launch.selected,
+        dead_launch_removed: dead_launch.removed,
+        dead_launch_reclaimable_bytes: dead_launch.reclaimable_bytes,
+        dead_launch_reclaimed_bytes: dead_launch.reclaimed_bytes,
+        dead_launch_preserved_live: dead_launch.preserved_live,
+        dead_launch_preserved_incomplete: dead_launch.preserved_incomplete,
+        dead_launch_observer: dead_launch.observer,
         pressure_selected: pressure.selected,
         pressure_removed: pressure.removed,
         pressure_reclaimable_bytes: pressure.reclaimable_bytes,
@@ -589,6 +713,227 @@ fn is_launch_scratch_bucket(bucket: &str) -> bool {
     matches!(bucket, "agent-tmp" | "cargo-targets")
 }
 
+fn dead_launch_config(
+    request: &ManagedTmpReapRequestWire,
+) -> Option<&ManagedTmpDeadLaunchRequestWire> {
+    request.dead_launch.as_ref().filter(|dead| dead.enabled)
+}
+
+#[derive(Debug, Clone)]
+struct DeadLaunchEntry {
+    path: PathBuf,
+    bucket: String,
+    key: String,
+    size_bytes: u64,
+    latest_mtime: f64,
+}
+
+/// Remove launch-keyed scratch no live process holds after the grace.
+///
+/// This is the backstop for launches that never ran runner-exit cleanup:
+/// crashed, SIGKILLed, or OOM-killed agents, and monitor/gate handoffs (a
+/// follow-up turn mints a fresh scratch key, so the handoff outcome skips
+/// runner-exit cleanup and the old key goes quiet). An entry is removed,
+/// largest first within the remaining budget, only when its newest
+/// descendant write predates the grace and the batch liveness observer
+/// reports no holder with a complete observation. Held and incomplete
+/// entries are preserved and counted, never removed. When the observer is
+/// unobservable (no usable procfs), the pass selects nothing and the age
+/// horizons remain the fallback.
+fn reap_dead_launch(
+    root: &Path,
+    request: &ManagedTmpReapRequestWire,
+    current_budget: u64,
+) -> DeadLaunchReapResult {
+    let mut result = DeadLaunchReapResult {
+        observer: DEAD_LAUNCH_OBSERVER_DISABLED.to_string(),
+        ..DeadLaunchReapResult::default()
+    };
+    let Some(dead) = dead_launch_config(request) else {
+        return result;
+    };
+    let grace_cutoff = request.now_epoch_seconds - dead.grace_seconds.max(0.0);
+    let mut aged: Vec<DeadLaunchEntry> = Vec::new();
+    for bucket in DEAD_LAUNCH_BUCKETS {
+        let bucket_dir = root.join(bucket);
+        let bucket_stat = match fs::symlink_metadata(&bucket_dir) {
+            Ok(stat) => stat,
+            Err(_) if !bucket_dir.exists() => continue,
+            Err(error) => {
+                result.skipped += 1;
+                result.incomplete_observations += 1;
+                result.skip_reasons.push(format!(
+                    "could not inspect dead-launch bucket {}: {error}",
+                    bucket_dir.display()
+                ));
+                continue;
+            }
+        };
+        if bucket_stat.file_type().is_symlink() || !bucket_stat.is_dir() {
+            continue;
+        }
+        let children = iter_children(&bucket_dir);
+        if !children.complete {
+            result.skipped += 1;
+            result.incomplete_observations += 1;
+            result.skip_reasons.push(format!(
+                "could not fully list dead-launch bucket {}",
+                bucket_dir.display()
+            ));
+        }
+        for child in children.children {
+            result.scanned += 1;
+            let Some(snapshot) = tree_snapshot(&child) else {
+                result.skipped += 1;
+                result.incomplete_observations += 1;
+                result.skip_reasons.push(format!(
+                    "dead-launch entry {} vanished during scan",
+                    child.display()
+                ));
+                continue;
+            };
+            if snapshot.is_symlink || !snapshot.is_dir {
+                continue;
+            }
+            if !snapshot.complete {
+                result.preserved_incomplete += 1;
+                result.skipped += 1;
+                result.incomplete_observations += 1;
+                result.skip_reasons.push(format!(
+                    "dead-launch entry {} preserved because its newest \
+                     write time is unobservable",
+                    child.display()
+                ));
+                continue;
+            }
+            if snapshot.latest_mtime >= grace_cutoff {
+                continue;
+            }
+            aged.push(DeadLaunchEntry {
+                key: path_name(&child),
+                path: child,
+                bucket: bucket.to_string(),
+                size_bytes: snapshot.size_bytes,
+                latest_mtime: snapshot.latest_mtime,
+            });
+        }
+    }
+
+    let observation =
+        observe_launch_scratch_liveness(&LaunchScratchLivenessRequestWire {
+            schema_version: LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
+            candidates: aged
+                .iter()
+                .map(|entry| LaunchScratchLivenessCandidateWire {
+                    scratch_key: entry.key.clone(),
+                    path: entry.path.to_string_lossy().into_owned(),
+                })
+                .collect(),
+            proc_root: dead.proc_root.clone(),
+            current_pid: dead.current_pid.unwrap_or_else(std::process::id),
+            exempt_pids: dead.exempt_pids.clone(),
+        });
+    if observation.observer == LAUNCH_SCRATCH_OBSERVER_UNOBSERVABLE {
+        result.observer = observation.observer;
+        return result;
+    }
+    result.observer = LAUNCH_SCRATCH_OBSERVER_PROCFS.to_string();
+
+    let mut eligible: Vec<DeadLaunchEntry> = Vec::new();
+    for (entry, verdict) in aged.into_iter().zip(observation.candidates.iter())
+    {
+        // The observer answers in request order; a mismatch fails closed.
+        if verdict.path != entry.path.to_string_lossy() {
+            result.preserved_incomplete += 1;
+            result.skipped += 1;
+            result.incomplete_observations += 1;
+            result.skip_reasons.push(format!(
+                "dead-launch entry {} preserved because its liveness \
+                 answer did not align",
+                entry.path.display()
+            ));
+            continue;
+        }
+        if verdict.live {
+            result.preserved_live += 1;
+            result.skipped += 1;
+            result.skip_reasons.push(format!(
+                "dead-launch entry {} held by a live process; preserved",
+                entry.path.display()
+            ));
+        } else if !verdict.complete {
+            result.preserved_incomplete += 1;
+            result.skipped += 1;
+            result.incomplete_observations += 1;
+            result.skip_reasons.push(format!(
+                "dead-launch entry {} preserved because liveness was \
+                 incomplete",
+                entry.path.display()
+            ));
+        } else {
+            eligible.push(entry);
+        }
+    }
+
+    eligible.sort_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| {
+                left.latest_mtime
+                    .partial_cmp(&right.latest_mtime)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut budget = current_budget;
+    for entry in eligible {
+        if budget == 0 {
+            result.capped = true;
+            break;
+        }
+        let Some(attempt) =
+            remove_if_stale(&entry.path, grace_cutoff, request.apply)
+        else {
+            continue;
+        };
+        let outcome = match attempt {
+            RemovalAttempt::Selected(outcome) => outcome,
+            RemovalAttempt::Skipped(skip) => {
+                result.skipped += 1;
+                if skip.incomplete {
+                    result.incomplete_observations += 1;
+                }
+                result.skip_reasons.push(skip.reason);
+                continue;
+            }
+        };
+        result.selected += 1;
+        result.reclaimable_bytes =
+            result.reclaimable_bytes.saturating_add(outcome.size_bytes);
+        result.selected_directories.push(entry.path.clone());
+        *result
+            .selected_by_subdir
+            .entry(entry.bucket.clone())
+            .or_insert(0) += 1;
+        if outcome.removed() {
+            result.removed += 1;
+            result.reclaimed_bytes =
+                result.reclaimed_bytes.saturating_add(outcome.size_bytes);
+            result.removed_directories.push(entry.path);
+            *result.removed_by_subdir.entry(entry.bucket).or_insert(0) += 1;
+        }
+        if let Some(message) = outcome.failure_message() {
+            result.failed += 1;
+            result.removal_errors.push(message.to_string());
+        }
+        budget -= 1;
+    }
+
+    result
+}
+
 fn is_single_path_segment(value: &str) -> bool {
     let mut components = Path::new(value).components();
     let Some(std::path::Component::Normal(component)) = components.next()
@@ -647,7 +992,7 @@ fn reap_pressure_candidates(
         .cloned()
         .collect::<BTreeSet<_>>();
     let cutoff = request.now_epoch_seconds - plan.effective_min_age_seconds;
-    let mut candidates = Vec::new();
+    let mut sized: Vec<SizedPressureEntry> = Vec::new();
     let mut scanned = 0_u64;
     let mut diagnostics = CleanupDiagnostics::default();
     let root_children = iter_children(root);
@@ -678,13 +1023,12 @@ fn reap_pressure_candidates(
             }
             for child in children.children {
                 scanned += 1;
-                match pressure_candidate(
+                match inspect_pressure_entry(
                     &child,
                     &name,
-                    cutoff,
                     request.pressure_min_entry_bytes,
                 ) {
-                    Ok(Some(candidate)) => candidates.push(candidate),
+                    Ok(Some(entry)) => sized.push(entry),
                     Ok(None) => {}
                     Err(skip) => diagnostics.record_skip(skip),
                 }
@@ -696,18 +1040,20 @@ fn reap_pressure_candidates(
             && is_build_target_residue_name(&name)
         {
             scanned += 1;
-            match pressure_candidate(
+            match inspect_pressure_entry(
                 &entry,
                 TOP_LEVEL_BUCKET,
-                cutoff,
                 request.pressure_min_entry_bytes,
             ) {
-                Ok(Some(candidate)) => candidates.push(candidate),
+                Ok(Some(entry)) => sized.push(entry),
                 Ok(None) => {}
                 Err(skip) => diagnostics.record_skip(skip),
             }
         }
     }
+
+    let mut candidates =
+        apply_pressure_liveness(sized, request, cutoff, &mut diagnostics);
 
     candidates.sort_by(|left, right| {
         right
@@ -749,7 +1095,7 @@ fn reap_pressure_candidates(
             break;
         }
         let Some(attempt) =
-            remove_if_stale(&candidate.path, cutoff, request.apply)
+            remove_if_stale(&candidate.path, candidate.cutoff, request.apply)
         else {
             continue;
         };
@@ -950,12 +1296,11 @@ pub(crate) fn validate_reap_root(
     Ok(resolved)
 }
 
-fn pressure_candidate(
+fn inspect_pressure_entry(
     path: &Path,
     bucket: &str,
-    cutoff: f64,
     min_entry_bytes: u64,
-) -> Result<Option<PressureCandidate>, RemovalSkip> {
+) -> Result<Option<SizedPressureEntry>, RemovalSkip> {
     let Some(snapshot) = tree_snapshot(path) else {
         return Ok(None);
     };
@@ -971,18 +1316,122 @@ fn pressure_candidate(
             incomplete: true,
         });
     }
-    if snapshot.latest_mtime >= cutoff {
-        return Ok(None);
-    }
     if snapshot.size_bytes < min_entry_bytes {
         return Ok(None);
     }
-    Ok(Some(PressureCandidate {
+    Ok(Some(SizedPressureEntry {
         path: path.to_path_buf(),
         bucket: bucket.to_string(),
         size_bytes: snapshot.size_bytes,
         latest_mtime: snapshot.latest_mtime,
     }))
+}
+
+/// Apply the age floor to pressure entries, liveness-aware when possible.
+///
+/// When the dead-launch observer is available, a held entry is never a
+/// pressure candidate, an entry whose liveness is incomplete is preserved,
+/// and an unheld entry needs only the dead-launch grace rather than the
+/// configured pressure minimum age. Otherwise every entry keeps the
+/// configured pressure cutoff. The reported
+/// `pressure_effective_min_age_seconds` still describes the configured
+/// policy; the grace shortcut for observed-unheld entries is documented,
+/// not folded into that number.
+fn apply_pressure_liveness(
+    sized: Vec<SizedPressureEntry>,
+    request: &ManagedTmpReapRequestWire,
+    cutoff: f64,
+    diagnostics: &mut CleanupDiagnostics,
+) -> Vec<PressureCandidate> {
+    let mut candidates = Vec::new();
+    let push_legacy =
+        |entry: SizedPressureEntry, candidates: &mut Vec<PressureCandidate>| {
+            if entry.latest_mtime < cutoff {
+                candidates.push(PressureCandidate {
+                    path: entry.path,
+                    bucket: entry.bucket,
+                    size_bytes: entry.size_bytes,
+                    latest_mtime: entry.latest_mtime,
+                    cutoff,
+                });
+            }
+        };
+    let Some(dead) = dead_launch_config(request) else {
+        for entry in sized {
+            push_legacy(entry, &mut candidates);
+        }
+        return candidates;
+    };
+    let grace_cutoff = request.now_epoch_seconds - dead.grace_seconds.max(0.0);
+    let Some(verdicts) = observe_pressure_liveness(&sized, dead) else {
+        for entry in sized {
+            push_legacy(entry, &mut candidates);
+        }
+        return candidates;
+    };
+    for (entry, verdict) in sized.into_iter().zip(verdicts) {
+        // Like the dead-launch pass, a misaligned answer fails closed.
+        let aligned = verdict.path == entry.path.to_string_lossy();
+        if aligned && verdict.live {
+            diagnostics.record_skip(RemovalSkip {
+                reason: format!(
+                    "pressure candidate {} held by a live process; preserved",
+                    entry.path.display()
+                ),
+                incomplete: false,
+            });
+        } else if !aligned || !verdict.complete {
+            diagnostics.record_skip(RemovalSkip {
+                reason: format!(
+                    "pressure candidate {} preserved because liveness was \
+                     incomplete",
+                    entry.path.display()
+                ),
+                incomplete: true,
+            });
+        } else if entry.latest_mtime < grace_cutoff {
+            candidates.push(PressureCandidate {
+                path: entry.path,
+                bucket: entry.bucket,
+                size_bytes: entry.size_bytes,
+                latest_mtime: entry.latest_mtime,
+                cutoff: grace_cutoff,
+            });
+        }
+    }
+    candidates
+}
+
+/// Batch-observe pressure entries through the launch-scratch observer.
+///
+/// Returns `None` when the observer is unobservable so the caller falls
+/// back to the configured pressure age; otherwise one verdict per entry
+/// in candidate order.
+fn observe_pressure_liveness(
+    sized: &[SizedPressureEntry],
+    dead: &ManagedTmpDeadLaunchRequestWire,
+) -> Option<Vec<LaunchScratchCandidateLivenessWire>> {
+    if sized.is_empty() {
+        return Some(Vec::new());
+    }
+    let observation =
+        observe_launch_scratch_liveness(&LaunchScratchLivenessRequestWire {
+            schema_version: LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION,
+            candidates: sized
+                .iter()
+                .map(|entry| LaunchScratchLivenessCandidateWire {
+                    scratch_key: path_name(&entry.path),
+                    path: entry.path.to_string_lossy().into_owned(),
+                })
+                .collect(),
+            proc_root: dead.proc_root.clone(),
+            current_pid: dead.current_pid.unwrap_or_else(std::process::id),
+            exempt_pids: dead.exempt_pids.clone(),
+        });
+    if observation.observer == LAUNCH_SCRATCH_OBSERVER_UNOBSERVABLE {
+        return None;
+    }
+    Some(observation.candidates)
 }
 
 fn remove_if_stale(
@@ -1272,6 +1721,7 @@ mod tests {
             ],
             filesystem_available_bytes: None,
             launch_scratch: None,
+            dead_launch: None,
         }
     }
 
@@ -1834,6 +2284,262 @@ mod tests {
 
         assert_eq!(result.pressure_removed, 1);
         assert!(result.capped);
+    }
+
+    const DEAD_GRACE: f64 = 2.0 * HOUR;
+
+    fn dead_launch_request(
+        root: &Path,
+        proc_root: &Path,
+    ) -> ManagedTmpReapRequestWire {
+        let mut req = request(root);
+        req.age_reap = false;
+        req.pressure_reap = false;
+        req.dead_launch = Some(ManagedTmpDeadLaunchRequestWire {
+            enabled: true,
+            grace_seconds: DEAD_GRACE,
+            proc_root: proc_root.to_string_lossy().into_owned(),
+            current_pid: None,
+            exempt_pids: Vec::new(),
+        });
+        req
+    }
+
+    fn empty_proc_root(parent: &Path) -> PathBuf {
+        let proc_root = parent.join("proc");
+        fs::create_dir_all(&proc_root).unwrap();
+        proc_root
+    }
+
+    fn holder_proc_root(parent: &Path, candidate: &Path) -> PathBuf {
+        let proc_root = empty_proc_root(parent);
+        let pid_dir = proc_root.join("4242");
+        fs::create_dir_all(&pid_dir).unwrap();
+        fs::write(
+            pid_dir.join("environ"),
+            format!("TMPDIR={}\0", candidate.display()),
+        )
+        .unwrap();
+        proc_root
+    }
+
+    fn write_fake_proc_stat(proc_root: &Path, btime: f64) {
+        let mut file = File::create(proc_root.join("stat")).unwrap();
+        writeln!(file, "cpu  0 0 0 0 0 0 0 0 0 0").unwrap();
+        writeln!(file, "btime {}", btime.trunc() as u64).unwrap();
+    }
+
+    fn write_fake_process_stat(pid_dir: &Path, starttime_ticks: u64) {
+        // `stat` layout: pid (comm) state ... with starttime as field
+        // 22 overall, the 20th whitespace token after the comm close.
+        let mut fields = vec!["R".to_string(), "1".to_string()];
+        fields.extend(std::iter::repeat_n("0".to_string(), 17));
+        fields.push(starttime_ticks.to_string());
+        let content = format!("1 (fake-proc) {}\n", fields.join(" "));
+        let mut file = File::create(pid_dir.join("stat")).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+    }
+
+    fn incomplete_proc_root(parent: &Path) -> PathBuf {
+        let proc_root = empty_proc_root(parent);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        write_fake_proc_stat(&proc_root, now - 1000.0);
+        let pid_dir = proc_root.join("9999");
+        fs::create_dir_all(&pid_dir).unwrap();
+        // environ as a directory reads as an error, like EACCES on a
+        // non-dumpable process; starttime far in the future keeps the
+        // pre-launch exemption from applying.
+        fs::create_dir(pid_dir.join("environ")).unwrap();
+        write_fake_process_stat(&pid_dir, 200_000);
+        proc_root
+    }
+
+    #[test]
+    fn dead_entry_past_grace_is_removed() {
+        let temp = tempdir().unwrap();
+        let proc_root = empty_proc_root(temp.path());
+        let dead =
+            aged_dir(temp.path(), "cargo-targets/dead-key", 3.0 * HOUR, 256);
+        let young = aged_dir(temp.path(), "cargo-targets/young-key", HOUR, 256);
+
+        let result =
+            reap_managed_tmpdir(&dead_launch_request(temp.path(), &proc_root))
+                .unwrap();
+
+        assert!(!dead.exists());
+        assert!(young.exists());
+        assert_eq!(result.dead_launch_scanned, 2);
+        assert_eq!(result.dead_launch_selected, 1);
+        assert_eq!(result.dead_launch_removed, 1);
+        assert_eq!(result.dead_launch_reclaimable_bytes, 256);
+        assert_eq!(result.dead_launch_reclaimed_bytes, 256);
+        assert_eq!(result.dead_launch_preserved_live, 0);
+        assert_eq!(result.dead_launch_preserved_incomplete, 0);
+        assert_eq!(result.dead_launch_observer, "procfs");
+        assert_eq!(result.selected, 1);
+        assert_eq!(result.removed, 1);
+        assert_eq!(result.selected_by_subdir.get("cargo-targets"), Some(&1));
+    }
+
+    #[test]
+    fn dead_launch_keeps_held_entry() {
+        let temp = tempdir().unwrap();
+        let held = aged_dir(temp.path(), "agent-tmp/held-key", 3.0 * HOUR, 64);
+        let proc_root = holder_proc_root(temp.path(), &held);
+
+        let result =
+            reap_managed_tmpdir(&dead_launch_request(temp.path(), &proc_root))
+                .unwrap();
+
+        assert!(held.exists());
+        assert_eq!(result.dead_launch_selected, 0);
+        assert_eq!(result.dead_launch_removed, 0);
+        assert_eq!(result.dead_launch_preserved_live, 1);
+        assert_eq!(result.skipped, 1);
+        assert!(result
+            .skip_reasons
+            .iter()
+            .any(|reason| reason.contains("held by a live process")));
+    }
+
+    #[test]
+    fn dead_launch_keeps_incomplete_observation() {
+        let temp = tempdir().unwrap();
+        let proc_root = incomplete_proc_root(temp.path());
+        let stale =
+            aged_dir(temp.path(), "cargo-targets/stale-key", 3.0 * HOUR, 64);
+
+        let result =
+            reap_managed_tmpdir(&dead_launch_request(temp.path(), &proc_root))
+                .unwrap();
+
+        assert!(stale.exists());
+        assert_eq!(result.dead_launch_selected, 0);
+        assert_eq!(result.dead_launch_removed, 0);
+        assert_eq!(result.dead_launch_preserved_incomplete, 1);
+        assert_eq!(result.incomplete_observations, 1);
+    }
+
+    #[test]
+    fn dead_launch_unobservable_skips() {
+        let temp = tempdir().unwrap();
+        let stale =
+            aged_dir(temp.path(), "cargo-targets/stale-key", 3.0 * HOUR, 64);
+
+        let result = reap_managed_tmpdir(&dead_launch_request(
+            temp.path(),
+            &temp.path().join("no-such-proc"),
+        ))
+        .unwrap();
+
+        assert!(stale.exists());
+        assert_eq!(result.dead_launch_observer, "unobservable");
+        assert_eq!(result.dead_launch_scanned, 1);
+        assert_eq!(result.dead_launch_selected, 0);
+        assert_eq!(result.dead_launch_removed, 0);
+    }
+
+    #[test]
+    fn dead_launch_respects_removal_budget() {
+        let temp = tempdir().unwrap();
+        let proc_root = empty_proc_root(temp.path());
+        let largest =
+            aged_dir(temp.path(), "cargo-targets/largest", 3.0 * HOUR, 8192);
+        let smaller =
+            aged_dir(temp.path(), "cargo-targets/smaller", 3.0 * HOUR, 4096);
+        let mut req = dead_launch_request(temp.path(), &proc_root);
+        req.max_removals = 1;
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!largest.exists());
+        assert!(smaller.exists());
+        assert_eq!(result.dead_launch_selected, 1);
+        assert_eq!(result.dead_launch_removed, 1);
+        assert!(result.capped);
+    }
+
+    #[test]
+    fn pressure_never_removes_held_entry() {
+        let temp = tempdir().unwrap();
+        let held = aged_dir(temp.path(), "cargo-targets/held-run", DAY, 8192);
+        let proc_root = holder_proc_root(temp.path(), &held);
+        let mut req = request(temp.path());
+        req.age_reap = false;
+        req.pressure_max_bytes = Some(100);
+        req.pressure_target_bytes = 50;
+        req.dead_launch = Some(ManagedTmpDeadLaunchRequestWire {
+            enabled: true,
+            grace_seconds: DEAD_GRACE,
+            proc_root: proc_root.to_string_lossy().into_owned(),
+            current_pid: None,
+            exempt_pids: Vec::new(),
+        });
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(held.exists());
+        assert_eq!(result.dead_launch_preserved_live, 1);
+        assert_eq!(result.pressure_removed, 0);
+        assert!(result
+            .skip_reasons
+            .iter()
+            .any(|reason| reason.contains("held by a live process")));
+    }
+
+    #[test]
+    fn pressure_uses_grace_for_unheld_entry() {
+        let temp = tempdir().unwrap();
+        let proc_root = empty_proc_root(temp.path());
+        // Top-level build-target residue is outside the dead-launch
+        // buckets, so the dead-launch pass never sees it; it is older
+        // than the dead-launch grace but younger than the 12-hour
+        // pressure age, so only the grace shortcut makes it removable.
+        let residue =
+            aged_dir(temp.path(), "core-target-old", 3.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.age_reap = false;
+        req.pressure_max_bytes = Some(100);
+        req.pressure_target_bytes = 50;
+        req.dead_launch = Some(ManagedTmpDeadLaunchRequestWire {
+            enabled: true,
+            grace_seconds: DEAD_GRACE,
+            proc_root: proc_root.to_string_lossy().into_owned(),
+            current_pid: None,
+            exempt_pids: Vec::new(),
+        });
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(!residue.exists());
+        assert_eq!(result.dead_launch_removed, 0);
+        assert_eq!(result.pressure_removed, 1);
+        // The reported effective age still describes the configured
+        // policy; the grace shortcut is not folded into it.
+        assert_eq!(
+            result.pressure_effective_min_age_seconds,
+            Some(12.0 * HOUR)
+        );
+    }
+
+    #[test]
+    fn pressure_without_dead_launch_keeps_grace_young_entry() {
+        let temp = tempdir().unwrap();
+        let entry =
+            aged_dir(temp.path(), "cargo-targets/run-recent", 3.0 * HOUR, 8192);
+        let mut req = request(temp.path());
+        req.age_reap = false;
+        req.pressure_max_bytes = Some(100);
+        req.pressure_target_bytes = 50;
+
+        let result = reap_managed_tmpdir(&req).unwrap();
+
+        assert!(entry.exists());
+        assert_eq!(result.dead_launch_observer, "disabled");
+        assert_eq!(result.pressure_removed, 0);
     }
 
     #[test]

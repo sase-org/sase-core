@@ -1071,6 +1071,69 @@ fn service_status_bindings_round_trip_python_dicts() {
 }
 
 #[test]
+fn managed_tmp_reap_binding_round_trips_dead_launch_wire() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module
+            .getattr("managed_tmp_reap_wire_schema_version")
+            .is_ok());
+        assert!(module.getattr("reap_managed_tmpdir").is_ok());
+
+        let version = module
+            .getattr("managed_tmp_reap_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract::<u32>()
+            .unwrap();
+        assert_eq!(version, MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION);
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": MANAGED_TMP_REAP_WIRE_SCHEMA_VERSION,
+                "root": "/tmp/no-such-managed-root-dead-launch",
+                "apply": false,
+                "now_epoch_seconds": 1_800_000_000.0,
+                "age_reap": false,
+                "horizons": {},
+                "default_horizon_seconds": 259200.0,
+                "max_removals": 2000,
+                "pressure_reap": false,
+                "pressure_max_bytes": null,
+                "pressure_target_bytes": 8589934592_i64,
+                "pressure_min_available_bytes": null,
+                "pressure_recovery_available_bytes": 51539607552_i64,
+                "pressure_min_age_seconds": 43200.0,
+                "pressure_min_entry_bytes": 67108864,
+                "pressure_reap_buckets": ["cargo-targets"],
+                "filesystem_available_bytes": null,
+                "launch_scratch": null,
+                "dead_launch": {
+                    "enabled": true,
+                    "grace_seconds": 7200.0,
+                    "proc_root": "/tmp/no-such-proc-root",
+                },
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_reap_managed_tmpdir(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+
+        assert_eq!(result["schema_version"], json!(version));
+        assert_eq!(result["dead_launch_observer"], json!("unobservable"));
+        assert_eq!(result["dead_launch_scanned"], json!(0));
+        assert_eq!(result["dead_launch_selected"], json!(0));
+        assert_eq!(result["dead_launch_removed"], json!(0));
+        assert_eq!(result["dead_launch_preserved_live"], json!(0));
+        assert_eq!(result["dead_launch_preserved_incomplete"], json!(0));
+    });
+}
+
+#[test]
 fn launch_scratch_liveness_binding_round_trips_wire() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
