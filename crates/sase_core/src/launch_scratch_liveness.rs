@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub const LAUNCH_SCRATCH_LIVENESS_WIRE_SCHEMA_VERSION: u32 = 1;
@@ -385,16 +385,44 @@ fn is_missing(error: &std::io::Error) -> bool {
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = path.canonicalize() {
-        return canonical;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+
+    let mut existing = absolute.clone();
+    let mut missing_suffix = Vec::new();
+    loop {
+        if let Ok(mut canonical) = existing.canonicalize() {
+            for component in missing_suffix.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+
+        let Some(component) = existing.components().next_back() else {
+            break;
+        };
+        let suffix_component = match component {
+            Component::Normal(value) => value.to_os_string(),
+            Component::ParentDir => "..".into(),
+            Component::CurDir => {
+                existing.pop();
+                continue;
+            }
+            Component::RootDir | Component::Prefix(_) => break,
+        };
+        missing_suffix.push(suffix_component);
+        if !existing.pop() {
+            break;
+        }
     }
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    match std::env::current_dir() {
-        Ok(cwd) => cwd.join(path),
-        Err(_) => path.to_path_buf(),
-    }
+
+    absolute
 }
 
 fn is_at_or_under(path: &Path, parent: &Path) -> bool {
@@ -535,6 +563,20 @@ mod tests {
     }
 
     #[test]
+    fn normalize_path_canonicalizes_existing_prefix_before_missing_suffix() {
+        let temp = tempdir().unwrap();
+        let prefix = temp.path().join("existing");
+        fs::create_dir(&prefix).unwrap();
+
+        let normalized = normalize_path(&prefix.join("missing/nested"));
+
+        assert_eq!(
+            normalized,
+            prefix.canonicalize().unwrap().join("missing/nested")
+        );
+    }
+
+    #[test]
     fn live_holder_matches_environ_path() {
         let temp = tempdir().unwrap();
         let candidate = candidate_dir(temp.path(), "cargo-targets");
@@ -555,6 +597,35 @@ mod tests {
 
         assert_eq!(result.observer, LAUNCH_SCRATCH_OBSERVER_PROCFS);
         assert_eq!(result.candidates.len(), 1);
+        assert!(result.candidates[0].live);
+        assert!(result.candidates[0].complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_holder_matches_environ_path_through_symlink_with_missing_suffix() {
+        let temp = tempdir().unwrap();
+        let real_candidate = candidate_dir(temp.path(), "real");
+        let symlinked_bucket = temp.path().join("linked");
+        std::os::unix::fs::symlink(temp.path().join("real"), &symlinked_bucket)
+            .unwrap();
+        let candidate = symlinked_bucket.join(SCRATCH_KEY);
+        let proc_root = temp.path().join("proc");
+        fs::create_dir_all(&proc_root).unwrap();
+        let pid_dir = proc_root.join("4242");
+        fs::create_dir_all(&pid_dir).unwrap();
+        fs::write(
+            pid_dir.join("environ"),
+            format!("TMPDIR={}\0", candidate.join("nested").display()),
+        )
+        .unwrap();
+
+        let result = observe_launch_scratch_liveness(&request(
+            &[(SCRATCH_KEY, &candidate)],
+            &proc_root,
+        ));
+
+        assert_eq!(real_candidate, candidate.canonicalize().unwrap());
         assert!(result.candidates[0].live);
         assert!(result.candidates[0].complete);
     }

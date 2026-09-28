@@ -167,8 +167,8 @@ fn validate_root_candidate(
     }
     // Reuse the reaper's broad-root refusal (the sase-157.1 guard): a
     // transient bad SASE_TMPDIR can never enroll TMPDIR/HOME-shaped roots.
-    // Canonicalize for comparison only; the stored path keeps the resolved
-    // form the writer actually used.
+    // Store the canonical path so comparisons, broad-root refusal, and reaping
+    // all use the same identity.
     let resolved = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.to_path_buf());
@@ -354,7 +354,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![kept.to_string_lossy().to_string()]
+            vec![kept.canonicalize().unwrap().to_string_lossy().to_string()]
         );
     }
 
