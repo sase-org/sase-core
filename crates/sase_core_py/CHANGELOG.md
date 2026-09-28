@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0](https://github.com/sase-org/sase-core/compare/v0.35.1...v0.36.0) - 2026-09-28
+
+### Added
+
+- *(goals)* add goal ledger, fast path, and terminal renderer backend
+- *(goals)* make goal a first-class builtin artifact kind in sase-core (sase-1bu.6)
+- *(goal)* add goal ledger I/O in sase-core with Python bindings (sase-1bu.2)
+- *(tool-run)* add tool_run_detail projection with stage timeline and witness counts
+- *(managed-tmp)* dead-launch backstop in Rust reaper wire (sase-1bf.3)
+- *(tool-run)* add live glance, briefs, and node-summary projections
+- *(managed-tmp-roots)* add Rust-owned registry with Py bindings (sase-1bf.1)
+- *(core)* launch_scratch_liveness module with procfs probe bindings
+- [**breaking**] rename shell contracts to turn across core wires
+- *(agent-tab)* core tab model with directive, typed units, and Python bindings
+
 ## [0.35.1](https://github.com/sase-org/sase-core/compare/v0.35.0...v0.35.1) - 2026-09-27
 
 ### Added
