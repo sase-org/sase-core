@@ -298,6 +298,7 @@ pub fn goal_ledger_doctor(
                         request.mode.as_deref().unwrap_or("local"),
                         "",
                         "",
+                        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
                     )?;
                     if refreshed.wrote {
                         changed_paths.push(projection_display(root, path));

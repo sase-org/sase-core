@@ -5,6 +5,7 @@ use crate::prelude::*;
 use crate::json_bridge::{json_value_to_py, py_to_json_value};
 
 use pyo3::wrap_pyfunction;
+use sase_core::goal::ledger::GoalProjectionRefreshRequestWire;
 use sase_core::goal::ledger::{
     goal_ledger_append as core_goal_ledger_append,
     goal_ledger_doctor as core_goal_ledger_doctor,
@@ -22,8 +23,12 @@ use sase_core::goal::{
     goal_card_markdown as core_goal_card_markdown,
     goal_card_view as core_goal_card_view,
     goal_citation_line as core_goal_citation_line,
-    mint_goal_id as core_mint_goal_id, GoalCardViewWire,
-    GOAL_LEDGER_SCHEMA_VERSION, GOAL_WIRE_SCHEMA_VERSION,
+    goal_fast_path as core_goal_fast_path, mint_goal_id as core_mint_goal_id,
+    render_goal_card as core_render_goal_card,
+    render_goal_list as core_render_goal_list, GoalCardViewWire,
+    GoalFastPathRequestWire, GoalRenderCardRequestWire,
+    GoalRenderListRequestWire, GOAL_LEDGER_SCHEMA_VERSION,
+    GOAL_WIRE_SCHEMA_VERSION,
 };
 use std::path::PathBuf;
 
@@ -182,28 +187,75 @@ fn py_goal_projection_status<'py>(
 
 #[pyfunction]
 #[pyo3(name = "goal_projection_refresh")]
+#[pyo3(signature = (root, projection_path, request=None))]
 fn py_goal_projection_refresh<'py>(
     py: Python<'py>,
     root: &str,
     projection_path: &str,
-    project: &str,
-    mode: &str,
+    request: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let root = PathBuf::from(root);
     let projection_path = PathBuf::from(projection_path);
+    let request: GoalProjectionRefreshRequestWire = match request {
+        Some(dict) => request_from_dict(dict)?,
+        None => GoalProjectionRefreshRequestWire::default(),
+    };
     goal_result_to_py(
         py,
         py.allow_threads(|| {
             core_refresh_goal_projection(
                 &root,
                 &projection_path,
-                project,
-                mode,
-                "",
-                "",
+                &request.project,
+                &request.mode,
+                &request.watermark_path,
+                &request.outbox_path,
+                request.fetch_ttl_seconds,
             )
         }),
     )
+}
+
+#[pyfunction]
+#[pyo3(name = "goal_render_list")]
+fn py_goal_render_list<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: GoalRenderListRequestWire = request_from_dict(request)?;
+    let value = serde_json::to_value(sase_core::goal::GoalRenderTextWire {
+        text: core_render_goal_list(&request),
+    })
+    .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "goal_render_card")]
+fn py_goal_render_card<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: GoalRenderCardRequestWire = request_from_dict(request)?;
+    let value = serde_json::to_value(sase_core::goal::GoalRenderTextWire {
+        text: core_render_goal_card(&request),
+    })
+    .map_err(|error| {
+        PyValueError::new_err(format!("internal serialize error: {error}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "goal_fast_path")]
+fn py_goal_fast_path<'py>(
+    py: Python<'py>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request: GoalFastPathRequestWire = request_from_dict(request)?;
+    goal_result_to_py(py, py.allow_threads(|| core_goal_fast_path(&request)))
 }
 
 #[pyfunction]
@@ -277,5 +329,8 @@ pub(crate) fn register_goals(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_goal_card_view, m)?)?;
     m.add_function(wrap_pyfunction!(py_goal_card_markdown, m)?)?;
     m.add_function(wrap_pyfunction!(py_goal_citation_line, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_render_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_render_card, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_fast_path, m)?)?;
     Ok(())
 }

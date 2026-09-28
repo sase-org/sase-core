@@ -36,9 +36,10 @@ pub use probe::{
 };
 pub use projection::{
     goal_projection_status, refresh_goal_projection, GoalProjectionGoalWire,
-    GoalProjectionRefreshWire, GoalProjectionReportWire, GoalProjectionSigWire,
+    GoalProjectionRefreshRequestWire, GoalProjectionRefreshWire,
+    GoalProjectionReportWire, GoalProjectionSigWire,
     GoalProjectionStatusNameWire, GoalProjectionWire, GOALS_HOT_FILENAME,
-    GOAL_PROJECTION_SCHEMA_VERSION,
+    GOAL_DEFAULT_FETCH_TTL_SECONDS, GOAL_PROJECTION_SCHEMA_VERSION,
 };
 pub use read::{
     goal_ledger_history, goal_ledger_list, goal_ledger_show, read_goal_events,

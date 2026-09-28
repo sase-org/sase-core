@@ -6,6 +6,7 @@
 //! card and row view models.
 
 mod actions;
+mod fast_path;
 mod ids;
 pub mod ledger;
 mod reduce;
@@ -21,6 +22,9 @@ pub use actions::{
     GOAL_CRITERION_TEXT_MAX, GOAL_MESSAGE_MAX, GOAL_NOTE_MAX, GOAL_OUTCOME_MAX,
     GOAL_TITLE_MAX,
 };
+pub use fast_path::{
+    goal_fast_path, GoalFastPathRequestWire, GoalFastPathResponseWire,
+};
 pub use ids::{
     event_id_timestamp_ms, mint_event_id, mint_event_id_with, mint_goal_id,
     parse_event_id, parse_goal_id, GoalIdError, GOAL_EVENT_ID_LEN,
@@ -31,7 +35,9 @@ pub use reduce::{
     goal_event_publish_class, reduce_goal_events, GoalPublishClassWire,
 };
 pub use render::{
-    goal_card_markdown, goal_citation_line, GOAL_CITATION_LINE_MAX,
+    goal_card_markdown, goal_citation_line, render_goal_card, render_goal_list,
+    GoalRenderCardRequestWire, GoalRenderListRequestWire, GoalRenderTextWire,
+    GOAL_CITATION_LINE_MAX,
 };
 pub use view::{
     goal_card_view, goal_row_view, goal_row_view_at, GOAL_ACCENT_HEX,

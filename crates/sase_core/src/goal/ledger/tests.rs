@@ -299,6 +299,7 @@ fn projection_invalidates_by_signature() {
         "local",
         "",
         "",
+        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
     )
     .expect("refresh");
     assert!(first.wrote);
@@ -319,6 +320,7 @@ fn projection_invalidates_by_signature() {
         "local",
         "",
         "",
+        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
     )
     .expect("refresh again");
     assert!(!second.wrote);
@@ -340,6 +342,7 @@ fn projection_invalidates_by_signature() {
         "local",
         "",
         "",
+        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
     )
     .expect("refresh after drop");
     assert!(third.wrote);

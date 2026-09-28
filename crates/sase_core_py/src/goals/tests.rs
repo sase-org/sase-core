@@ -47,6 +47,9 @@ fn goal_bindings_are_registered() {
             "goal_card_view",
             "goal_card_markdown",
             "goal_citation_line",
+            "goal_render_list",
+            "goal_render_card",
+            "goal_fast_path",
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
@@ -99,11 +102,29 @@ fn goal_ledger_bindings_round_trip() {
 
         let projection =
             dir.path().join("goals-hot.json").display().to_string();
-        let refreshed =
-            py_goal_projection_refresh(py, &root, &projection, "sase", "local")
-                .unwrap();
+        let refresh_request = json_value_to_py(
+            py,
+            &json!({
+                "project": "sase",
+                "mode": "local",
+                "watermark_path": "",
+                "outbox_path": "",
+                "fetch_ttl_seconds": 60.0,
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let refresh_request = refresh_request.downcast::<PyDict>().unwrap();
+        let refreshed = py_goal_projection_refresh(
+            py,
+            &root,
+            &projection,
+            Some(refresh_request),
+        )
+        .unwrap();
         let value = py_to_json_value(refreshed.bind(py)).unwrap();
         assert_eq!(value["wrote"], json!(true));
+        assert_eq!(value["projection"]["fetch_ttl_seconds"], json!(60.0));
 
         let status = py_goal_projection_status(py, &root, &projection).unwrap();
         let value = py_to_json_value(status.bind(py)).unwrap();
@@ -170,6 +191,69 @@ fn goal_card_view_binding_reduces_state() {
         assert_eq!(value["goal_ref"], json!("goal:7k2mq"));
         assert_eq!(value["status_badge"], json!("ACTIVE"));
         assert_eq!(value["title"], json!("Binding goal"));
+    });
+}
+
+#[test]
+fn goal_render_and_fast_path_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("goals").display().to_string();
+        py_goal_ledger_init(py, &root).unwrap();
+        let request = json_value_to_py(py, &new_request("k1"))
+            .unwrap()
+            .into_bound(py);
+        let request = request.downcast::<PyDict>().unwrap();
+        py_goal_ledger_append(py, &root, request).unwrap();
+        let listed = py_goal_ledger_list(py, &root, None).unwrap();
+        let list_value = py_to_json_value(listed.bind(py)).unwrap();
+
+        let render_request = json_value_to_py(
+            py,
+            &json!({
+                "goals": list_value["goals"],
+                "project": "sase",
+                "mode": "local",
+                "now": "2026-09-28T14:00:00Z",
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let render_request = render_request.downcast::<PyDict>().unwrap();
+        let rendered = py_goal_render_list(py, render_request).unwrap();
+        let value = py_to_json_value(rendered.bind(py)).unwrap();
+        assert!(value["text"].as_str().unwrap().contains("Binding goal"));
+
+        let card_request = json_value_to_py(
+            py,
+            &json!({
+                "state": list_value["goals"][0],
+                "now": "2026-09-28T14:00:00Z",
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let card_request = card_request.downcast::<PyDict>().unwrap();
+        let card = py_goal_render_card(py, card_request).unwrap();
+        let value = py_to_json_value(card.bind(py)).unwrap();
+        assert!(value["text"].as_str().unwrap().contains("goal:7k2mq"));
+
+        let fast_request = json_value_to_py(
+            py,
+            &json!({
+                "argv": ["list"],
+                "cwd": "/nonexistent",
+                "sase_home": dir.path().join("home").display().to_string(),
+                "now": "2026-09-28T14:00:00Z",
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let fast_request = fast_request.downcast::<PyDict>().unwrap();
+        let fast = py_goal_fast_path(py, fast_request).unwrap();
+        let value = py_to_json_value(fast.bind(py)).unwrap();
+        assert_eq!(value["handled"], json!(false));
     });
 }
 

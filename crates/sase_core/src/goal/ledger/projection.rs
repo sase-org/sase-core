@@ -31,6 +31,13 @@ use crate::store_lock::{
 /// Hot projection schema version.
 pub const GOAL_PROJECTION_SCHEMA_VERSION: u32 = 1;
 
+/// Default fetch TTL (seconds) when the projection predates the field.
+pub const GOAL_DEFAULT_FETCH_TTL_SECONDS: f64 = 60.0;
+
+fn default_fetch_ttl_seconds() -> f64 {
+    GOAL_DEFAULT_FETCH_TTL_SECONDS
+}
+
 /// Default projection filename under `~/.sase/projects/<key>/`.
 pub const GOALS_HOT_FILENAME: &str = "goals-hot.json";
 
@@ -58,7 +65,7 @@ pub struct GoalProjectionGoalWire {
 }
 
 /// The machine-local hot projection file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoalProjectionWire {
     /// Projection schema version.
     #[serde(default)]
@@ -78,6 +85,9 @@ pub struct GoalProjectionWire {
     /// Outbox path the fast path reports for publish state.
     #[serde(default)]
     pub outbox_path: String,
+    /// Fetch TTL the fast path uses to decide a background fetch spawn.
+    #[serde(default = "default_fetch_ttl_seconds")]
+    pub fetch_ttl_seconds: f64,
     /// RFC3339 generation time.
     #[serde(default)]
     pub generated_at: String,
@@ -116,8 +126,28 @@ pub struct GoalProjectionReportWire {
     pub readable: bool,
 }
 
+/// Refresh request for [`refresh_goal_projection`] (Python binding).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GoalProjectionRefreshRequestWire {
+    /// Owning project key for the header.
+    #[serde(default)]
+    pub project: String,
+    /// `shared` or `local` for the header.
+    #[serde(default)]
+    pub mode: String,
+    /// Watermark path the fast path reports for freshness.
+    #[serde(default)]
+    pub watermark_path: String,
+    /// Outbox path the fast path reports for publish state.
+    #[serde(default)]
+    pub outbox_path: String,
+    /// Fetch TTL the fast path uses to decide a background fetch spawn.
+    #[serde(default = "default_fetch_ttl_seconds")]
+    pub fetch_ttl_seconds: f64,
+}
+
 /// Refresh outcome for [`refresh_goal_projection`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoalProjectionRefreshWire {
     /// Status before the refresh.
     pub status: GoalProjectionStatusNameWire,
@@ -270,19 +300,33 @@ pub fn refresh_goal_projection(
     mode: &str,
     watermark_path: &str,
     outbox_path: &str,
+    fetch_ttl_seconds: f64,
 ) -> Result<GoalProjectionRefreshWire, GoalLedgerError> {
     goal_ledger_init(root)?;
     let report = goal_projection_status(root, projection_path)?;
-    let mut cached: BTreeMap<String, GoalProjectionGoalWire> =
-        match load_projection(projection_path)? {
-            Some(projection)
-                if projection.schema_version
-                    == GOAL_PROJECTION_SCHEMA_VERSION =>
-            {
-                projection.goals
-            }
-            _ => BTreeMap::new(),
-        };
+    let previous = load_projection(projection_path)?;
+    let header_changed = match &previous {
+        Some(projection)
+            if projection.schema_version == GOAL_PROJECTION_SCHEMA_VERSION =>
+        {
+            projection.project != project
+                || projection.mode != mode
+                || projection.ledger_root != root.display().to_string()
+                || projection.watermark_path != watermark_path
+                || projection.outbox_path != outbox_path
+                || (projection.fetch_ttl_seconds - fetch_ttl_seconds).abs()
+                    > f64::EPSILON
+        }
+        _ => true,
+    };
+    let mut cached: BTreeMap<String, GoalProjectionGoalWire> = match previous {
+        Some(projection)
+            if projection.schema_version == GOAL_PROJECTION_SCHEMA_VERSION =>
+        {
+            projection.goals
+        }
+        _ => BTreeMap::new(),
+    };
     let markers = read_live_markers(root, None)?;
     let mut goals: BTreeMap<String, GoalProjectionGoalWire> = BTreeMap::new();
     let mut reused_all = report.status == GoalProjectionStatusNameWire::Fresh;
@@ -318,10 +362,12 @@ pub fn refresh_goal_projection(
         ledger_root: root.display().to_string(),
         watermark_path: watermark_path.to_string(),
         outbox_path: outbox_path.to_string(),
+        fetch_ttl_seconds,
         generated_at: super::layout::goal_now_rfc3339(),
         goals,
     };
     let wrote = if reused_all
+        && !header_changed
         && report.status == GoalProjectionStatusNameWire::Fresh
     {
         false
