@@ -625,7 +625,13 @@ mod tests {
             &proc_root,
         ));
 
-        assert_eq!(real_candidate, candidate.canonicalize().unwrap());
+        // temp.path() is itself under /var on macOS, which
+        // canonicalizes to /private/var. Compare canonical
+        // identities so the inner symlink is the only variable.
+        assert_eq!(
+            real_candidate.canonicalize().unwrap(),
+            candidate.canonicalize().unwrap()
+        );
         assert!(result.candidates[0].live);
         assert!(result.candidates[0].complete);
     }
