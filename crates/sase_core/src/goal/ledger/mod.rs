@@ -32,7 +32,8 @@ pub use layout::{
     GOAL_LEDGER_LAYOUT, GOAL_LIVE_DIR_NAME, GOAL_STORE_FILENAME,
 };
 pub use probe::{
-    probe_goal_ledger_list, GoalLedgerProbeCountsWire, GoalLedgerProbeWire,
+    probe_goal_ledger_history, probe_goal_ledger_list,
+    GoalLedgerProbeCountsWire, GoalLedgerProbeWire,
 };
 pub use projection::{
     goal_projection_status, refresh_goal_projection, GoalProjectionGoalWire,
@@ -43,6 +44,6 @@ pub use projection::{
 };
 pub use read::{
     goal_ledger_history, goal_ledger_list, goal_ledger_show, read_goal_events,
-    read_live_markers, reduce_goal, GoalHistoryFilterWire, GoalListFilterWire,
-    GoalListWire,
+    read_live_markers, reduce_goal, reduce_read_goal, GoalEventsReadWire,
+    GoalHistoryFilterWire, GoalListFilterWire, GoalListWire,
 };

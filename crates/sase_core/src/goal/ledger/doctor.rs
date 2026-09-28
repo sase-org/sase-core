@@ -16,10 +16,10 @@ use super::layout::{
     goal_items_dir, goal_marker_path, read_goal_store, GoalLedgerError,
 };
 use super::projection::refresh_goal_projection;
-use super::read::{read_goal_events, read_live_markers};
+use super::read::{read_goal_events, read_live_markers, reduce_read_goal};
 
 /// Request for [`goal_ledger_doctor`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GoalDoctorRequestWire {
     /// Repair by adding/removing markers and rebuilding the projection.
     #[serde(default)]
@@ -36,6 +36,15 @@ pub struct GoalDoctorRequestWire {
     /// Mode stamped on a rebuilt projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// Watermark path stamped on a rebuilt projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_path: Option<String>,
+    /// Outbox path stamped on a rebuilt projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbox_path: Option<String>,
+    /// Fetch TTL stamped on a rebuilt projection, in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_ttl_seconds: Option<f64>,
 }
 
 /// One doctor finding.
@@ -141,8 +150,9 @@ pub fn goal_ledger_doctor(
         }
     }
     for id in &all_ids {
-        let events = read_goal_events(root, id, None)?;
-        let state = super::super::reduce::reduce_goal_events(id, &events);
+        let read = read_goal_events(root, id, None)?;
+        let state = reduce_read_goal(id, &read);
+        let events = &read.events;
         if !state.readable {
             unreadable.push(id.clone());
             checks.push(GoalDoctorCheckWire {
@@ -207,8 +217,8 @@ pub fn goal_ledger_doctor(
         if !in_scope(id) {
             continue;
         }
-        let events = read_goal_events(root, id, None)?;
-        if events.is_empty() {
+        let read = read_goal_events(root, id, None)?;
+        if read.events.is_empty() && read.unparseable.is_empty() {
             checks.push(GoalDoctorCheckWire {
                 code: "orphan_marker".to_string(),
                 ok: false,
@@ -291,14 +301,40 @@ pub fn goal_ledger_doctor(
                         super::projection::GoalProjectionStatusNameWire::Fresh
                     )
                 {
+                    // Absent fields keep the existing projection
+                    // header's value instead of blanking it: a repair
+                    // of a stale marker must leave the header
+                    // untouched.
+                    let header =
+                        super::projection::load_projection_header(path);
+                    let project = request.project.clone().or_else(|| {
+                        header.as_ref().map(|head| head.project.clone())
+                    });
+                    let mode = request.mode.clone().or_else(|| {
+                        header.as_ref().map(|head| head.mode.clone())
+                    });
+                    let watermark =
+                        request.watermark_path.clone().or_else(|| {
+                            header
+                                .as_ref()
+                                .map(|head| head.watermark_path.clone())
+                        });
+                    let outbox = request.outbox_path.clone().or_else(|| {
+                        header.as_ref().map(|head| head.outbox_path.clone())
+                    });
+                    let fetch_ttl = request.fetch_ttl_seconds.or_else(|| {
+                        header.as_ref().map(|head| head.fetch_ttl_seconds)
+                    });
                     let refreshed = refresh_goal_projection(
                         root,
                         path,
-                        request.project.as_deref().unwrap_or(""),
-                        request.mode.as_deref().unwrap_or("local"),
-                        "",
-                        "",
-                        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
+                        project.as_deref().unwrap_or(""),
+                        mode.as_deref().unwrap_or("local"),
+                        watermark.as_deref().unwrap_or(""),
+                        outbox.as_deref().unwrap_or(""),
+                        fetch_ttl.unwrap_or(
+                            super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
+                        ),
                     )?;
                     if refreshed.wrote {
                         changed_paths.push(projection_display(root, path));

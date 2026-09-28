@@ -644,7 +644,11 @@ impl<'a> Reducer<'a> {
         if let Some(outcome) = payload.outcome.as_deref() {
             self.state.outcome = outcome.to_string();
         }
-        for input in &payload.criteria_added {
+        // Criterion ids are `<event_id>.<index>` within this event's
+        // own `criteria_added`, matching `created`: concurrent edits
+        // that share a basis assign the same id no matter how many
+        // sibling edits reduce alongside them.
+        for (index, input) in payload.criteria_added.iter().enumerate() {
             if self.state.criteria.len() >= super::actions::GOAL_CRITERIA_MAX {
                 self.diagnostic(
                     "criteria_limit",
@@ -653,7 +657,7 @@ impl<'a> Reducer<'a> {
                 );
                 break;
             }
-            let id = format!("{event_id}.{}", self.state.criteria.len());
+            let id = format!("{event_id}.{index}");
             self.state.criteria.push(GoalCriterionWire {
                 id,
                 text: input.text.clone(),
@@ -886,6 +890,39 @@ impl<'a> Reducer<'a> {
         false
     }
 
+    /// Mark an earlier-applied claim as superseded by a later race
+    /// winner: its record leaves `active` and its timeline entry no
+    /// longer reads as applied.
+    fn supersede_claim(&mut self, claim_event_id: &str) {
+        let mut claim_no: Option<u32> = None;
+        for event in &self.events {
+            if event.event_id == claim_event_id {
+                if let Ok(GoalEventPayloadWire::Claimed(payload)) =
+                    event.parse_payload()
+                {
+                    claim_no = Some(payload.claim_no);
+                }
+                break;
+            }
+        }
+        if let Some(claim_no) = claim_no {
+            for claim in &mut self.state.claims {
+                if claim.claim_no == claim_no
+                    && claim.status == GoalClaimStatusWire::Active
+                {
+                    claim.status = GoalClaimStatusWire::Superseded;
+                }
+            }
+        }
+        for entry in &mut self.state.timeline {
+            if entry.event_id == claim_event_id
+                && entry.effect == GoalTimelineEffectWire::Applied
+            {
+                entry.effect = GoalTimelineEffectWire::Superseded;
+            }
+        }
+    }
+
     fn apply_claim_retracted(
         &mut self,
         event: &GoalEventWire,
@@ -1012,6 +1049,10 @@ impl<'a> Reducer<'a> {
                 .filter(|claim_id| self.concurrent(claim_id, &event_id))
                 .collect();
             for claim_id in beaten {
+                // The claim applied first and the canceled drop won the
+                // race afterwards: the claim is history, not the active
+                // claim, and the diagnostic keeps the evidence.
+                self.supersede_claim(&claim_id);
                 self.diagnostic(
                     "canceled_beats_claim",
                     format!(
@@ -1059,6 +1100,10 @@ impl<'a> Reducer<'a> {
         }
         self.state.status = GoalStatusWire::Active;
         self.state.flavor = None;
+        // The goal is open again, so it no longer points at a merge
+        // target. The target's `merged_from` entry is that goal's own
+        // history and stays.
+        self.state.merged_into = None;
         let summary = format!("reopened: {}", payload.message);
         self.timeline(
             event,

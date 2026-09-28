@@ -92,9 +92,17 @@ fn goal_ledger_bindings_round_trip() {
         let value = py_to_json_value(history.bind(py)).unwrap();
         assert_eq!(value["goals"].as_array().unwrap().len(), 0);
 
-        let doctor_request = json_value_to_py(py, &json!({"repair": false}))
-            .unwrap()
-            .into_bound(py);
+        let doctor_request = json_value_to_py(
+            py,
+            &json!({
+                "repair": false,
+                "watermark_path": "wm-path",
+                "outbox_path": "ob-path",
+                "fetch_ttl_seconds": 30.0,
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
         let doctor_request = doctor_request.downcast::<PyDict>().unwrap();
         let doctor = py_goal_ledger_doctor(py, &root, doctor_request).unwrap();
         let value = py_to_json_value(doctor.bind(py)).unwrap();

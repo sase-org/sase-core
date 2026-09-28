@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "event_id": "01j8x90000000000000000005",
+  "event_id": "01j8x900000000000000000005",
   "goal_id": "7k2mq",
   "kind": "agent_attached",
   "at": "2026-09-28T14:04:00.000Z",
   "actor": { "principal": "sase.athena", "kind": "host" },
-  "basis": "01j8x90000000000000000001",
+  "basis": "01j8x900000000000000000001",
   "idempotency_key": "host:attach:0005",
   "payload": {
     "agent": "agent-a",

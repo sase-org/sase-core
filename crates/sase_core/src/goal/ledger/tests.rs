@@ -487,3 +487,421 @@ fn unknown_kind_wire_parses_as_unsupported() {
         serde_json::from_str(r#""time_travel""#).expect("parse kind");
     assert!(matches!(kind, GoalEventKindWire::Unsupported(_)));
 }
+
+fn reopen_request(goal_id: &str, key: &str) -> GoalLedgerAppendRequestWire {
+    GoalLedgerAppendRequestWire {
+        action: GoalActionWire::Reopen {
+            goal_id: goal_id.to_string(),
+            message: "another pass".to_string(),
+            expected_head: None,
+            idempotency_key: Some(key.to_string()),
+        },
+        actor: human(),
+        expected_head: None,
+        idempotency_key: None,
+        lock_path: None,
+        now: Some("2026-09-28T14:03:00.000Z".to_string()),
+        new_goal_id: None,
+        fault_after_event_write: None,
+    }
+}
+
+fn merge_request(
+    source: &str,
+    target: &str,
+    key: &str,
+) -> GoalLedgerAppendRequestWire {
+    GoalLedgerAppendRequestWire {
+        action: GoalActionWire::Merge {
+            source_id: source.to_string(),
+            target_id: target.to_string(),
+            target_state: None,
+            why: Some("same thread".to_string()),
+            expected_head: None,
+            idempotency_key: Some(key.to_string()),
+        },
+        actor: human(),
+        expected_head: None,
+        idempotency_key: None,
+        lock_path: None,
+        now: Some("2026-09-28T14:04:00.000Z".to_string()),
+        new_goal_id: None,
+        fault_after_event_write: None,
+    }
+}
+
+fn assert_no_trace(root: &Path, goal_id: &str) {
+    assert!(
+        !root.join("items").join(goal_id).exists(),
+        "refused append writes no items/{goal_id}"
+    );
+    assert!(
+        !goal_marker_path(root, goal_id).exists(),
+        "refused append writes no live/{goal_id}"
+    );
+}
+
+#[test]
+fn unknown_ids_refuse_without_writing() {
+    let (_tmp, root) = setup();
+    let created = append(&root, &new_request("Real goal", "7k2mq", "k1"));
+    assert_eq!(created.status, GOAL_APPEND_APPLIED);
+
+    let edit = append(
+        &root,
+        &edit_request("zzzzz", Some("Ghost edit"), None, None, "k2"),
+    );
+    assert_eq!(edit.status, GOAL_APPEND_REFUSED);
+    assert_eq!(edit.code.as_deref(), Some("goal_not_found"));
+    assert_no_trace(&root, "zzzzz");
+
+    let dropped = append(&root, &drop_request("zzzzz", None, "k3"));
+    assert_eq!(dropped.status, GOAL_APPEND_REFUSED);
+    assert_eq!(dropped.code.as_deref(), Some("goal_not_found"));
+    assert_no_trace(&root, "zzzzz");
+
+    let reopened = append(&root, &reopen_request("zzzzz", "k4"));
+    assert_eq!(reopened.status, GOAL_APPEND_REFUSED);
+    assert_eq!(reopened.code.as_deref(), Some("goal_not_found"));
+    assert_no_trace(&root, "zzzzz");
+
+    let bad_source = append(&root, &merge_request("zzzzz", "7k2mq", "k5"));
+    assert_eq!(bad_source.status, GOAL_APPEND_REFUSED);
+    assert_eq!(bad_source.code.as_deref(), Some("goal_not_found"));
+    assert_no_trace(&root, "zzzzz");
+
+    let bad_target = append(&root, &merge_request("7k2mq", "zzzzz", "k6"));
+    assert_eq!(bad_target.status, GOAL_APPEND_REFUSED);
+    assert_eq!(bad_target.code.as_deref(), Some("target_not_found"));
+    assert_no_trace(&root, "zzzzz");
+
+    // The existing goal is untouched by every refusal above.
+    let shown =
+        super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
+    assert_eq!(shown.title, "Real goal");
+
+    // A `new` that reuses a live id refuses instead of forking it.
+    let events_dir = root.join("items").join("7k2mq").join("events");
+    let before = std::fs::read_dir(&events_dir).expect("list").count();
+    let duplicate = append(&root, &new_request("Fork", "7k2mq", "k7"));
+    assert_eq!(duplicate.status, GOAL_APPEND_REFUSED);
+    assert_eq!(duplicate.code.as_deref(), Some("goal_already_exists"));
+    let after = std::fs::read_dir(&events_dir).expect("list").count();
+    assert_eq!(before, after);
+    assert!(goal_marker_path(&root, "7k2mq").exists());
+}
+
+#[test]
+fn normalized_edit_writes_only_under_the_canonical_id() {
+    let (_tmp, root) = setup();
+    let created = append(&root, &new_request("Cased goal", "7k2mq", "k1"));
+    assert_eq!(created.status, GOAL_APPEND_APPLIED);
+
+    let edited = append(
+        &root,
+        &edit_request("7K2MQ", Some("Retitled"), None, None, "k2"),
+    );
+    assert_eq!(edited.status, GOAL_APPEND_APPLIED);
+    assert_eq!(edited.events[0].goal_id, "7k2mq");
+    assert!(!root.join("items").join("7K2MQ").exists());
+    assert!(!goal_marker_path(&root, "7K2MQ").exists());
+
+    let shown =
+        super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
+    assert_eq!(shown.title, "Retitled");
+}
+
+#[test]
+fn merge_writes_normalized_ids_for_into_and_from() {
+    let (_tmp, root) = setup();
+    append(&root, &new_request("Source goal", "7k2mq", "k1"));
+    append(&root, &new_request("Target goal", "3fq9t", "k2"));
+
+    let merged = append(&root, &merge_request("7K2MQ", "3FQ9T", "k3"));
+    assert_eq!(merged.status, GOAL_APPEND_APPLIED);
+    assert!(merged
+        .events
+        .iter()
+        .all(|event| event.goal_id == "7k2mq" || event.goal_id == "3fq9t"));
+    assert!(!root.join("items").join("7K2MQ").exists());
+    assert!(!root.join("items").join("3FQ9T").exists());
+
+    let source =
+        super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
+    assert_eq!(source.merged_into.as_deref(), Some("3fq9t"));
+    let target =
+        super::read::goal_ledger_show(&root, "3fq9t", None).expect("show");
+    assert_eq!(target.merged_from, vec!["7k2mq".to_string()]);
+}
+
+#[test]
+fn merge_with_a_normalized_self_refuses() {
+    let (_tmp, root) = setup();
+    let created = append(&root, &new_request("Solo goal", "7k2mq", "k1"));
+    assert_eq!(created.status, GOAL_APPEND_APPLIED);
+
+    let merged = append(&root, &merge_request("7K2MQ", "7k2mq", "k2"));
+    assert_eq!(merged.status, GOAL_APPEND_REFUSED);
+    assert_eq!(merged.code.as_deref(), Some("merge_into_self"));
+
+    let shown =
+        super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
+    assert_eq!(shown.status, crate::goal::wire::GoalStatusWire::Active);
+}
+
+#[test]
+fn corrupt_event_file_isolates_one_goal() {
+    let (_tmp, root) = setup();
+    append(&root, &new_request("Good one", "7k2mq", "k1"));
+    append(&root, &new_request("Bad one", "3fq9t", "k2"));
+    std::fs::write(
+        root.join("items")
+            .join("3fq9t")
+            .join("events")
+            .join("corrupt.json"),
+        b"{ this is not json",
+    )
+    .expect("inject corruption");
+
+    let list = super::read::goal_ledger_list(
+        &root,
+        &GoalListFilterWire {
+            status: Some("all".to_string()),
+            limit: None,
+        },
+        None,
+    )
+    .expect("list keeps going");
+    assert_eq!(list.goals.len(), 2);
+    let bad = list
+        .goals
+        .iter()
+        .find(|state| state.id == "3fq9t")
+        .expect("bad goal");
+    assert!(!bad.readable);
+    let reason = bad.unreadable_reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("unparseable_event"), "reason: {reason}");
+    assert!(reason.contains("corrupt.json"), "reason: {reason}");
+    let good = list
+        .goals
+        .iter()
+        .find(|state| state.id == "7k2mq")
+        .expect("good");
+    assert!(good.readable);
+
+    let shown =
+        super::read::goal_ledger_show(&root, "3fq9t", None).expect("show bad");
+    assert!(!shown.readable);
+    let healthy =
+        super::read::goal_ledger_show(&root, "7k2mq", None).expect("show good");
+    assert!(healthy.readable);
+
+    let history = super::read::goal_ledger_history(
+        &root,
+        &GoalHistoryFilterWire {
+            status: Some("all".to_string()),
+            limit: Some(20),
+        },
+        None,
+    )
+    .expect("history keeps going");
+    assert!(history.goals.iter().any(|state| state.id == "3fq9t"));
+
+    let report = goal_ledger_doctor(
+        &root,
+        &GoalDoctorRequestWire {
+            repair: false,
+            ..Default::default()
+        },
+    )
+    .expect("doctor keeps going");
+    assert!(!report.ok);
+    assert_eq!(report.unreadable, vec!["3fq9t".to_string()]);
+    assert!(report.checks.iter().any(|check| check.code == "unreadable"
+        && check.goal_id.as_deref() == Some("3fq9t")));
+}
+
+#[test]
+fn corrupt_projection_reports_and_rebuilds() {
+    let (_tmp, root) = setup();
+    append(&root, &new_request("Proj goal", "7k2mq", "k1"));
+    let dir = TempDir::new().expect("tempdir");
+    let projection = dir.path().join("goals-hot.json");
+    std::fs::write(&projection, b"\x00\x01 garbage bytes").expect("inject");
+
+    let status = super::projection::goal_projection_status(&root, &projection)
+        .expect("status reports instead of erroring");
+    assert_eq!(
+        status.status,
+        super::projection::GoalProjectionStatusNameWire::SchemaMismatch
+    );
+
+    let rebuilt = super::projection::refresh_goal_projection(
+        &root,
+        &projection,
+        "sase",
+        "local",
+        "",
+        "",
+        super::projection::GOAL_DEFAULT_FETCH_TTL_SECONDS,
+    )
+    .expect("refresh rebuilds");
+    assert!(rebuilt.wrote);
+    assert_eq!(rebuilt.projection.goals.len(), 1);
+    let status = super::projection::goal_projection_status(&root, &projection)
+        .expect("status after rebuild");
+    assert_eq!(
+        status.status,
+        super::projection::GoalProjectionStatusNameWire::Fresh
+    );
+}
+
+#[test]
+fn doctor_repair_keeps_the_projection_header() {
+    let (_tmp, root) = setup();
+    append(&root, &new_request("Header goal", "7k2mq", "k1"));
+    let dir = TempDir::new().expect("tempdir");
+    let projection = dir.path().join("goals-hot.json");
+    let seeded = super::projection::refresh_goal_projection(
+        &root,
+        &projection,
+        "sase",
+        "shared",
+        "wm-path",
+        "ob-path",
+        30.0,
+    )
+    .expect("seed projection");
+    assert!(seeded.wrote);
+
+    // Break a marker so the repair has marker work plus a stale
+    // projection to rebuild.
+    std::fs::remove_file(goal_marker_path(&root, "7k2mq"))
+        .expect("remove marker");
+    let repaired = goal_ledger_doctor(
+        &root,
+        &GoalDoctorRequestWire {
+            repair: true,
+            projection_path: Some(projection.display().to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("repair");
+    assert!(repaired.changed_paths.iter().any(|p| p.contains("7k2mq")));
+    assert!(goal_marker_path(&root, "7k2mq").exists());
+
+    let body = std::fs::read_to_string(&projection).expect("read rebuilt");
+    let value: serde_json::Value =
+        serde_json::from_str(&body).expect("rebuilt parses");
+    assert_eq!(value["project"], serde_json::json!("sase"));
+    assert_eq!(value["mode"], serde_json::json!("shared"));
+    assert_eq!(value["watermark_path"], serde_json::json!("wm-path"));
+    assert_eq!(value["outbox_path"], serde_json::json!("ob-path"));
+    assert_eq!(value["fetch_ttl_seconds"], serde_json::json!(30.0));
+}
+
+fn write_direct_event(
+    root: &Path,
+    goal_id: &str,
+    event_id: &str,
+    kind: &str,
+    basis: Option<&str>,
+    payload: serde_json::Value,
+) {
+    let dir = root.join("items").join(goal_id).join("events");
+    std::fs::create_dir_all(&dir).expect("events dir");
+    let body = serde_json::json!({
+        "schema_version": 1,
+        "event_id": event_id,
+        "goal_id": goal_id,
+        "kind": kind,
+        "at": "2026-09-28T14:00:00.000Z",
+        "actor": {"principal": "t.t", "kind": "human"},
+        "basis": basis,
+        "idempotency_key": format!("k:{event_id}"),
+        "payload": payload,
+    });
+    std::fs::write(
+        dir.join(format!("{event_id}.json")),
+        serde_json::to_string(&body).unwrap(),
+    )
+    .expect("write event");
+}
+
+#[test]
+fn probe_counts_real_opens_across_a_thousand_goals() {
+    let (_tmp, root) = setup();
+    for index in 0..1000 {
+        let id = format!("s{index:04}");
+        let create = format!("1{index:025}");
+        let settle = format!("2{index:025}");
+        write_direct_event(
+            &root,
+            &id,
+            &create,
+            "created",
+            None,
+            serde_json::json!({
+                "title": format!("Settled {index}"),
+                "outcome": "done",
+                "criteria": [],
+                "draft": false,
+                "project": "sase",
+            }),
+        );
+        write_direct_event(
+            &root,
+            &id,
+            &settle,
+            "settled",
+            Some(&create),
+            serde_json::json!({"flavor": "canceled"}),
+        );
+    }
+    for index in 0..10 {
+        let id = format!("a{index:04}");
+        let create = format!("3{index:025}");
+        write_direct_event(
+            &root,
+            &id,
+            &create,
+            "created",
+            None,
+            serde_json::json!({
+                "title": format!("Live {index}"),
+                "outcome": "open",
+                "criteria": [],
+                "draft": false,
+                "project": "sase",
+            }),
+        );
+        std::fs::write(goal_marker_path(&root, &id), b"").expect("marker");
+    }
+
+    let probe = super::probe::probe_goal_ledger_list(
+        &root,
+        &GoalListFilterWire {
+            status: None,
+            limit: None,
+        },
+    )
+    .expect("probe");
+    assert_eq!(probe.list.goals.len(), 10);
+    assert_eq!(probe.counts.settled_event_opens, 0);
+    assert_eq!(probe.counts.event_dir_stats, 10);
+    assert_eq!(probe.counts.store_reads, 1);
+    assert!(!probe.counts.history_scan);
+
+    // The history scan is the negative control: it opens settled
+    // directories by design, and the probe counts them.
+    let scanned = super::probe::probe_goal_ledger_history(
+        &root,
+        &GoalHistoryFilterWire {
+            status: Some("all".to_string()),
+            limit: Some(20),
+        },
+    )
+    .expect("probed history");
+    assert!(scanned.counts.history_scan);
+    assert_eq!(scanned.counts.settled_event_opens, 1000);
+}

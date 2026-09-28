@@ -52,3 +52,42 @@ fn every_fixture_round_trips() {
         assert_eq!(back, event, "fixture {word} round-trips");
     }
 }
+
+#[test]
+fn every_fixture_id_parses() {
+    use crate::goal::ids::parse_event_id;
+    for (word, body) in FIXTURES {
+        let event: GoalEventWire = serde_json::from_str(body)
+            .unwrap_or_else(|error| panic!("fixture {word} parses: {error}"));
+        parse_event_id(&event.event_id).unwrap_or_else(|error| {
+            panic!("fixture {word} event id parses: {error}")
+        });
+        if let Some(basis) = event.basis.as_deref() {
+            parse_event_id(basis).unwrap_or_else(|error| {
+                panic!("fixture {word} basis parses: {error}")
+            });
+        }
+    }
+}
+
+#[test]
+fn serialized_created_event_writes_basis_null() {
+    use super::support::{created, eid, human, GOAL, T0};
+    let event = created(
+        GOAL,
+        &eid(1000, 1),
+        T0,
+        human(),
+        "k:1",
+        "Title",
+        "Outcome",
+        "sase",
+    );
+    let value = serde_json::to_value(&event).unwrap();
+    let map = value.as_object().expect("event serializes to an object");
+    assert!(
+        map.contains_key("basis"),
+        "serialized created event carries a basis key"
+    );
+    assert_eq!(map["basis"], serde_json::Value::Null);
+}

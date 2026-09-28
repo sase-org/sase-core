@@ -6,7 +6,8 @@ use crate::goal::reduce::{
     goal_event_publish_class, reduce_goal_events, GoalPublishClassWire,
 };
 use crate::goal::wire::{
-    GoalEventKindWire, GoalStatusWire, GoalTimelineEffectWire,
+    GoalClaimStatusWire, GoalEventKindWire, GoalStatusWire,
+    GoalTimelineEffectWire,
 };
 
 use super::support::{
@@ -461,6 +462,146 @@ fn concurrent_canceled_beats_a_claim() {
     );
     assert_eq!(state.status, GoalStatusWire::Dropped);
     assert!(codes(&state).contains(&"superseded_claim".to_string()));
+}
+
+#[test]
+fn concurrent_edits_share_stable_criterion_ids() {
+    let create = eid(1000, 1);
+    let second = eid(2000, 2);
+    let third = eid(3000, 3);
+    let created_event =
+        created(GOAL, &create, T0, human(), "k:c", "T", "O", "sase");
+    let edit_two = event(
+        GOAL,
+        &second,
+        GoalEventKindWire::Edited,
+        T1,
+        human(),
+        Some(&create),
+        "k:e2",
+        json!({"criteria_added": [{"text": "Second"}]}),
+    );
+    let edit_three = event(
+        GOAL,
+        &third,
+        GoalEventKindWire::Edited,
+        T2,
+        human(),
+        Some(&create),
+        "k:e3",
+        json!({"criteria_added": [{"text": "Third"}]}),
+    );
+    // Two edits share one basis, so they are concurrent.
+    let pair =
+        reduce_goal_events(GOAL, &[created_event.clone(), edit_three.clone()]);
+    let trio = reduce_goal_events(GOAL, &[created_event, edit_two, edit_three]);
+    let pair_id = pair
+        .criteria
+        .iter()
+        .find(|criterion| criterion.text == "Third")
+        .map(|criterion| criterion.id.clone())
+        .expect("third criterion in the pair");
+    let trio_id = trio
+        .criteria
+        .iter()
+        .find(|criterion| criterion.text == "Third")
+        .map(|criterion| criterion.id.clone())
+        .expect("third criterion in the trio");
+    assert_eq!(pair_id, trio_id);
+    assert_eq!(pair_id, format!("{third}.0"));
+}
+
+#[test]
+fn reopen_clears_the_merge_target_but_keeps_history() {
+    let create = eid(1000, 1);
+    let settle = eid(2000, 2);
+    let open = eid(3000, 3);
+    let source = reduce_goal_events(
+        GOAL,
+        &[
+            created(GOAL, &create, T0, human(), "k:c", "T", "O", "sase"),
+            settled(
+                GOAL,
+                &settle,
+                T1,
+                human(),
+                &create,
+                "k:s",
+                "merged",
+                Some(OTHER_GOAL),
+                None,
+            ),
+            reopened(GOAL, &open, T2, human(), &settle, "k:r"),
+        ],
+    );
+    assert_eq!(source.status, GoalStatusWire::Active);
+    assert_eq!(source.merged_into, None);
+
+    // The target's `merged_from` entry is that goal's own history.
+    let target_create = eid(1100, 11);
+    let merge = eid(2100, 12);
+    let target = reduce_goal_events(
+        OTHER_GOAL,
+        &[
+            created(
+                OTHER_GOAL,
+                &target_create,
+                T0,
+                human(),
+                "k:c",
+                "Target",
+                "O",
+                "sase",
+            ),
+            merged_record(OTHER_GOAL, &merge, T1, &target_create, "k:m", GOAL),
+        ],
+    );
+    assert_eq!(target.merged_from, vec![GOAL.to_string()]);
+}
+
+#[test]
+fn claim_beaten_by_a_later_canceled_drop_is_superseded() {
+    let create = eid(1000, 1);
+    let claim = eid(2000, 2);
+    let drop = eid(3000, 3);
+    let state = reduce_goal_events(
+        GOAL,
+        &[
+            created(GOAL, &create, T0, human(), "k:c", "T", "O", "sase"),
+            claimed(GOAL, &claim, T1, agent("a"), &create, "k:cl", 1),
+            settled(
+                GOAL,
+                &drop,
+                T2,
+                human(),
+                &create,
+                "k:s",
+                "canceled",
+                None,
+                None,
+            ),
+        ],
+    );
+    assert_eq!(state.status, GoalStatusWire::Dropped);
+    assert!(
+        !state
+            .claims
+            .iter()
+            .any(|entry| entry.status == GoalClaimStatusWire::Active),
+        "no claim stays active under a winning canceled drop"
+    );
+    assert!(
+        state.claims.iter().any(|entry| entry.claim_no == 1
+            && entry.status == GoalClaimStatusWire::Superseded),
+        "the beaten claim reads as superseded"
+    );
+    let entry = state
+        .timeline
+        .iter()
+        .find(|entry| entry.event_id == claim)
+        .expect("claim timeline entry");
+    assert_eq!(entry.effect, GoalTimelineEffectWire::Superseded);
+    assert!(codes(&state).contains(&"canceled_beats_claim".to_string()));
 }
 
 #[test]

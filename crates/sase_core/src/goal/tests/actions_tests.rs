@@ -155,9 +155,11 @@ fn new_refusals_are_stable() {
     assert_eq!(refusal.code, "goal_already_exists");
 
     for (title, outcome, project, code) in [
-        ("", "O", "sase", "title_required"),
+        ("", "O", "sase", "title_empty"),
+        ("   ", "O", "sase", "title_empty"),
         (&"t".repeat(61), "O", "sase", "title_too_long"),
-        ("T", "", "sase", "outcome_required"),
+        ("T", "", "sase", "outcome_empty"),
+        ("T", "   ", "sase", "outcome_empty"),
         ("T", &"o".repeat(281), "sase", "outcome_too_long"),
         ("T", "one\ntwo", "sase", "outcome_must_be_one_line"),
         ("T", "O", "", "project_required"),
@@ -533,6 +535,225 @@ fn merge_refusals_are_stable() {
     )
     .unwrap_err();
     assert_eq!(refusal.code, "target_settled");
+}
+
+#[test]
+fn edit_normalizes_the_goal_id() {
+    let live = live_state();
+    let events = plan_goal_action(
+        Some(&live),
+        &GoalActionWire::Edit {
+            goal_id: "7K2MQ".to_string(),
+            title: Some("New title".to_string()),
+            outcome: None,
+            criteria_added: vec![],
+            criteria_removed: vec![],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap();
+    assert_eq!(events[0].goal_id, GOAL);
+}
+
+#[test]
+fn edit_refuses_unknown_criteria() {
+    let live = live_state();
+    let refusal = plan_goal_action(
+        Some(&live),
+        &GoalActionWire::Edit {
+            goal_id: GOAL.to_string(),
+            title: None,
+            outcome: None,
+            criteria_added: vec![],
+            criteria_removed: vec!["nope".to_string()],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "criterion_not_found");
+}
+
+#[test]
+fn edit_refuses_unchanged_fields() {
+    let live = live_state();
+    assert_eq!(live.title, "Title");
+    for (title, outcome) in [
+        (Some("Title".to_string()), None),
+        (None, Some("Outcome".to_string())),
+        (Some("  Title  ".to_string()), None),
+    ] {
+        let refusal = plan_goal_action(
+            Some(&live),
+            &GoalActionWire::Edit {
+                goal_id: GOAL.to_string(),
+                title: title.clone(),
+                outcome: outcome.clone(),
+                criteria_added: vec![],
+                criteria_removed: vec![],
+                note: None,
+                expected_head: None,
+                idempotency_key: None,
+            },
+            &human(),
+            T1,
+            &mut mint(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal.code, "no_changes",
+            "title={title:?} outcome={outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn edit_empty_title_and_outcome_name_their_codes() {
+    let live = live_state();
+    let refusal = plan_goal_action(
+        Some(&live),
+        &GoalActionWire::Edit {
+            goal_id: GOAL.to_string(),
+            title: Some("   ".to_string()),
+            outcome: None,
+            criteria_added: vec![],
+            criteria_removed: vec![],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "title_empty");
+
+    let refusal = plan_goal_action(
+        Some(&live),
+        &GoalActionWire::Edit {
+            goal_id: GOAL.to_string(),
+            title: None,
+            outcome: Some(String::new()),
+            criteria_added: vec![],
+            criteria_removed: vec![],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "outcome_empty");
+}
+
+#[test]
+fn edit_cap_counts_removals_before_additions() {
+    use crate::goal::wire::GoalEventKindWire;
+    use serde_json::json;
+
+    use super::support::event;
+    let create = eid(1000, 1);
+    let criteria: Vec<_> = (0..10)
+        .map(|index| json!({"text": format!("c{index}")}))
+        .collect();
+    let full = reduce_goal_events(
+        GOAL,
+        &[event(
+            GOAL,
+            &create,
+            GoalEventKindWire::Created,
+            T0,
+            human(),
+            None,
+            "k:c",
+            json!({
+                "title": "Title",
+                "outcome": "Outcome",
+                "criteria": criteria,
+                "draft": false,
+                "project": "sase",
+            }),
+        )],
+    );
+    assert_eq!(full.criteria.len(), 10);
+    let first = full.criteria[0].id.clone();
+
+    // Ten minus one valid removal plus one addition still fits.
+    let added = vec![crate::goal::wire::GoalCriterionInputWire {
+        text: "fresh".to_string(),
+        source: crate::goal::wire::GoalCriterionSourceWire::User,
+    }];
+    let events = plan_goal_action(
+        Some(&full),
+        &GoalActionWire::Edit {
+            goal_id: GOAL.to_string(),
+            title: None,
+            outcome: None,
+            criteria_added: added.clone(),
+            criteria_removed: vec![first],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap();
+    assert_eq!(events.len(), 1);
+
+    // Ten plus one without a removal does not.
+    let refusal = plan_goal_action(
+        Some(&full),
+        &GoalActionWire::Edit {
+            goal_id: GOAL.to_string(),
+            title: None,
+            outcome: None,
+            criteria_added: added,
+            criteria_removed: vec![],
+            note: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "too_many_criteria");
+}
+
+#[test]
+fn merge_compares_normalized_ids_for_self() {
+    let source = live_state();
+    let refusal = plan_goal_action(
+        Some(&source),
+        &GoalActionWire::Merge {
+            source_id: "7K2MQ".to_string(),
+            target_id: GOAL.to_string(),
+            target_state: None,
+            why: None,
+            expected_head: None,
+            idempotency_key: None,
+        },
+        &human(),
+        T1,
+        &mut mint(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal.code, "merge_into_self");
 }
 
 #[test]

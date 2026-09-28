@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "event_id": "01j8x90000000000000000004",
+  "event_id": "01j8x900000000000000000004",
   "goal_id": "7k2mq",
   "kind": "adopted",
   "at": "2026-09-28T14:03:00.000Z",
   "actor": { "principal": "bryan.athena:agent-a", "kind": "agent", "agent": "agent-a" },
-  "basis": "01j8x90000000000000000001",
+  "basis": "01j8x900000000000000000001",
   "idempotency_key": "agent:adopt:0004",
   "payload": {
     "draft_id": "draft-7k2mq",

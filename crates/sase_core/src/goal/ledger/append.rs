@@ -22,7 +22,6 @@ use super::super::actions::{
     GoalActionWire, GoalIdMint, GoalRefusalWire, OsGoalIdMint,
 };
 use super::super::ids::{mint_event_id, parse_goal_id};
-use super::super::reduce::reduce_goal_events;
 use super::super::wire::{GoalActorWire, GoalEventWire, GoalStateWire};
 use super::layout::{
     goal_events_dir, goal_ledger_init, goal_marker_path, goal_now_rfc3339,
@@ -228,15 +227,75 @@ fn is_commutative_edit(action: &GoalActionWire) -> bool {
 }
 
 /// Load and reduce one goal. Missing event directories reduce to an empty
-/// state so `new` can plan against `None` and readers report unknown ids.
+/// state; planning decides whether that empty state or `None` applies.
 fn load_goal_state(
     root: &Path,
     goal_id: &str,
     probe: Option<&mut super::probe::GoalLedgerProbeCountsWire>,
 ) -> Result<(GoalStateWire, Vec<GoalEventWire>), GoalLedgerError> {
-    let events = super::read::read_goal_events(root, goal_id, probe)?;
-    let state = reduce_goal_events(goal_id, &events);
-    Ok((state, events))
+    let read = super::read::read_goal_events(root, goal_id, probe)?;
+    let state = super::read::reduce_read_goal(goal_id, &read);
+    Ok((state, read.events))
+}
+
+/// Rewrite an action's goal ids onto their `parse_goal_id` forms so the
+/// envelope, the `items/` and `live/` paths, and the merge `into`/`from`
+/// fields never fork on letter case.
+///
+/// Callers validate first, so every id here parses; anything else is
+/// left alone and fails downstream.
+fn normalize_action_ids(action: &mut GoalActionWire) {
+    let normalize = |id: &mut String| {
+        if let Ok(parsed) = parse_goal_id(id) {
+            *id = parsed;
+        }
+    };
+    match action {
+        GoalActionWire::New { .. } => {}
+        GoalActionWire::Edit { goal_id, .. }
+        | GoalActionWire::Drop { goal_id, .. }
+        | GoalActionWire::Reopen { goal_id, .. } => normalize(goal_id),
+        GoalActionWire::Merge {
+            source_id,
+            target_id,
+            ..
+        } => {
+            normalize(source_id);
+            normalize(target_id);
+        }
+    }
+}
+
+/// Whether any event files exist for a goal.
+fn goal_has_events(root: &Path, goal_id: &str) -> bool {
+    match fs::read_dir(goal_events_dir(root, goal_id)) {
+        Ok(entries) => entries.flatten().any(|entry| {
+            entry.path().extension().and_then(|ext| ext.to_str())
+                == Some("json")
+        }),
+        Err(_) => false,
+    }
+}
+
+/// The reduced state of `want` when it has events, else `None`.
+///
+/// A touched goal with zero events plans against `None` so actions on
+/// unknown ids refuse instead of minting phantom goals.
+fn state_with_events(
+    touched: &[String],
+    states: &[GoalStateWire],
+    event_sets: &[Vec<GoalEventWire>],
+    want: &str,
+) -> Option<GoalStateWire> {
+    touched
+        .iter()
+        .position(|id| id == want)
+        .filter(|idx| {
+            event_sets
+                .get(*idx)
+                .is_some_and(|events| !events.is_empty())
+        })
+        .and_then(|idx| states.get(idx).cloned())
 }
 
 fn refused_outcome(refusal: &GoalRefusalWire) -> GoalLedgerAppendOutcomeWire {
@@ -296,9 +355,13 @@ pub fn goal_ledger_append(
         parse_goal_id(override_id)
             .map_err(|error| GoalLedgerError::InvalidId(error.to_string()))?;
     }
+    // Plan, write, and reduce against the normalized ids.
+    normalize_action_ids(&mut action);
 
     // Load current states. `merge` also refreshes the embedded target
-    // state so planning sees this lock's view of both goals.
+    // state so planning sees this lock's view of both goals; a target
+    // with no events embeds `None` so planning refuses
+    // `target_not_found`.
     let mut states: Vec<GoalStateWire> = Vec::new();
     let mut event_sets: Vec<Vec<GoalEventWire>> = Vec::new();
     for goal_id in &touched {
@@ -306,33 +369,30 @@ pub fn goal_ledger_append(
         states.push(state);
         event_sets.push(events);
     }
-    let source_state = |touched: &[String],
-                        states: &[GoalStateWire],
-                        want: &str|
-     -> Option<GoalStateWire> {
-        touched
-            .iter()
-            .position(|id| id == want)
-            .and_then(|idx| states.get(idx).cloned())
-    };
     if let GoalActionWire::Merge { target_id, .. } = &action {
         let parsed = parse_goal_id(target_id)
             .map_err(|error| GoalLedgerError::InvalidId(error.to_string()))?;
-        if let Some(target_state) = source_state(&touched, &states, &parsed) {
-            if let GoalActionWire::Merge {
-                target_state: slot, ..
-            } = &mut action
-            {
-                *slot = Some(target_state);
-            }
+        let current =
+            state_with_events(&touched, &states, &event_sets, &parsed);
+        if let GoalActionWire::Merge {
+            target_state: slot, ..
+        } = &mut action
+        {
+            *slot = current;
         }
     }
 
     // Plan. On a stale head, commutative content edits re-plan without
     // the expectation; anything else reports `stale_basis`.
     let mut mint = AppendMint {
-        goal_override: request.new_goal_id.clone(),
+        goal_override: request
+            .new_goal_id
+            .as_ref()
+            .map(|id| parse_goal_id(id).unwrap_or_else(|_| id.clone())),
     };
+    // An action on a goal with no events plans against `None`, so
+    // `plan_goal_action` refuses with `goal_not_found` (or
+    // `target_not_found`) instead of minting a phantom goal.
     let source_for_plan: Option<GoalStateWire> = match &action {
         GoalActionWire::New { .. } => None,
         GoalActionWire::Edit { goal_id, .. }
@@ -341,39 +401,16 @@ pub fn goal_ledger_append(
             let parsed = parse_goal_id(goal_id).map_err(|error| {
                 GoalLedgerError::InvalidId(error.to_string())
             })?;
-            source_state(&touched, &states, &parsed)
+            state_with_events(&touched, &states, &event_sets, &parsed)
         }
         GoalActionWire::Merge { source_id, .. } => {
             let parsed = parse_goal_id(source_id).map_err(|error| {
                 GoalLedgerError::InvalidId(error.to_string())
             })?;
-            source_state(&touched, &states, &parsed)
+            state_with_events(&touched, &states, &event_sets, &parsed)
         }
     };
-    // An action on a goal with no events plans against an empty state;
-    // `plan_goal_action` refuses or plans as its rules dictate.
-    let empty;
-    let plan_state = match source_for_plan.as_ref() {
-        Some(state) => state,
-        None => {
-            empty = match &action {
-                GoalActionWire::New { .. } => GoalStateWire::empty(""),
-                _ => {
-                    let raw = action_goal_ids(&action)
-                        .into_iter()
-                        .next()
-                        .unwrap_or_default();
-                    let parsed = parse_goal_id(&raw).unwrap_or_default();
-                    GoalStateWire::empty(&parsed)
-                }
-            };
-            &empty
-        }
-    };
-    let plan_state_opt = match &action {
-        GoalActionWire::New { .. } => None,
-        _ => Some(plan_state),
-    };
+    let plan_state_opt = source_for_plan.as_ref();
     let mut planned = match super::super::actions::plan_goal_action(
         plan_state_opt,
         &action,
@@ -423,6 +460,24 @@ pub fn goal_ledger_append(
         let mut outcome = refused_outcome(&refusal);
         outcome.states = states;
         return Ok(outcome);
+    }
+    // A `new` whose id already has events refuses instead of forking
+    // the goal. The mint override names the id up front, and a random
+    // mint collision lands here too. Nothing is written.
+    if matches!(&action, GoalActionWire::New { .. }) {
+        let goal_id = planned
+            .first()
+            .map(|event| event.goal_id.clone())
+            .unwrap_or_default();
+        if goal_has_events(root, &goal_id) {
+            let refusal = GoalRefusalWire::new(
+                "goal_already_exists",
+                format!("goal {goal_id} already has events"),
+            );
+            let mut outcome = refused_outcome(&refusal);
+            outcome.states = states;
+            return Ok(outcome);
+        }
     }
 
     // The set of goals these events touch.

@@ -651,7 +651,9 @@ pub struct GoalEventWire {
     #[serde(default = "default_actor")]
     pub actor: GoalActorWire,
     /// Head event id the writer reduced from; null for `created`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always serialized (including null) so the bytes match the
+    /// contract example; readers accept both forms.
+    #[serde(default)]
     pub basis: Option<String>,
     /// Unique key per logical action for dedupe.
     #[serde(default)]

@@ -72,26 +72,33 @@ pub struct GoalHistoryFilterWire {
     pub limit: Option<usize>,
 }
 
+/// What one goal's events directory held: the events that parsed plus
+/// the files that did not.
+#[derive(Debug, Clone, Default)]
+pub struct GoalEventsReadWire {
+    /// Events that parsed, in filename order.
+    pub events: Vec<GoalEventWire>,
+    /// Display paths of files that failed to parse, with their error.
+    pub unparseable: Vec<String>,
+}
+
 /// Read and parse every event file for one goal, in filename order.
 ///
-/// Unknown fields are ignored by the envelope; files that fail to parse
-/// are skipped with an `unparseable_event` diagnostic contribution left
-/// to the reducer's unreadable marking via a synthetic record. In
-/// practice the writer only emits well-formed events, so a corrupt file
-/// surfaces here as data error detail instead.
+/// Unknown fields are ignored by the envelope. Files that fail to parse
+/// are collected into [`GoalEventsReadWire::unparseable`] instead of
+/// failing the read, so [`reduce_read_goal`] can isolate the corruption
+/// to that one goal. In practice the writer only emits well-formed
+/// events.
 pub fn read_goal_events(
     root: &Path,
     goal_id: &str,
     mut probe: Option<&mut GoalLedgerProbeCountsWire>,
-) -> Result<Vec<GoalEventWire>, GoalLedgerError> {
+) -> Result<GoalEventsReadWire, GoalLedgerError> {
     let dir = goal_events_dir(root, goal_id);
-    if let Some(counts) = probe.as_mut() {
-        counts.event_dir_stats += 1;
-    }
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(Vec::new());
+            return Ok(GoalEventsReadWire::default());
         }
         Err(error) => {
             return Err(GoalLedgerError::Io(format!(
@@ -100,6 +107,10 @@ pub fn read_goal_events(
             )));
         }
     };
+    if let Some(counts) = probe.as_mut() {
+        counts.event_dir_stats += 1;
+        counts.opened_event_dirs.push(goal_id.to_string());
+    }
     let mut names: Vec<String> = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
@@ -118,41 +129,55 @@ pub fn read_goal_events(
     }
     names.sort();
     let mut events = Vec::with_capacity(names.len());
+    let mut unparseable = Vec::new();
     for name in names {
         let path = dir.join(format!("{name}.json"));
         if let Some(counts) = probe.as_mut() {
             counts.event_files_opened += 1;
         }
-        let contents = fs::read_to_string(&path).map_err(|error| {
-            if error.kind() == ErrorKind::NotFound {
-                // Raced with a concurrent repair; skip it.
-                return GoalLedgerError::Io(format!(
-                    "vanished during read: {}",
-                    path.display()
-                ));
-            }
-            GoalLedgerError::Io(format!(
-                "failed to read {}: {error}",
-                path.display()
-            ))
-        });
-        let contents = match contents {
+        let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
-            Err(error) if error.to_string().starts_with("vanished") => {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // The file vanished between readdir and read, raced
+                // with a concurrent repair; skip it.
                 continue;
             }
-            Err(error) => return Err(error),
-        };
-        let event: GoalEventWire =
-            serde_json::from_str(&contents).map_err(|error| {
-                GoalLedgerError::Data(format!(
-                    "unparseable event {}: {error}",
+            Err(error) => {
+                return Err(GoalLedgerError::Io(format!(
+                    "failed to read {}: {error}",
                     path.display()
-                ))
-            })?;
-        events.push(event);
+                )));
+            }
+        };
+        match serde_json::from_str::<GoalEventWire>(&contents) {
+            Ok(event) => events.push(event),
+            Err(error) => {
+                unparseable.push(format!("{}: {error}", path.display()));
+            }
+        }
     }
-    Ok(events)
+    Ok(GoalEventsReadWire {
+        events,
+        unparseable,
+    })
+}
+
+/// Reduce one goal's read outcome to its state, isolating corruption:
+/// an unparseable event file makes only its goal unreadable, with an
+/// `unparseable_event` reason naming the file. Neighbors keep going.
+pub fn reduce_read_goal(
+    goal_id: &str,
+    read: &GoalEventsReadWire,
+) -> GoalStateWire {
+    let mut state = reduce_goal_events(goal_id, &read.events);
+    if let Some(first) = read.unparseable.first() {
+        if state.readable {
+            state.readable = false;
+            state.unreadable_reason =
+                Some(format!("unparseable_event {first}"));
+        }
+    }
+    state
 }
 
 /// Reduce one goal's current events to its state.
@@ -161,8 +186,15 @@ pub fn reduce_goal(
     goal_id: &str,
     probe: Option<&mut GoalLedgerProbeCountsWire>,
 ) -> Result<GoalStateWire, GoalLedgerError> {
-    let events = read_goal_events(root, goal_id, probe)?;
-    Ok(reduce_goal_events(goal_id, &events))
+    let read = read_goal_events(root, goal_id, probe)?;
+    Ok(reduce_read_goal(goal_id, &read))
+}
+
+/// Count one real `STORE.json` read on the probe.
+fn count_store_read(mut probe: Option<&mut GoalLedgerProbeCountsWire>) {
+    if let Some(counts) = probe.as_mut() {
+        counts.store_reads += 1;
+    }
 }
 
 /// List the live marker ids in sorted order.
@@ -257,6 +289,7 @@ fn goal_ledger_list_inner(
     mut probe: Option<&mut GoalLedgerProbeCountsWire>,
 ) -> Result<GoalListWire, GoalLedgerError> {
     read_goal_store(root)?;
+    count_store_read(reborrow(&mut probe));
     let word = filter.status.as_deref().unwrap_or("unsettled");
     let markers = read_live_markers(root, reborrow(&mut probe))?;
     let mut states = Vec::new();
@@ -299,17 +332,18 @@ fn goal_ledger_list_inner(
 pub fn goal_ledger_show(
     root: &Path,
     goal_id: &str,
-    probe: Option<&mut GoalLedgerProbeCountsWire>,
+    mut probe: Option<&mut GoalLedgerProbeCountsWire>,
 ) -> Result<GoalStateWire, GoalLedgerError> {
     use super::super::ids::parse_goal_id;
     read_goal_store(root)?;
+    count_store_read(reborrow(&mut probe));
     let parsed = parse_goal_id(goal_id)
         .map_err(|error| GoalLedgerError::InvalidId(error.to_string()))?;
-    let events = read_goal_events(root, &parsed, probe)?;
-    if events.is_empty() {
+    let read = read_goal_events(root, &parsed, reborrow(&mut probe))?;
+    if read.events.is_empty() && read.unparseable.is_empty() {
         return Err(GoalLedgerError::UnknownGoal(parsed));
     }
-    Ok(reduce_goal_events(&parsed, &events))
+    Ok(reduce_read_goal(&parsed, &read))
 }
 
 /// Explicit history scan for `done`/`dropped`/`settled`/`all`, newest
@@ -321,6 +355,7 @@ pub fn goal_ledger_history(
     mut probe: Option<&mut GoalLedgerProbeCountsWire>,
 ) -> Result<GoalListWire, GoalLedgerError> {
     read_goal_store(root)?;
+    count_store_read(reborrow(&mut probe));
     let word = filter.status.as_deref().unwrap_or("settled");
     let limit = filter.limit.unwrap_or(20);
     let dir = goal_items_dir(root);

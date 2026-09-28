@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "event_id": "01j8x90000000000000000006",
+  "event_id": "01j8x900000000000000000006",
   "goal_id": "7k2mq",
   "kind": "progress",
   "at": "2026-09-28T14:05:00.000Z",
   "actor": { "principal": "bryan.athena:agent-a", "kind": "agent", "agent": "agent-a" },
-  "basis": "01j8x90000000000000000001",
+  "basis": "01j8x900000000000000000001",
   "idempotency_key": "agent:progress:0006",
   "payload": {
     "note": "Drafted the storage section.",

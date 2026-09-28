@@ -212,14 +212,26 @@ fn projection_lock_path(projection_path: &Path) -> PathBuf {
     projection_path.with_file_name(format!("{filename}.lock"))
 }
 
-/// Read a projection file. `Ok(None)` means missing.
+/// What the projection file held when we looked.
+enum ProjectionLoad {
+    /// No projection file exists.
+    Missing,
+    /// The file exists but does not parse: rebuildable, never fatal.
+    Corrupt,
+    /// The file parsed.
+    Loaded(GoalProjectionWire),
+}
+
+/// Read a projection file. A missing file loads as `Missing`; an
+/// unparseable file loads as `Corrupt` so status reports a non-Fresh
+/// name and refresh rebuilds it instead of erroring.
 fn load_projection(
     projection_path: &Path,
-) -> Result<Option<GoalProjectionWire>, GoalLedgerError> {
+) -> Result<ProjectionLoad, GoalLedgerError> {
     let contents = match fs::read_to_string(projection_path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(None);
+            return Ok(ProjectionLoad::Missing);
         }
         Err(error) => {
             return Err(GoalLedgerError::Io(format!(
@@ -228,14 +240,27 @@ fn load_projection(
             )));
         }
     };
-    let projection: GoalProjectionWire = serde_json::from_str(&contents)
-        .map_err(|error| {
-            GoalLedgerError::Data(format!(
-                "unreadable projection {}: {error}",
-                projection_path.display()
-            ))
-        })?;
-    Ok(Some(projection))
+    match serde_json::from_str::<GoalProjectionWire>(&contents) {
+        Ok(projection) => Ok(ProjectionLoad::Loaded(projection)),
+        Err(_) => Ok(ProjectionLoad::Corrupt),
+    }
+}
+
+/// Read a projection file's header for repair paths that preserve it.
+///
+/// Returns `None` when the file is missing, corrupt, or on an older
+/// schema; callers fall back to the request values and then defaults.
+pub(crate) fn load_projection_header(
+    projection_path: &Path,
+) -> Option<GoalProjectionWire> {
+    match load_projection(projection_path) {
+        Ok(ProjectionLoad::Loaded(projection))
+            if projection.schema_version == GOAL_PROJECTION_SCHEMA_VERSION =>
+        {
+            Some(projection)
+        }
+        _ => None,
+    }
 }
 
 /// Classify a projection file against its ledger without reducing.
@@ -243,13 +268,27 @@ pub fn goal_projection_status(
     root: &Path,
     projection_path: &Path,
 ) -> Result<GoalProjectionReportWire, GoalLedgerError> {
-    let Some(projection) = load_projection(projection_path)? else {
-        return Ok(GoalProjectionReportWire {
-            status: GoalProjectionStatusNameWire::Missing,
-            cached_goals: 0,
-            changed_goals: 0,
-            readable: false,
-        });
+    let loaded = load_projection(projection_path)?;
+    let projection = match loaded {
+        ProjectionLoad::Missing => {
+            return Ok(GoalProjectionReportWire {
+                status: GoalProjectionStatusNameWire::Missing,
+                cached_goals: 0,
+                changed_goals: 0,
+                readable: false,
+            });
+        }
+        ProjectionLoad::Corrupt => {
+            // Garbage bytes are rebuildable, not fatal: report a
+            // non-Fresh status so repair rewrites the file.
+            return Ok(GoalProjectionReportWire {
+                status: GoalProjectionStatusNameWire::SchemaMismatch,
+                cached_goals: 0,
+                changed_goals: 0,
+                readable: false,
+            });
+        }
+        ProjectionLoad::Loaded(projection) => projection,
     };
     if projection.schema_version != GOAL_PROJECTION_SCHEMA_VERSION {
         return Ok(GoalProjectionReportWire {
@@ -304,11 +343,20 @@ pub fn refresh_goal_projection(
 ) -> Result<GoalProjectionRefreshWire, GoalLedgerError> {
     goal_ledger_init(root)?;
     let report = goal_projection_status(root, projection_path)?;
-    let previous = load_projection(projection_path)?;
-    let header_changed = match &previous {
-        Some(projection)
+    let previous = match load_projection(projection_path)? {
+        ProjectionLoad::Loaded(projection)
             if projection.schema_version == GOAL_PROJECTION_SCHEMA_VERSION =>
         {
+            Some(projection)
+        }
+        // Missing, corrupt, or older-schema files carry no reusable
+        // header or cache: rebuild from the ledger.
+        ProjectionLoad::Loaded(_)
+        | ProjectionLoad::Missing
+        | ProjectionLoad::Corrupt => None,
+    };
+    let header_changed = match &previous {
+        Some(projection) => {
             projection.project != project
                 || projection.mode != mode
                 || projection.ledger_root != root.display().to_string()
@@ -317,15 +365,11 @@ pub fn refresh_goal_projection(
                 || (projection.fetch_ttl_seconds - fetch_ttl_seconds).abs()
                     > f64::EPSILON
         }
-        _ => true,
+        None => true,
     };
     let mut cached: BTreeMap<String, GoalProjectionGoalWire> = match previous {
-        Some(projection)
-            if projection.schema_version == GOAL_PROJECTION_SCHEMA_VERSION =>
-        {
-            projection.goals
-        }
-        _ => BTreeMap::new(),
+        Some(projection) => projection.goals,
+        None => BTreeMap::new(),
     };
     let markers = read_live_markers(root, None)?;
     let mut goals: BTreeMap<String, GoalProjectionGoalWire> = BTreeMap::new();

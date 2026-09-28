@@ -223,12 +223,14 @@ fn py_goal_render_list<'py>(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
     let request: GoalRenderListRequestWire = request_from_dict(request)?;
-    let value = serde_json::to_value(sase_core::goal::GoalRenderTextWire {
-        text: core_render_goal_list(&request),
-    })
-    .map_err(|error| {
-        PyValueError::new_err(format!("internal serialize error: {error}"))
-    })?;
+    let text = py.allow_threads(|| core_render_goal_list(&request));
+    let value =
+        serde_json::to_value(sase_core::goal::GoalRenderTextWire { text })
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal serialize error: {error}"
+                ))
+            })?;
     json_value_to_py(py, &value)
 }
 
@@ -239,12 +241,14 @@ fn py_goal_render_card<'py>(
     request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
     let request: GoalRenderCardRequestWire = request_from_dict(request)?;
-    let value = serde_json::to_value(sase_core::goal::GoalRenderTextWire {
-        text: core_render_goal_card(&request),
-    })
-    .map_err(|error| {
-        PyValueError::new_err(format!("internal serialize error: {error}"))
-    })?;
+    let text = py.allow_threads(|| core_render_goal_card(&request));
+    let value =
+        serde_json::to_value(sase_core::goal::GoalRenderTextWire { text })
+            .map_err(|error| {
+                PyValueError::new_err(format!(
+                    "internal serialize error: {error}"
+                ))
+            })?;
     json_value_to_py(py, &value)
 }
 

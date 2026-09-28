@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::ids::{mint_event_id, mint_goal_id};
+use super::ids::{mint_event_id, mint_goal_id, parse_goal_id};
 use super::wire::{
     GoalActorWire, GoalCreatedPayloadWire, GoalCriterionInputWire,
     GoalEditedPayloadWire, GoalEventKindWire, GoalEventPayloadWire,
@@ -391,8 +391,8 @@ fn check_title(title: &str) -> Result<String, GoalRefusalWire> {
     let title = trimmed(title);
     if title.is_empty() {
         return Err(GoalRefusalWire::new(
-            "title_required",
-            "title is required",
+            "title_empty",
+            "title is empty after trimming",
         ));
     }
     if title.chars().count() > GOAL_TITLE_MAX {
@@ -417,8 +417,8 @@ fn check_outcome(outcome: &str) -> Result<String, GoalRefusalWire> {
     let outcome = trimmed(outcome);
     if outcome.is_empty() {
         return Err(GoalRefusalWire::new(
-            "outcome_required",
-            "outcome is required",
+            "outcome_empty",
+            "outcome is empty after trimming",
         ));
     }
     if outcome.chars().count() > GOAL_OUTCOME_MAX {
@@ -594,31 +594,25 @@ fn plan_edit(
         ));
     }
     check_head(state, expected_head)?;
-    let title =
-        title
-            .map(|value| check_title(&value))
-            .transpose()
-            .map_err(|_| {
-                GoalRefusalWire::new(
-                    "title_too_long",
-                    format!(
-                        "title is too long or empty; \
-                     want 1 to {GOAL_TITLE_MAX} chars on one line"
-                    ),
-                )
-            })?;
-    let outcome = outcome
-        .map(|value| check_outcome(&value))
-        .transpose()
-        .map_err(|_| {
-            GoalRefusalWire::new(
-                "outcome_too_long",
-                format!(
-                    "outcome is too long or empty; \
-                     want 1 to {GOAL_OUTCOME_MAX} chars on one line"
-                ),
-            )
-        })?;
+    // Plan against the normalized id so the envelope and the write
+    // paths never fork on letter case.
+    let goal_id =
+        parse_goal_id(goal_id).unwrap_or_else(|_| goal_id.to_string());
+    let title = title.map(|value| check_title(&value)).transpose()?;
+    let outcome = outcome.map(|value| check_outcome(&value)).transpose()?;
+    // Every removed id must name a criterion currently on the goal;
+    // the reducer's `unknown_criterion` diagnostic is history repair,
+    // not validation.
+    for removed in criteria_removed {
+        if !state.criteria.iter().any(|known| &known.id == removed) {
+            return Err(GoalRefusalWire::new(
+                "criterion_not_found",
+                format!("criterion {removed} is not on goal {}", state.id,),
+            ));
+        }
+    }
+    // The cap counts current criteria, minus valid removals, plus
+    // additions.
     let criteria_added = check_criteria(
         criteria_added,
         state.criteria.len().saturating_sub(criteria_removed.len()),
@@ -640,8 +634,14 @@ fn plan_edit(
         })
         .transpose()?
         .flatten();
-    if title.is_none()
-        && outcome.is_none()
+    // An edit whose every supplied field already equals the current
+    // value changes nothing.
+    let title_same = title.as_deref().is_none_or(|value| value == state.title);
+    let outcome_same = outcome
+        .as_deref()
+        .is_none_or(|value| value == state.outcome);
+    if title_same
+        && outcome_same
         && criteria_added.is_empty()
         && criteria_removed.is_empty()
         && note.is_none()
@@ -658,7 +658,7 @@ fn plan_edit(
         note,
     };
     Ok(vec![envelope(
-        goal_id,
+        &goal_id,
         event_id.clone(),
         GoalEventKindWire::Edited,
         state.head.clone(),
@@ -693,6 +693,8 @@ fn plan_drop(
         ));
     }
     check_head(state, expected_head)?;
+    let goal_id =
+        parse_goal_id(goal_id).unwrap_or_else(|_| goal_id.to_string());
     let why = trimmed(why);
     if why.is_empty() {
         return Err(GoalRefusalWire::new(
@@ -717,7 +719,7 @@ fn plan_drop(
         note: Some(why),
     };
     Ok(vec![envelope(
-        goal_id,
+        &goal_id,
         event_id.clone(),
         GoalEventKindWire::Settled,
         state.head.clone(),
@@ -755,12 +757,14 @@ fn plan_reopen(
         ));
     }
     check_head(state, expected_head)?;
+    let goal_id =
+        parse_goal_id(goal_id).unwrap_or_else(|_| goal_id.to_string());
     let message = check_message(message)?;
     let event_id = ids.mint_event_id();
     let key = key_or_generated(idempotency_key, &event_id);
     let payload = GoalReopenedPayloadWire { message };
     Ok(vec![envelope(
-        goal_id,
+        &goal_id,
         event_id.clone(),
         GoalEventKindWire::Reopened,
         state.head.clone(),
@@ -784,6 +788,11 @@ fn plan_merge(
     now: &str,
     ids: &mut dyn GoalIdMint,
 ) -> Result<Vec<GoalEventWire>, GoalRefusalWire> {
+    // Compare normalized ids so `ABCDE` into `abcde` is still itself.
+    let source_id =
+        parse_goal_id(source_id).unwrap_or_else(|_| source_id.to_string());
+    let target_id =
+        parse_goal_id(target_id).unwrap_or_else(|_| target_id.to_string());
     if source_id == target_id {
         return Err(GoalRefusalWire::new(
             "merge_into_self",
@@ -853,7 +862,7 @@ fn plan_merge(
     };
     Ok(vec![
         envelope(
-            source_id,
+            &source_id,
             settle_id.clone(),
             GoalEventKindWire::Settled,
             state.head.clone(),
@@ -863,7 +872,7 @@ fn plan_merge(
             to_payload(&settle),
         ),
         envelope(
-            target_id,
+            &target_id,
             record_id.clone(),
             GoalEventKindWire::Merged,
             target.head.clone(),
