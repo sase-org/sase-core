@@ -219,7 +219,7 @@ fn artifact_kind_candidates_list_builtins_in_documented_order() {
             .iter()
             .map(|candidate| candidate.insertion.as_str())
             .collect::<Vec<_>>(),
-        vec!["commit:", "chat:", "bug:", "file:", "bead:", "agent:"]
+        vec!["commit:", "chat:", "bug:", "file:", "bead:", "agent:", "goal:"]
     );
     assert!(list.candidates.iter().all(|candidate| {
         candidate.detail.as_deref() == Some("builtin artifact kind")

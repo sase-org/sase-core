@@ -114,6 +114,18 @@ fn registrations() -> Vec<KindRegistration> {
             diagnostic: None,
         },
         KindRegistration {
+            kind: "goal",
+            display_name: "Goal",
+            status: ArtifactRefKindStatusWire::Live,
+            canonical: None,
+            aliases: &[],
+            reserved: true,
+            argument_summary: "goal:<id> or goal:<project>@<id>",
+            offered_in_completion: true,
+            fragment_probe: ArtifactRefKindWire::Goal,
+            diagnostic: None,
+        },
+        KindRegistration {
             kind: "agent",
             display_name: "Agent",
             status: ArtifactRefKindStatusWire::Live,
@@ -307,7 +319,7 @@ mod tests {
     #[test]
     fn catalog_lists_reserved_kinds_offered_in_completion() {
         let catalog = artifact_ref_kind_catalog();
-        for kind in ["stitch", "patch", "bead", "agent", "file"] {
+        for kind in ["stitch", "patch", "bead", "agent", "file", "goal"] {
             let descriptor = catalog
                 .iter()
                 .find(|descriptor| descriptor.kind == kind)

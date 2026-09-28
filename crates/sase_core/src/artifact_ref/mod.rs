@@ -225,6 +225,19 @@ pub fn render_artifact_ref(
             name.clone()
         }
         (
+            ArtifactRefKindWire::Goal,
+            ArtifactRefPayloadWire::Goal { project, id },
+        ) => {
+            let id = validate_goal_id(id)?;
+            match project {
+                Some(project) => {
+                    validate_project(project)?;
+                    format!("{project}@{id}")
+                }
+                None => id,
+            }
+        }
+        (
             ArtifactRefKindWire::Document { .. },
             ArtifactRefPayloadWire::Document { path },
         ) => {
@@ -386,6 +399,9 @@ pub fn resolve_artifact_ref(
         (ArtifactRefKindWire::Patch, ArtifactRefPayloadWire::Patch { .. }) => {
             Ok(unresolved_kind_resolution("patch", rendered))
         }
+        (ArtifactRefKindWire::Goal, ArtifactRefPayloadWire::Goal { .. }) => {
+            Ok(unresolved_kind_resolution("goal", rendered))
+        }
         _ => Err(ArtifactRefError::validation(
             "artifact reference kind does not match its payload",
         )),
@@ -440,6 +456,7 @@ fn classify_kind(kind: &str) -> ArtifactRefKindWire {
         "agent" => ArtifactRefKindWire::Agent,
         "stitch" => ArtifactRefKindWire::Stitch,
         "patch" => ArtifactRefKindWire::Patch,
+        "goal" => ArtifactRefKindWire::Goal,
         role => ArtifactRefKindWire::Document {
             role: role.to_string(),
         },
@@ -560,6 +577,19 @@ fn parse_payload(
                 name: payload.to_string(),
             })
         }
+        ArtifactRefKindWire::Goal => match payload.rsplit_once('@') {
+            Some((project, id)) => {
+                validate_project(project)?;
+                Ok(ArtifactRefPayloadWire::Goal {
+                    project: Some(project.to_string()),
+                    id: validate_goal_id(id)?,
+                })
+            }
+            None => Ok(ArtifactRefPayloadWire::Goal {
+                project: None,
+                id: validate_goal_id(payload)?,
+            }),
+        },
         ArtifactRefKindWire::Bead => {
             validate_bead_id(payload)?;
             Ok(ArtifactRefPayloadWire::Bead {
@@ -1218,7 +1248,8 @@ fn kind_rejects_fragments(kind: &ArtifactRefKindWire) -> bool {
         | ArtifactRefKindWire::Bead
         | ArtifactRefKindWire::Agent
         | ArtifactRefKindWire::Stitch
-        | ArtifactRefKindWire::Patch => true,
+        | ArtifactRefKindWire::Patch
+        | ArtifactRefKindWire::Goal => true,
         ArtifactRefKindWire::Document { role } if role == "tool" => true,
         _ => false,
     }
@@ -1248,6 +1279,16 @@ fn validate_bead_id(id: &str) -> Result<(), ArtifactRefError> {
         }
     }
     Ok(())
+}
+
+/// Validate a `goal:` id against the frozen G1 contract.
+///
+/// Parsing folds uppercase to lowercase, so the canonical folded id is
+/// returned for rendering.
+fn validate_goal_id(id: &str) -> Result<String, ArtifactRefError> {
+    crate::goal::parse_goal_id(id).map_err(|error| {
+        ArtifactRefError::validation(format!("invalid goal id: {error}"))
+    })
 }
 
 /// Validate an `agent:` payload against the historical semantic-name rules.
@@ -1498,6 +1539,9 @@ mod tests {
             ("bead:sase-9z", "bead:sase-9z"),
             ("bead:sase-9z.1", "bead:sase-9z.1"),
             ("bead:sase-ag.land", "bead:sase-ag.land"),
+            ("goal:7k2mq", "goal:7k2mq"),
+            ("goal:7K2MQ", "goal:7k2mq"),
+            ("goal:sase@7k2mq", "goal:sase@7k2mq"),
             ("agent:bbugyi200.athena.9w", "agent:bbugyi200.athena.9w"),
             (
                 "agent:bbugyi200.athena.9w--code",
@@ -1553,6 +1597,14 @@ mod tests {
             "patch: leading space",
             "patch:trailing space ",
             "patch:name#L1",
+            "goal:",
+            "goal: text",
+            "goal:7k2m",
+            "goal:7k2mqx",
+            "goal:7k2m!",
+            "goal:@7k2mq",
+            "goal:sase@7k2mq#L1",
+            "goal:7k2mq#L1",
             "file:#L1",
             "file:notes/x.md\0",
             "file:notes/x.md\\y",
@@ -1560,6 +1612,42 @@ mod tests {
         ] {
             assert!(parse_artifact_ref(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn goal_kind_resolves_through_the_provider_registry() {
+        let context = ArtifactRefContextWire::default();
+        for value in ["goal:7k2mq", "goal:sase@7k2mq"] {
+            let parsed = parse_artifact_ref(value).unwrap();
+            assert!(kind_rejects_fragments(&parsed.kind));
+            let resolved = resolve_artifact_ref(&parsed, &context).unwrap();
+            assert_eq!(resolved.status, "unknown_kind");
+            assert_eq!(
+                resolved.diagnostic.as_deref(),
+                Some(
+                    "goal references resolve through the provider registry, \
+                     not this crate"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn goal_kind_is_reserved_live_and_offered_in_completion() {
+        let catalog = artifact_ref_kind_catalog();
+        let descriptor = catalog
+            .iter()
+            .find(|descriptor| descriptor.kind == "goal")
+            .expect("missing goal descriptor");
+        assert_eq!(descriptor.display_name, "Goal");
+        assert_eq!(descriptor.status, ArtifactRefKindStatusWire::Live);
+        assert!(descriptor.reserved);
+        assert!(descriptor.offered_in_completion);
+        assert_eq!(
+            descriptor.argument_summary,
+            "goal:<id> or goal:<project>@<id>"
+        );
+        assert_eq!(canonical_artifact_ref_kind("goal").canonical, "goal");
     }
 
     #[test]

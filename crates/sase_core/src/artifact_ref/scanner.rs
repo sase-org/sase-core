@@ -1186,6 +1186,43 @@ mod tests {
     }
 
     #[test]
+    fn goal_refs_scan_while_yaml_goal_labels_stay_dropped() {
+        let candidate = only("@goal:7k2mq");
+        assert_eq!(candidate.kind, "goal");
+        assert!(candidate.well_formed);
+
+        // YAML-style `goal: text` (plan frontmatter) is malformed and dropped.
+        let scan = scan_artifact_ref_document_links(
+            "---\ngoal: write the design\n---\n",
+            &[],
+        );
+        assert!(scan.links.iter().all(|link| !link.well_formed));
+        assert!(scan
+            .links
+            .iter()
+            .all(|link| link.artifact_reference.is_none()));
+
+        // Unsigiled goal refs in plan bodies linkify through the catalog.
+        let links =
+            scan_artifact_ref_document_links("see goal:7k2mq next", &[]);
+        let targets = links
+            .links
+            .iter()
+            .filter(|link| link.well_formed)
+            .map(|link| link.target.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(targets, ["goal:7k2mq"]);
+
+        // But `goal:` followed by a space never linkifies.
+        let links = scan_artifact_ref_document_links("our goal: ship it", &[]);
+        assert!(links
+            .links
+            .iter()
+            .filter(|link| link.well_formed)
+            .all(|link| !link.target.starts_with("goal:")));
+    }
+
+    #[test]
     fn document_scan_uses_markdown_destination_for_ordinary_links() {
         let links = document_links(
             "open [the plan](plan:202609/pager_target_integrity.md#L4) \

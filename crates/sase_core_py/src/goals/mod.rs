@@ -19,8 +19,11 @@ use sase_core::goal::ledger::{
     GoalLedgerError, GoalListFilterWire,
 };
 use sase_core::goal::{
-    mint_goal_id as core_mint_goal_id, GOAL_LEDGER_SCHEMA_VERSION,
-    GOAL_WIRE_SCHEMA_VERSION,
+    goal_card_markdown as core_goal_card_markdown,
+    goal_card_view as core_goal_card_view,
+    goal_citation_line as core_goal_citation_line,
+    mint_goal_id as core_mint_goal_id, GoalCardViewWire,
+    GOAL_LEDGER_SCHEMA_VERSION, GOAL_WIRE_SCHEMA_VERSION,
 };
 use std::path::PathBuf;
 
@@ -218,6 +221,46 @@ fn py_goal_ledger_probe_list<'py>(
     )
 }
 
+#[pyfunction]
+#[pyo3(name = "goal_card_view")]
+fn py_goal_card_view<'py>(
+    py: Python<'py>,
+    root: &str,
+    goal_id: &str,
+    now: &str,
+) -> PyResult<PyObject> {
+    let root = PathBuf::from(root);
+    let goal_id = goal_id.to_string();
+    let now = now.to_string();
+    goal_result_to_py(
+        py,
+        py.allow_threads(|| {
+            core_goal_ledger_show(&root, &goal_id, None)
+                .map(|state| core_goal_card_view(&state, &now))
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "goal_card_markdown")]
+fn py_goal_card_markdown<'py>(
+    py: Python<'py>,
+    card: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let card: GoalCardViewWire = request_from_dict(card)?;
+    Ok(py.allow_threads(|| core_goal_card_markdown(&card)))
+}
+
+#[pyfunction]
+#[pyo3(name = "goal_citation_line")]
+fn py_goal_citation_line<'py>(
+    py: Python<'py>,
+    card: &Bound<'_, PyDict>,
+) -> PyResult<String> {
+    let card: GoalCardViewWire = request_from_dict(card)?;
+    Ok(py.allow_threads(|| core_goal_citation_line(&card)))
+}
+
 pub(crate) fn register_goals(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_goal_ledger_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_goal_ledger_store_schema_version, m)?)?;
@@ -231,5 +274,8 @@ pub(crate) fn register_goals(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_goal_projection_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_goal_projection_refresh, m)?)?;
     m.add_function(wrap_pyfunction!(py_goal_ledger_probe_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_card_view, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_card_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(py_goal_citation_line, m)?)?;
     Ok(())
 }

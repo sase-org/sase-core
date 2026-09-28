@@ -21,7 +21,7 @@ pub const AT_REFERENCE_MAX_GROUP_ROWS: usize = 200;
 /// New kinds are appended so existing rows keep their position. This is the
 /// single source of truth; nothing else may hardcode the list.
 pub const BUILTIN_ARTIFACT_REF_KINDS: &[&str] =
-    &["commit", "chat", "bug", "file", "bead", "agent"];
+    &["commit", "chat", "bug", "file", "bead", "agent", "goal"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

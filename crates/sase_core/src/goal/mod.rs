@@ -9,6 +9,7 @@ mod actions;
 mod ids;
 pub mod ledger;
 mod reduce;
+pub mod render;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -28,6 +29,9 @@ pub use ids::{
 };
 pub use reduce::{
     goal_event_publish_class, reduce_goal_events, GoalPublishClassWire,
+};
+pub use render::{
+    goal_card_markdown, goal_citation_line, GOAL_CITATION_LINE_MAX,
 };
 pub use view::{
     goal_card_view, goal_row_view, goal_row_view_at, GOAL_ACCENT_HEX,

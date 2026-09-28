@@ -44,6 +44,9 @@ fn goal_bindings_are_registered() {
             "goal_ledger_wire_schema_version",
             "goal_ledger_store_schema_version",
             "goal_ledger_probe_list",
+            "goal_card_view",
+            "goal_card_markdown",
+            "goal_citation_line",
         ] {
             assert!(module.getattr(name).is_ok(), "{name}");
         }
@@ -109,6 +112,64 @@ fn goal_ledger_bindings_round_trip() {
         let probe = py_goal_ledger_probe_list(py, &root).unwrap();
         let value = py_to_json_value(probe.bind(py)).unwrap();
         assert_eq!(value["counts"]["settled_event_opens"], json!(0));
+    });
+}
+
+#[test]
+fn goal_render_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let card = json_value_to_py(
+            py,
+            &json!({
+                "title": "Binding goal",
+                "status_badge": "ACTIVE",
+                "goal_ref": "goal:7k2mq",
+                "project": "sase",
+                "opened_by": "bryan.athena",
+                "opened_at": "2026-09-28T14:00:00.000Z",
+                "outcome": "the outcome",
+                "criteria": [
+                    {"id": "e.0", "text": "cover sync", "source": "user"},
+                ],
+            }),
+        )
+        .unwrap()
+        .into_bound(py);
+        let card = card.downcast::<PyDict>().unwrap();
+        let markdown = py_goal_card_markdown(py, card).unwrap();
+        assert!(markdown.contains("⌖ Binding goal"));
+        assert!(markdown.contains("goal:7k2mq · sase · ACTIVE"));
+        assert!(markdown.contains("- cover sync (user)"));
+        let line = py_goal_citation_line(py, card).unwrap();
+        assert!(line.starts_with(
+            "goal ⌖7k2mq \"Binding goal\" in the sase project (active)"
+        ));
+        assert!(line.contains("sase goal show 7k2mq"));
+        assert!(line.chars().count() <= 400);
+    });
+}
+
+#[test]
+fn goal_card_view_binding_reduces_state() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("goals").display().to_string();
+        py_goal_ledger_init(py, &root).unwrap();
+        let request = json_value_to_py(py, &new_request("k1"))
+            .unwrap()
+            .into_bound(py);
+        let request = request.downcast::<PyDict>().unwrap();
+        py_goal_ledger_append(py, &root, request).unwrap();
+
+        let card =
+            py_goal_card_view(py, &root, "7k2mq", "2026-09-28T15:00:00.000Z")
+                .unwrap();
+        let value = py_to_json_value(card.bind(py)).unwrap();
+        assert_eq!(value["goal_ref"], json!("goal:7k2mq"));
+        assert_eq!(value["status_badge"], json!("ACTIVE"));
+        assert_eq!(value["title"], json!("Binding goal"));
     });
 }
 

@@ -25,7 +25,7 @@ use super::wire::ArtifactRefError;
 pub const ARTIFACT_REF_PROVIDER_SPEC_WIRE_SCHEMA_VERSION: u64 = 1;
 
 const RESERVED_KINDS: &[&str] =
-    &["stitch", "patch", "bead", "agent", "file", "tool"];
+    &["stitch", "patch", "bead", "agent", "file", "tool", "goal"];
 pub(crate) const PROPERTY_TYPES: &[&str] = &[
     "string",
     "enum",
@@ -303,6 +303,10 @@ mod tests {
 
         let mut spec = valid_spec();
         spec.reference.kind = "tool".to_string();
+        assert!(validate_artifact_ref_provider_spec(&spec).is_err());
+
+        let mut spec = valid_spec();
+        spec.reference.kind = "goal".to_string();
         assert!(validate_artifact_ref_provider_spec(&spec).is_err());
 
         let mut spec = valid_spec();

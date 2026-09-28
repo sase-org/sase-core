@@ -263,6 +263,7 @@ async fn completes_grouped_at_references_from_the_client_root() {
             "@file:",
             "@bead:",
             "@agent:",
+            "@goal:",
             "@designs:",
             "@plan:",
         ]

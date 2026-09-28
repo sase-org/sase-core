@@ -52,6 +52,7 @@ pub enum ArtifactRefKindWire {
     Agent,
     Stitch,
     Patch,
+    Goal,
     Document { role: String },
 }
 
@@ -66,6 +67,7 @@ impl ArtifactRefKindWire {
             Self::Agent => "agent",
             Self::Stitch => "stitch",
             Self::Patch => "patch",
+            Self::Goal => "goal",
             Self::Document { role } => role,
         }
     }
@@ -120,6 +122,10 @@ pub enum ArtifactRefPayloadWire {
     },
     Patch {
         name: String,
+    },
+    Goal {
+        project: Option<String>,
+        id: String,
     },
     Document {
         path: String,

@@ -131,6 +131,10 @@ pub fn artifact_md_path(
             canonical,
             "stitch references have no artifact markdown file; links render on the peer",
         )),
+        (ArtifactRefKindWire::Goal, _) => Ok(none_path(
+            canonical,
+            "goal references have no artifact markdown file; read the card with `sase artifact read`",
+        )),
         (ArtifactRefKindWire::Bead, ArtifactRefPayloadWire::Bead { id }) => {
             bead_md_path(canonical, id, &request.context)
         }
@@ -457,6 +461,18 @@ mod tests {
         assert_eq!(result.kind, ArtifactMdPathKindWire::None);
         assert!(result.path.is_none());
         assert!(result.reason.as_deref().unwrap().contains("peer"));
+    }
+
+    #[test]
+    fn goal_has_no_markdown_file() {
+        let result = artifact_md_path(&request("goal:7k2mq")).unwrap();
+        assert_eq!(result.kind, ArtifactMdPathKindWire::None);
+        assert!(result.path.is_none());
+        assert!(result
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("sase artifact read"));
     }
 
     #[test]
