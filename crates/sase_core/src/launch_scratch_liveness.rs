@@ -8,13 +8,15 @@
 //! variable at or under it, or `SASE_LAUNCH_SCRATCH_KEY=<key>`) or
 //! its cwd resolves at or under it.
 //!
-//! Unreadable process detail is fail-closed, with one exception: a
+//! Unreadable process detail is fail-closed, with two exceptions. A
 //! process that started strictly before the scratch directory
 //! existed (systemd --user, sd-pam, ssh-agent pre-date every
 //! launch) cannot have inherited the launch environment, so it is
-//! neither a holder nor an incomplete observation. Hosts without a
-//! usable procfs report an explicit `unobservable` observer instead
-//! of `complete=false`.
+//! neither a holder nor an incomplete observation. Nor can a zombie
+//! or dead process, which has already released its address space,
+//! fs struct and cwd, so it is skipped outright rather than probed.
+//! Hosts without a usable procfs report an explicit `unobservable`
+//! observer instead of `complete=false`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -123,6 +125,7 @@ pub fn observe_launch_scratch_liveness(
     let mut diagnostics: Vec<String> = Vec::new();
     let mut exempted_pre_launch = 0_u64;
     let mut unreadable = 0_u64;
+    let mut exited_processes = 0_u64;
 
     let entries = match fs::read_dir(proc_root) {
         Ok(entries) => entries,
@@ -177,6 +180,19 @@ pub fn observe_launch_scratch_liveness(
             None => continue,
         }
 
+        let proc_stat = read_proc_stat(&pid_dir);
+        if matches!(
+            proc_stat.as_ref().map(|stat| stat.state),
+            Some('Z') | Some('X')
+        ) {
+            // A zombie or dead process has already released its
+            // address space, fs struct and cwd, so it cannot hold a
+            // launch's environment or working directory.
+            exited_processes += 1;
+            continue;
+        }
+        let started = process_start_epoch(proc_stat.as_ref(), &clock);
+
         let mut tally = PidTally::default();
         match fs::read(pid_dir.join("environ")) {
             Ok(environ) => {
@@ -187,8 +203,7 @@ pub fn observe_launch_scratch_liveness(
                     pid,
                     "environ",
                     &error.to_string(),
-                    &pid_dir,
-                    &clock,
+                    started,
                     &mut candidates,
                     &mut diagnostics,
                     &mut tally,
@@ -214,8 +229,7 @@ pub fn observe_launch_scratch_liveness(
                     pid,
                     "cwd",
                     &error.to_string(),
-                    &pid_dir,
-                    &clock,
+                    started,
                     &mut candidates,
                     &mut diagnostics,
                     &mut tally,
@@ -231,6 +245,11 @@ pub fn observe_launch_scratch_liveness(
         }
     }
 
+    if exited_processes > 0 {
+        diagnostics.push(format!(
+            "zombie exemption: {exited_processes} exited processes skipped"
+        ));
+    }
     if exempted_pre_launch > 0 {
         diagnostics.push(format!(
             "pre-launch exemption: {exempted_pre_launch} processes started \
@@ -297,18 +316,15 @@ fn observe_environ(environ: &[u8], candidates: &mut [Candidate]) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn observe_unreadable(
     pid: u32,
     source: &str,
     detail: &str,
-    pid_dir: &Path,
-    clock: &BootClock,
+    started: Option<f64>,
     candidates: &mut [Candidate],
     diagnostics: &mut Vec<String>,
     tally: &mut PidTally,
 ) {
-    let started = process_start_epoch(pid_dir, clock);
     let mut still_unreadable = false;
     for candidate in candidates.iter_mut() {
         tally.decisions += 1;
@@ -418,16 +434,40 @@ fn read_boot_clock(proc_root: &Path) -> BootClock {
     }
 }
 
-/// Start time of one pid as epoch seconds, from `stat` field 22
-/// (starttime ticks since boot) plus `btime` in `stat`.
-fn process_start_epoch(pid_dir: &Path, clock: &BootClock) -> Option<f64> {
-    let btime = clock.btime_epoch?;
-    let ticks_per_second = clock.ticks_per_second?;
+/// State and start time of one pid, parsed from `/proc/<pid>/stat`:
+/// field 3 (state) and field 22 (starttime ticks since boot). `comm`
+/// can contain spaces and parentheses, so both are read from the
+/// tokens after the last `)`, and a single read serves both
+/// `process_start_epoch` and the zombie/dead-process check.
+struct ProcStat {
+    state: char,
+    starttime_ticks: u64,
+}
+
+fn read_proc_stat(pid_dir: &Path) -> Option<ProcStat> {
     let content = fs::read_to_string(pid_dir.join("stat")).ok()?;
     let after_comm = content.rsplit_once(')')?.1;
-    let starttime =
-        after_comm.split_whitespace().nth(19)?.parse::<f64>().ok()?;
-    Some(btime + starttime / ticks_per_second)
+    let mut tokens = after_comm.split_whitespace();
+    let state = tokens.next()?.chars().next()?;
+    let starttime_ticks = tokens.nth(18)?.parse().ok()?;
+    Some(ProcStat {
+        state,
+        starttime_ticks,
+    })
+}
+
+/// Start time of one pid as epoch seconds, from its parsed `stat`
+/// starttime ticks plus `btime`. An unreadable or malformed `stat`
+/// (including one for which `read_proc_stat` returned `None`) yields
+/// `None`, falling through to today's behavior.
+fn process_start_epoch(
+    stat: Option<&ProcStat>,
+    clock: &BootClock,
+) -> Option<f64> {
+    let stat = stat?;
+    let btime = clock.btime_epoch?;
+    let ticks_per_second = clock.ticks_per_second?;
+    Some(btime + stat.starttime_ticks as f64 / ticks_per_second)
 }
 
 fn is_pre_launch(started: Option<f64>, birth: Option<f64>) -> bool {
@@ -471,10 +511,10 @@ mod tests {
         }
     }
 
-    fn write_process_stat(pid_dir: &Path, starttime_ticks: u64) {
+    fn write_process_stat(pid_dir: &Path, state: &str, starttime_ticks: u64) {
         // `stat` layout: pid (comm) state ... with starttime as field
         // 22 overall, the 20th whitespace token after the comm close.
-        let mut fields = vec!["R".to_string(), "1".to_string()];
+        let mut fields = vec![state.to_string(), "1".to_string()];
         fields.extend(std::iter::repeat_n("0".to_string(), 17));
         fields.push(starttime_ticks.to_string());
         let content = format!("1 (fake-proc) {}\n", fields.join(" "));
@@ -564,7 +604,7 @@ mod tests {
         let pid_dir = proc_root.join("1");
         fs::create_dir_all(&pid_dir).unwrap();
         fs::create_dir(pid_dir.join("environ")).unwrap();
-        write_process_stat(&pid_dir, 5);
+        write_process_stat(&pid_dir, "R", 5);
         let candidate = candidate_dir(temp.path(), "cargo-targets");
 
         let result = observe_launch_scratch_liveness(&request(
@@ -596,7 +636,7 @@ mod tests {
         // non-dumpable process; starttime far in the future keeps the
         // pre-launch exemption from applying.
         fs::create_dir(pid_dir.join("environ")).unwrap();
-        write_process_stat(&pid_dir, 200_000);
+        write_process_stat(&pid_dir, "R", 200_000);
         let candidate = candidate_dir(temp.path(), "cargo-targets");
 
         let result = observe_launch_scratch_liveness(&request(
@@ -608,6 +648,37 @@ mod tests {
         assert!(!result.candidates[0].complete);
         assert_eq!(result.exempted_pre_launch, 0);
         assert_eq!(result.unreadable, 1);
+    }
+
+    #[test]
+    fn zombie_process_is_not_counted_as_unreadable() {
+        let temp = tempdir().unwrap();
+        let now = current_epoch();
+        let proc_root = temp.path().join("proc");
+        fs::create_dir_all(&proc_root).unwrap();
+        write_proc_stat(&proc_root, now - 1000.0);
+        let pid_dir = proc_root.join("9999");
+        fs::create_dir_all(&pid_dir).unwrap();
+        // environ as a directory reads as an error, same shape as
+        // `later_unreadable_process_stays_incomplete`; the difference
+        // is the zombie state, which must exempt the pid outright
+        // even though its starttime is far in the future.
+        fs::create_dir(pid_dir.join("environ")).unwrap();
+        write_process_stat(&pid_dir, "Z", 200_000);
+        let candidate = candidate_dir(temp.path(), "cargo-targets");
+
+        let result = observe_launch_scratch_liveness(&request(
+            &[(SCRATCH_KEY, &candidate)],
+            &proc_root,
+        ));
+
+        assert!(!result.candidates[0].live);
+        assert!(
+            result.candidates[0].complete,
+            "a zombie process must not mark the observation incomplete: {}",
+            result.diagnostics.join("; ")
+        );
+        assert_eq!(result.unreadable, 0);
     }
 
     #[test]
