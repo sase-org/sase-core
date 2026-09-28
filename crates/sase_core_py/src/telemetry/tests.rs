@@ -1174,6 +1174,7 @@ fn tool_run_glance_projection_bindings_round_trip() {
                     "per_node_limit": 5
                 }),
             ),
+            ("detail", json!({"schema_version": 1, "run_id": "missing"})),
         ] {
             let request_obj = json_value_to_py(py, &request).unwrap();
             let request_dict =
@@ -1191,7 +1192,13 @@ fn tool_run_glance_projection_bindings_round_trip() {
                     request_dict,
                     1_000,
                 ),
-                _ => py_tool_run_node_summaries(
+                "nodes" => py_tool_run_node_summaries(
+                    py,
+                    missing.to_str().unwrap(),
+                    request_dict,
+                    1_000,
+                ),
+                _ => py_tool_run_detail(
                     py,
                     missing.to_str().unwrap(),
                     request_dict,
@@ -1304,6 +1311,45 @@ fn tool_run_glance_projection_bindings_round_trip() {
             nodes["nodes"][0]["latest_by_tool"][0]["run_id"],
             json!(run_id)
         );
+
+        let detail_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "run_id": run_id}),
+        )
+        .unwrap();
+        let detail_request = detail_obj.bind(py).downcast::<PyDict>().unwrap();
+        let detailed = py_tool_run_detail(
+            py,
+            path.to_str().unwrap(),
+            detail_request,
+            1_000,
+        )
+        .unwrap();
+        let detailed = py_to_json_value(detailed.bind(py)).unwrap();
+        assert_eq!(detailed["store_exists"], json!(true));
+        assert_eq!(detailed["found"], json!(true));
+        assert_eq!(detailed["brief"]["run_id"], json!(run_id));
+        assert_eq!(detailed["display_argv"], json!(["just", "check"]));
+        assert_eq!(detailed["detail_pruned"], json!(false));
+
+        // A witness window beyond the 30-day max fails closed.
+        let bad_window_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "witness_window_days": 31
+            }),
+        )
+        .unwrap();
+        let bad_window = bad_window_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_detail(
+            py,
+            path.to_str().unwrap(),
+            bad_window,
+            1_000
+        )
+        .is_err());
 
         // Unknown request fields and bad limits fail closed.
         let unknown_obj =

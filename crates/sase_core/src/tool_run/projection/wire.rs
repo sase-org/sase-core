@@ -316,3 +316,147 @@ pub struct ToolRunNodeSummariesResultWire {
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }
+
+/// `tool_run_detail` witness window: new/known witnesses count distinct
+/// runs and agents with the same signature inside this many days.
+pub const TOOL_RUN_DETAIL_DEFAULT_WINDOW_DAYS: u32 = 7;
+
+/// `tool_run_detail` accepts at most this many witness window days.
+pub const TOOL_RUN_DETAIL_MAX_WINDOW_DAYS: u32 = 30;
+
+/// `tool_run_detail` returns at most this many triage items by default.
+pub const TOOL_RUN_DETAIL_DEFAULT_ITEM_LIMIT: u32 = 50;
+
+/// `tool_run_detail` accepts at most this many triage items.
+pub const TOOL_RUN_DETAIL_MAX_ITEM_LIMIT: u32 = 200;
+
+/// Triage item locator paths cap here so one item stays a short block.
+pub const TOOL_RUN_DETAIL_MAX_LOCATORS: usize = 3;
+
+fn default_detail_window_days() -> u32 {
+    TOOL_RUN_DETAIL_DEFAULT_WINDOW_DAYS
+}
+
+fn default_detail_item_limit() -> u32 {
+    TOOL_RUN_DETAIL_DEFAULT_ITEM_LIMIT
+}
+
+/// Per-stage triage class counts for one finished or in-flight stage.
+/// Unlabeled items carry no class and count toward no bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunDetailStageCountsWire {
+    #[serde(default)]
+    pub new: u32,
+    #[serde(default)]
+    pub known: u32,
+    #[serde(default)]
+    pub flaky: u32,
+    #[serde(default)]
+    pub unknown: u32,
+}
+
+/// One stage of the run. Every stamp is milliseconds and says so; a
+/// started-only row leaves the finish fields absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunDetailStageWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub incomplete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bytes: Option<i64>,
+    #[serde(default)]
+    pub counts: ToolRunDetailStageCountsWire,
+}
+
+/// One stage of the reference run: the expected timeline the card shows
+/// pending and not-reached stages against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunExpectedStageWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<i64>,
+}
+
+/// One triage item with cross-run and cross-agent witness counts.
+/// `class` is absent for unlabeled items; witnesses share the item's
+/// `(signature, extractor_version)` inside the request window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunDetailTriageItemWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    pub stage_key: String,
+    pub display: String,
+    #[serde(default)]
+    pub locator_paths: Vec<String>,
+    #[serde(default)]
+    pub occurrences: u32,
+    #[serde(default)]
+    pub witness_runs: u32,
+    #[serde(default)]
+    pub witness_agents: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen_ts: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunDetailRequestWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    #[serde(default = "default_detail_window_days")]
+    pub witness_window_days: u32,
+    #[serde(default = "default_detail_item_limit")]
+    pub item_limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+/// One run for one card block: its brief, safe argv, millisecond stages,
+/// the reference run's expected stages, witnessed triage items, child
+/// runs, log metadata, and pruning facts. `private_argv` never appears.
+///
+/// No `Eq`: the shared log-metadata wire is `PartialEq`-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunDetailResultWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    pub store_exists: bool,
+    pub found: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<ToolRunBriefWire>,
+    #[serde(default)]
+    pub display_argv: Vec<String>,
+    #[serde(default)]
+    pub stages: Vec<ToolRunDetailStageWire>,
+    #[serde(default)]
+    pub expected_stages: Vec<ToolRunExpectedStageWire>,
+    #[serde(default)]
+    pub triage_items: Vec<ToolRunDetailTriageItemWire>,
+    #[serde(default)]
+    pub items_truncated: bool,
+    #[serde(default)]
+    pub child_runs: Vec<ToolRunBriefWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<super::super::wire::ToolRunLogMetadataWire>,
+    #[serde(default)]
+    pub detail_pruned: bool,
+    #[serde(default = "empty_diagnostics")]
+    pub diagnostics: Vec<String>,
+}

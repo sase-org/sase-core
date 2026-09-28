@@ -947,6 +947,34 @@ fn py_tool_run_node_summaries<'py>(
     telemetry_result_to_py(py, &result)
 }
 
+/// One run's card-block detail: brief, stages, expected stages, witnessed
+/// triage items, child runs, log metadata, and pruning facts.
+#[pyfunction]
+#[pyo3(
+    name = "tool_run_detail",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_detail<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::ToolRunDetailRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunDetailRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::tool_run_detail(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
 pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_telemetry_cleanup_matching_labels, m)?)?;
     m.add_function(wrap_pyfunction!(py_telemetry_record_batch, m)?)?;
@@ -984,6 +1012,7 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_live_glance, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_briefs, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_node_summaries, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_detail, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_store_stats, m)?)?;
     m.add_function(wrap_pyfunction!(py_perf_logs_query, m)?)?;
     Ok(())

@@ -24,12 +24,15 @@ use super::super::wire::{
 use super::super::ToolRunError;
 use super::shared::bucket_for;
 use super::wire::{
-    ToolRunBriefOwnerWire, ToolRunBriefsRequestWire,
+    ToolRunBriefOwnerWire, ToolRunBriefsRequestWire, ToolRunDetailRequestWire,
     ToolRunLiveGlanceRequestWire, ToolRunNodeSelectorWire,
     ToolRunNodeSummariesRequestWire, ToolRunVerdictBucketWire,
     TOOL_RUN_GLANCE_MAX_RUNS,
 };
-use super::{tool_run_briefs, tool_run_live_glance, tool_run_node_summaries};
+use super::{
+    tool_run_briefs, tool_run_detail, tool_run_live_glance,
+    tool_run_node_summaries,
+};
 
 const NOW: i64 = 1_700_000_000;
 
@@ -67,6 +70,9 @@ struct BeginArgs {
     owner_kind: Option<String>,
     owner_id: Option<String>,
     parent_run_id: Option<String>,
+    log_stdout_path: Option<String>,
+    log_stderr_path: Option<String>,
+    owner_log_path: Option<String>,
     now: i64,
     commit_running: bool,
 }
@@ -129,13 +135,13 @@ fn begin_run(path: &Path, args: BeginArgs) -> ToolRunBeginResultWire {
             boot_id: Some("boot-1".into()),
             process_start_identity: Some("start-1".into()),
             events_path: None,
-            log_stdout_path: None,
-            log_stderr_path: None,
+            log_stdout_path: args.log_stdout_path,
+            log_stderr_path: args.log_stderr_path,
             now_ts: Some(args.now),
             commit_running: args.commit_running,
             launch_mode: None,
             launch: None,
-            owner_log_path: None,
+            owner_log_path: args.owner_log_path,
         },
         Duration::from_secs(1),
     )
@@ -1783,4 +1789,393 @@ fn schema_version_mismatches_are_rejected() {
     )
     .unwrap_err();
     assert!(matches!(error, ToolRunError::SchemaVersion { .. }));
+}
+
+fn detail_for(
+    path: &Path,
+    run_id: &str,
+    item_limit: u32,
+    now: i64,
+) -> super::wire::ToolRunDetailResultWire {
+    tool_run_detail(
+        path,
+        ToolRunDetailRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            witness_window_days: 7,
+            item_limit,
+            now_ts: Some(now),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap()
+}
+
+#[test]
+fn detail_returns_brief_stages_argv_logs_and_children() {
+    let (_temp, path) = store();
+    let parent = begin_run(
+        &path,
+        BeginArgs {
+            display_argv: vec!["just".into(), "check".into(), "--fast".into()],
+            private_argv: Some(vec![
+                "just".into(),
+                "check".into(),
+                "--secret-token".into(),
+            ]),
+            log_stdout_path: Some("/tmp/out.log".into()),
+            log_stderr_path: Some("/tmp/err.log".into()),
+            ..BeginArgs::named("check")
+        },
+    );
+    stage_finished(
+        &path,
+        &parent.run.run_id,
+        "evt-s1",
+        "stage-1",
+        "lint",
+        NOW * 1000,
+        (NOW + 60) * 1000,
+    );
+    let child = begin_run(
+        &path,
+        BeginArgs {
+            parent_run_id: Some(parent.run.run_id.clone()),
+            now: NOW + 10,
+            ..BeginArgs::named("check")
+        },
+    );
+    let detail = detail_for(&path, &parent.run.run_id, 50, NOW + 100);
+    assert!(detail.store_exists);
+    assert!(detail.found);
+    let brief = detail.brief.as_ref().expect("detail carries the run brief");
+    assert_eq!(brief.run_id, parent.run.run_id);
+    assert_eq!(brief.label, "check");
+    assert_eq!(detail.display_argv, vec!["just", "check", "--fast"]);
+    // Only the safe argv reaches the card; the private argv never does.
+    let json = serde_json::to_value(&detail).unwrap();
+    assert!(!json.to_string().contains("--secret-token"));
+    assert_eq!(detail.stages.len(), 1);
+    let stage = &detail.stages[0];
+    assert_eq!(stage.description, "lint");
+    assert_eq!(stage.started_ms, Some(NOW * 1000));
+    assert_eq!(stage.finished_ms, Some((NOW + 60) * 1000));
+    assert_eq!(stage.elapsed_ms, Some(60_000));
+    assert_eq!(stage.exit_code, Some(0));
+    assert!(!stage.incomplete);
+    assert_eq!(stage.output_bytes, Some(100));
+    // A live run with no reference run yet has no expected stages.
+    assert!(detail.expected_stages.is_empty());
+    assert!(!detail.items_truncated);
+    assert!(detail.triage_items.is_empty());
+    assert_eq!(detail.child_runs.len(), 1);
+    assert_eq!(detail.child_runs[0].run_id, child.run.run_id);
+    let logs = detail.logs.expect("detail carries log metadata");
+    assert_eq!(logs.stdout_path.as_deref(), Some("/tmp/out.log"));
+    assert_eq!(logs.stderr_path.as_deref(), Some("/tmp/err.log"));
+    assert!(logs.has_private_argv);
+    assert!(!detail.detail_pruned);
+    assert!(detail.diagnostics.is_empty());
+}
+
+#[test]
+fn detail_expected_stages_come_from_the_reference_run() {
+    let (_temp, path) = store();
+    let reference = begin_run(
+        &path,
+        BeginArgs {
+            now: NOW - 1000,
+            ..BeginArgs::named("check")
+        },
+    );
+    stage_finished(
+        &path,
+        &reference.run.run_id,
+        "evt-r1",
+        "ref-1",
+        "setup",
+        (NOW - 1000) * 1000,
+        (NOW - 990) * 1000,
+    );
+    stage_finished(
+        &path,
+        &reference.run.run_id,
+        "evt-r2",
+        "ref-2",
+        "lint",
+        (NOW - 990) * 1000,
+        (NOW - 900) * 1000,
+    );
+    finish_run(
+        &path,
+        &reference.run.run_id,
+        ToolRunStateWire::Succeeded,
+        Some(0),
+        None,
+        None,
+        Some(100_000),
+        NOW - 900,
+    );
+    // A live run gets the full expected timeline for pending stages.
+    let target = begin_run(&path, BeginArgs::named("check"));
+    let live = detail_for(&path, &target.run.run_id, 50, NOW + 50);
+    assert_eq!(live.expected_stages.len(), 2);
+    assert_eq!(live.expected_stages[0].description, "setup");
+    assert_eq!(live.expected_stages[0].elapsed_ms, Some(10_000));
+    assert_eq!(live.expected_stages[1].description, "lint");
+    // A run that died mid-stage is not its own reference (its stages are
+    // incomplete), so it keeps the older timeline for not-reached stages.
+    stage_finished(
+        &path,
+        &target.run.run_id,
+        "evt-t1",
+        "tgt-1",
+        "setup",
+        NOW * 1000,
+        (NOW + 5) * 1000,
+    );
+    stage_started(
+        &path,
+        &target.run.run_id,
+        "evt-t2",
+        "tgt-2",
+        "lint",
+        (NOW + 5) * 1000,
+    );
+    finish_run(
+        &path,
+        &target.run.run_id,
+        ToolRunStateWire::Failed,
+        Some(1),
+        None,
+        None,
+        Some(5_000),
+        NOW + 60,
+    );
+    let settled_early = detail_for(&path, &target.run.run_id, 50, NOW + 70);
+    assert_eq!(settled_early.expected_stages.len(), 2);
+    // A run that reached every reference stage drops the timeline.
+    let complete = begin_run(
+        &path,
+        BeginArgs {
+            agent: Some("agent-2".into()),
+            now: NOW + 80,
+            ..BeginArgs::named("check")
+        },
+    );
+    stage_finished(
+        &path,
+        &complete.run.run_id,
+        "evt-c1",
+        "cmp-1",
+        "setup",
+        (NOW + 80) * 1000,
+        (NOW + 85) * 1000,
+    );
+    stage_finished(
+        &path,
+        &complete.run.run_id,
+        "evt-c2",
+        "cmp-2",
+        "lint",
+        (NOW + 85) * 1000,
+        (NOW + 95) * 1000,
+    );
+    finish_run(
+        &path,
+        &complete.run.run_id,
+        ToolRunStateWire::Succeeded,
+        Some(0),
+        None,
+        None,
+        Some(15_000),
+        NOW + 95,
+    );
+    let settled_full = detail_for(&path, &complete.run.run_id, 50, NOW + 100);
+    assert!(settled_full.expected_stages.is_empty());
+}
+
+#[test]
+fn detail_triage_items_order_witnesses_and_truncate() {
+    let (_temp, path) = store();
+    let first = begin_run(&path, BeginArgs::named("check"));
+    seed_triage(
+        &path,
+        &first.run.run_id,
+        &[("*", "parsed")],
+        &[
+            ("*", "known", "ext-a"),
+            ("*", "new", "ext-a"),
+            ("*", "", "ext-a"),
+        ],
+        false,
+        false,
+    );
+    // A second agent's run witnesses the same signature.
+    let second = begin_run(
+        &path,
+        BeginArgs {
+            agent: Some("agent-2".into()),
+            now: NOW + 5,
+            ..BeginArgs::named("check")
+        },
+    );
+    seed_triage(
+        &path,
+        &second.run.run_id,
+        &[("*", "parsed")],
+        &[("*", "known", "ext-a")],
+        false,
+        false,
+    );
+    let detail = detail_for(&path, &first.run.run_id, 50, NOW + 100);
+    assert_eq!(detail.triage_items.len(), 3);
+    // Card order: NEW, UNKNOWN, unlabeled, KNOWN, FLAKY. The empty class
+    // reads as unlabeled.
+    let classes: Vec<Option<&str>> = detail
+        .triage_items
+        .iter()
+        .map(|item| item.class.as_deref())
+        .collect();
+    assert_eq!(classes, vec![Some("new"), None, Some("known")]);
+    let new = &detail.triage_items[0];
+    assert_eq!(new.stage_key, "*");
+    assert_eq!(new.occurrences, 1);
+    assert!(new.locator_paths.is_empty());
+    // Both runs share the seeded signature, so each item sees two
+    // witness runs across two agents inside the window.
+    assert_eq!(new.witness_runs, 2);
+    assert_eq!(new.witness_agents, 2);
+    assert_eq!(new.first_seen_ts, Some(NOW));
+    assert_eq!(new.last_seen_ts, Some(NOW));
+    assert!(!detail.items_truncated);
+    let truncated = detail_for(&path, &first.run.run_id, 2, NOW + 100);
+    assert_eq!(truncated.triage_items.len(), 2);
+    assert!(truncated.items_truncated);
+    assert_eq!(truncated.triage_items[0].class.as_deref(), Some("new"));
+}
+
+#[test]
+fn detail_stage_counts_join_items_by_stage_and_cap_locators() {
+    let (_temp, path) = store();
+    let started = begin_run(&path, BeginArgs::named("check"));
+    stage_started(
+        &path,
+        &started.run.run_id,
+        "evt-s1",
+        "stage-1",
+        "lint",
+        NOW * 1000,
+    );
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO tool_triage_items(
+            item_id, run_id, stage_id, stage_key, extractor,
+            extractor_version, signature, display, locator_paths_json,
+            occurrences, created_ts, class
+         ) VALUES ('item-1', ?1, 'stage-1', 'lint', 'ext-b', 2, ?2,
+                   'broken lint', '[\"a\",\"b\",\"c\",\"d\",\"e\"]', 3, ?3, 'new')",
+        rusqlite::params![
+            started.run.run_id,
+            "b".repeat(64),
+            NOW,
+        ],
+    )
+    .unwrap();
+    drop(conn);
+    let detail = detail_for(&path, &started.run.run_id, 50, NOW + 100);
+    assert_eq!(detail.stages.len(), 1);
+    assert!(detail.stages[0].incomplete);
+    assert_eq!(detail.stages[0].counts.new, 1);
+    assert_eq!(detail.stages[0].counts.known, 0);
+    assert_eq!(detail.stages[0].counts.flaky, 0);
+    assert_eq!(detail.stages[0].counts.unknown, 0);
+    assert_eq!(detail.triage_items.len(), 1);
+    let item = &detail.triage_items[0];
+    assert_eq!(item.class.as_deref(), Some("new"));
+    assert_eq!(item.locator_paths, vec!["a", "b", "c"]);
+    assert_eq!(item.occurrences, 3);
+    assert_eq!(item.witness_runs, 1);
+    assert_eq!(item.witness_agents, 1);
+}
+
+#[test]
+fn detail_reports_missing_stores_and_runs() {
+    let (temp, path) = store();
+    let missing = temp.path().join("missing.sqlite");
+    let absent = tool_run_detail(
+        &missing,
+        ToolRunDetailRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: "run-nope".to_string(),
+            witness_window_days: 7,
+            item_limit: 50,
+            now_ts: Some(NOW),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(!absent.store_exists);
+    assert!(!absent.found);
+    assert!(absent.brief.is_none());
+    assert!(!absent.diagnostics.is_empty());
+    // The store file only exists after the first write.
+    begin_run(&path, BeginArgs::named("check"));
+    let unknown = detail_for(&path, "run-nope", 50, NOW);
+    assert!(unknown.store_exists);
+    assert!(!unknown.found);
+    assert!(unknown.brief.is_none());
+    assert!(unknown.stages.is_empty());
+    assert!(unknown.diagnostics.join(" ").contains("run-nope"));
+}
+
+#[test]
+fn detail_rejects_bad_requests() {
+    let (_temp, path) = store();
+    let request =
+        |run_id: &str, days: u32, limit: u32| ToolRunDetailRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            witness_window_days: days,
+            item_limit: limit,
+            now_ts: Some(NOW),
+        };
+    for (run_id, days, limit) in [
+        ("", 7, 50),
+        ("run-1", 0, 50),
+        ("run-1", 31, 50),
+        ("run-1", 7, 0),
+        ("run-1", 7, 201),
+    ] {
+        assert!(
+            tool_run_detail(
+                &path,
+                request(run_id, days, limit),
+                Duration::from_secs(1)
+            )
+            .is_err(),
+            "run_id={run_id:?} days={days} limit={limit}"
+        );
+    }
+    assert!(tool_run_detail(
+        &path,
+        ToolRunDetailRequestWire {
+            schema_version: 999,
+            run_id: "run-1".to_string(),
+            witness_window_days: 7,
+            item_limit: 50,
+            now_ts: Some(NOW),
+        },
+        Duration::from_secs(1),
+    )
+    .is_err());
+    // Request wires reject unknown fields.
+    assert!(serde_json::from_value::<ToolRunDetailRequestWire>(
+        serde_json::json!({
+            "schema_version": 1,
+            "run_id": "run-1",
+            "nope": true,
+        })
+    )
+    .is_err());
 }
