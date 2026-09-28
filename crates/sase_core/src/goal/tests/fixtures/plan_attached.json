@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "event_id": "01j8x90000000000000000007",
+  "goal_id": "7k2mq",
+  "kind": "plan_attached",
+  "at": "2026-09-28T14:06:00.000Z",
+  "actor": { "principal": "sase.athena", "kind": "host" },
+  "basis": "01j8x90000000000000000001",
+  "idempotency_key": "host:plan:0007",
+  "payload": {
+    "plan_ref": "plan:202609/goal_ledger.md",
+    "digest": "sha256:abc123"
+  }
+}

@@ -297,6 +297,7 @@ fn observe_environ(environ: &[u8], candidates: &mut [Candidate]) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn observe_unreadable(
     pid: u32,
     source: &str,
@@ -474,7 +475,7 @@ mod tests {
         // `stat` layout: pid (comm) state ... with starttime as field
         // 22 overall, the 20th whitespace token after the comm close.
         let mut fields = vec!["R".to_string(), "1".to_string()];
-        fields.extend(std::iter::repeat("0".to_string()).take(17));
+        fields.extend(std::iter::repeat_n("0".to_string(), 17));
         fields.push(starttime_ticks.to_string());
         let content = format!("1 (fake-proc) {}\n", fields.join(" "));
         let mut file = fs::File::create(pid_dir.join("stat")).unwrap();

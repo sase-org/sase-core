@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "event_id": "01j8x90000000000000000001",
+  "goal_id": "7k2mq",
+  "kind": "created",
+  "at": "2026-09-28T14:00:00.000Z",
+  "actor": { "principal": "bryan.athena", "kind": "human" },
+  "basis": null,
+  "idempotency_key": "cli:3f1c0001",
+  "payload": {
+    "title": "Goals feature design",
+    "outcome": "A critiqued, recommended design for Goals exists.",
+    "criteria": [
+      { "text": "Covers storage and sync", "source": "user" },
+      { "text": "Names every open question", "source": "user" }
+    ],
+    "origin": {
+      "kind": "cli",
+      "principal": "bryan.athena",
+      "machine": "athena",
+      "at": "2026-09-28T14:00:00.000Z",
+      "via": "cli"
+    },
+    "draft": false,
+    "project": "sase"
+  }
+}

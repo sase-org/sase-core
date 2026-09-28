@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "event_id": "01j8x9000000000000000000a",
+  "goal_id": "7k2mq",
+  "kind": "settled",
+  "at": "2026-09-28T14:09:00.000Z",
+  "actor": { "principal": "bryan.athena", "kind": "human" },
+  "basis": "01j8x90000000000000000001",
+  "idempotency_key": "cli:3f1c000a",
+  "payload": {
+    "flavor": "verified",
+    "note": "Shipped in G1."
+  }
+}

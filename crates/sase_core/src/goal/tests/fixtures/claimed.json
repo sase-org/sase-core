@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "event_id": "01j8x90000000000000000008",
+  "goal_id": "7k2mq",
+  "kind": "claimed",
+  "at": "2026-09-28T14:07:00.000Z",
+  "actor": { "principal": "bryan.athena:agent-a", "kind": "agent", "agent": "agent-a" },
+  "basis": "01j8x90000000000000000001",
+  "idempotency_key": "agent:claim:0008",
+  "payload": {
+    "claim_no": 1,
+    "claim": "The design doc is written and reviewed.",
+    "evidence": [
+      { "ref": "doc:goals", "why": "Design covers storage and sync" }
+    ],
+    "check": ["read the doc", "ran the benchmark"],
+    "gaps": ["apollo check pending"],
+    "receipts": [
+      {
+        "tool": "check",
+        "verdict": "pass",
+        "fingerprint": "fp-1",
+        "tree_sha": "abc123",
+        "at": "2026-09-28T14:06:30.000Z"
+      }
+    ],
+    "strength": "documented"
+  }
+}

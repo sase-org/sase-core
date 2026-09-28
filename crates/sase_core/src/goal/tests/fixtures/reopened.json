@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "event_id": "01j8x9000000000000000000b",
+  "goal_id": "7k2mq",
+  "kind": "reopened",
+  "at": "2026-09-28T14:10:00.000Z",
+  "actor": { "principal": "bryan.athena", "kind": "human" },
+  "basis": "01j8x9000000000000000000a",
+  "idempotency_key": "cli:3f1c000b",
+  "payload": {
+    "message": "The benchmark regressed; take another pass."
+  }
+}

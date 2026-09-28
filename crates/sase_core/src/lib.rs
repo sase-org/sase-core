@@ -70,6 +70,7 @@ pub mod gate_followup;
 pub mod git_object_sharing;
 pub mod git_query;
 pub mod glossary;
+pub mod goal;
 pub mod hold_directive;
 pub mod host_bridge;
 pub mod host_liveness;
