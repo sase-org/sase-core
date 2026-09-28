@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::store_lock::{
@@ -13,10 +14,13 @@ use crate::store_lock::{
 };
 
 use super::wire::{
-    PromptStashEntryWire, PromptStashLifecycleOutcomeWire,
-    PromptStashLifecycleSnapshotWire, PromptStashPopOutcomeWire,
-    PromptStashSnapshotWire, PromptStashStoreStatsWire,
-    PromptStashTrashRecordWire, PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION,
+    PromptStashArchiveReason, PromptStashArchiveRecordWire,
+    PromptStashArchiveSnapshotWire, PromptStashEntryWire,
+    PromptStashLifecycleOutcomeWire, PromptStashLifecycleSnapshotWire,
+    PromptStashPopOutcomeWire, PromptStashSnapshotWire,
+    PromptStashStoreStatsWire, PromptStashTrashRecordWire,
+    PROMPT_STASH_ARCHIVE_LINE_KIND, PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION,
+    PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION,
     PROMPT_STASH_WIRE_SCHEMA_VERSION,
 };
 
@@ -28,6 +32,155 @@ const TRASH_LINE_KIND: &str = "trash";
 
 /// Suffix for the recoverable copy taken before the first tagged write.
 const PRE_UPGRADE_BACKUP_SUFFIX: &str = ".pre-upgrade-backup";
+
+/// One row staged for the append-only archive: the entry as it looked before
+/// removal, why it left, and the Trash deletion time for rows that were in
+/// Trash.
+struct PendingArchiveRow {
+    reason: PromptStashArchiveReason,
+    trashed_at: Option<String>,
+    entry: PromptStashEntryWire,
+}
+
+/// Derive the append-only archive path from a stash path.
+///
+/// This mirrors [`lock_path_for`]: the archive is a sibling in the same
+/// directory, so it inherits the stash lock. `prompt_stash.jsonl` maps to
+/// `prompt_stash_archive.jsonl`; any other `*.jsonl` stem maps to
+/// `<stem>_archive.jsonl`.
+pub fn archive_path_for_prompt_stash(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("prompt_stash.jsonl");
+    if let Some(stem) = filename.strip_suffix(".jsonl") {
+        path.with_file_name(format!("{stem}_archive.jsonl"))
+    } else {
+        path.with_file_name(format!("{filename}_archive.jsonl"))
+    }
+}
+
+fn archive_timestamp_rfc3339() -> String {
+    let now: DateTime<Utc> = SystemTime::now().into();
+    now.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// Append staged rows to the archive and fsync before the stash rewrite.
+///
+/// Must run under the stash exclusive lock (the archive shares that lock).
+/// An empty stage is a no-op that never creates the archive file. Any I/O or
+/// serialization failure returns an error so the caller leaves the stash
+/// untouched (fail closed). A crash between this append and the stash rewrite
+/// can duplicate a row in the archive, but never lose one.
+fn append_archive_records_unlocked(
+    stash_path: &Path,
+    staged: Vec<PendingArchiveRow>,
+) -> Result<(), String> {
+    if staged.is_empty() {
+        return Ok(());
+    }
+    let archive_path = archive_path_for_prompt_stash(stash_path);
+    let parent = ensure_parent(&archive_path)?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let archived_at = archive_timestamp_rfc3339();
+    let pid = process::id();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&archive_path)
+        .map_err(|e| {
+            format!(
+                "failed to append prompt stash archive {}: {e}; refusing to rewrite the stash",
+                archive_path.display()
+            )
+        })?;
+    for row in &staged {
+        let record = PromptStashArchiveRecordWire {
+            kind: PROMPT_STASH_ARCHIVE_LINE_KIND.to_string(),
+            archived_at: archived_at.clone(),
+            reason: row.reason,
+            pid,
+            trashed_at: row.trashed_at.clone(),
+            entry: row.entry.clone(),
+        };
+        serde_json::to_writer(&mut file, &record).map_err(|e| {
+            format!(
+                "failed to serialize prompt stash archive record: {e}; refusing to rewrite the stash"
+            )
+        })?;
+        file.write_all(b"\n").map_err(|e| {
+            format!(
+                "failed to append prompt stash archive {}: {e}; refusing to rewrite the stash",
+                archive_path.display()
+            )
+        })?;
+    }
+    file.flush().map_err(|e| {
+        format!(
+            "failed to append prompt stash archive {}: {e}; refusing to rewrite the stash",
+            archive_path.display()
+        )
+    })?;
+    file.sync_all().map_err(|e| {
+        format!(
+            "failed to fsync prompt stash archive {}: {e}; refusing to rewrite the stash",
+            archive_path.display()
+        )
+    })?;
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+fn read_archive_records_unlocked(
+    stash_path: &Path,
+) -> Result<
+    (Vec<PromptStashArchiveRecordWire>, PromptStashStoreStatsWire),
+    String,
+> {
+    let archive_path = archive_path_for_prompt_stash(stash_path);
+    let file = match File::open(&archive_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), PromptStashStoreStatsWire::default()));
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let reader = BufReader::new(file);
+    let mut stats = PromptStashStoreStatsWire::default();
+    let mut records = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        stats.total_lines += 1;
+        if line.trim().is_empty() {
+            stats.blank_lines += 1;
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+            Ok(value) => value,
+            Err(_) => {
+                stats.invalid_json_lines += 1;
+                continue;
+            }
+        };
+        match serde_json::from_value::<PromptStashArchiveRecordWire>(value) {
+            Ok(record)
+                if record.kind == PROMPT_STASH_ARCHIVE_LINE_KIND
+                    && !record.archived_at.is_empty()
+                    && !record.entry.id.is_empty()
+                    && !record.entry.created_at.is_empty() =>
+            {
+                stats.loaded_rows += 1;
+                records.push(record);
+            }
+            _ => {
+                stats.invalid_record_lines += 1;
+            }
+        }
+    }
+    Ok((records, stats))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PromptStashStoreError {
@@ -132,6 +285,102 @@ pub fn read_prompt_stash_lifecycle(
     Ok(lifecycle_snapshot_from_parsed(result?))
 }
 
+/// Read the append-only stash archive, newest first.
+///
+/// A missing archive file reads as empty. Malformed lines are tolerated and
+/// counted in `stats`, like the stash reader. `limit` caps the returned
+/// records; `stats` always describes the whole file. Takes the shared stash
+/// lock, which also guards the archive.
+pub fn read_prompt_stash_archive(
+    path: &Path,
+    limit: u64,
+) -> PromptStashResult<PromptStashArchiveSnapshotWire> {
+    let archive_path = archive_path_for_prompt_stash(path);
+    if !archive_path.exists() {
+        return Ok(PromptStashArchiveSnapshotWire {
+            schema_version: PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION,
+            records: Vec::new(),
+            stats: PromptStashStoreStatsWire::default(),
+        });
+    }
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Shared,
+        prompt_stash_lock_timeout(),
+        "read_prompt_stash_archive",
+    )?;
+    let result: Result<PromptStashArchiveSnapshotWire, String> = (|| {
+        let (records, stats) = read_archive_records_unlocked(path)?;
+        let mut newest_first = records;
+        newest_first.reverse();
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        newest_first.truncate(limit);
+        Ok(PromptStashArchiveSnapshotWire {
+            schema_version: PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION,
+            records: newest_first,
+            stats,
+        })
+    })();
+    unlock(lock)?;
+    Ok(result?)
+}
+
+/// Recover archived rows back into the active stash.
+///
+/// For each id in caller order, appends the newest archived version of that
+/// entry back to the active rows. Ids currently active or in Trash, and
+/// unknown ids, are skipped. Returns the recovered ids in `changed` with the
+/// authoritative post-commit snapshot. The archive stays append-only:
+/// recovery never deletes archive lines.
+pub fn recover_prompt_stash_archive(
+    path: &Path,
+    ids: &[String],
+) -> PromptStashResult<PromptStashLifecycleOutcomeWire> {
+    let lock = lock_with_timeout(
+        path,
+        LockMode::Exclusive,
+        prompt_stash_lock_timeout(),
+        "recover_prompt_stash_archive",
+    )?;
+    let result: Result<PromptStashLifecycleOutcomeWire, String> = (|| {
+        let mut parsed = read_parsed_unlocked(path)?;
+        let (records, _) = read_archive_records_unlocked(path)?;
+        let mut newest_by_id: HashMap<String, PromptStashEntryWire> =
+            HashMap::new();
+        for record in records.into_iter().rev() {
+            newest_by_id
+                .entry(record.entry.id.clone())
+                .or_insert(record.entry);
+        }
+        let wanted = ordered_unique(ids);
+        let active_ids: BTreeSet<String> =
+            parsed.active.iter().map(|row| row.id.clone()).collect();
+        let trashed_ids: BTreeSet<String> = parsed
+            .trash
+            .iter()
+            .map(|row| row.entry.id.clone())
+            .collect();
+        let mut changed = Vec::new();
+        for id in wanted {
+            if active_ids.contains(id) || trashed_ids.contains(id) {
+                continue;
+            }
+            if let Some(entry) = newest_by_id.get(id) {
+                parsed.active.push(entry.clone());
+                changed.push(id.to_string());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(outcome_from_parsed(changed, Vec::new(), parsed));
+        }
+        write_parsed_atomic(path, &parsed)?;
+        let parsed = read_parsed_unlocked(path)?;
+        Ok(outcome_from_parsed(changed, Vec::new(), parsed))
+    })();
+    unlock(lock)?;
+    Ok(result?)
+}
+
 pub fn append_prompt_stash(
     path: &Path,
     entry: &PromptStashEntryWire,
@@ -205,7 +454,8 @@ pub fn trash_prompt_stash(
             }
         }
         parsed.active = kept_active;
-        let evicted = enforce_trash_limit(&mut parsed.trash, trash_limit);
+        let evicted_rows = enforce_trash_limit(&mut parsed.trash, trash_limit);
+        let evicted = evicted_ids(&evicted_rows);
         let moved_set: BTreeSet<&str> =
             moved.iter().map(String::as_str).collect();
         let evicted_set: BTreeSet<&str> =
@@ -218,6 +468,17 @@ pub fn trash_prompt_stash(
         if moved.is_empty() && evicted.is_empty() {
             return Ok(outcome_from_parsed(changed, evicted, parsed));
         }
+        append_archive_records_unlocked(
+            path,
+            evicted_rows
+                .into_iter()
+                .map(|row| PendingArchiveRow {
+                    reason: PromptStashArchiveReason::Evicted,
+                    trashed_at: Some(row.trashed_at),
+                    entry: row.entry,
+                })
+                .collect(),
+        )?;
         if !parsed.trash.is_empty() && !had_trash {
             ensure_pre_upgrade_backup(path)?;
         }
@@ -303,10 +564,12 @@ pub fn purge_prompt_stash(
         let wanted = ordered_unique(ids);
         let wanted_set: BTreeSet<&str> = wanted.iter().copied().collect();
         let mut purged_set: BTreeSet<String> = BTreeSet::new();
+        let mut purged_rows: Vec<TrashRow> = Vec::new();
         let mut kept = Vec::with_capacity(parsed.trash.len());
         for row in parsed.trash {
             if wanted_set.contains(row.entry.id.as_str()) {
-                purged_set.insert(row.entry.id);
+                purged_set.insert(row.entry.id.clone());
+                purged_rows.push(row);
             } else {
                 kept.push(row);
             }
@@ -320,6 +583,17 @@ pub fn purge_prompt_stash(
         if changed.is_empty() {
             return Ok(outcome_from_parsed(changed, Vec::new(), parsed));
         }
+        append_archive_records_unlocked(
+            path,
+            purged_rows
+                .into_iter()
+                .map(|row| PendingArchiveRow {
+                    reason: PromptStashArchiveReason::Purged,
+                    trashed_at: Some(row.trashed_at),
+                    entry: row.entry,
+                })
+                .collect(),
+        )?;
         write_parsed_atomic(path, &parsed)?;
         let parsed = read_parsed_unlocked(path)?;
         Ok(outcome_from_parsed(changed, Vec::new(), parsed))
@@ -333,6 +607,7 @@ pub fn purge_prompt_stash(
 /// This is the reconciliation path for a lowered configured limit: the first
 /// trash-aware open or write after reload calls here, persists the trim, and
 /// surfaces the permanently deleted ids in `evicted`, oldest first.
+/// Evicted rows are archived with reason `evicted` before the rewrite.
 pub fn reconcile_prompt_stash_trash(
     path: &Path,
     trash_limit: u64,
@@ -345,10 +620,22 @@ pub fn reconcile_prompt_stash_trash(
     )?;
     let result: Result<PromptStashLifecycleOutcomeWire, String> = (|| {
         let mut parsed = read_parsed_unlocked(path)?;
-        let evicted = enforce_trash_limit(&mut parsed.trash, trash_limit);
+        let evicted_rows = enforce_trash_limit(&mut parsed.trash, trash_limit);
+        let evicted = evicted_ids(&evicted_rows);
         if evicted.is_empty() {
             return Ok(outcome_from_parsed(Vec::new(), evicted, parsed));
         }
+        append_archive_records_unlocked(
+            path,
+            evicted_rows
+                .into_iter()
+                .map(|row| PendingArchiveRow {
+                    reason: PromptStashArchiveReason::Evicted,
+                    trashed_at: Some(row.trashed_at),
+                    entry: row.entry,
+                })
+                .collect(),
+        )?;
         write_parsed_atomic(path, &parsed)?;
         let parsed = read_parsed_unlocked(path)?;
         Ok(outcome_from_parsed(Vec::new(), evicted, parsed))
@@ -387,6 +674,18 @@ pub fn pop_prompt_stash(
         }
         parsed.active = kept;
         if !removed.is_empty() {
+            append_archive_records_unlocked(
+                path,
+                removed
+                    .iter()
+                    .cloned()
+                    .map(|entry| PendingArchiveRow {
+                        reason: PromptStashArchiveReason::Popped,
+                        trashed_at: None,
+                        entry,
+                    })
+                    .collect(),
+            )?;
             write_parsed_atomic(path, &parsed)?;
         }
         let parsed = read_parsed_unlocked(path)?;
@@ -470,9 +769,9 @@ fn ordered_unique(ids: &[String]) -> Vec<&str> {
 /// Sort trash oldest-first and drop rows past `trash_limit`.
 ///
 /// Ordering is `(trashed_at, seq, id)`: deletion time first, then file/batch
-/// order, then id as the final stable tie break. Returns the evicted ids,
-/// oldest first.
-fn enforce_trash_limit(trash: &mut Vec<TrashRow>, limit: u64) -> Vec<String> {
+/// order, then id as the final stable tie break. Returns the evicted rows,
+/// oldest first, so callers can archive the full entries before the rewrite.
+fn enforce_trash_limit(trash: &mut Vec<TrashRow>, limit: u64) -> Vec<TrashRow> {
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     if trash.len() <= limit {
         return Vec::new();
@@ -484,13 +783,11 @@ fn enforce_trash_limit(trash: &mut Vec<TrashRow>, limit: u64) -> Vec<String> {
             .then(a.entry.id.cmp(&b.entry.id))
     });
     let evict_count = trash.len() - limit;
-    let evicted: Vec<String> = trash
-        .iter()
-        .take(evict_count)
-        .map(|row| row.entry.id.clone())
-        .collect();
-    trash.drain(..evict_count);
-    evicted
+    trash.drain(..evict_count).collect()
+}
+
+fn evicted_ids(rows: &[TrashRow]) -> Vec<String> {
+    rows.iter().map(|row| row.entry.id.clone()).collect()
 }
 
 fn append_prompt_stash_unlocked(
@@ -508,6 +805,7 @@ fn append_prompt_stash_unlocked(
         .map_err(|e| format!("failed to serialize prompt stash entry: {e}"))?;
     file.write_all(b"\n").map_err(|e| e.to_string())?;
     file.flush().map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -671,12 +969,33 @@ fn merge_and_rewrite_entries_unlocked(
     }
     let input_ids: BTreeSet<&str> =
         input.iter().map(|n| n.id.as_str()).collect();
+    // Archive the previous version of every active row whose text,
+    // frontmatter, or cursor the input replaces. Merge-preserved rows (on
+    // disk but absent from the input) are not archived.
+    let mut overwritten: Vec<PendingArchiveRow> = Vec::new();
+    for incoming in input {
+        if let Some(previous) =
+            parsed.active.iter().find(|row| row.id == incoming.id)
+        {
+            if previous.text != incoming.text
+                || previous.frontmatter != incoming.frontmatter
+                || previous.cursor != incoming.cursor
+            {
+                overwritten.push(PendingArchiveRow {
+                    reason: PromptStashArchiveReason::Overwritten,
+                    trashed_at: None,
+                    entry: previous.clone(),
+                });
+            }
+        }
+    }
     let mut merged: Vec<PromptStashEntryWire> = input.to_vec();
     for row in parsed.active {
         if !input_ids.contains(row.id.as_str()) {
             merged.push(row);
         }
     }
+    append_archive_records_unlocked(path, overwritten)?;
     let merged_parsed = ParsedStash {
         active: merged,
         trash: parsed.trash,

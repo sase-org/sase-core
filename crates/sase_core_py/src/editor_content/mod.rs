@@ -9,10 +9,13 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 use pyo3::wrap_pyfunction;
 use sase_core::prompt_stash::{
     purge_prompt_stash as core_purge_prompt_stash,
+    read_prompt_stash_archive as core_read_prompt_stash_archive,
     read_prompt_stash_lifecycle as core_read_prompt_stash_lifecycle,
     reconcile_prompt_stash_trash as core_reconcile_prompt_stash_trash,
+    recover_prompt_stash_archive as core_recover_prompt_stash_archive,
     restore_prompt_stash as core_restore_prompt_stash,
     trash_prompt_stash as core_trash_prompt_stash,
+    PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION,
     PROMPT_STASH_LIFECYCLE_WIRE_SCHEMA_VERSION,
 };
 
@@ -501,6 +504,64 @@ fn py_reconcile_prompt_stash_trash(
     json_value_to_py(py, &value)
 }
 
+// --- Prompt stash archive bindings ---------------------------------------
+
+/// Return the wire schema version for the stash archive endpoints.
+///
+/// Versioned separately from the v1 stash and v1 lifecycle bindings so
+/// existing callers keep their shape while archive results evolve.
+#[pyfunction]
+#[pyo3(name = "prompt_stash_archive_wire_schema_version")]
+fn py_prompt_stash_archive_wire_schema_version() -> u32 {
+    PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION
+}
+
+/// Read the append-only stash archive and return a snapshot dict.
+///
+/// `limit` caps the newest-first records; stats always describe the whole
+/// archive file. A missing archive reads as empty. The GIL is released while
+/// Rust performs filesystem work.
+#[pyfunction]
+#[pyo3(name = "read_prompt_stash_archive")]
+fn py_read_prompt_stash_archive(
+    py: Python<'_>,
+    path: &str,
+    limit: u64,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let snapshot =
+        py.allow_threads(|| core_read_prompt_stash_archive(&path, limit));
+    let value =
+        serde_json::to_value(snapshot.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
+/// Recover archived rows back into the active stash.
+///
+/// For each id, the newest archived version is appended back to Stash. Ids
+/// currently active or in Trash, and unknown ids, are skipped. Returns the
+/// lifecycle outcome dict with recovered ids in `changed`.
+#[pyfunction]
+#[pyo3(name = "recover_prompt_stash_archive")]
+fn py_recover_prompt_stash_archive(
+    py: Python<'_>,
+    path: &str,
+    ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_recover_prompt_stash_archive(&path, &ids));
+    let value =
+        serde_json::to_value(outcome.map_err(prompt_stash_error_to_pyerr)?)
+            .map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+    json_value_to_py(py, &value)
+}
+
 // --- Canonical project/home content layout -------------------------------
 /// Return the shared canonical/legacy SASE content layout and xprompt order.
 #[pyfunction]
@@ -729,6 +790,12 @@ pub(crate) fn register_editor_content(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_restore_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_purge_prompt_stash, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_prompt_stash_trash, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_prompt_stash_archive_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_read_prompt_stash_archive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_recover_prompt_stash_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_sase_content_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_skill_reference_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_reference_name, m)?)?;

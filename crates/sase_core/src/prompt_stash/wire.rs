@@ -120,3 +120,47 @@ pub struct PromptStashLifecycleOutcomeWire {
     pub evicted: Vec<String>,
     pub snapshot: PromptStashLifecycleSnapshotWire,
 }
+
+/// Wire schema version for the append-only stash archive endpoints.
+///
+/// Versioned separately so the v1 stash and v1 lifecycle bindings keep their
+/// shape while archive results evolve independently.
+pub const PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION: u32 = 1;
+
+/// Tag written on every archive line of `prompt_stash_archive.jsonl`.
+pub const PROMPT_STASH_ARCHIVE_LINE_KIND: &str = "archived";
+
+/// Why a row entered the append-only stash archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptStashArchiveReason {
+    Popped,
+    Purged,
+    Evicted,
+    Overwritten,
+}
+
+/// One append-only archive record: the complete entry as it looked before a
+/// permanent removal, plus when and why it was archived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptStashArchiveRecordWire {
+    pub kind: String,
+    pub archived_at: String,
+    pub reason: PromptStashArchiveReason,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trashed_at: Option<String>,
+    pub entry: PromptStashEntryWire,
+}
+
+/// Newest-first view of the append-only stash archive.
+///
+/// `records` holds at most `limit` entries, newest first (reverse file
+/// order). `stats` describes the whole archive file: `loaded_rows` counts
+/// every valid record, while `records` may be truncated by `limit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptStashArchiveSnapshotWire {
+    pub schema_version: u32,
+    pub records: Vec<PromptStashArchiveRecordWire>,
+    pub stats: PromptStashStoreStatsWire,
+}

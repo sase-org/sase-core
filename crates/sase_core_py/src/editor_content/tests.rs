@@ -19,9 +19,16 @@ fn prompt_stash_lifecycle_bindings_are_registered_and_round_trip() {
             "restore_prompt_stash",
             "purge_prompt_stash",
             "reconcile_prompt_stash_trash",
+            "prompt_stash_archive_wire_schema_version",
+            "read_prompt_stash_archive",
+            "recover_prompt_stash_archive",
         ] {
             assert!(module.hasattr(name).unwrap(), "missing binding {name}");
         }
+        assert_eq!(
+            py_prompt_stash_archive_wire_schema_version(),
+            PROMPT_STASH_ARCHIVE_WIRE_SCHEMA_VERSION
+        );
 
         let temp = tempfile::tempdir().unwrap();
         let path = temp
@@ -118,6 +125,98 @@ fn prompt_stash_lifecycle_bindings_are_registered_and_round_trip() {
         let outcome = py_to_json_value(&outcome).unwrap();
         assert_eq!(outcome["changed"], json!(["bound"]));
         assert_eq!(outcome["snapshot"]["trash"], json!([]));
+
+        let snapshot = module
+            .getattr("read_prompt_stash_archive")
+            .unwrap()
+            .call1((path.clone(), 20_u64))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(snapshot["schema_version"], json!(1));
+        assert_eq!(snapshot["records"][0]["reason"], json!("purged"));
+        assert_eq!(snapshot["records"][0]["entry"]["id"], json!("bound"));
+        assert_eq!(snapshot["records"][0]["trashed_at"], json!(trashed_at));
+
+        let outcome = module
+            .getattr("recover_prompt_stash_archive")
+            .unwrap()
+            .call1((path.clone(), vec!["bound".to_string()]))
+            .unwrap();
+        let outcome = py_to_json_value(&outcome).unwrap();
+        assert_eq!(outcome["changed"], json!(["bound"]));
+        assert_eq!(outcome["snapshot"]["active"][0]["id"], json!("bound"));
+    });
+}
+
+#[test]
+fn prompt_stash_archive_bindings_round_trip_pop_and_overwrite() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_editor_content(&module).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("prompt_stash.jsonl")
+            .to_string_lossy()
+            .into_owned();
+
+        let entry = json_value_to_py(
+            py,
+            &json!({
+                "id": "arch",
+                "created_at": "2026-06-16T01:02:03+00:00",
+                "text": "v1",
+            }),
+        )
+        .unwrap();
+        let entry = entry.bind(py).downcast::<PyDict>().unwrap();
+        module
+            .getattr("append_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), entry))
+            .unwrap();
+
+        let updated = json_value_to_py(
+            py,
+            &json!({
+                "id": "arch",
+                "created_at": "2026-06-16T01:02:03+00:00",
+                "text": "v2",
+            }),
+        )
+        .unwrap();
+        // rewrite takes a list; build it from the single dict.
+        let list = PyList::new_bound(py, [updated]);
+        module
+            .getattr("rewrite_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), list))
+            .unwrap();
+
+        let snapshot = module
+            .getattr("read_prompt_stash_archive")
+            .unwrap()
+            .call1((path.clone(), 20_u64))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(snapshot["records"][0]["reason"], json!("overwritten"));
+        assert_eq!(snapshot["records"][0]["entry"]["text"], json!("v1"));
+
+        module
+            .getattr("pop_prompt_stash")
+            .unwrap()
+            .call1((path.clone(), vec!["arch".to_string()]))
+            .unwrap();
+        let snapshot = module
+            .getattr("read_prompt_stash_archive")
+            .unwrap()
+            .call1((path.clone(), 1_u64))
+            .unwrap();
+        let snapshot = py_to_json_value(&snapshot).unwrap();
+        assert_eq!(snapshot["records"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["records"][0]["reason"], json!("popped"));
+        assert_eq!(snapshot["stats"]["loaded_rows"], json!(2));
     });
 }
 
