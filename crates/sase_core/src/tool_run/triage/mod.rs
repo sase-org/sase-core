@@ -25,8 +25,8 @@ pub use extract::{
     triage_signature,
 };
 pub use failures::{
-    ToolRunFailuresGroupWire, ToolRunFailuresRequestWire,
-    ToolRunFailuresResultWire,
+    ToolRunFailuresAffectedRunWire, ToolRunFailuresGroupWire,
+    ToolRunFailuresRequestWire, ToolRunFailuresResultWire,
 };
 pub use normalize::{clean_locator_path, display_text, normalize_line};
 pub use stage::{

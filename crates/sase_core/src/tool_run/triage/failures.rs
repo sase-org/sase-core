@@ -16,6 +16,10 @@ fn default_limit() -> u32 {
     50
 }
 
+fn default_runs_limit() -> u32 {
+    0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRunFailuresRequestWire {
@@ -35,6 +39,25 @@ pub struct ToolRunFailuresRequestWire {
     pub limit: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_ts: Option<i64>,
+    #[serde(default = "default_runs_limit")]
+    pub runs_limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunFailuresAffectedRunWire {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_ts: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +87,8 @@ pub struct ToolRunFailuresGroupWire {
     pub newest_class: Option<String>,
     #[serde(default)]
     pub newest_owners: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_runs: Vec<ToolRunFailuresAffectedRunWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

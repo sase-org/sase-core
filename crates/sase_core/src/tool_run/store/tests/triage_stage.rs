@@ -508,6 +508,7 @@ fn failures_aggregation_filters_and_isolation() {
             days: 7,
             limit: 50,
             now_ts: Some(2000),
+            runs_limit: 0,
         },
         Duration::from_secs(1),
     )
@@ -532,6 +533,7 @@ fn failures_aggregation_filters_and_isolation() {
             days: 7,
             limit: 50,
             now_ts: Some(2000),
+            runs_limit: 0,
         },
         Duration::from_secs(1),
     )
@@ -551,6 +553,7 @@ fn failures_aggregation_filters_and_isolation() {
             days: 7,
             limit: 50,
             now_ts: Some(2000),
+            runs_limit: 0,
         },
         Duration::from_secs(1),
     )
@@ -633,4 +636,190 @@ fn stage_and_settle_reject_unknown_fields() {
     )
     .unwrap_err();
     let _ = error;
+}
+
+#[test]
+fn failures_affected_runs_off_by_default() {
+    let (_temp, path) = store();
+    for (run_id, workspace, ts) in
+        [("r-1", "ws-a", 1000), ("r-2", "ws-b", 1500)]
+    {
+        let run = begin_named(&path, run_id, Some(workspace), ts - 50);
+        observe_fp(&path, &run.run_id, "head-3", vec![]);
+        finish_failed(
+            &path,
+            &run.run_id,
+            ts - 10,
+            Some(
+                crate::tool_run::handoff_wire::ToolRunTerminalCauseWire::Exited,
+            ),
+        );
+        triage_stage(
+            &path,
+            ToolRunTriageStageRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: run.run_id.clone(),
+                stage: ToolRunTriageStageInputWire {
+                    stage_key: "lint (mypy)".to_string(),
+                    stage_id: None,
+                    output: Some(mypy_output()),
+                    truncated: false,
+                    output_path: None,
+                },
+                project_root: None,
+                workspace_roots: Vec::new(),
+                ancestry: vec!["head-3".to_string()],
+                flake_baseline: Vec::new(),
+                selection_records: Vec::new(),
+                owner_candidates: Vec::new(),
+                knobs: Default::default(),
+                now_ts: Some(ts),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    }
+    let result = tool_run_failures(
+        &path,
+        ToolRunFailuresRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            project: Some("sase".to_string()),
+            all_projects: false,
+            tool: Some("check".to_string()),
+            class: None,
+            days: 7,
+            limit: 50,
+            now_ts: Some(2000),
+            runs_limit: 0,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result.groups.len(), 1);
+    assert!(result.groups[0].affected_runs.is_empty());
+    let value = serde_json::to_value(&result.groups[0]).unwrap();
+    assert!(
+        value.get("affected_runs").is_none(),
+        "default output must stay byte-identical"
+    );
+}
+
+#[test]
+fn failures_affected_runs_bounded_newest_first() {
+    let (_temp, path) = store();
+    for (run_id, workspace, ts) in [
+        ("r-1", "ws-a", 1000),
+        ("r-2", "ws-b", 1500),
+        ("r-3", "ws-c", 1800),
+    ] {
+        let run = begin_named(&path, run_id, Some(workspace), ts - 50);
+        observe_fp(&path, &run.run_id, "head-3", vec![]);
+        finish_failed(
+            &path,
+            &run.run_id,
+            ts - 10,
+            Some(
+                crate::tool_run::handoff_wire::ToolRunTerminalCauseWire::Exited,
+            ),
+        );
+        triage_stage(
+            &path,
+            ToolRunTriageStageRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                run_id: run.run_id.clone(),
+                stage: ToolRunTriageStageInputWire {
+                    stage_key: "lint (mypy)".to_string(),
+                    stage_id: None,
+                    output: Some(mypy_output()),
+                    truncated: false,
+                    output_path: None,
+                },
+                project_root: None,
+                workspace_roots: Vec::new(),
+                ancestry: vec!["head-3".to_string()],
+                flake_baseline: Vec::new(),
+                selection_records: Vec::new(),
+                owner_candidates: Vec::new(),
+                knobs: Default::default(),
+                now_ts: Some(ts),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "UPDATE runs SET owner_kind = 'monitor', owner_id = 'm-1'
+             WHERE run_id = 'r-3'",
+            [],
+        )
+        .unwrap();
+    }
+    let result = tool_run_failures(
+        &path,
+        ToolRunFailuresRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            project: Some("sase".to_string()),
+            all_projects: false,
+            tool: Some("check".to_string()),
+            class: None,
+            days: 7,
+            limit: 50,
+            now_ts: Some(2000),
+            runs_limit: 20,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result.groups.len(), 1);
+    let runs = &result.groups[0].affected_runs;
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].run_id, "r-3");
+    assert_eq!(runs[1].run_id, "r-2");
+    assert_eq!(runs[2].run_id, "r-1");
+    let mut ids: Vec<String> =
+        runs.iter().map(|item| item.run_id.clone()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), runs.len(), "affected runs must be distinct");
+    assert_eq!(runs[0].owner_kind.as_deref(), Some("monitor"));
+    assert_eq!(runs[0].owner_id.as_deref(), Some("m-1"));
+    assert_eq!(runs[0].workspace.as_deref(), Some("ws-c"));
+    let bounded = tool_run_failures(
+        &path,
+        ToolRunFailuresRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            project: Some("sase".to_string()),
+            all_projects: false,
+            tool: Some("check".to_string()),
+            class: None,
+            days: 7,
+            limit: 50,
+            now_ts: Some(2000),
+            runs_limit: 1,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(bounded.groups[0].affected_runs.len(), 1);
+    assert_eq!(bounded.groups[0].affected_runs[0].run_id, "r-3");
+    let capped = tool_run_failures(
+        &path,
+        ToolRunFailuresRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            project: Some("sase".to_string()),
+            all_projects: false,
+            tool: Some("check".to_string()),
+            class: None,
+            days: 7,
+            limit: 50,
+            now_ts: Some(2000),
+            runs_limit: 500,
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert!(capped.groups[0].affected_runs.len() <= 50);
+    assert_eq!(capped.groups[0].affected_runs.len(), 3);
 }

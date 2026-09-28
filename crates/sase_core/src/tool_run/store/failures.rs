@@ -5,8 +5,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::super::triage::{
-    ToolRunFailuresGroupWire, ToolRunFailuresRequestWire,
-    ToolRunFailuresResultWire, TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT,
+    ToolRunFailuresAffectedRunWire, ToolRunFailuresGroupWire,
+    ToolRunFailuresRequestWire, ToolRunFailuresResultWire,
+    TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT,
 };
 use super::super::wire::TOOL_RUN_WIRE_SCHEMA_VERSION;
 use super::super::ToolRunError;
@@ -51,7 +52,8 @@ pub fn tool_run_failures(
                     items.stage_key, items.extractor, items.extractor_version,
                     items.signature, items.display, items.created_ts,
                     runs.run_id, runs.agent, runs.workspace,
-                    items.class, items.possible_owners_json
+                    items.class, items.possible_owners_json,
+                    runs.owner_kind, runs.owner_id
              FROM tool_triage_items AS items
              JOIN runs ON runs.run_id = items.run_id
              WHERE items.created_ts >= ?1",
@@ -95,6 +97,8 @@ pub fn tool_run_failures(
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
                 row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         })?;
         #[allow(clippy::type_complexity)]
@@ -106,6 +110,7 @@ pub fn tool_run_failures(
                 String,
                 i64,
                 String,
+                Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<String>,
@@ -132,6 +137,8 @@ pub fn tool_run_failures(
                 workspace,
                 class,
                 owners,
+                owner_kind,
+                owner_id,
             ) = row?;
             let key = (
                 project.clone().unwrap_or_default(),
@@ -151,7 +158,8 @@ pub fn tool_run_failures(
                 workspace,
                 class,
                 owners,
-                None,
+                owner_kind,
+                owner_id,
             ));
         }
         let _ = TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT;
@@ -189,6 +197,37 @@ pub fn tool_run_failures(
                     continue;
                 }
             }
+            let affected_runs = if request.runs_limit == 0 {
+                Vec::new()
+            } else {
+                let cap = (request.runs_limit.min(50)) as usize;
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                let mut out: Vec<ToolRunFailuresAffectedRunWire> = Vec::new();
+                for row in &rows {
+                    if out.len() >= cap {
+                        break;
+                    }
+                    let run_id = row.2.clone();
+                    if run_id.is_empty() || !seen.insert(run_id.clone()) {
+                        continue;
+                    }
+                    let agent = if row.4.is_empty() {
+                        None
+                    } else {
+                        Some(row.4.clone())
+                    };
+                    out.push(ToolRunFailuresAffectedRunWire {
+                        run_id,
+                        agent,
+                        workspace: row.5.clone().filter(|v| !v.is_empty()),
+                        created_ts: Some(row.3),
+                        class: row.6.clone().filter(|v| !v.is_empty()),
+                        owner_kind: row.8.clone().filter(|v| !v.is_empty()),
+                        owner_id: row.9.clone().filter(|v| !v.is_empty()),
+                    });
+                }
+                out
+            };
             groups.push(ToolRunFailuresGroupWire {
                 schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
                 project: if project.is_empty() {
@@ -210,6 +249,7 @@ pub fn tool_run_failures(
                 last_run_id,
                 newest_class,
                 newest_owners,
+                affected_runs,
             });
         }
         // Fix displays (computed above by key) and sort deterministically
