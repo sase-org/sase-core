@@ -65,6 +65,7 @@ pub mod fleet_follow_promotion;
 pub mod fleet_mutation;
 pub mod fleet_owner_facts;
 pub mod fleet_presentation;
+pub(crate) mod fs_sig;
 pub mod gate_decision;
 pub mod gate_followup;
 pub mod git_object_sharing;

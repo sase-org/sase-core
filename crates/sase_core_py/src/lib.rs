@@ -39,6 +39,7 @@ mod editor_completion;
 mod editor_content;
 mod fleet;
 mod fleet_attention;
+mod goals;
 mod json_bridge;
 mod migration;
 mod notifications;
@@ -85,6 +86,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;
     agent_holds::register_agent_holds(m)?;
+    goals::register_goals(m)?;
     fleet::register_fleet(m)?;
     fleet_attention::register_fleet_attention(m)?;
     sudo::register_sudo(m)?;

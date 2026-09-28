@@ -29,16 +29,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tempfile::NamedTempFile;
 
 use crate::agent_identity::validate_agent_name;
+use crate::fs_sig::{mtime_ns, write_json_atomic};
 use crate::store_lock::{
     acquire_store_lock, holder_path_for, timeout_from_env, LockMode,
     StoreLockError,
@@ -1333,31 +1333,13 @@ fn scan_stream_signatures(
     Ok(signatures)
 }
 
-fn mtime_ns(modified: Option<SystemTime>) -> i64 {
-    let Some(modified) = modified else {
-        return 0;
-    };
-    let nanos = match modified.duration_since(UNIX_EPOCH) {
-        Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
-        Err(before) => {
-            -i128::try_from(before.duration().as_nanos()).unwrap_or(i128::MAX)
-        }
-    };
-    i64::try_from(nanos).unwrap_or(if nanos < 0 { i64::MIN } else { i64::MAX })
-}
-
 fn write_index_atomic(
     index_path: &Path,
     index: &BeadTouchIndexWire,
 ) -> Result<(), BeadError> {
-    let mut temporary = NamedTempFile::new_in(index_parent(index_path))?;
-    temporary.write_all(&serde_json::to_vec(index)?)?;
-    temporary.write_all(b"\n")?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(index_path)
-        .map_err(|error| BeadError::from(error.error))?;
+    let value = serde_json::to_value(index)?;
+    write_json_atomic(index_path, &value)
+        .map_err(|error| BeadError::io(error.to_string()))?;
     Ok(())
 }
 
@@ -1391,6 +1373,7 @@ fn lock_error(error: StoreLockError) -> BeadError {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
     use tempfile::{tempdir, TempDir};
 
     const OWNER: &str = "owner@example.com";
