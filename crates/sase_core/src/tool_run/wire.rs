@@ -221,6 +221,29 @@ impl ToolArgsPolicyWire {
     }
 }
 
+/// Declared lower bound on how long a catalog tool takes.
+///
+/// A class states the least time the tool essentially always takes. It is a
+/// floor, not a forecast: `short` tools can still overrun their ceiling on a
+/// slow machine, and that tail is an escalation problem, not a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDurationClassWire {
+    Short,
+    Long,
+    Unbounded,
+}
+
+impl ToolDurationClassWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Long => "long",
+            Self::Unbounded => "unbounded",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRunEventKindWire {
@@ -359,6 +382,8 @@ pub struct ToolDefinitionWire {
     pub fingerprint: ToolFingerprintSpecWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ToolReceiptPolicyWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_class: Option<ToolDurationClassWire>,
     #[serde(default = "empty_diagnostics")]
     pub diagnostics: Vec<String>,
 }

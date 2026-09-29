@@ -836,6 +836,7 @@ fn queries_never_expose_the_envelope() {
         args: ToolArgsPolicyWire::Deny,
         fingerprint: ToolFingerprintSpecWire::default(),
         receipt: None,
+        duration_class: None,
         diagnostics: Vec::new(),
     })
     .unwrap();

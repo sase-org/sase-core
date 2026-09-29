@@ -43,6 +43,7 @@ fn definition() -> ToolDefinitionWire {
         args: ToolArgsPolicyWire::Deny,
         fingerprint: ToolFingerprintSpecWire::default(),
         receipt: None,
+        duration_class: None,
         diagnostics: Vec::new(),
     }
 }

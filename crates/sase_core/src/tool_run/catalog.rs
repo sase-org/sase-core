@@ -283,6 +283,7 @@ mod tests {
                 .collect(),
             },
             receipt: None,
+            duration_class: None,
             diagnostics: Vec::new(),
         }
     }
@@ -345,5 +346,63 @@ mod tests {
         assert_eq!(normalized.definition.stages, ToolStagesWire::RunSilent);
         assert_eq!(normalized.definition.args, ToolArgsPolicyWire::Deny);
         assert_eq!(normalized.digest.len(), 64);
+    }
+
+    #[test]
+    fn duration_class_does_not_move_digest() {
+        let base = sample_definition();
+        let base = normalize_tool_definition(base).unwrap();
+        for class in [
+            None,
+            Some(crate::tool_run::wire::ToolDurationClassWire::Short),
+            Some(crate::tool_run::wire::ToolDurationClassWire::Long),
+            Some(crate::tool_run::wire::ToolDurationClassWire::Unbounded),
+        ] {
+            let mut classified = sample_definition();
+            classified.duration_class = class;
+            let normalized = normalize_tool_definition(classified).unwrap();
+            assert_eq!(normalized.digest, base.digest);
+            assert_eq!(normalized.definition.duration_class, class);
+        }
+    }
+
+    #[test]
+    fn undeclared_duration_class_is_omitted_from_output() {
+        let normalized =
+            normalize_tool_definition(sample_definition()).unwrap();
+        let value = serde_json::to_value(&normalized.definition).unwrap();
+        assert_eq!(value.get("duration_class"), None);
+    }
+
+    #[test]
+    fn unknown_duration_class_names_the_value() {
+        let mut value = serde_json::to_value(sample_definition()).unwrap();
+        value["duration_class"] =
+            serde_json::Value::String("eternal".to_string());
+        let error = serde_json::from_value::<ToolDefinitionWire>(value)
+            .expect_err("unknown class must fail");
+        assert!(
+            error.to_string().contains("eternal"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn golden_duration_fixture_matches_undeclared_digest() {
+        let plain: ToolDefinitionWire = serde_json::from_str(include_str!(
+            "fixtures/definition_check.json"
+        ))
+        .unwrap();
+        let plain = normalize_tool_definition(plain).unwrap();
+        let classified: ToolDefinitionWire = serde_json::from_str(
+            include_str!("fixtures/definition_duration_long.json"),
+        )
+        .unwrap();
+        let classified = normalize_tool_definition(classified).unwrap();
+        assert_eq!(
+            classified.definition.duration_class,
+            Some(crate::tool_run::wire::ToolDurationClassWire::Long)
+        );
+        assert_eq!(classified.digest, plain.digest);
     }
 }

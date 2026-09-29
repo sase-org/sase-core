@@ -2,6 +2,7 @@
 
 mod canonical;
 mod catalog;
+mod duration;
 mod fingerprint;
 mod handoff_wire;
 pub mod projection;
@@ -13,6 +14,14 @@ mod wire;
 pub use catalog::{
     normalize_receipt_policy, normalize_tool_definition, parse_receipt_ttl,
     receipt_ttl_seconds,
+};
+pub use duration::{
+    duration_calibration, duration_class_floor_seconds, duration_fit,
+    effective_duration_class, DurationCalibrationKindWire,
+    DurationCalibrationRequestWire, DurationCalibrationResponseWire,
+    DurationCalibrationWire, DurationFitRequestWire, DurationFitResponseWire,
+    DURATION_CALIBRATION_MIN_SAMPLES, DURATION_CLASS_LONG_FLOOR_MS,
+    DURATION_CLASS_LONG_FLOOR_SECONDS, DURATION_CLASS_SHORT_FLOOR_SECONDS,
 };
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
 pub use handoff_wire::*;

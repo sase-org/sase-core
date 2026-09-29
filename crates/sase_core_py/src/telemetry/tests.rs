@@ -459,6 +459,86 @@ fn tool_run_bindings_round_trip_python_dicts() {
 }
 
 #[test]
+fn tool_run_duration_bindings_round_trip_python_dicts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let call_fit = |request: serde_json::Value| {
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_tool_run_duration_fit(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        let refused = call_fit(json!({
+            "schema_version": 1,
+            "duration_class": "long",
+            "ceiling_seconds": 600,
+        }));
+        assert_eq!(refused["duration_class"], json!("long"));
+        assert_eq!(refused["floor_seconds"], json!(600));
+        assert_eq!(refused["ceiling_seconds"], json!(600));
+        assert_eq!(refused["fits_inline"], json!(false));
+
+        let fits = call_fit(json!({
+            "schema_version": 1,
+            "duration_class": "long",
+            "ceiling_seconds": 1800,
+        }));
+        assert_eq!(fits["fits_inline"], json!(true));
+
+        let default = call_fit(json!({"schema_version": 1}));
+        assert_eq!(default["duration_class"], json!("short"));
+        assert_eq!(default["floor_seconds"], json!(0));
+        assert_eq!(default["fits_inline"], json!(true));
+
+        let unbounded = call_fit(json!({
+            "schema_version": 1,
+            "duration_class": "unbounded",
+            "ceiling_seconds": 14400,
+        }));
+        assert_eq!(unbounded["floor_seconds"], serde_json::Value::Null);
+        assert_eq!(unbounded["fits_inline"], json!(false));
+
+        let call_calibration = |request: serde_json::Value| {
+            let request_obj = json_value_to_py(py, &request).unwrap();
+            let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_tool_run_duration_calibration(py, request).unwrap();
+            py_to_json_value(result.bind(py)).unwrap()
+        };
+        let overstated = call_calibration(json!({
+            "schema_version": 1,
+            "duration_class": "long",
+            "typical_duration_ms": 120_000,
+            "typical_sample_count": 12,
+        }));
+        assert_eq!(overstated["duration_class"], json!("long"));
+        assert_eq!(
+            overstated["calibration"]["suggested_class"],
+            json!("short")
+        );
+        assert!(overstated["calibration"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("suggest short"));
+
+        let silent = call_calibration(json!({
+            "schema_version": 1,
+            "duration_class": "short",
+            "typical_duration_ms": 180_000,
+            "typical_sample_count": 15,
+        }));
+        assert_eq!(silent["calibration"], serde_json::Value::Null);
+
+        let thin = call_calibration(json!({
+            "schema_version": 1,
+            "duration_class": "long",
+            "typical_duration_ms": 120_000,
+            "typical_sample_count": 9,
+        }));
+        assert_eq!(thin["calibration"], serde_json::Value::Null);
+    });
+}
+
+#[test]
 fn perf_logs_query_binding_round_trips_python_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

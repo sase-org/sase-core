@@ -32,6 +32,7 @@ fn definition() -> ToolDefinitionWire {
         args: ToolArgsPolicyWire::Deny,
         fingerprint: crate::tool_run::wire::ToolFingerprintSpecWire::default(),
         receipt: None,
+        duration_class: None,
         diagnostics: Vec::new(),
     }
 }
