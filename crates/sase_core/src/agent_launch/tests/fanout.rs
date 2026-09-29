@@ -1075,3 +1075,336 @@ fn fanout_planner_unclosed_brace_reports_missing_close() {
     assert!(message.contains("%{"), "message was {message:?}");
     assert!(message.contains('}'), "message was {message:?}");
 }
+
+#[test]
+fn fanout_planner_brace_opens_mid_word() {
+    let plan =
+        plan_agent_launch_fanout("foo%{bar | baz}qux", Some("alternatives"))
+            .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["foobarqux", "foobazqux"]
+    );
+}
+
+#[test]
+fn fanout_planner_brace_single_branch_mid_word() {
+    let plan =
+        plan_agent_launch_fanout("word%{s}", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["words", "word"]
+    );
+
+    // A leading empty branch parses away, so the implicit empty variant
+    // still renders last, exactly like `word%{s}`.
+    let plan =
+        plan_agent_launch_fanout("word%{|s} ok", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["words ok", "word ok"]
+    );
+}
+
+#[test]
+fn fanout_planner_brace_opens_after_punctuation() {
+    let plan =
+        plan_agent_launch_fanout("pre-%{a | b}", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pre-a", "pre-b"]
+    );
+}
+
+#[test]
+fn fanout_planner_adjacent_brace_directives_all_expand() {
+    let plan =
+        plan_agent_launch_fanout("%{a|b}%{c|d}", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ac", "ad", "bc", "bd"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.alt_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("1.1"), Some("1.2"), Some("2.1"), Some("2.2")]
+    );
+}
+
+#[test]
+fn fanout_planner_mid_word_named_branches_correlate() {
+    let plan = plan_agent_launch_fanout(
+        "pre%{a=X | b=Y}mid%{a=Z | b=W}post",
+        Some("alternatives"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["preXmidZpost", "preYmidWpost"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.alt_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("a"), Some("b")]
+    );
+}
+
+#[test]
+fn fanout_planner_brace_expands_inside_colon_value() {
+    let plan =
+        plan_agent_launch_fanout("%m:op%{us | x}", Some("model")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["%m:opus", "%m:opx"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.model.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("opus"), Some("opx")]
+    );
+}
+
+#[test]
+fn fanout_planner_paren_forms_still_need_a_boundary() {
+    for prompt in ["x%(a,b)", "50%(approx)", "fmt%alt(a,b)"] {
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert!(plan.slots.is_empty(), "prompt was {prompt:?}");
+    }
+
+    let plan =
+        plan_agent_launch_fanout("x %(a,b)", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x a", "x b"]
+    );
+}
+
+#[test]
+fn fanout_planner_mid_word_brace_ignores_literal_zones() {
+    for prompt in [
+        "keep `foo%{a | b}` literal",
+        "```text\nfoo%{a | b}\n```",
+        "%xprompts_enabled:false\nfoo%{a | b}\n%xprompts_enabled:true",
+    ] {
+        let plan =
+            plan_agent_launch_fanout(prompt, Some("alternatives")).unwrap();
+
+        assert!(plan.slots.is_empty(), "prompt was {prompt:?}");
+    }
+}
+
+#[test]
+fn fanout_planner_unclosed_mid_word_brace_reports_missing_close() {
+    let err =
+        plan_agent_launch_fanout("foo%{bar", Some("alternatives")).unwrap_err();
+
+    let message = err.to_string();
+    assert!(message.contains("%{"), "message was {message:?}");
+    assert!(message.contains('}'), "message was {message:?}");
+}
+
+#[test]
+fn fanout_planner_nested_brace_expands_per_branch() {
+    let plan =
+        plan_agent_launch_fanout("a %{x %{p|q} | y} b", Some("alternatives"))
+            .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a x p b", "a x q b", "a y b"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.alt_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("1.1"), Some("1.2"), Some("2")]
+    );
+}
+
+#[test]
+fn fanout_planner_nested_brace_mid_word_operand() {
+    let plan = plan_agent_launch_fanout(
+        "%{sase-%{core | github} | chezmoi}",
+        Some("alternatives"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["sase-core", "sase-github", "chezmoi"]
+    );
+}
+
+#[test]
+fn fanout_planner_nested_variants_multiply_within_correlated_slot() {
+    // The named outer branch keeps `a` as its correlation key while its
+    // nested alternation multiplies inside that slot.
+    let plan = plan_agent_launch_fanout(
+        "%{a=X %{p|q} | b=Y} %{a=Z}",
+        Some("alternatives"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["X p Z", "X q Z", "Y"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.alt_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("a.1"), Some("a.2"), Some("b")]
+    );
+}
+
+#[test]
+fn fanout_planner_deeply_nested_brace_never_panics() {
+    let plan = plan_agent_launch_fanout(
+        "%{a %{b %{c|d} | e} | f}",
+        Some("alternatives"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a b c", "a b d", "a e", "f"]
+    );
+}
+
+#[test]
+fn fanout_planner_glued_references_and_tags_stay_verbatim() {
+    let plan =
+        plan_agent_launch_fanout("A%{#x | +t}B", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A#xB", "A+tB"]
+    );
+}
+
+#[test]
+fn fanout_planner_concatenated_opener_stays_literal() {
+    // The `%{` rendered by joining branch `a%` with the trailing `{x}`
+    // was never an alternation in the source, so it is not expanded.
+    let plan =
+        plan_agent_launch_fanout("%{a% | b}{x}", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a%{x}", "b{x}"]
+    );
+}
+
+#[test]
+fn fanout_planner_glued_branch_directives_keep_parseable_spacing() {
+    let plan = plan_agent_launch_fanout(
+        "Review:%{%m:opus | %m:sonnet}",
+        Some("model"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Review: %m:opus", "Review: %m:sonnet"]
+    );
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.model.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("opus"), Some("sonnet")]
+    );
+
+    let plan = plan_agent_launch_fanout(
+        "foo %{%m:opus | %m:sonnet}bar",
+        Some("model"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["foo %m:opus bar", "foo %m:sonnet bar"]
+    );
+}
+
+#[test]
+fn fanout_planner_percent_before_jinja_tag_is_an_alternation() {
+    // A literal `%` immediately followed by a Jinja `{%` tag reads as an
+    // alternation opener; write `100% {% ... %}` for a literal percent.
+    let plan = plan_agent_launch_fanout("100%{% if x %}", Some("alternatives"))
+        .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["100% if x %", "100"]
+    );
+}

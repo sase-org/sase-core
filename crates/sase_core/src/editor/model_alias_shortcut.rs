@@ -462,8 +462,23 @@ fn destination_replacement(
         Some(' ') => (format!("{replacement} "), dest_end + 1),
         Some('\t') => (replacement.to_string(), dest_end),
         Some('\n') | Some('\r') | None => (format!("{replacement} "), dest_end),
-        Some(_) => (replacement.to_string(), dest_end),
+        Some(_) => {
+            if expansion_abuts_alternation_opener(text, dest_end) {
+                (format!("{replacement} "), dest_end)
+            } else {
+                (replacement.to_string(), dest_end)
+            }
+        }
     }
+}
+
+/// Whether an expansion ending at `end` would glue onto a `%{` opener.
+///
+/// `%{` opens an alternation anywhere, so `%m:@large%{x | y}` would fan
+/// out with a mangled model; leaving one separating space keeps both the
+/// directive and the alternation parseable.
+fn expansion_abuts_alternation_opener(text: &str, end: usize) -> bool {
+    text.get(end..).is_some_and(|tail| tail.starts_with("%{"))
 }
 
 fn byte_range_of(
@@ -636,7 +651,12 @@ fn apply_replacement_preview(
                 edit_text.push(' ');
                 start + edit_text.len()
             }
-            Some(_) => start + replacement.len(),
+            Some(_) => {
+                if expansion_abuts_alternation_opener(text, end) {
+                    edit_text.push(' ');
+                }
+                start + edit_text.len()
+            }
         };
 
     let mut preview = String::with_capacity(
@@ -1734,10 +1754,12 @@ mod tests {
     fn trigger_token_overlapping_a_body_keeps_body_text() {
         // The shared alternation grammar still sees `%{` after `(` inside
         // the whitespace token, so the expansion stops at the body start.
+        // Because `%{` opens mid-word, the expansion leaves one separating
+        // space instead of gluing onto the opener.
         let planned = accept("Use =la(%{x | y})", 0, 7, "@large");
         assert_eq!(
             apply_all("Use =la(%{x | y})", &planned),
-            "Use %m:@large%{x | y})"
+            "Use %m:@large %{x | y})"
         );
     }
 }

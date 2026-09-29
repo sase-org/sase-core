@@ -405,9 +405,29 @@ fn split_prompt_for_alternatives_with_ids(
     prompt: &str,
 ) -> Result<Option<Vec<AlternativeSlot>>, AgentLaunchFanoutPlanError> {
     let ignored_ranges = launch_literal_zone_ranges(prompt);
+    plan_alternative_slots(prompt, &ignored_ranges)
+}
+
+/// Plan every launch slot for the outermost alternations in `prompt`.
+///
+/// Only outermost directives are planned: a start inside an
+/// already-accepted `[start, end)` span opens a nested alternation that
+/// expands with its parent branch instead. Branch values that themselves
+/// contain alternations fan out recursively, so planning only ever sees
+/// text that was nested in the source and rendered concatenations such as
+/// `a%{x}` are never re-expanded.
+fn plan_alternative_slots(
+    prompt: &str,
+    ignored_ranges: &[(usize, usize)],
+) -> Result<Option<Vec<AlternativeSlot>>, AgentLaunchFanoutPlanError> {
     let mut directives: Vec<AlternativeDirective> = Vec::new();
     for (start, open_start, delimiter) in alt_directive_starts(prompt) {
-        if position_in_ranges(start, &ignored_ranges) {
+        if position_in_ranges(start, ignored_ranges) {
+            continue;
+        }
+        if directives.iter().any(|directive: &AlternativeDirective| {
+            start >= directive.start && start < directive.end
+        }) {
             continue;
         }
         let Some(close_end) = find_matching_delimiter(
@@ -440,8 +460,11 @@ fn split_prompt_for_alternatives_with_ids(
 
     let mut axes = alternative_axes_for_directives(&directives);
     axes.sort_by_key(|axis| axis.start);
-    let arg_lists: Vec<Vec<AlternativeVariant>> =
-        axes.into_iter().map(|axis| axis.variants).collect();
+    let mut arg_lists: Vec<Vec<AlternativeVariant>> =
+        Vec::with_capacity(axes.len());
+    for axis in &axes {
+        arg_lists.push(expand_axis_variants(axis)?);
+    }
     let mut combinations = Vec::new();
     cartesian_product(&arg_lists, 0, &mut Vec::new(), &mut combinations);
 
@@ -460,6 +483,88 @@ fn split_prompt_for_alternatives_with_ids(
         });
     }
     Ok(Some(result))
+}
+
+/// Expand one axis's variants for nested alternations.
+///
+/// A variant whose replacement values contain no alternation keeps its id;
+/// any other variant multiplies into one variant per nested combination,
+/// with each nested sub-id appended to the parent id (`1` becomes `1.1`,
+/// `1.2`; a correlated `a` becomes `a.1`, `a.2`). The named outer branch
+/// keeps its name as the correlation key, so nested variants multiply
+/// within their correlated slot.
+fn expand_axis_variants(
+    axis: &AlternativeAxis,
+) -> Result<Vec<AlternativeVariant>, AgentLaunchFanoutPlanError> {
+    let mut expanded = Vec::with_capacity(axis.variants.len());
+    for variant in &axis.variants {
+        expanded.extend(expand_variant_nested(variant)?);
+    }
+    Ok(expanded)
+}
+
+fn expand_variant_nested(
+    variant: &AlternativeVariant,
+) -> Result<Vec<AlternativeVariant>, AgentLaunchFanoutPlanError> {
+    let mut lists: Vec<Vec<(usize, String, String)>> =
+        Vec::with_capacity(variant.replacements.len());
+    for replacement in &variant.replacements {
+        lists.push(
+            expand_branch_value(&replacement.value)?
+                .into_iter()
+                .map(|(value, sub_id)| {
+                    (replacement.directive_index, value, sub_id)
+                })
+                .collect(),
+        );
+    }
+    if lists.iter().all(|list| list.len() == 1) {
+        return Ok(vec![variant.clone()]);
+    }
+    let mut combinations: Vec<Vec<(usize, String, String)>> = Vec::new();
+    cartesian_product(&lists, 0, &mut Vec::new(), &mut combinations);
+    Ok(combinations
+        .into_iter()
+        .map(|combination| {
+            let mut id = variant.id.clone();
+            let replacements = combination
+                .into_iter()
+                .map(|(directive_index, value, sub_id)| {
+                    if !sub_id.is_empty() {
+                        id.push('.');
+                        id.push_str(&sub_id);
+                    }
+                    AlternativeReplacement {
+                        directive_index,
+                        value,
+                    }
+                })
+                .collect();
+            AlternativeVariant { id, replacements }
+        })
+        .collect())
+}
+
+/// Expand the nested alternations inside one branch value.
+///
+/// Returns the fully rendered values with their local sub-ids, or the
+/// value unchanged (with an empty sub-id) when it holds no alternation
+/// outside its own literal zones.
+fn expand_branch_value(
+    value: &str,
+) -> Result<Vec<(String, String)>, AgentLaunchFanoutPlanError> {
+    if !value.contains('%') {
+        return Ok(vec![(value.to_string(), String::new())]);
+    }
+    let ignored = launch_literal_zone_ranges(value);
+    let slots = plan_alternative_slots(value, &ignored)?.unwrap_or_default();
+    if slots.is_empty() {
+        return Ok(vec![(value.to_string(), String::new())]);
+    }
+    Ok(slots
+        .into_iter()
+        .map(|slot| (slot.prompt, slot.alt_id))
+        .collect())
 }
 
 /// Split `%alt(...)`, `%(...)`, and `%{...}` directives into launch slots.
@@ -670,7 +775,9 @@ pub(crate) fn render_alternative_prompt(
         .flat_map(|variant| {
             variant.replacements.iter().map(|replacement| {
                 let directive = &directives[replacement.directive_index];
-                (directive.start, directive.end, replacement.value.clone())
+                let value =
+                    spaced_branch_value(prompt, directive, &replacement.value);
+                (directive.start, directive.end, value)
             })
         })
         .collect();
@@ -785,6 +892,59 @@ fn push_collapsed_empty_alt_run(
     }
 }
 
+/// Keep a non-empty branch's `%` directives parseable when the branch is
+/// glued to adjacent text.
+///
+/// A leading `%name`/`%(` marker gains one space when the character before
+/// the alternation site is not a directive left boundary, and a trailing
+/// `%name` token gains one space when the character after the site
+/// continues a word. `#xprompt` references and `+tag`s substitute verbatim.
+fn spaced_branch_value(
+    prompt: &str,
+    directive: &AlternativeDirective,
+    value: &str,
+) -> String {
+    if value.is_empty() {
+        return value.to_string();
+    }
+    let mut spaced = value.to_string();
+    if branch_starts_with_directive_marker(value)
+        && prompt[..directive.start]
+            .chars()
+            .next_back()
+            .is_some_and(|prev| !is_directive_left_boundary(prev))
+    {
+        spaced.insert(0, ' ');
+    }
+    if branch_ends_with_directive_token(value)
+        && !spaced.ends_with([' ', '\t', '\n', '\r'])
+        && prompt[directive.end..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_alphanumeric() || next == '_')
+    {
+        spaced.push(' ');
+    }
+    spaced
+}
+
+fn branch_starts_with_directive_marker(value: &str) -> bool {
+    let mut chars = value.chars();
+    if chars.next() != Some('%') {
+        return false;
+    }
+    matches!(chars.next(), Some('(') | Some('a'..='z' | 'A'..='Z' | '_'))
+}
+
+fn branch_ends_with_directive_token(value: &str) -> bool {
+    let token = value.split_whitespace().next_back().unwrap_or(value);
+    let mut chars = token.chars();
+    if chars.next() != Some('%') {
+        return false;
+    }
+    matches!(chars.next(), Some('a'..='z' | 'A'..='Z' | '_'))
+}
+
 fn should_preserve_directive_separator(
     rendered: &str,
     run_end: usize,
@@ -802,7 +962,9 @@ fn starts_with_directive_marker(text: &str) -> bool {
     if chars.next() != Some('%') {
         return false;
     }
-    matches!(chars.next(), Some('{') | Some('(') | Some('a'..='z' | 'A'..='Z' | '_'))
+    // `%{` opens mid-word, so it never needs a separating space; `%(` and
+    // `%name` still do.
+    matches!(chars.next(), Some('(') | Some('a'..='z' | 'A'..='Z' | '_'))
 }
 
 fn is_directive_left_boundary(ch: char) -> bool {

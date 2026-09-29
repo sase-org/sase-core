@@ -102,6 +102,25 @@ mod tests {
     }
 
     #[test]
+    fn covers_mid_word_and_adjacent_openers() {
+        assert_eq!(
+            alternation_body_ranges("foo%{a | b}qux"),
+            vec![(3, 11)],
+            "mid-word brace opener"
+        );
+        assert_eq!(
+            alternation_body_ranges("%{a|b}%{c|d}"),
+            vec![(0, 6), (6, 12)],
+            "adjacent openers are all found"
+        );
+        assert_eq!(
+            alternation_body_ranges("x%(a,b)"),
+            Vec::new(),
+            "paren form still needs a boundary"
+        );
+    }
+
+    #[test]
     fn detects_positions_and_spans() {
         let text = "%{%m:opus | %m:sonnet} Use =la";
         assert!(position_in_alternation(text, 3));

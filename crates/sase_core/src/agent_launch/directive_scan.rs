@@ -211,13 +211,21 @@ pub(crate) fn launch_inline_literal_ranges(
     inline_code_ranges(prompt, &masks)
 }
 
+/// Start offset, opener-delimiter offset, and delimiter form for every
+/// alternation opener in `prompt`, in source order.
+///
+/// `%{` opens anywhere outside literal zones (mid-word, after punctuation,
+/// adjacent to another alternation, or nested inside a branch); `%(` and
+/// `%alt(` keep the directive-valid position rule (start of text or after
+/// whitespace, `(`, `[`, `{`, `"`, `'`, or `:`) so format strings like
+/// `%(name)s` never fan out. Callers skip literal zones themselves.
 pub(crate) fn alt_directive_starts(
     prompt: &str,
 ) -> Vec<(usize, usize, AltDelimiter)> {
     alt_directive_re()
         .captures_iter(prompt)
         .filter_map(|caps| {
-            let marker = caps.get(2)?;
+            let marker = caps.get(1).or_else(|| caps.get(2))?;
             let open = marker.end() - 1;
             let delimiter = if prompt.as_bytes()[open] == b'{' {
                 AltDelimiter::Brace
@@ -548,10 +556,18 @@ fn xprompt_reference_re() -> &'static Regex {
     })
 }
 
+/// Match alternation openers: `%{` anywhere, `%(`/`%alt(` only at a
+/// directive-valid position.
+///
+/// The `regex` crate has no lookbehind, so the paren branch matches its
+/// left-boundary prefix (`(?:^|...)`) while the brace branch matches the
+/// bare marker and consumes no prefix, letting adjacent openers
+/// (`%{a|b}%{c|d}`) all match. Group 1 is the brace marker; group 2 is
+/// the paren marker.
 fn alt_directive_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?m)(^|[\s\(\[\{"':])(%(?:alt)?\(|%\{)"#).unwrap()
+        Regex::new(r#"(?m)(%\{)|(?:^|[\s\(\[\{"':])(%(?:alt)?\()"#).unwrap()
     })
 }
 
