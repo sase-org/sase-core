@@ -806,12 +806,79 @@ fn concurrent_task_plus_ones_preserve_reporters_and_deduplicate_retries() {
     );
 }
 
-#[test]
-fn plus_one_attachments_without_a_wake_note_are_refused() {
-    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
-    let before = persisted_claim_state(&beads_dir);
+const PLUS_ONE_ATTACHMENT_DIGEST: &str =
+    "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1";
 
-    let error = add_task_plus_one(
+fn plus_one_attachment(name: &str) -> BeadNoteAttachmentWire {
+    BeadNoteAttachmentWire {
+        name: name.to_string(),
+        sha256: PLUS_ONE_ATTACHMENT_DIGEST.to_string(),
+        size_bytes: 188416,
+        mime_type: "image/png".to_string(),
+        image: None,
+        origin: None,
+    }
+}
+
+#[test]
+fn plus_one_ordinary_records_evidence_attachments() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
+
+    let issue = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "repro @attachment:proof.png",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    assert_eq!(issue.plus_one_count(), 1);
+    assert_eq!(
+        issue.plus_one_evidence[0].note,
+        "repro @attachment:proof.png"
+    );
+    assert_eq!(
+        issue.plus_one_evidence[0].attachments,
+        vec![plus_one_attachment("proof.png")]
+    );
+    // Ordinary +1 appends no bead note; the manifest lives on the evidence.
+    assert!(issue.notes.is_empty());
+    assert_eq!(reduces_to_store(&beads_dir), vec![issue.clone()]);
+    let (projected, reduced) = projected_and_reduced(&beads_dir, &task_id);
+    assert_eq!(projected, issue);
+    assert_eq!(reduced, issue);
+
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    let payload = streams
+        .iter()
+        .flat_map(|stream| &stream.events)
+        .find(|event| {
+            event.operation == BeadEventOperationWire::TaskPlusOneRecorded
+        })
+        .map(|event| event.payload.clone())
+        .unwrap();
+    match payload {
+        BeadEventPayloadWire::TaskPlusOneRecorded { evidence } => {
+            assert_eq!(
+                evidence.attachments,
+                vec![plus_one_attachment("proof.png")]
+            );
+        }
+        other => panic!("unexpected +1 payload: {other:?}"),
+    }
+}
+
+#[test]
+fn plus_one_without_attachments_stays_byte_identical() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
+
+    let issue = add_task_plus_one(
         &beads_dir,
         &task_id,
         "reporter-one",
@@ -819,23 +886,174 @@ fn plus_one_attachments_without_a_wake_note_are_refused() {
         &[],
         Some("2026-01-02T00:00:00Z".to_string()),
         None,
-        Some(vec![BeadNoteAttachmentWire {
-            name: "proof.png".to_string(),
-            sha256: "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1"
-                .to_string(),
-            size_bytes: 188416,
-            mime_type: "image/png".to_string(),
-            image: None,
-            origin: None,
-        }]),
+        None,
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    assert!(issue.plus_one_evidence[0].attachments.is_empty());
+    let value = serde_json::to_value(&issue.plus_one_evidence[0]).unwrap();
+    assert!(
+        value.get("attachments").is_none(),
+        "empty manifest must omit the key: {value}"
+    );
+    assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+}
+
+#[test]
+fn plus_one_wake_keeps_manifest_on_evidence_and_wake_note_free() {
+    let (_temp, beads_dir, task_id) =
+        snoozed_task_fixture("2026-01-04T00:00:00Z", Some(1));
+
+    let issue = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "repro @attachment:proof.png",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    assert_eq!(issue.status, StatusWire::Ready);
+    assert_eq!(issue.plus_one_evidence[0].attachments.len(), 1);
+    assert_eq!(
+        issue.plus_one_evidence[0].note,
+        "repro @attachment:proof.png"
+    );
+    // Snooze note plus the generated wake note; the wake note carries no
+    // attachments because its preset text has no @attachment tokens.
+    assert_eq!(issue.notes.len(), 2);
+    assert!(issue.notes[1].attachments.is_empty());
+    assert!(
+        issue.notes[1].text.contains("Reopened by +1 threshold"),
+        "{}",
+        issue.notes[1].text
+    );
+    assert_eq!(reduces_to_store(&beads_dir), vec![issue]);
+}
+
+#[test]
+fn plus_one_withheld_reopen_records_evidence_attachments() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture_with_assignee(
+        StatusWire::Closed,
+        "finished-agent",
+    );
+
+    let result = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-agent",
+        "saw this @attachment:proof.png before the close landed",
+        &[],
+        Some("2026-01-01T00:02:00Z".to_string()),
+        Some("2026-01-01T00:00:30Z".to_string()),
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap();
+
+    assert!(result.changed);
+    assert!(result.reopen_withheld);
+    let issue = result.issue.unwrap();
+    assert_eq!(issue.status, StatusWire::Closed);
+    assert_eq!(issue.plus_one_evidence[0].attachments.len(), 1);
+    let (projected, reduced) = projected_and_reduced(&beads_dir, &task_id);
+    assert_eq!(projected, issue);
+    assert_eq!(reduced, issue);
+}
+
+#[test]
+fn plus_one_duplicate_reporter_with_attachments_is_a_noop() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
+    add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "repro @attachment:proof.png",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap();
+    let before = persisted_claim_state(&beads_dir);
+
+    let repeat = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "later @attachment:proof.png",
+        &[],
+        Some("2026-01-03T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap();
+
+    assert!(!repeat.changed);
+    assert_eq!(persisted_claim_state(&beads_dir), before);
+}
+
+#[test]
+fn plus_one_invalid_manifest_writes_no_partial_event() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
+    let before = persisted_claim_state(&beads_dir);
+
+    // Token/manifest mismatch: text names proof.png but the manifest names
+    // an unrelated file.
+    let error = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "repro @attachment:proof.png",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("other.png")]),
     )
     .unwrap_err();
-
     assert_eq!(error.kind, "validation");
     assert!(
-        error.message.contains("only records when the +1 wakes"),
+        error.message.contains("tokens and manifest must match"),
         "{}",
         error.message
     );
+    assert_eq!(persisted_claim_state(&beads_dir), before);
+
+    // Manifest without a matching token is the same one-to-one violation.
+    let error = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "plain repro",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![plus_one_attachment("proof.png")]),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("tokens and manifest must match"));
+    assert_eq!(persisted_claim_state(&beads_dir), before);
+
+    // A malformed descriptor is refused before anything is written.
+    let mut bad = plus_one_attachment("proof.png");
+    bad.sha256 = "not-a-digest".to_string();
+    let error = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "repro @attachment:proof.png",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![bad]),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("digest"));
     assert_eq!(persisted_claim_state(&beads_dir), before);
 }

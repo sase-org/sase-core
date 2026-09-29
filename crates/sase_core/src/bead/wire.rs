@@ -250,6 +250,10 @@ pub struct DependencyWire {
 /// The collection on [`IssueWire`] is the source of truth for the visible
 /// `+N` count.  Keeping the evidence structured and append-only prevents the
 /// count from drifting away from the reports that justify it.
+///
+/// Each entry owns the attachment manifest for its own note text, exactly
+/// like a bead note does: `attachments` is empty-omitted so evidence
+/// written before attachments existed stays byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPlusOneEvidenceWire {
     pub timestamp: String,
@@ -259,6 +263,12 @@ pub struct TaskPlusOneEvidenceWire {
     pub note: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
+    /// Content-addressed attachment descriptors for `note`. Absent (never
+    /// `null`) on every evidence written before attachments existed, and
+    /// on evidence without attachments, so existing projections stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::note_attachment::BeadNoteAttachmentWire>,
 }
 
 impl TaskPlusOneEvidenceWire {
@@ -293,6 +303,11 @@ impl TaskPlusOneEvidenceWire {
                 "task +1 evidence refs must be normalized and deduplicated",
             ));
         }
+        crate::note_attachment::validate_note_attachment_manifest(
+            &self.attachments,
+            &self.note,
+        )
+        .map_err(|error| BeadError::validation(error.to_string()))?;
         Ok(())
     }
 }
@@ -1533,6 +1548,7 @@ mod tests {
             reporter: "agent-a".to_string(),
             note: "reproduced".to_string(),
             refs: vec!["research:202608/repro.md".to_string()],
+            attachments: Vec::new(),
         }];
         issue.validate().unwrap();
         assert_eq!(issue.plus_one_count(), 1);

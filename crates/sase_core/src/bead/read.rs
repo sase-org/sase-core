@@ -1342,6 +1342,7 @@ mod tests {
                 reporter: "agent-a".to_string(),
                 note: "first".to_string(),
                 refs: Vec::new(),
+                attachments: Vec::new(),
             },
             TaskPlusOneEvidenceWire {
                 timestamp: "2026-01-02T00:00:00Z".to_string(),
@@ -1349,6 +1350,7 @@ mod tests {
                 reporter: "agent-b".to_string(),
                 note: "second".to_string(),
                 refs: Vec::new(),
+                attachments: Vec::new(),
             },
         ];
 

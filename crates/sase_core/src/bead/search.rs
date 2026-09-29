@@ -462,6 +462,7 @@ mod tests {
                         reporter: "agent.beta".to_string(),
                         note: "Saw this before the close landed.".to_string(),
                         refs: Vec::new(),
+                        attachments: Vec::new(),
                     }];
                 }),
                 "2026-01-01T00:00:00Z",

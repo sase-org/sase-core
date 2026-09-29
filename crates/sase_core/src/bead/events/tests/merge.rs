@@ -30,6 +30,7 @@ fn plus_one_event(event_id: &str, reporter: &str) -> BeadEventRecordWire {
         reporter: reporter.to_string(),
         note: "independent reproduction".to_string(),
         refs: Vec::new(),
+        attachments: Vec::new(),
     };
     BeadEventRecordWire {
         schema_version: BEAD_EVENT_SCHEMA_VERSION,

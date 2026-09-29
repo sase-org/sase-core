@@ -29,9 +29,10 @@ use std::path::Path;
 /// The evidence, referenced artifacts, and any draft/closed-to-ready status
 /// promotion are persisted together under the bead mutation lock. Repeating
 /// the creator or an existing reporter is an exact no-op.
-/// Record a +1, threading `note_attachments` into the snooze-wake note when
-/// this +1 wakes the bead. Attachments with no wake note are refused rather
-/// than silently dropped: there is no other bead note to record them on.
+/// Each evidence entry owns the attachment manifest for its own note text.
+/// The generated snooze-wake note stays attachment-free: it carries no
+/// `@attachment:` tokens, so an empty manifest is the only manifest that
+/// validates against it.
 #[allow(clippy::too_many_arguments)]
 pub fn add_task_plus_one(
     beads_dir: &Path,
@@ -85,12 +86,14 @@ pub fn add_task_plus_one(
         }
 
         let timestamp = now.unwrap_or_else(now_utc);
+        let manifest = note_attachments.clone().unwrap_or_default();
         let evidence = TaskPlusOneEvidenceWire {
             timestamp: timestamp.clone(),
             observed_since,
             reporter: reporter.clone(),
             note,
             refs: references.clone(),
+            attachments: manifest,
         };
         evidence.validate()?;
 
@@ -156,15 +159,8 @@ pub fn add_task_plus_one(
                 note,
                 &reporter,
                 &timestamp,
-                &note_attachments.clone().unwrap_or_default(),
+                &[],
             )?;
-        } else if note_attachments
-            .as_ref()
-            .is_some_and(|manifest| !manifest.is_empty())
-        {
-            return Err(BeadError::validation(
-                "note_attachments on task +1 only records when the +1 wakes a snoozed bead",
-            ));
         }
         let issue = store.issues[index].clone();
         store.save()?;
