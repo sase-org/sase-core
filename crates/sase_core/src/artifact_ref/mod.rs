@@ -64,6 +64,10 @@ pub use ref_files::{
     ArtifactRefLogicalFileWire, ARTIFACT_REF_FILE_INDEX_WIRE_SCHEMA_VERSION,
 };
 pub use repository_resolution::resolve_document_source_target;
+pub(crate) use scanner::{
+    baseline_document_kind_labels, has_allowed_left_context,
+    scan_quoted_argument, unescape_quoted_argument,
+};
 pub use scanner::{
     quote_artifact_ref_argument, scan_artifact_ref_document_links,
     scan_artifact_refs,
@@ -238,6 +242,13 @@ pub fn render_artifact_ref(
             }
         }
         (
+            ArtifactRefKindWire::Document { role },
+            ArtifactRefPayloadWire::Document { path },
+        ) if role == "attachment" => {
+            parse_attachment_payload(path)?;
+            path.clone()
+        }
+        (
             ArtifactRefKindWire::Document { .. },
             ArtifactRefPayloadWire::Document { path },
         ) => {
@@ -356,6 +367,17 @@ pub fn resolve_artifact_ref(
             ArtifactRefPayloadWire::Document { .. },
         ) if role == "tool" => {
             Ok(reserved_unresolved_kind_resolution("tool", rendered))
+        }
+        (
+            ArtifactRefKindWire::Document { role },
+            ArtifactRefPayloadWire::Document { .. },
+        ) if role == "attachment" => {
+            let mut resolved = resolution("unknown_kind", rendered);
+            resolved.diagnostic = Some(
+                "attachment references resolve through the bead attachment store, not this crate"
+                    .to_string(),
+            );
+            Ok(resolved)
         }
         (
             ArtifactRefKindWire::Document { role },
@@ -601,6 +623,10 @@ fn parse_payload(
             Ok(ArtifactRefPayloadWire::Agent {
                 name: payload.to_string(),
             })
+        }
+        ArtifactRefKindWire::Document { role } if role == "attachment" => {
+            let path = parse_attachment_payload(payload)?;
+            Ok(ArtifactRefPayloadWire::Document { path })
         }
         ArtifactRefKindWire::Document { .. } => {
             validate_path_payload("document", payload)?;
@@ -1250,9 +1276,52 @@ fn kind_rejects_fragments(kind: &ArtifactRefKindWire) -> bool {
         | ArtifactRefKindWire::Stitch
         | ArtifactRefKindWire::Patch
         | ArtifactRefKindWire::Goal => true,
-        ArtifactRefKindWire::Document { role } if role == "tool" => true,
+        ArtifactRefKindWire::Document { role }
+            if role == "tool" || role == "attachment" =>
+        {
+            true
+        }
         _ => false,
     }
+}
+
+pub(crate) fn validate_attachment_name(
+    name: &str,
+) -> Result<(), ArtifactRefError> {
+    if name.is_empty() || name.len() > 96 {
+        return Err(ArtifactRefError::validation(
+            "attachment name must be non-empty and at most 96 characters",
+        ));
+    }
+    if !name.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+    }) {
+        return Err(ArtifactRefError::validation(
+            "attachment name must match [A-Za-z0-9._-]",
+        ));
+    }
+    if name.starts_with('.') || name.starts_with('-') {
+        return Err(ArtifactRefError::validation(
+            "attachment name must not start with '.' or '-'",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_attachment_payload(payload: &str) -> Result<String, ArtifactRefError> {
+    let (bead_id, name) = payload.split_once('/').ok_or_else(|| {
+        ArtifactRefError::validation(
+            "attachment payload must have the form <bead-id>/<name>",
+        )
+    })?;
+    if name.contains('/') {
+        return Err(ArtifactRefError::validation(
+            "attachment payload must contain exactly one '/'",
+        ));
+    }
+    validate_bead_id(bead_id)?;
+    validate_attachment_name(name)?;
+    Ok(payload.to_string())
 }
 
 /// Validate a bead id lexically, with no bead-store reads.
@@ -2424,6 +2493,43 @@ mod tests {
                 .map(|candidate| candidate.text.as_str())
                 .collect::<Vec<_>>(),
             ["@plans:first.md", "@plans:fenced.md"]
+        );
+    }
+
+    #[test]
+    fn attachment_payload_requires_exactly_one_slash() {
+        let parsed =
+            parse_artifact_ref("attachment:sase-1ck.1/login.png").unwrap();
+        assert_eq!(parsed.rendered, "attachment:sase-1ck.1/login.png");
+        assert!(parse_artifact_ref("attachment:login.png").is_err());
+        assert!(parse_artifact_ref("attachment:a/b/c").is_err());
+        assert!(parse_artifact_ref("attachment:sase-1ck/.hidden").is_err());
+    }
+
+    #[test]
+    fn attachment_resolves_through_the_bead_store_not_the_filesystem() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("attachments");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("login.png"), "bytes").unwrap();
+        let context = ArtifactRefContextWire {
+            document_roots: vec![ArtifactRefDocumentRootWire {
+                kind: "attachment".to_string(),
+                root: root.to_string_lossy().into_owned(),
+                path_globs: None,
+            }],
+            ..Default::default()
+        };
+        let parsed =
+            parse_artifact_ref("attachment:sase-1ck.1/login.png").unwrap();
+        let resolved = resolve_artifact_ref(&parsed, &context).unwrap();
+        assert_eq!(resolved.status, "unknown_kind");
+        assert!(resolved.resolved_path.is_none());
+        assert_eq!(
+            resolved.diagnostic.as_deref(),
+            Some(
+                "attachment references resolve through the bead attachment store, not this crate"
+            )
         );
     }
 }

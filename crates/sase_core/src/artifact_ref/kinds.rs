@@ -150,6 +150,20 @@ fn registrations() -> Vec<KindRegistration> {
             diagnostic: None,
         },
         KindRegistration {
+            kind: "attachment",
+            display_name: "Attachment",
+            status: ArtifactRefKindStatusWire::Live,
+            canonical: None,
+            aliases: &[],
+            reserved: true,
+            argument_summary: "attachment:<bead-id>/<name>",
+            offered_in_completion: false,
+            fragment_probe: ArtifactRefKindWire::Document {
+                role: "attachment".to_string(),
+            },
+            diagnostic: None,
+        },
+        KindRegistration {
             kind: "tool",
             display_name: "Tool",
             status: ArtifactRefKindStatusWire::Live,
@@ -363,6 +377,20 @@ mod tests {
         assert_eq!(descriptor.status, ArtifactRefKindStatusWire::Alias);
         assert!(descriptor.offered_in_completion);
         assert!(!descriptor.reserved);
+    }
+
+    #[test]
+    fn attachment_kind_is_reserved_live_and_absent_from_completion() {
+        let catalog = artifact_ref_kind_catalog();
+        let descriptor = catalog
+            .iter()
+            .find(|descriptor| descriptor.kind == "attachment")
+            .expect("missing attachment descriptor");
+        assert!(descriptor.reserved);
+        assert!(!descriptor.offered_in_completion);
+        assert_eq!(descriptor.status, ArtifactRefKindStatusWire::Live);
+        assert!(!descriptor.accepts_fragment);
+        assert_eq!(descriptor.argument_summary, "attachment:<bead-id>/<name>");
     }
 
     #[test]

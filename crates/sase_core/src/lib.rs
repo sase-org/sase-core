@@ -85,6 +85,7 @@ pub mod markdown_link_refs;
 pub mod migration;
 pub mod model_completion;
 pub mod model_route;
+pub mod note_attachment;
 pub mod notifications;
 pub mod parser;
 pub mod pending_commit_checkpoint;

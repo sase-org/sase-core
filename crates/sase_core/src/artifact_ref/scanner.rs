@@ -165,14 +165,27 @@ pub fn scan_artifact_ref_document_links(
     }
 }
 
-fn known_document_kind_labels(known_kinds: &[String]) -> BTreeSet<String> {
-    let mut labels: BTreeSet<String> = [
-        "agent", "bead", "bug", "chat", "commit", "file", "patch", "plan",
-        "plans", "stitch",
+pub(crate) fn baseline_document_kind_labels() -> &'static [&'static str] {
+    &[
+        "agent",
+        "attachment",
+        "bead",
+        "bug",
+        "chat",
+        "commit",
+        "file",
+        "patch",
+        "plan",
+        "plans",
+        "stitch",
     ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+}
+
+fn known_document_kind_labels(known_kinds: &[String]) -> BTreeSet<String> {
+    let mut labels: BTreeSet<String> = baseline_document_kind_labels()
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect();
     for descriptor in artifact_ref_kind_catalog() {
         labels.insert(descriptor.kind);
         labels.extend(descriptor.aliases);
@@ -1015,7 +1028,10 @@ fn scan_quoted_candidate(
 /// Returns the byte offset of the terminator and whether it is the matching
 /// closing quote. When unterminated, the terminator is either an embedded
 /// newline (the argument never crosses a line boundary) or the end of text.
-fn scan_quoted_argument(text: &str, payload_start: usize) -> (usize, bool) {
+pub(crate) fn scan_quoted_argument(
+    text: &str,
+    payload_start: usize,
+) -> (usize, bool) {
     let content_start = payload_start + 1;
     let mut chars = text[content_start..].char_indices().peekable();
     while let Some((offset, character)) = chars.next() {
@@ -1036,7 +1052,7 @@ fn scan_quoted_argument(text: &str, payload_start: usize) -> (usize, bool) {
 }
 
 /// Undo `\"` and `\\` escapes. Any other backslash is a literal backslash.
-fn unescape_quoted_argument(raw: &str) -> String {
+pub(crate) fn unescape_quoted_argument(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
     while let Some(character) = chars.next() {
@@ -1088,13 +1104,13 @@ fn argument_needs_quoting(argument: &str) -> bool {
         .is_some_and(|character| TRAILING_PUNCTUATION.contains(&character))
 }
 
-fn has_allowed_left_context(text: &str, start: usize) -> bool {
+pub(crate) fn has_allowed_left_context(text: &str, start: usize) -> bool {
     start == 0
         || text[..start].chars().next_back().is_some_and(|character| {
             character.is_whitespace()
                 || matches!(
                     character,
-                    '"' | '\'' | '`' | '(' | '[' | '{' | ',' | '='
+                    '"' | '\'' | '`' | '(' | '[' | '{' | ',' | '=' | '<'
                 )
         })
 }
@@ -1518,6 +1534,18 @@ mod tests {
                 .map(|candidate| candidate.text.as_str())
                 .collect::<Vec<_>>(),
             ["@plan:a.md", "@plans:b.md", "@commit:sase@abcdef1"]
+        );
+    }
+
+    #[test]
+    fn angle_bracket_is_an_allowed_left_context() {
+        let candidates = scan_artifact_refs("<@bead:sase-1ck");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.text.as_str())
+                .collect::<Vec<_>>(),
+            ["@bead:sase-1ck"]
         );
     }
 
