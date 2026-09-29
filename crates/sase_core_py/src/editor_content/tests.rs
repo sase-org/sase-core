@@ -390,3 +390,101 @@ fn text_tail_binding_returns_plain_dict_and_counts_unicode_chars() {
         );
     });
 }
+
+#[test]
+fn alternation_scan_binding_is_registered_and_uses_char_offsets() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_editor_content(&module).unwrap();
+        assert!(module.hasattr("alternation_scan").unwrap());
+
+        let value = module
+            .getattr("alternation_scan")
+            .unwrap()
+            .call1(("foo%{bar | baz}qux",))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&value).unwrap(),
+            json!([{
+                "form": "brace",
+                "marker_start": 3,
+                "opener_end": 5,
+                "close": 14,
+                "separators": [9],
+                "branch_names": [],
+                "depth": 0,
+            }])
+        );
+
+        let value = module
+            .getattr("alternation_scan")
+            .unwrap()
+            .call1(("foo%{bar",))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&value).unwrap(),
+            json!([{
+                "form": "brace",
+                "marker_start": 3,
+                "opener_end": 5,
+                "close": null,
+                "separators": [],
+                "branch_names": [],
+                "depth": 0,
+            }])
+        );
+    });
+}
+
+#[test]
+fn alternation_scan_binding_converts_non_ascii_to_char_offsets() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_alternation_scan, &module).unwrap(),
+            )
+            .unwrap();
+        // `é` is two bytes but one code point: the byte-based marker
+        // would sit at 7, the code-point marker at 6.
+        let value = module
+            .getattr("alternation_scan")
+            .unwrap()
+            .call1(("héllo %{a | b} wörld",))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&value).unwrap(),
+            json!([{
+                "form": "brace",
+                "marker_start": 6,
+                "opener_end": 8,
+                "close": 13,
+                "separators": [10],
+                "branch_names": [],
+                "depth": 0,
+            }])
+        );
+
+        // A multibyte branch name converts at its own span, proving
+        // every span goes through the shared table.
+        let value = module
+            .getattr("alternation_scan")
+            .unwrap()
+            .call1(("%{☃=x | y}",))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&value).unwrap(),
+            json!([{
+                "form": "brace",
+                "marker_start": 0,
+                "opener_end": 2,
+                "close": 9,
+                "separators": [6],
+                "branch_names": [[2, 3]],
+                "depth": 0,
+            }])
+        );
+    });
+}

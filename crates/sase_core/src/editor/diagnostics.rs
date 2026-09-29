@@ -10,6 +10,7 @@ use crate::{
     typed_launch_units_flag_key, ArtifactRefContextWire, ArtifactRefKindWire,
 };
 
+use super::alternation::{scan_alternations, AlternationFormWire};
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
@@ -40,6 +41,7 @@ pub fn analyze_document(
     diagnostics.extend(xprompt_diagnostics(document, entries));
     diagnostics.extend(slash_skill_diagnostics(document, entries));
     diagnostics.extend(directive_diagnostics(document));
+    diagnostics.extend(alternation_diagnostics(document));
     diagnostics.extend(argument_diagnostics(document, entries));
     diagnostics
 }
@@ -298,6 +300,32 @@ fn directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
                 message: format!("Unknown directive `%{}`", name.as_str()),
             });
         }
+    }
+    out
+}
+
+/// One error per unclosed alternation opener outside literal zones,
+/// reusing launch's wording. The marker span is the error span.
+fn alternation_diagnostics(
+    document: &DocumentSnapshot,
+) -> Vec<EditorDiagnostic> {
+    let mut out = Vec::new();
+    for record in scan_alternations(document.text()) {
+        if record.close.is_some() {
+            continue;
+        }
+        let (name, close) = match record.form {
+            AlternationFormWire::Brace => ("%{", '}'),
+            AlternationFormWire::Paren => ("%alt", ')'),
+        };
+        push_diagnostic(
+            document,
+            &mut out,
+            record.marker_start,
+            record.opener_end,
+            "unclosed_alternation",
+            format!("unclosed {name} directive: missing closing '{close}'"),
+        );
     }
     out
 }
@@ -1236,6 +1264,48 @@ mod tests {
 
         let enabled_valid = typed_launch_directive_diagnostics(&valid, true);
         assert!(enabled_valid.is_empty(), "{enabled_valid:?}");
+    }
+
+    #[test]
+    fn reports_unclosed_alternation_with_launch_wording() {
+        let text = "foo%{bar";
+        let diagnostics = diagnostics_for(text);
+        assert_eq!(diagnostic_count(&diagnostics, "unclosed_alternation"), 1);
+        let found = diagnostic(&diagnostics, "unclosed_alternation");
+        assert_eq!(found.severity, DiagnosticSeverity::Error);
+        assert_eq!(found.message, "unclosed %{ directive: missing closing '}'");
+        assert_eq!(diagnostic_text(text, found), "%{");
+    }
+
+    #[test]
+    fn reports_unclosed_paren_alternation_with_alt_wording() {
+        let text = "x %alt(a, b";
+        let diagnostics = diagnostics_for(text);
+        assert_eq!(diagnostic_count(&diagnostics, "unclosed_alternation"), 1);
+        assert_eq!(
+            diagnostic(&diagnostics, "unclosed_alternation").message,
+            "unclosed %alt directive: missing closing ')'"
+        );
+    }
+
+    #[test]
+    fn closed_alternations_and_literal_zones_have_no_diagnostic() {
+        for text in [
+            "foo%{bar | baz}qux",
+            "x %(a, b)",
+            "`%{a | b}`",
+            "```text\n%{a | b}\n```",
+            "```\nfoo%{bar\n```",
+        ] {
+            assert_eq!(
+                diagnostic_count(
+                    &diagnostics_for(text),
+                    "unclosed_alternation"
+                ),
+                0,
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

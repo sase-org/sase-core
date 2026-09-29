@@ -4,6 +4,7 @@ use lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
     SemanticTokensLegend,
 };
+use sase_core::editor::scan_alternations;
 use sase_core::{
     editor_extract_xprompt_argument_spans,
     editor_extract_xprompt_argument_spans_with_catalog,
@@ -39,12 +40,19 @@ const DISABLED_TAG_MODIFIER: u32 = 1 << 4;
 /// `accent0`…`accent17` live at bits 5..23, inside the 32-bit budget.
 const ACCENT_MODIFIER_SHIFT: u32 = 5;
 const ACCENT_MODIFIER_COUNT: usize = 18;
+/// Alternation modifiers follow the `accent0`…`accent17` block so every
+/// existing modifier bit stays stable within 32 bits.
+const ALTERNATION_MODIFIER: u32 = 1 << 23;
+const SEPARATOR_MODIFIER: u32 = 1 << 24;
 const ARTIFACT_PRIORITY: u8 = 0;
 const CODE_PRIORITY: u8 = 0;
 const NAME_PRIORITY: u8 = 0;
 const PROJECT_TAG_PRIORITY: u8 = 0;
 const GLOSSARY_PRIORITY: u8 = 1;
 const ARGUMENT_PRIORITY: u8 = 2;
+/// Alternation tokens lose to every existing token class at shared
+/// bytes, so `%alt(` keeps its MACRO name and argument tokens.
+const ALTERNATION_PRIORITY: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawSemanticToken {
@@ -64,6 +72,8 @@ pub(crate) fn legend() -> SemanticTokensLegend {
         SemanticTokenModifier::new("disabled"),
     ];
     token_modifiers.extend(accent_modifiers());
+    token_modifiers.push(SemanticTokenModifier::new("alternation"));
+    token_modifiers.push(SemanticTokenModifier::new("separator"));
     SemanticTokensLegend {
         token_types: vec![
             SemanticTokenType::NAMESPACE,
@@ -132,7 +142,59 @@ pub(crate) fn document_semantic_tokens(
         project_tags,
         project_entries,
     ));
+    raw_tokens.extend(raw_alternation_tokens(document));
     encode_tokens(document, non_overlapping_tokens(raw_tokens))
+}
+
+/// One scan per semantic-tokens request: delimiters, separators, and
+/// branch names for every alternation outside literal zones.
+fn raw_alternation_tokens(
+    document: &DocumentSnapshot,
+) -> Vec<RawSemanticToken> {
+    let mut tokens = Vec::new();
+    for record in scan_alternations(document.text()) {
+        let opener_modifiers = if record.close.is_some() {
+            ALTERNATION_MODIFIER
+        } else {
+            ALTERNATION_MODIFIER | UNKNOWN_TAG_MODIFIER
+        };
+        tokens.push(RawSemanticToken {
+            byte_start: record.marker_start,
+            byte_end: record.opener_end,
+            token_type: OPERATOR_TOKEN_TYPE,
+            token_modifiers_bitset: opener_modifiers,
+            priority: ALTERNATION_PRIORITY,
+        });
+        if let Some(close) = record.close {
+            tokens.push(RawSemanticToken {
+                byte_start: close,
+                byte_end: close + 1,
+                token_type: OPERATOR_TOKEN_TYPE,
+                token_modifiers_bitset: ALTERNATION_MODIFIER,
+                priority: ALTERNATION_PRIORITY,
+            });
+        }
+        for separator in record.separators {
+            tokens.push(RawSemanticToken {
+                byte_start: separator,
+                byte_end: separator + 1,
+                token_type: OPERATOR_TOKEN_TYPE,
+                token_modifiers_bitset: ALTERNATION_MODIFIER
+                    | SEPARATOR_MODIFIER,
+                priority: ALTERNATION_PRIORITY,
+            });
+        }
+        for (start, end) in record.branch_names {
+            tokens.push(RawSemanticToken {
+                byte_start: start,
+                byte_end: end,
+                token_type: PARAMETER_TOKEN_TYPE,
+                token_modifiers_bitset: ALTERNATION_MODIFIER,
+                priority: ALTERNATION_PRIORITY,
+            });
+        }
+    }
+    tokens
 }
 
 /// One sigil (`+`) token plus one name token per project tag. Resolved tags
@@ -682,7 +744,15 @@ mod tests {
                 "disabled"
             ]
         );
-        assert_eq!(legend.token_modifiers.len(), 2 + 3 + 18);
+        assert_eq!(legend.token_modifiers.len(), 2 + 3 + 18 + 2);
+        assert_eq!(
+            legend
+                .token_modifiers
+                .iter()
+                .map(|modifier| modifier.as_str())
+                .collect::<Vec<_>>()[23..],
+            vec!["alternation", "separator"]
+        );
     }
 
     #[test]
@@ -812,6 +882,126 @@ mod tests {
     #[test]
     fn argument_tokens_skip_fenced_blocks() {
         let document = DocumentSnapshot::new("```\n#foo(path=\"a\")\n```");
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
+
+        assert!(tokens.data.is_empty());
+    }
+
+    #[test]
+    fn alternation_tokens_cover_mid_word_delimiters_and_separators() {
+        let document = DocumentSnapshot::new("foo%{bar | baz}qux");
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(
+            absolute.contains(&(
+                0,
+                3,
+                2,
+                OPERATOR_TOKEN_TYPE,
+                ALTERNATION_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(
+                0,
+                9,
+                1,
+                OPERATOR_TOKEN_TYPE,
+                ALTERNATION_MODIFIER | SEPARATOR_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(
+                0,
+                14,
+                1,
+                OPERATOR_TOKEN_TYPE,
+                ALTERNATION_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert_no_token_overlaps(&absolute);
+    }
+
+    #[test]
+    fn alternation_branch_names_get_parameter_tokens() {
+        let document = DocumentSnapshot::new("%{a=x | b=y}");
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(
+            absolute.contains(&(
+                0,
+                2,
+                1,
+                PARAMETER_TOKEN_TYPE,
+                ALTERNATION_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.contains(&(
+                0,
+                8,
+                1,
+                PARAMETER_TOKEN_TYPE,
+                ALTERNATION_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert_no_token_overlaps(&absolute);
+    }
+
+    #[test]
+    fn unclosed_alternation_opener_carries_unknown_modifier() {
+        let document = DocumentSnapshot::new("foo%{bar");
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(
+            absolute.contains(&(
+                0,
+                3,
+                2,
+                OPERATOR_TOKEN_TYPE,
+                ALTERNATION_MODIFIER | UNKNOWN_TAG_MODIFIER
+            )),
+            "{absolute:?}"
+        );
+        assert_no_token_overlaps(&absolute);
+    }
+
+    #[test]
+    fn paren_alternation_keeps_macro_name_tokens() {
+        let document = DocumentSnapshot::new("%alt(a, b)");
+        let tokens =
+            document_semantic_tokens(&document, None, None, None, &[], &[]);
+        let absolute = absolute_semantic_tokens(&tokens.data);
+
+        assert!(
+            absolute
+                .iter()
+                .any(|token| token.3 == MACRO_TOKEN_TYPE && token.4 == 0),
+            "{absolute:?}"
+        );
+        assert!(
+            absolute.iter().any(|token| token.3 == OPERATOR_TOKEN_TYPE
+                && token.4 & ALTERNATION_MODIFIER != 0),
+            "{absolute:?}"
+        );
+        assert_no_token_overlaps(&absolute);
+    }
+
+    #[test]
+    fn alternation_tokens_skip_literal_zones() {
+        let document = DocumentSnapshot::new("```text\n%{a | b}\n```");
         let tokens =
             document_semantic_tokens(&document, None, None, None, &[], &[]);
 

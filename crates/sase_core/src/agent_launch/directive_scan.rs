@@ -303,11 +303,18 @@ fn parse_directive_args(inner: &str) -> Vec<String> {
     args.into_iter().filter(|arg| !arg.is_empty()).collect()
 }
 
-pub(crate) fn parse_directive_args_with_names(
+/// Split `inner` at top-level `separator` occurrences, returning
+/// the raw segment ranges plus the byte offset of each separator.
+///
+/// The walk is the single shared branch-splitting rule launch uses:
+/// backticks, double quotes, `[[...]]` blocks, and bracket depth hide
+/// separators; single quotes do not. Offsets are relative to `inner`.
+pub(crate) fn split_top_level_arg_ranges(
     inner: &str,
     separator: char,
-) -> Vec<DirectiveArg> {
-    let mut args = Vec::new();
+) -> (Vec<(usize, usize)>, Vec<usize>) {
+    let mut segments = Vec::new();
+    let mut separators = Vec::new();
     let mut start = 0;
     let mut depth = 0_i32;
     let mut in_backticks = false;
@@ -340,14 +347,27 @@ pub(crate) fn parse_directive_args_with_names(
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
             _ if ch == separator && depth == 0 => {
-                push_directive_arg(&mut args, &inner[start..idx]);
+                segments.push((start, idx));
+                separators.push(idx);
                 start = idx + ch_len;
             }
             _ => {}
         }
         idx += ch_len;
     }
-    push_directive_arg(&mut args, &inner[start..]);
+    segments.push((start, inner.len()));
+    (segments, separators)
+}
+
+pub(crate) fn parse_directive_args_with_names(
+    inner: &str,
+    separator: char,
+) -> Vec<DirectiveArg> {
+    let (segments, _) = split_top_level_arg_ranges(inner, separator);
+    let mut args = Vec::with_capacity(segments.len());
+    for (start, end) in segments {
+        push_directive_arg(&mut args, &inner[start..end]);
+    }
     args.into_iter()
         .filter(|arg| !arg.value.is_empty() || arg.name.is_some())
         .collect()
@@ -366,7 +386,14 @@ fn push_arg(args: &mut Vec<String>, raw: &str) {
     args.push(unquote_directive_arg_value(trimmed));
 }
 
-pub(crate) fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
+/// Byte offset of the top-level `=` in `raw`, or `None`.
+///
+/// This is the single shared `name=value` scan behind both
+/// [`split_named_directive_arg`] and the alternation scanner's
+/// branch-name spans: backticks, double quotes, `[[...]]` blocks, and
+/// bracket depth hide the `=`; single quotes do not. The offset is
+/// relative to `raw`, and `=` is always one byte.
+pub(crate) fn top_level_eq_offset(raw: &str) -> Option<usize> {
     let mut depth = 0_i32;
     let mut in_backticks = false;
     let mut in_double_quotes = false;
@@ -397,19 +424,23 @@ pub(crate) fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
         match ch {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' if depth > 0 => depth -= 1,
-            '=' if depth == 0 => {
-                let name = raw[..idx].trim();
-                let value = &raw[idx + ch_len..];
-                if !name.is_empty() {
-                    return (Some(unquote_backticks(name)), value);
-                }
-                return (None, raw);
-            }
+            '=' if depth == 0 => return Some(idx),
             _ => {}
         }
         idx += ch_len;
     }
-    (None, raw)
+    None
+}
+
+pub(crate) fn split_named_directive_arg(raw: &str) -> (Option<String>, &str) {
+    let Some(eq) = top_level_eq_offset(raw) else {
+        return (None, raw);
+    };
+    let name = raw[..eq].trim();
+    if name.is_empty() {
+        return (None, raw);
+    }
+    (Some(unquote_backticks(name)), &raw[eq + 1..])
 }
 
 pub(crate) fn unquote_directive_arg_value(trimmed: &str) -> String {

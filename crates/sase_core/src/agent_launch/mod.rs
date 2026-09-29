@@ -45,7 +45,8 @@ pub use conditional::{
 };
 pub(crate) use directive_scan::{
     alt_directive_starts, directive_occurrences, find_matching_delimiter,
-    launch_literal_zone_ranges,
+    launch_literal_zone_ranges, split_top_level_arg_ranges,
+    top_level_eq_offset, AltDelimiter,
 };
 pub use fanout::{bind_batch_predecessor_waits, plan_agent_launch_fanout};
 pub use launch_hold::{launch_unit_hold_armer, launch_unit_hold_key};

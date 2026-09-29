@@ -7,6 +7,9 @@ use crate::continuation::optional_wire_to_py;
 use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 
 use pyo3::wrap_pyfunction;
+use sase_core::editor::{
+    scan_alternations as core_scan_alternations, AlternationFormWire,
+};
 use sase_core::prompt_stash::{
     purge_prompt_stash as core_purge_prompt_stash,
     read_prompt_stash_archive as core_read_prompt_stash_archive,
@@ -746,6 +749,106 @@ fn py_code_value_wire_schema_version() -> u32 {
     CODE_VALUE_WIRE_SCHEMA_VERSION
 }
 
+// --- Alternation scan binding --------------------------------------------
+
+/// Monotonic byte-to-code-point offset table for one scan.
+///
+/// Collects every byte offset once, walks `text` a single time, and
+/// answers each lookup without recounting a prefix per span.
+struct CharOffsetTable {
+    bytes: Vec<usize>,
+    chars: Vec<usize>,
+}
+
+impl CharOffsetTable {
+    fn new(text: &str, byte_offsets: &[usize]) -> Self {
+        let mut bytes = byte_offsets.to_vec();
+        bytes.sort_unstable();
+        bytes.dedup();
+        let mut chars = Vec::with_capacity(bytes.len());
+        let mut chars_seen = 0usize;
+        let mut char_starts = text.char_indices().map(|(byte, _)| byte);
+        let mut next_start = char_starts.next();
+        for &target in &bytes {
+            let target = target.min(text.len());
+            while let Some(byte) = next_start {
+                if byte >= target {
+                    break;
+                }
+                chars_seen += 1;
+                next_start = char_starts.next();
+            }
+            chars.push(chars_seen);
+        }
+        Self { bytes, chars }
+    }
+
+    fn lookup(&self, byte: usize) -> usize {
+        self.bytes
+            .binary_search(&byte)
+            .map(|index| self.chars[index])
+            .unwrap_or_else(|_| {
+                // Defensive: every emitted offset was collected, so a
+                // miss means a caller bug; clamp to the text end.
+                self.chars.last().copied().unwrap_or(0)
+            })
+    }
+}
+
+/// Scan `text` for alternations, returning record dicts with Python
+/// code-point offsets.
+///
+/// Each dict holds `form` (`brace`/`paren`), `marker_start`,
+/// `opener_end`, `close` (null when unclosed), `separators`,
+/// `branch_names` (`[start, end]` pairs), and `depth`.
+#[pyfunction]
+#[pyo3(name = "alternation_scan")]
+fn py_alternation_scan(py: Python<'_>, text: &str) -> PyResult<PyObject> {
+    let records = core_scan_alternations(text);
+    let mut byte_offsets = Vec::new();
+    for record in &records {
+        byte_offsets.push(record.marker_start);
+        byte_offsets.push(record.opener_end);
+        if let Some(close) = record.close {
+            byte_offsets.push(close);
+        }
+        byte_offsets.extend(record.separators.iter().copied());
+        for (start, end) in &record.branch_names {
+            byte_offsets.push(*start);
+            byte_offsets.push(*end);
+        }
+    }
+    let table = CharOffsetTable::new(text, &byte_offsets);
+    let wire = records
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "form": match record.form {
+                    AlternationFormWire::Brace => "brace",
+                    AlternationFormWire::Paren => "paren",
+                },
+                "marker_start": table.lookup(record.marker_start),
+                "opener_end": table.lookup(record.opener_end),
+                "close": record.close.map(|close| table.lookup(close)),
+                "separators": record
+                    .separators
+                    .iter()
+                    .map(|separator| table.lookup(*separator))
+                    .collect::<Vec<_>>(),
+                "branch_names": record
+                    .branch_names
+                    .iter()
+                    .map(|(start, end)| {
+                        [table.lookup(*start), table.lookup(*end)]
+                    })
+                    .collect::<Vec<_>>(),
+                "depth": record.depth,
+            })
+        })
+        .collect::<Vec<_>>();
+    json_value_to_py(py, &serde_json::Value::Array(wire))
+}
+
 pub(crate) fn register_editor_content(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_source_language_wire_schema_version,
@@ -809,6 +912,7 @@ pub(crate) fn register_editor_content(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_fenced_block_details, m)?)?;
     m.add_function(wrap_pyfunction!(py_tail_text_by_lines_and_chars, m)?)?;
     m.add_function(wrap_pyfunction!(py_code_value_wire_schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(py_alternation_scan, m)?)?;
     Ok(())
 }
 

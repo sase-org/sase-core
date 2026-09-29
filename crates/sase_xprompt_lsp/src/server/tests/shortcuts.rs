@@ -823,6 +823,8 @@ async fn advertises_full_semantic_tokens_with_standard_legend() {
             "accent15",
             "accent16",
             "accent17",
+            "alternation",
+            "separator",
         ]
     );
     assert!(matches!(
