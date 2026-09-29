@@ -171,6 +171,7 @@ pub fn create_issue(
                 &initial_note,
                 &issue.created_by,
                 &issue.created_at,
+                &[],
             )?
         };
         store.save()?;

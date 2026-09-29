@@ -29,6 +29,7 @@ fn one_mutation_touches_only_the_mutated_stream_file() {
         "probe",
         Some("owner@example.com".to_string()),
         Some("2026-01-01T00:10:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -70,6 +71,7 @@ fn sase_mk_blast_radius_regression_preserves_unrelated_stream_bytes() {
         "mutate a different stream",
         Some("owner@example.com".to_string()),
         Some("2026-01-01T00:10:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -123,6 +125,7 @@ fn legacy_jsonl_migration_first_save_writes_every_imported_stream() {
         "migrate and mutate",
         Some("owner@example.com".to_string()),
         Some("2026-01-01T00:10:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -175,6 +178,7 @@ fn append_note_preserves_legacy_issue_created_prefix_and_projects_structured_not
         "a new note",
         Some("owner@example.com".to_string()),
         Some("2026-01-02T00:00:00Z".to_string()),
+        None,
     )
     .unwrap();
 

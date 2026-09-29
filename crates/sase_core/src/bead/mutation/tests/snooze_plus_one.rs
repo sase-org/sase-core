@@ -10,6 +10,7 @@ use crate::bead::read::read_store_issues;
 use crate::bead::wire::BeadResolutionWire;
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::StatusWire;
+use crate::note_attachment::BeadNoteAttachmentWire;
 use std::sync::Arc;
 use std::sync::Barrier;
 use std::thread;
@@ -89,6 +90,7 @@ fn re_snoozing_appends_a_second_note_naming_the_replaced_wake_time() {
         "hit this too",
         &[],
         Some("2026-01-02T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -447,6 +449,7 @@ fn plus_one_below_the_target_leaves_a_snoozed_bead_snoozed() {
         &[],
         Some("2026-01-02T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap()
     .issue
@@ -469,6 +472,7 @@ fn plus_one_at_the_target_wakes_a_snoozed_bead_with_a_preset_note() {
         &[],
         Some("2026-01-02T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap();
 
@@ -479,6 +483,7 @@ fn plus_one_at_the_target_wakes_a_snoozed_bead_with_a_preset_note() {
         "and again",
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap()
@@ -512,6 +517,7 @@ fn plus_one_never_wakes_a_snoozed_bead_that_set_no_target() {
             &[],
             Some(timestamp.to_string()),
             None,
+            None,
         )
         .unwrap();
     }
@@ -536,6 +542,7 @@ fn task_plus_one_is_atomic_normalized_and_promotes_closed_task() {
             "bead:sase-related".to_string(),
         ],
         Some("2026-01-02T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -585,6 +592,7 @@ fn task_plus_one_stale_observation_window_records_without_reopening_closed_task(
         &[],
         Some("2026-01-01T00:02:00Z".to_string()),
         Some("2026-01-01T00:00:30Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -624,6 +632,7 @@ fn task_plus_one_fresh_observation_window_reopens_closed_task_and_clears_assigne
         &[],
         Some("2026-01-01T00:03:00Z".to_string()),
         Some("2026-01-01T00:02:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -667,6 +676,7 @@ fn task_plus_one_open_and_active_statuses_preserve_existing_contract() {
         &[],
         Some("2026-01-01T00:02:00Z".to_string()),
         Some("2025-12-31T00:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     let open_issue = open_result.issue.unwrap();
@@ -688,6 +698,7 @@ fn task_plus_one_open_and_active_statuses_preserve_existing_contract() {
             &[],
             Some("2026-01-01T00:02:00Z".to_string()),
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
         )
         .unwrap();
         assert!(result.changed);
@@ -717,6 +728,7 @@ fn task_plus_one_creator_and_repeat_are_byte_identical_noops() {
         &[],
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(!creator.changed);
@@ -730,6 +742,7 @@ fn task_plus_one_creator_and_repeat_are_byte_identical_noops() {
         &[],
         Some("2026-01-02T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap();
     let before_repeat = persisted_claim_state(&beads_dir);
@@ -740,6 +753,7 @@ fn task_plus_one_creator_and_repeat_are_byte_identical_noops() {
         "later supplemental detail",
         &["research:202608/later.md".to_string()],
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -766,6 +780,7 @@ fn concurrent_task_plus_ones_preserve_reporters_and_deduplicate_retries() {
                 &[],
                 Some("2026-01-02T00:00:00Z".to_string()),
                 None,
+                None,
             )
             .unwrap()
         }));
@@ -789,4 +804,38 @@ fn concurrent_task_plus_ones_preserve_reporters_and_deduplicate_retries() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from(["agent-a", "agent-b"])
     );
+}
+
+#[test]
+fn plus_one_attachments_without_a_wake_note_are_refused() {
+    let (_temp, beads_dir, task_id) = task_plus_one_fixture(StatusWire::Open);
+    let before = persisted_claim_state(&beads_dir);
+
+    let error = add_task_plus_one(
+        &beads_dir,
+        &task_id,
+        "reporter-one",
+        "hit this too",
+        &[],
+        Some("2026-01-02T00:00:00Z".to_string()),
+        None,
+        Some(vec![BeadNoteAttachmentWire {
+            name: "proof.png".to_string(),
+            sha256: "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1"
+                .to_string(),
+            size_bytes: 188416,
+            mime_type: "image/png".to_string(),
+            image: None,
+            origin: None,
+        }]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, "validation");
+    assert!(
+        error.message.contains("only records when the +1 wakes"),
+        "{}",
+        error.message
+    );
+    assert_eq!(persisted_claim_state(&beads_dir), before);
 }

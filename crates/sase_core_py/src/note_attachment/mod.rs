@@ -7,6 +7,9 @@ use crate::json_bridge::{py_to_json_value, serialize_to_py};
 use pyo3::wrap_pyfunction;
 
 use sase_core::note_attachment::{
+    attachment_placement as core_attachment_placement,
+    attachment_sensitive_path_reason as core_attachment_sensitive_path_reason,
+    attachment_should_auto_fetch as core_attachment_should_auto_fetch,
     classify_attachment as core_classify_attachment,
     compose_note_attachment_text as core_compose_note_attachment_text,
     note_attachment_source_text as core_note_attachment_source_text,
@@ -14,7 +17,7 @@ use sase_core::note_attachment::{
     scan_note_attachment_refs as core_scan_note_attachment_refs,
     stored_attachment_tokens as core_stored_attachment_tokens,
     unique_attachment_name as core_unique_attachment_name,
-    AttachmentNameDigestWire, NoteAttachmentScanWire,
+    AttachmentNameDigestWire, AttachmentStoreTierWire, NoteAttachmentScanWire,
 };
 
 fn note_attachment_error_to_pyerr(
@@ -105,6 +108,49 @@ fn py_unique_attachment_name(
     Ok(core_unique_attachment_name(candidate, sha256, &existing))
 }
 
+#[pyfunction]
+#[pyo3(name = "attachment_placement")]
+fn py_attachment_placement<'py>(
+    py: Python<'py>,
+    size_bytes: u64,
+    tiers: &Bound<'py, PyList>,
+    local_only: bool,
+) -> PyResult<PyObject> {
+    let mut parsed = Vec::with_capacity(tiers.len());
+    for (idx, item) in tiers.iter().enumerate() {
+        let tier: AttachmentStoreTierWire =
+            serde_json::from_value(py_to_json_value(&item)?).map_err(
+                |error| {
+                    PyValueError::new_err(format!(
+                        "tiers[{idx}] is not a valid AttachmentStoreTierWire dict: {error}"
+                    ))
+                },
+            )?;
+        parsed.push(tier);
+    }
+    let placement = core_attachment_placement(size_bytes, &parsed, local_only)
+        .map_err(note_attachment_error_to_pyerr)?;
+    serialize_to_py(py, &placement)
+}
+
+#[pyfunction]
+#[pyo3(name = "attachment_should_auto_fetch")]
+fn py_attachment_should_auto_fetch(size_bytes: u64, cap_bytes: u64) -> bool {
+    core_attachment_should_auto_fetch(size_bytes, cap_bytes)
+}
+
+#[pyfunction]
+#[pyo3(name = "attachment_sensitive_path_reason")]
+#[pyo3(signature = (path, home, extra_patterns=None))]
+fn py_attachment_sensitive_path_reason(
+    path: &str,
+    home: &str,
+    extra_patterns: Option<Vec<String>>,
+) -> Option<String> {
+    let extra = extra_patterns.unwrap_or_default();
+    core_attachment_sensitive_path_reason(path, home, &extra)
+}
+
 pub(crate) fn register_note_attachment(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -115,6 +161,9 @@ pub(crate) fn register_note_attachment(
     m.add_function(wrap_pyfunction!(py_stored_attachment_tokens, m)?)?;
     m.add_function(wrap_pyfunction!(py_sanitize_attachment_name, m)?)?;
     m.add_function(wrap_pyfunction!(py_unique_attachment_name, m)?)?;
+    m.add_function(wrap_pyfunction!(py_attachment_placement, m)?)?;
+    m.add_function(wrap_pyfunction!(py_attachment_should_auto_fetch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_attachment_sensitive_path_reason, m)?)?;
     Ok(())
 }
 

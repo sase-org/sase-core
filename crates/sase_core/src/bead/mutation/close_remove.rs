@@ -74,7 +74,7 @@ pub fn close_issues(
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     close_issues_with_note(
-        beads_dir, issue_ids, reason, resolution, force, None, None, now,
+        beads_dir, issue_ids, reason, resolution, force, None, None, now, None,
     )
 }
 
@@ -88,6 +88,9 @@ pub fn close_issues_with_note(
     note: Option<String>,
     actor: Option<String>,
     now: Option<String>,
+    note_attachments: Option<
+        Vec<crate::note_attachment::BeadNoteAttachmentWire>,
+    >,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let note = match note {
         None => None,
@@ -176,11 +179,26 @@ pub fn close_issues_with_note(
 
         let mut noted_ids = Vec::new();
         if let Some(entry) = note.as_ref() {
+            let attachments = note_attachments.clone().unwrap_or_default();
             for issue_id in &requested_ids {
                 let index = store.issue_index(issue_id)?;
-                append_note_to_store(&mut store, index, entry, &actor, &now)?;
+                append_note_to_store(
+                    &mut store,
+                    index,
+                    entry,
+                    &actor,
+                    &now,
+                    &attachments,
+                )?;
                 noted_ids.push(issue_id.clone());
             }
+        } else if note_attachments
+            .as_ref()
+            .is_some_and(|manifest| !manifest.is_empty())
+        {
+            return Err(BeadError::validation(
+                "note_attachments requires a close note to attach to",
+            ));
         }
         let mut batch = CloseBatch {
             standard_close_ids,

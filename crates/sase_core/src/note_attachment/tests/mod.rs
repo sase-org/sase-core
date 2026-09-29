@@ -1,5 +1,7 @@
 //! Unit and corpus tests for note attachments.
 
+mod manifest;
+
 use crate::note_attachment::NOTE_ATTACHMENT_SCAN_WIRE_SCHEMA_VERSION;
 use crate::note_attachment::{
     classify_attachment, extension_mime_for, AttachmentClassWire,

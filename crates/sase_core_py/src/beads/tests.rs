@@ -415,6 +415,7 @@ fn bead_update_binding_preserves_resolution_presence_semantics() {
         None,
         None,
         Some("2026-01-01T00:01:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -577,6 +578,7 @@ fn bead_plus_one_binding_exports_structured_atomic_result() {
             Some(vec!["research:202608/repro.md".to_string()]),
             Some("2026-01-02T00:00:00Z".to_string()),
             None,
+            None,
         )
         .unwrap();
         let result = py_to_json_value(result.bind(py)).unwrap();
@@ -612,6 +614,7 @@ fn bead_note_edit_and_remove_bindings_round_trip() {
         "first draft",
         Some("agent-1".to_string()),
         Some("2026-01-01T00:01:00Z".to_string()),
+        None,
     )
     .unwrap()
     .issue
@@ -632,6 +635,7 @@ fn bead_note_edit_and_remove_bindings_round_trip() {
             "corrected",
             Some("agent-2".to_string()),
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
         )
         .unwrap();
         let edited = py_to_json_value(edited.bind(py)).unwrap();
@@ -659,6 +663,7 @@ fn bead_note_edit_and_remove_bindings_round_trip() {
             &issue.id,
             &note_id,
             "too late",
+            None,
             None,
             None,
         );
@@ -1556,6 +1561,7 @@ fn bead_close_binding_stamps_the_supplied_author_on_the_close_event() {
             Some("2026-01-01T00:01:00Z".to_string()),
             None,
             Some("worker".to_string()),
+            None,
         )
         .unwrap();
     });
@@ -1576,4 +1582,77 @@ fn bead_close_binding_stamps_the_supplied_author_on_the_close_event() {
         }
     }
     assert!(found, "expected one stamped issue_closed event");
+}
+
+#[test]
+fn bead_attachment_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let issue = core_bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Notes".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("bead_attachment_roster").is_ok());
+        assert!(module.getattr("bead_attachment_references").is_ok());
+
+        let attachments = json_value_to_py(
+            py,
+            &json!([{
+                "name": "login.png",
+                "sha256": "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1",
+                "size_bytes": 188416,
+                "mime_type": "image/png",
+            }]),
+        )
+        .unwrap()
+        .into_bound(py);
+        let attachments = attachments.downcast::<PyList>().unwrap().clone();
+        let noted = py_bead_append_note(
+            py,
+            beads_dir.to_str().unwrap(),
+            &issue.id,
+            "Crash @attachment:login.png",
+            Some("agent-1".to_string()),
+            Some("2026-01-01T00:01:00Z".to_string()),
+            Some(attachments),
+        )
+        .unwrap();
+        let noted = py_to_json_value(noted.bind(py)).unwrap();
+        assert_eq!(
+            noted["issue"]["notes"][0]["attachments"][0]["name"],
+            json!("login.png")
+        );
+
+        let roster = py_bead_attachment_roster(
+            py,
+            beads_dir.to_str().unwrap(),
+            &issue.id,
+        )
+        .unwrap();
+        let roster = py_to_json_value(roster.bind(py)).unwrap();
+        assert_eq!(roster.as_array().unwrap().len(), 1);
+        assert_eq!(roster[0]["name"], json!("login.png"));
+        assert_eq!(roster[0]["ordinal"], json!(1));
+
+        let references =
+            py_bead_attachment_references(py, beads_dir.to_str().unwrap())
+                .unwrap();
+        let references = py_to_json_value(references.bind(py)).unwrap();
+        assert_eq!(references.as_array().unwrap().len(), 1);
+        assert_eq!(references[0]["current"], json!(true));
+    });
 }

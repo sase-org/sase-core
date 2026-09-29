@@ -171,6 +171,7 @@ fn write_event_store_leaves_an_unrelated_streams_bytes_unchanged_across_a_mutati
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "probe".to_string(),
+            attachments: Vec::new(),
         },
     ));
 
@@ -405,6 +406,7 @@ fn note_appended_matches_legacy_note_rendering_and_composes() {
                 BeadEventOperationWire::NoteAppended,
                 BeadEventPayloadWire::NoteAppended {
                     entry: "first note".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
         ],
@@ -426,6 +428,7 @@ fn note_appended_matches_legacy_note_rendering_and_composes() {
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "second note".to_string(),
+            attachments: Vec::new(),
         },
     ));
     assert_eq!(
@@ -472,6 +475,7 @@ fn note_appended_composes_after_a_legacy_note_snapshot() {
                 BeadEventOperationWire::NoteAppended,
                 BeadEventPayloadWire::NoteAppended {
                     entry: "new entry".to_string(),
+                    attachments: Vec::new(),
                 },
             ),
         ],
@@ -511,6 +515,7 @@ fn concurrent_note_appends_merge_without_losing_text() {
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "later branch".to_string(),
+            attachments: Vec::new(),
         },
     ));
     let mut theirs = base.clone();
@@ -521,6 +526,7 @@ fn concurrent_note_appends_merge_without_losing_text() {
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "earlier branch".to_string(),
+            attachments: Vec::new(),
         },
     ));
 
@@ -560,6 +566,7 @@ fn byte_identical_concurrent_note_append_merges_once() {
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "same entry".to_string(),
+            attachments: Vec::new(),
         },
     );
     let mut ours = base.clone();
@@ -1362,6 +1369,7 @@ fn merge_event_stream_keeps_non_monotonic_upstream_order() {
             BeadEventOperationWire::NoteAppended,
             BeadEventPayloadWire::NoteAppended {
                 entry: entry.to_string(),
+                attachments: Vec::new(),
             },
         )
     };
@@ -1383,7 +1391,7 @@ fn merge_event_stream_keeps_non_monotonic_upstream_order() {
         .iter()
         .skip(1)
         .map(|event| match &event.payload {
-            BeadEventPayloadWire::NoteAppended { entry } => entry.as_str(),
+            BeadEventPayloadWire::NoteAppended { entry, .. } => entry.as_str(),
             _ => "<other>",
         })
         .collect();
@@ -1425,6 +1433,7 @@ fn merge_event_stream_accepts_pure_reorder_branch() {
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: "new".to_string(),
+            attachments: Vec::new(),
         },
     );
     // Old-merge shape: base events reordered with a genuine addition.

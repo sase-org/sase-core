@@ -1356,6 +1356,7 @@ fn a_pre_close_history_projection_recovers_its_reason_on_the_next_load() {
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap();
 

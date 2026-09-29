@@ -29,6 +29,10 @@ use std::path::Path;
 /// The evidence, referenced artifacts, and any draft/closed-to-ready status
 /// promotion are persisted together under the bead mutation lock. Repeating
 /// the creator or an existing reporter is an exact no-op.
+/// Record a +1, threading `note_attachments` into the snooze-wake note when
+/// this +1 wakes the bead. Attachments with no wake note are refused rather
+/// than silently dropped: there is no other bead note to record them on.
+#[allow(clippy::too_many_arguments)]
 pub fn add_task_plus_one(
     beads_dir: &Path,
     issue_id: &str,
@@ -37,6 +41,9 @@ pub fn add_task_plus_one(
     references: &[String],
     now: Option<String>,
     observed_since: Option<String>,
+    note_attachments: Option<
+        Vec<crate::note_attachment::BeadNoteAttachmentWire>,
+    >,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let reporter = reporter.trim().to_string();
     if reporter.is_empty() {
@@ -144,8 +151,20 @@ pub fn add_task_plus_one(
                 &reporter,
             )?;
             append_note_to_store(
-                &mut store, index, note, &reporter, &timestamp,
+                &mut store,
+                index,
+                note,
+                &reporter,
+                &timestamp,
+                &note_attachments.clone().unwrap_or_default(),
             )?;
+        } else if note_attachments
+            .as_ref()
+            .is_some_and(|manifest| !manifest.is_empty())
+        {
+            return Err(BeadError::validation(
+                "note_attachments on task +1 only records when the +1 wakes a snoozed bead",
+            ));
         }
         let issue = store.issues[index].clone();
         store.save()?;
@@ -351,7 +370,14 @@ pub fn snooze_task(
             &timestamp,
             &actor,
         )?;
-        append_note_to_store(&mut store, index, &note, &actor, &timestamp)?;
+        append_note_to_store(
+            &mut store,
+            index,
+            &note,
+            &actor,
+            &timestamp,
+            &[],
+        )?;
         let issue = store.issues[index].clone();
         store.save()?;
 

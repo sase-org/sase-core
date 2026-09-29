@@ -174,10 +174,19 @@ pub enum BeadEventPayloadWire {
     },
     NoteAppended {
         entry: String,
+        /// Attachment descriptors for the appended note. Absent on every
+        /// event written before attachments existed; no migration is needed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::note_attachment::BeadNoteAttachmentWire>,
     },
     NoteEdited {
         note_id: String,
         text: String,
+        /// `None` means an older writer's edit and keeps the manifest;
+        /// `Some` replaces it (including `Some([])`, which detaches all).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachments:
+            Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
     },
     NoteRemoved {
         note_id: String,
@@ -272,18 +281,22 @@ impl BeadEventPayloadWire {
             ) => fields.validate(),
             (
                 BeadEventOperationWire::NoteAppended,
-                BeadEventPayloadWire::NoteAppended { entry },
+                BeadEventPayloadWire::NoteAppended { entry, attachments },
             ) => {
                 if entry.trim().is_empty() {
                     return Err(BeadError::validation(
                         "note_appended entry cannot be empty or blank",
                     ));
                 }
-                Ok(())
+                validate_manifest(attachments, entry)
             }
             (
                 BeadEventOperationWire::NoteEdited,
-                BeadEventPayloadWire::NoteEdited { note_id, text },
+                BeadEventPayloadWire::NoteEdited {
+                    note_id,
+                    text,
+                    attachments,
+                },
             ) => {
                 if note_id.trim().is_empty() {
                     return Err(BeadError::validation(
@@ -295,7 +308,10 @@ impl BeadEventPayloadWire {
                         "note_edited text cannot be empty or blank",
                     ));
                 }
-                Ok(())
+                match attachments {
+                    None => Ok(()),
+                    Some(manifest) => validate_manifest(manifest, text),
+                }
             }
             (
                 BeadEventOperationWire::NoteRemoved,
@@ -419,6 +435,14 @@ impl BeadEventPayloadWire {
             ))),
         }
     }
+}
+
+fn validate_manifest(
+    manifest: &[crate::note_attachment::BeadNoteAttachmentWire],
+    text: &str,
+) -> Result<(), BeadError> {
+    crate::note_attachment::validate_note_attachment_manifest(manifest, text)
+        .map_err(|error| BeadError::validation(error.to_string()))
 }
 
 fn validate_link_added_payload(

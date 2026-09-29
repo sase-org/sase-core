@@ -903,6 +903,7 @@ mod tests {
             issue_id: stream.stream_id.clone(),
             payload: BeadEventPayloadWire::NoteAppended {
                 entry: entry.to_string(),
+                attachments: Vec::new(),
             },
         });
         stream
@@ -1189,6 +1190,7 @@ mod tests {
             issue_id: "sase-lg".to_string(),
             payload: BeadEventPayloadWire::NoteAppended {
                 entry: "a new note".to_string(),
+                attachments: Vec::new(),
             },
         });
 

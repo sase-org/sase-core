@@ -84,7 +84,7 @@ pub struct StoredAttachmentTokenWire {
     pub span: NoteAttachmentSpanWire,
 }
 
-/// Compose errors.
+/// Compose and manifest errors.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum NoteAttachmentError {
     #[error(
@@ -93,6 +93,10 @@ pub enum NoteAttachmentError {
     AssignedNameCount { expected: usize, actual: usize },
     #[error("assigned name {name:?} would be changed by sanitization")]
     UnsanitizedAssignedName { name: String },
+    #[error("invalid attachment manifest: {message}")]
+    InvalidManifest { message: String },
+    #[error("no configured attachment store accepts {size_bytes} bytes")]
+    NoAcceptingStore { size_bytes: u64 },
 }
 
 const TRAILING_PUNCTUATION: &[char] =

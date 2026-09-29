@@ -18,6 +18,9 @@ fn note_attachment_bindings_are_registered() {
             "stored_attachment_tokens",
             "sanitize_attachment_name",
             "unique_attachment_name",
+            "attachment_placement",
+            "attachment_should_auto_fetch",
+            "attachment_sensitive_path_reason",
         ] {
             assert!(module.getattr(name).is_ok(), "{name} is registered");
         }
@@ -88,5 +91,43 @@ fn uniquify_bumps_on_digest_conflict() {
             py_unique_attachment_name("login.png", &"a".repeat(64), existing)
                 .unwrap();
         assert_eq!(uniquified, "login-2.png");
+    });
+}
+
+#[test]
+fn policy_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let tiers = json_value_to_py(
+            py,
+            &json!([
+                {"name": "git", "max_bytes": 52428800},
+                {"name": "large", "max_bytes": null},
+            ]),
+        )
+        .unwrap();
+        let tiers = tiers.bind(py).downcast::<PyList>().unwrap();
+        let placement =
+            py_attachment_placement(py, 1024, tiers, false).unwrap();
+        let value = py_to_json_value(placement.bind(py)).unwrap();
+        assert_eq!(value, json!({"kind": "store", "store": "git"}));
+        let local = py_attachment_placement(py, 1024, tiers, true).unwrap();
+        let value = py_to_json_value(local.bind(py)).unwrap();
+        assert_eq!(value, json!({"kind": "local_only"}));
+        assert!(py_attachment_should_auto_fetch(1024, 2048));
+        assert!(!py_attachment_should_auto_fetch(2049, 2048));
+        let reason = py_attachment_sensitive_path_reason(
+            "/home/bryan/.ssh/id_ed25519",
+            "/home/bryan",
+            None,
+        )
+        .unwrap();
+        assert!(reason.contains("~/.ssh/**"), "{reason}");
+        let clean = py_attachment_sensitive_path_reason(
+            "/tmp/crash.log",
+            "/home/bryan",
+            None,
+        );
+        assert!(clean.is_none());
     });
 }

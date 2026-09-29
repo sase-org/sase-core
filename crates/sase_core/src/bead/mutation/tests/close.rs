@@ -8,6 +8,7 @@ use crate::bead::wire::BeadResolutionWire;
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::PhaseSizeWire;
 use crate::bead::wire::StatusWire;
+use crate::note_attachment::BeadNoteAttachmentWire;
 use std::fs;
 use tempfile::tempdir;
 
@@ -238,6 +239,7 @@ fn repeat_close_with_note_writes_only_the_note() {
         Some("extra evidence".to_string()),
         Some("agent-1".to_string()),
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -297,6 +299,7 @@ fn conflicting_resolution_aborts_mixed_batch_before_writing() {
         Some("must not land".to_string()),
         Some("agent-1".to_string()),
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
     )
     .unwrap_err();
 
@@ -534,6 +537,7 @@ fn every_reopen_cause_archives_the_close_reason_it_used_to_destroy() {
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap();
 
@@ -567,6 +571,7 @@ fn mutation_and_reducer_agree_on_every_reopen_path() {
         "Still flaky.",
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -631,6 +636,7 @@ fn plus_one_close_record_joins_its_evidence_entry_exactly() {
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
         None,
+        None,
     )
     .unwrap();
 
@@ -657,6 +663,7 @@ fn repeated_close_episodes_append_oldest_first_with_their_causes() {
         "Still flaky.",
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -697,6 +704,7 @@ fn reopening_a_bead_that_was_never_closed_archives_nothing() {
         "Also hit this.",
         &[],
         Some("2026-01-03T00:00:00Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -749,6 +757,7 @@ fn close_stamps_the_supplied_actor_on_the_envelope_and_closed_by() {
         None,
         Some("closer-agent".to_string()),
         Some("2026-01-01T00:01:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -796,6 +805,7 @@ fn close_stamps_the_supplied_actor_on_the_envelope_and_closed_by() {
         Some("evidence".to_string()),
         Some("closer-agent".to_string()),
         Some("2026-01-01T00:03:00Z".to_string()),
+        None,
     )
     .unwrap();
     let issue = MutableStore::load(&beads_dir)
@@ -904,6 +914,7 @@ fn close_stamps_the_actor_on_the_delegated_parent() {
         None,
         Some("worker".to_string()),
         Some("2026-01-01T12:00:00Z".to_string()),
+        None,
     )
     .unwrap();
     close_issues_with_note(
@@ -915,6 +926,7 @@ fn close_stamps_the_actor_on_the_delegated_parent() {
         None,
         Some("worker".to_string()),
         Some("2026-01-02T00:00:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -983,6 +995,7 @@ fn forced_close_stamps_the_actor_on_every_swept_descendant() {
         None,
         Some("worker".to_string()),
         Some("2026-01-02T00:00:00Z".to_string()),
+        None,
     )
     .unwrap();
 
@@ -1006,4 +1019,76 @@ fn forced_close_stamps_the_actor_on_every_swept_descendant() {
             "{issue_id}"
         );
     }
+}
+
+#[test]
+fn close_with_note_records_attachments_on_the_close_note() {
+    let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+
+    let result = close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&phase_id),
+        None,
+        None,
+        false,
+        Some("Verified @attachment:proof.png".to_string()),
+        Some("agent-1".to_string()),
+        Some("2026-01-01T00:02:00Z".to_string()),
+        Some(vec![BeadNoteAttachmentWire {
+            name: "proof.png".to_string(),
+            sha256: "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1"
+                .to_string(),
+            size_bytes: 188416,
+            mime_type: "image/png".to_string(),
+            image: None,
+            origin: None,
+        }]),
+    )
+    .unwrap();
+
+    assert!(result.changed);
+    let issue = result
+        .issues
+        .iter()
+        .find(|issue| issue.id == phase_id)
+        .unwrap();
+    assert_eq!(issue.status, StatusWire::Closed);
+    let note = issue.notes.last().unwrap();
+    assert_eq!(note.text, "Verified @attachment:proof.png");
+    assert_eq!(note.attachments.len(), 1);
+    assert_eq!(note.attachments[0].name, "proof.png");
+}
+
+#[test]
+fn close_note_attachments_requires_a_note() {
+    let (_temp, beads_dir, phase_id) = claim_mutation_fixture();
+    let before = persisted_claim_state(&beads_dir);
+
+    let error = close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&phase_id),
+        None,
+        None,
+        false,
+        None,
+        None,
+        Some("2026-01-01T00:02:00Z".to_string()),
+        Some(vec![BeadNoteAttachmentWire {
+            name: "proof.png".to_string(),
+            sha256: "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1"
+                .to_string(),
+            size_bytes: 188416,
+            mime_type: "image/png".to_string(),
+            image: None,
+            origin: None,
+        }]),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind, "validation");
+    assert_eq!(
+        error.message,
+        "note_attachments requires a close note to attach to"
+    );
+    assert_eq!(persisted_claim_state(&beads_dir), before);
 }

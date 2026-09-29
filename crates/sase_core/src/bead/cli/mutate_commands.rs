@@ -184,6 +184,7 @@ pub(super) fn handle_close(
         note,
         close_actor,
         None,
+        None,
     ) {
         Ok(outcome) => {
             let mut stdout = String::new();

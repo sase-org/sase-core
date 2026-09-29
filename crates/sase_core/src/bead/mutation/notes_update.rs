@@ -153,6 +153,7 @@ pub fn append_issue_note(
     entry: &str,
     author: Option<String>,
     now: Option<String>,
+    attachments: Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let entry = entry.trim();
     if entry.is_empty() {
@@ -168,8 +169,14 @@ pub fn append_issue_note(
         let author = author
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| store.config.owner.clone());
-        let issue =
-            append_note_to_store(&mut store, index, entry, &author, &now)?;
+        let issue = append_note_to_store(
+            &mut store,
+            index,
+            entry,
+            &author,
+            &now,
+            &attachments.clone().unwrap_or_default(),
+        )?;
         store.save()?;
 
         let mut result = outcome("note", true, vec![issue.id.clone()]);
@@ -184,6 +191,7 @@ pub(crate) fn append_note_to_store(
     entry: &str,
     author: &str,
     now: &str,
+    attachments: &[crate::note_attachment::BeadNoteAttachmentWire],
 ) -> Result<IssueWire, BeadError> {
     let issue_id = store.issues[issue_index].id.clone();
     let event_id = store.append_issue_event(
@@ -191,12 +199,17 @@ pub(crate) fn append_note_to_store(
         BeadEventOperationWire::NoteAppended,
         BeadEventPayloadWire::NoteAppended {
             entry: entry.to_string(),
+            attachments: attachments.to_vec(),
         },
         now,
         author,
     )?;
     if let Some(note) = crate::bead::wire::BeadNoteWire::from_event(
-        &event_id, now, author, entry,
+        &event_id,
+        now,
+        author,
+        entry,
+        attachments.to_vec(),
     ) {
         store.issues[issue_index].notes.push(note);
     }
@@ -206,6 +219,9 @@ pub(crate) fn append_note_to_store(
     Ok(issue)
 }
 
+/// Rewrite a note's text, with `attachments` replacing the manifest when
+/// `Some` (including `Some([])`, which detaches every attachment) and
+/// keeping it when `None` (an older writer's edit).
 pub fn edit_issue_note(
     beads_dir: &Path,
     issue_id: &str,
@@ -213,6 +229,7 @@ pub fn edit_issue_note(
     text: &str,
     author: Option<String>,
     now: Option<String>,
+    attachments: Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     let note_id = note_id.trim();
     if note_id.is_empty() {
@@ -233,7 +250,13 @@ pub fn edit_issue_note(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| store.config.owner.clone());
         let issue = edit_note_in_store(
-            &mut store, index, note_id, text, &author, &now,
+            &mut store,
+            index,
+            note_id,
+            text,
+            &author,
+            &now,
+            attachments.clone(),
         )?;
         store.save()?;
 
@@ -250,6 +273,7 @@ fn edit_note_in_store(
     text: &str,
     author: &str,
     now: &str,
+    attachments: Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
 ) -> Result<IssueWire, BeadError> {
     if !store.issues[issue_index]
         .notes
@@ -265,6 +289,7 @@ fn edit_note_in_store(
         BeadEventPayloadWire::NoteEdited {
             note_id: note_id.to_string(),
             text: text.to_string(),
+            attachments: attachments.clone(),
         },
         now,
         author,
@@ -275,6 +300,9 @@ fn edit_note_in_store(
         .find(|note| note.id == note_id)
         .ok_or_else(|| note_not_found(note_id))?;
     note.text = text.to_string();
+    if let Some(manifest) = attachments {
+        note.attachments = manifest;
+    }
     note.edited_at = Some(now.to_string());
     note.edited_by = Some(author.to_string());
     store.issues[issue_index].updated_at = now.to_string();

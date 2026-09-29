@@ -317,6 +317,37 @@ fn py_bead_lost_notes<'py>(
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_attachment_roster")]
+fn py_bead_attachment_roster<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_id: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            sase_core::bead::bead_attachment_roster(&beads_dir, issue_id)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_attachment_references")]
+fn py_bead_attachment_references<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            sase_core::bead::bead_attachment_references(&beads_dir)
+        }),
+    )
+}
+
+#[pyfunction]
 #[pyo3(name = "bead_touch_index_wire_schema_version")]
 fn py_bead_touch_index_wire_schema_version() -> u32 {
     BEAD_TOUCH_INDEX_WIRE_SCHEMA_VERSION
@@ -603,7 +634,7 @@ fn py_bead_update_many<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_append_note")]
-#[pyo3(signature = (beads_dir, issue_id, entry, author=None, now=None))]
+#[pyo3(signature = (beads_dir, issue_id, entry, author=None, now=None, attachments=None))]
 fn py_bead_append_note<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -611,13 +642,20 @@ fn py_bead_append_note<'py>(
     entry: &str,
     author: Option<String>,
     now: Option<String>,
+    attachments: Option<Bound<'py, PyList>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
+    let attachments = bead_note_attachments_from_py_list(attachments)?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
             core_bead_append_issue_note(
-                &beads_dir, issue_id, entry, author, now,
+                &beads_dir,
+                issue_id,
+                entry,
+                author,
+                now,
+                attachments,
             )
         }),
     )
@@ -625,7 +663,10 @@ fn py_bead_append_note<'py>(
 
 #[pyfunction]
 #[pyo3(name = "bead_note_edit")]
-#[pyo3(signature = (beads_dir, issue_id, note_id, text, author=None, now=None))]
+#[pyo3(signature = (beads_dir, issue_id, note_id, text, author=None, now=None, attachments=None))]
+// The argument list mirrors the exported Python binding signature; grouping it
+// locally would add a wrapper type the caller could not use directly.
+#[allow(clippy::too_many_arguments)]
 fn py_bead_note_edit<'py>(
     py: Python<'py>,
     beads_dir: &str,
@@ -634,13 +675,21 @@ fn py_bead_note_edit<'py>(
     text: &str,
     author: Option<String>,
     now: Option<String>,
+    attachments: Option<Bound<'py, PyList>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
+    let attachments = bead_note_attachments_from_py_list(attachments)?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
             core_bead_edit_issue_note(
-                &beads_dir, issue_id, note_id, text, author, now,
+                &beads_dir,
+                issue_id,
+                note_id,
+                text,
+                author,
+                now,
+                attachments,
             )
         }),
     )
@@ -669,7 +718,7 @@ fn py_bead_note_remove<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None, observed_since=None))]
+#[pyo3(name = "bead_plus_one", signature = (beads_dir, issue_id, reporter, note, refs=None, now=None, observed_since=None, note_attachments=None))]
 // The argument list mirrors the exported Python binding signature; grouping it
 // locally would add a wrapper type the caller could not use directly.
 #[allow(clippy::too_many_arguments)]
@@ -682,9 +731,12 @@ fn py_bead_plus_one<'py>(
     refs: Option<Vec<String>>,
     now: Option<String>,
     observed_since: Option<String>,
+    note_attachments: Option<Bound<'py, PyList>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     let refs = refs.unwrap_or_default();
+    let note_attachments =
+        bead_note_attachments_from_py_list(note_attachments)?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
@@ -696,6 +748,7 @@ fn py_bead_plus_one<'py>(
                 &refs,
                 now,
                 observed_since,
+                note_attachments,
             )
         }),
     )
@@ -863,6 +916,7 @@ fn py_bead_open<'py>(
     now=None,
     note=None,
     author=None,
+    note_attachments=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn py_bead_close<'py>(
@@ -875,18 +929,28 @@ fn py_bead_close<'py>(
     now: Option<String>,
     note: Option<String>,
     author: Option<String>,
+    note_attachments: Option<Bound<'py, PyList>>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
     let resolution = resolution
         .as_deref()
         .map(parse_bead_resolution)
         .transpose()?;
+    let note_attachments =
+        bead_note_attachments_from_py_list(note_attachments)?;
     bead_result_to_py(
         py,
         py.allow_threads(|| {
             core_bead_close_issues_with_note(
-                &beads_dir, &issue_ids, reason, resolution, force, note,
-                author, now,
+                &beads_dir,
+                &issue_ids,
+                reason,
+                resolution,
+                force,
+                note,
+                author,
+                now,
+                note_attachments,
             )
         }),
     )
@@ -1213,6 +1277,26 @@ where
     json_value_to_py(py, &value)
 }
 
+fn bead_note_attachments_from_py_list(
+    list: Option<Bound<'_, PyList>>,
+) -> PyResult<Option<Vec<sase_core::note_attachment::BeadNoteAttachmentWire>>> {
+    let Some(list) = list else {
+        return Ok(None);
+    };
+    let mut values = Vec::with_capacity(list.len());
+    for (idx, item) in list.iter().enumerate() {
+        let value = py_to_json_value(&item)?;
+        let attachment: sase_core::note_attachment::BeadNoteAttachmentWire =
+            serde_json::from_value(value).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "attachments[{idx}] is not a valid BeadNoteAttachmentWire dict: {e}"
+                ))
+            })?;
+        values.push(attachment);
+    }
+    Ok(Some(values))
+}
+
 fn bead_link_projection_requests_from_py_list(
     list: &Bound<'_, PyList>,
 ) -> PyResult<Vec<BeadLinkProjectionRequestWire>> {
@@ -1377,6 +1461,8 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_show, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_history, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_lost_notes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_attachment_roster, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_attachment_references, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_bead_touch_index_wire_schema_version,
         m

@@ -4,6 +4,7 @@
 //! codecs without exposing command handlers yet. Later phases build read and
 //! mutation engines on top of these wire records.
 
+pub mod attachments;
 pub mod cli;
 pub mod config;
 pub mod events;
@@ -19,6 +20,7 @@ pub mod wire;
 pub mod work;
 
 pub use crate::artifact_link::BeadLinkWire;
+pub use attachments::{bead_attachment_references, bead_attachment_roster};
 pub use cli::{
     execute_bead_cli, BeadCliMutationSummaryWire, BeadCliOutcomeWire,
     BeadCliStatusTransitionWire,

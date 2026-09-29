@@ -305,20 +305,25 @@ pub(in crate::bead) fn apply_event(
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
-        BeadEventPayloadWire::NoteAppended { entry } => {
+        BeadEventPayloadWire::NoteAppended { entry, attachments } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             if let Some(note) = BeadNoteWire::from_event(
                 &event.event_id,
                 &event.timestamp,
                 &event.actor,
                 entry,
+                attachments.clone(),
             ) {
                 issue.notes.push(note);
             }
             issue.updated_at = event.timestamp.clone();
             issue.validate()?;
         }
-        BeadEventPayloadWire::NoteEdited { note_id, text } => {
+        BeadEventPayloadWire::NoteEdited {
+            note_id,
+            text,
+            attachments,
+        } => {
             let issue = existing_issue_mut(issues, &event.issue_id)?;
             let note = issue
                 .notes
@@ -330,6 +335,9 @@ pub(in crate::bead) fn apply_event(
                     ))
                 })?;
             note.text = text.trim().to_string();
+            if let Some(manifest) = attachments {
+                note.attachments = manifest.clone();
+            }
             note.edited_at = Some(event.timestamp.clone());
             note.edited_by = Some(event.actor.clone());
             issue.updated_at = event.timestamp.clone();

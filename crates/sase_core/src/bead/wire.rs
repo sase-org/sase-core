@@ -310,6 +310,11 @@ pub struct BeadNoteWire {
     pub edited_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_by: Option<String>,
+    /// Content-addressed attachment descriptors. Absent (never `null`) on
+    /// every note written before attachments existed, and on notes without
+    /// attachments, so existing projections stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::note_attachment::BeadNoteAttachmentWire>,
 }
 
 impl BeadNoteWire {
@@ -354,6 +359,14 @@ impl BeadNoteWire {
                 ));
             }
         }
+        if let Err(error) =
+            crate::note_attachment::validate_note_attachment_manifest(
+                &self.attachments,
+                &self.text,
+            )
+        {
+            return Err(BeadError::validation(error.to_string()));
+        }
         Ok(())
     }
 
@@ -362,6 +375,7 @@ impl BeadNoteWire {
         timestamp: &str,
         actor: &str,
         text: &str,
+        attachments: Vec<crate::note_attachment::BeadNoteAttachmentWire>,
     ) -> Option<Self> {
         let text = text.trim();
         if text.is_empty() {
@@ -374,6 +388,7 @@ impl BeadNoteWire {
             text: text.to_string(),
             edited_at: None,
             edited_by: None,
+            attachments,
         })
     }
 }
@@ -418,6 +433,7 @@ pub(crate) fn parse_legacy_note_blob(
                 text: body,
                 edited_at: None,
                 edited_by: None,
+                attachments: Vec::new(),
             });
             continue;
         }
@@ -439,6 +455,7 @@ pub(crate) fn parse_legacy_note_blob(
                 text: paragraph.to_string(),
                 edited_at: None,
                 edited_by: None,
+                attachments: Vec::new(),
             });
         }
     }

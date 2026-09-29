@@ -62,6 +62,7 @@ fn note_append_validation_and_rendering_are_owned_by_the_event() {
         issue_id: "sase-1".to_string(),
         payload: BeadEventPayloadWire::NoteAppended {
             entry: " verified ".to_string(),
+            attachments: Vec::new(),
         },
     };
 
@@ -81,6 +82,7 @@ fn note_append_validation_and_rendering_are_owned_by_the_event() {
     let blank = BeadEventRecordWire {
         payload: BeadEventPayloadWire::NoteAppended {
             entry: " \t ".to_string(),
+            attachments: Vec::new(),
         },
         ..note
     };
@@ -103,6 +105,7 @@ fn note_edited_rewrites_text_and_stamps_editor() {
         issue_id: "sase-1".to_string(),
         payload: BeadEventPayloadWire::NoteAppended {
             entry: "first draft".to_string(),
+            attachments: Vec::new(),
         },
     };
     apply_event(&mut issues, &appended).unwrap();
@@ -117,6 +120,7 @@ fn note_edited_rewrites_text_and_stamps_editor() {
         payload: BeadEventPayloadWire::NoteEdited {
             note_id: "note".to_string(),
             text: " corrected ".to_string(),
+            attachments: None,
         },
     };
     apply_event(&mut issues, &edited).unwrap();
@@ -133,6 +137,7 @@ fn note_edited_rewrites_text_and_stamps_editor() {
         payload: BeadEventPayloadWire::NoteEdited {
             note_id: "does-not-exist".to_string(),
             text: "x".to_string(),
+            attachments: None,
         },
         ..edited.clone()
     };
@@ -145,6 +150,7 @@ fn note_edited_rewrites_text_and_stamps_editor() {
         payload: BeadEventPayloadWire::NoteEdited {
             note_id: "note".to_string(),
             text: " \t ".to_string(),
+            attachments: None,
         },
         ..edited
     };
@@ -167,6 +173,7 @@ fn note_removed_retracts_the_record() {
         issue_id: "sase-1".to_string(),
         payload: BeadEventPayloadWire::NoteAppended {
             entry: "retract me".to_string(),
+            attachments: Vec::new(),
         },
     };
     apply_event(&mut issues, &appended).unwrap();
