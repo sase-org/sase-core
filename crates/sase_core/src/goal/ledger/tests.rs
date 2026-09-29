@@ -541,6 +541,25 @@ fn assert_no_trace(root: &Path, goal_id: &str) {
     );
 }
 
+/// Sorted on-disk entry names in `dir`. Unlike probing a case-variant
+/// path with `exists()`, a listing reports the stored (case-preserved)
+/// names, so it means the same thing on case-insensitive macOS APFS as
+/// on case-sensitive Linux.
+fn dir_entry_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("list dir")
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn unknown_ids_refuse_without_writing() {
     let (_tmp, root) = setup();
@@ -603,8 +622,8 @@ fn normalized_edit_writes_only_under_the_canonical_id() {
     );
     assert_eq!(edited.status, GOAL_APPEND_APPLIED);
     assert_eq!(edited.events[0].goal_id, "7k2mq");
-    assert!(!root.join("items").join("7K2MQ").exists());
-    assert!(!goal_marker_path(&root, "7K2MQ").exists());
+    assert_eq!(dir_entry_names(&root.join("items")), vec!["7k2mq"]);
+    assert_eq!(dir_entry_names(&root.join("live")), vec!["7k2mq"]);
 
     let shown =
         super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
@@ -623,8 +642,8 @@ fn merge_writes_normalized_ids_for_into_and_from() {
         .events
         .iter()
         .all(|event| event.goal_id == "7k2mq" || event.goal_id == "3fq9t"));
-    assert!(!root.join("items").join("7K2MQ").exists());
-    assert!(!root.join("items").join("3FQ9T").exists());
+    assert_eq!(dir_entry_names(&root.join("items")), vec!["3fq9t", "7k2mq"]);
+    assert_eq!(dir_entry_names(&root.join("live")), vec!["3fq9t"]);
 
     let source =
         super::read::goal_ledger_show(&root, "7k2mq", None).expect("show");
