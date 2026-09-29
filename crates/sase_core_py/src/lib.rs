@@ -48,6 +48,7 @@ mod plans;
 mod prelude;
 mod procs;
 mod project_tag;
+mod prompt_prediction;
 mod provider_policy;
 mod query;
 mod sudo;
@@ -94,5 +95,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     sudo::register_sudo(m)?;
     continuation::register_continuation(m)?;
     telemetry::register_telemetry(m)?;
+    prompt_prediction::register_prompt_prediction(m)?;
     Ok(())
 }
