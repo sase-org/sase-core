@@ -97,6 +97,7 @@ pub mod prompt_archive;
 pub mod prompt_artifact;
 pub mod prompt_history_filter;
 pub mod prompt_literals;
+pub mod prompt_prediction;
 mod prompt_rewrite;
 pub mod prompt_stash;
 pub mod provider_disable;
