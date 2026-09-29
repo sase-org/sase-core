@@ -389,6 +389,131 @@ impl PromptSuccessorSource for CompiledPromptPredictionCorpus {
     }
 }
 
+impl PromptPredictionBuilder {
+    fn resolve_ids(&self, context: &[&str]) -> Option<Vec<u32>> {
+        context
+            .iter()
+            .map(|key| self.ids.get(*key).copied())
+            .collect()
+    }
+
+    fn excluded_set(&self) -> FastHashSet<String> {
+        self.options
+            .excluded_words
+            .iter()
+            .map(|word| word.to_lowercase().replace('’', "'"))
+            .collect()
+    }
+
+    fn builder_stats_for(
+        &self,
+        context: &[&str],
+        word: Option<&str>,
+    ) -> (Option<(f64, u64)>, (f64, u64)) {
+        let Some(ids) = self.resolve_ids(context) else {
+            return (None, (0.0, 0));
+        };
+        let Some(stats) = self.contexts.get(&ids) else {
+            return (None, (0.0, 0));
+        };
+        let totals = (stats.total_mass, stats.total_distinct);
+        let word_stats = word.and_then(|key| {
+            self.ids.get(key).and_then(|id| {
+                stats
+                    .successors
+                    .get(id)
+                    .map(|succ| (succ.mass, succ.distinct))
+            })
+        });
+        (word_stats, totals)
+    }
+
+    fn builder_project_stats_for(
+        &self,
+        project: &str,
+        context: &[&str],
+        word: Option<&str>,
+    ) -> (Option<(f64, u64)>, (f64, u64)) {
+        let (Some(ids), Some(map)) =
+            (self.resolve_ids(context), self.projects.get(project))
+        else {
+            return (None, (0.0, 0));
+        };
+        let Some(stats) = map.get(&ids) else {
+            return (None, (0.0, 0));
+        };
+        let totals = (stats.total_mass, stats.total_distinct);
+        let word_stats = word.and_then(|key| {
+            self.ids.get(key).and_then(|id| {
+                stats
+                    .successors
+                    .get(id)
+                    .map(|succ| (succ.mass, succ.distinct))
+            })
+        });
+        (word_stats, totals)
+    }
+}
+
+impl PromptSuccessorSource for PromptPredictionBuilder {
+    fn successor_stats(&self, context: &[&str], word: &str) -> (f64, u64) {
+        self.builder_stats_for(context, Some(word))
+            .0
+            .unwrap_or((0.0, 0))
+    }
+
+    fn context_totals(&self, context: &[&str]) -> (f64, u64) {
+        self.builder_stats_for(context, None).1
+    }
+
+    fn project_successor_stats(
+        &self,
+        project: &str,
+        context: &[&str],
+        word: &str,
+    ) -> (f64, u64) {
+        self.builder_project_stats_for(project, context, Some(word))
+            .0
+            .unwrap_or((0.0, 0))
+    }
+
+    fn project_context_totals(
+        &self,
+        project: &str,
+        context: &[&str],
+    ) -> (f64, u64) {
+        self.builder_project_stats_for(project, context, None).1
+    }
+
+    fn ranked_successors(&self, context: &[&str]) -> Vec<(String, f64, u64)> {
+        let Some(ids) = self.resolve_ids(context) else {
+            return Vec::new();
+        };
+        let Some(stats) = self.contexts.get(&ids) else {
+            return Vec::new();
+        };
+        let excluded = self.excluded_set();
+        let limit = self.options.max_successors_per_context.max(1);
+        let mut out: Vec<(String, f64, u64)> = stats
+            .successors
+            .iter()
+            .filter(|(id, _)| {
+                !excluded.contains(self.keys[**id as usize].as_str())
+            })
+            .map(|(id, succ)| {
+                (self.keys[*id as usize].clone(), succ.mass, succ.distinct)
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        out.truncate(limit);
+        out
+    }
+}
+
 /// Compile entry point as free function over wire structs.
 pub fn compile_prompt_prediction_corpus(
     rows: &[PromptPredictionRowWire],
@@ -397,7 +522,7 @@ pub fn compile_prompt_prediction_corpus(
     CompiledPromptPredictionCorpus::compile(rows, options)
 }
 
-fn is_generated_row(row: &PromptPredictionRowWire) -> bool {
+pub(crate) fn is_generated_row(row: &PromptPredictionRowWire) -> bool {
     match row.origin.as_deref() {
         Some("generated") => true,
         Some("typed") => false,
@@ -435,7 +560,13 @@ type InternedSequence = (bool, Vec<InternedToken>);
 
 /// Mutable corpus builder: same accumulation as [`CompiledPromptPredictionCorpus::compile`],
 /// queryable between row additions without a recompile.
-#[derive(Debug)]
+///
+/// The replay evaluator scores positions against a live builder through
+/// [`PromptSuccessorSource`], so one pass over history never recompiles.
+/// `ranked_successors` applies the same top-N truncation as [`finish`](Self::finish),
+/// so gate and top-3 outcomes match a frozen corpus; the replay scorer
+/// additionally filters `excluded_words` and emulates singleton pruning.
+#[derive(Debug, Clone)]
 pub struct PromptPredictionBuilder {
     options: PromptPredictionCorpusOptionsWire,
     keys: Vec<String>,

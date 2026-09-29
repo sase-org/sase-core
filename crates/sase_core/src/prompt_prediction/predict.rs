@@ -31,11 +31,15 @@ pub const PRESET_CAUTIOUS: ConfidencePreset = ConfidencePreset {
     min_margin: 0.35,
     min_support: 4,
 };
-/// Balanced preset: the default.
+/// Balanced preset: the default. Calibrated on the 2026-09 prequential
+/// replay over typed history (see `tools/prompt_prediction_replay`): the
+/// max-coverage grid point meeting overall precision >= 75% and novel
+/// precision >= 65%. The margin is flat across 0.05-0.40 at this point,
+/// so it keeps its previous value.
 pub const PRESET_BALANCED: ConfidencePreset = ConfidencePreset {
-    min_p: 0.6,
+    min_p: 0.75,
     min_margin: 0.2,
-    min_support: 3,
+    min_support: 4,
 };
 /// Eager preset: coverage first.
 pub const PRESET_EAGER: ConfidencePreset = ConfidencePreset {
@@ -123,7 +127,7 @@ impl DraftCounts {
         words
     }
 
-    fn pair(&self, context: &[String], word: &str) -> (f64, u64) {
+    pub(crate) fn pair(&self, context: &[String], word: &str) -> (f64, u64) {
         self.pairs
             .get(context)
             .and_then(|words| words.get(word))
@@ -131,7 +135,7 @@ impl DraftCounts {
             .unwrap_or((0.0, 0))
     }
 
-    fn totals(&self, context: &[String]) -> (f64, u64) {
+    pub(crate) fn totals(&self, context: &[String]) -> (f64, u64) {
         self.totals.get(context).copied().unwrap_or((0.0, 0))
     }
 }

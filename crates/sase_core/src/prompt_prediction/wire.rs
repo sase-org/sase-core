@@ -263,6 +263,131 @@ pub struct PromptPrefixRankResultWire {
     pub matches: Vec<PromptPrefixRankMatchWire>,
 }
 
+/// Default warm fraction for prequential replay: the oldest share of typed
+/// rows that seed the builder before scoring starts.
+pub const DEFAULT_REPLAY_WARM_FRACTION: f64 = 0.4;
+
+/// Options for [`crate::prompt_prediction::evaluate_prompt_prediction_replay`].
+///
+/// The corpus fields mirror [`PromptPredictionCorpusOptionsWire`], the model
+/// fields mirror [`PromptPredictionModelConfigWire`], and `warm_fraction`
+/// splits the typed rows into the warm prefix and the scored suffix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayOptionsWire {
+    pub schema_version: u32,
+    pub now_epoch: i64,
+    #[serde(default = "default_recency_half_life")]
+    pub recency_half_life_days: f64,
+    #[serde(default = "default_max_context_words")]
+    pub max_context_words: usize,
+    #[serde(default = "default_max_successors")]
+    pub max_successors_per_context: usize,
+    #[serde(default)]
+    pub prune_singleton_contexts: bool,
+    #[serde(default)]
+    pub excluded_words: Vec<String>,
+    #[serde(default = "default_backoff_alpha")]
+    pub backoff_alpha: f64,
+    #[serde(default = "default_project_boost")]
+    pub project_boost: f64,
+    #[serde(default = "default_draft_weight")]
+    pub draft_weight: f64,
+    #[serde(default = "default_reject_conflicts")]
+    pub reject_conflicts: bool,
+    #[serde(default = "default_replay_warm_fraction")]
+    pub warm_fraction: f64,
+}
+
+fn default_replay_warm_fraction() -> f64 {
+    DEFAULT_REPLAY_WARM_FRACTION
+}
+
+impl Default for PromptPredictionReplayOptionsWire {
+    fn default() -> Self {
+        Self {
+            schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            now_epoch: 0,
+            recency_half_life_days: DEFAULT_RECENCY_HALF_LIFE_DAYS,
+            max_context_words: DEFAULT_MAX_CONTEXT_WORDS,
+            max_successors_per_context: DEFAULT_MAX_SUCCESSORS_PER_CONTEXT,
+            prune_singleton_contexts: false,
+            excluded_words: Vec::new(),
+            backoff_alpha: DEFAULT_BACKOFF_ALPHA,
+            project_boost: DEFAULT_PROJECT_BOOST,
+            draft_weight: DEFAULT_DRAFT_WEIGHT,
+            reject_conflicts: true,
+            warm_fraction: DEFAULT_REPLAY_WARM_FRACTION,
+        }
+    }
+}
+
+/// Gated metrics for one threshold setting: coverage (share of positions
+/// gated), precision (share of gated positions whose top-1 is correct;
+/// `None` when nothing gated), the ghost keystroke-savings upper bound, and
+/// the gated-correct run-length distribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayGateMetricsWire {
+    pub coverage: f64,
+    pub precision: Option<f64>,
+    pub savings: f64,
+    pub run_mean: f64,
+    pub run_p95: f64,
+    pub run_max: u64,
+}
+
+/// One cohort slice of the replay report: ungated top-1/top-3 accuracy plus
+/// gated metrics at each confidence preset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayCohortWire {
+    pub cohort: String,
+    pub positions: u64,
+    pub top1: f64,
+    pub top3: f64,
+    pub cautious: PromptPredictionReplayGateMetricsWire,
+    pub balanced: PromptPredictionReplayGateMetricsWire,
+    pub eager: PromptPredictionReplayGateMetricsWire,
+}
+
+/// One threshold-grid point swept over the recorded per-position evidence
+/// without replaying. The novel tallies reuse the same records filtered to
+/// the novel cohort, so preset calibration can constrain novel precision
+/// without replaying.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplaySweepPointWire {
+    pub min_p: f64,
+    pub min_margin: f64,
+    pub min_support: u64,
+    pub coverage: f64,
+    pub precision: Option<f64>,
+    #[serde(default)]
+    pub novel_coverage: f64,
+    pub novel_precision: Option<f64>,
+}
+
+/// Aggregate-only prequential replay report. It never carries prompt text:
+/// positions are counted, cohorts are named, and the sweep holds rates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayReportWire {
+    pub schema_version: u32,
+    pub rows_total: u64,
+    pub rows_typed: u64,
+    pub rows_warmed: u64,
+    pub rows_scored: u64,
+    pub positions_total: u64,
+    pub overall_top1: f64,
+    pub overall_top3: f64,
+    pub cautious: PromptPredictionReplayGateMetricsWire,
+    pub balanced: PromptPredictionReplayGateMetricsWire,
+    pub eager: PromptPredictionReplayGateMetricsWire,
+    pub cohorts: Vec<PromptPredictionReplayCohortWire>,
+    pub sweep: Vec<PromptPredictionReplaySweepPointWire>,
+    pub latency_us_p50: u64,
+    pub latency_us_p95: u64,
+    pub corpus_bytes: u64,
+    pub corpus_rows_used: u64,
+    pub corpus_contexts: u64,
+}
+
 /// Corpus compile statistics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptPredictionCorpusStatsWire {

@@ -10,6 +10,7 @@ pub mod corpus;
 pub mod model;
 pub mod origin;
 pub mod predict;
+pub mod replay;
 pub mod tokenize;
 pub mod wire;
 
@@ -28,6 +29,7 @@ pub use predict::{
     ScoringQuery, MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED, PRESET_CAUTIOUS,
     PRESET_EAGER,
 };
+pub use replay::evaluate_prompt_prediction_replay;
 pub use tokenize::{
     canonical_surface, classify_word, tokenize_cursor_text,
     tokenize_prompt_text, BLOCKED_FRONTMATTER, BLOCKED_NO_WORD_CONTEXT,
@@ -37,9 +39,11 @@ pub use tokenize::{
 pub use wire::{
     PromptPredictionCandidateWire, PromptPredictionCorpusOptionsWire,
     PromptPredictionCorpusStatsWire, PromptPredictionModelConfigWire,
-    PromptPredictionRequestWire, PromptPredictionResultWire,
-    PromptPredictionRowWire, PromptPredictionSourceRole,
-    PromptPredictionSourceSharesWire, PromptPrefixRankMatchWire,
-    PromptPrefixRankRequestWire, PromptPrefixRankResultWire,
-    PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+    PromptPredictionReplayCohortWire, PromptPredictionReplayGateMetricsWire,
+    PromptPredictionReplayOptionsWire, PromptPredictionReplayReportWire,
+    PromptPredictionReplaySweepPointWire, PromptPredictionRequestWire,
+    PromptPredictionResultWire, PromptPredictionRowWire,
+    PromptPredictionSourceRole, PromptPredictionSourceSharesWire,
+    PromptPrefixRankMatchWire, PromptPrefixRankRequestWire,
+    PromptPrefixRankResultWire, PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
 };

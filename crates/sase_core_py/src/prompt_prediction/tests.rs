@@ -166,6 +166,49 @@ fn prompt_prediction_model_predicts_and_ranks() {
 }
 
 #[test]
+fn prompt_prediction_replay_reports_aggregates_only() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let report = module
+            .call_method1(
+                "evaluate_prompt_prediction_replay",
+                (ROWS_JSON, OPTIONS_JSON),
+            )
+            .unwrap();
+        let value = py_to_json_value(report.as_any()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["rows_total"], 4);
+        assert_eq!(value["rows_typed"], 4);
+        // 40% of 4 rows warm the builder; the rest are scored.
+        assert_eq!(value["rows_warmed"], 1);
+        assert_eq!(value["rows_scored"], 3);
+        assert!(value["positions_total"].as_u64().unwrap() > 0);
+        assert_eq!(value["cohorts"].as_array().unwrap().len(), 3);
+        assert!(!value["sweep"].as_array().unwrap().is_empty());
+        assert!(value["corpus_bytes"].as_u64().unwrap() > 0);
+        // Aggregates only: no prompt text leaves the evaluator.
+        let serialized = value.to_string();
+        assert!(!serialized.contains("help me implement the plan"));
+
+        let bad = module.call_method1(
+            "evaluate_prompt_prediction_replay",
+            ("not json", OPTIONS_JSON),
+        );
+        assert!(bad.is_err());
+        assert!(bad.unwrap_err().is_instance_of::<PyValueError>(py));
+
+        let bad = module.call_method1(
+            "evaluate_prompt_prediction_replay",
+            (ROWS_JSON, "not json"),
+        );
+        assert!(bad.is_err());
+        assert!(bad.unwrap_err().is_instance_of::<PyValueError>(py));
+    });
+}
+
+#[test]
 fn prompt_prediction_model_rejects_unknown_role() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

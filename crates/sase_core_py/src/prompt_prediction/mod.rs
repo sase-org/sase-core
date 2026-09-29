@@ -149,6 +149,38 @@ fn py_prompt_prediction_wire_schema_version() -> u32 {
     sase_core::prompt_prediction::PROMPT_PREDICTION_WIRE_SCHEMA_VERSION
 }
 
+/// Run a prequential replay over typed history rows.
+///
+/// Inputs arrive as JSON strings so parse errors stay `ValueError`s like
+/// the neighbouring domains; the evaluator runs with the GIL released and
+/// returns the aggregate-only report dict.
+#[pyfunction]
+#[pyo3(name = "evaluate_prompt_prediction_replay")]
+fn py_evaluate_prompt_prediction_replay(
+    py: Python<'_>,
+    rows_json: &str,
+    options_json: &str,
+) -> PyResult<PyObject> {
+    let rows: Vec<sase_core::prompt_prediction::PromptPredictionRowWire> =
+        serde_json::from_str(rows_json).map_err(|error| {
+            PyValueError::new_err(format!(
+                "rows is not a list of PromptPredictionRowWire dicts: {error}"
+            ))
+        })?;
+    let options: sase_core::prompt_prediction::PromptPredictionReplayOptionsWire =
+        serde_json::from_str(options_json).map_err(|error| {
+            PyValueError::new_err(format!(
+                "options is not a PromptPredictionReplayOptionsWire dict: {error}"
+            ))
+        })?;
+    let report = py.allow_threads(move || {
+        sase_core::prompt_prediction::evaluate_prompt_prediction_replay(
+            &rows, &options,
+        )
+    });
+    serialize_to_py(py, &report)
+}
+
 pub(crate) fn register_prompt_prediction(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -158,6 +190,7 @@ pub(crate) fn register_prompt_prediction(
         py_prompt_prediction_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_evaluate_prompt_prediction_replay, m)?)?;
     Ok(())
 }
 
