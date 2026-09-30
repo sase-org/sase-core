@@ -23,10 +23,12 @@ use super::wire::{
     NotificationUpsertRequestWire, NotificationWire,
     NOTIFICATION_PLUS_ONE_MAX_ENTRIES, NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES,
+    NOTIFICATION_WAIT_CHECKS_SENDER,
 };
 
 const STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const NOTIFICATION_COMPACTION_RETENTION_DAYS: i64 = 14;
+const NOTIFICATION_COMPACTION_RETENTION_DAYS: i64 = 3;
 const NOTIFICATION_COMPACTION_DISMISSED_ROW_THRESHOLD: usize = 1_000;
 const NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -161,7 +163,10 @@ fn read_notifications_snapshot_rewriting_if_needed(
         Vec::new()
     };
     let compaction = maybe_compact_notifications_unlocked(path, rows, now)?;
-    if !expired_ids.is_empty() || compaction.archived_count > 0 {
+    if !expired_ids.is_empty()
+        || compaction.archived_count > 0
+        || compaction.normalized_count > 0
+    {
         write_notifications_atomic(path, &compaction.rows)?;
     }
     let (notifications, stats) = read_rows_unlocked(path, include_dismissed)?;
@@ -187,7 +192,7 @@ pub(crate) fn compact_notifications_for_index_unlocked(
         rows,
         DateTime::<Utc>::from(SystemTime::now()),
     )?;
-    if compaction.archived_count > 0 {
+    if compaction.archived_count > 0 || compaction.normalized_count > 0 {
         write_notifications_atomic(path, &compaction.rows)?;
         let (rows, _) = read_rows_unlocked(path, true)?;
         return Ok(rows);
@@ -843,6 +848,29 @@ fn find_newest_matching_index(
     best.map(|(index, _)| index)
 }
 
+fn plus_one_cap_for(sender: &str) -> usize {
+    if sender == NOTIFICATION_WAIT_CHECKS_SENDER {
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES
+    } else {
+        NOTIFICATION_PLUS_ONE_MAX_ENTRIES
+    }
+}
+
+fn trim_plus_one_caps(rows: &mut [NotificationWire]) -> u64 {
+    let mut normalized_count = 0_u64;
+    for row in rows.iter_mut() {
+        let cap = plus_one_cap_for(row.sender.as_str());
+        if row.plus_ones.len() > cap {
+            let removed = row.plus_ones.len() - cap;
+            row.plus_ones.drain(0..removed);
+            row.plus_ones_dropped =
+                row.plus_ones_dropped.saturating_add(removed as u32);
+            normalized_count += 1;
+        }
+    }
+    normalized_count
+}
+
 fn apply_prepared_plus_one(
     row: &mut NotificationWire,
     plus_one: &PreparedPlusOne,
@@ -852,7 +880,8 @@ fn apply_prepared_plus_one(
         sender: plus_one.sender.clone(),
         note: plus_one.note.clone(),
     });
-    while row.plus_ones.len() > NOTIFICATION_PLUS_ONE_MAX_ENTRIES {
+    let cap = plus_one_cap_for(row.sender.as_str());
+    while row.plus_ones.len() > cap {
         row.plus_ones.remove(0);
         row.plus_ones_dropped = row.plus_ones_dropped.saturating_add(1);
     }
@@ -989,6 +1018,7 @@ pub(crate) fn read_rows_unlocked(
 struct NotificationCompaction {
     rows: Vec<NotificationWire>,
     archived_count: u64,
+    normalized_count: u64,
 }
 
 fn should_recheck_for_notification_compaction(
@@ -1030,6 +1060,8 @@ fn maybe_compact_notifications_unlocked(
     rows: Vec<NotificationWire>,
     now: DateTime<Utc>,
 ) -> Result<NotificationCompaction, String> {
+    let mut rows = rows;
+    let normalized_count = trim_plus_one_caps(&mut rows);
     if notification_file_size(path)
         < NOTIFICATION_COMPACTION_FILE_SIZE_THRESHOLD_BYTES
         && notification_compaction_candidate_count(&rows)
@@ -1038,6 +1070,7 @@ fn maybe_compact_notifications_unlocked(
         return Ok(NotificationCompaction {
             rows,
             archived_count: 0,
+            normalized_count,
         });
     }
 
@@ -1057,6 +1090,7 @@ fn maybe_compact_notifications_unlocked(
         return Ok(NotificationCompaction {
             rows: kept,
             archived_count: 0,
+            normalized_count,
         });
     }
 
@@ -1064,6 +1098,7 @@ fn maybe_compact_notifications_unlocked(
     Ok(NotificationCompaction {
         rows: kept,
         archived_count: archived.len() as u64,
+        normalized_count,
     })
 }
 

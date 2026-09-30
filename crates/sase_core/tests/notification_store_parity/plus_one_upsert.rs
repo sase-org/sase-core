@@ -10,6 +10,7 @@ use sase_core::notifications::{
     NotificationWire, NOTIFICATION_PLUS_ONE_MAX_ENTRIES,
     NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+    NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -533,4 +534,215 @@ fn notification_upsert_does_not_supersede_when_plus_oning() {
         .unwrap();
     assert!(!old.dismissed);
     assert!(old.plus_ones.is_empty());
+}
+
+#[test]
+fn notification_wait_checks_plus_one_cap_is_32_with_exact_drops() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut row = notification("wait-row");
+    row.sender = "wait_checks".to_string();
+    row.plus_ones = (0..NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES)
+        .map(|index| NotificationPlusOneWire {
+            timestamp: "2026-05-01T02:00:00+00:00".to_string(),
+            sender: "wait_checks".to_string(),
+            note: format!("n{index}"),
+        })
+        .collect();
+    rewrite_notifications(&path, &[row]).unwrap();
+
+    let outcome = append_notification_plus_one(
+        &path,
+        &plus_one_by_id("wait-row", "newest"),
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.plus_one_count,
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES as u64 + 1
+    );
+    assert_eq!(outcome.plus_ones_dropped, 1);
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let updated = &snapshot.notifications[0];
+    assert_eq!(
+        updated.plus_ones.len(),
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES
+    );
+    assert_eq!(updated.plus_ones[0].note, "n1");
+    assert_eq!(
+        updated.plus_ones[NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES - 1]
+            .note,
+        "newest"
+    );
+    assert_eq!(updated.plus_one_count(), outcome.plus_one_count);
+}
+
+#[test]
+fn notification_wait_checks_upsert_caps_at_32_while_others_keep_500() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut wait_row = notification("wait-row");
+    wait_row.sender = "wait_checks".to_string();
+    wait_row.dedup_key = Some("wait-combo".to_string());
+    wait_row.plus_ones = (0..NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES)
+        .map(|index| NotificationPlusOneWire {
+            timestamp: "2026-05-01T02:00:00+00:00".to_string(),
+            sender: "wait_checks".to_string(),
+            note: format!("w{index}"),
+        })
+        .collect();
+    let mut other_row = notification("other-row");
+    other_row.dedup_key = Some("other-combo".to_string());
+    other_row.plus_ones = (0..NOTIFICATION_PLUS_ONE_MAX_ENTRIES)
+        .map(|index| NotificationPlusOneWire {
+            timestamp: "2026-05-01T02:00:00+00:00".to_string(),
+            sender: "test-sender".to_string(),
+            note: format!("o{index}"),
+        })
+        .collect();
+    rewrite_notifications(&path, &[wait_row, other_row]).unwrap();
+
+    let mut wait_incoming = notification("wait-ignored");
+    wait_incoming.sender = "wait_checks".to_string();
+    wait_incoming.dedup_key = Some("wait-combo".to_string());
+    let wait_outcome = upsert_notification(
+        &path,
+        &NotificationUpsertRequestWire {
+            notification: wait_incoming,
+            plus_one_note: Some("wait-newest".to_string()),
+            plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
+            supersedes: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(wait_outcome.action, NotificationUpsertActionWire::PlusOned);
+    assert_eq!(wait_outcome.plus_ones_dropped, 1);
+
+    let mut other_incoming = notification("other-ignored");
+    other_incoming.dedup_key = Some("other-combo".to_string());
+    let other_outcome = upsert_notification(
+        &path,
+        &NotificationUpsertRequestWire {
+            notification: other_incoming,
+            plus_one_note: Some("other-newest".to_string()),
+            plus_one_timestamp: Some("2026-05-01T04:00:00+00:00".to_string()),
+            supersedes: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(other_outcome.action, NotificationUpsertActionWire::PlusOned);
+    assert_eq!(other_outcome.plus_ones_dropped, 1);
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let wait_row = snapshot
+        .notifications
+        .iter()
+        .find(|row| row.id == "wait-row")
+        .unwrap();
+    assert_eq!(
+        wait_row.plus_ones.len(),
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES
+    );
+    assert_eq!(wait_row.plus_ones[0].note, "w1");
+    assert_eq!(
+        wait_row.plus_ones[NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES - 1]
+            .note,
+        "wait-newest"
+    );
+    let other_row = snapshot
+        .notifications
+        .iter()
+        .find(|row| row.id == "other-row")
+        .unwrap();
+    assert_eq!(other_row.plus_ones.len(), NOTIFICATION_PLUS_ONE_MAX_ENTRIES);
+    assert_eq!(other_row.plus_ones[0].note, "o1");
+    assert_eq!(
+        other_row.plus_ones[NOTIFICATION_PLUS_ONE_MAX_ENTRIES - 1].note,
+        "other-newest"
+    );
+}
+
+#[test]
+fn notification_compaction_trims_legacy_wait_checks_rows_preserving_newest() {
+    use std::fs;
+
+    use sase_core::notifications::NotificationWire;
+
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut wait_row = notification("legacy-wait");
+    wait_row.sender = "wait_checks".to_string();
+    wait_row.plus_ones = (0..100)
+        .map(|index| NotificationPlusOneWire {
+            timestamp: "2026-05-01T02:00:00+00:00".to_string(),
+            sender: "wait_checks".to_string(),
+            note: format!("legacy-{index}"),
+        })
+        .collect();
+    wait_row.plus_ones_dropped = 5;
+    let mut other_row = notification("legacy-other");
+    other_row.plus_ones = (0..10)
+        .map(|index| NotificationPlusOneWire {
+            timestamp: "2026-05-01T02:00:00+00:00".to_string(),
+            sender: "test-sender".to_string(),
+            note: format!("other-{index}"),
+        })
+        .collect();
+    let mut body = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&wait_row).unwrap(),
+        serde_json::to_string(&other_row).unwrap(),
+    );
+    for index in 0..1_000 {
+        let mut filler = notification(&format!("filler-{index:04}"));
+        filler.timestamp = "2020-01-01T00:00:00+00:00".to_string();
+        filler.dismissed = true;
+        body.push_str(&serde_json::to_string(&filler).unwrap());
+        body.push('\n');
+    }
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, body).unwrap();
+
+    let before = read_notifications_snapshot(&path, true).unwrap();
+    let trimmed = before
+        .notifications
+        .iter()
+        .find(|row| row.id == "legacy-wait")
+        .unwrap();
+    assert_eq!(
+        trimmed.plus_ones.len(),
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES
+    );
+    assert_eq!(trimmed.plus_ones[0].note, "legacy-68");
+    assert_eq!(
+        trimmed.plus_ones[NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES - 1]
+            .note,
+        "legacy-99"
+    );
+    assert_eq!(trimmed.plus_ones_dropped, 5 + (100 - 32));
+    assert_eq!(
+        trimmed.plus_one_count(),
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES as u64
+            + 5
+            + (100 - 32) as u64
+    );
+    let untouched = before
+        .notifications
+        .iter()
+        .find(|row| row.id == "legacy-other")
+        .unwrap();
+    assert_eq!(untouched.plus_ones.len(), 10);
+    assert_eq!(untouched.plus_ones_dropped, 0);
+
+    let after = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(after.notifications, before.notifications);
+    let stored: NotificationWire = serde_json::from_str(
+        fs::read_to_string(&path).unwrap().lines().next().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.plus_ones.len(),
+        NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES
+    );
 }

@@ -10,6 +10,12 @@ pub const NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS: usize = 2000;
 /// Hard cap on stored plus-one entries per notification row.
 pub const NOTIFICATION_PLUS_ONE_MAX_ENTRIES: usize = 500;
 
+/// Live cap on stored plus-one entries for `wait_checks` rows.
+pub const NOTIFICATION_WAIT_CHECKS_PLUS_ONE_MAX_ENTRIES: usize = 32;
+
+/// Sender whose rows use the tighter plus-one live cap.
+pub const NOTIFICATION_WAIT_CHECKS_SENDER: &str = "wait_checks";
+
 fn u32_is_zero(value: &u32) -> bool {
     *value == 0
 }

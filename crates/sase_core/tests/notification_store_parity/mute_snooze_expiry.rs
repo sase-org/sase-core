@@ -470,7 +470,7 @@ fn notification_snapshot_compacts_old_dismissed_rows_to_archive() {
     let path = store_path(temp.path());
     let archive = archive_path(temp.path());
     let old_timestamp = timestamp_days_from_now(-30);
-    let recent_timestamp = timestamp_days_from_now(-3);
+    let recent_timestamp = timestamp_days_from_now(-2);
     let future_snooze = timestamp_days_from_now(1);
 
     let mut live = notification("live");
@@ -644,5 +644,105 @@ fn notification_activity_cursor_uses_resurface_time_and_id_tiebreaker() {
     assert_eq!(
         notification_activity_cursor(&notification("legacy")),
         ("2026-05-01T01:02:03+00:00", "legacy")
+    );
+}
+
+#[test]
+fn notification_three_day_retention_boundary_and_activity_fallback() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let archive = archive_path(temp.path());
+    let old_timestamp = timestamp_days_from_now(-30);
+    let four_days_ago = timestamp_days_from_now(-4);
+    let two_days_ago = timestamp_days_from_now(-2);
+    let one_day_ago = timestamp_days_from_now(-1);
+    let future_snooze = timestamp_days_from_now(1);
+
+    let mut stale_dismissed = notification("stale-dismissed");
+    stale_dismissed.timestamp = four_days_ago.clone();
+    stale_dismissed.dismissed = true;
+
+    let mut fresh_dismissed = notification("fresh-dismissed");
+    fresh_dismissed.timestamp = two_days_ago.clone();
+    fresh_dismissed.dismissed = true;
+
+    let mut active_old = notification("active-old");
+    active_old.timestamp = old_timestamp.clone();
+
+    let mut snoozed_dismissed = notification("snoozed-dismissed");
+    snoozed_dismissed.timestamp = old_timestamp.clone();
+    snoozed_dismissed.dismissed = true;
+    snoozed_dismissed.muted = true;
+    snoozed_dismissed.snooze_until = Some(future_snooze);
+
+    let mut resurfaced_fresh = notification("resurfaced-fresh");
+    resurfaced_fresh.timestamp = old_timestamp.clone();
+    resurfaced_fresh.dismissed = true;
+    resurfaced_fresh.resurfaced_at = Some(one_day_ago.clone());
+
+    let mut resurfaced_stale = notification("resurfaced-stale");
+    resurfaced_stale.timestamp = one_day_ago.clone();
+    resurfaced_stale.dismissed = true;
+    resurfaced_stale.resurfaced_at = Some(four_days_ago.clone());
+
+    let mut rows = vec![
+        stale_dismissed,
+        fresh_dismissed.clone(),
+        active_old.clone(),
+        snoozed_dismissed.clone(),
+        resurfaced_fresh.clone(),
+        resurfaced_stale,
+    ];
+    for index in 0..1_000 {
+        let mut row = notification(&format!("old-dismissed-{index:04}"));
+        row.timestamp = old_timestamp.clone();
+        row.dismissed = true;
+        rows.push(row);
+    }
+    write_jsonl(&path, &rows);
+
+    let snapshot = read_notifications_snapshot(&path, true).unwrap();
+    let ids: Vec<_> = snapshot
+        .notifications
+        .iter()
+        .map(|row| row.id.as_str())
+        .collect();
+    assert!(ids.contains(&"fresh-dismissed"));
+    assert!(ids.contains(&"active-old"));
+    assert!(ids.contains(&"snoozed-dismissed"));
+    assert!(ids.contains(&"resurfaced-fresh"));
+    assert!(!ids.contains(&"stale-dismissed"));
+    assert!(!ids.contains(&"resurfaced-stale"));
+    assert!(snapshot.generation > 0);
+
+    let archived: Vec<NotificationWire> = fs::read_to_string(&archive)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(archived.iter().any(|row| row.id == "stale-dismissed"));
+    assert!(archived.iter().any(|row| row.id == "resurfaced-stale"));
+    assert!(!archived.iter().any(|row| row.id == "fresh-dismissed"));
+    assert!(!archived.iter().any(|row| row.id == "resurfaced-fresh"));
+    assert!(archived.iter().any(|row| row.id == "old-dismissed-0000"));
+    let archived_count = archived.len();
+
+    let reread = read_notifications_snapshot(&path, true).unwrap();
+    assert_eq!(reread.generation, snapshot.generation);
+    assert_eq!(
+        reread
+            .notifications
+            .iter()
+            .map(|row| &row.id)
+            .collect::<Vec<_>>(),
+        snapshot
+            .notifications
+            .iter()
+            .map(|row| &row.id)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        fs::read_to_string(&archive).unwrap().lines().count(),
+        archived_count,
     );
 }
