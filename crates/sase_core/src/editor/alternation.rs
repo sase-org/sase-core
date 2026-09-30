@@ -389,6 +389,58 @@ mod tests {
     }
 
     #[test]
+    fn scanner_reports_openers_after_literal_brace() {
+        for (text, marker, opener_end, close, separator) in [
+            ("{%{a | b}", 1, 3, 8, 5),
+            ("{%(a,b)", 1, 3, 6, 4),
+            ("{%alt(a,b)", 1, 6, 9, 7),
+            ("x {%{a | b} y", 3, 5, 10, 7),
+        ] {
+            let records = scan_alternations(text);
+            assert_eq!(records.len(), 1, "{text}");
+            assert_eq!(records[0].marker_start, marker, "{text}");
+            assert_eq!(records[0].opener_end, opener_end, "{text}");
+            assert_eq!(records[0].close, Some(close), "{text}");
+            assert_eq!(records[0].separators, vec![separator], "{text}");
+            assert_eq!(records[0].depth, 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn scanner_reports_paren_opener_after_another_opener() {
+        for text in ["%{%(a,b) | c}", "%{%alt(a,b) | c}", "%(%(a,b), c)"] {
+            let records = scan_alternations(text);
+            assert_eq!(records.len(), 2, "{text}");
+            assert_eq!(records[0].depth, 0, "{text}");
+            assert_eq!(records[1].depth, 1, "{text}");
+            assert_eq!(records[1].form, AlternationFormWire::Paren, "{text}");
+            assert_eq!(records[1].separators.len(), 1, "{text}");
+        }
+        let records = scan_alternations("%{%(a,b) | c}");
+        assert_eq!(records[0].marker_start, 0);
+        assert_eq!(records[0].close, Some(12));
+        assert_eq!(records[0].separators, vec![9]);
+        assert_eq!(records[1].marker_start, 2);
+        assert_eq!(records[1].close, Some(7));
+        assert_eq!(records[1].separators, vec![5]);
+    }
+
+    #[test]
+    fn scanner_keeps_glued_and_bare_percent_plain() {
+        assert_eq!(scan_alternations("x%(a,b)"), Vec::new());
+        assert_eq!(scan_alternations("%%(a,b)"), Vec::new());
+        assert_eq!(scan_alternations("fmt%alt(a,b)"), Vec::new());
+    }
+
+    #[test]
+    fn scanner_reports_only_trailing_alternation_after_real_jinja() {
+        let records = scan_alternations("{% if x %}y{% endif %} %{a|b}");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].marker_start, 23);
+        assert_eq!(scan_alternations("{{%{a|b}}}"), Vec::new());
+    }
+
+    #[test]
     fn scanner_uses_byte_offsets_for_non_ascii_text() {
         let prefix = "héllo ".len();
         let records = scan_alternations("héllo %{a | b}");

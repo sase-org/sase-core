@@ -219,22 +219,49 @@ pub(crate) fn launch_inline_literal_ranges(
 /// `%alt(` keep the directive-valid position rule (start of text or after
 /// whitespace, `(`, `[`, `{`, `"`, `'`, or `:`) so format strings like
 /// `%(name)s` never fan out. Callers skip literal zones themselves.
+///
+/// The walk visits every `%` byte position instead of iterating a regex with
+/// a consumed left-boundary prefix, so adjacent openers (`%{%(a,b) | c}`)
+/// all match: the paren branch's boundary (`{`/`(`) may be the previous
+/// match's delimiter.
 pub(crate) fn alt_directive_starts(
     prompt: &str,
 ) -> Vec<(usize, usize, AltDelimiter)> {
-    alt_directive_re()
-        .captures_iter(prompt)
-        .filter_map(|caps| {
-            let marker = caps.get(1).or_else(|| caps.get(2))?;
-            let open = marker.end() - 1;
-            let delimiter = if prompt.as_bytes()[open] == b'{' {
-                AltDelimiter::Brace
-            } else {
-                AltDelimiter::Paren
-            };
-            Some((marker.start(), open, delimiter))
-        })
-        .collect()
+    let mut out = Vec::new();
+    for (i, _) in prompt.match_indices('%') {
+        let tail = &prompt[i..];
+        if tail.starts_with("%{") {
+            out.push((i, i + 1, AltDelimiter::Brace));
+            continue;
+        }
+        let (open_offset, delimiter) = if tail.starts_with("%alt(") {
+            (i + 4, AltDelimiter::Paren)
+        } else if tail.starts_with("%(") {
+            (i + 1, AltDelimiter::Paren)
+        } else {
+            continue;
+        };
+        if is_alt_paren_boundary(prompt, i) {
+            out.push((i, open_offset, delimiter));
+        }
+    }
+    out
+}
+
+/// Whether the paren alternation at byte offset `i` sits at a directive-valid
+/// position: start of text, or after whitespace, `(`, `[`, `{`, `"`, `'`, or
+/// `:`. `(?m)^` after `\n` is covered by whitespace.
+fn is_alt_paren_boundary(prompt: &str, i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    match prompt[..i].chars().next_back() {
+        Some(ch) => {
+            ch.is_whitespace()
+                || matches!(ch, '(' | '[' | '{' | '"' | '\'' | ':')
+        }
+        None => true,
+    }
 }
 
 pub(crate) fn alt_inner_ranges(
@@ -584,21 +611,6 @@ fn xprompt_reference_re() -> &'static Regex {
             r#"(?m)(^|[\s\(\[\{"'])(#!?([A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*)(?:!!|\?\?)?(?:(\()|:(`[^`]*`|\$\([^)]*\)|\{\{[^}]*\}\}|\{[^}]*\}|[A-Za-z0-9_.~,+/@-]*[A-Za-z0-9_~,+/@-])|(\+))?)"#,
         )
         .unwrap()
-    })
-}
-
-/// Match alternation openers: `%{` anywhere, `%(`/`%alt(` only at a
-/// directive-valid position.
-///
-/// The `regex` crate has no lookbehind, so the paren branch matches its
-/// left-boundary prefix (`(?:^|...)`) while the brace branch matches the
-/// bare marker and consumes no prefix, letting adjacent openers
-/// (`%{a|b}%{c|d}`) all match. Group 1 is the brace marker; group 2 is
-/// the paren marker.
-fn alt_directive_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"(?m)(%\{)|(?:^|[\s\(\[\{"':])(%(?:alt)?\()"#).unwrap()
     })
 }
 

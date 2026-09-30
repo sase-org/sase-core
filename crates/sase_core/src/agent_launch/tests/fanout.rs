@@ -1408,3 +1408,31 @@ fn fanout_planner_percent_before_jinja_tag_is_an_alternation() {
         vec!["100% if x %", "100"]
     );
 }
+
+#[test]
+fn fanout_planner_opener_after_literal_brace_fans_out() {
+    let plan =
+        plan_agent_launch_fanout("{%{a | b}", Some("alternatives")).unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["{a", "{b"]
+    );
+}
+
+#[test]
+fn fanout_planner_nested_paren_after_brace_opener_fans_out() {
+    let plan = plan_agent_launch_fanout("%{%(a,b) | c}", Some("alternatives"))
+        .unwrap();
+
+    assert_eq!(
+        plan.slots
+            .iter()
+            .map(|slot| slot.prompt.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "c"]
+    );
+}
