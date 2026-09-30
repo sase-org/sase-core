@@ -25,27 +25,42 @@ pub struct ConfidencePreset {
     pub min_support: u64,
 }
 
-/// Cautious preset: precision first.
+/// Cautious preset: precision first. Calibrated on the 2026-09-30
+/// prequential replay over typed history (11,631 rows; 3,301 typed;
+/// 1,320 warmed; 1,971 scored; 142,120 positions — see
+/// `tools/prompt_prediction_replay` in sase): the max-coverage grid
+/// point meeting overall precision >= 85% (85.0%) with novel precision
+/// at least 5 points above balanced (77.6% vs 70.1%). Strictly tighter
+/// than balanced via `min_support` 5 > 2; the 0.40 margin is
+/// load-bearing at `min_p` 0.60 (unlike at 0.75, where the margin is
+/// always met). Coverage 18.1% vs balanced 25.9%, so the two presets
+/// gate measurably different position sets.
 pub const PRESET_CAUTIOUS: ConfidencePreset = ConfidencePreset {
-    min_p: 0.75,
-    min_margin: 0.35,
-    min_support: 4,
+    min_p: 0.60,
+    min_margin: 0.40,
+    min_support: 5,
 };
-/// Balanced preset: the default. Calibrated on the 2026-09 prequential
-/// replay over typed history (see `tools/prompt_prediction_replay`): the
-/// max-coverage grid point meeting overall precision >= 75% and novel
-/// precision >= 65%. The margin is flat across 0.05-0.40 at this point,
-/// so it keeps its previous value.
+/// Balanced preset: the default. Calibrated on the 2026-09-30 prequential
+/// replay over typed history (see `tools/prompt_prediction_replay` in
+/// sase): the max-coverage grid point meeting overall precision >= 75%
+/// (80.7%) and novel precision >= 65% (65.1%). The margin is flat across
+/// 0.05-0.40 at this point, so it keeps its previous value. Novel
+/// headroom is razor-thin (+0.1pp), so re-run the replay before loosening
+/// this preset.
 pub const PRESET_BALANCED: ConfidencePreset = ConfidencePreset {
     min_p: 0.75,
     min_margin: 0.2,
-    min_support: 4,
-};
-/// Eager preset: coverage first.
-pub const PRESET_EAGER: ConfidencePreset = ConfidencePreset {
-    min_p: 0.45,
-    min_margin: 0.1,
     min_support: 2,
+};
+/// Eager preset: coverage first. Calibrated on the 2026-09-30 prequential
+/// replay over typed history (see `tools/prompt_prediction_replay` in
+/// sase): the max-coverage grid point meeting overall precision >= 60%
+/// (62.9%), at 59.0% coverage. Overall headroom is thin (+2.9pp), so
+/// re-run the replay before loosening this preset.
+pub const PRESET_EAGER: ConfidencePreset = ConfidencePreset {
+    min_p: 0.40,
+    min_margin: 0.05,
+    min_support: 1,
 };
 
 /// Parse a confidence name; unknown names fall back to balanced.
@@ -1046,12 +1061,14 @@ mod tests {
 
     #[test]
     fn gate_boundaries_need_full_thresholds() {
-        // Four identical rows give support 4 and share 1.0 at order 2.
+        // Five identical rows give support 5 (cautious `min_support`) and
+        // share 1.0 at order 2, so every preset passes at its thresholds.
         let corpus = corpus_for(&[
             "help me implement it",
             "help me implement it now",
             "help me implement it today",
             "help me implement it fast",
+            "help me implement it well",
         ]);
         let sources = sources_of(&corpus);
         let context: Vec<String> = vec!["help".into(), "me".into()];
@@ -1061,7 +1078,7 @@ mod tests {
             let ranked = score_candidates(&query, &candidates);
             assert!(apply_gate(&query, &ranked, &candidates).is_some());
             // Just above each achievable threshold must fail (share and
-            // margin top out at 1.0, support at 4 rows here).
+            // margin top out at 1.0, support at 5 rows here).
             let below_p = ConfidencePreset {
                 min_p: 1.01,
                 ..preset

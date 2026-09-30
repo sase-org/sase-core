@@ -143,12 +143,20 @@ pub fn evaluate_prompt_prediction_replay(
     let mut records: Vec<PositionRecord> = Vec::new();
     let mut cohort_chars = [0u64; 3];
     let mut rows_scored = 0u64;
+    // Deterministic scoring stride: every K-th post-warm row is scored,
+    // but every row still joins the corpus and the cohort history, so a
+    // sampled run sees the same evidence as the full run.
+    let score_every = options.score_every.max(1);
     for (row_id, row) in typed.iter().enumerate().skip(warm_n) {
         let row_index = row_id as u32;
         let sequences = tokenize_prompt_text(&row.text);
         let cohort = cohort_for(&sequences, &prior_five, &prior_vocab);
         let mut scored_any = false;
+        let sampled = ((row_id - warm_n) as u64).is_multiple_of(score_every);
         for (seq_index, sequence) in sequences.iter().enumerate() {
+            if !sampled {
+                break;
+            }
             let keys: Vec<String> = sequence
                 .tokens
                 .iter()
@@ -1187,6 +1195,38 @@ mod tests {
         // scores the single row with an empty builder.
         assert_eq!(single.rows_warmed, 0);
         assert_eq!(single.rows_scored, 1);
+    }
+
+    #[test]
+    fn replay_score_every_samples_rows_but_keeps_evidence() {
+        let full = evaluate_prompt_prediction_replay(
+            &formulaic_rows(),
+            &replay_options(),
+        );
+        let sampled = evaluate_prompt_prediction_replay(
+            &formulaic_rows(),
+            &PromptPredictionReplayOptionsWire {
+                score_every: 2,
+                ..replay_options()
+            },
+        );
+        // Every K-th post-warm row is scored: ordinals 0, 2, 4 of the 6
+        // post-warm rows.
+        assert_eq!(sampled.rows_scored, 3);
+        assert!(sampled.positions_total < full.positions_total);
+        // Every row still joins the corpus and warms identically.
+        assert_eq!(sampled.corpus_rows_used, full.corpus_rows_used);
+        assert_eq!(sampled.rows_warmed, full.rows_warmed);
+        // Deterministic: the same stride selects the same positions.
+        let again = evaluate_prompt_prediction_replay(
+            &formulaic_rows(),
+            &PromptPredictionReplayOptionsWire {
+                score_every: 2,
+                ..replay_options()
+            },
+        );
+        assert_eq!(sampled.positions_total, again.positions_total);
+        assert_eq!(sampled.overall_top1, again.overall_top1);
     }
 
     #[test]

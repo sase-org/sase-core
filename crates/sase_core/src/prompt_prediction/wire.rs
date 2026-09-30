@@ -267,6 +267,12 @@ pub struct PromptPrefixRankResultWire {
 /// rows that seed the builder before scoring starts.
 pub const DEFAULT_REPLAY_WARM_FRACTION: f64 = 0.4;
 
+/// Default row-sampling stride for prequential replay scoring: every
+/// post-warm row is scored. Larger strides score every K-th post-warm
+/// row while every row still joins the corpus, so long archive
+/// comparisons stay affordable on a deterministic selection.
+pub const DEFAULT_REPLAY_SCORE_EVERY: u64 = 1;
+
 /// Options for [`crate::prompt_prediction::evaluate_prompt_prediction_replay`].
 ///
 /// The corpus fields mirror [`PromptPredictionCorpusOptionsWire`], the model
@@ -296,10 +302,16 @@ pub struct PromptPredictionReplayOptionsWire {
     pub reject_conflicts: bool,
     #[serde(default = "default_replay_warm_fraction")]
     pub warm_fraction: f64,
+    #[serde(default = "default_replay_score_every")]
+    pub score_every: u64,
 }
 
 fn default_replay_warm_fraction() -> f64 {
     DEFAULT_REPLAY_WARM_FRACTION
+}
+
+fn default_replay_score_every() -> u64 {
+    DEFAULT_REPLAY_SCORE_EVERY
 }
 
 impl Default for PromptPredictionReplayOptionsWire {
@@ -317,6 +329,7 @@ impl Default for PromptPredictionReplayOptionsWire {
             draft_weight: DEFAULT_DRAFT_WEIGHT,
             reject_conflicts: true,
             warm_fraction: DEFAULT_REPLAY_WARM_FRACTION,
+            score_every: DEFAULT_REPLAY_SCORE_EVERY,
         }
     }
 }
