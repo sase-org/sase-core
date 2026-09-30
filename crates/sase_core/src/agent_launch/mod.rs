@@ -44,7 +44,8 @@ pub use conditional::{
     CONDITIONAL_LAUNCH_SEGMENT_FILTER_SCHEMA_VERSION,
 };
 pub(crate) use directive_scan::{
-    alt_directive_starts, directive_occurrences, find_matching_delimiter,
+    alt_directive_starts, directive_occurrences, disabled_region_ranges,
+    find_matching_delimiter, launch_inline_literal_ranges,
     launch_literal_zone_ranges, split_top_level_arg_ranges,
     top_level_eq_offset, AltDelimiter,
 };

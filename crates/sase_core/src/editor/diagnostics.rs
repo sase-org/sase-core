@@ -605,7 +605,7 @@ fn local_xprompt_entry_from_config(
     })
 }
 
-fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
+pub(crate) fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
     if let Some(mapping) = value.as_mapping() {
         return mapping
             .iter()
@@ -709,7 +709,7 @@ fn parse_input_type_name(raw: &str) -> String {
     .to_string()
 }
 
-fn default_display(value: &Value) -> Option<String> {
+pub(crate) fn default_display(value: &Value) -> Option<String> {
     if value.is_null() || value.as_str().is_some() {
         return None;
     }
@@ -722,7 +722,7 @@ fn default_display(value: &Value) -> Option<String> {
     value.as_f64().map(|value| value.to_string())
 }
 
-fn frontmatter_mapping(text: &str) -> Option<Mapping> {
+pub(crate) fn frontmatter_mapping(text: &str) -> Option<Mapping> {
     let opening_line_end = text.find('\n')?;
     if text[..opening_line_end].trim_end_matches('\r') != "---" {
         return None;
@@ -750,11 +750,14 @@ fn frontmatter_mapping(text: &str) -> Option<Mapping> {
     None
 }
 
-fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+pub(crate) fn mapping_get<'a>(
+    mapping: &'a Mapping,
+    key: &str,
+) -> Option<&'a Value> {
     mapping.get(Value::String(key.to_string()))
 }
 
-fn value_as_string(value: &Value) -> Option<String> {
+pub(crate) fn value_as_string(value: &Value) -> Option<String> {
     if let Some(value) = value.as_str() {
         Some(value.to_string())
     } else if let Some(value) = value.as_i64() {

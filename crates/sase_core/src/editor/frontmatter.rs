@@ -2429,7 +2429,7 @@ fn is_valid_snippet_trigger(trigger: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn value_is_truthy(value: &Value) -> bool {
+pub(crate) fn value_is_truthy(value: &Value) -> bool {
     value.as_bool().unwrap_or_else(|| {
         value
             .as_sequence()

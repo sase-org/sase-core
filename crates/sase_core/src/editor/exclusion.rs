@@ -24,7 +24,7 @@ pub(crate) fn position_in_ranges(
         .any(|(start, end)| *start <= pos && pos < *end)
 }
 
-fn jinja_tag_ranges(text: &str) -> Vec<(usize, usize)> {
+pub(crate) fn jinja_tag_ranges(text: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut offset = 0;
     while offset < text.len() {
@@ -45,7 +45,10 @@ fn jinja_tag_ranges(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn next_jinja_tag(text: &str, offset: usize) -> Option<(usize, &'static str)> {
+pub(crate) fn next_jinja_tag(
+    text: &str,
+    offset: usize,
+) -> Option<(usize, &'static str)> {
     let tail = text.get(offset..)?;
     [("{{", "}}"), ("{%", "%}"), ("{#", "#}")]
         .into_iter()
@@ -84,7 +87,7 @@ fn is_alt_opener_after_jinja_open(tail: &str, start: usize) -> bool {
         || after.starts_with("alt(")
 }
 
-fn frontmatter_block_len(text: &str) -> Option<usize> {
+pub(crate) fn frontmatter_block_len(text: &str) -> Option<usize> {
     let mut lines = text.split_inclusive('\n');
     let first = lines.next()?;
     if first.trim() != "---" {
