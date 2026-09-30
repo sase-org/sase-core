@@ -96,7 +96,9 @@ pub fn tokenize_cursor_text(text: &str) -> CursorContext {
             reason: BLOCKED_UNCLOSED_JINJA,
         };
     }
-    if has_unclosed_alternation(text) {
+    // The alternation scanner is the costliest unclosed check; its syntax
+    // always contains `%`, so plain prose skips it entirely.
+    if text.as_bytes().contains(&b'%') && has_unclosed_alternation(text) {
         return CursorContext::Blocked {
             reason: BLOCKED_UNCLOSED_ALTERNATION,
         };
@@ -179,22 +181,40 @@ fn finish_cursor_context(
 /// at both compile and query time. The scanner already skips markers inside
 /// literal zones, so an alternation inside a code span stays inert.
 fn excluded_ranges(text: &str) -> Vec<(usize, usize)> {
+    // Fast path for plain prose: every marker scanner below can only match
+    // when its marker bytes are present, so one byte pass over the text
+    // decides which scanners can possibly fire. Pasted-block detection is
+    // length/ratio based and always runs.
+    let bytes = text.as_bytes();
+    let mut markers = false;
+    for byte in bytes {
+        if matches!(byte, b'`' | b'~' | b'%' | b'{') {
+            markers = true;
+            break;
+        }
+    }
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    if let Some(range) = frontmatter_range(text) {
-        ranges.push(range);
+    if text.starts_with("---") {
+        if let Some(range) = frontmatter_range(text) {
+            ranges.push(range);
+        }
     }
-    for (start, end) in fenced_block_ranges(text) {
-        ranges.push((start, end));
+    if markers {
+        for (start, end) in fenced_block_ranges(text) {
+            ranges.push((start, end));
+        }
+        let masks = ranges.clone();
+        for (start, end) in inline_code_ranges(text, &masks) {
+            ranges.push((start, end));
+        }
+        ranges.extend(jinja_ranges(text));
+        ranges.extend(alternation_body_ranges(text));
     }
-    let masks = ranges.clone();
-    for (start, end) in inline_code_ranges(text, &masks) {
-        ranges.push((start, end));
-    }
-    ranges.extend(jinja_ranges(text));
-    ranges.extend(alternation_body_ranges(text));
     ranges.extend(pasted_block_ranges(text));
     // Segment separators are line-based; mark the whole line excluded.
-    ranges.extend(segment_separator_ranges(text));
+    if text.contains("---") {
+        ranges.extend(segment_separator_ranges(text));
+    }
     ranges.sort();
     ranges
 }
@@ -750,14 +770,13 @@ fn is_hex_char(ch: char) -> bool {
 }
 
 fn is_hash_like(word: &str) -> bool {
-    let chars: Vec<char> = word.chars().collect();
-    if chars.len() < 7 {
+    // No allocation: two char passes over the borrowed word instead of a
+    // collected Vec. Same predicate as before.
+    if word.chars().count() < 7 {
         return false;
     }
-    chars
-        .iter()
-        .all(|c| is_hex_char(*c) || *c == '-' || *c == '_')
-        && chars.iter().any(|c| c.is_ascii_digit())
+    word.chars().all(|c| is_hex_char(c) || c == '-' || c == '_')
+        && word.chars().any(|c| c.is_ascii_digit())
 }
 
 const SECRET_PREFIXES: &[&str] =

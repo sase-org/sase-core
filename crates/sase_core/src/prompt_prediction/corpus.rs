@@ -76,6 +76,51 @@ fn fast_set<K>() -> FastHashSet<K> {
     HashSet::default()
 }
 
+/// Packed n-gram context key: up to [`MAX_PACKED_CONTEXT`] word ids.
+///
+/// Contexts used to be `Vec<u32>` map keys: every compile pair and every
+/// query lookup cloned a heap vector and hashed it element-wise. The packed
+/// key is `Copy` (no allocation on either path) and hashes as fixed-size
+/// bytes. `len` disambiguates ids that would otherwise share low words
+/// (word id `0` is a real id: the `<s>` marker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct ContextKey {
+    len: u8,
+    ids: [u32; MAX_PACKED_CONTEXT],
+}
+
+/// Maximum context words packed into one [`ContextKey`].
+///
+/// Mirrors the compile default (`DEFAULT_MAX_CONTEXT_WORDS` on the wire);
+/// longer contexts are trimmed before packing, matching `trim_context` and
+/// `replay_context` on the query paths.
+pub(crate) const MAX_PACKED_CONTEXT: usize = 4;
+
+impl ContextKey {
+    /// Pack the last `order` ids of `preceding` (order ≤ 4).
+    fn suffix(preceding: &[u32], order: usize) -> Self {
+        let start = preceding.len().saturating_sub(order);
+        Self::pack(&preceding[start..])
+    }
+
+    /// Pack a whole slice (truncating to the last 4 ids when longer).
+    pub(crate) fn pack(ids: &[u32]) -> Self {
+        let start = ids.len().saturating_sub(MAX_PACKED_CONTEXT);
+        let slice = &ids[start..];
+        let mut arr = [0u32; MAX_PACKED_CONTEXT];
+        arr[..slice.len()].copy_from_slice(slice);
+        Self {
+            len: slice.len() as u8,
+            ids: arr,
+        }
+    }
+
+    /// Length of the packed context.
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+}
+
 /// One successor observation bundle.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct SuccessorStats {
@@ -84,8 +129,25 @@ struct SuccessorStats {
 }
 
 /// One context entry: pre-truncation totals plus kept successors.
+///
+/// The frozen corpus stores successors as a flat array in rank order
+/// (mass descending, key ascending) instead of a per-context hash map:
+/// every context entry then holds its successors inline with no map
+/// object, no buckets, and no per-entry allocation, and lookups scan a
+/// tiny cache-friendly array (truncated to at most 32 entries at finish).
+/// Ranked queries clone the array without re-sorting.
 #[derive(Debug, Clone, PartialEq, Default)]
 struct ContextStats {
+    total_mass: f64,
+    total_distinct: u64,
+    successors: Vec<(u32, SuccessorStats)>,
+}
+
+/// One context entry under construction: same totals with a hash map of
+/// successors for O(1) inserts while rows accumulate. `finish` flattens
+/// each map into the ranked flat array above.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct BuildContextStats {
     total_mass: f64,
     total_distinct: u64,
     successors: FastHashMap<u32, SuccessorStats>,
@@ -129,9 +191,13 @@ struct CorpusInner {
     keys: Vec<String>,
     surfaces: Vec<String>,
     ids: FastHashMap<String, u32>,
-    contexts: FastHashMap<Vec<u32>, ContextStats>,
-    projects: FastHashMap<String, FastHashMap<Vec<u32>, ContextStats>>,
+    contexts: FastHashMap<ContextKey, ContextStats>,
+    projects: FastHashMap<String, FastHashMap<ContextKey, ContextStats>>,
     excluded: FastHashSet<String>,
+    /// Word ids sorted by key string: binary-searched by `keys_with_prefix`
+    /// so prefix ranking costs O(log vocab + matches) instead of a full
+    /// vocabulary scan per keystroke.
+    prefix_index: Vec<u32>,
     stats: CorpusStats,
 }
 
@@ -183,6 +249,12 @@ impl CompiledPromptPredictionCorpus {
                 .cmp(&b.epoch_seconds)
                 .then_with(|| a.text.cmp(&b.text))
         });
+        // Pre-size the hot tables: each row contributes on the order of its
+        // word count times the context window in pairs, so reserve up front
+        // instead of rehashing through the whole compile.
+        builder.contexts.reserve(kept.len().saturating_mul(128));
+        builder.ids.reserve(kept.len().saturating_mul(8));
+        builder.seen_texts.reserve(kept.len());
         for row in kept {
             builder.add_row(row);
         }
@@ -231,28 +303,43 @@ impl CompiledPromptPredictionCorpus {
         self.inner.ids.get(key).copied()
     }
 
-    /// Resolve context keys to word ids. `None` when any key is unknown:
-    /// the context then has no observations.
-    pub(crate) fn resolve_context(&self, keys: &[&str]) -> Option<Vec<u32>> {
-        keys.iter().map(|key| self.resolve_word(key)).collect()
+    /// Resolve context keys to a packed key. `None` when any key is
+    /// unknown: the context then has no observations. Callers must pass
+    /// at most [`MAX_PACKED_CONTEXT`] keys (query paths trim first).
+    pub(crate) fn resolve_key(&self, keys: &[&str]) -> Option<ContextKey> {
+        if keys.len() > MAX_PACKED_CONTEXT {
+            return None;
+        }
+        let mut arr = [0u32; MAX_PACKED_CONTEXT];
+        for (index, key) in keys.iter().enumerate() {
+            arr[index] = self.resolve_word(key)?;
+        }
+        Some(ContextKey {
+            len: keys.len() as u8,
+            ids: arr,
+        })
     }
 
-    /// `(total_mass, total_distinct)` for resolved context ids.
-    pub(crate) fn totals_for(&self, ids: &[u32]) -> (f64, u64) {
+    /// `(total_mass, total_distinct)` for a packed context key.
+    pub(crate) fn totals_for(&self, key: ContextKey) -> (f64, u64) {
         self.inner
             .contexts
-            .get(ids)
+            .get(&key)
             .map(|stats| (stats.total_mass, stats.total_distinct))
             .unwrap_or((0.0, 0))
     }
 
-    /// `(mass, distinct)` of one word after resolved context ids.
-    pub(crate) fn word_stats_for(&self, ids: &[u32], word: u32) -> (f64, u64) {
+    /// `(mass, distinct)` of one word after a packed context key: a
+    /// linear scan over the flat successor array.
+    pub(crate) fn word_stats_for(
+        &self,
+        key: ContextKey,
+        word: u32,
+    ) -> (f64, u64) {
         self.inner
             .contexts
-            .get(ids)
-            .and_then(|stats| stats.successors.get(&word))
-            .map(|succ| (succ.mass, succ.distinct))
+            .get(&key)
+            .and_then(|stats| successor_lookup(&stats.successors, word))
             .unwrap_or((0.0, 0))
     }
 
@@ -260,12 +347,12 @@ impl CompiledPromptPredictionCorpus {
     pub(crate) fn project_totals_for(
         &self,
         project: &str,
-        ids: &[u32],
+        key: ContextKey,
     ) -> (f64, u64) {
         self.inner
             .projects
             .get(project)
-            .and_then(|map| map.get(ids))
+            .and_then(|map| map.get(&key))
             .map(|stats| (stats.total_mass, stats.total_distinct))
             .unwrap_or((0.0, 0))
     }
@@ -274,26 +361,33 @@ impl CompiledPromptPredictionCorpus {
     pub(crate) fn project_word_stats_for(
         &self,
         project: &str,
-        ids: &[u32],
+        key: ContextKey,
         word: u32,
     ) -> (f64, u64) {
         self.inner
             .projects
             .get(project)
-            .and_then(|map| map.get(ids))
-            .and_then(|stats| stats.successors.get(&word))
-            .map(|succ| (succ.mass, succ.distinct))
+            .and_then(|map| map.get(&key))
+            .and_then(|stats| successor_lookup(&stats.successors, word))
             .unwrap_or((0.0, 0))
     }
 
-    /// Every known key starting with `prefix`.
+    /// Every known key starting with `prefix`, via the sorted prefix
+    /// index: O(log vocab + matches) instead of a full vocabulary scan.
     pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
-        self.inner
-            .keys
-            .iter()
-            .filter(|key| key.starts_with(prefix))
-            .cloned()
-            .collect()
+        let inner = &self.inner;
+        let lower = inner
+            .prefix_index
+            .partition_point(|id| inner.keys[*id as usize].as_str() < prefix);
+        let mut out = Vec::new();
+        for id in inner.prefix_index[lower..].iter() {
+            let key = &inner.keys[*id as usize];
+            if !key.starts_with(prefix) {
+                break;
+            }
+            out.push(key.clone());
+        }
+        out
     }
 
     fn approx_bytes(&self) -> u64 {
@@ -305,36 +399,50 @@ impl CompiledPromptPredictionCorpus {
         for surface in &inner.surfaces {
             bytes += surface.len() as u64 + 16;
         }
-        for (context, stats) in &inner.contexts {
-            bytes += context.len() as u64 * 4 + 64;
-            bytes += stats.successors.len() as u64 * 32;
+        bytes += inner.prefix_index.len() as u64 * 4;
+        // Packed context key (24 bytes with padding) plus map overhead and
+        // the flat successor array (24 bytes per entry: id, mass, distinct).
+        for stats in inner.contexts.values() {
+            bytes += 88;
+            bytes += stats.successors.len() as u64 * 24;
         }
         for (project, map) in &inner.projects {
             bytes += project.len() as u64 + 64;
-            for (context, stats) in map {
-                bytes += context.len() as u64 * 4 + 64;
-                bytes += stats.successors.len() as u64 * 32;
+            for stats in map.values() {
+                bytes += 88;
+                bytes += stats.successors.len() as u64 * 24;
             }
         }
         bytes
     }
 }
 
+/// Linear lookup of one word in a flat successor array.
+fn successor_lookup(
+    successors: &[(u32, SuccessorStats)],
+    word: u32,
+) -> Option<(f64, u64)> {
+    successors
+        .iter()
+        .find(|(id, _)| *id == word)
+        .map(|(_, succ)| (succ.mass, succ.distinct))
+}
+
 impl PromptSuccessorSource for CompiledPromptPredictionCorpus {
     fn successor_stats(&self, context: &[&str], word: &str) -> (f64, u64) {
         let (Some(ctx), Some(id)) =
-            (self.resolve_context(context), self.resolve_word(word))
+            (self.resolve_key(context), self.resolve_word(word))
         else {
             return (0.0, 0);
         };
-        self.word_stats_for(&ctx, id)
+        self.word_stats_for(ctx, id)
     }
 
     fn context_totals(&self, context: &[&str]) -> (f64, u64) {
-        let Some(ctx) = self.resolve_context(context) else {
+        let Some(ctx) = self.resolve_key(context) else {
             return (0.0, 0);
         };
-        self.totals_for(&ctx)
+        self.totals_for(ctx)
     }
 
     fn project_successor_stats(
@@ -344,11 +452,11 @@ impl PromptSuccessorSource for CompiledPromptPredictionCorpus {
         word: &str,
     ) -> (f64, u64) {
         let (Some(ctx), Some(id)) =
-            (self.resolve_context(context), self.resolve_word(word))
+            (self.resolve_key(context), self.resolve_word(word))
         else {
             return (0.0, 0);
         };
-        self.project_word_stats_for(project, &ctx, id)
+        self.project_word_stats_for(project, ctx, id)
     }
 
     fn project_context_totals(
@@ -356,20 +464,23 @@ impl PromptSuccessorSource for CompiledPromptPredictionCorpus {
         project: &str,
         context: &[&str],
     ) -> (f64, u64) {
-        let Some(ctx) = self.resolve_context(context) else {
+        let Some(ctx) = self.resolve_key(context) else {
             return (0.0, 0);
         };
-        self.project_totals_for(project, &ctx)
+        self.project_totals_for(project, ctx)
     }
 
     fn ranked_successors(&self, context: &[&str]) -> Vec<(String, f64, u64)> {
-        let Some(ctx) = self.resolve_context(context) else {
+        let Some(ctx) = self.resolve_key(context) else {
             return Vec::new();
         };
         let Some(stats) = self.inner.contexts.get(&ctx) else {
             return Vec::new();
         };
-        let mut out: Vec<(String, f64, u64)> = stats
+        // Successors are stored in rank order (mass descending, key
+        // ascending), so no re-sort: the output matches the old
+        // collect-then-sort sequence exactly.
+        stats
             .successors
             .iter()
             .map(|(id, succ)| {
@@ -379,22 +490,23 @@ impl PromptSuccessorSource for CompiledPromptPredictionCorpus {
                     succ.distinct,
                 )
             })
-            .collect();
-        out.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
-        });
-        out
+            .collect()
     }
 }
 
 impl PromptPredictionBuilder {
-    fn resolve_ids(&self, context: &[&str]) -> Option<Vec<u32>> {
-        context
-            .iter()
-            .map(|key| self.ids.get(*key).copied())
-            .collect()
+    fn resolve_key(&self, context: &[&str]) -> Option<ContextKey> {
+        if context.len() > MAX_PACKED_CONTEXT {
+            return None;
+        }
+        let mut arr = [0u32; MAX_PACKED_CONTEXT];
+        for (index, key) in context.iter().enumerate() {
+            arr[index] = self.ids.get(*key).copied()?;
+        }
+        Some(ContextKey {
+            len: context.len() as u8,
+            ids: arr,
+        })
     }
 
     fn excluded_set(&self) -> FastHashSet<String> {
@@ -410,10 +522,10 @@ impl PromptPredictionBuilder {
         context: &[&str],
         word: Option<&str>,
     ) -> (Option<(f64, u64)>, (f64, u64)) {
-        let Some(ids) = self.resolve_ids(context) else {
+        let Some(key) = self.resolve_key(context) else {
             return (None, (0.0, 0));
         };
-        let Some(stats) = self.contexts.get(&ids) else {
+        let Some(stats) = self.contexts.get(&key) else {
             return (None, (0.0, 0));
         };
         let totals = (stats.total_mass, stats.total_distinct);
@@ -434,12 +546,12 @@ impl PromptPredictionBuilder {
         context: &[&str],
         word: Option<&str>,
     ) -> (Option<(f64, u64)>, (f64, u64)) {
-        let (Some(ids), Some(map)) =
-            (self.resolve_ids(context), self.projects.get(project))
+        let (Some(key), Some(map)) =
+            (self.resolve_key(context), self.projects.get(project))
         else {
             return (None, (0.0, 0));
         };
-        let Some(stats) = map.get(&ids) else {
+        let Some(stats) = map.get(&key) else {
             return (None, (0.0, 0));
         };
         let totals = (stats.total_mass, stats.total_distinct);
@@ -486,10 +598,10 @@ impl PromptSuccessorSource for PromptPredictionBuilder {
     }
 
     fn ranked_successors(&self, context: &[&str]) -> Vec<(String, f64, u64)> {
-        let Some(ids) = self.resolve_ids(context) else {
+        let Some(key) = self.resolve_key(context) else {
             return Vec::new();
         };
-        let Some(stats) = self.contexts.get(&ids) else {
+        let Some(stats) = self.contexts.get(&key) else {
             return Vec::new();
         };
         let excluded = self.excluded_set();
@@ -548,15 +660,16 @@ pub fn recency_weight(
 }
 
 /// One interned word occurrence: id plus display surface and
-/// sequence-initial flag.
-struct InternedToken {
+/// sequence-initial flag. The surface borrows the tokenized row: only one
+/// owned clone per distinct word per row ever reaches the vote tables.
+struct InternedToken<'a> {
     id: u32,
-    surface: String,
+    surface: &'a str,
     initial: bool,
 }
 
 /// One interned sequence: `<s>`-started flag plus word occurrences.
-type InternedSequence = (bool, Vec<InternedToken>);
+type InternedSequence<'a> = (bool, Vec<InternedToken<'a>>);
 
 /// Mutable corpus builder: same accumulation as [`CompiledPromptPredictionCorpus::compile`],
 /// queryable between row additions without a recompile.
@@ -572,8 +685,8 @@ pub struct PromptPredictionBuilder {
     keys: Vec<String>,
     ids: FastHashMap<String, u32>,
     votes: FastHashMap<u32, Vec<(String, f64, bool)>>,
-    contexts: FastHashMap<Vec<u32>, ContextStats>,
-    projects: FastHashMap<String, FastHashMap<Vec<u32>, ContextStats>>,
+    contexts: FastHashMap<ContextKey, BuildContextStats>,
+    projects: FastHashMap<String, FastHashMap<ContextKey, BuildContextStats>>,
     seen_texts: FastHashSet<String>,
     rows_used: u64,
     rows_generated_skipped: u64,
@@ -623,13 +736,19 @@ impl PromptPredictionBuilder {
             self.options.now_epoch,
             self.options.recency_half_life_days,
         );
-        let max_context = self.options.max_context_words.max(1);
+        // Packing caps contexts at MAX_PACKED_CONTEXT (the wire default and
+        // the query-side trim cap): longer configured windows trim to the
+        // last words, which is all any query can observe.
+        let max_context =
+            self.options.max_context_words.clamp(1, MAX_PACKED_CONTEXT);
         // Single intern pass: word ids per sequence plus surface votes by
         // id (one vote per key per row, preferring non-initial casing).
-        let mut interned: Vec<InternedSequence> =
+        // Surfaces borrow the tokenized sequences: no per-token clone.
+        let mut interned: Vec<InternedSequence<'_>> =
             Vec::with_capacity(sequences.len());
         let mut repeated_word = false;
         let mut row_ids: FastHashSet<u32> = fast_set();
+        let mut preceding: Vec<u32> = Vec::with_capacity(max_context + 1);
         for seq in &sequences {
             let mut words = Vec::with_capacity(seq.tokens.len());
             for token in &seq.tokens {
@@ -639,25 +758,26 @@ impl PromptPredictionBuilder {
                 }
                 words.push(InternedToken {
                     id,
-                    surface: token.surface.clone(),
+                    surface: token.surface.as_str(),
                     initial: token.sequence_initial,
                 });
             }
             interned.push((seq.started, words));
         }
         {
-            let mut row_surfaces: FastHashMap<u32, (String, bool)> = fast_map();
+            let mut row_surfaces: FastHashMap<u32, (String, bool)> =
+                HashMap::with_capacity_and_hasher(word_count, FnvBuild);
             for (_, words) in &interned {
                 for token in words {
                     row_surfaces
                         .entry(token.id)
                         .and_modify(|entry| {
                             if !token.initial {
-                                *entry = (token.surface.clone(), false);
+                                *entry = (token.surface.to_string(), false);
                             }
                         })
                         .or_insert_with(|| {
-                            (token.surface.clone(), token.initial)
+                            (token.surface.to_string(), token.initial)
                         });
                 }
             }
@@ -673,8 +793,8 @@ impl PromptPredictionBuilder {
         // pair is trivially unique.
         let start_id = self.intern(SEQUENCE_START);
         let project_name = row.project.clone();
-        let mut seen_pairs: FastHashSet<(Vec<u32>, u32)> = fast_set();
-        let mut seen: Option<&mut FastHashSet<(Vec<u32>, u32)>> =
+        let mut seen_pairs: FastHashSet<(ContextKey, u32)> = fast_set();
+        let mut seen: Option<&mut FastHashSet<(ContextKey, u32)>> =
             repeated_word.then_some(&mut seen_pairs);
         // Disjoint field borrows: counting touches only these maps.
         let Self {
@@ -686,19 +806,20 @@ impl PromptPredictionBuilder {
             projects.get_mut(name).expect("inserted")
         });
         for (started, words) in &interned {
-            let mut preceding: Vec<u32> = Vec::with_capacity(max_context + 1);
+            // Reused across sequences: no allocation per sequence.
+            preceding.clear();
             if *started {
                 preceding.push(start_id);
             }
             for token in words {
                 let depth = preceding.len().min(max_context);
                 for order in 0..=depth {
-                    let context: Vec<u32> =
-                        preceding[preceding.len() - order..].to_vec();
+                    // Packed by value: no heap vector per pair.
+                    let context = ContextKey::suffix(&preceding, order);
                     // Without repeats every pair is new; otherwise check
                     // the set before counting.
                     let fresh = match seen.as_mut() {
-                        Some(set) => set.insert((context.clone(), token.id)),
+                        Some(set) => set.insert((context, token.id)),
                         None => true,
                     };
                     if fresh {
@@ -754,17 +875,53 @@ impl PromptPredictionBuilder {
             .collect();
         // Excluded words are never predicted: drop them from successors.
         // Totals stay pre-truncation, matching the truncation contract.
-        for stats in self.contexts.values_mut() {
-            stats.successors.retain(|id, _| {
-                !excluded.contains(self.keys[*id as usize].as_str())
-            });
-        }
-        for map in self.projects.values_mut() {
-            for stats in map.values_mut() {
-                stats.successors.retain(|id, _| {
+        // Flatten each map into its rank-ordered flat array first, so the
+        // frozen order matches what ranked queries always produced. An
+        // empty exclusion set (the common case) skips the per-successor
+        // filter entirely: retaining everything is a no-op either way.
+        let filter_excluded = !excluded.is_empty();
+        let mut contexts: FastHashMap<ContextKey, ContextStats> =
+            HashMap::with_capacity_and_hasher(self.contexts.len(), FnvBuild);
+        for (key, stats) in &self.contexts {
+            let mut successors = flatten_successors(stats, &self.keys);
+            if filter_excluded {
+                successors.retain(|(id, _)| {
                     !excluded.contains(self.keys[*id as usize].as_str())
                 });
             }
+            contexts.insert(
+                *key,
+                ContextStats {
+                    total_mass: stats.total_mass,
+                    total_distinct: stats.total_distinct,
+                    successors,
+                },
+            );
+        }
+        let mut projects: FastHashMap<
+            String,
+            FastHashMap<ContextKey, ContextStats>,
+        > = HashMap::with_capacity_and_hasher(self.projects.len(), FnvBuild);
+        for (name, map) in &self.projects {
+            let mut flat: FastHashMap<ContextKey, ContextStats> =
+                HashMap::with_capacity_and_hasher(map.len(), FnvBuild);
+            for (key, stats) in map {
+                let mut successors = flatten_successors(stats, &self.keys);
+                if filter_excluded {
+                    successors.retain(|(id, _)| {
+                        !excluded.contains(self.keys[*id as usize].as_str())
+                    });
+                }
+                flat.insert(
+                    *key,
+                    ContextStats {
+                        total_mass: stats.total_mass,
+                        total_distinct: stats.total_distinct,
+                        successors,
+                    },
+                );
+            }
+            projects.insert(name.clone(), flat);
         }
         let mut surfaces = vec![String::new(); self.keys.len()];
         for (index, key) in self.keys.iter().enumerate() {
@@ -781,14 +938,20 @@ impl PromptPredictionBuilder {
         if let Some(id) = self.ids.get(SEQUENCE_START).copied() {
             surfaces[id as usize] = SEQUENCE_START.to_string();
         }
+        // Sorted word-id index for prefix search: ids ordered by key.
+        let mut prefix_index: Vec<u32> = (0..self.keys.len() as u32).collect();
+        prefix_index.sort_by(|a, b| {
+            self.keys[*a as usize].cmp(&self.keys[*b as usize])
+        });
         CompiledPromptPredictionCorpus {
             inner: Arc::new(CorpusInner {
                 keys: self.keys,
                 surfaces,
                 ids: self.ids,
-                contexts: self.contexts,
-                projects: self.projects,
+                contexts,
+                projects,
                 excluded,
+                prefix_index,
                 stats: CorpusStats {
                     rows_used: self.rows_used,
                     rows_generated_skipped: self.rows_generated_skipped,
@@ -801,15 +964,16 @@ impl PromptPredictionBuilder {
 }
 
 /// Count one `(context, word)` pair into the main table and, when
-/// present, one project partition.
+/// present, one project partition. The packed key is `Copy`, so hot
+/// inserts never allocate for the key itself.
 fn record_pair(
-    contexts: &mut FastHashMap<Vec<u32>, ContextStats>,
-    project_map: Option<&mut FastHashMap<Vec<u32>, ContextStats>>,
-    context: Vec<u32>,
+    contexts: &mut FastHashMap<ContextKey, BuildContextStats>,
+    project_map: Option<&mut FastHashMap<ContextKey, BuildContextStats>>,
+    context: ContextKey,
     word_id: u32,
     weight: f64,
 ) {
-    let stats = contexts.entry(context.clone()).or_default();
+    let stats = contexts.entry(context).or_default();
     stats.total_mass += weight;
     stats.total_distinct += 1;
     let succ = stats.successors.entry(word_id).or_default();
@@ -826,7 +990,7 @@ fn record_pair(
 }
 
 fn truncate_contexts(
-    contexts: &mut FastHashMap<Vec<u32>, ContextStats>,
+    contexts: &mut FastHashMap<ContextKey, BuildContextStats>,
     keys: &[String],
     max_successors: usize,
 ) {
@@ -851,6 +1015,31 @@ fn truncate_contexts(
             .collect();
         stats.successors.retain(|id, _| keep.contains(id));
     }
+}
+
+/// Rank-order one build entry's successors (mass descending, key
+/// ascending) into the frozen flat array. Same comparator as truncation,
+/// so the stored order matches what ranked queries always produced.
+fn flatten_successors(
+    stats: &BuildContextStats,
+    keys: &[String],
+) -> Vec<(u32, SuccessorStats)> {
+    let mut ranked: Vec<(u32, SuccessorStats)> = stats
+        .successors
+        .iter()
+        .map(|(id, succ)| (*id, succ.clone()))
+        .collect();
+    // Zero- and one-element arrays are trivially ordered: skip most sorts.
+    if ranked.len() < 2 {
+        return ranked;
+    }
+    ranked.sort_by(|a, b| {
+        b.1.mass
+            .partial_cmp(&a.1.mass)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| keys[a.0 as usize].cmp(&keys[b.0 as usize]))
+    });
+    ranked
 }
 
 #[cfg(test)]

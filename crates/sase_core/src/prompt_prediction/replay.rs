@@ -511,8 +511,8 @@ fn combined_at(
         total += tuning.project_boost * proj_total;
     }
     if let Some((counts, weight)) = draft {
-        let (draft_mass, draft_distinct) = counts.pair(suffix, word);
-        let (draft_total, _) = counts.totals(suffix);
+        let (draft_mass, draft_distinct) = counts.pair_by_str(suffix, word);
+        let (draft_total, _) = counts.totals_by_str(suffix);
         mass += weight * draft_mass;
         total += weight * draft_total;
         support += draft_distinct;
@@ -544,7 +544,7 @@ fn totals_at(
         total += tuning.project_boost * proj_total;
     }
     if let Some((counts, weight)) = draft {
-        let (draft_total, draft_distinct) = counts.totals(suffix);
+        let (draft_total, draft_distinct) = counts.totals_by_str(suffix);
         total += weight * draft_total;
         distinct += draft_distinct;
     }

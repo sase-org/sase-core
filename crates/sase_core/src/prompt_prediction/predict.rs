@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use crate::prompt_prediction::corpus::{
-    CompiledPromptPredictionCorpus, FastHashMap,
+    CompiledPromptPredictionCorpus, ContextKey, FastHashMap, MAX_PACKED_CONTEXT,
 };
 use crate::prompt_prediction::tokenize::SEQUENCE_START;
 
@@ -69,10 +69,18 @@ struct DraftStats {
 }
 
 /// Per-request draft counts, frozen for continuation.
+///
+/// Draft words are interned once per request to small ids, so counting and
+/// every later lookup hash packed [`ContextKey`]s instead of cloning and
+/// hashing strings per n-gram. Values match the old string-keyed tables
+/// exactly: mass sums occurrences, distinct counts each pair once, and
+/// context totals count each context once.
 #[derive(Debug, Clone, Default)]
 pub struct DraftCounts {
-    pairs: FastHashMap<Vec<String>, FastHashMap<String, DraftStats>>,
-    totals: FastHashMap<Vec<String>, (f64, u64)>,
+    vocab: Vec<String>,
+    ids: FastHashMap<String, u32>,
+    pairs: FastHashMap<(ContextKey, u32), DraftStats>,
+    totals: FastHashMap<ContextKey, (f64, u64)>,
 }
 
 impl DraftCounts {
@@ -84,21 +92,44 @@ impl DraftCounts {
         max_context: usize,
     ) -> Self {
         let mut counts = Self::default();
-        let mut seen: HashSet<(Vec<String>, String)> = HashSet::new();
-        for (seq_index, seq) in sequences.iter().enumerate() {
-            let is_last_seq = seq_index + 1 == sequences.len();
+        // Intern every distinct word once: later passes never hash strings.
+        for seq in sequences {
+            for word in seq {
+                if !counts.ids.contains_key(word) {
+                    let id = counts.vocab.len() as u32;
+                    counts.vocab.push(word.clone());
+                    counts.ids.insert(word.clone(), id);
+                }
+            }
+        }
+        let id_seqs: Vec<Vec<u32>> = sequences
+            .iter()
+            .map(|seq| {
+                seq.iter().map(|word| counts.ids[word.as_str()]).collect()
+            })
+            .collect();
+        let max_context = max_context.clamp(1, MAX_PACKED_CONTEXT);
+        // Pre-size the pair tables: tokens times the context window is the
+        // pair upper bound, so one reservation replaces the rehash chain.
+        let token_estimate: usize =
+            id_seqs.iter().map(Vec::len).sum::<usize>() * (max_context + 1);
+        counts.pairs.reserve(token_estimate);
+        counts.totals.reserve(token_estimate);
+        let mut seen: HashSet<(ContextKey, u32)> =
+            HashSet::with_capacity(token_estimate);
+        for (seq_index, seq) in id_seqs.iter().enumerate() {
+            let is_last_seq = seq_index + 1 == id_seqs.len();
             for (pos, word) in seq.iter().enumerate() {
                 if is_last_seq && pos + 1 == seq.len() {
                     continue;
                 }
                 let depth = pos.min(max_context);
                 for order in 0..=depth {
-                    let context: Vec<String> = seq[pos - order..pos].to_vec();
-                    let words =
-                        counts.pairs.entry(context.clone()).or_default();
-                    let entry = words.entry(word.clone()).or_default();
+                    let context = ContextKey::pack(&seq[pos - order..pos]);
+                    let entry =
+                        counts.pairs.entry((context, *word)).or_default();
                     entry.mass += 1.0;
-                    if seen.insert((context.clone(), word.clone())) {
+                    if seen.insert((context, *word)) {
                         entry.distinct += 1;
                     }
                     let total =
@@ -115,28 +146,76 @@ impl DraftCounts {
         counts
     }
 
-    /// Every word observed in the draft.
+    /// Resolve one draft word to its request-local id, if observed.
+    pub(crate) fn resolve_word(&self, word: &str) -> Option<u32> {
+        self.ids.get(word).copied()
+    }
+
+    /// Resolve a query context suffix to a draft-local packed key: `None`
+    /// when any word was never observed in the draft.
+    pub(crate) fn resolve_key(&self, keys: &[String]) -> Option<ContextKey> {
+        if keys.len() > MAX_PACKED_CONTEXT {
+            return None;
+        }
+        let mut ids = [0u32; MAX_PACKED_CONTEXT];
+        for (index, key) in keys.iter().enumerate() {
+            ids[index] = self.resolve_word(key)?;
+        }
+        Some(ContextKey::pack(&ids[..keys.len()]))
+    }
+
+    /// Every word observed in the draft as a successor (words seen only
+    /// in the skipped final position contribute no pair and stay out,
+    /// matching the old string-keyed collection exactly).
     pub(crate) fn candidate_words(&self) -> Vec<String> {
         let mut words: Vec<String> = self
             .pairs
-            .values()
-            .flat_map(|words| words.keys().cloned())
+            .keys()
+            .map(|(_, id)| self.vocab[*id as usize].clone())
             .collect();
         words.sort();
         words.dedup();
         words
     }
 
-    pub(crate) fn pair(&self, context: &[String], word: &str) -> (f64, u64) {
+    pub(crate) fn pair(
+        &self,
+        context: ContextKey,
+        word: Option<u32>,
+    ) -> (f64, u64) {
+        let Some(id) = word else {
+            return (0.0, 0);
+        };
         self.pairs
-            .get(context)
-            .and_then(|words| words.get(word))
+            .get(&(context, id))
             .map(|stats| (stats.mass, stats.distinct))
             .unwrap_or((0.0, 0))
     }
 
-    pub(crate) fn totals(&self, context: &[String]) -> (f64, u64) {
-        self.totals.get(context).copied().unwrap_or((0.0, 0))
+    pub(crate) fn totals(&self, context: ContextKey) -> (f64, u64) {
+        self.totals.get(&context).copied().unwrap_or((0.0, 0))
+    }
+
+    /// String-keyed pair lookup for the replay scorer's string-level path.
+    pub(crate) fn pair_by_str(
+        &self,
+        context: &[String],
+        word: &str,
+    ) -> (f64, u64) {
+        let (Some(key), Some(id)) =
+            (self.resolve_key(context), self.resolve_word(word))
+        else {
+            return (0.0, 0);
+        };
+        self.pair(key, Some(id))
+    }
+
+    /// String-keyed totals lookup for the replay scorer's string-level path.
+    pub(crate) fn totals_by_str(&self, context: &[String]) -> (f64, u64) {
+        let Some(key) = self.resolve_key(context) else {
+            return (0.0, 0);
+        };
+        self.totals(key)
     }
 }
 
@@ -182,59 +261,131 @@ pub struct WeightedSource<'a> {
     pub weight: f64,
 }
 
-/// One source with its per-order contexts resolved to word ids once per
-/// scoring pass. Candidates then hit direct map lookups with no string
-/// hashing and no per-call allocation.
+/// One source with its per-order contexts resolved to packed keys once
+/// per scoring pass, plus the per-order context totals cached alongside.
+/// Candidates then hit flat-array lookups with no string hashing, no
+/// per-call allocation, and no repeated totals fetches.
 struct ResolvedView<'a> {
     corpus: &'a CompiledPromptPredictionCorpus,
     share: usize,
     weight: f64,
-    orders: Vec<Option<Vec<u32>>>,
+    orders: Vec<Option<ContextKey>>,
+    masses: Vec<f64>,
+    distincts: Vec<u64>,
 }
 
-/// Resolved inputs for one scoring pass: id-space source views plus
-/// the string-level project, boost, and draft settings.
+/// Resolved inputs for one scoring pass: packed-key source views plus
+/// cached per-order totals (corpus, project-partition, and draft), so the
+/// per-candidate hot loop only resolves word ids and scans flat arrays.
 struct PassCtx<'a> {
     views: Vec<ResolvedView<'a>>,
     project: Option<&'a str>,
     boost: f64,
     draft: Option<(&'a DraftCounts, f64)>,
+    draft_orders: Vec<Option<ContextKey>>,
+    draft_masses: Vec<f64>,
+    draft_distincts: Vec<u64>,
+    project_masses: Vec<Vec<f64>>,
+    order_count: usize,
 }
 
 impl<'a> PassCtx<'a> {
     fn of(query: &ScoringQuery<'a>, suffixes: &OrderSuffixes) -> Self {
-        Self {
-            views: resolve_views(query.sources, suffixes),
-            project: query.project,
-            boost: query.project_boost,
-            draft: query.draft,
-        }
+        Self::resolve(
+            query.sources,
+            query.project,
+            query.project_boost,
+            query.draft,
+            suffixes,
+        )
     }
-}
 
-fn resolve_views<'a>(
-    sources: &[WeightedSource<'a>],
-    suffixes: &OrderSuffixes,
-) -> Vec<ResolvedView<'a>> {
-    sources
-        .iter()
-        .map(|source| {
-            let orders = suffixes
-                .iter()
-                .map(|suffix| {
+    fn resolve(
+        sources: &[WeightedSource<'a>],
+        project: Option<&'a str>,
+        boost: f64,
+        draft: Option<(&'a DraftCounts, f64)>,
+        suffixes: &OrderSuffixes,
+    ) -> Self {
+        let views = sources
+            .iter()
+            .map(|source| {
+                let mut orders = Vec::with_capacity(suffixes.len());
+                let mut masses = Vec::with_capacity(suffixes.len());
+                let mut distincts = Vec::with_capacity(suffixes.len());
+                for suffix in suffixes {
                     let refs: Vec<&str> =
                         suffix.iter().map(String::as_str).collect();
-                    source.corpus.resolve_context(&refs)
+                    let key = source.corpus.resolve_key(&refs);
+                    // Totals are context-only: fetch once per order here
+                    // instead of once per candidate below. Same values.
+                    let (mass, distinct) = key
+                        .map(|packed| source.corpus.totals_for(packed))
+                        .unwrap_or((0.0, 0));
+                    orders.push(key);
+                    masses.push(mass);
+                    distincts.push(distinct);
+                }
+                ResolvedView {
+                    corpus: source.corpus,
+                    share: source.share,
+                    weight: source.weight,
+                    orders,
+                    masses,
+                    distincts,
+                }
+            })
+            .collect::<Vec<_>>();
+        // Draft context keys and totals: one resolution per order, shared
+        // by every candidate. Unknown words mean no draft observations.
+        let mut draft_orders = Vec::with_capacity(suffixes.len());
+        let mut draft_masses = Vec::with_capacity(suffixes.len());
+        let mut draft_distincts = Vec::with_capacity(suffixes.len());
+        for suffix in suffixes {
+            let key = draft.and_then(|(counts, _)| counts.resolve_key(suffix));
+            let (mass, distinct) = key
+                .map(|packed| {
+                    draft
+                        .map(|(counts, _)| counts.totals(packed))
+                        .unwrap_or((0.0, 0))
                 })
-                .collect();
-            ResolvedView {
-                corpus: source.corpus,
-                share: source.share,
-                weight: source.weight,
-                orders,
-            }
-        })
-        .collect()
+                .unwrap_or((0.0, 0));
+            draft_orders.push(key);
+            draft_masses.push(mass);
+            draft_distincts.push(distinct);
+        }
+        // Project-partition masses: one fetch per view per order. Entries
+        // stay 0.0 for unknown contexts, mirroring the old skip.
+        let project_masses = views
+            .iter()
+            .map(|view| {
+                view.orders
+                    .iter()
+                    .map(|key| match (project, key) {
+                        (Some(name), Some(packed)) => {
+                            view.corpus.project_totals_for(name, *packed).0
+                        }
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        Self {
+            order_count: suffixes.len(),
+            views,
+            project,
+            boost,
+            draft,
+            draft_orders,
+            draft_masses,
+            draft_distincts,
+            project_masses,
+        }
+    }
+
+    fn order_count(&self) -> usize {
+        self.order_count
+    }
 }
 
 /// Owned order suffixes of a query context, indexed by order.
@@ -258,29 +409,27 @@ fn outranks(mass: f64, best_mass: f64, word: &str, best_word: &str) -> bool {
 }
 
 /// Combined mass, total, and support of one word at one order, plus
-/// per-share mass contributions. `word_ids` holds each view's resolved
-/// word id (or `None` when the view never saw the word).
+/// per-share mass contributions. Context totals come from the per-pass
+/// cache (same values the old per-candidate fetches returned); only the
+/// word lookups run per candidate. Summation order matches the old loop
+/// exactly, so scores are bit-identical.
 fn combined_at_order(
     ctx: &PassCtx<'_>,
-    suffix_owned: &[String],
     order: usize,
-    word_ids: &[Option<u32>],
-    word: &str,
+    candidate: &ScoredCandidate,
 ) -> (f64, f64, u64, [f64; 5]) {
     let mut mass = 0.0;
     let mut total = 0.0;
     let mut support = 0u64;
     let mut shares = [0.0; 5];
-    for (view, word_id) in ctx.views.iter().zip(word_ids.iter()) {
-        let Some(context) = view.orders.get(order).and_then(|opt| opt.as_ref())
-        else {
+    for (view_index, view) in ctx.views.iter().enumerate() {
+        let Some(context) = view.orders.get(order).and_then(|opt| *opt) else {
             continue;
         };
-        let (ctx_mass, _) = view.corpus.totals_for(context);
-        total += view.weight * ctx_mass;
-        if let Some(id) = word_id {
+        total += view.weight * view.masses[order];
+        if let Some(id) = candidate.word_ids[view_index] {
             let (word_mass, word_distinct) =
-                view.corpus.word_stats_for(context, *id);
+                view.corpus.word_stats_for(context, id);
             mass += view.weight * word_mass;
             support += word_distinct;
             shares[view.share] += view.weight * word_mass;
@@ -289,11 +438,10 @@ fn combined_at_order(
             // The project partition is a subset of the same rows: it changes
             // only mass, total, and source shares. Distinct support counts
             // each observation once, so project distinct is never added.
-            let (proj_total, _) = view.corpus.project_totals_for(name, context);
-            total += ctx.boost * proj_total;
-            if let Some(id) = word_id {
+            total += ctx.boost * ctx.project_masses[view_index][order];
+            if let Some(id) = candidate.word_ids[view_index] {
                 let (proj_mass, _) =
-                    view.corpus.project_word_stats_for(name, context, *id);
+                    view.corpus.project_word_stats_for(name, context, id);
                 mass += ctx.boost * proj_mass;
                 shares[SHARE_PROJECT] += ctx.boost * proj_mass;
             }
@@ -302,12 +450,14 @@ fn combined_at_order(
     // Support counts successor observations; context distinct totals live
     // in the totals helper below.
     if let Some((counts, weight)) = ctx.draft {
-        let (draft_mass, draft_distinct) = counts.pair(suffix_owned, word);
-        mass += weight * draft_mass;
-        let (draft_total, _) = counts.totals(suffix_owned);
-        total += weight * draft_total;
-        support += draft_distinct;
-        shares[SHARE_DRAFT] += weight * draft_mass;
+        if let Some(draft_key) = ctx.draft_orders[order] {
+            let (draft_mass, draft_distinct) =
+                counts.pair(draft_key, candidate.draft_id);
+            mass += weight * draft_mass;
+            support += draft_distinct;
+            shares[SHARE_DRAFT] += weight * draft_mass;
+        }
+        total += weight * ctx.draft_masses[order];
     }
     // Normalize shares against the combined mass.
     if mass > 0.0 {
@@ -319,55 +469,45 @@ fn combined_at_order(
 }
 
 /// Combined totals of one precomputed order suffix: mass, mass (kept as
-/// a pair for call-site symmetry), and distinct rows.
+/// a pair for call-site symmetry), and distinct rows. All values come
+/// from the per-pass cache.
 fn combined_totals_at_order(
     ctx: &PassCtx<'_>,
-    suffix_owned: &[String],
     order: usize,
 ) -> (f64, f64, u64) {
     let mut total = 0.0;
     let mut distinct = 0u64;
-    for view in &ctx.views {
-        let Some(context) = view.orders.get(order).and_then(|opt| opt.as_ref())
-        else {
+    for (view_index, view) in ctx.views.iter().enumerate() {
+        if view.orders.get(order).and_then(|opt| *opt).is_none() {
             continue;
-        };
-        let (ctx_mass, ctx_distinct) = view.corpus.totals_for(context);
-        total += view.weight * ctx_mass;
-        distinct += ctx_distinct;
-        if let Some(name) = ctx.project {
+        }
+        total += view.weight * view.masses[order];
+        distinct += view.distincts[order];
+        if ctx.project.is_some() {
             // Project totals add mass only; distinct rows are already counted
             // in the global totals above.
-            let (proj_total, _) = view.corpus.project_totals_for(name, context);
-            total += ctx.boost * proj_total;
+            total += ctx.boost * ctx.project_masses[view_index][order];
         }
     }
-    if let Some((counts, weight)) = ctx.draft {
-        let (draft_total, draft_distinct) = counts.totals(suffix_owned);
-        total += weight * draft_total;
-        distinct += draft_distinct;
+    if let Some((_, weight)) = ctx.draft {
+        total += weight * ctx.draft_masses[order];
+        distinct += ctx.draft_distincts[order];
     }
     (total, total, distinct)
 }
 
 /// Top two successors at one order by combined mass, key ascending on
 /// ties, plus the runner-up share. One pass serves both the leader check
-/// and the margin check.
-fn top_two_at_order(
-    ctx: &PassCtx<'_>,
-    suffixes: &OrderSuffixes,
+/// and the margin check. Reads the round mass table: same values as the
+/// old per-candidate recomputation.
+fn top_two_from_table(
+    table: &MassTable,
+    resolved: &[ScoredCandidate],
     order: usize,
-    candidates: &[ScoredCandidate],
 ) -> (Option<(String, f64, f64, u64)>, f64) {
     let mut best: Option<(String, f64, f64, u64)> = None;
-    for candidate in candidates {
-        let (mass, total, support, _) = combined_at_order(
-            ctx,
-            &suffixes[order],
-            order,
-            &candidate.word_ids,
-            &candidate.key,
-        );
+    for (index, candidate) in resolved.iter().enumerate() {
+        let (mass, total, support, _) = table.at(index, order);
         if total <= 0.0 || mass <= 0.0 {
             continue;
         }
@@ -386,17 +526,11 @@ fn top_two_at_order(
         .as_ref()
         .map(|(top_key, _, _, _)| {
             let mut second: f64 = 0.0;
-            for candidate in candidates {
+            for (index, candidate) in resolved.iter().enumerate() {
                 if candidate.key == *top_key {
                     continue;
                 }
-                let (mass, total, _, _) = combined_at_order(
-                    ctx,
-                    &suffixes[order],
-                    order,
-                    &candidate.word_ids,
-                    &candidate.key,
-                );
+                let (mass, total, _, _) = table.at(index, order);
                 if total > 0.0 {
                     second = second.max(mass / total);
                 }
@@ -407,30 +541,67 @@ fn top_two_at_order(
     (best, runner_up)
 }
 
-/// One candidate with word ids resolved once per scoring pass.
+/// One candidate with corpus word ids and the draft-local word id
+/// resolved once per scoring pass.
 struct ScoredCandidate {
     key: String,
     word_ids: Vec<Option<u32>>,
+    draft_id: Option<u32>,
 }
 
 fn resolve_candidates(
-    views: &[ResolvedView<'_>],
+    ctx: &PassCtx<'_>,
     candidates: &[String],
 ) -> Vec<ScoredCandidate> {
+    let draft = ctx.draft.map(|(counts, _)| counts);
     candidates
         .iter()
         .filter(|key| key.as_str() != SEQUENCE_START)
         .map(|key| {
-            let word_ids = views
+            let word_ids = ctx
+                .views
                 .iter()
                 .map(|view| view.corpus.resolve_word(key))
                 .collect();
+            // One string hash per candidate here instead of one per
+            // candidate per order in the old hot loop.
+            let draft_id = draft.and_then(|counts| counts.resolve_word(key));
             ScoredCandidate {
                 key: key.clone(),
                 word_ids,
+                draft_id,
             }
         })
         .collect()
+}
+
+/// One combined `(mass, total, support, shares)` tuple.
+type CombinedMass = (f64, f64, u64, [f64; 5]);
+
+/// One round's memoized masses: per candidate per order. Scoring fills it
+/// once; the gate reads it instead of recomputing every combined value
+/// two to four times.
+struct MassTable {
+    rows: Vec<Vec<CombinedMass>>,
+}
+
+impl MassTable {
+    fn build(ctx: &PassCtx<'_>, resolved: &[ScoredCandidate]) -> Self {
+        let orders = ctx.order_count();
+        let rows = resolved
+            .iter()
+            .map(|candidate| {
+                (0..orders)
+                    .map(|order| combined_at_order(ctx, order, candidate))
+                    .collect()
+            })
+            .collect();
+        Self { rows }
+    }
+
+    fn at(&self, candidate: usize, order: usize) -> CombinedMass {
+        self.rows[candidate][order]
+    }
 }
 
 /// Score every candidate with stupid backoff over orders `max_order..=0`.
@@ -441,19 +612,25 @@ pub fn score_candidates(
     let max_order = query.max_order;
     let suffixes = order_suffixes(query.context, max_order);
     let ctx = PassCtx::of(query, &suffixes);
-    let resolved = resolve_candidates(&ctx.views, candidates);
+    let resolved = resolve_candidates(&ctx, candidates);
+    let table = MassTable::build(&ctx, &resolved);
+    score_from_table(query, &resolved, &table)
+}
+
+/// Backoff scoring over a memoized mass table: same arithmetic as the old
+/// per-candidate loop, read from the table instead of recomputed.
+fn score_from_table(
+    query: &ScoringQuery<'_>,
+    resolved: &[ScoredCandidate],
+    table: &MassTable,
+) -> Vec<ScoredWord> {
+    let max_order = query.max_order;
     let mut scored = Vec::new();
-    for candidate in &resolved {
+    for (index, candidate) in resolved.iter().enumerate() {
         let mut best: Option<ScoredWord> = None;
         let mut has_higher = false;
         for order in (0..=max_order).rev() {
-            let (mass, total, support, shares) = combined_at_order(
-                &ctx,
-                &suffixes[order],
-                order,
-                &candidate.word_ids,
-                &candidate.key,
-            );
+            let (mass, total, support, shares) = table.at(index, order);
             if total <= 0.0 || mass <= 0.0 {
                 continue;
             }
@@ -495,6 +672,25 @@ pub fn score_candidates(
     scored
 }
 
+/// Score every candidate and apply the confidence gate in one pass over
+/// one resolved context: the gate reads the scoring mass table instead of
+/// recomputing every combined value. Results match separate
+/// `score_candidates` + `apply_gate` calls exactly.
+pub fn score_and_gate(
+    query: &ScoringQuery<'_>,
+    candidates: &[String],
+) -> (Vec<ScoredWord>, Option<GatePass>) {
+    let max_order = query.max_order;
+    let suffixes = order_suffixes(query.context, max_order);
+    let ctx = PassCtx::of(query, &suffixes);
+    let resolved = resolve_candidates(&ctx, candidates);
+    let table = MassTable::build(&ctx, &resolved);
+    let ranked = score_from_table(query, &resolved, &table);
+    let gate =
+        gate_from_table(&ctx, query, &suffixes, &ranked, &resolved, &table);
+    (ranked, gate)
+}
+
 /// Evidence order: the largest order whose context holds a real word and
 /// whose combined distinct total reaches `min_support`.
 pub fn evidence_order(
@@ -505,12 +701,8 @@ pub fn evidence_order(
     suffixes: &OrderSuffixes,
     min_support: u64,
 ) -> Option<usize> {
-    let ctx = PassCtx {
-        views: resolve_views(sources, suffixes),
-        project,
-        boost: project_boost,
-        draft,
-    };
+    let ctx =
+        PassCtx::resolve(sources, project, project_boost, draft, suffixes);
     evidence_order_views(&ctx, suffixes, min_support)
 }
 
@@ -524,7 +716,7 @@ fn evidence_order_views(
         if !suffix.iter().any(|token| token != SEQUENCE_START) {
             continue;
         }
-        let (_, _, distinct) = combined_totals_at_order(ctx, suffix, order);
+        let (_, _, distinct) = combined_totals_at_order(ctx, order);
         if distinct >= min_support {
             return Some(order);
         }
@@ -547,29 +739,61 @@ pub fn apply_gate(
     ranked: &[ScoredWord],
     candidates: &[String],
 ) -> Option<GatePass> {
-    let top = ranked.first()?;
     let suffixes = order_suffixes(query.context, query.max_order);
     let ctx = PassCtx::of(query, &suffixes);
-    let resolved = resolve_candidates(&ctx.views, candidates);
+    let resolved = resolve_candidates(&ctx, candidates);
+    let table = MassTable::build(&ctx, &resolved);
+    gate_from_table(&ctx, query, &suffixes, ranked, &resolved, &table)
+}
+
+/// Confidence gate over a memoized mass table: same decisions as the old
+/// recomputing gate, read from the table.
+fn gate_from_table(
+    ctx: &PassCtx<'_>,
+    query: &ScoringQuery<'_>,
+    suffixes: &OrderSuffixes,
+    ranked: &[ScoredWord],
+    resolved: &[ScoredCandidate],
+    table: &MassTable,
+) -> Option<GatePass> {
+    let top = ranked.first()?;
     let evidence =
-        evidence_order_views(&ctx, &suffixes, query.preset.min_support)?;
-    let top_ids = resolved
+        evidence_order_views(ctx, suffixes, query.preset.min_support)?;
+    let top_index = resolved
         .iter()
-        .find(|candidate| candidate.key == top.key)
-        .map(|candidate| candidate.word_ids.clone())
-        .unwrap_or_default();
-    let (top_mass, top_total, top_support, _) = combined_at_order(
-        &ctx,
-        &suffixes[evidence],
-        evidence,
-        &top_ids,
-        &top.key,
-    );
+        .position(|candidate| candidate.key == top.key);
+    let (top_mass, top_total, top_support, _) = match top_index {
+        Some(index) => table.at(index, evidence),
+        // Unreachable through the model (ranked derives from the same
+        // candidate list): no corpus mass, draft masses by string — mirror
+        // the old empty-views fallback exactly (same pair/total lookups,
+        // same weighting).
+        None => {
+            let (mass, total, support) = ctx
+                .draft
+                .map(|(counts, weight)| {
+                    match counts.resolve_key(&suffixes[evidence]) {
+                        Some(key) => {
+                            let (pair_mass, pair_distinct) =
+                                counts.pair(key, counts.resolve_word(&top.key));
+                            let (total_mass, _) = counts.totals(key);
+                            (
+                                weight * pair_mass,
+                                weight * total_mass,
+                                pair_distinct,
+                            )
+                        }
+                        None => (0.0, 0.0, 0),
+                    }
+                })
+                .unwrap_or((0.0, 0.0, 0));
+            (mass, total, support, [0.0; 5])
+        }
+    };
     if top_total <= 0.0 {
         return None;
     }
-    let (leader, runner_up) =
-        top_two_at_order(&ctx, &suffixes, evidence, &resolved);
+    let (leader, runner_up) = top_two_from_table(table, resolved, evidence);
     let leader = leader?;
     if leader.0 != top.key {
         return None;
@@ -586,13 +810,11 @@ pub fn apply_gate(
     }
     if query.reject_conflicts {
         for higher in evidence + 1..suffixes.len() {
-            let (total, _, _) =
-                combined_totals_at_order(&ctx, &suffixes[higher], higher);
+            let (total, _, _) = combined_totals_at_order(ctx, higher);
             if total <= 0.0 {
                 continue;
             }
-            let (higher_top, _) =
-                top_two_at_order(&ctx, &suffixes, higher, &resolved);
+            let (higher_top, _) = top_two_from_table(table, resolved, higher);
             if higher_top.is_some_and(|(word, _, _, _)| word != top.key) {
                 return None;
             }
@@ -733,8 +955,14 @@ mod tests {
         let seqs = vec![vec!["fix".to_string(), "the".to_string()]];
         let counts = DraftCounts::from_sequences(&seqs, 4);
         // Pair (* -> fix) counts; pair (fix -> the) is the final position.
-        assert!(counts.pair(&[], "fix").0 > 0.0);
-        assert_eq!(counts.pair(&["fix".to_string()], "the"), (0.0, 0));
+        let empty = ContextKey::pack(&[]);
+        assert!(counts.pair(empty, counts.resolve_word("fix")).0 > 0.0);
+        assert_eq!(counts.pair_by_str(&["fix".to_string()], "the"), (0.0, 0));
+        // String and packed paths agree.
+        assert_eq!(
+            counts.pair_by_str(&[], "fix"),
+            counts.pair(empty, counts.resolve_word("fix"))
+        );
     }
 
     fn gate_query<'a>(

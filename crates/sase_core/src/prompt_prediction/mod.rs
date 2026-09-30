@@ -25,9 +25,9 @@ pub use corpus::{
 pub use model::PromptPredictionModel;
 pub use origin::{looks_generated, MARKER_LAND_EPIC, MARKER_WORK_PHASE_BEAD};
 pub use predict::{
-    parse_confidence, ConfidencePreset, DraftCounts, OrderSuffixes,
-    ScoringQuery, MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED, PRESET_CAUTIOUS,
-    PRESET_EAGER,
+    parse_confidence, score_and_gate, ConfidencePreset, DraftCounts,
+    OrderSuffixes, ScoringQuery, MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED,
+    PRESET_CAUTIOUS, PRESET_EAGER,
 };
 pub use replay::evaluate_prompt_prediction_replay;
 pub use tokenize::{

@@ -13,7 +13,7 @@ use crate::prompt_prediction::corpus::{
     CompiledPromptPredictionCorpus, PromptSuccessorSource,
 };
 use crate::prompt_prediction::predict::{
-    apply_gate, parse_confidence, score_candidates, ConfidencePreset,
+    parse_confidence, score_and_gate, score_candidates, ConfidencePreset,
     DraftCounts, GatePass, ScoredWord, ScoringQuery, WeightedSource,
     MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED, SHARE_ARCHIVE, SHARE_HISTORY,
     SHARE_SESSION,
@@ -100,16 +100,11 @@ impl PromptPredictionModel {
         let trimmed = trim_context(&full_context);
         let draft = self.draft_counts(request, &sequences);
         let project = request.project.as_deref();
-        let candidates = self.candidate_keys(&trimmed, draft.as_ref());
         let preset = parse_confidence(&request.confidence);
-        let ranked = self.score(&trimmed, project, draft.as_ref(), &candidates);
-        let gate = self.with_query(
-            &trimmed,
-            project,
-            draft.as_ref(),
-            preset,
-            |query| apply_gate(query, &ranked, &candidates),
-        );
+        // One fused scoring round: the gate reads the scoring mass table
+        // instead of recomputing every combined value.
+        let (ranked, gate) =
+            self.round(&trimmed, project, draft.as_ref(), preset);
         let confident = gate.is_some();
         let ghost = match &gate {
             Some(pass) => self.continuation(
@@ -274,6 +269,9 @@ impl PromptPredictionModel {
         let mut words: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let max_order = context.len();
+        // Order 0 stays included: unigram-only words never reach the menu,
+        // but they can still outrank higher-order words in backoff score,
+        // and the gate compares its leader against `ranked.first()`.
         for order in 0..=max_order {
             let start = context.len().saturating_sub(order);
             let suffix: Vec<&str> =
@@ -334,6 +332,33 @@ impl PromptPredictionModel {
         })
     }
 
+    /// One fused scoring round: candidates, backoff ranking, and gate in a
+    /// single pass over one resolved context. The gate reads the scoring
+    /// mass table instead of recomputing every combined value, with results
+    /// identical to the separate calls.
+    fn round(
+        &self,
+        context: &[String],
+        project: Option<&str>,
+        draft: Option<&DraftCounts>,
+        preset: ConfidencePreset,
+    ) -> (Vec<ScoredWord>, Option<GatePass>) {
+        let candidates = self.candidate_keys(context, draft);
+        let weighted = self.weighted();
+        let query = ScoringQuery {
+            sources: &weighted,
+            project,
+            project_boost: self.config.project_boost,
+            backoff_alpha: self.config.backoff_alpha,
+            draft: draft_param(draft, &self.config),
+            context,
+            max_order: context.len(),
+            preset,
+            reject_conflicts: self.config.reject_conflicts,
+        };
+        score_and_gate(&query, &candidates)
+    }
+
     /// Greedy gated continuation from a passing gate, capped at
     /// `max_words`. The draft stays frozen to the original text.
     fn continuation(
@@ -348,18 +373,8 @@ impl PromptPredictionModel {
         let mut extended = trimmed_extended(context, &pass.word);
         let mut keys = vec![pass.word.clone()];
         while keys.len() < max_words.max(1) {
-            let candidates = self.candidate_keys(&extended, draft);
-            let ranked = self.score(&extended, project, draft, &candidates);
-            let Some(next) = self.gate_at(
-                &extended,
-                project,
-                draft,
-                &ranked,
-                &candidates,
-                preset,
-            ) else {
-                break;
-            };
+            let (_, gate) = self.round(&extended, project, draft, preset);
+            let Some(next) = gate else { break };
             keys.push(next.word.clone());
             extended = trimmed_extended(&extended, &next.word);
         }
@@ -367,20 +382,6 @@ impl PromptPredictionModel {
         keys.into_iter()
             .map(|key| self.surface_for(&key).unwrap_or(key))
             .collect()
-    }
-
-    fn gate_at(
-        &self,
-        context: &[String],
-        project: Option<&str>,
-        draft: Option<&DraftCounts>,
-        ranked: &[ScoredWord],
-        candidates: &[String],
-        preset: ConfidencePreset,
-    ) -> Option<GatePass> {
-        self.with_query(context, project, draft, preset, |query| {
-            apply_gate(query, ranked, candidates)
-        })
     }
 
     fn candidate_wire(
@@ -394,18 +395,8 @@ impl PromptPredictionModel {
         let mut extended = trimmed_extended(context, &word.key);
         let mut preview_keys: Vec<String> = Vec::new();
         while preview_keys.len() < CANDIDATE_PREVIEW_WORDS {
-            let candidates = self.candidate_keys(&extended, draft);
-            let ranked = self.score(&extended, project, draft, &candidates);
-            let Some(next) = self.gate_at(
-                &extended,
-                project,
-                draft,
-                &ranked,
-                &candidates,
-                preset,
-            ) else {
-                break;
-            };
+            let (_, gate) = self.round(&extended, project, draft, preset);
+            let Some(next) = gate else { break };
             preview_keys.push(next.word.clone());
             extended = trimmed_extended(&extended, &next.word);
         }
