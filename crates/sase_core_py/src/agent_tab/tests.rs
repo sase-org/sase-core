@@ -92,5 +92,39 @@ fn agent_tab_bindings_round_trip() {
             vec!["main", "blog"]
         );
         assert_eq!(catalog["keys"].as_array().unwrap().len(), 2);
+
+        let local_catalog = module
+            .getattr("build_agent_tab_catalog")
+            .unwrap()
+            .call1((
+                json_value_to_py(
+                    py,
+                    &json!([
+                        {"agent_tab": null, "owner": {"kind": "local"}},
+                    ]),
+                )
+                .unwrap(),
+                json_value_to_py(
+                    py,
+                    &json!({
+                        "machine_mode": true,
+                        "machine_order": [],
+                        "named_order": {},
+                        "local_alias": "athena",
+                    }),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let local_catalog = py_to_json_value(&local_catalog).unwrap();
+        assert_eq!(
+            local_catalog["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["label"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["⌂ athena"]
+        );
     });
 }

@@ -106,9 +106,15 @@ fn is_valid_agent_tab_name(canonical: &str) -> bool {
     })
 }
 
+/// Machine-tab glyph for remote machines.
+pub const MACHINE_TAB_GLYPH: &str = "⌨";
+
+/// Home glyph marking the local machine tab.
+pub const LOCAL_MACHINE_TAB_GLYPH: &str = "⌂";
+
 /// Stable identity of one agent tab.
 ///
-/// The default tab keeps one key whether it is labeled `main` or `⌨ local`,
+/// The default tab keeps one key whether it is labeled `main` or `⌂ local`,
 /// so enrolling a first remote relabels it without losing selection, folds,
 /// or memory. Machine tabs are keyed by owner installation id; the alias is
 /// only the label. `UnresolvedMachine` is a session-only key for origins with
@@ -210,6 +216,8 @@ pub struct AgentTabCatalogOptionsWire {
     pub machine_order: Vec<AgentTabMachineOrderWire>,
     #[serde(default)]
     pub named_order: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_alias: Option<String>,
 }
 
 /// One configured machine in display order.
@@ -245,6 +253,11 @@ pub struct AgentTabCatalogWire {
 /// machine tabs in configured-machine order followed by unconfigured origins
 /// by alias, then named tabs by configured `order` followed by natural
 /// case-insensitive name. Only keys with at least one root appear.
+///
+/// In machine mode the default tab renders as `⌂ <local_alias>` (the
+/// viewer's configured machine name, `⌂ local` when unset or blank), and a
+/// remote alias equal to the effective local name (case-insensitive, plus a
+/// literal `local`) renders as `⌨ <alias>·remote`.
 pub fn build_agent_tab_catalog(
     roots: &[AgentTabRootWire],
     options: &AgentTabCatalogOptionsWire,
@@ -272,6 +285,7 @@ pub fn build_agent_tab_catalog(
                 .or_insert_with(|| alias.clone());
         }
     }
+    let local_name = effective_local_name(options.local_alias.as_deref());
     let configured_alias: BTreeMap<&str, &str> = options
         .machine_order
         .iter()
@@ -284,7 +298,7 @@ pub fn build_agent_tab_catalog(
             .filter(|alias| !alias.is_empty())
             .or_else(|| seen_alias.get(id).map(String::as_str))
             .unwrap_or(id);
-        machine_tab_label(alias)
+        machine_tab_label(alias, &local_name)
     };
 
     // Configured machine ids in order, then unconfigured ids by alias.
@@ -329,7 +343,7 @@ pub fn build_agent_tab_catalog(
         entries.push(AgentTabCatalogEntryWire {
             key: AgentTabKeyWire::Default,
             kind: "default".to_string(),
-            label: default_tab_label(options.machine_mode),
+            label: default_tab_label(options.machine_mode, &local_name),
             root_count: *count,
         });
     }
@@ -369,7 +383,7 @@ pub fn build_agent_tab_catalog(
         entries.push(AgentTabCatalogEntryWire {
             key,
             kind: "machine".to_string(),
-            label: machine_tab_label(&alias),
+            label: machine_tab_label(&alias, &local_name),
             root_count: *count,
         });
     }
@@ -396,19 +410,28 @@ pub fn build_agent_tab_catalog(
     AgentTabCatalogWire { keys, entries }
 }
 
-fn default_tab_label(machine_mode: bool) -> String {
+fn effective_local_name(local_alias: Option<&str>) -> String {
+    let trimmed = local_alias.map(str::trim).unwrap_or("");
+    if trimmed.is_empty() {
+        "local".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn default_tab_label(machine_mode: bool, local_name: &str) -> String {
     if machine_mode {
-        "⌨ local".to_string()
+        format!("{LOCAL_MACHINE_TAB_GLYPH} {local_name}")
     } else {
         "main".to_string()
     }
 }
 
-fn machine_tab_label(alias: &str) -> String {
-    if alias == "local" {
-        "⌨ local·remote".to_string()
+fn machine_tab_label(alias: &str, local_name: &str) -> String {
+    if alias == "local" || alias.to_lowercase() == local_name.to_lowercase() {
+        format!("{MACHINE_TAB_GLYPH} {alias}·remote")
     } else {
-        format!("⌨ {alias}")
+        format!("{MACHINE_TAB_GLYPH} {alias}")
     }
 }
 
@@ -591,6 +614,7 @@ mod tests {
                 },
             ],
             named_order: BTreeMap::new(),
+            local_alias: None,
         };
         let catalog = build_agent_tab_catalog(&roots, &options);
         assert_eq!(catalog.keys.len(), roots.len());
@@ -608,7 +632,7 @@ mod tests {
             .collect();
         assert_eq!(
             labels,
-            vec!["⌨ local", "⌨ mac", "⌨ apollo", "⌨ zeus", "blog", "sase",]
+            vec!["⌂ local", "⌨ mac", "⌨ apollo", "⌨ zeus", "blog", "sase",]
         );
         assert_eq!(
             catalog
@@ -635,6 +659,7 @@ mod tests {
             machine_mode: false,
             machine_order: Vec::new(),
             named_order: BTreeMap::new(),
+            local_alias: Some("athena".to_string()),
         };
         let catalog = build_agent_tab_catalog(&roots, &options);
         let labels: Vec<&str> = catalog
@@ -659,6 +684,7 @@ mod tests {
                 alias: "apollo".to_string(),
             }],
             named_order: BTreeMap::from([("alpha".to_string(), 5)]),
+            local_alias: None,
         };
         let catalog = build_agent_tab_catalog(&roots, &options);
         let labels: Vec<&str> = catalog
@@ -683,6 +709,7 @@ mod tests {
             machine_mode: true,
             machine_order: Vec::new(),
             named_order: BTreeMap::new(),
+            local_alias: None,
         };
         let catalog = build_agent_tab_catalog(&roots, &options);
         let labels: Vec<&str> = catalog
@@ -690,6 +717,114 @@ mod tests {
             .iter()
             .map(|entry| entry.label.as_str())
             .collect();
-        assert_eq!(labels, vec!["⌨ local", "⌨ local·remote"]);
+        assert_eq!(labels, vec!["⌂ local", "⌨ local·remote"]);
+    }
+
+    #[test]
+    fn catalog_names_local_tab_after_local_alias() {
+        let roots = vec![local_root(None)];
+        let options = AgentTabCatalogOptionsWire {
+            machine_mode: true,
+            machine_order: Vec::new(),
+            named_order: BTreeMap::new(),
+            local_alias: Some("athena".to_string()),
+        };
+        let catalog = build_agent_tab_catalog(&roots, &options);
+        let labels: Vec<&str> = catalog
+            .entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["⌂ athena"]);
+    }
+
+    #[test]
+    fn catalog_blank_local_alias_falls_back_to_local() {
+        for alias in [None, Some(""), Some("   ")] {
+            let roots = vec![local_root(None)];
+            let options = AgentTabCatalogOptionsWire {
+                machine_mode: true,
+                machine_order: Vec::new(),
+                named_order: BTreeMap::new(),
+                local_alias: alias.map(str::to_string),
+            };
+            let catalog = build_agent_tab_catalog(&roots, &options);
+            let labels: Vec<&str> = catalog
+                .entries
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect();
+            assert_eq!(labels, vec!["⌂ local"]);
+        }
+    }
+
+    #[test]
+    fn catalog_trims_local_alias() {
+        let roots = vec![local_root(None)];
+        let options = AgentTabCatalogOptionsWire {
+            machine_mode: true,
+            machine_order: Vec::new(),
+            named_order: BTreeMap::new(),
+            local_alias: Some("  athena  ".to_string()),
+        };
+        let catalog = build_agent_tab_catalog(&roots, &options);
+        assert_eq!(catalog.entries[0].label, "⌂ athena");
+    }
+
+    #[test]
+    fn catalog_disambiguates_remote_alias_matching_local_name() {
+        let roots = vec![
+            remote_root(None, Some("id-1"), "Athena"),
+            remote_root(None, None, "ATHENA"),
+            remote_root(None, Some("id-2"), "apollo"),
+            local_root(None),
+        ];
+        let options = AgentTabCatalogOptionsWire {
+            machine_mode: true,
+            machine_order: Vec::new(),
+            named_order: BTreeMap::new(),
+            local_alias: Some("athena".to_string()),
+        };
+        let catalog = build_agent_tab_catalog(&roots, &options);
+        let labels: Vec<&str> = catalog
+            .entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["⌂ athena", "⌨ apollo", "⌨ Athena·remote", "⌨ ATHENA·remote"]
+        );
+    }
+
+    #[test]
+    fn catalog_keeps_local_remote_rule_with_local_alias_set() {
+        let roots =
+            vec![remote_root(None, Some("id-1"), "local"), local_root(None)];
+        let options = AgentTabCatalogOptionsWire {
+            machine_mode: true,
+            machine_order: Vec::new(),
+            named_order: BTreeMap::new(),
+            local_alias: Some("athena".to_string()),
+        };
+        let catalog = build_agent_tab_catalog(&roots, &options);
+        let labels: Vec<&str> = catalog
+            .entries
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["⌂ athena", "⌨ local·remote"]);
+    }
+
+    #[test]
+    fn catalog_options_without_local_alias_still_deserializes() {
+        let value = serde_json::json!({
+            "machine_mode": true,
+            "machine_order": [],
+            "named_order": {},
+        });
+        let options: AgentTabCatalogOptionsWire =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(options.local_alias, None);
     }
 }
