@@ -50,6 +50,11 @@ pub fn jinja_scope_variables(
                 }
             }
             Availability::Unavailable => {
+                // A declared input (or otherwise known name) wins over
+                // the builtin: never list a known name as unavailable.
+                if seen.contains(&variable.name) {
+                    continue;
+                }
                 push_unavailable(
                     &mut unavailable,
                     &mut unavailable_seen,
@@ -77,17 +82,23 @@ pub fn jinja_scope_variables(
             }
         }
     } else {
-        push_unavailable(
-            &mut unavailable,
-            &mut unavailable_seen,
-            "_args".to_string(),
-            xprompt_only_reason(),
-        );
-        for index in 1..=positional_count {
+        if !seen.contains("_args") {
             push_unavailable(
                 &mut unavailable,
                 &mut unavailable_seen,
-                format!("_{index}"),
+                "_args".to_string(),
+                xprompt_only_reason(),
+            );
+        }
+        for index in 1..=positional_count {
+            let name = format!("_{index}");
+            if seen.contains(&name) {
+                continue;
+            }
+            push_unavailable(
+                &mut unavailable,
+                &mut unavailable_seen,
+                name,
                 xprompt_only_reason(),
             );
         }
@@ -147,5 +158,20 @@ mod tests {
             .unavailable
             .iter()
             .any(|entry| entry.name == "patch_name"));
+    }
+
+    #[test]
+    fn shadowed_builtin_is_known_not_unavailable() {
+        let variables = jinja_scope_variables(&JinjaScopeRequestWire {
+            text: "---\ninput:\n  n: int\n---\n{{ x }}".to_string(),
+            scope: JinjaScopeKind::Prompt,
+            frontmatter: None,
+        });
+        assert!(variables.known.contains(&"n".to_string()));
+        assert!(
+            !variables.unavailable.iter().any(|entry| entry.name == "n"),
+            "{:?}",
+            variables.unavailable
+        );
     }
 }

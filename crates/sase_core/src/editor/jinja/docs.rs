@@ -237,10 +237,11 @@ pub fn statement_markdown(
     summary: &str,
     closes: Option<&str>,
 ) -> String {
-    let example = format!("{{%% {name} %%}}");
+    // `{{` renders a literal `{`, so `{{%` renders `{%`.
+    let example = format!("{{% {name} %}}");
     let mut bullets = Vec::new();
     if let Some(keyword) = closes {
-        bullets.push(format!("Closes `{{%% {keyword} %%}}`"));
+        bullets.push(format!("Closes `{{% {keyword} %}}`"));
     }
     render_doc(name, None, "jinja", summary, Some(&example), &bullets)
 }
@@ -330,6 +331,17 @@ mod tests {
         );
         assert!(markdown.contains("Who to greet."));
         assert!(markdown.contains("- Choices: `a`, `b`"));
+    }
+
+    #[test]
+    fn statement_example_renders_jinja_tags() {
+        let markdown =
+            statement_markdown("endfor", "Close a `for` block.", None);
+        assert!(markdown.contains("Example: `{% endfor %}`"), "{markdown}");
+        assert!(!markdown.contains("{%%"), "{markdown}");
+        let markdown =
+            statement_markdown("endfor", "Close a `for` block.", Some("for"));
+        assert!(markdown.contains("Closes `{% for %}`"), "{markdown}");
     }
 
     #[test]

@@ -1305,11 +1305,15 @@ mod tests {
             jinja_completion(&request(text, 3, JinjaScopeKind::Prompt))
                 .unwrap();
         let ordered = names(&completion.items);
-        let patch = ordered.iter().position(|name| *name == "patch_name");
-        let cl = ordered.iter().position(|name| *name == "cl_name");
-        if let (Some(patch), Some(cl)) = (patch, cl) {
-            assert_eq!(cl, patch + 1, "{ordered:?}");
-        }
+        let patch = ordered
+            .iter()
+            .position(|name| *name == "patch_name")
+            .expect("patch_name is offered in prompt scope");
+        let cl = ordered
+            .iter()
+            .position(|name| *name == "cl_name")
+            .expect("cl_name is offered in prompt scope");
+        assert_eq!(cl, patch + 1, "{ordered:?}");
     }
 
     #[test]
@@ -1372,6 +1376,53 @@ mod tests {
     }
 
     #[test]
+    fn closed_raw_block_offers_no_endraw() {
+        let text = "{% raw %}x{% endraw %} {% ";
+        let completion = jinja_completion(&request(
+            text,
+            text.len(),
+            JinjaScopeKind::Prompt,
+        ))
+        .unwrap();
+        assert_eq!(completion.slot, JinjaCompletionSlotKind::Statement);
+        assert!(
+            !names(&completion.items).contains(&"endraw"),
+            "{:?}",
+            names(&completion.items)
+        );
+    }
+
+    #[test]
+    fn unclosed_raw_block_offers_endraw_first() {
+        let text = "{% raw %}x{% ";
+        let completion = jinja_completion(&request(
+            text,
+            text.len(),
+            JinjaScopeKind::Prompt,
+        ))
+        .unwrap();
+        assert_eq!(completion.slot, JinjaCompletionSlotKind::Statement);
+        assert_eq!(completion.items[0].name, "endraw");
+    }
+
+    #[test]
+    fn fenced_for_block_offers_no_endfor() {
+        let text = "```\n{% for a in b %}\n```\n{% ";
+        let completion = jinja_completion(&request(
+            text,
+            text.len(),
+            JinjaScopeKind::Prompt,
+        ))
+        .unwrap();
+        assert_eq!(completion.slot, JinjaCompletionSlotKind::Statement);
+        assert!(
+            !names(&completion.items).contains(&"endfor"),
+            "{:?}",
+            names(&completion.items)
+        );
+    }
+
+    #[test]
     fn none_slot_returns_empty_items() {
         let text = "{{ \"a\" }}";
         let completion =
@@ -1386,6 +1437,20 @@ mod tests {
         assert!(
             jinja_completion(&request("hello", 5, JinjaScopeKind::Prompt))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn inline_code_opener_returns_none_at_trailing_text() {
+        let text = "Use `{{` to open. hello";
+        assert!(
+            jinja_completion(&request(
+                text,
+                text.len(),
+                JinjaScopeKind::Prompt
+            ))
+            .is_none(),
+            "{text}"
         );
     }
 

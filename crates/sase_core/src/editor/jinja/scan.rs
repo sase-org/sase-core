@@ -104,12 +104,24 @@ fn scan_document(text: &str) -> ScannedDocument {
         statements: Vec::new(),
         inert: Vec::new(),
     };
+    // Openers starting inside literal zones or leading frontmatter are
+    // plain text, never Jinja tags. Skipping them here keeps every
+    // consumer (`jinja_tag_at_cursor`, `scan_jinja_tags`,
+    // `scan_statement_tags`, scope analysis) in agreement.
+    let mut skip_zones = jinja_inert_literal_zones(text);
+    if let Some(len) = frontmatter_block_len(text) {
+        skip_zones.push((0, len));
+    }
     let mut offset = 0;
     while offset < text.len() {
         let Some((relative, _)) = next_jinja_tag(text, offset) else {
             break;
         };
         let start = offset + relative;
+        if position_in_ranges(start, &skip_zones) {
+            offset = start + 2;
+            continue;
+        }
         let opener = &text[start..start + 2];
         if opener == "{#" {
             let end = text
@@ -165,9 +177,31 @@ fn scan_document(text: &str) -> ScannedDocument {
                 closed,
             });
             if closed && is_raw_opener(text, start + 2, content_end) {
-                if let Some(end) = find_raw_end(text, tag_end) {
-                    out.inert.push((tag_end, end));
-                    offset = end;
+                if let Some((raw_end_start, raw_end_close, raw_end)) =
+                    find_raw_end(text, tag_end)
+                {
+                    // A closed `{% raw %}…{% endraw %}` block leaves no
+                    // open frame: record the `endraw` tag so scope pops
+                    // the `raw` frame. The body alone is inert; the
+                    // closer stays a real tag. Unclosed `raw` keeps its
+                    // frame so `endraw` is still suggested.
+                    out.inert.push((tag_end, raw_end_start));
+                    out.tags.push(JinjaTag {
+                        kind: JinjaTagKind::Statement,
+                        open_start: raw_end_start,
+                        content_start: raw_end_start + 2,
+                        content_end: raw_end_close,
+                        tag_end: raw_end,
+                        closed: true,
+                    });
+                    out.statements.push(ScannedStatementTag {
+                        open_start: raw_end_start,
+                        content_start: raw_end_start + 2,
+                        content_end: raw_end_close,
+                        tag_end: raw_end,
+                        closed: true,
+                    });
+                    offset = raw_end;
                     continue;
                 }
             }
@@ -220,9 +254,10 @@ fn is_raw_opener(text: &str, content_start: usize, content_end: usize) -> bool {
     first_word(content).is_some_and(|(word, _, _)| word == "raw")
 }
 
-/// Find the end of a raw body: the tag end of the first `{% endraw %}` at or
-/// after `from`. The body is literal, so this scan is naive.
-fn find_raw_end(text: &str, from: usize) -> Option<usize> {
+/// Find the end of a raw body: the `(open_start, content_end, tag_end)`
+/// of the first `{% endraw %}` at or after `from`. The body is literal,
+/// so this scan is naive.
+fn find_raw_end(text: &str, from: usize) -> Option<(usize, usize, usize)> {
     let mut offset = from;
     while offset < text.len() {
         let (relative, _) = next_jinja_tag(text, offset)?;
@@ -235,9 +270,17 @@ fn find_raw_end(text: &str, from: usize) -> Option<usize> {
             .get(start + 2..)
             .and_then(|tail| tail.find("%}"))
             .map(|index| start + 2 + index)?;
-        let content = text.get(start + 2..close).unwrap_or("");
+        // Include a `-`/`+` whitespace-control prefix in the closer.
+        let close_start = if close > start + 2
+            && matches!(text.as_bytes().get(close - 1), Some(b'-' | b'+'))
+        {
+            close - 1
+        } else {
+            close
+        };
+        let content = text.get(start + 2..close_start).unwrap_or("");
         if first_word(content).is_some_and(|(word, _, _)| word == "endraw") {
-            return Some(close + 2);
+            return Some((start, close_start, close + 2));
         }
         offset = start + 2;
     }
@@ -485,5 +528,28 @@ mod tests {
         assert_eq!(&text[first.content_start..first.content_end], " a ");
         let second = tag_at(text, 11).expect("second tag completes");
         assert_eq!(second.kind, JinjaTagKind::Statement);
+    }
+
+    #[test]
+    fn inline_code_opener_does_not_claim_trailing_text() {
+        // Repro: an inline-code `{{` must not swallow later plain text.
+        let text = "Use `{{` to open. hello";
+        assert!(tag_at(text, text.len()).is_none(), "{text}");
+        assert!(scan_jinja_tags(text).is_empty(), "{text}");
+        assert!(scan_statement_tags(text).is_empty(), "{text}");
+    }
+
+    #[test]
+    fn tags_inside_literal_zones_are_not_scanned() {
+        let fenced = "```\n{% for a in b %}\n```\n{% ";
+        assert_eq!(scan_statement_tags(fenced).len(), 1, "{fenced}");
+        let inline = "`{% for a in b %}` {% ";
+        assert_eq!(scan_statement_tags(inline).len(), 1, "{inline}");
+        let disabled =
+            "%xprompts_enabled:false\n{% for a in b %}\n%xprompts_enabled:true\n{% ";
+        assert_eq!(scan_statement_tags(disabled).len(), 1, "{disabled}");
+        let frontmatter = "---\ninput:\n  a: word\n---\n{% for a in b %}";
+        // Leading frontmatter holds no tags; only the trailing tag scans.
+        assert_eq!(scan_statement_tags(frontmatter).len(), 1, "{frontmatter}");
     }
 }

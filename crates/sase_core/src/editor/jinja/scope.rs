@@ -852,4 +852,32 @@ mod tests {
         // ... and past the closer the local is gone.
         assert!(scope_of(text, text.len(), "x").is_none());
     }
+
+    #[test]
+    fn closed_raw_block_leaves_no_open_frame() {
+        let text = "{% raw %}x{% endraw %} {% ";
+        let (_, blocks) = jinja_template_scope(text, text.len());
+        assert!(blocks.is_empty(), "{blocks:?}");
+    }
+
+    #[test]
+    fn unclosed_raw_block_stays_open() {
+        let text = "{% raw %}x{% ";
+        let (_, blocks) = jinja_template_scope(text, text.len());
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.closer.as_str())
+                .collect::<Vec<_>>(),
+            ["endraw"]
+        );
+    }
+
+    #[test]
+    fn fenced_for_block_does_not_leak_locals() {
+        let text = "```\n{% for a in b %}\n```\n{% ";
+        let (locals, blocks) = jinja_template_scope(text, text.len());
+        assert!(locals.is_empty(), "{locals:?}");
+        assert!(blocks.is_empty(), "{blocks:?}");
+    }
 }

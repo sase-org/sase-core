@@ -108,7 +108,11 @@ async fn conditional_n_without_repeat_is_dimmed_with_hint() {
     else {
         panic!("expected markdown documentation");
     };
-    assert!(documentation.value.contains('n'), "{}", documentation.value);
+    assert!(
+        documentation.value.contains("%repeat"),
+        "{}",
+        documentation.value
+    );
 }
 
 #[tokio::test]
@@ -369,18 +373,19 @@ async fn completion_item_carries_edits_sort_and_deprecation() {
     }
     // `cl_name` is the legacy alias of `patch_name`: it sorts right
     // after its canonical name and carries DEPRECATED.
-    let plain = items_at(server, "{{ cl_ }}", 7).await;
-    let position = labels(&plain).iter().position(|name| *name == "cl_name");
-    if let Some(index) = position {
-        let item = &plain[index];
-        assert!(
-            item.tags
-                .as_deref()
-                .unwrap_or(&[])
-                .contains(&CompletionItemTag::DEPRECATED),
-            "{item:?}"
-        );
-    }
+    let plain = items_at(server, "{{ cl_ }}", 6).await;
+    let index = labels(&plain)
+        .iter()
+        .position(|name| *name == "cl_name")
+        .expect("cl_name is offered for prefix cl_");
+    let item = &plain[index];
+    assert!(
+        item.tags
+            .as_deref()
+            .unwrap_or(&[])
+            .contains(&CompletionItemTag::DEPRECATED),
+        "{item:?}"
+    );
 }
 
 #[tokio::test]
