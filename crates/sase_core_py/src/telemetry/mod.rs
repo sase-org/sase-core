@@ -968,6 +968,32 @@ fn py_tool_run_receipts_report<'py>(
 
 #[pyfunction]
 #[pyo3(
+    name = "tool_run_stats_report",
+    signature = (store_path, request, busy_timeout_ms=250)
+)]
+fn py_tool_run_stats_report<'py>(
+    py: Python<'py>,
+    store_path: &str,
+    request: &Bound<'py, PyDict>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let request: sase_core::tool_run::stats::ToolRunStatsRequestWire =
+        telemetry_request_from_pydict(request, "ToolRunStatsRequestWire")?;
+    let path = PathBuf::from(store_path);
+    let result = py
+        .allow_threads(|| {
+            sase_core::tool_run::tool_run_stats_report(
+                &path,
+                request,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    telemetry_result_to_py(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(
     name = "tool_run_failures",
     signature = (store_path, request, busy_timeout_ms=250)
 )]
@@ -1143,6 +1169,7 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_tool_run_receipt_settle, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_receipt_lookup, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_receipts_report, m)?)?;
+    m.add_function(wrap_pyfunction!(py_tool_run_stats_report, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_failures, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_live_glance, m)?)?;
     m.add_function(wrap_pyfunction!(py_tool_run_briefs, m)?)?;
@@ -1155,5 +1182,7 @@ pub(crate) fn register_telemetry(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod demand_tests;
+#[cfg(test)]
+mod stats_tests;
 #[cfg(test)]
 mod tests;

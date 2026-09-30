@@ -19,6 +19,9 @@ mod receipt;
 mod receipts_report;
 mod reconcile;
 mod retention;
+mod stats;
+#[cfg(test)]
+mod stats_tests;
 #[cfg(test)]
 mod tests;
 mod triage;
@@ -34,6 +37,7 @@ pub use receipt::{receipt_lookup, receipt_settle};
 pub use receipts_report::tool_run_receipts_report;
 pub use reconcile::reconcile;
 pub use retention::{retention_apply, retention_preview};
+pub use stats::tool_run_stats_report;
 pub(crate) use triage::triage_tables_present;
 pub use triage::{triage_record, triage_show};
 pub use triage_stage::{triage_settle, triage_stage};

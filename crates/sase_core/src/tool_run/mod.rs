@@ -8,6 +8,7 @@ mod fingerprint;
 mod handoff_wire;
 pub mod projection;
 pub mod receipt;
+pub mod stats;
 mod store;
 mod triage;
 mod wire;
@@ -61,8 +62,9 @@ pub use store::{
     append_event, begin, claim, finish, join, list_runs, observe,
     receipt_lookup, receipt_settle, reconcile, record_demand, release_join,
     request_stop, retention_apply, retention_preview, show_run, store_stats,
-    summarize, tool_run_failures, tool_run_receipts_report, triage_record,
-    triage_settle, triage_show, triage_stage,
+    summarize, tool_run_failures, tool_run_receipts_report,
+    tool_run_stats_report, triage_record, triage_settle, triage_show,
+    triage_stage,
 };
 pub use triage::*;
 pub use triage::{
