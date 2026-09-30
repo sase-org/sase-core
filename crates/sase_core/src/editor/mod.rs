@@ -12,6 +12,7 @@ pub mod file;
 mod frontmatter;
 pub mod fuzzy;
 pub mod hover;
+pub mod jinja;
 pub mod model_alias_shortcut;
 pub mod placeholder;
 pub mod token;
