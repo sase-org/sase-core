@@ -40,6 +40,35 @@ pub struct StatsRunRow {
     pub fingerprint_before: Option<ToolFingerprintWire>,
 }
 
+/// One loaded `stages` row, stamped with its run's group keys and
+/// window membership. `started_ts` is epoch milliseconds while
+/// `run_running_ts` is epoch seconds.
+#[derive(Debug, Clone)]
+pub struct StatsStageRow {
+    pub stage_id: String,
+    pub run_id: String,
+    pub project: String,
+    pub tool_name: String,
+    pub description: String,
+    pub started_ts: Option<i64>,
+    pub elapsed_ms: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub incomplete: bool,
+    pub run_running_ts: Option<i64>,
+    pub in_window: bool,
+}
+
+/// One loaded `samples` row. `observed_ts` is epoch seconds.
+#[derive(Debug, Clone)]
+pub struct StatsSampleRow {
+    pub run_id: String,
+    pub observed_ts: i64,
+    pub psi_cpu_some: Option<f64>,
+    pub psi_memory_some: Option<f64>,
+    pub psi_io_some: Option<f64>,
+    pub load_per_cpu: Option<f64>,
+}
+
 const ROUTES: [&str; 5] =
     ["escalated", "detached", "handoff", "owned", "inline"];
 
@@ -257,11 +286,18 @@ fn duration_summary(durations: &[i64]) -> ToolRunStatsDurationSummaryWire {
 }
 
 /// Fold one report entry for a single (project, tool) group.
+/// `prior_rows` are the group's lookback rows: they never count in
+/// the entry, but the backtest draws its priors from them. `stages`
+/// are the group's in-window stage rows; `prior_stages` are the
+/// group's lookback stage rows for the per-stage backtests.
 #[allow(clippy::too_many_arguments)]
 fn tool_entry(
     project: &str,
     tool_name: &str,
     rows: &[(&StatsRunRow, Option<i64>)],
+    prior_rows: &[(&StatsRunRow, Option<i64>)],
+    stages: &[StatsStageRow],
+    prior_stages: &[StatsStageRow],
     empty_extra_args_digest: &str,
     since_ts: i64,
     now_ts: i64,
@@ -326,6 +362,12 @@ fn tool_entry(
         trend_section(rows, &bare, since_ts, now_ts, utc_offset_seconds);
     let repeats = repeats_section(rows, now_ts);
     let demand = demand_section(rows);
+    let stage_entries = stage_section(stages);
+    let backtest = backtest_section(
+        &bare_points(prior_rows, empty_extra_args_digest),
+        &bare_points(rows, empty_extra_args_digest),
+    );
+    let stage_backtests = stage_backtest_section(stages, prior_stages);
     ToolRunStatsToolWire {
         project: project.to_string(),
         tool_name: tool_name.to_string(),
@@ -343,6 +385,9 @@ fn tool_entry(
         trend,
         repeats,
         demand,
+        stages: stage_entries,
+        backtest,
+        stage_backtests,
     }
 }
 
@@ -811,8 +856,347 @@ fn demand_section(
     demand
 }
 
+/// Per-stage distributions over a group's in-window stage rows.
+/// A finished instance has `incomplete = false` and `elapsed_ms`
+/// present. `runs` counts stage instances; `ok` and `failed` split
+/// finished instances by exit code, so a finished instance without a
+/// recorded exit counts in neither. Entries sort by `median_offset_ms`
+/// so stages read in recipe order; undescribed offsets sort last.
+fn stage_section(stages: &[StatsStageRow]) -> Vec<ToolRunStatsStageWire> {
+    let mut groups: BTreeMap<&str, Vec<&StatsStageRow>> = BTreeMap::new();
+    for stage in stages {
+        groups
+            .entry(stage.description.as_str())
+            .or_default()
+            .push(stage);
+    }
+    let mut entries = Vec::new();
+    for (description, member) in &groups {
+        let mut finished_ms: Vec<i64> = Vec::new();
+        let mut offsets: Vec<i64> = Vec::new();
+        let mut ok = 0;
+        let mut failed = 0;
+        let mut incomplete = 0;
+        let mut hours = 0.0;
+        for stage in member {
+            if stage.incomplete || stage.elapsed_ms.is_none() {
+                incomplete += 1;
+            } else {
+                let elapsed = stage.elapsed_ms.unwrap_or(0);
+                finished_ms.push(elapsed);
+                hours += elapsed as f64 / 3_600_000.0;
+                match stage.exit_code {
+                    Some(0) => ok += 1,
+                    Some(_) => failed += 1,
+                    None => {}
+                }
+            }
+            if let (Some(started), Some(running)) =
+                (stage.started_ts, stage.run_running_ts)
+            {
+                offsets
+                    .push(started.saturating_sub(running.saturating_mul(1000)));
+            }
+        }
+        finished_ms.sort_unstable();
+        offsets.sort_unstable();
+        let p50_ms = percentile_i64(&finished_ms, 0.50);
+        let p90_ms = percentile_i64(&finished_ms, 0.90);
+        let p90_over_p50 = match (p50_ms, p90_ms) {
+            (Some(lo), Some(hi)) if lo > 0 => Some(hi as f64 / lo as f64),
+            _ => None,
+        };
+        entries.push(ToolRunStatsStageWire {
+            description: (*description).to_string(),
+            runs: member.len(),
+            ok,
+            failed,
+            incomplete,
+            p50_ms,
+            p90_ms,
+            p90_over_p50,
+            total_hours: hours,
+            median_offset_ms: percentile_i64(&offsets, 0.50),
+        });
+    }
+    entries.sort_by(|left, right| {
+        let left_key = match left.median_offset_ms {
+            Some(offset) => (0, offset),
+            None => (1, 0),
+        };
+        let right_key = match right.median_offset_ms {
+            Some(offset) => (0, offset),
+            None => (1, 0),
+        };
+        left_key
+            .cmp(&right_key)
+            .then_with(|| left.description.cmp(&right.description))
+    });
+    entries
+}
+
+/// Bare-settled series points: (order timestamp, tie-break id,
+/// value). The cohort matches the duration summary: settled state,
+/// no extra args, known effective duration. Whole-run points order by
+/// `running_ts` else `created_ts`; stage points order by `started_ts`.
+fn bare_points(
+    rows: &[(&StatsRunRow, Option<i64>)],
+    empty_extra_args_digest: &str,
+) -> Vec<(i64, String, i64)> {
+    let mut points = Vec::new();
+    for (row, effective) in rows {
+        if !matches!(
+            row.state,
+            ToolRunStateWire::Succeeded | ToolRunStateWire::Failed
+        ) {
+            continue;
+        }
+        if row.extra_args_digest != empty_extra_args_digest {
+            continue;
+        }
+        let Some(duration) = effective else {
+            continue;
+        };
+        points.push((
+            row.running_ts.unwrap_or(row.created_ts),
+            row.run_id.clone(),
+            *duration,
+        ));
+    }
+    points
+}
+
+/// Chronological backtest of the unconditioned empirical-quantile
+/// baseline: each in-window point with at least
+/// `STATS_BACKTEST_MIN_PRIOR_RUNS` strictly earlier series points is
+/// predicted from the `STATS_BACKTEST_PRIOR_RUNS` most recent earlier
+/// points (lookback points count) as `p10..=p90`. Covered when the
+/// value lands inside; width is `hi / max(lo, floor)`. This is the
+/// baseline a future conditioned forecast must beat, not a forecaster.
+fn backtest_section(
+    prior_points: &[(i64, String, i64)],
+    window_points: &[(i64, String, i64)],
+) -> ToolRunStatsBacktestWire {
+    let mut series: Vec<(i64, &str, i64, bool)> = Vec::new();
+    for point in prior_points {
+        series.push((point.0, point.1.as_str(), point.2, false));
+    }
+    for point in window_points {
+        series.push((point.0, point.1.as_str(), point.2, true));
+    }
+    series.sort_by(|left, right| {
+        left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1))
+    });
+    let mut history: Vec<i64> = Vec::new();
+    let mut widths: Vec<f64> = Vec::new();
+    let mut predictions = 0;
+    let mut covered = 0;
+    for (_, _, value, in_window) in &series {
+        if *in_window && history.len() >= STATS_BACKTEST_MIN_PRIOR_RUNS {
+            let start = history.len().saturating_sub(STATS_BACKTEST_PRIOR_RUNS);
+            let mut priors = history[start..].to_vec();
+            priors.sort_unstable();
+            if let (Some(lo), Some(hi)) =
+                (percentile_i64(&priors, 0.10), percentile_i64(&priors, 0.90))
+            {
+                predictions += 1;
+                if lo <= *value && *value <= hi {
+                    covered += 1;
+                }
+                let floor = lo.max(STATS_BACKTEST_WIDTH_FLOOR_MS);
+                widths.push(hi as f64 / floor as f64);
+            }
+        }
+        history.push(*value);
+    }
+    let coverage = if predictions == 0 {
+        None
+    } else {
+        Some(covered as f64 / predictions as f64)
+    };
+    let mut sorted_widths = widths.clone();
+    sort_f64(&mut sorted_widths);
+    let median_width = percentile_f64(&sorted_widths, 0.50);
+    let meets_target = if predictions == 0 {
+        None
+    } else {
+        Some(
+            coverage.unwrap_or(0.0) >= STATS_BACKTEST_TARGET_COVERAGE
+                && median_width.unwrap_or(f64::INFINITY)
+                    <= STATS_BACKTEST_TARGET_MAX_WIDTH,
+        )
+    };
+    ToolRunStatsBacktestWire {
+        predictions,
+        covered,
+        coverage,
+        median_width,
+        target_coverage: STATS_BACKTEST_TARGET_COVERAGE,
+        target_max_width: STATS_BACKTEST_TARGET_MAX_WIDTH,
+        meets_target,
+    }
+}
+
+/// Per-stage backtests, one per description with at least one
+/// finished in-window instance. Finished instances order by
+/// (`started_ts`, `stage_id`); instances without `started_ts` sort
+/// last.
+fn stage_backtest_section(
+    stages: &[StatsStageRow],
+    prior_stages: &[StatsStageRow],
+) -> Vec<ToolRunStatsStageBacktestWire> {
+    let mut points: BTreeMap<&str, Vec<(i64, String, i64, bool)>> =
+        BTreeMap::new();
+    for stage in stages.iter().chain(prior_stages.iter()) {
+        if stage.incomplete || stage.elapsed_ms.is_none() {
+            continue;
+        }
+        points.entry(stage.description.as_str()).or_default().push((
+            stage.started_ts.unwrap_or(i64::MAX),
+            stage.stage_id.clone(),
+            stage.elapsed_ms.unwrap_or(0),
+            stage.in_window,
+        ));
+    }
+    let mut entries = Vec::new();
+    for (description, member) in &points {
+        let mut priors = Vec::new();
+        let mut window = Vec::new();
+        for (started, stage_id, elapsed, in_window) in member {
+            if *in_window {
+                window.push((*started, stage_id.clone(), *elapsed));
+            } else {
+                priors.push((*started, stage_id.clone(), *elapsed));
+            }
+        }
+        if window.is_empty() {
+            continue;
+        }
+        entries.push(ToolRunStatsStageBacktestWire {
+            description: (*description).to_string(),
+            backtest: backtest_section(&priors, &window),
+        });
+    }
+    entries.sort_by(|left, right| left.description.cmp(&right.description));
+    entries
+}
+
+fn max_present(left: Option<f64>, right: Option<f64>) -> Option<f64> {
+    match (left, right) {
+        (Some(known), Some(seen)) => Some(known.max(seen)),
+        (Some(known), None) => Some(known),
+        (None, Some(seen)) => Some(seen),
+        (None, None) => None,
+    }
+}
+
+struct PressureBucket<'a> {
+    runs: BTreeSet<&'a str>,
+    cpu_psi: Option<f64>,
+    memory_psi: Option<f64>,
+    io_psi: Option<f64>,
+    load_per_cpu: Option<f64>,
+}
+
+/// Report-level host pressure over samples of in-window runs.
+/// Buckets are `floor(observed_ts / STATS_PRESSURE_BUCKET_SECONDS)`
+/// seconds wide; a bucket is busy with at least
+/// `STATS_PRESSURE_BUSY_MIN_RUNS` distinct runs. A bucket has PSI when
+/// any PSI kind was recorded. OOM kills are not observable from the
+/// ledger.
+fn pressure_section(samples: &[StatsSampleRow]) -> ToolRunStatsPressureWire {
+    let mut buckets: BTreeMap<i64, PressureBucket<'_>> = BTreeMap::new();
+    for sample in samples {
+        let bucket = buckets
+            .entry(sample.observed_ts.div_euclid(STATS_PRESSURE_BUCKET_SECONDS))
+            .or_insert(PressureBucket {
+                runs: BTreeSet::new(),
+                cpu_psi: None,
+                memory_psi: None,
+                io_psi: None,
+                load_per_cpu: None,
+            });
+        bucket.runs.insert(sample.run_id.as_str());
+        bucket.cpu_psi = max_present(bucket.cpu_psi, sample.psi_cpu_some);
+        bucket.memory_psi =
+            max_present(bucket.memory_psi, sample.psi_memory_some);
+        bucket.io_psi = max_present(bucket.io_psi, sample.psi_io_some);
+        bucket.load_per_cpu =
+            max_present(bucket.load_per_cpu, sample.load_per_cpu);
+    }
+    let mut busy_buckets = 0;
+    let mut buckets_with_psi = 0;
+    let mut memory_over = 0;
+    let mut busy_with_psi = 0;
+    let mut busy_memory_over = 0;
+    let mut cpu_values: Vec<f64> = Vec::new();
+    let mut memory_values: Vec<f64> = Vec::new();
+    let mut io_values: Vec<f64> = Vec::new();
+    let mut load_values: Vec<f64> = Vec::new();
+    for bucket in buckets.values() {
+        let busy = bucket.runs.len() >= STATS_PRESSURE_BUSY_MIN_RUNS;
+        if busy {
+            busy_buckets += 1;
+        }
+        let has_psi = bucket.cpu_psi.is_some()
+            || bucket.memory_psi.is_some()
+            || bucket.io_psi.is_some();
+        if has_psi {
+            buckets_with_psi += 1;
+            if busy {
+                busy_with_psi += 1;
+            }
+        }
+        let over = bucket
+            .memory_psi
+            .is_some_and(|psi| psi > STATS_PRESSURE_MEMORY_PSI_THRESHOLD);
+        if over {
+            memory_over += 1;
+            if busy {
+                busy_memory_over += 1;
+            }
+        }
+        if let Some(value) = bucket.cpu_psi {
+            cpu_values.push(value);
+        }
+        if let Some(value) = bucket.memory_psi {
+            memory_values.push(value);
+        }
+        if let Some(value) = bucket.io_psi {
+            io_values.push(value);
+        }
+        if let Some(value) = bucket.load_per_cpu {
+            load_values.push(value);
+        }
+    }
+    sort_f64(&mut cpu_values);
+    sort_f64(&mut memory_values);
+    sort_f64(&mut io_values);
+    sort_f64(&mut load_values);
+    ToolRunStatsPressureWire {
+        buckets: buckets.len(),
+        busy_buckets,
+        buckets_with_psi,
+        memory_over_threshold_share: if buckets_with_psi == 0 {
+            None
+        } else {
+            Some(memory_over as f64 / buckets_with_psi as f64)
+        },
+        busy_memory_over_threshold_share: if busy_with_psi == 0 {
+            None
+        } else {
+            Some(busy_memory_over as f64 / busy_with_psi as f64)
+        },
+        cpu_psi_p90: percentile_f64(&cpu_values, 0.90),
+        memory_psi_p90: percentile_f64(&memory_values, 0.90),
+        io_psi_p90: percentile_f64(&io_values, 0.90),
+        load_per_cpu_p90: percentile_f64(&load_values, 0.90),
+    }
+}
+
 /// Report scope for [`compute_stats_report`]: the filters echoed in
-/// the result plus the window edges and truncation flag from the loader.
+/// the result plus the window edges and truncation flags from the
+/// loader.
 #[derive(Debug, Clone)]
 pub struct StatsReportScope {
     pub project: Option<String>,
@@ -822,13 +1206,21 @@ pub struct StatsReportScope {
     pub now_ts: i64,
     pub utc_offset_seconds: i32,
     pub runs_truncated: bool,
+    pub stages_truncated: bool,
+    pub samples_truncated: bool,
 }
 
 /// Fold the loaded window rows into the report. `priors` are lookback
-/// rows the detail phase's backtest consumes; this phase ignores them.
+/// run rows, `prior_stages` lookback stage rows: neither counts in any
+/// group, but the backtests draw their priors from them. `samples`
+/// are sample rows of in-window runs for the report-level pressure
+/// section.
 pub fn compute_stats_report(
     window: &[StatsRunRow],
-    _priors: &[StatsRunRow],
+    priors: &[StatsRunRow],
+    stages: &[StatsStageRow],
+    prior_stages: &[StatsStageRow],
+    samples: &[StatsSampleRow],
     scope: &StatsReportScope,
 ) -> Result<ToolRunStatsResultWire, ToolRunError> {
     let empty_extra_args_digest = extra_args_digest(&[])?;
@@ -844,6 +1236,33 @@ pub fn compute_stats_report(
             .or_default()
             .push(index);
     }
+    let mut prior_groups: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+    for (index, row) in priors.iter().enumerate() {
+        let Some(tool) = row.tool_name.as_deref() else {
+            continue;
+        };
+        prior_groups
+            .entry((row.project.clone().unwrap_or_default(), tool.to_string()))
+            .or_default()
+            .push(index);
+    }
+    let mut stage_groups: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+    for (index, stage) in stages.iter().enumerate() {
+        stage_groups
+            .entry((stage.project.clone(), stage.tool_name.clone()))
+            .or_default()
+            .push(index);
+    }
+    let mut prior_stage_groups: BTreeMap<(String, String), Vec<usize>> =
+        BTreeMap::new();
+    for (index, stage) in prior_stages.iter().enumerate() {
+        prior_stage_groups
+            .entry((stage.project.clone(), stage.tool_name.clone()))
+            .or_default()
+            .push(index);
+    }
     let mut order: Vec<((String, String), usize)> = groups
         .iter()
         .map(|(key, member)| (key.clone(), member.len()))
@@ -853,29 +1272,67 @@ pub fn compute_stats_report(
     });
     let with_effective: Vec<Option<i64>> =
         window.iter().map(effective_duration_ms).collect();
+    let with_prior_effective: Vec<Option<i64>> =
+        priors.iter().map(effective_duration_ms).collect();
     let mut tools = Vec::new();
     for ((project_key, tool_key), _) in &order {
+        let key = (project_key.clone(), tool_key.clone());
         let member: Vec<(&StatsRunRow, Option<i64>)> = groups
-            .get(&(project_key.clone(), tool_key.clone()))
+            .get(&key)
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .map(|index| (&window[index], with_effective[index]))
             .collect();
+        let prior_member: Vec<(&StatsRunRow, Option<i64>)> = prior_groups
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|index| (&priors[index], with_prior_effective[index]))
+            .collect();
+        let member_stages: Vec<StatsStageRow> = stage_groups
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|index| stages[index].clone())
+            .collect();
+        let member_prior_stages: Vec<StatsStageRow> = prior_stage_groups
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|index| prior_stages[index].clone())
+            .collect();
         tools.push(tool_entry(
             project_key,
             tool_key,
             &member,
+            &prior_member,
+            &member_stages,
+            &member_prior_stages,
             &empty_extra_args_digest,
             scope.since_ts,
             scope.now_ts,
             scope.utc_offset_seconds,
         ));
     }
+    let pressure = pressure_section(samples);
     let mut diagnostics = Vec::new();
     if scope.runs_truncated {
         diagnostics.push(format!(
             "stats truncated to {STATS_MAX_RUNS} newest runs; narrowing days or tool keeps the whole window"
+        ));
+    }
+    if scope.stages_truncated {
+        diagnostics.push(format!(
+            "stats truncated to {STATS_MAX_STAGES} newest stages; narrowing days or tool keeps the whole window"
+        ));
+    }
+    if scope.samples_truncated {
+        diagnostics.push(format!(
+            "stats truncated to {STATS_MAX_SAMPLES} newest samples; narrowing days or tool keeps the whole window"
         ));
     }
     Ok(ToolRunStatsResultWire {
@@ -890,8 +1347,11 @@ pub fn compute_stats_report(
         },
         runs_scanned: window.len(),
         runs_truncated: scope.runs_truncated,
+        stages_truncated: scope.stages_truncated,
+        samples_truncated: scope.samples_truncated,
         adhoc_runs,
         tools,
+        pressure,
         thresholds: stats_thresholds(),
         diagnostics,
     })

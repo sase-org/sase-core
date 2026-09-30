@@ -4,15 +4,20 @@
 //! then folds them with the pure `stats` computation. Reads only; never
 //! migrates, quarantines, or writes the ledger.
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::Connection;
+use serde::Deserialize;
 
 use super::super::stats::{
     compute_stats_report, stats_thresholds, StatsReportScope, StatsRunRow,
+    StatsSampleRow, StatsStageRow, ToolRunStatsPressureWire,
     ToolRunStatsRequestWire, ToolRunStatsResultWire,
     STATS_BACKTEST_LOOKBACK_DAYS, STATS_MAX_DAYS, STATS_MAX_RUNS,
+    STATS_MAX_SAMPLES, STATS_MAX_STAGES,
 };
 use super::super::wire::{ToolRunStateWire, TOOL_RUN_WIRE_SCHEMA_VERSION};
 use super::super::ToolRunError;
@@ -59,9 +64,15 @@ pub fn tool_run_stats_report(
             since,
             lookback,
         )?;
+        let (stages, prior_stages, stages_truncated) =
+            load_stage_rows(conn, &window, &priors)?;
+        let (samples, samples_truncated) = load_sample_rows(conn, &window)?;
         compute_stats_report(
             &window,
             &priors,
+            &stages,
+            &prior_stages,
+            &samples,
             &StatsReportScope {
                 project: request.project.clone(),
                 tool_name: request.tool_name.clone(),
@@ -70,6 +81,8 @@ pub fn tool_run_stats_report(
                 now_ts: now,
                 utc_offset_seconds: request.utc_offset_seconds,
                 runs_truncated: truncated,
+                stages_truncated,
+                samples_truncated,
             },
         )
     })
@@ -93,8 +106,11 @@ fn empty_stats_report(
         },
         runs_scanned: 0,
         runs_truncated: false,
+        stages_truncated: false,
+        samples_truncated: false,
         adhoc_runs: 0,
         tools: Vec::new(),
+        pressure: ToolRunStatsPressureWire::default(),
         thresholds: stats_thresholds(),
         diagnostics: vec![diagnostic.to_string()],
     }
@@ -281,4 +297,208 @@ fn parse_json<T: serde::de::DeserializeOwned>(
         return None;
     }
     serde_json::from_str(&text).ok()
+}
+
+/// Sample payload fields the pressure section needs. Lenient on
+/// purpose: no `deny_unknown_fields`, so a newer writer's extra fields
+/// never drop a sample.
+#[derive(Debug, Default, Deserialize)]
+struct SamplePayload {
+    #[serde(default)]
+    psi_cpu_some: Option<f64>,
+    #[serde(default)]
+    psi_memory_some: Option<f64>,
+    #[serde(default)]
+    psi_io_some: Option<f64>,
+    #[serde(default)]
+    loadavg_1: Option<f64>,
+    #[serde(default)]
+    logical_cpus: Option<u32>,
+}
+
+struct StageChunkRow {
+    stage_id: String,
+    run_id: String,
+    description: String,
+    started_ts: Option<i64>,
+    elapsed_ms: Option<i64>,
+    exit_code: Option<i32>,
+    incomplete: i64,
+}
+
+/// Run one `WHERE run_id IN (...)` chunk over the stages table.
+fn query_stage_chunk(
+    conn: &Connection,
+    chunk: &[&str],
+) -> Result<Vec<StageChunkRow>, ToolRunError> {
+    let placeholders = chunk
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT stage_id, run_id, description, started_ts, elapsed_ms,
+                exit_code, incomplete
+         FROM stages WHERE run_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> =
+        chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let fetched = stmt.query_map(params.as_slice(), |row| {
+        Ok(StageChunkRow {
+            stage_id: row.get(0)?,
+            run_id: row.get(1)?,
+            description: row.get(2)?,
+            started_ts: row.get(3)?,
+            elapsed_ms: row.get(4)?,
+            exit_code: row.get(5)?,
+            incomplete: row.get(6)?,
+        })
+    })?;
+    fetched.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Stage rows of the loaded window and lookback runs, split by window
+/// membership. Stages whose run has no tool never join a group and are
+/// skipped. Keeps the newest rows under `STATS_MAX_STAGES`.
+fn load_stage_rows(
+    conn: &Connection,
+    window: &[StatsRunRow],
+    priors: &[StatsRunRow],
+) -> Result<(Vec<StatsStageRow>, Vec<StatsStageRow>, bool), ToolRunError> {
+    if !table_present(conn, "stages")? {
+        return Ok((Vec::new(), Vec::new(), false));
+    }
+    let mut lookup: HashMap<&str, (&StatsRunRow, bool)> = HashMap::new();
+    for row in window {
+        lookup.insert(row.run_id.as_str(), (row, true));
+    }
+    for row in priors {
+        lookup.insert(row.run_id.as_str(), (row, false));
+    }
+    let mut ids: Vec<&str> = lookup.keys().copied().collect();
+    ids.sort_unstable();
+    let mut collected: Vec<StatsStageRow> = Vec::new();
+    for chunk in ids.chunks(500) {
+        for fetched in query_stage_chunk(conn, chunk)? {
+            let Some((run, in_window)) = lookup.get(fetched.run_id.as_str())
+            else {
+                continue;
+            };
+            let Some(tool) = run.tool_name.clone() else {
+                continue;
+            };
+            collected.push(StatsStageRow {
+                stage_id: fetched.stage_id,
+                run_id: fetched.run_id,
+                project: run.project.clone().unwrap_or_default(),
+                tool_name: tool,
+                description: fetched.description,
+                started_ts: fetched.started_ts,
+                elapsed_ms: fetched.elapsed_ms,
+                exit_code: fetched.exit_code,
+                incomplete: fetched.incomplete != 0,
+                run_running_ts: run.running_ts,
+                in_window: *in_window,
+            });
+        }
+    }
+    // Newest first; rows without a start stamp sort last.
+    collected.sort_by(|left, right| {
+        match (left.started_ts, right.started_ts) {
+            (Some(left_ts), Some(right_ts)) => right_ts
+                .cmp(&left_ts)
+                .then_with(|| right.stage_id.cmp(&left.stage_id)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => right.stage_id.cmp(&left.stage_id),
+        }
+    });
+    let truncated = collected.len() > STATS_MAX_STAGES;
+    collected.truncate(STATS_MAX_STAGES);
+    let mut stages = Vec::new();
+    let mut prior_stages = Vec::new();
+    for stage in collected {
+        if stage.in_window {
+            stages.push(stage);
+        } else {
+            prior_stages.push(stage);
+        }
+    }
+    Ok((stages, prior_stages, truncated))
+}
+
+/// Run one `WHERE run_id IN (...)` chunk over the samples table.
+fn query_sample_chunk(
+    conn: &Connection,
+    chunk: &[&str],
+) -> Result<Vec<(String, i64, String)>, ToolRunError> {
+    let placeholders = chunk
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT run_id, observed_ts, payload_json
+         FROM samples WHERE run_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> =
+        chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let fetched = stmt.query_map(params.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    fetched.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Sample rows of the loaded window runs for the report-level
+/// pressure section. A payload that fails to parse still counts its
+/// bucket, with no metrics. Keeps the newest rows under
+/// `STATS_MAX_SAMPLES`.
+fn load_sample_rows(
+    conn: &Connection,
+    window: &[StatsRunRow],
+) -> Result<(Vec<StatsSampleRow>, bool), ToolRunError> {
+    if !table_present(conn, "samples")? {
+        return Ok((Vec::new(), false));
+    }
+    let mut ids: Vec<&str> =
+        window.iter().map(|row| row.run_id.as_str()).collect();
+    ids.sort_unstable();
+    let mut collected: Vec<StatsSampleRow> = Vec::new();
+    for chunk in ids.chunks(500) {
+        for (run_id, observed_ts, payload) in query_sample_chunk(conn, chunk)? {
+            let parsed: SamplePayload =
+                serde_json::from_str(&payload).unwrap_or_default();
+            let load_per_cpu = match (parsed.loadavg_1, parsed.logical_cpus) {
+                (Some(load), Some(cpus)) if cpus > 0 => {
+                    Some(load / f64::from(cpus))
+                }
+                _ => None,
+            };
+            collected.push(StatsSampleRow {
+                run_id,
+                observed_ts,
+                psi_cpu_some: parsed.psi_cpu_some,
+                psi_memory_some: parsed.psi_memory_some,
+                psi_io_some: parsed.psi_io_some,
+                load_per_cpu,
+            });
+        }
+    }
+    collected.sort_by(|left, right| {
+        right
+            .observed_ts
+            .cmp(&left.observed_ts)
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    let truncated = collected.len() > STATS_MAX_SAMPLES;
+    collected.truncate(STATS_MAX_SAMPLES);
+    Ok((collected, truncated))
 }

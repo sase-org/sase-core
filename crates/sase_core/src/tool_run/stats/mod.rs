@@ -6,13 +6,18 @@ mod wire;
 #[cfg(test)]
 mod tests;
 
-pub use report::{compute_stats_report, StatsReportScope, StatsRunRow};
+pub use report::{
+    compute_stats_report, StatsReportScope, StatsRunRow, StatsSampleRow,
+    StatsStageRow,
+};
 pub use wire::{
-    stats_thresholds, ToolRunStatsDemandWire, ToolRunStatsDurationSummaryWire,
-    ToolRunStatsDurationWire, ToolRunStatsMonitorOwnedWire,
-    ToolRunStatsOutcomesWire, ToolRunStatsProviderWire,
+    stats_thresholds, ToolRunStatsBacktestWire, ToolRunStatsDemandWire,
+    ToolRunStatsDurationSummaryWire, ToolRunStatsDurationWire,
+    ToolRunStatsMonitorOwnedWire, ToolRunStatsOutcomesWire,
+    ToolRunStatsPressureWire, ToolRunStatsProviderWire,
     ToolRunStatsRepeatsWire, ToolRunStatsRequestWire, ToolRunStatsResultWire,
-    ToolRunStatsRouteWire, ToolRunStatsThresholdsWire, ToolRunStatsToolWire,
+    ToolRunStatsRouteWire, ToolRunStatsStageBacktestWire,
+    ToolRunStatsStageWire, ToolRunStatsThresholdsWire, ToolRunStatsToolWire,
     ToolRunStatsTrendBucketWire, ToolRunStatsWasteCategoryWire,
     ToolRunStatsWasteWire, ToolRunStatsWindowWire,
     STATS_BACKTEST_LOOKBACK_DAYS, STATS_BACKTEST_MIN_PRIOR_RUNS,

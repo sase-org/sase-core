@@ -1,4 +1,7 @@
-use super::report::{compute_stats_report, StatsReportScope, StatsRunRow};
+use super::report::{
+    compute_stats_report, StatsReportScope, StatsRunRow, StatsSampleRow,
+    StatsStageRow,
+};
 use super::wire::*;
 use crate::tool_run::catalog::extra_args_digest;
 use crate::tool_run::demand_wire::{
@@ -75,13 +78,32 @@ fn scope(
         now_ts: now,
         utc_offset_seconds: offset,
         runs_truncated: truncated,
+        stages_truncated: false,
+        samples_truncated: false,
     }
 }
 
 fn report(rows: &[StatsRunRow]) -> ToolRunStatsResultWire {
+    report_full(rows, &[], &[], &[], &[])
+}
+
+fn report_full(
+    rows: &[StatsRunRow],
+    priors: &[StatsRunRow],
+    stages: &[StatsStageRow],
+    prior_stages: &[StatsStageRow],
+    samples: &[StatsSampleRow],
+) -> ToolRunStatsResultWire {
     let now = 1_000_000 + 7 * 86_400;
-    compute_stats_report(rows, &[], &scope(now - 7 * 86_400, now, 0, false))
-        .unwrap()
+    compute_stats_report(
+        rows,
+        priors,
+        stages,
+        prior_stages,
+        samples,
+        &scope(now - 7 * 86_400, now, 0, false),
+    )
+    .unwrap()
 }
 
 fn group(result: ToolRunStatsResultWire) -> ToolRunStatsToolWire {
@@ -391,6 +413,9 @@ fn trend_buckets_empty_days_and_offset() {
     let result = compute_stats_report(
         &[first_day, second_day],
         &[],
+        &[],
+        &[],
+        &[],
         &scope(since, now, offset, false),
     )
     .unwrap();
@@ -564,6 +589,9 @@ fn truncation_sets_flag_and_diagnostic() {
     let result = compute_stats_report(
         &[row("run-1")],
         &[],
+        &[],
+        &[],
+        &[],
         &scope(now - 7 * 86_400, now, 0, true),
     )
     .unwrap();
@@ -596,4 +624,293 @@ fn thresholds_echo_the_constants() {
     );
     assert_eq!(result.tools.len(), 0);
     assert_eq!(result.diagnostics.len(), 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_row(
+    stage_id: &str,
+    run_id: &str,
+    description: &str,
+    started_ms: Option<i64>,
+    elapsed_ms: Option<i64>,
+    exit_code: Option<i32>,
+    incomplete: bool,
+    in_window: bool,
+) -> StatsStageRow {
+    StatsStageRow {
+        stage_id: stage_id.to_string(),
+        run_id: run_id.to_string(),
+        project: "sase".to_string(),
+        tool_name: "check".to_string(),
+        description: description.to_string(),
+        started_ts: started_ms,
+        elapsed_ms,
+        exit_code,
+        incomplete,
+        run_running_ts: Some(1_000_000),
+        in_window,
+    }
+}
+
+fn sample_row(
+    run_id: &str,
+    observed_ts: i64,
+    cpu: Option<f64>,
+    memory: Option<f64>,
+    io: Option<f64>,
+    load_per_cpu: Option<f64>,
+) -> StatsSampleRow {
+    StatsSampleRow {
+        run_id: run_id.to_string(),
+        observed_ts,
+        psi_cpu_some: cpu,
+        psi_memory_some: memory,
+        psi_io_some: io,
+        load_per_cpu,
+    }
+}
+
+#[test]
+fn stage_distributions_split_ok_failed_and_incomplete() {
+    // Four finished lint instances: nearest-rank p50 is the second
+    // value, p90 the fourth, and the ratio is exact.
+    let mut stages = Vec::new();
+    for (index, elapsed) in [1000, 2000, 3000, 4000].iter().enumerate() {
+        stages.push(stage_row(
+            &format!("lint-{index}"),
+            "run-1",
+            "lint",
+            Some(1_000_000_000 + index as i64),
+            Some(*elapsed),
+            Some(0),
+            false,
+            true,
+        ));
+    }
+    // One failed, one incomplete-flagged, one finished without an
+    // elapsed time, and one finished without an exit code.
+    stages.push(stage_row(
+        "test-0",
+        "run-1",
+        "test",
+        Some(1_000_010_000),
+        Some(5000),
+        Some(2),
+        false,
+        true,
+    ));
+    stages.push(stage_row(
+        "test-1",
+        "run-1",
+        "test",
+        Some(1_000_011_000),
+        Some(6000),
+        Some(0),
+        true,
+        true,
+    ));
+    stages.push(stage_row(
+        "test-2",
+        "run-1",
+        "test",
+        Some(1_000_012_000),
+        None,
+        None,
+        false,
+        true,
+    ));
+    stages.push(stage_row(
+        "test-3",
+        "run-1",
+        "test",
+        Some(1_000_013_000),
+        Some(7000),
+        None,
+        false,
+        true,
+    ));
+    let group = group(report_full(&[row("run-1")], &[], &stages, &[], &[]));
+    assert_eq!(group.stages.len(), 2);
+    // Lint started first, so recipe order puts it first.
+    assert_eq!(group.stages[0].description, "lint");
+    assert_eq!(group.stages[0].runs, 4);
+    assert_eq!(group.stages[0].ok, 4);
+    assert_eq!(group.stages[0].failed, 0);
+    assert_eq!(group.stages[0].incomplete, 0);
+    assert_eq!(group.stages[0].p50_ms, Some(2000));
+    assert_eq!(group.stages[0].p90_ms, Some(4000));
+    assert_eq!(group.stages[0].p90_over_p50, Some(2.0));
+    assert!(
+        (group.stages[0].total_hours - 10_000.0 / 3_600_000.0).abs() < 1e-12
+    );
+    assert_eq!(group.stages[0].median_offset_ms, Some(1));
+    let test = &group.stages[1];
+    assert_eq!(test.runs, 4);
+    assert_eq!(test.ok, 0);
+    assert_eq!(test.failed, 1);
+    assert_eq!(test.incomplete, 2);
+    // Only the two elapsed, finished instances feed p50/p90/hours:
+    // the exit-less instance counts in neither ok nor failed.
+    assert_eq!(test.p50_ms, Some(5000));
+    assert_eq!(test.p90_ms, Some(7000));
+    assert!((test.total_hours - 12_000.0 / 3_600_000.0).abs() < 1e-12);
+}
+
+#[test]
+fn stage_entries_without_offsets_sort_last() {
+    let stages = vec![
+        stage_row(
+            "late",
+            "run-1",
+            "zzz",
+            None,
+            Some(1000),
+            Some(0),
+            false,
+            true,
+        ),
+        stage_row(
+            "early",
+            "run-1",
+            "aaa",
+            Some(1_000_000_000),
+            Some(1000),
+            Some(0),
+            false,
+            true,
+        ),
+    ];
+    let group = group(report_full(&[row("run-1")], &[], &stages, &[], &[]));
+    assert_eq!(group.stages[0].description, "aaa");
+    assert_eq!(group.stages[1].description, "zzz");
+    assert_eq!(group.stages[1].median_offset_ms, None);
+    assert_eq!(group.stages[1].p90_over_p50, Some(1.0));
+}
+
+fn bare_run(run_id: &str, order_ts: i64, duration_ms: i64) -> StatsRunRow {
+    let mut row = row(run_id);
+    row.created_ts = order_ts;
+    row.running_ts = Some(order_ts);
+    row.settled_ts = Some(order_ts + duration_ms / 1000);
+    row.duration_ms = Some(duration_ms);
+    row
+}
+
+#[test]
+fn backtest_counts_predictions_from_lookback_priors() {
+    // Twenty flat priors then three identical window runs: every
+    // window run predicts, covers, and measures width 1.
+    let priors: Vec<StatsRunRow> = (0..20)
+        .map(|index| bare_run(&format!("prior-{index}"), 1000 + index, 10_000))
+        .collect();
+    let window: Vec<StatsRunRow> = (0..3)
+        .map(|index| {
+            bare_run(&format!("run-{index}"), 1_000_000 + index, 10_000)
+        })
+        .collect();
+    let with_priors = group(report_full(&window, &priors, &[], &[], &[]));
+    assert_eq!(with_priors.backtest.predictions, 3);
+    assert_eq!(with_priors.backtest.covered, 3);
+    assert_eq!(with_priors.backtest.coverage, Some(1.0));
+    assert_eq!(with_priors.backtest.median_width, Some(1.0));
+    assert_eq!(with_priors.backtest.meets_target, Some(true));
+    assert_eq!(
+        with_priors.backtest.target_coverage,
+        STATS_BACKTEST_TARGET_COVERAGE
+    );
+    // Without the lookback priors the window alone predicts nothing.
+    let solo = group(report_full(&window, &[], &[], &[], &[]));
+    assert_eq!(solo.backtest.predictions, 0);
+    assert_eq!(solo.backtest.coverage, None);
+    assert_eq!(solo.backtest.median_width, None);
+    assert_eq!(solo.backtest.meets_target, None);
+}
+
+#[test]
+fn backtest_misses_and_width_floor() {
+    // Twenty priors at 500 ms; the window run at 40 s misses a band
+    // whose width divides by the 1 s floor: 500 / 1000, not 500 / 0.
+    let priors: Vec<StatsRunRow> = (0..20)
+        .map(|index| bare_run(&format!("prior-{index}"), 1000 + index, 500))
+        .collect();
+    let window = vec![bare_run("run-1", 2_000_000, 40_000)];
+    let group = group(report_full(&window, &priors, &[], &[], &[]));
+    assert_eq!(group.backtest.predictions, 1);
+    assert_eq!(group.backtest.covered, 0);
+    assert_eq!(group.backtest.coverage, Some(0.0));
+    assert_eq!(group.backtest.median_width, Some(0.5));
+    assert_eq!(group.backtest.meets_target, Some(false));
+}
+
+#[test]
+fn stage_backtests_run_per_description() {
+    // Twenty-one flat prior instances then one window instance: the
+    // window instance predicts and covers at width 1.
+    let mut prior_stages = Vec::new();
+    for index in 0..21 {
+        prior_stages.push(stage_row(
+            &format!("prior-{index}"),
+            &format!("prior-run-{index}"),
+            "lint",
+            Some(1_000_000 + index),
+            Some(5000),
+            Some(0),
+            false,
+            false,
+        ));
+    }
+    let stages = vec![stage_row(
+        "win-0",
+        "run-1",
+        "lint",
+        Some(2_000_000),
+        Some(5000),
+        Some(0),
+        false,
+        true,
+    )];
+    let group = group(report_full(
+        &[row("run-1")],
+        &[],
+        &stages,
+        &prior_stages,
+        &[],
+    ));
+    assert_eq!(group.stage_backtests.len(), 1);
+    assert_eq!(group.stage_backtests[0].description, "lint");
+    assert_eq!(group.stage_backtests[0].backtest.predictions, 1);
+    assert_eq!(group.stage_backtests[0].backtest.covered, 1);
+    assert_eq!(group.stage_backtests[0].backtest.meets_target, Some(true));
+}
+
+#[test]
+fn pressure_buckets_busy_shares_and_p90() {
+    let samples = vec![
+        sample_row("run-1", 5, Some(3.0), Some(12.0), Some(1.0), Some(2.0)),
+        sample_row("run-2", 10, Some(4.0), Some(13.0), None, Some(4.0)),
+        sample_row("run-3", 35, None, Some(5.0), None, None),
+    ];
+    let result = report_full(&[], &[], &[], &[], &samples);
+    let pressure = &result.pressure;
+    assert_eq!(pressure.buckets, 2);
+    assert_eq!(pressure.busy_buckets, 1);
+    assert_eq!(pressure.buckets_with_psi, 2);
+    assert_eq!(pressure.memory_over_threshold_share, Some(0.5));
+    assert_eq!(pressure.busy_memory_over_threshold_share, Some(1.0));
+    assert_eq!(pressure.cpu_psi_p90, Some(4.0));
+    assert_eq!(pressure.memory_psi_p90, Some(13.0));
+    assert_eq!(pressure.io_psi_p90, Some(1.0));
+    assert_eq!(pressure.load_per_cpu_p90, Some(4.0));
+}
+
+#[test]
+fn pressure_empty_samples_leave_shares_missing() {
+    let result = report_full(&[], &[], &[], &[], &[]);
+    let pressure = &result.pressure;
+    assert_eq!(pressure.buckets, 0);
+    assert_eq!(pressure.busy_buckets, 0);
+    assert_eq!(pressure.memory_over_threshold_share, None);
+    assert_eq!(pressure.busy_memory_over_threshold_share, None);
+    assert_eq!(pressure.cpu_psi_p90, None);
+    assert_eq!(pressure.load_per_cpu_p90, None);
 }

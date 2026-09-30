@@ -351,6 +351,78 @@ pub struct ToolRunStatsDemandWire {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunStatsStageWire {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub runs: usize,
+    #[serde(default)]
+    pub ok: usize,
+    #[serde(default)]
+    pub failed: usize,
+    #[serde(default)]
+    pub incomplete: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p50_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p90_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p90_over_p50: Option<f64>,
+    #[serde(default)]
+    pub total_hours: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_offset_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunStatsBacktestWire {
+    #[serde(default)]
+    pub predictions: usize,
+    #[serde(default)]
+    pub covered: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_width: Option<f64>,
+    #[serde(default)]
+    pub target_coverage: f64,
+    #[serde(default)]
+    pub target_max_width: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meets_target: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunStatsStageBacktestWire {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub backtest: ToolRunStatsBacktestWire,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunStatsPressureWire {
+    #[serde(default)]
+    pub buckets: usize,
+    #[serde(default)]
+    pub busy_buckets: usize,
+    #[serde(default)]
+    pub buckets_with_psi: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_over_threshold_share: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_memory_over_threshold_share: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_psi_p90: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_psi_p90: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_psi_p90: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_per_cpu_p90: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolRunStatsToolWire {
     #[serde(default)]
     pub project: String,
@@ -384,6 +456,12 @@ pub struct ToolRunStatsToolWire {
     pub repeats: ToolRunStatsRepeatsWire,
     #[serde(default)]
     pub demand: ToolRunStatsDemandWire,
+    #[serde(default)]
+    pub stages: Vec<ToolRunStatsStageWire>,
+    #[serde(default)]
+    pub backtest: ToolRunStatsBacktestWire,
+    #[serde(default)]
+    pub stage_backtests: Vec<ToolRunStatsStageBacktestWire>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -400,9 +478,15 @@ pub struct ToolRunStatsResultWire {
     #[serde(default)]
     pub runs_truncated: bool,
     #[serde(default)]
+    pub stages_truncated: bool,
+    #[serde(default)]
+    pub samples_truncated: bool,
+    #[serde(default)]
     pub adhoc_runs: usize,
     #[serde(default)]
     pub tools: Vec<ToolRunStatsToolWire>,
+    #[serde(default)]
+    pub pressure: ToolRunStatsPressureWire,
     pub thresholds: ToolRunStatsThresholdsWire,
     #[serde(default)]
     pub diagnostics: Vec<String>,

@@ -7,12 +7,13 @@ use super::super::handoff_wire::ToolRunTerminalCauseWire;
 use super::super::stats::{ToolRunStatsRequestWire, STATS_MAX_DAYS};
 use super::super::wire::{
     ToolArgsPolicyWire, ToolDefinitionWire, ToolEvidenceCompletenessWire,
-    ToolFingerprintSpecWire, ToolFingerprintWire, ToolRunBeginRequestWire,
-    ToolRunFinishRequestWire, ToolRunStateWire, ToolStagesWire,
-    TOOL_RUN_WIRE_SCHEMA_VERSION,
+    ToolFingerprintSpecWire, ToolFingerprintWire, ToolLoadSampleWire,
+    ToolRunAppendRequestWire, ToolRunBeginRequestWire, ToolRunEventKindWire,
+    ToolRunEventWire, ToolRunFinishRequestWire, ToolRunStateWire,
+    ToolStageWire, ToolStagesWire, TOOL_RUN_WIRE_SCHEMA_VERSION,
 };
 use super::super::ToolRunError;
-use super::{finish, record_demand, tool_run_stats_report};
+use super::{append_event, finish, record_demand, tool_run_stats_report};
 use crate::tool_run::begin;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -288,4 +289,141 @@ fn missing_store_returns_empty_report() {
     assert!(result.tools.is_empty());
     assert_eq!(result.diagnostics, ["tool run store does not exist"]);
     assert!(result.thresholds.max_runs > 0);
+}
+
+fn append_stage_finished(
+    path: &Path,
+    run_id: &str,
+    event_id: &str,
+    started_ms: i64,
+    elapsed_ms: i64,
+) {
+    append_event(
+        path,
+        ToolRunAppendRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            event: ToolRunEventWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                event_id: event_id.to_string(),
+                run_id: run_id.to_string(),
+                attempt: 1,
+                kind: ToolRunEventKindWire::StageFinished,
+                created_ts: (started_ms + elapsed_ms).div_euclid(1000),
+                stage: Some(ToolStageWire {
+                    schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                    stage_id: format!("{event_id}-stage"),
+                    run_id: run_id.to_string(),
+                    attempt: 1,
+                    description: "lint".to_string(),
+                    started_ts: Some(started_ms),
+                    finished_ts: Some(started_ms + elapsed_ms),
+                    elapsed_ms: Some(elapsed_ms),
+                    exit_code: Some(0),
+                    output_bytes: Some(100),
+                    incomplete: false,
+                    diagnostics: Vec::new(),
+                }),
+                sample: None,
+                exit_code: None,
+                signal: None,
+                reason: None,
+                diagnostics: Vec::new(),
+            },
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+}
+
+fn append_sample(path: &Path, run_id: &str, event_id: &str) {
+    append_event(
+        path,
+        ToolRunAppendRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            event: ToolRunEventWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                event_id: event_id.to_string(),
+                run_id: run_id.to_string(),
+                attempt: 1,
+                kind: ToolRunEventKindWire::Sample,
+                created_ts: NOW + 100,
+                stage: None,
+                sample: Some(ToolLoadSampleWire {
+                    schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                    sample_id: format!("{event_id}-sample"),
+                    run_id: run_id.to_string(),
+                    attempt: 1,
+                    observed_ts: NOW + 100,
+                    elapsed_ms: None,
+                    loadavg_1: Some(4.0),
+                    loadavg_5: None,
+                    loadavg_15: None,
+                    logical_cpus: Some(2),
+                    psi_cpu_some: Some(3.0),
+                    psi_memory_some: Some(12.0),
+                    psi_io_some: Some(1.0),
+                    host_identity: None,
+                    availability: Vec::new(),
+                    diagnostics: Vec::new(),
+                }),
+                exit_code: None,
+                signal: None,
+                reason: None,
+                diagnostics: Vec::new(),
+            },
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+}
+
+#[test]
+fn report_includes_stages_backtest_and_pressure() {
+    let (_temp, path) = store();
+    // Twenty-one flat runs: the last run's whole-run backtest and the
+    // last lint instance's stage backtest each see twenty priors.
+    for index in 0..21 {
+        let run_id = begin_run(&path, Some("check"), Some("sase"));
+        append_stage_finished(
+            &path,
+            &run_id,
+            &format!("stage-{index}"),
+            (NOW + index as i64) * 1000,
+            5000,
+        );
+        append_sample(&path, &run_id, &format!("sample-{index}"));
+        finish_state(&path, &run_id, ToolRunStateWire::Succeeded, 60_000, None);
+    }
+    let result = stats(&path, Some("sase"), None, 7);
+    assert_eq!(result.tools.len(), 1);
+    let group = &result.tools[0];
+    assert_eq!(group.stages.len(), 1);
+    assert_eq!(group.stages[0].description, "lint");
+    assert_eq!(group.stages[0].runs, 21);
+    assert_eq!(group.stages[0].ok, 21);
+    assert_eq!(group.stages[0].failed, 0);
+    assert_eq!(group.stages[0].incomplete, 0);
+    assert_eq!(group.stages[0].p50_ms, Some(5000));
+    assert_eq!(group.stages[0].p90_ms, Some(5000));
+    assert_eq!(group.stages[0].p90_over_p50, Some(1.0));
+    assert_eq!(group.backtest.predictions, 1);
+    assert_eq!(group.backtest.covered, 1);
+    assert_eq!(group.backtest.meets_target, Some(true));
+    assert_eq!(group.stage_backtests.len(), 1);
+    assert_eq!(group.stage_backtests[0].description, "lint");
+    assert_eq!(group.stage_backtests[0].backtest.predictions, 1);
+    assert_eq!(group.stage_backtests[0].backtest.covered, 1);
+    // All samples share one observed timestamp: one busy bucket over
+    // the memory PSI threshold.
+    assert_eq!(result.pressure.buckets, 1);
+    assert_eq!(result.pressure.busy_buckets, 1);
+    assert_eq!(result.pressure.buckets_with_psi, 1);
+    assert_eq!(result.pressure.memory_over_threshold_share, Some(1.0));
+    assert_eq!(result.pressure.busy_memory_over_threshold_share, Some(1.0));
+    assert_eq!(result.pressure.cpu_psi_p90, Some(3.0));
+    assert_eq!(result.pressure.memory_psi_p90, Some(12.0));
+    assert_eq!(result.pressure.load_per_cpu_p90, Some(2.0));
+    assert!(!result.stages_truncated);
+    assert!(!result.samples_truncated);
+    assert!(result.diagnostics.is_empty());
 }
