@@ -149,6 +149,30 @@ async fn advertises_model_shortcut_trigger_character() {
     assert!(!triggers.contains(&"*".to_string()), "{triggers:?}");
 }
 
+#[tokio::test]
+async fn advertises_jinja_trigger_characters() {
+    let (service, _) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog(None)),
+        )
+    });
+    let server = service.inner();
+
+    let result = server
+        .initialize(InitializeParams::default())
+        .await
+        .unwrap();
+    let triggers = result
+        .capabilities
+        .completion_provider
+        .and_then(|completion| completion.trigger_characters)
+        .unwrap_or_default();
+
+    assert!(triggers.contains(&"{".to_string()), "{triggers:?}");
+    assert!(triggers.contains(&"|".to_string()), "{triggers:?}");
+}
+
 // --- `=alias` shortcut completion ---------------------------------------
 
 fn model_alias_shortcut_service(

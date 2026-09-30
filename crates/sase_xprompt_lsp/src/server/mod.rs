@@ -113,6 +113,7 @@ mod completion;
 mod completion_items;
 mod documents;
 mod initialize;
+pub(crate) mod jinja;
 mod state;
 
 #[cfg(test)]
@@ -161,6 +162,8 @@ impl LanguageServer for XpromptLspServer {
                         "+".to_string(),
                         "<".to_string(),
                         "=".to_string(),
+                        "{".to_string(),
+                        "|".to_string(),
                     ]),
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -296,11 +299,19 @@ impl LanguageServer for XpromptLspServer {
         if !document.eligible {
             return Ok(None);
         }
+        let source_path = uri.to_file_path().map(|path| path.into_owned());
+        let (trigger_kind, trigger_character) = params
+            .context
+            .map(|context| (context.trigger_kind, context.trigger_character))
+            .unzip();
         Ok(self
-            .completion_for_text_with_trigger(
+            .completion_for_document(
                 document.text,
                 params.text_document_position.position,
-                params.context.map(|context| context.trigger_kind),
+                source_path,
+                &document.language_id,
+                trigger_kind,
+                trigger_character.flatten(),
             )
             .await)
     }
@@ -339,10 +350,13 @@ impl LanguageServer for XpromptLspServer {
         if !document.eligible {
             return Ok(None);
         }
+        let source_path = uri.to_file_path().map(|path| path.into_owned());
         Ok(self
-            .hover_for_text(
+            .hover_for_document(
                 document.text,
                 params.text_document_position_params.position,
+                source_path,
+                &document.language_id,
             )
             .await)
     }

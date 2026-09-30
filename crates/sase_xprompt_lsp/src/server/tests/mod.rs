@@ -2,6 +2,7 @@ mod at_references;
 mod catalog_loading;
 mod completion;
 mod documents;
+mod jinja;
 mod model_completion;
 mod project_tags;
 mod shortcuts;

@@ -11,6 +11,9 @@ use super::*;
 use crate::project_tags::{
     hover_at_tag, tag_diagnostics, tag_quickfixes, tag_rewrites, TagEdit,
 };
+use crate::server::jinja::jinja_scope_for_document;
+use sase_core::editor::jinja::{jinja_hover, JinjaAssistRequestWire};
+use std::path::PathBuf;
 
 impl XpromptLspServer {
     pub async fn hover_for_text(
@@ -18,6 +21,30 @@ impl XpromptLspServer {
         text: String,
         position: Position,
     ) -> Option<Hover> {
+        self.hover_for_document(text, position, None, "markdown")
+            .await
+    }
+
+    pub async fn hover_for_document(
+        &self,
+        text: String,
+        position: Position,
+        source_path: Option<PathBuf>,
+        language_id: &str,
+    ) -> Option<Hover> {
+        if let Some(scope) =
+            jinja_scope_for_document(source_path.as_deref(), language_id)
+        {
+            let request = JinjaAssistRequestWire {
+                text: text.clone(),
+                position: to_editor_position(position),
+                scope,
+                frontmatter: None,
+            };
+            if let Some(payload) = jinja_hover(&request) {
+                return Some(lsp_hover(payload));
+            }
+        }
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);

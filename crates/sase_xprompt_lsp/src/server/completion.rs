@@ -20,11 +20,15 @@ use super::state::{
     XpromptLspServer,
 };
 use super::*;
+use crate::lsp_convert::jinja_completion_response;
+use crate::server::jinja::jinja_scope_for_document;
+use sase_core::editor::jinja::{jinja_completion, JinjaAssistRequestWire};
 use sase_core::editor::vcs_project_entry_targets;
 use sase_core::snippet_variables::{
     substitute_snippet_variables, PROJECT_SNIPPET_VARIABLE,
 };
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 impl XpromptLspServer {
     pub async fn completion_for_text(
@@ -42,9 +46,51 @@ impl XpromptLspServer {
         position: Position,
         trigger: Option<CompletionTriggerKind>,
     ) -> Option<CompletionResponse> {
+        self.completion_for_document(
+            text, position, None, "markdown", trigger, None,
+        )
+        .await
+    }
+
+    /// Document-aware completion: threads the source path and language
+    /// id into Jinja scope derivation, plus the LSP trigger character
+    /// so `{` / `|` stay silent outside tags.
+    pub async fn completion_for_document(
+        &self,
+        text: String,
+        position: Position,
+        source_path: Option<PathBuf>,
+        language_id: &str,
+        trigger: Option<CompletionTriggerKind>,
+        trigger_character: Option<String>,
+    ) -> Option<CompletionResponse> {
         let config = self.current_config();
         let document = DocumentSnapshot::new(text);
         let editor_position = to_editor_position(position);
+
+        // Jinja owns every in-tag position, ahead of all other
+        // surfaces. `Some` (even empty) never falls through; this
+        // also fixes the `{{ a < b` placeholder misread and `{%if`
+        // directive misreads.
+        if let Some(scope) =
+            jinja_scope_for_document(source_path.as_deref(), language_id)
+        {
+            let request = JinjaAssistRequestWire {
+                text: document.text().to_string(),
+                position: editor_position,
+                scope,
+                frontmatter: None,
+            };
+            if let Some(jinja) = jinja_completion(&request) {
+                return Some(jinja_completion_response(jinja));
+            }
+        }
+        // `{` and `|` are Jinja triggers only. Outside a tag they
+        // stay silent so literal braces and alternation pipes never
+        // pop a menu.
+        if matches!(trigger_character.as_deref(), Some("{") | Some("|")) {
+            return None;
+        }
 
         // Placeholder completion is document-local. Classify it before any
         // catalog refresh so this source never depends on the helper bridge.

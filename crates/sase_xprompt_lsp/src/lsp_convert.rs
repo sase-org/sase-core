@@ -4,6 +4,10 @@ use lsp_types::{
     InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
     Range, TextEdit,
 };
+use sase_core::editor::jinja::{
+    JinjaAvailabilityState, JinjaCompletionItemKind, JinjaCompletionItemWire,
+    JinjaCompletionSource, JinjaCompletionWire,
+};
 use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
     AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
@@ -613,6 +617,102 @@ pub fn placeholder_completion_response(
             })
             .collect(),
     )
+}
+
+/// Render the Jinja engine's ranked candidates as rich LSP items.
+///
+/// The engine already owns ranking, filtering, and documentation text;
+/// this only maps its wire shape onto LSP kinds, label details, edits,
+/// and sort order. An empty item list still returns an array (never
+/// `None`) so Jinja owns the in-tag position.
+pub fn jinja_completion_response(
+    completion: JinjaCompletionWire,
+) -> CompletionResponse {
+    let replacement_range = completion.replacement_range;
+    CompletionResponse::Array(
+        completion
+            .items
+            .into_iter()
+            .map(|item| jinja_completion_item(item, replacement_range))
+            .collect(),
+    )
+}
+
+fn jinja_completion_item(
+    item: JinjaCompletionItemWire,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let kind = match item.kind {
+        JinjaCompletionItemKind::Variable => CompletionItemKind::VARIABLE,
+        JinjaCompletionItemKind::Member => CompletionItemKind::FIELD,
+        JinjaCompletionItemKind::Function
+        | JinjaCompletionItemKind::Filter
+        | JinjaCompletionItemKind::Test => CompletionItemKind::FUNCTION,
+        JinjaCompletionItemKind::Keyword => CompletionItemKind::KEYWORD,
+    };
+    let detail = item
+        .signature
+        .as_deref()
+        .or(item.type_label.as_deref())
+        .map(|type_label| format!(" {type_label}"));
+    let description = jinja_source_description(&item);
+    CompletionItem {
+        label: item.name.clone(),
+        kind: Some(kind),
+        label_details: Some(CompletionItemLabelDetails {
+            detail,
+            description: Some(description),
+        }),
+        detail: item.summary.clone(),
+        documentation: Some(markdown_doc(item.documentation.clone())),
+        filter_text: Some(item.name.clone()),
+        sort_text: Some(format!("{:04}", item.rank)),
+        preselect: Some(item.rank == 0).filter(|preselect| *preselect),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: item.insertion.clone(),
+        })),
+        tags: item
+            .legacy_for
+            .as_deref()
+            .map(|_| vec![CompletionItemTag::DEPRECATED]),
+        ..Default::default()
+    }
+}
+
+fn jinja_source_description(item: &JinjaCompletionItemWire) -> String {
+    let base = match item.source {
+        JinjaCompletionSource::Input => {
+            if item.required {
+                "input · required".to_string()
+            } else {
+                "input".to_string()
+            }
+        }
+        JinjaCompletionSource::Local => "local".to_string(),
+        JinjaCompletionSource::Sase => "sase".to_string(),
+        JinjaCompletionSource::Positional => "arg".to_string(),
+        JinjaCompletionSource::Provider => "skill".to_string(),
+        JinjaCompletionSource::Jinja => "jinja".to_string(),
+    };
+    if item.availability.state == JinjaAvailabilityState::Conditional {
+        if let Some(hint) = item.availability.hint.as_deref() {
+            if hint.contains("%repeat") {
+                return format!("{base} · needs %repeat");
+            }
+            if hint.contains("%wait") {
+                return format!("{base} · needs %wait");
+            }
+        }
+        return format!("{base} · conditional");
+    }
+    if let Some(closes) = item.closes.as_deref() {
+        return format!("closes {closes}");
+    }
+    if item.legacy_for.is_some() {
+        return format!("{base} · legacy");
+    }
+    base
 }
 
 /// Build the completion response for the `+` (`vcs_project`) completion kind.
