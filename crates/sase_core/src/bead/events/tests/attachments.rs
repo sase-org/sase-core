@@ -208,6 +208,21 @@ fn note_payload_validation_rejects_mismatches() {
     assert!(error.contains("duplicate name"), "{error}");
 }
 
+#[test]
+fn note_payload_validation_accepts_repeated_token() {
+    let payload = BeadEventPayloadWire::NoteAppended {
+        entry: "shot @attachment:login.png again @attachment:login.png"
+            .to_string(),
+        attachments: vec![login_attachment()],
+    };
+    assert!(record_error(
+        BeadEventOperationWire::NoteAppended,
+        &payload,
+        "sase-1"
+    )
+    .is_empty());
+}
+
 fn record_error(
     operation: BeadEventOperationWire,
     payload: &BeadEventPayloadWire,

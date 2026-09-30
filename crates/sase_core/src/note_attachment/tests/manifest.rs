@@ -52,6 +52,21 @@ fn manifest_validates_matching_tokens() {
 }
 
 #[test]
+fn manifest_validates_repeated_token_with_one_descriptor() {
+    let manifest = vec![descriptor("shot.png", DIGEST_A)];
+    validate_note_attachment_manifest(
+        &manifest,
+        "shot @attachment:shot.png again @attachment:shot.png",
+    )
+    .unwrap();
+    validate_note_attachment_manifest(
+        &manifest,
+        "@attachment:shot.png @attachment:shot.png",
+    )
+    .unwrap();
+}
+
+#[test]
 fn manifest_rejects_missing_token() {
     let manifest = vec![descriptor("login.png", DIGEST_A)];
     let error = validate_note_attachment_manifest(&manifest, "no tokens here")

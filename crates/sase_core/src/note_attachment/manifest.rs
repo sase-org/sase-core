@@ -122,7 +122,8 @@ fn validate_attachment_mime_type(
 
 /// Validate a full manifest against its note text: every descriptor
 /// validates, names are unique within the manifest, and — whenever the
-/// manifest is non-empty — tokens and manifest match one-to-one.
+/// manifest is non-empty — every token names a descriptor and every
+/// descriptor has at least one token (repeated tokens reuse one descriptor).
 pub fn validate_note_attachment_manifest(
     manifest: &[BeadNoteAttachmentWire],
     text: &str,
@@ -150,6 +151,7 @@ pub fn validate_note_attachment_manifest(
     let mut token_names: Vec<&str> =
         tokens.iter().map(|token| token.name.as_str()).collect();
     token_names.sort_unstable();
+    token_names.dedup();
     if token_names != names {
         return Err(NoteAttachmentError::InvalidManifest {
             message: format!(
