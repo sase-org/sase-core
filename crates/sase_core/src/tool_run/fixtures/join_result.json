@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "outcome": "joined",
+  "replayed": false,
+  "run": {
+    "schema_version": 1,
+    "run_id": "7f3a2b1c9d4e5f6a8b0c1d2e3f4a5b6c",
+    "state": "created",
+    "source": "native",
+    "executor": "inline",
+    "attempt": 1,
+    "tool_name": "check",
+    "definition_digest": "4644c991c1171e11ef8eca6f60b20b1da5bcaf418aaec0f29cddf7b69af8cdb5",
+    "extra_args_digest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "display_argv": [
+      "just",
+      "check"
+    ],
+    "project": "sase",
+    "owner_kind": "proc",
+    "owner_id": "proc-123",
+    "created_ts": 10,
+    "logs": {
+      "has_private_argv": false,
+      "owner_log_path": "logs/proc-123.log"
+    },
+    "evidence_completeness": {
+      "complete": false,
+      "missing": [
+        "evidence not yet observed"
+      ]
+    },
+    "diagnostics": [],
+    "launch_mode": "handoff",
+    "launcher": {
+      "pid": 4242,
+      "boot_id": "boot-1",
+      "process_start_identity": "boot-1:4242"
+    },
+    "starter": {
+      "agent": "agent-1",
+      "pid": 4242,
+      "boot_id": "boot-1",
+      "process_start_identity": "boot-1:4242"
+    },
+    "join": {
+      "kind": "monitor",
+      "id": "mon-1",
+      "joined_ts": 12,
+      "requested_by": "agent-1"
+    }
+  },
+  "diagnostics": []
+}

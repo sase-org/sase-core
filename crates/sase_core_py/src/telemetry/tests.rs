@@ -455,6 +455,143 @@ fn tool_run_bindings_round_trip_python_dicts() {
         .unwrap();
         let reconciled = py_to_json_value(reconciled.bind(py)).unwrap();
         assert_eq!(reconciled["persisted"], json!(true));
+        let budget_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "ceiling_seconds": 600}),
+        )
+        .unwrap();
+        let budget_request = budget_obj.bind(py).downcast::<PyDict>().unwrap();
+        let budgeted =
+            py_tool_run_sync_wait_budget(py, budget_request).unwrap();
+        let budgeted = py_to_json_value(budgeted.bind(py)).unwrap();
+        assert_eq!(budgeted["budget_seconds"], json!(510));
+        assert_eq!(budgeted["source"], json!("hard"));
+        let bad_budget_obj = json_value_to_py(
+            py,
+            &json!({"schema_version": 1, "ceiling_seconds": 0}),
+        )
+        .unwrap();
+        let bad_budget_request =
+            bad_budget_obj.bind(py).downcast::<PyDict>().unwrap();
+        assert!(py_tool_run_sync_wait_budget(py, bad_budget_request).is_err());
+        let starter_begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "now_ts": 40,
+                "commit_running": false,
+                "launch_mode": "handoff",
+                "owner_kind": "proc",
+                "owner_id": "proc-1",
+                "wrapper_pid": 111,
+                "boot_id": "boot-1",
+                "process_start_identity": "boot-1:111",
+                "launch": {
+                    "argv": ["just", "check"],
+                    "tool_name": "check",
+                    "extra_args": [],
+                    "display_argv": ["just", "check"],
+                    "definition": {
+                        "schema_version": 1,
+                        "name": "check",
+                        "argv": ["just", "check"],
+                        "description": "check",
+                        "stages": "run_silent",
+                        "inputs": ["Justfile"],
+                        "env": [],
+                        "args": "deny",
+                        "fingerprint": {"repos": [], "toolchain": {}}
+                    },
+                    "digest": digest,
+                    "adhoc": false,
+                    "continuation_mode": "always"
+                },
+                "starter": {
+                    "agent": "agent-1",
+                    "pid": 4242,
+                    "boot_id": "boot-1",
+                    "process_start_identity": "boot-1:4242"
+                }
+            }),
+        )
+        .unwrap();
+        let starter_begin_request =
+            starter_begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let starter_started = py_tool_run_begin(
+            py,
+            path.to_str().unwrap(),
+            starter_begin_request,
+            1_000,
+        )
+        .unwrap();
+        let starter_started =
+            py_to_json_value(starter_started.bind(py)).unwrap();
+        assert_eq!(
+            starter_started["run"]["starter"]["agent"],
+            json!("agent-1")
+        );
+        let starter_id = starter_started["run"]["run_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let join_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": starter_id,
+                "joiner_kind": "monitor",
+                "joiner_id": "mon-1",
+                "agent": "agent-1",
+                "requested_by": "agent-1",
+                "now_ts": 41
+            }),
+        )
+        .unwrap();
+        let join_request = join_obj.bind(py).downcast::<PyDict>().unwrap();
+        let joined =
+            py_tool_run_join(py, path.to_str().unwrap(), join_request, 1_000)
+                .unwrap();
+        let joined = py_to_json_value(joined.bind(py)).unwrap();
+        assert_eq!(joined["outcome"], json!("joined"));
+        assert_eq!(joined["run"]["starter"]["agent"], json!("agent-1"));
+        assert_eq!(joined["run"]["join"]["kind"], json!("monitor"));
+        let release_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": starter_id,
+                "joiner_kind": "monitor",
+                "joiner_id": "mon-1",
+                "now_ts": 42
+            }),
+        )
+        .unwrap();
+        let release_request =
+            release_obj.bind(py).downcast::<PyDict>().unwrap();
+        let released = py_tool_run_release_join(
+            py,
+            path.to_str().unwrap(),
+            release_request,
+            1_000,
+        )
+        .unwrap();
+        let released = py_to_json_value(released.bind(py)).unwrap();
+        assert_eq!(released["outcome"], json!("released"));
+        assert!(released["run"].get("join").is_none());
     });
 }
 

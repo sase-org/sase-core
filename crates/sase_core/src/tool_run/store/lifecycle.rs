@@ -33,7 +33,7 @@ use std::time::Duration;
 
 pub fn begin(
     store_path: &Path,
-    request: ToolRunBeginRequestWire,
+    mut request: ToolRunBeginRequestWire,
     busy_timeout: Duration,
 ) -> Result<ToolRunBeginResultWire, ToolRunError> {
     validate_schema(request.schema_version)?;
@@ -55,7 +55,7 @@ pub fn begin(
             ));
         }
     }
-    validate_handoff_begin(&request, &definition_digest)?;
+    validate_handoff_begin(&mut request, &definition_digest)?;
     with_write_store(store_path, busy_timeout, |conn| {
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -476,9 +476,36 @@ fn identity_for_begin(
 }
 
 fn validate_handoff_begin(
-    request: &ToolRunBeginRequestWire,
+    request: &mut ToolRunBeginRequestWire,
     definition_digest: &str,
 ) -> Result<(), ToolRunError> {
+    if let Some(starter) = request.starter.as_mut() {
+        if !matches!(request.launch_mode, Some(ToolRunLaunchModeWire::Handoff))
+        {
+            return Err(ToolRunError::invalid(
+                "starter requires launch_mode handoff",
+            ));
+        }
+        let trimmed = starter.agent.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ToolRunError::invalid(
+                "starter agent must not be empty",
+            ));
+        }
+        starter.agent = trimmed;
+        if starter.pid <= 0 {
+            return Err(ToolRunError::invalid("starter pid must be positive"));
+        }
+    }
+    if let Some(envelope) = request.launch.as_ref() {
+        if let Some(mode) = envelope.continuation_mode.as_deref() {
+            if !matches!(mode, "always" | "never" | "known") {
+                return Err(ToolRunError::invalid(
+                    "continuation_mode must be one of always, never, known",
+                ));
+            }
+        }
+    }
     let is_handoff =
         matches!(request.launch_mode, Some(ToolRunLaunchModeWire::Handoff));
     if request.launch.is_some() && !is_handoff {
@@ -618,6 +645,12 @@ fn insert_run(
             request.process_start_identity.clone(),
         )
     };
+    let starter_json = request
+        .starter
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| ToolRunError::store(error.to_string()))?;
     tx.execute(
         "INSERT INTO runs(
             run_id, state, source, executor, attempt, tool_name,
@@ -626,11 +659,12 @@ fn insert_run(
             owner_id, parent_run_id, created_ts, running_ts, wrapper_pid,
             boot_id, process_start_identity, log_stdout_path, log_stderr_path,
             events_path, evidence_json, diagnostics_json,
-            launch_mode, launch_envelope_json, launcher_json, owner_log_path
+            launch_mode, launch_envelope_json, launcher_json, owner_log_path,
+            starter_json
          ) VALUES (
             ?1, ?2, 'native', 'inline', 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
-            '[]', ?24, ?25, ?26, ?27
+            '[]', ?24, ?25, ?26, ?27, ?28
          )",
         params![
             run_id,
@@ -664,6 +698,7 @@ fn insert_run(
             envelope_json,
             launcher_json,
             request.owner_log_path,
+            starter_json,
         ],
     )?;
     Ok(())

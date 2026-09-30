@@ -211,6 +211,135 @@ pub struct ToolRunLaunchEnvelopeWire {
     pub digest: Option<String>,
     #[serde(default)]
     pub adhoc: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunStarterWire {
+    pub agent: String,
+    pub pid: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start_identity: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRunJoinRecordWire {
+    pub kind: String,
+    pub id: String,
+    pub joined_ts: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunJoinOutcomeWire {
+    Joined,
+    Refused,
+}
+
+impl ToolRunJoinOutcomeWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunJoinRefusalWire {
+    NotDetached,
+    Settled,
+    StopRequested,
+    JoinedElsewhere,
+    AgentMismatch,
+}
+
+impl ToolRunJoinRefusalWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotDetached => "not_detached",
+            Self::Settled => "settled",
+            Self::StopRequested => "stop_requested",
+            Self::JoinedElsewhere => "joined_elsewhere",
+            Self::AgentMismatch => "agent_mismatch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunJoinRequestWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    pub joiner_kind: String,
+    pub joiner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunJoinResultWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub outcome: ToolRunJoinOutcomeWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ToolRunJoinRefusalWire>,
+    pub replayed: bool,
+    pub run: ToolRunWire,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunReleaseJoinOutcomeWire {
+    Released,
+    NotJoined,
+    JoinedElsewhere,
+}
+
+impl ToolRunReleaseJoinOutcomeWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::NotJoined => "not_joined",
+            Self::JoinedElsewhere => "joined_elsewhere",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRunReleaseJoinRequestWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub run_id: String,
+    pub joiner_kind: String,
+    pub joiner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ts: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolRunReleaseJoinResultWire {
+    #[serde(default = "handoff_schema_version")]
+    pub schema_version: u32,
+    pub outcome: ToolRunReleaseJoinOutcomeWire,
+    pub run: ToolRunWire,
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

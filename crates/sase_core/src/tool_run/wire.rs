@@ -723,6 +723,10 @@ pub struct ToolRunWire {
     pub stop_request: Option<super::handoff_wire::ToolRunStopRecordWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher: Option<super::handoff_wire::ToolRunProcessIdentityWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<super::handoff_wire::ToolRunStarterWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<super::handoff_wire::ToolRunJoinRecordWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -780,6 +784,8 @@ pub struct ToolRunBeginRequestWire {
     pub launch: Option<super::handoff_wire::ToolRunLaunchEnvelopeWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_log_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starter: Option<super::handoff_wire::ToolRunStarterWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

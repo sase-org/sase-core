@@ -22,7 +22,7 @@ mod triage;
 mod triage_stage;
 
 pub use failures::tool_run_failures;
-pub use handoff::{claim, request_stop};
+pub use handoff::{claim, join, release_join, request_stop};
 pub use lifecycle::{append_event, begin, finish, observe};
 pub(crate) use query::typical_duration_for;
 pub use query::{list_runs, show_run, store_stats, summarize};

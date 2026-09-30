@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS runs (
     terminal_cause TEXT,
     settled_by TEXT,
     stop_request_json TEXT,
+    starter_json TEXT,
+    join_json TEXT,
     owner_log_path TEXT,
     mutated_input INTEGER,
     fingerprint_before_json TEXT,
@@ -227,6 +229,8 @@ pub(super) fn ensure_child_observation_columns(
         ("terminal_cause", "TEXT"),
         ("settled_by", "TEXT"),
         ("stop_request_json", "TEXT"),
+        ("starter_json", "TEXT"),
+        ("join_json", "TEXT"),
         ("owner_log_path", "TEXT"),
     ] {
         if !existing.contains(column) {

@@ -183,6 +183,8 @@ fn old_shape_store_is_readable_and_migrates_on_write() {
     assert!(run.stop_request.is_none());
     assert!(run.launcher.is_none());
     assert!(run.logs.owner_log_path.is_none());
+    assert!(run.starter.is_none());
+    assert!(run.join.is_none());
     let listed = list_runs(
         &path,
         ToolRunListRequestWire {
@@ -204,6 +206,7 @@ fn old_shape_store_is_readable_and_migrates_on_write() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("new-1".into()),
             created_event_id: None,
@@ -249,6 +252,8 @@ fn old_shape_store_is_readable_and_migrates_on_write() {
         "terminal_cause",
         "settled_by",
         "stop_request_json",
+        "starter_json",
+        "join_json",
         "owner_log_path",
     ] {
         assert!(names.contains(&column.to_string()), "missing {column}");
@@ -263,6 +268,7 @@ fn new_shape_store_stays_loadable_by_old_query() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("compat-1".into()),
             created_event_id: None,
@@ -291,6 +297,7 @@ fn new_shape_store_stays_loadable_by_old_query() {
                 crate::tool_run::handoff_wire::ToolRunLaunchModeWire::Handoff,
             ),
             launch: Some(ToolRunLaunchEnvelopeWire {
+                continuation_mode: None,
                 argv: vec!["just".into(), "check".into()],
                 cwd: None,
                 tool_name: Some("check".into()),
@@ -505,6 +512,7 @@ fn old_queries_load_store_with_triage_rows() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("with-triage-1".into()),
             created_event_id: None,
@@ -620,6 +628,7 @@ fn old_retention_deletes_cascade_triage_rows() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("cascade-1".into()),
             created_event_id: None,
@@ -747,6 +756,7 @@ fn retention_reports_and_deletes_triage_and_stage_output() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("ret-1".into()),
             created_event_id: None,
@@ -833,6 +843,7 @@ fn retention_reports_and_deletes_triage_and_stage_output() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("ret-2".into()),
             created_event_id: None,

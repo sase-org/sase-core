@@ -115,6 +115,7 @@ fn begin_run(
     let result = begin(
         path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some(run_id.to_string()),
             created_event_id: None,

@@ -17,11 +17,15 @@ pub use catalog::{
 };
 pub use duration::{
     duration_calibration, duration_class_floor_seconds, duration_fit,
-    effective_duration_class, DurationCalibrationKindWire,
+    effective_duration_class, sync_wait_budget, DurationCalibrationKindWire,
     DurationCalibrationRequestWire, DurationCalibrationResponseWire,
     DurationCalibrationWire, DurationFitRequestWire, DurationFitResponseWire,
-    DURATION_CALIBRATION_MIN_SAMPLES, DURATION_CLASS_LONG_FLOOR_MS,
-    DURATION_CLASS_LONG_FLOOR_SECONDS, DURATION_CLASS_SHORT_FLOOR_SECONDS,
+    SyncWaitBudgetRequestWire, SyncWaitBudgetResponseWire,
+    SyncWaitBudgetSourceWire, DURATION_CALIBRATION_MIN_SAMPLES,
+    DURATION_CLASS_LONG_FLOOR_MS, DURATION_CLASS_LONG_FLOOR_SECONDS,
+    DURATION_CLASS_SHORT_FLOOR_SECONDS, SYNC_WAIT_BUDGET_MARGIN_CAP_SECONDS,
+    SYNC_WAIT_BUDGET_MARGIN_DENOMINATOR, SYNC_WAIT_BUDGET_MARGIN_FLOOR_SECONDS,
+    SYNC_WAIT_BUDGET_MARGIN_NUMERATOR,
 };
 pub use fingerprint::{canonicalize_tool_fingerprint, unknown_evidence};
 pub use handoff_wire::*;
@@ -52,11 +56,11 @@ pub use receipt::{
     RECEIPT_MAX_CHANGED_PATHS, RECEIPT_MAX_TTL_SECONDS, RECEIPT_POLICY_VERSION,
 };
 pub use store::{
-    append_event, begin, claim, finish, list_runs, observe, receipt_lookup,
-    receipt_settle, reconcile, request_stop, retention_apply,
-    retention_preview, show_run, store_stats, summarize, tool_run_failures,
-    tool_run_receipts_report, triage_record, triage_settle, triage_show,
-    triage_stage,
+    append_event, begin, claim, finish, join, list_runs, observe,
+    receipt_lookup, receipt_settle, reconcile, release_join, request_stop,
+    retention_apply, retention_preview, show_run, store_stats, summarize,
+    tool_run_failures, tool_run_receipts_report, triage_record, triage_settle,
+    triage_show, triage_stage,
 };
 pub use triage::*;
 pub use triage::{

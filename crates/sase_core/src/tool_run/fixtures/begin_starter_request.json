@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "run_id": "7f3a2b1c9d4e5f6a8b0c1d2e3f4a5b6c",
+  "tool_name": "check",
+  "definition": {
+    "schema_version": 1,
+    "name": "check",
+    "argv": ["just", "check"],
+    "description": "check",
+    "stages": "run_silent",
+    "inputs": ["Justfile"],
+    "env": [],
+    "args": "deny",
+    "fingerprint": {"repos": [], "toolchain": {}}
+  },
+  "display_argv": ["just", "check"],
+  "project": "sase",
+  "owner_kind": "proc",
+  "owner_id": "proc-123",
+  "wrapper_pid": 4242,
+  "boot_id": "boot-1",
+  "process_start_identity": "boot-1:4242",
+  "now_ts": 10,
+  "commit_running": false,
+  "launch_mode": "handoff",
+  "launch": {
+    "argv": ["just", "check"],
+    "cwd": "/tmp",
+    "tool_name": "check",
+    "extra_args": [],
+    "display_argv": ["just", "check"],
+    "definition": {
+      "schema_version": 1,
+      "name": "check",
+      "argv": ["just", "check"],
+      "description": "check",
+      "stages": "run_silent",
+      "inputs": ["Justfile"],
+      "env": [],
+      "args": "deny",
+      "fingerprint": {"repos": [], "toolchain": {}}
+    },
+    "adhoc": false
+  },
+  "owner_log_path": "logs/proc-123.log",
+  "starter": {
+    "agent": "agent-1",
+    "pid": 4242,
+    "boot_id": "boot-1",
+    "process_start_identity": "boot-1:4242"
+  }
+}

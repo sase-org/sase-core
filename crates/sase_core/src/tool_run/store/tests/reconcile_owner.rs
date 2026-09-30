@@ -16,6 +16,7 @@ use crate::tool_run::handoff_wire::ToolRunClaimRequestWire;
 
 fn envelope(digest: &str) -> ToolRunLaunchEnvelopeWire {
     ToolRunLaunchEnvelopeWire {
+        continuation_mode: None,
         argv: vec!["just".into(), "check".into()],
         cwd: None,
         tool_name: Some("check".into()),
@@ -34,6 +35,7 @@ fn begin_handoff(path: &std::path::Path, run_id: &str) {
     begin(
         path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some(run_id.to_string()),
             created_event_id: None,
@@ -525,6 +527,7 @@ fn foreground_lost_records_wrapper_lost_and_reap_only_unowned() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("f-1".into()),
             created_event_id: None,
@@ -591,6 +594,7 @@ fn foreground_lost_records_wrapper_lost_and_reap_only_unowned() {
     begin(
         &path,
         ToolRunBeginRequestWire {
+            starter: None,
             schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
             run_id: Some("f-2".into()),
             created_event_id: None,

@@ -26,6 +26,15 @@ fn schema_version() -> u32 {
     TOOL_RUN_WIRE_SCHEMA_VERSION
 }
 
+/// Numerator of the hard-ceiling margin fraction (15 percent).
+pub const SYNC_WAIT_BUDGET_MARGIN_NUMERATOR: u64 = 15;
+/// Denominator of the hard-ceiling margin fraction (15 percent).
+pub const SYNC_WAIT_BUDGET_MARGIN_DENOMINATOR: u64 = 100;
+/// Floor for the hard-ceiling margin, in seconds.
+pub const SYNC_WAIT_BUDGET_MARGIN_FLOOR_SECONDS: u64 = 90;
+/// Cap for the hard-ceiling margin, in seconds.
+pub const SYNC_WAIT_BUDGET_MARGIN_CAP_SECONDS: u64 = 300;
+
 /// Undeclared tools are `short`.
 pub fn effective_duration_class(
     class: Option<ToolDurationClassWire>,
@@ -242,6 +251,125 @@ pub fn duration_calibration(
         floor_seconds: duration_class_floor_seconds(class),
         summary,
     })))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncWaitBudgetSourceWire {
+    Hard,
+    Soft,
+}
+
+impl SyncWaitBudgetSourceWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hard => "hard",
+            Self::Soft => "soft",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncWaitBudgetRequestWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_ceiling_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncWaitBudgetResponseWire {
+    #[serde(default = "schema_version")]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SyncWaitBudgetSourceWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_ceiling_seconds: Option<u64>,
+}
+
+/// Budget a synchronous wait against hard and soft kill ceilings.
+///
+/// The hard ceiling keeps a 15 percent margin clamped to 90..=300 seconds,
+/// then budgets the later of `ceiling - margin` and `ceiling / 2`. The soft
+/// ceiling budgets itself with no margin. The smaller present budget wins;
+/// ties report `hard`. With neither ceiling there is no budget.
+pub fn sync_wait_budget(
+    request: SyncWaitBudgetRequestWire,
+) -> Result<SyncWaitBudgetResponseWire, ToolRunError> {
+    if request.schema_version != TOOL_RUN_WIRE_SCHEMA_VERSION {
+        return Err(ToolRunError::SchemaVersion {
+            expected: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            actual: request.schema_version,
+        });
+    }
+    if let Some(ceiling) = request.ceiling_seconds {
+        if ceiling == 0 {
+            return Err(ToolRunError::invalid(
+                "sync wait budget ceiling_seconds must be a positive number of seconds",
+            ));
+        }
+    }
+    if let Some(soft) = request.soft_ceiling_seconds {
+        if soft == 0 {
+            return Err(ToolRunError::invalid(
+                "sync wait budget soft_ceiling_seconds must be a positive number of seconds",
+            ));
+        }
+    }
+    let margin_seconds = request.ceiling_seconds.map(|ceiling| {
+        let raw = ceiling
+            .checked_mul(SYNC_WAIT_BUDGET_MARGIN_NUMERATOR)
+            .ok_or_else(|| {
+                ToolRunError::invalid(
+                    "sync wait budget ceiling_seconds overflows the margin",
+                )
+            })
+            .map(|product| product / SYNC_WAIT_BUDGET_MARGIN_DENOMINATOR)?;
+        Ok::<u64, ToolRunError>(raw.clamp(
+            SYNC_WAIT_BUDGET_MARGIN_FLOOR_SECONDS,
+            SYNC_WAIT_BUDGET_MARGIN_CAP_SECONDS,
+        ))
+    });
+    let margin_seconds = margin_seconds.transpose()?;
+    let hard_budget = request.ceiling_seconds.map(|ceiling| {
+        let margin = margin_seconds.unwrap_or(0);
+        let after_margin = ceiling.saturating_sub(margin);
+        after_margin.max(ceiling / 2)
+    });
+    let soft_budget = request.soft_ceiling_seconds;
+    let (budget_seconds, source) = match (hard_budget, soft_budget) {
+        (None, None) => (None, None),
+        (Some(hard), None) => {
+            (Some(hard), Some(SyncWaitBudgetSourceWire::Hard))
+        }
+        (None, Some(soft)) => {
+            (Some(soft), Some(SyncWaitBudgetSourceWire::Soft))
+        }
+        (Some(hard), Some(soft)) => {
+            if hard <= soft {
+                (Some(hard), Some(SyncWaitBudgetSourceWire::Hard))
+            } else {
+                (Some(soft), Some(SyncWaitBudgetSourceWire::Soft))
+            }
+        }
+    };
+    Ok(SyncWaitBudgetResponseWire {
+        schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+        budget_seconds,
+        source,
+        margin_seconds,
+        ceiling_seconds: request.ceiling_seconds,
+        soft_ceiling_seconds: request.soft_ceiling_seconds,
+    })
 }
 
 fn format_duration_ms(ms: u64) -> String {
@@ -465,6 +593,111 @@ mod tests {
             duration_class: None,
             typical_duration_ms: None,
             typical_sample_count: 0,
+        });
+        match schema {
+            Err(ToolRunError::SchemaVersion { .. }) => {}
+            other => panic!("expected schema error, got {other:?}"),
+        }
+    }
+
+    fn budget(
+        ceiling_seconds: Option<u64>,
+        soft_ceiling_seconds: Option<u64>,
+    ) -> SyncWaitBudgetResponseWire {
+        sync_wait_budget(SyncWaitBudgetRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            ceiling_seconds,
+            soft_ceiling_seconds,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn sync_wait_budget_pins_the_table() {
+        let hard_600 = budget(Some(600), None);
+        assert_eq!(hard_600.budget_seconds, Some(510));
+        assert_eq!(hard_600.source, Some(SyncWaitBudgetSourceWire::Hard));
+        assert_eq!(hard_600.margin_seconds, Some(90));
+
+        let hard_14400 = budget(Some(14_400), None);
+        assert_eq!(hard_14400.budget_seconds, Some(14_100));
+        assert_eq!(hard_14400.source, Some(SyncWaitBudgetSourceWire::Hard));
+        assert_eq!(hard_14400.margin_seconds, Some(300));
+
+        let hard_60 = budget(Some(60), None);
+        assert_eq!(hard_60.budget_seconds, Some(30));
+        assert_eq!(hard_60.margin_seconds, Some(90));
+
+        let hard_1 = budget(Some(1), None);
+        assert_eq!(hard_1.budget_seconds, Some(0));
+        assert_eq!(hard_1.margin_seconds, Some(90));
+
+        let soft_only = budget(None, Some(1200));
+        assert_eq!(soft_only.budget_seconds, Some(1200));
+        assert_eq!(soft_only.source, Some(SyncWaitBudgetSourceWire::Soft));
+        assert_eq!(soft_only.margin_seconds, None);
+
+        let soft_wins = budget(Some(600), Some(200));
+        assert_eq!(soft_wins.budget_seconds, Some(200));
+        assert_eq!(soft_wins.source, Some(SyncWaitBudgetSourceWire::Soft));
+        assert_eq!(soft_wins.margin_seconds, Some(90));
+
+        let tie_reports_hard = budget(Some(600), Some(510));
+        assert_eq!(tie_reports_hard.budget_seconds, Some(510));
+        assert_eq!(
+            tie_reports_hard.source,
+            Some(SyncWaitBudgetSourceWire::Hard)
+        );
+
+        let hard_wins = budget(Some(600), Some(1000));
+        assert_eq!(hard_wins.budget_seconds, Some(510));
+        assert_eq!(hard_wins.source, Some(SyncWaitBudgetSourceWire::Hard));
+
+        let neither = budget(None, None);
+        assert_eq!(neither.budget_seconds, None);
+        assert_eq!(neither.source, None);
+        assert_eq!(neither.margin_seconds, None);
+        assert_eq!(neither.ceiling_seconds, None);
+        assert_eq!(neither.soft_ceiling_seconds, None);
+    }
+
+    #[test]
+    fn sync_wait_budget_echoes_positive_ceilings() {
+        let response = budget(Some(600), Some(200));
+        assert_eq!(response.ceiling_seconds, Some(600));
+        assert_eq!(response.soft_ceiling_seconds, Some(200));
+    }
+
+    #[test]
+    fn sync_wait_budget_rejects_zero_and_unknown_schema() {
+        for request in [
+            SyncWaitBudgetRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                ceiling_seconds: Some(0),
+                soft_ceiling_seconds: None,
+            },
+            SyncWaitBudgetRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                ceiling_seconds: None,
+                soft_ceiling_seconds: Some(0),
+            },
+            SyncWaitBudgetRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                ceiling_seconds: Some(0),
+                soft_ceiling_seconds: Some(0),
+            },
+            SyncWaitBudgetRequestWire {
+                schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+                ceiling_seconds: Some(0),
+                soft_ceiling_seconds: Some(200),
+            },
+        ] {
+            assert!(sync_wait_budget(request).is_err());
+        }
+        let schema = sync_wait_budget(SyncWaitBudgetRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION + 1,
+            ceiling_seconds: None,
+            soft_ceiling_seconds: None,
         });
         match schema {
             Err(ToolRunError::SchemaVersion { .. }) => {}

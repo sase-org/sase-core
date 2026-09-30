@@ -6,8 +6,8 @@
 
 use super::super::catalog::extra_args_digest;
 use super::super::handoff_wire::{
-    ToolRunLaunchEnvelopeWire, ToolRunProcessIdentityWire,
-    ToolRunStopRecordWire,
+    ToolRunJoinRecordWire, ToolRunLaunchEnvelopeWire,
+    ToolRunProcessIdentityWire, ToolRunStarterWire, ToolRunStopRecordWire,
 };
 use super::super::wire::{
     ToolAttemptWire, ToolLoadSampleWire, ToolRunEventWire, ToolRunExecutorWire,
@@ -359,6 +359,8 @@ pub(super) fn load_run(
     let settled_by_projection = projection("settled_by");
     let stop_request_projection = projection("stop_request_json");
     let owner_log_projection = projection("owner_log_path");
+    let starter_projection = projection("starter_json");
+    let join_projection = projection("join_json");
     let sql = format!(
         "SELECT run_id, state, source, executor, attempt, tool_name,
                 definition_digest, extra_args_digest, display_argv_json,
@@ -373,7 +375,8 @@ pub(super) fn load_run(
                 diagnostics_json, {launch_mode_projection},
                 {launcher_projection}, {terminal_cause_projection},
                 {settled_by_projection}, {stop_request_projection},
-                {owner_log_projection}
+                {owner_log_projection}, {starter_projection},
+                {join_projection}
          FROM runs WHERE run_id = ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -394,6 +397,8 @@ pub(super) fn load_run(
     let settled_by: Option<String> = row.get(43)?;
     let stop_request_json: Option<String> = row.get(44)?;
     let owner_log_path: Option<String> = row.get(45)?;
+    let starter_json: Option<String> = row.get(46)?;
+    let join_json: Option<String> = row.get(47)?;
     let mut diagnostics: Vec<String> =
         serde_json::from_str(&diagnostics_raw)
             .map_err(|error| ToolRunError::store(error.to_string()))?;
@@ -410,6 +415,20 @@ pub(super) fn load_run(
             }
         }
     };
+    let (starter, starter_diagnostic) = parse_stored_record::<ToolRunStarterWire>(
+        starter_json,
+        "stored starter was unreadable",
+    );
+    if let Some(diagnostic) = starter_diagnostic {
+        diagnostics.push(diagnostic);
+    }
+    let (join, join_diagnostic) = parse_stored_record::<ToolRunJoinRecordWire>(
+        join_json,
+        "stored join was unreadable",
+    );
+    if let Some(diagnostic) = join_diagnostic {
+        diagnostics.push(diagnostic);
+    }
     let launcher = launcher_json.as_deref().and_then(|raw| {
         serde_json::from_str::<ToolRunProcessIdentityWire>(raw).ok()
     });
@@ -468,7 +487,25 @@ pub(super) fn load_run(
         settled_by,
         stop_request,
         launcher,
+        starter,
+        join,
     }))
+}
+
+fn parse_stored_record<T: serde::de::DeserializeOwned>(
+    raw: Option<String>,
+    unreadable: &str,
+) -> (Option<T>, Option<String>) {
+    let Some(raw) = raw else {
+        return (None, None);
+    };
+    if raw.trim() == "null" {
+        return (None, None);
+    }
+    match serde_json::from_str::<T>(&raw) {
+        Ok(record) => (Some(record), None),
+        Err(_) => (None, Some(unreadable.to_string())),
+    }
 }
 
 fn load_attempt(
