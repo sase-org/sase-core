@@ -503,12 +503,12 @@ fn combined_at(
     total += ctx_mass;
     support += word_distinct;
     if let Some(name) = project {
-        let (proj_mass, proj_distinct) =
-            builder.project_successor_stats(name, refs, word);
+        // Project partition is a subset of the same rows: mass only, never
+        // distinct, mirroring production `combined_at_order`.
+        let (proj_mass, _) = builder.project_successor_stats(name, refs, word);
         let (proj_total, _) = builder.project_context_totals(name, refs);
         mass += tuning.project_boost * proj_mass;
         total += tuning.project_boost * proj_total;
-        support += proj_distinct;
     }
     if let Some((counts, weight)) = draft {
         let (draft_mass, draft_distinct) = counts.pair(suffix, word);
@@ -540,10 +540,8 @@ fn totals_at(
     let mut total = ctx_mass;
     let mut distinct = ctx_distinct;
     if let Some(name) = project {
-        let (proj_total, proj_distinct) =
-            builder.project_context_totals(name, refs);
+        let (proj_total, _) = builder.project_context_totals(name, refs);
         total += tuning.project_boost * proj_total;
-        distinct += proj_distinct;
     }
     if let Some((counts, weight)) = draft {
         let (draft_total, draft_distinct) = counts.totals(suffix);

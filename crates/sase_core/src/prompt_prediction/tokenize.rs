@@ -3,12 +3,13 @@
 //! Compile and query share this tokenizer so context extraction always
 //! matches training. Words carry a casefolded key plus a display surface;
 //! everything else is a boundary. Excluded regions (frontmatter, fenced
-//! code, inline code, Jinja, segment separators, pasted blocks) are hard
-//! boundaries: their content yields no tokens and a cursor inside an
-//! unclosed one blocks prediction.
+//! code, inline code, Jinja, alternation spans, segment separators, pasted
+//! blocks) are hard boundaries: their content yields no tokens and a cursor
+//! inside an unclosed one blocks prediction.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
+use crate::editor::alternation::{alternation_body_ranges, scan_alternations};
 use crate::fenced_code::fenced_block_ranges;
 use crate::prompt_literals::inline_code_ranges;
 
@@ -19,6 +20,7 @@ pub const SEQUENCE_START: &str = "<s>";
 pub const BLOCKED_UNCLOSED_FENCE: &str = "unclosed_fence";
 pub const BLOCKED_UNCLOSED_CODE_SPAN: &str = "unclosed_code_span";
 pub const BLOCKED_UNCLOSED_JINJA: &str = "unclosed_jinja";
+pub const BLOCKED_UNCLOSED_ALTERNATION: &str = "unclosed_alternation";
 pub const BLOCKED_FRONTMATTER: &str = "frontmatter";
 pub const BLOCKED_NO_WORD_CONTEXT: &str = "no_word_context";
 pub const BLOCKED_STRUCTURAL_TAIL: &str = "structural_tail";
@@ -68,6 +70,11 @@ pub enum CursorContext {
 }
 
 /// Tokenize `text_before_cursor` for a prediction query.
+///
+/// Query time keeps trailing empty sequences as structural-tail markers so a
+/// mid-sentence structural token, a closed excluded span, or a `:`/`;`
+/// clause boundary blocks instead of falling back to earlier words. Training
+/// (`tokenize_prompt_text`) still drops those tails.
 pub fn tokenize_cursor_text(text: &str) -> CursorContext {
     if cursor_in_frontmatter(text) {
         return CursorContext::Blocked {
@@ -89,12 +96,17 @@ pub fn tokenize_cursor_text(text: &str) -> CursorContext {
             reason: BLOCKED_UNCLOSED_JINJA,
         };
     }
+    if has_unclosed_alternation(text) {
+        return CursorContext::Blocked {
+            reason: BLOCKED_UNCLOSED_ALTERNATION,
+        };
+    }
     let excluded = excluded_ranges(text);
     if cursor_in_excluded(text.len(), &excluded) {
         // Closed excluded region touching the cursor (e.g. cursor right
-        // after a code span or Jinja tag with no trailing word) behaves
-        // like a structural tail rather than a word context.
-        let sequences = tokenize_with_excluded(text, &excluded);
+        // after a code span, Jinja tag, or alternation span with no trailing
+        // word) blocks rather than falling back to earlier words.
+        let sequences = tokenize_with_excluded_keep_tail(text, &excluded);
         let Some(last) = sequences.last() else {
             return CursorContext::Blocked {
                 reason: BLOCKED_NO_WORD_CONTEXT,
@@ -102,12 +114,21 @@ pub fn tokenize_cursor_text(text: &str) -> CursorContext {
         };
         if last.tokens.is_empty() {
             return CursorContext::Blocked {
-                reason: BLOCKED_NO_WORD_CONTEXT,
+                reason: BLOCKED_STRUCTURAL_TAIL,
             };
         }
     }
-    let sequences = tokenize_with_excluded(text, &excluded);
+    let sequences = tokenize_with_excluded_keep_tail(text, &excluded);
     finish_cursor_context(text, sequences)
+}
+
+/// True when `text` holds an unclosed alternation opener outside literal
+/// zones. Alternation scanners already skip frontmatter, fenced/inline code,
+/// and Jinja, so an alternation inside a code span stays inert.
+fn has_unclosed_alternation(text: &str) -> bool {
+    scan_alternations(text)
+        .iter()
+        .any(|record| record.close.is_none())
 }
 
 fn finish_cursor_context(
@@ -153,6 +174,10 @@ fn finish_cursor_context(
 }
 
 /// Byte ranges of excluded regions (closed only).
+///
+/// Alternation spans (`%{...}`, `%(...)`, `%alt(...)`) are hard boundaries
+/// at both compile and query time. The scanner already skips markers inside
+/// literal zones, so an alternation inside a code span stays inert.
 fn excluded_ranges(text: &str) -> Vec<(usize, usize)> {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     if let Some(range) = frontmatter_range(text) {
@@ -166,6 +191,7 @@ fn excluded_ranges(text: &str) -> Vec<(usize, usize)> {
         ranges.push((start, end));
     }
     ranges.extend(jinja_ranges(text));
+    ranges.extend(alternation_body_ranges(text));
     ranges.extend(pasted_block_ranges(text));
     // Segment separators are line-based; mark the whole line excluded.
     ranges.extend(segment_separator_ranges(text));
@@ -360,6 +386,28 @@ fn tokenize_with_excluded(
     text: &str,
     excluded: &[(usize, usize)],
 ) -> Vec<ProseSequence> {
+    let mut sequences = tokenize_with_excluded_keep_tail(text, excluded);
+    // Training keeps a single trailing empty non-started sequence dropped so
+    // row compilation never ends on a structural tail. Query time uses the
+    // keep-tail form directly so those tails block.
+    while sequences.len() > 1
+        && sequences
+            .last()
+            .is_some_and(|seq| seq.tokens.is_empty() && !seq.started)
+    {
+        sequences.pop();
+    }
+    sequences
+}
+
+/// Tokenize without dropping trailing empty sequences. Query time uses this
+/// so structural tails, clause boundaries, and closed excluded spans stay
+/// visible to `finish_cursor_context` instead of falling back to earlier
+/// words.
+fn tokenize_with_excluded_keep_tail(
+    text: &str,
+    excluded: &[(usize, usize)],
+) -> Vec<ProseSequence> {
     let mut sequences: Vec<ProseSequence> = vec![ProseSequence {
         tokens: Vec::new(),
         started: true,
@@ -372,15 +420,6 @@ fn tokenize_with_excluded(
         let body = body.strip_suffix('\r').unwrap_or(body);
         process_line(body, line_start, excluded, &mut sequences);
         offset += line_len;
-    }
-    // Drop a single trailing empty sequence; keep empties that mark a
-    // structural tail for blocked detection.
-    while sequences.len() > 1
-        && sequences
-            .last()
-            .is_some_and(|seq| seq.tokens.is_empty() && !seq.started)
-    {
-        sequences.pop();
     }
     sequences
 }
@@ -580,22 +619,28 @@ enum TrailingBoundary {
 }
 
 fn split_trailing_boundary(raw: &str) -> (&str, TrailingBoundary) {
-    if let Some(stripped) = raw.strip_suffix("…") {
+    // Strip trailing closers before checking for sentence-final punctuation
+    // so `this.)` and `"really?"` keep their sentence boundary.
+    let text = raw.trim_end_matches([')', ']', '"', '\'', '”', '’']);
+    if text.is_empty() {
+        return ("", TrailingBoundary::None);
+    }
+    if let Some(stripped) = text.strip_suffix("…") {
         return (stripped, TrailingBoundary::Sentence);
     }
-    let bytes = raw.as_bytes();
+    let bytes = text.as_bytes();
     if bytes.is_empty() {
-        return (raw, TrailingBoundary::None);
+        return (text, TrailingBoundary::None);
     }
     let last = bytes[bytes.len() - 1] as char;
     match last {
         '.' | '?' | '!' => (
-            raw[..raw.len() - 1].trim_end_matches(['.', '?', '!']),
+            text[..text.len() - 1].trim_end_matches(['.', '?', '!']),
             TrailingBoundary::Sentence,
         ),
-        ':' | ';' => (&raw[..raw.len() - 1], TrailingBoundary::Clause),
-        ',' => (&raw[..raw.len() - 1], TrailingBoundary::None),
-        _ => (raw, TrailingBoundary::None),
+        ':' | ';' => (&text[..text.len() - 1], TrailingBoundary::Clause),
+        ',' => (&text[..text.len() - 1], TrailingBoundary::None),
+        _ => (text, TrailingBoundary::None),
     }
 }
 
@@ -739,7 +784,9 @@ fn is_secret_like(word: &str) -> bool {
 /// when every occurrence is sequence-initial, lowercases the first letter
 /// unless the word is all caps (2+ letters) or has an interior capital.
 pub fn canonical_surface(key: &str, votes: &[(String, f64, bool)]) -> String {
-    let mut weighted: HashMap<&str, f64> = HashMap::new();
+    // Deterministic: BTreeMap iterates in surface order, and exact-mass ties
+    // keep the lexicographically smallest surface so compiles never flip.
+    let mut weighted: BTreeMap<&str, f64> = BTreeMap::new();
     let mut non_initial_mass = 0.0;
     for (surface, weight, initial) in votes {
         if !initial {
@@ -750,7 +797,14 @@ pub fn canonical_surface(key: &str, votes: &[(String, f64, bool)]) -> String {
     if non_initial_mass > 0.0 {
         let mut best: Option<(&str, f64)> = None;
         for (surface, mass) in weighted {
-            if best.is_none_or(|(_, m)| mass > m) {
+            let replace = match best {
+                None => true,
+                Some((best_surface, best_mass)) => {
+                    mass > best_mass
+                        || (mass == best_mass && surface < best_surface)
+                }
+            };
+            if replace {
                 best = Some((surface, mass));
             }
         }
@@ -1005,5 +1059,156 @@ mod tests {
             canonical_surface("api", &[("API".to_string(), 1.0, true)]),
             "API"
         );
+    }
+
+    #[test]
+    fn structural_tails_block_at_query_time() {
+        for text in [
+            "please look at src/foo.rs",
+            "please look at #gh:sase",
+            "please look at `x`",
+            "please look at {{ x }}",
+            "please look at %{a,b}",
+            "please look at this:",
+            "please look at this;",
+        ] {
+            match tokenize_cursor_text(text) {
+                CursorContext::Blocked { .. } => {}
+                CursorContext::Ready { context, .. } => {
+                    panic!("expected block for {text:?}, got {context:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn word_with_trailing_space_stays_ready() {
+        match tokenize_cursor_text("help me ") {
+            CursorContext::Ready { context_words, .. } => {
+                assert_eq!(context_words, vec!["help", "me"]);
+            }
+            CursorContext::Blocked { reason } => {
+                panic!("blocked: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn closing_punctuation_keeps_sentence_boundary() {
+        for text in ["Fix it.", "Fix it.)", "Say \"really?\"", "Wait this.)"] {
+            match tokenize_cursor_text(text) {
+                CursorContext::Blocked { .. } => {}
+                CursorContext::Ready { context, .. } => {
+                    panic!("expected block for {text:?}, got {context:?}")
+                }
+            }
+        }
+        // Training still splits on the boundary.
+        let seqs = tokenize_prompt_text("Fix it.) Then review");
+        assert!(seqs.len() >= 2);
+        assert_eq!(seqs.last().expect("last").tokens[0].key, "then");
+    }
+
+    #[test]
+    fn alternation_spans_are_excluded_and_unclosed_blocks() {
+        // Closed alternation touching the cursor blocks.
+        match tokenize_cursor_text("please look at %{a,b}") {
+            CursorContext::Blocked { .. } => {}
+            CursorContext::Ready { context, .. } => {
+                panic!("expected block, got {context:?}")
+            }
+        }
+        // Spaced alternation alone holds no words.
+        match tokenize_cursor_text("%{fix the bug | add a test}") {
+            CursorContext::Blocked { .. } => {}
+            CursorContext::Ready { context, .. } => {
+                panic!("expected block, got {context:?}")
+            }
+        }
+        // Unclosed opener blocks with its own reason.
+        assert_eq!(
+            tokenize_cursor_text("%{fix the "),
+            CursorContext::Blocked {
+                reason: BLOCKED_UNCLOSED_ALTERNATION
+            }
+        );
+        // Training excludes alternation bodies.
+        let all: Vec<String> = tokenize_prompt_text("fix %{a,b} now")
+            .iter()
+            .flat_map(|s| s.tokens.iter().map(|t| t.key.clone()))
+            .collect();
+        assert!(all.contains(&"fix".to_string()));
+        assert!(all.contains(&"now".to_string()));
+        assert!(!all.contains(&"a".to_string()));
+        assert!(!all.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn alternation_inside_code_span_stays_inert() {
+        assert!(
+            !has_unclosed_alternation("use `%{a | b}` today"),
+            "code span must hide the opener"
+        );
+        match tokenize_cursor_text("use `%{a|b}` today") {
+            CursorContext::Ready { context_words, .. } => {
+                assert!(context_words.contains(&"today".to_string()));
+            }
+            CursorContext::Blocked { reason } => {
+                panic!("blocked: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_contexts_at_cursor() {
+        assert_eq!(
+            tokenize_cursor_text("---\ntitle: hi\n"),
+            CursorContext::Blocked {
+                reason: BLOCKED_FRONTMATTER
+            }
+        );
+        assert_eq!(
+            tokenize_cursor_text("explain `code"),
+            CursorContext::Blocked {
+                reason: BLOCKED_UNCLOSED_CODE_SPAN
+            }
+        );
+        assert_eq!(
+            tokenize_cursor_text("explain\n```python\nprint"),
+            CursorContext::Blocked {
+                reason: BLOCKED_UNCLOSED_FENCE
+            }
+        );
+    }
+
+    #[test]
+    fn pasted_and_separator_lines_are_boundaries() {
+        let pasted = format!("fix the bug\n{}\nreview now", "x ".repeat(500));
+        let seqs = tokenize_prompt_text(&pasted);
+        let all: Vec<String> = seqs
+            .iter()
+            .flat_map(|s| s.tokens.iter().map(|t| t.key.clone()))
+            .collect();
+        assert!(all.contains(&"fix".to_string()));
+        assert!(all.contains(&"review".to_string()));
+        let sep = "fix the bug\n---\nreview now";
+        let seqs = tokenize_prompt_text(sep);
+        assert!(seqs.len() >= 2);
+    }
+
+    #[test]
+    fn canonical_surface_tie_is_deterministic() {
+        // Equal mass ties keep the lexicographically smallest surface.
+        for _ in 0..20 {
+            let surface = canonical_surface(
+                "fix",
+                &[
+                    ("Fix".to_string(), 1.0, false),
+                    ("FIX".to_string(), 1.0, false),
+                    ("fix".to_string(), 1.0, false),
+                ],
+            );
+            assert_eq!(surface, "FIX");
+        }
     }
 }

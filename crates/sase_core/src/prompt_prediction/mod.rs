@@ -33,8 +33,9 @@ pub use replay::evaluate_prompt_prediction_replay;
 pub use tokenize::{
     canonical_surface, classify_word, tokenize_cursor_text,
     tokenize_prompt_text, BLOCKED_FRONTMATTER, BLOCKED_NO_WORD_CONTEXT,
-    BLOCKED_STRUCTURAL_TAIL, BLOCKED_UNCLOSED_CODE_SPAN,
-    BLOCKED_UNCLOSED_FENCE, BLOCKED_UNCLOSED_JINJA, SEQUENCE_START,
+    BLOCKED_STRUCTURAL_TAIL, BLOCKED_UNCLOSED_ALTERNATION,
+    BLOCKED_UNCLOSED_CODE_SPAN, BLOCKED_UNCLOSED_FENCE, BLOCKED_UNCLOSED_JINJA,
+    SEQUENCE_START,
 };
 pub use wire::{
     PromptPredictionCandidateWire, PromptPredictionCorpusOptionsWire,

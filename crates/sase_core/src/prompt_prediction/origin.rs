@@ -3,7 +3,18 @@
 //! Rows with `origin == "generated"` are dropped by the compiler; rows with
 //! no origin pass through this heuristic, which marks machine-generated
 //! prompts from their template markers. Every marker is a named const with a
-//! test, inventoried from the sase repo's `src/sase/xprompts/` templates.
+//! test, inventoried from the sase repo:
+//!
+//! - `#bd/work_phase_bead`, `#bd/work_task`, `#bd/land_epic` from
+//!   `src/sase/agent/launch_cwd_bead_work.py` (every bead-work segment
+//!   references exactly one bead xprompt)
+//! - `%id(` from `src/sase/xprompts/tribe.md` (`%id(tribe=...)`) and the
+//!   bead-work `%id` render assertions
+//! - `%wait(` from `src/sase/xprompts/t.md` (`%wait(time=...)`)
+//! - `SASE single-turn instructions for` from
+//!   `src/sase/llm_provider/muse.py` (also codex/claude variants)
+//! - `clan=` with `%id(` from `src/sase/xprompts/skills/sase_run.md`
+//!   (`%id(worker, clan=...)`, `%clan(...)`)
 
 /// Bead-work segment reference: every `sase bead work` segment references
 /// exactly one bead xprompt through this marker.
@@ -18,10 +29,6 @@ pub const MARKER_BEAD_PREFIX: &str = "#bd/";
 pub const MARKER_ID_DIRECTIVE: &str = "%id(";
 /// Deferred launch directive; a generated prompt starts with this.
 pub const MARKER_WAIT_DIRECTIVE: &str = "%wait(";
-/// Multi-prompt swarm expansion marker from the xprompt swarm templates.
-pub const MARKER_SWARM: &str = "%swarm(";
-/// Lead template marker from the lead orchestration templates.
-pub const MARKER_LEAD: &str = "%lead(";
 /// Single-turn agent instructions header stamped onto generated prompts.
 pub const MARKER_SINGLE_TURN: &str = "SASE single-turn instructions for";
 /// Agent clan declaration used by generated member prompts.
@@ -32,13 +39,16 @@ pub fn looks_generated(text: &str) -> bool {
     if text.contains(MARKER_WORK_PHASE_BEAD) {
         return true;
     }
+    if text.contains(MARKER_WORK_TASK) {
+        return true;
+    }
+    if text.contains(MARKER_LAND_EPIC) {
+        return true;
+    }
     if text.contains(MARKER_BEAD_PREFIX) && text.contains(MARKER_ID_DIRECTIVE) {
         return true;
     }
     if text.trim_start().starts_with(MARKER_WAIT_DIRECTIVE) {
-        return true;
-    }
-    if text.contains(MARKER_SWARM) || text.contains(MARKER_LEAD) {
         return true;
     }
     if text.contains(MARKER_SINGLE_TURN) {
@@ -59,6 +69,16 @@ mod tests {
     #[test]
     fn work_phase_bead_token_is_generated() {
         assert!(looks_generated("Do the work for #bd/work_phase_bead now"));
+    }
+
+    #[test]
+    fn work_task_token_is_generated() {
+        assert!(looks_generated("Do the work for #bd/work_task now"));
+    }
+
+    #[test]
+    fn land_epic_token_is_generated() {
+        assert!(looks_generated("Land this #bd/land_epic now"));
     }
 
     #[test]
@@ -87,12 +107,6 @@ mod tests {
     #[test]
     fn mid_text_wait_is_not_enough_alone() {
         assert!(!looks_generated("I waited %wait(around) for lunch"));
-    }
-
-    #[test]
-    fn swarm_and_lead_markers_are_generated() {
-        assert!(looks_generated("expand %swarm(workers=4) now"));
-        assert!(looks_generated("run %lead(plan) for this"));
     }
 
     #[test]

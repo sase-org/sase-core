@@ -6,6 +6,8 @@ const ROWS_JSON: &str = r#"[
 {"text": "help me implement the plan", "epoch_seconds": 100, "project": "sase", "origin": "typed", "cancelled": false},
 {"text": "help me implement the fix", "epoch_seconds": 101, "project": "sase", "origin": "typed", "cancelled": false},
 {"text": "help me implement the docs", "epoch_seconds": 102, "project": "sase", "origin": "typed", "cancelled": false},
+{"text": "help me implement the test", "epoch_seconds": 104, "project": "sase", "origin": "typed", "cancelled": false},
+{"text": "help me implement the code", "epoch_seconds": 105, "project": "sase", "origin": "typed", "cancelled": false},
 {"text": "can you help me review this", "epoch_seconds": 103, "project": "sase", "origin": "typed", "cancelled": false}
 ]"#;
 
@@ -59,7 +61,7 @@ fn prompt_prediction_corpus_compiles_and_reports_stats() {
         let stats = corpus.call_method0("stats").unwrap();
         let value = py_to_json_value(stats.as_any()).unwrap();
         assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["rows_used"], 4);
+        assert_eq!(value["rows_used"], 6);
         assert_eq!(value["rows_generated_skipped"], 0);
 
         let bad = module
@@ -179,11 +181,11 @@ fn prompt_prediction_replay_reports_aggregates_only() {
             .unwrap();
         let value = py_to_json_value(report.as_any()).unwrap();
         assert_eq!(value["schema_version"], 1);
-        assert_eq!(value["rows_total"], 4);
-        assert_eq!(value["rows_typed"], 4);
-        // 40% of 4 rows warm the builder; the rest are scored.
-        assert_eq!(value["rows_warmed"], 1);
-        assert_eq!(value["rows_scored"], 3);
+        assert_eq!(value["rows_total"], 6);
+        assert_eq!(value["rows_typed"], 6);
+        // 40% of 6 rows warm the builder; the rest are scored.
+        assert_eq!(value["rows_warmed"], 2);
+        assert_eq!(value["rows_scored"], 4);
         assert!(value["positions_total"].as_u64().unwrap() > 0);
         assert_eq!(value["cohorts"].as_array().unwrap().len(), 3);
         assert!(!value["sweep"].as_array().unwrap().is_empty());

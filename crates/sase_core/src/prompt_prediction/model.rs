@@ -148,10 +148,24 @@ impl PromptPredictionModel {
     }
 
     /// Rank current-word completions for a typed prefix.
+    ///
+    /// A structural tail before the prefix (a structural token, a closed
+    /// excluded span, or a `:`/`;` boundary) yields no matches, mirroring
+    /// the `predict` query-time block.
     pub fn rank_prefix(
         &self,
         request: &PromptPrefixRankRequestWire,
     ) -> PromptPrefixRankResultWire {
+        if matches!(
+            tokenize_cursor_text(&request.text_before_word),
+            CursorContext::Blocked { .. }
+        ) {
+            return PromptPrefixRankResultWire {
+                schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+                context_words: Vec::new(),
+                matches: Vec::new(),
+            };
+        }
         let sequences = tokenize_prompt_text(&request.text_before_word);
         let mut context: Vec<String> = Vec::new();
         if let Some(last) = sequences.last() {
@@ -674,5 +688,74 @@ mod tests {
         req.max_words = 2;
         let result = model.predict(&req);
         assert!(result.ghost.len() <= 2, "ghost={:?}", result.ghost);
+    }
+
+    #[test]
+    fn predict_blocks_structural_and_alternation_tails() {
+        let model = model_for(&[
+            "please look at home now",
+            "please look at home today",
+            "please look at home fast",
+            "please look at home soon",
+        ]);
+        for text in [
+            "please look at src/foo.rs",
+            "please look at #gh:sase",
+            "please look at `x`",
+            "please look at {{ x }}",
+            "please look at %{a,b}",
+            "please look at this:",
+            "%{fix the ",
+        ] {
+            let result = model.predict(&request(text));
+            assert!(
+                result.blocked_reason.is_some(),
+                "expected block for {text:?}"
+            );
+            assert!(!result.confident);
+            assert!(result.ghost.is_empty());
+        }
+    }
+
+    #[test]
+    fn rank_prefix_blocks_structural_and_alternation_tails() {
+        let model = model_for(&[
+            "help me implement it",
+            "help me implement it now",
+            "help me implement it today",
+            "help me implement it fast",
+        ]);
+        for text in [
+            "please look at src/foo.rs",
+            "please look at #gh:sase",
+            "please look at `x`",
+            "please look at {{ x }}",
+            "please look at %{a,b}",
+            "please look at this:",
+            "%{fix the ",
+        ] {
+            let result = model.rank_prefix(&PromptPrefixRankRequestWire {
+                schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+                text_before_word: text.to_string(),
+                prefix: "impl".to_string(),
+                project: None,
+                limit: 5,
+            });
+            assert!(
+                result.matches.is_empty(),
+                "expected no matches for {text:?}, got {:?}",
+                result.matches
+            );
+        }
+    }
+
+    #[test]
+    fn predict_blocks_backtick_and_frontmatter_at_cursor() {
+        let model = model_for(&["help me implement it"]);
+        for text in ["explain `code", "---\ntitle: hi\n"] {
+            let result = model.predict(&request(text));
+            assert!(result.blocked_reason.is_some());
+            assert!(result.ghost.is_empty());
+        }
     }
 }

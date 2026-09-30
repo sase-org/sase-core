@@ -286,13 +286,15 @@ fn combined_at_order(
             shares[view.share] += view.weight * word_mass;
         }
         if let Some(name) = ctx.project {
+            // The project partition is a subset of the same rows: it changes
+            // only mass, total, and source shares. Distinct support counts
+            // each observation once, so project distinct is never added.
             let (proj_total, _) = view.corpus.project_totals_for(name, context);
             total += ctx.boost * proj_total;
             if let Some(id) = word_id {
-                let (proj_mass, proj_word_distinct) =
+                let (proj_mass, _) =
                     view.corpus.project_word_stats_for(name, context, *id);
                 mass += ctx.boost * proj_mass;
-                support += proj_word_distinct;
                 shares[SHARE_PROJECT] += ctx.boost * proj_mass;
             }
         }
@@ -334,10 +336,10 @@ fn combined_totals_at_order(
         total += view.weight * ctx_mass;
         distinct += ctx_distinct;
         if let Some(name) = ctx.project {
-            let (proj_total, proj_distinct) =
-                view.corpus.project_totals_for(name, context);
+            // Project totals add mass only; distinct rows are already counted
+            // in the global totals above.
+            let (proj_total, _) = view.corpus.project_totals_for(name, context);
             total += ctx.boost * proj_total;
-            distinct += proj_distinct;
         }
     }
     if let Some((counts, weight)) = ctx.draft {
@@ -733,5 +735,162 @@ mod tests {
         // Pair (* -> fix) counts; pair (fix -> the) is the final position.
         assert!(counts.pair(&[], "fix").0 > 0.0);
         assert_eq!(counts.pair(&["fix".to_string()], "the"), (0.0, 0));
+    }
+
+    fn gate_query<'a>(
+        sources: &'a [WeightedSource<'a>],
+        context: &'a [String],
+        preset: ConfidencePreset,
+        reject_conflicts: bool,
+    ) -> ScoringQuery<'a> {
+        ScoringQuery {
+            sources,
+            project: None,
+            project_boost: 1.0,
+            backoff_alpha: 0.4,
+            draft: None,
+            context,
+            max_order: context.len(),
+            preset,
+            reject_conflicts,
+        }
+    }
+
+    #[test]
+    fn project_boost_adds_mass_but_not_support() {
+        // Two same-project rows must not pass `min_support` 4: the project
+        // partition is a subset of the same rows.
+        let rows = vec![
+            PromptPredictionRowWire {
+                text: "help me implement it".to_string(),
+                epoch_seconds: 100,
+                project: Some("sase".to_string()),
+                origin: Some("typed".to_string()),
+                cancelled: false,
+            },
+            PromptPredictionRowWire {
+                text: "help me implement it now".to_string(),
+                epoch_seconds: 200,
+                project: Some("sase".to_string()),
+                origin: Some("typed".to_string()),
+                cancelled: false,
+            },
+        ];
+        let corpus = compile_prompt_prediction_corpus(
+            &rows,
+            &crate::prompt_prediction::wire::PromptPredictionCorpusOptionsWire {
+                now_epoch: 1_000,
+                ..Default::default()
+            },
+        );
+        let sources = sources_of(&corpus);
+        let context: Vec<String> = vec!["help".into(), "me".into()];
+        let candidates: Vec<String> = vec!["implement".into()];
+        let query = ScoringQuery {
+            sources: &sources,
+            project: Some("sase"),
+            project_boost: 1.0,
+            backoff_alpha: 0.4,
+            draft: None,
+            context: &context,
+            max_order: 2,
+            preset: ConfidencePreset {
+                min_p: 0.0,
+                min_margin: 0.0,
+                min_support: 4,
+            },
+            reject_conflicts: false,
+        };
+        let ranked = score_candidates(&query, &candidates);
+        assert!(!ranked.is_empty());
+        assert!(
+            ranked[0].support < 4,
+            "support counts once per row, got {}",
+            ranked[0].support
+        );
+        let suffixes = order_suffixes(&context, 2);
+        assert_eq!(
+            evidence_order(&sources, Some("sase"), 1.0, None, &suffixes, 4),
+            None,
+            "two rows cannot reach distinct 4 even with the project boost"
+        );
+    }
+
+    #[test]
+    fn gate_boundaries_need_full_thresholds() {
+        // Four identical rows give support 4 and share 1.0 at order 2.
+        let corpus = corpus_for(&[
+            "help me implement it",
+            "help me implement it now",
+            "help me implement it today",
+            "help me implement it fast",
+        ]);
+        let sources = sources_of(&corpus);
+        let context: Vec<String> = vec!["help".into(), "me".into()];
+        let candidates: Vec<String> = vec!["implement".into(), "review".into()];
+        for preset in [PRESET_CAUTIOUS, PRESET_BALANCED, PRESET_EAGER] {
+            let query = gate_query(&sources, &context, preset, true);
+            let ranked = score_candidates(&query, &candidates);
+            assert!(apply_gate(&query, &ranked, &candidates).is_some());
+            // Just above each achievable threshold must fail (share and
+            // margin top out at 1.0, support at 4 rows here).
+            let below_p = ConfidencePreset {
+                min_p: 1.01,
+                ..preset
+            };
+            let q = gate_query(&sources, &context, below_p, true);
+            let ranked = score_candidates(&q, &candidates);
+            assert!(apply_gate(&q, &ranked, &candidates).is_none());
+            let below_margin = ConfidencePreset {
+                min_margin: 1.01,
+                ..preset
+            };
+            let q = gate_query(&sources, &context, below_margin, true);
+            let ranked = score_candidates(&q, &candidates);
+            assert!(apply_gate(&q, &ranked, &candidates).is_none());
+            let below_support = ConfidencePreset {
+                min_support: 99,
+                ..preset
+            };
+            let q = gate_query(&sources, &context, below_support, true);
+            let ranked = score_candidates(&q, &candidates);
+            assert!(apply_gate(&q, &ranked, &candidates).is_none());
+        }
+    }
+
+    #[test]
+    fn reject_conflicts_toggles_higher_order_veto() {
+        // `help me` predicts implement, but `me` alone (order 1) predicts
+        // review when review dominates the short context.
+        let corpus = corpus_for(&[
+            "help me implement it",
+            "help me implement it now",
+            "help me implement it today",
+            "help me implement it fast",
+            "me review it",
+            "me review it now",
+            "me review it today",
+            "me review it fast",
+            "me review it soon",
+        ]);
+        let sources = sources_of(&corpus);
+        let context: Vec<String> = vec!["help".into(), "me".into()];
+        let candidates: Vec<String> = vec!["implement".into(), "review".into()];
+        let preset = ConfidencePreset {
+            min_p: 0.0,
+            min_margin: 0.0,
+            min_support: 1,
+        };
+        let strict = gate_query(&sources, &context, preset, true);
+        let loose = gate_query(&sources, &context, preset, false);
+        let strict_ranked = score_candidates(&strict, &candidates);
+        let loose_ranked = score_candidates(&loose, &candidates);
+        let strict_gate = apply_gate(&strict, &strict_ranked, &candidates);
+        let loose_gate = apply_gate(&loose, &loose_ranked, &candidates);
+        // The toggle must be observable: strict can only gate equal or less
+        // often than loose on the same evidence.
+        if strict_gate.is_some() {
+            assert!(loose_gate.is_some());
+        }
     }
 }
