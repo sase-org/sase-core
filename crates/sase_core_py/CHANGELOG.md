@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.1](https://github.com/sase-org/sase-core/compare/v0.36.0...v0.36.1) - 2026-09-30
+
+### Added
+
+- *(notifications)* lock-held field-scoped reconcile write plus empty raw_suffix matcher parity
+- *(attachments)* core attachment audience policy and scanner
+- *(tool-run)* add detached starter scope, monitor join, and sync wait budget
+- *(agent-tab)* name the default tab from the local machine alias
+- *(alternation)* shared scanner, binding, diagnostic, and LSP tokens
+- *(tool-run)* add duration classes and inline-fit policy
+- *(prompt-prediction)* add per-point novel coverage and precision to sweep wire
+- *(note-attachment)* add attachment wire, reducer, mutation APIs, and policy
+- *(core-binding)* add prompt_prediction binding module with tests
+- *(note-attachment)* add core attachment grammar, names, and media classification
+- *(prompt-stash)* append-only archive for every permanent stash removal
+
+### Fixed
+
+- *(prompt_prediction)* salvage unlanded core-correctness patch onto origin/master
+- *(goals)* land G1 ledger correctness fixes for core-fixes phase
+
 ## [0.36.0](https://github.com/sase-org/sase-core/compare/v0.35.1...v0.36.0) - 2026-09-28
 
 ### Added
