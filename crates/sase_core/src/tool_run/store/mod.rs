@@ -8,6 +8,9 @@
 //! preview, apply, and log reclamation.
 
 pub(crate) mod connection;
+mod demand;
+#[cfg(test)]
+mod demand_tests;
 mod failures;
 mod handoff;
 mod lifecycle;
@@ -21,6 +24,7 @@ mod tests;
 mod triage;
 mod triage_stage;
 
+pub use demand::record_demand;
 pub use failures::tool_run_failures;
 pub use handoff::{claim, join, release_join, request_stop};
 pub use lifecycle::{append_event, begin, finish, observe};

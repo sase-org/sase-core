@@ -2,6 +2,7 @@
 
 mod canonical;
 mod catalog;
+mod demand_wire;
 mod duration;
 mod fingerprint;
 mod handoff_wire;
@@ -15,6 +16,7 @@ pub use catalog::{
     normalize_receipt_policy, normalize_tool_definition, parse_receipt_ttl,
     receipt_ttl_seconds,
 };
+pub use demand_wire::*;
 pub use duration::{
     duration_calibration, duration_class_floor_seconds, duration_fit,
     effective_duration_class, sync_wait_budget, DurationCalibrationKindWire,
@@ -57,10 +59,10 @@ pub use receipt::{
 };
 pub use store::{
     append_event, begin, claim, finish, join, list_runs, observe,
-    receipt_lookup, receipt_settle, reconcile, release_join, request_stop,
-    retention_apply, retention_preview, show_run, store_stats, summarize,
-    tool_run_failures, tool_run_receipts_report, triage_record, triage_settle,
-    triage_show, triage_stage,
+    receipt_lookup, receipt_settle, reconcile, record_demand, release_join,
+    request_stop, retention_apply, retention_preview, show_run, store_stats,
+    summarize, tool_run_failures, tool_run_receipts_report, triage_record,
+    triage_settle, triage_show, triage_stage,
 };
 pub use triage::*;
 pub use triage::{

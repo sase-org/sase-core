@@ -5,6 +5,7 @@
 //! `load_events`, `load_stages`, `load_samples`) shared with the write side.
 
 use super::super::catalog::extra_args_digest;
+use super::super::demand_wire::ToolRunDemandWire;
 use super::super::handoff_wire::{
     ToolRunJoinRecordWire, ToolRunLaunchEnvelopeWire,
     ToolRunProcessIdentityWire, ToolRunStarterWire, ToolRunStopRecordWire,
@@ -361,6 +362,7 @@ pub(super) fn load_run(
     let owner_log_projection = projection("owner_log_path");
     let starter_projection = projection("starter_json");
     let join_projection = projection("join_json");
+    let demand_projection = projection("demand_json");
     let sql = format!(
         "SELECT run_id, state, source, executor, attempt, tool_name,
                 definition_digest, extra_args_digest, display_argv_json,
@@ -376,7 +378,7 @@ pub(super) fn load_run(
                 {launcher_projection}, {terminal_cause_projection},
                 {settled_by_projection}, {stop_request_projection},
                 {owner_log_projection}, {starter_projection},
-                {join_projection}
+                {join_projection}, {demand_projection}
          FROM runs WHERE run_id = ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -399,6 +401,7 @@ pub(super) fn load_run(
     let owner_log_path: Option<String> = row.get(45)?;
     let starter_json: Option<String> = row.get(46)?;
     let join_json: Option<String> = row.get(47)?;
+    let demand_json: Option<String> = row.get(48)?;
     let mut diagnostics: Vec<String> =
         serde_json::from_str(&diagnostics_raw)
             .map_err(|error| ToolRunError::store(error.to_string()))?;
@@ -427,6 +430,15 @@ pub(super) fn load_run(
         "stored join was unreadable",
     );
     if let Some(diagnostic) = join_diagnostic {
+        diagnostics.push(diagnostic);
+    }
+    // Malformed demand reads as absent plus a diagnostic and never fails
+    // the load, so older and hand-edited rows keep loading.
+    let (demand, demand_diagnostic) = parse_stored_record::<ToolRunDemandWire>(
+        demand_json,
+        "stored demand was unreadable",
+    );
+    if let Some(diagnostic) = demand_diagnostic {
         diagnostics.push(diagnostic);
     }
     let launcher = launcher_json.as_deref().and_then(|raw| {
@@ -489,6 +501,7 @@ pub(super) fn load_run(
         launcher,
         starter,
         join,
+        demand,
     }))
 }
 

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS runs (
     stop_request_json TEXT,
     starter_json TEXT,
     join_json TEXT,
+    demand_json TEXT,
     owner_log_path TEXT,
     mutated_input INTEGER,
     fingerprint_before_json TEXT,
@@ -231,6 +232,7 @@ pub(super) fn ensure_child_observation_columns(
         ("stop_request_json", "TEXT"),
         ("starter_json", "TEXT"),
         ("join_json", "TEXT"),
+        ("demand_json", "TEXT"),
         ("owner_log_path", "TEXT"),
     ] {
         if !existing.contains(column) {
