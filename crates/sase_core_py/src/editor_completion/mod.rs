@@ -855,6 +855,68 @@ fn py_scan_directive_owned_fences<'py>(
     json_value_to_py(py, &value)
 }
 
+// --- Jinja completion engine ------------------------------------------------
+//
+// These bindings expose the same Rust Jinja engine consumed directly by
+// the xprompt LSP. They are the single source of truth shared by the TUI
+// adapter and the LSP for completion, scope variables, and the catalog.
+/// Return ranked Jinja completion for a cursor inside a tag, or `None`
+/// when the cursor is outside any tag.
+#[pyfunction]
+#[pyo3(name = "jinja_completion")]
+fn py_jinja_completion(
+    py: Python<'_>,
+    request: Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<
+        sase_core::editor::jinja::JinjaAssistRequestWire,
+    >(py_to_json_value(request.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid JinjaAssistRequestWire dict: {error}"
+        ))
+    })?;
+    let completion = sase_core::editor::jinja::jinja_completion(&request);
+    let value = serde_json::to_value(&completion).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the scope-variable list backing the unknown-variable lint.
+#[pyfunction]
+#[pyo3(name = "jinja_scope_variables")]
+fn py_jinja_scope_variables(
+    py: Python<'_>,
+    request: Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let request = serde_json::from_value::<
+        sase_core::editor::jinja::JinjaScopeRequestWire,
+    >(py_to_json_value(request.as_any())?)
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid JinjaScopeRequestWire dict: {error}"
+        ))
+    })?;
+    let variables = sase_core::editor::jinja::jinja_scope_variables(&request);
+    let value = serde_json::to_value(&variables).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the static Jinja catalog of variables, filters, tests,
+/// Jinja globals, and statement keywords.
+#[pyfunction]
+#[pyo3(name = "jinja_catalog")]
+fn py_jinja_catalog(py: Python<'_>) -> PyResult<PyObject> {
+    let catalog = sase_core::editor::jinja::jinja_catalog();
+    let value = serde_json::to_value(catalog).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 pub(crate) fn register_editor_completion(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -910,6 +972,9 @@ pub(crate) fn register_editor_completion(
     m.add_function(wrap_pyfunction!(py_glossary_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_compile_glossary_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_directive_owned_fences, m)?)?;
+    m.add_function(wrap_pyfunction!(py_jinja_completion, m)?)?;
+    m.add_function(wrap_pyfunction!(py_jinja_scope_variables, m)?)?;
+    m.add_function(wrap_pyfunction!(py_jinja_catalog, m)?)?;
     Ok(())
 }
 
