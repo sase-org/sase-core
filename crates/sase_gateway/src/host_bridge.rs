@@ -803,6 +803,7 @@ impl StaticNotificationHostBridge {
                 expired_ids: Vec::new(),
                 next_snooze_deadline: None,
                 stats: Default::default(),
+                generation: 0,
             },
             action_states: Default::default(),
         }
@@ -821,6 +822,7 @@ impl StaticNotificationHostBridge {
                 expired_ids: Vec::new(),
                 next_snooze_deadline: None,
                 stats: Default::default(),
+                generation: 0,
             },
             action_states,
         }

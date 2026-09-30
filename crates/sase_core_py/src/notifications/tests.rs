@@ -681,3 +681,124 @@ fn notification_delivery_binding_rejects_malformed_rules() {
         }
     });
 }
+
+#[test]
+fn notification_ack_and_index_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, path) = temp_notification_path("notifications.jsonl");
+        for row in [
+            json!({
+                "id": "completion-1",
+                "timestamp": "2026-04-30T12:00:00+00:00",
+                "sender": "user-agent",
+                "action": "JumpToAgent",
+                "action_data": {
+                    "cl_name": "feature",
+                    "raw_suffix": "20260430120000",
+                },
+                "read": false,
+                "dismissed": false,
+            }),
+            json!({
+                "id": "settlement-1",
+                "timestamp": "2026-04-30T12:01:00+00:00",
+                "sender": "epic-launch",
+                "action_data": {
+                    "cl_name": "feature",
+                    "raw_suffix": "20260430120000",
+                },
+                "read": true,
+                "dismissed": false,
+            }),
+            json!({
+                "id": "remote-1",
+                "timestamp": "2026-04-30T12:02:00+00:00",
+                "sender": "remote-attention",
+                "notes": ["old"],
+                "read": false,
+                "dismissed": false,
+            }),
+        ] {
+            let row_obj = json_value_to_py(py, &row).unwrap();
+            let row_dict = row_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_append_notification(py, path.to_str().unwrap(), row_dict)
+                .unwrap();
+        }
+
+        let before_obj =
+            py_read_unread_completion_index(py, path.to_str().unwrap())
+                .unwrap();
+        let before = py_to_json_value(before_obj.bind(py)).unwrap();
+        assert_eq!(before["schema_version"], json!(1));
+        let generation_before = before["generation"].as_u64().unwrap();
+
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "agents": [
+                    {
+                        "cl_name": "feature",
+                        "raw_suffix": "20260430120000",
+                    },
+                ],
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome_obj =
+            py_ack_agent_completions(py, path.to_str().unwrap(), request)
+                .unwrap();
+        let outcome = py_to_json_value(outcome_obj.bind(py)).unwrap();
+        assert_eq!(outcome["schema_version"], json!(1));
+        assert_eq!(
+            outcome["dismissed_ids"],
+            json!(["completion-1", "settlement-1"])
+        );
+        assert_eq!(
+            outcome["generation"].as_u64().unwrap(),
+            generation_before + 1
+        );
+
+        // A repeat ack with the same keys dismisses nothing new and does
+        // not bump the generation.
+        let repeat_obj =
+            py_ack_agent_completions(py, path.to_str().unwrap(), request)
+                .unwrap();
+        let repeat = py_to_json_value(repeat_obj.bind(py)).unwrap();
+        assert_eq!(repeat["dismissed_ids"], json!([]));
+        assert_eq!(repeat["generation"], outcome["generation"]);
+
+        // The index lists the completion and settlement rows with their
+        // flags and the post-ack generation, and omits the unrelated row.
+        let index_obj =
+            py_read_unread_completion_index(py, path.to_str().unwrap())
+                .unwrap();
+        let index = py_to_json_value(index_obj.bind(py)).unwrap();
+        assert_eq!(index["schema_version"], json!(1));
+        assert_eq!(index["generation"], outcome["generation"]);
+        let rows = index["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], json!("completion-1"));
+        assert_eq!(
+            rows[0]["agent"],
+            json!({
+                "cl_name": "feature",
+                "raw_suffix": "20260430120000",
+            })
+        );
+        assert_eq!(rows[0]["read"], json!(false));
+        assert_eq!(rows[0]["dismissed"], json!(true));
+        assert_eq!(rows[1]["id"], json!("settlement-1"));
+        assert_eq!(rows[1]["read"], json!(true));
+        assert_eq!(rows[1]["dismissed"], json!(true));
+
+        // Malformed ack input is a ValueError, not a panic.
+        let bad_obj = json_value_to_py(py, &json!({"agents": "nope"})).unwrap();
+        let bad = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+        let err = py_ack_agent_completions(py, path.to_str().unwrap(), bad)
+            .unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        assert!(err.to_string().contains("NotificationAckRequestWire"));
+    });
+}

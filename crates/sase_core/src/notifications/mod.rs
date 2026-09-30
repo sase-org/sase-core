@@ -1,4 +1,6 @@
 //! Notification store, rules, and snapshot reads.
+pub mod ack;
+pub(crate) mod generation;
 pub mod mobile;
 pub mod pending_actions;
 pub mod rules;
@@ -6,6 +8,7 @@ pub mod store;
 pub mod tabs;
 pub mod wire;
 
+pub use ack::{ack_agent_completions, read_unread_completion_index};
 pub use mobile::{
     mobile_action_detail_from_notification,
     mobile_attachment_manifest_from_path, mobile_notification_card_from_wire,
@@ -57,6 +60,7 @@ pub use tabs::{
 };
 pub use wire::{
     notification_activity_at, notification_activity_cursor,
+    NotificationAckOutcomeWire, NotificationAckRequestWire,
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
     NotificationPlusOneRequestWire, NotificationPlusOneWire,
@@ -66,6 +70,7 @@ pub use wire::{
     NotificationTabWire, NotificationUpdateOutcomeWire,
     NotificationUpsertActionWire, NotificationUpsertOutcomeWire,
     NotificationUpsertRequestWire, NotificationWire,
+    UnreadCompletionIndexRowWire, UnreadCompletionIndexWire,
     NOTIFICATION_PLUS_ONE_MAX_ENTRIES, NOTIFICATION_PLUS_ONE_NOTE_MAX_CHARS,
     NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
 };

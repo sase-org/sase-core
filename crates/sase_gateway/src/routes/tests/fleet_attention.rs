@@ -70,6 +70,7 @@ impl NotificationHostBridge for FakeAttentionNotificationBridge {
             next_snooze_deadline: None,
             stats:
                 sase_core::notifications::NotificationStoreStatsWire::default(),
+            generation: 0,
         })
     }
 

@@ -209,6 +209,10 @@ pub struct NotificationStoreSnapshotWire {
     #[serde(default)]
     pub next_snooze_deadline: Option<String>,
     pub stats: NotificationStoreStatsWire,
+    /// Store generation the rows were observed at; 0 when an older core
+    /// omitted it. Additive: the wire schema version stays 1.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +251,46 @@ pub struct NotificationAgentKeyWire {
     pub cl_name: String,
     #[serde(default)]
     pub raw_suffix: Option<String>,
+}
+
+/// Agent keys whose completion and settlement rows one ack dismisses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAckRequestWire {
+    #[serde(default)]
+    pub agents: Vec<NotificationAgentKeyWire>,
+}
+
+/// Ids one [`super::store::ack_agent_completions`] call newly dismissed,
+/// plus the store generation after the call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAckOutcomeWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub dismissed_ids: Vec<String>,
+    #[serde(default)]
+    pub generation: u64,
+}
+
+/// One live completion or settlement row in the lean unread index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadCompletionIndexRowWire {
+    pub id: String,
+    pub agent: NotificationAgentKeyWire,
+    #[serde(default)]
+    pub read: bool,
+    #[serde(default)]
+    pub dismissed: bool,
+}
+
+/// Lean unread index: the store generation plus one row per live
+/// completion and settlement row, dismissed rows included.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadCompletionIndexWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub rows: Vec<UnreadCompletionIndexRowWire>,
 }
 
 /// Field-scoped reconcile write for one inventory owner (for example the

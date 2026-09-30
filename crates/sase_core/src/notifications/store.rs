@@ -8,6 +8,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use fs2::FileExt;
 
+use super::generation::{
+    bump_generation, generation_for_missing_store, read_generation,
+};
 use super::tabs::{tab_key_for, tabs_and_counts_for};
 use super::wire::{
     notification_activity_at, NotificationAgentKeyWire, NotificationCountsWire,
@@ -65,6 +68,7 @@ pub fn read_notifications_snapshot_with_options(
         return Ok(snapshot_from_rows(
             Vec::new(),
             NotificationStoreStatsWire::default(),
+            generation_for_missing_store(path),
         ));
     }
 
@@ -85,9 +89,14 @@ pub fn read_notifications_snapshot_with_options(
     }
 
     FileExt::lock_shared(&lock).map_err(|e| e.to_string())?;
-    let result = read_rows(path, include_dismissed);
+    let result = read_rows(path, include_dismissed).and_then(
+        |(notifications, stats)| {
+            read_generation(path)
+                .map(|generation| (notifications, stats, generation))
+        },
+    );
     unlock(lock)?;
-    let (notifications, stats) = result?;
+    let (notifications, stats, generation) = result?;
     if should_recheck_for_notification_compaction(
         path,
         &notifications,
@@ -100,7 +109,7 @@ pub fn read_notifications_snapshot_with_options(
             DateTime::<Utc>::from(SystemTime::now()),
         );
     }
-    Ok(snapshot_from_rows(notifications, stats))
+    Ok(snapshot_from_rows(notifications, stats, generation))
 }
 
 fn read_notifications_snapshot_expiring_snoozes(
@@ -156,9 +165,34 @@ fn read_notifications_snapshot_rewriting_if_needed(
         write_notifications_atomic(path, &compaction.rows)?;
     }
     let (notifications, stats) = read_rows_unlocked(path, include_dismissed)?;
-    let mut snapshot = snapshot_from_rows(notifications, stats);
+    // Sampled under the same exclusive lock after any write above, so
+    // this is the post-compaction, post-expiry generation.
+    let generation = read_generation(path)?;
+    let mut snapshot = snapshot_from_rows(notifications, stats, generation);
     snapshot.expired_ids = expired_ids;
     Ok(snapshot)
+}
+
+/// Read every live row for the lean unread index, compacting exactly when
+/// the snapshot reader would, and return the post-compaction rows.
+///
+/// The caller samples the generation after this returns, still under the
+/// same lock, so the generation describes these rows.
+pub(crate) fn compact_notifications_for_index_unlocked(
+    path: &Path,
+) -> Result<Vec<NotificationWire>, String> {
+    let (rows, _) = read_rows_unlocked(path, true)?;
+    let compaction = maybe_compact_notifications_unlocked(
+        path,
+        rows,
+        DateTime::<Utc>::from(SystemTime::now()),
+    )?;
+    if compaction.archived_count > 0 {
+        write_notifications_atomic(path, &compaction.rows)?;
+        let (rows, _) = read_rows_unlocked(path, true)?;
+        return Ok(rows);
+    }
+    Ok(compaction.rows)
 }
 
 pub fn append_notification(
@@ -223,6 +257,9 @@ fn append_notification_unlocked(
         .map_err(|e| format!("failed to serialize notification: {e}"))?;
     file.write_all(b"\n").map_err(|e| e.to_string())?;
     file.flush().map_err(|e| e.to_string())?;
+    // The append succeeded: bump inside the caller's exclusive lock. This
+    // is the only bump for the append path.
+    bump_generation(path)?;
     Ok(())
 }
 
@@ -894,7 +931,7 @@ fn read_rows(
     read_rows_unlocked(path, include_dismissed)
 }
 
-fn read_rows_unlocked(
+pub(crate) fn read_rows_unlocked(
     path: &Path,
     include_dismissed: bool,
 ) -> Result<(Vec<NotificationWire>, NotificationStoreStatsWire), String> {
@@ -1157,7 +1194,7 @@ fn reconcile_notification_rows_unlocked(
 // disk but absent from the input are preserved (they may be concurrent appends
 // from another thread). Callers cannot use this to delete rows by passing a
 // shorter list — if replacement semantics are ever needed, add a separate API.
-fn merge_and_rewrite_notifications_unlocked(
+pub(crate) fn merge_and_rewrite_notifications_unlocked(
     path: &Path,
     input: &[NotificationWire],
 ) -> Result<(), String> {
@@ -1221,7 +1258,7 @@ fn archive_path_for(path: &Path) -> PathBuf {
     path.with_file_name(archive_name)
 }
 
-fn write_notifications_atomic(
+pub(crate) fn write_notifications_atomic(
     path: &Path,
     notifications: &[NotificationWire],
 ) -> Result<(), String> {
@@ -1252,8 +1289,13 @@ fn write_notifications_atomic(
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&tmp_path);
+        return write_result;
     }
-    write_result
+    // The rewrite succeeded: bump inside the caller's exclusive lock. This
+    // is the only bump for every rewrite path (reconcile, state updates,
+    // upsert, compaction, snooze-expiry rewrite).
+    bump_generation(path)?;
+    Ok(())
 }
 
 fn reap_stale_temp_siblings(path: &Path, now: SystemTime) {
@@ -1304,6 +1346,7 @@ fn reap_stale_temp_siblings(path: &Path, now: SystemTime) {
 fn snapshot_from_rows(
     notifications: Vec<NotificationWire>,
     stats: NotificationStoreStatsWire,
+    generation: u64,
 ) -> NotificationStoreSnapshotWire {
     let next_snooze_deadline = next_snooze_deadline_for(&notifications);
     let (tabs, counts) = tabs_and_counts_for(&notifications);
@@ -1315,6 +1358,7 @@ fn snapshot_from_rows(
         expired_ids: Vec::new(),
         next_snooze_deadline,
         stats,
+        generation,
     }
 }
 
@@ -1447,7 +1491,7 @@ fn matches_agent_notification(
     }
 }
 
-fn matches_agent_completion_notification(
+pub(crate) fn matches_agent_completion_notification(
     notification: &NotificationWire,
 ) -> bool {
     if notification.sender != "user-agent" {
@@ -1463,7 +1507,7 @@ fn matches_agent_completion_notification(
     }
 }
 
-fn matches_agent_completion_notification_for_agents(
+pub(crate) fn matches_agent_completion_notification_for_agents(
     notification: &NotificationWire,
     agents: &[NotificationAgentKeyWire],
 ) -> bool {
@@ -1492,7 +1536,7 @@ fn matches_agent_completion_notification_for_agents(
 const AGENT_SETTLEMENT_SENDERS: [&str; 2] =
     ["epic-launch", "monitor-settlement"];
 
-fn matches_agent_settlement_notification(
+pub(crate) fn matches_agent_settlement_notification(
     notification: &NotificationWire,
 ) -> bool {
     if !AGENT_SETTLEMENT_SENDERS.contains(&notification.sender.as_str()) {
@@ -1506,7 +1550,7 @@ fn matches_agent_settlement_notification(
     })
 }
 
-fn matches_agent_settlement_notification_for_agents(
+pub(crate) fn matches_agent_settlement_notification_for_agents(
     notification: &NotificationWire,
     agents: &[NotificationAgentKeyWire],
 ) -> bool {
@@ -1608,7 +1652,7 @@ fn format_utc_python_iso(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, false)
 }
 
-fn open_lock_file(path: &Path) -> Result<File, String> {
+pub(crate) fn open_lock_file(path: &Path) -> Result<File, String> {
     let parent = ensure_parent(path)?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     OpenOptions::new()
@@ -1646,6 +1690,6 @@ fn ensure_parent(path: &Path) -> Result<&Path, String> {
     })
 }
 
-fn unlock(lock: File) -> Result<(), String> {
+pub(crate) fn unlock(lock: File) -> Result<(), String> {
     lock.unlock().map_err(|e| e.to_string())
 }

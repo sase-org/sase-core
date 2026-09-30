@@ -234,6 +234,47 @@ fn py_reconcile_notification_rows<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Dismiss completion and settlement rows for the request's agent keys.
+///
+/// The GIL is released while Rust dismisses under the exclusive store lock.
+/// Returns the newly dismissed ids and the store generation after the call.
+#[pyfunction]
+#[pyo3(name = "ack_agent_completions")]
+fn py_ack_agent_completions<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = ack_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_ack_agent_completions(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Read the lean unread completion index and its store generation.
+///
+/// The GIL is released while Rust reads under the store lock. One row per
+/// live completion and settlement row, dismissed rows included.
+#[pyfunction]
+#[pyo3(name = "read_unread_completion_index")]
+fn py_read_unread_completion_index<'py>(
+    py: Python<'py>,
+    path: &str,
+) -> PyResult<PyObject> {
+    let path = PathBuf::from(path);
+    let index = py.allow_threads(|| core_read_unread_completion_index(&path));
+    let value = serde_json::to_value(index.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+            PyValueError::new_err(format!("internal serialize error: {e}"))
+        })?;
+    json_value_to_py(py, &value)
+}
+
 /// Classify notification dicts into ordered tabs and per-row tab keys.
 ///
 /// One call classifies a whole page, so callers never pay one FFI hop per row.
@@ -491,6 +532,17 @@ fn reconcile_request_from_pydict(
     })
 }
 
+fn ack_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationAckRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationAckRequestWire dict: {e}"
+        ))
+    })
+}
+
 fn pending_action_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<PendingActionWire> {
@@ -545,6 +597,8 @@ pub(crate) fn register_notifications(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_reconcile_notification_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(py_ack_agent_completions, m)?)?;
+    m.add_function(wrap_pyfunction!(py_read_unread_completion_index, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_notification_deliveries, m)?)?;
     m.add_function(wrap_pyfunction!(py_pending_action_from_notification, m)?)?;

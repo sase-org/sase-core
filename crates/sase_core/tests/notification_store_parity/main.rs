@@ -5,6 +5,7 @@
 //! `cargo test --test notification_store_parity` keeps working with a
 //! single test binary. The shared `tests/fixtures/` directory is untouched.
 
+mod ack_index;
 mod agent_dismissal;
 mod concurrency;
 mod mute_snooze_expiry;

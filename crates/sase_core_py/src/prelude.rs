@@ -767,6 +767,7 @@ pub(crate) use sase_core::model_route::{
     ModelRouteError as ModelRouteDomainError,
 };
 pub(crate) use sase_core::notifications::{
+    ack_agent_completions as core_ack_agent_completions,
     append_notification as core_append_notification,
     append_notification_counts as core_append_notification_counts,
     append_notification_plus_one as core_append_notification_plus_one,
@@ -781,6 +782,7 @@ pub(crate) use sase_core::notifications::{
     read_current_notifications_snapshot as core_read_current_notifications_snapshot,
     read_notifications_snapshot_with_options as core_read_notifications_snapshot_with_options,
     read_pending_action_store as core_read_pending_action_store,
+    read_unread_completion_index as core_read_unread_completion_index,
     reconcile_notification_rows as core_reconcile_notification_rows,
     register_pending_action as core_register_pending_action,
     remove_pending_action as core_remove_pending_action,
@@ -788,10 +790,10 @@ pub(crate) use sase_core::notifications::{
     rewrite_notifications as core_rewrite_notifications,
     rewrite_notifications_counts as core_rewrite_notifications_counts,
     upsert_notification as core_upsert_notification,
-    NotificationPlusOneRequestWire, NotificationReconcileRequestWire,
-    NotificationRuleWire, NotificationStateUpdateWire,
-    NotificationUpsertRequestWire, NotificationWire,
-    PendingActionTransportRequestWire, PendingActionWire,
+    NotificationAckRequestWire, NotificationPlusOneRequestWire,
+    NotificationReconcileRequestWire, NotificationRuleWire,
+    NotificationStateUpdateWire, NotificationUpsertRequestWire,
+    NotificationWire, PendingActionTransportRequestWire, PendingActionWire,
 };
 pub(crate) use sase_core::pending_commit_checkpoint::{
     decide_pending_commit_checkpoint_recovery as core_decide_pending_commit_checkpoint_recovery,
