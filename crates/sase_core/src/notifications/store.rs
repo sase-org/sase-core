@@ -13,6 +13,7 @@ use super::wire::{
     notification_activity_at, NotificationAgentKeyWire, NotificationCountsWire,
     NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
     NotificationPlusOneRequestWire, NotificationPlusOneWire,
+    NotificationReconcileOutcomeWire, NotificationReconcileRequestWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationStoreStatsWire, NotificationUpdateOutcomeWire,
     NotificationUpsertActionWire, NotificationUpsertOutcomeWire,
@@ -1041,6 +1042,117 @@ fn notification_should_archive(
         .unwrap_or(false)
 }
 
+/// Apply one inventory owner's reconcile write without clobbering anyone
+/// else's rows.
+///
+/// The request carries only the rows this call created, refreshed, or
+/// auto-dismissed — never a full-store snapshot. Under the exclusive store
+/// lock the file is re-read and, per input row:
+/// - absent on disk → appended as-is (created);
+/// - present → the on-disk row is kept and only the closed owned set
+///   (`icon`, `color`, `notes`, `tags`, `action`, `action_data`, `silent`)
+///   is copied from the input, mirroring `_refresh_existing_notification`
+///   in sase's `attention_inbox.py`. `read`/`dismissed` stay on disk,
+///   except: (a) resurface when the on-disk row is dismissed carrying the
+///   reversible marker while the input row is not dismissed → `read=false`,
+///   `dismissed=false`; (b) auto-dismiss when the input row is dismissed
+///   carrying the marker while the on-disk row is not dismissed →
+///   `dismissed=true` with the marker. An on-disk dismissal without the
+///   marker is a user dismissal: it stays dismissed and the marker is never
+///   added.
+/// - `id`, `timestamp`, `sender`, `files`, `muted`, `snooze_until`,
+///   `resurfaced_at`, `plus_ones`, `plus_ones_dropped` and `dedup_key`
+///   always come from disk.
+///
+/// Rows absent from the input are untouched, so a dismissal committed by
+/// another writer between the caller's snapshot read and this write
+/// survives. The file is not rewritten when nothing changed. Each input row
+/// lands in at most one outcome bucket (created, resurfaced, dismissed,
+/// updated, in that priority). Input rows with an empty id are skipped.
+pub fn reconcile_notification_rows(
+    path: &Path,
+    request: &NotificationReconcileRequestWire,
+) -> Result<NotificationReconcileOutcomeWire, String> {
+    let lock = open_lock_file(path)?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+    let result = reconcile_notification_rows_unlocked(path, request);
+    unlock(lock)?;
+    result
+}
+
+fn reconcile_notification_rows_unlocked(
+    path: &Path,
+    request: &NotificationReconcileRequestWire,
+) -> Result<NotificationReconcileOutcomeWire, String> {
+    let marker = request
+        .reversible_dismiss_marker_key
+        .as_deref()
+        .filter(|key| !key.is_empty());
+    let (mut rows, _) = read_rows_unlocked(path, true)?;
+    let mut outcome = NotificationReconcileOutcomeWire {
+        schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+        ..NotificationReconcileOutcomeWire::default()
+    };
+    for input in &request.notifications {
+        if input.id.is_empty() {
+            continue;
+        }
+        let Some(index) = rows.iter().position(|row| row.id == input.id) else {
+            rows.push(input.clone());
+            outcome.created += 1;
+            continue;
+        };
+        let on_disk = rows[index].clone();
+        let mut merged = on_disk.clone();
+        merged.icon.clone_from(&input.icon);
+        merged.color.clone_from(&input.color);
+        merged.notes.clone_from(&input.notes);
+        merged.tags.clone_from(&input.tags);
+        merged.action.clone_from(&input.action);
+        merged.action_data.clone_from(&input.action_data);
+        merged.silent = input.silent;
+        let disk_has_marker = marker.is_some_and(|key| {
+            on_disk.action_data.get(key) == Some(&"true".to_string())
+        });
+        let input_has_marker = marker.is_some_and(|key| {
+            input.action_data.get(key) == Some(&"true".to_string())
+        });
+        let mut transition: Option<&str> = None;
+        if on_disk.dismissed && !disk_has_marker {
+            // User dismissal: stays dismissed and the marker is never added.
+            merged.dismissed = true;
+            if let Some(key) = marker {
+                merged.action_data.remove(key);
+            }
+        } else if on_disk.dismissed && disk_has_marker && !input.dismissed {
+            merged.dismissed = false;
+            merged.read = false;
+            transition = Some("resurfaced");
+        } else if !on_disk.dismissed && input.dismissed && input_has_marker {
+            merged.dismissed = true;
+            transition = Some("dismissed");
+        }
+        if merged == on_disk {
+            continue;
+        }
+        rows[index] = merged;
+        match transition {
+            Some("resurfaced") => outcome.resurfaced += 1,
+            Some("dismissed") => outcome.dismissed += 1,
+            _ => outcome.updated += 1,
+        }
+    }
+    if outcome.created == 0
+        && outcome.updated == 0
+        && outcome.dismissed == 0
+        && outcome.resurfaced == 0
+    {
+        return Ok(outcome);
+    }
+    write_notifications_atomic(path, &rows)?;
+    Ok(outcome)
+}
+
 // Rewrite is a _merge_: caller's rows win on id collision; rows present on
 // disk but absent from the input are preserved (they may be concurrent appends
 // from another thread). Callers cannot use this to delete rows by passing a
@@ -1266,7 +1378,10 @@ fn matches_agent_notification(
     match notification.action.as_deref() {
         Some("JumpToAgent") => {
             let cl_name = notification.action_data.get("cl_name");
-            let raw_suffix = notification.action_data.get("raw_suffix");
+            let raw_suffix = notification
+                .action_data
+                .get("raw_suffix")
+                .filter(|suffix| !suffix.is_empty());
             match raw_suffix {
                 None => {
                     agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
@@ -1283,7 +1398,10 @@ fn matches_agent_notification(
             if cl_name.is_none() {
                 return false;
             }
-            let raw_suffix = notification.action_data.get("raw_suffix");
+            let raw_suffix = notification
+                .action_data
+                .get("raw_suffix")
+                .filter(|suffix| !suffix.is_empty());
             match raw_suffix {
                 None => {
                     agents.iter().any(|agent| Some(&agent.cl_name) == cl_name)
@@ -1354,7 +1472,13 @@ fn matches_agent_completion_notification_for_agents(
         return false;
     }
     let cl_name = notification.action_data.get("cl_name");
-    let raw_suffix = notification.action_data.get("raw_suffix");
+    // An empty `raw_suffix` matches exactly like a missing key (on `cl_name`
+    // alone), the way Python's `agent_completion_notification_matches_agent`
+    // already does with `or None`.
+    let raw_suffix = notification
+        .action_data
+        .get("raw_suffix")
+        .filter(|suffix| !suffix.is_empty());
     match raw_suffix {
         None => agents.iter().any(|agent| Some(&agent.cl_name) == cl_name),
         Some(raw_suffix) => agents.iter().any(|agent| {

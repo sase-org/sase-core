@@ -211,6 +211,29 @@ fn py_rewrite_notifications_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Apply one inventory owner's field-scoped reconcile write.
+///
+/// The GIL is released while Rust re-reads the store under its exclusive
+/// lock, so concurrent dismissals committed after the caller's snapshot read
+/// survive. Returns created/updated/dismissed/resurfaced counts.
+#[pyfunction]
+#[pyo3(name = "reconcile_notification_rows")]
+fn py_reconcile_notification_rows<'py>(
+    py: Python<'py>,
+    path: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request = reconcile_request_from_pydict(request)?;
+    let path = PathBuf::from(path);
+    let outcome =
+        py.allow_threads(|| core_reconcile_notification_rows(&path, &request));
+    let value = serde_json::to_value(outcome.map_err(PyValueError::new_err)?)
+        .map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 /// Classify notification dicts into ordered tabs and per-row tab keys.
 ///
 /// One call classifies a whole page, so callers never pay one FFI hop per row.
@@ -457,6 +480,17 @@ fn notification_update_from_pydict(
     })
 }
 
+fn reconcile_request_from_pydict(
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<NotificationReconcileRequestWire> {
+    let value = py_to_json_value(dict.as_any())?;
+    serde_json::from_value(value).map_err(|e| {
+        PyValueError::new_err(format!(
+            "request is not a valid NotificationReconcileRequestWire dict: {e}"
+        ))
+    })
+}
+
 fn pending_action_from_pydict(
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<PendingActionWire> {
@@ -510,6 +544,7 @@ pub(crate) fn register_notifications(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_upsert_notification, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications, m)?)?;
     m.add_function(wrap_pyfunction!(py_rewrite_notifications_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(py_reconcile_notification_rows, m)?)?;
     m.add_function(wrap_pyfunction!(py_classify_notification_tabs, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_notification_deliveries, m)?)?;
     m.add_function(wrap_pyfunction!(py_pending_action_from_notification, m)?)?;

@@ -9,6 +9,7 @@ mod agent_dismissal;
 mod concurrency;
 mod mute_snooze_expiry;
 mod plus_one_upsert;
+mod reconcile_upsert;
 mod state_updates;
 mod store_io;
 mod support;

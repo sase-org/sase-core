@@ -47,8 +47,8 @@ pub use store::{
     append_notification_plus_one, apply_notification_state_update,
     apply_notification_state_update_counts,
     read_current_notifications_snapshot, read_notifications_snapshot,
-    read_notifications_snapshot_with_options, rewrite_notifications,
-    rewrite_notifications_counts, upsert_notification,
+    read_notifications_snapshot_with_options, reconcile_notification_rows,
+    rewrite_notifications, rewrite_notifications_counts, upsert_notification,
 };
 pub use tabs::{
     classify_notification_tabs, tab_key_for, tab_label, DONE_TAB_KEY,
@@ -60,6 +60,7 @@ pub use wire::{
     NotificationAgentKeyWire, NotificationCountsWire,
     NotificationPlusOneActionWire, NotificationPlusOneOutcomeWire,
     NotificationPlusOneRequestWire, NotificationPlusOneWire,
+    NotificationReconcileOutcomeWire, NotificationReconcileRequestWire,
     NotificationStateUpdateWire, NotificationStoreSnapshotWire,
     NotificationStoreStatsWire, NotificationTabClassificationWire,
     NotificationTabWire, NotificationUpdateOutcomeWire,

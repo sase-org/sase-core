@@ -249,6 +249,35 @@ pub struct NotificationAgentKeyWire {
     pub raw_suffix: Option<String>,
 }
 
+/// Field-scoped reconcile write for one inventory owner (for example the
+/// remote-attention reconciler).
+///
+/// `notifications` carries only the rows this call created, refreshed, or
+/// auto-dismissed — never a full-store snapshot. `reversible_dismiss_marker_key`
+/// names the `action_data` key whose `"true"` value marks a dismissal the
+/// reconciler itself owns (and may therefore resurface or re-apply); `None`
+/// disables both transitions and every dismissal stays as it is on disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationReconcileRequestWire {
+    #[serde(default)]
+    pub notifications: Vec<NotificationWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reversible_dismiss_marker_key: Option<String>,
+}
+
+/// Outcome counts for one [`super::store::reconcile_notification_rows`] call.
+///
+/// Every input row lands in at most one bucket: created, then resurfaced,
+/// then dismissed, then updated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationReconcileOutcomeWire {
+    pub schema_version: u32,
+    pub created: u64,
+    pub updated: u64,
+    pub dismissed: u64,
+    pub resurfaced: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotificationStateUpdateWire {

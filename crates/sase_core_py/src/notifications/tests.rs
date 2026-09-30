@@ -553,6 +553,111 @@ fn notification_delivery_binding_resolves_a_batch_in_one_call() {
 }
 
 #[test]
+fn notification_reconcile_binding_applies_field_scoped_write() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, path) = temp_notification_path("notifications.jsonl");
+        for id in ["remote-1", "completion-1"] {
+            let row_obj = json_value_to_py(
+                py,
+                &json!({
+                    "id": id,
+                    "timestamp": "2026-04-30T12:00:00+00:00",
+                    "sender": "remote-attention",
+                    "notes": ["old"],
+                    "read": true,
+                }),
+            )
+            .unwrap();
+            let row = row_obj.bind(py).downcast::<PyDict>().unwrap();
+            py_append_notification(py, path.to_str().unwrap(), row).unwrap();
+        }
+
+        // A concurrent dismissal lands after the caller's snapshot read.
+        let dismiss_obj = json_value_to_py(
+            py,
+            &json!({"kind": "mark_dismissed", "id": "completion-1"}),
+        )
+        .unwrap();
+        let dismiss = dismiss_obj.bind(py).downcast::<PyDict>().unwrap();
+        py_apply_notification_state_update(py, path.to_str().unwrap(), dismiss)
+            .unwrap();
+
+        // Stale refresh of remote-1, auto-dismiss of the completion row
+        // (already dismissed: stays put), plus one brand-new row.
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "notifications": [
+                    {
+                        "id": "remote-1",
+                        "timestamp": "1999-01-01T00:00:00+00:00",
+                        "sender": "impostor",
+                        "notes": ["new"],
+                        "read": false,
+                        "dismissed": true,
+                    },
+                    {
+                        "id": "remote-2",
+                        "timestamp": "2026-04-30T13:00:00+00:00",
+                        "sender": "remote-attention",
+                        "notes": ["fresh"],
+                    },
+                ],
+                "reversible_dismiss_marker_key": "test_marker",
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let outcome =
+            py_reconcile_notification_rows(py, path.to_str().unwrap(), request)
+                .unwrap();
+        let value = py_to_json_value(outcome.bind(py)).unwrap();
+        assert_eq!(value["schema_version"], json!(1));
+        assert_eq!(value["created"], json!(1));
+        assert_eq!(value["updated"], json!(1));
+        assert_eq!(value["dismissed"], json!(0));
+        assert_eq!(value["resurfaced"], json!(0));
+
+        let snapshot = py_read_notifications_snapshot(
+            py,
+            path.to_str().unwrap(),
+            true,
+            false,
+        )
+        .unwrap();
+        let snapshot_value = py_to_json_value(snapshot.bind(py)).unwrap();
+        let rows = snapshot_value["notifications"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        let refreshed = rows
+            .iter()
+            .find(|row| row["id"] == json!("remote-1"))
+            .unwrap();
+        assert_eq!(refreshed["notes"], json!(["new"]));
+        // Disk-owned fields win over the stale input.
+        assert_eq!(refreshed["timestamp"], json!("2026-04-30T12:00:00+00:00"));
+        assert_eq!(refreshed["sender"], json!("remote-attention"));
+        assert_eq!(refreshed["read"], json!(true));
+        assert_eq!(refreshed["dismissed"], json!(false));
+    });
+}
+
+#[test]
+fn notification_reconcile_binding_rejects_malformed_requests() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let bad_obj =
+            json_value_to_py(py, &json!({"notifications": "nope"})).unwrap();
+        let bad = bad_obj.bind(py).downcast::<PyDict>().unwrap();
+        let err =
+            py_reconcile_notification_rows(py, "/tmp/notifications.jsonl", bad)
+                .unwrap_err();
+        assert!(err.is_instance_of::<PyValueError>(py));
+        assert!(err.to_string().contains("NotificationReconcileRequestWire"));
+    });
+}
+
+#[test]
 fn notification_delivery_binding_rejects_malformed_rules() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
