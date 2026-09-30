@@ -229,3 +229,44 @@ fn prompt_prediction_model_rejects_unknown_role() {
         assert!(bad.unwrap_err().is_instance_of::<PyValueError>(py));
     });
 }
+
+#[test]
+fn prompt_looks_generated_binding_matches_core_classifier() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let generated = [
+            "Do the work for #bd/work_phase_bead now",
+            "%wait(time=60)\nDo the thing",
+            "%id(worker, clan=research) do this",
+            "%id(docs-agent, tribe=chop) do this",
+            "%clan(toobig-3j, tribe=chop, summary=[[[bold]Large modules[/bold]]])\nSplit.",
+            "%id(worker, tribe=job) do this",
+            "%tribe:chop\nDo work",
+            "%group:job\nDo work",
+        ];
+        for text in generated {
+            let value: bool = module
+                .call_method1("prompt_looks_generated", (text,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(value, "text={text:?}");
+        }
+        let typed = [
+            "Can you help me implement it now",
+            "%id(worker, tribe=quality) do this",
+            "%id(worker, tribe=chopper) do this",
+            "Can you help me file #bd/lunch-plans for Friday",
+        ];
+        for text in typed {
+            let value: bool = module
+                .call_method1("prompt_looks_generated", (text,))
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(!value, "text={text:?}");
+        }
+    });
+}

@@ -14,7 +14,12 @@
 //! - `SASE single-turn instructions for` from
 //!   `src/sase/llm_provider/muse.py` (also codex/claude variants)
 //! - `clan=` with `%id(` from `src/sase/xprompts/skills/sase_run.md`
-//!   (`%id(worker, clan=...)`, `%clan(...)`)
+//!   (`%id(worker, clan=research)`)
+//! - `tribe=chop`, `%tribe:chop`, `%group:chop` (plus the `job` spellings of
+//!   each; `job` is the public alias of the `chop` tribe) from routine member
+//!   prompts (`%id(docs-agent, tribe=chop)`,
+//!   `%clan(toobig-3j, tribe=chop, ...)`). Other `tribe=` values never match,
+//!   because humans assign tribes by hand.
 
 /// Bead-work segment reference: every `sase bead work` segment references
 /// exactly one bead xprompt through this marker.
@@ -33,6 +38,39 @@ pub const MARKER_WAIT_DIRECTIVE: &str = "%wait(";
 pub const MARKER_SINGLE_TURN: &str = "SASE single-turn instructions for";
 /// Agent clan declaration used by generated member prompts.
 pub const MARKER_CLAN: &str = "clan=";
+/// Routine-tribe binding rendered into every AXE automation member prompt
+/// (`%id(docs-agent, tribe=chop)`, `%clan(toobig-3j, tribe=chop, ...)`).
+pub const MARKER_ROUTINE_TRIBE_CHOP: &str = "tribe=chop";
+/// Public-alias spelling of the routine-tribe binding (`job` canonicalizes
+/// to the `chop` tribe).
+pub const MARKER_ROUTINE_TRIBE_JOB: &str = "tribe=job";
+/// Legacy routine-tribe directive form still present in the live store.
+pub const MARKER_ROUTINE_TRIBE_DIRECTIVE_CHOP: &str = "%tribe:chop";
+/// Public-alias spelling of the legacy routine-tribe directive.
+pub const MARKER_ROUTINE_TRIBE_DIRECTIVE_JOB: &str = "%tribe:job";
+/// Legacy routine-group directive form still present in the live store.
+pub const MARKER_ROUTINE_GROUP_DIRECTIVE_CHOP: &str = "%group:chop";
+/// Public-alias spelling of the legacy routine-group directive.
+pub const MARKER_ROUTINE_GROUP_DIRECTIVE_JOB: &str = "%group:job";
+
+/// True when `needle` occurs in `haystack` at a tribe-name boundary.
+///
+/// Tribe names admit `[A-Za-z0-9_.-]`, so a plain substring search for
+/// `tribe=chop` would also match a hand-assigned `tribe=chopper`. The match
+/// only counts when the next character cannot extend the tribe name.
+fn contains_tribe_marker(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, _)| {
+        !haystack[start + needle.len()..]
+            .chars()
+            .next()
+            .is_some_and(|next| {
+                next.is_ascii_alphanumeric()
+                    || next == '_'
+                    || next == '.'
+                    || next == '-'
+            })
+    })
+}
 
 /// True when a prompt row with no recorded origin looks machine-generated.
 pub fn looks_generated(text: &str) -> bool {
@@ -55,8 +93,29 @@ pub fn looks_generated(text: &str) -> bool {
         return true;
     }
     // Clan member prompts carry an identity directive with a clan binding,
-    // e.g. `%id(worker, tribe=quality)` or `%id(worker, clan=research)`.
+    // e.g. `%id(worker, clan=research)`.
     if text.contains(MARKER_ID_DIRECTIVE) && text.contains(MARKER_CLAN) {
+        return true;
+    }
+    // Routine members render the automation tribe inline. Any other
+    // hand-assigned `tribe=` value (e.g. `%id(worker, tribe=quality)`)
+    // stays typed.
+    if contains_tribe_marker(text, MARKER_ROUTINE_TRIBE_CHOP) {
+        return true;
+    }
+    if contains_tribe_marker(text, MARKER_ROUTINE_TRIBE_JOB) {
+        return true;
+    }
+    if contains_tribe_marker(text, MARKER_ROUTINE_TRIBE_DIRECTIVE_CHOP) {
+        return true;
+    }
+    if contains_tribe_marker(text, MARKER_ROUTINE_TRIBE_DIRECTIVE_JOB) {
+        return true;
+    }
+    if contains_tribe_marker(text, MARKER_ROUTINE_GROUP_DIRECTIVE_CHOP) {
+        return true;
+    }
+    if contains_tribe_marker(text, MARKER_ROUTINE_GROUP_DIRECTIVE_JOB) {
         return true;
     }
     false
@@ -119,6 +178,42 @@ mod tests {
     #[test]
     fn clan_identity_is_generated() {
         assert!(looks_generated("%id(worker, clan=research) do this"));
+    }
+
+    #[test]
+    fn hand_assigned_tribe_is_typed() {
+        assert!(!looks_generated("%id(worker, tribe=quality) do this"));
+        assert!(!looks_generated("%clan(review, tribe=quality) do this"));
+    }
+
+    #[test]
+    fn routine_tribe_binding_is_generated() {
+        assert!(looks_generated("%id(docs-agent, tribe=chop) do this"));
+        assert!(looks_generated(
+            "%clan(toobig-3j, tribe=chop, summary=[[[bold]Large modules[/bold]]])\nSplit."
+        ));
+        assert!(looks_generated("%id(worker, tribe=job) do this"));
+        assert!(looks_generated("%clan(review-0, tribe=job)\nReview."));
+    }
+
+    #[test]
+    fn routine_tribe_prefix_is_typed() {
+        // `tribe=chopper` is a distinct hand-assigned tribe, not the
+        // routine tribe.
+        assert!(!looks_generated("%id(worker, tribe=chopper) do this"));
+        assert!(!looks_generated("%id(worker, tribe=jobless) do this"));
+    }
+
+    #[test]
+    fn legacy_routine_directives_are_generated() {
+        for text in [
+            "%tribe:chop\nDo work",
+            "%tribe:job\nDo work",
+            "%group:chop\nDo work",
+            "%group:job\nDo work",
+        ] {
+            assert!(looks_generated(text), "text={text:?}");
+        }
     }
 
     #[test]

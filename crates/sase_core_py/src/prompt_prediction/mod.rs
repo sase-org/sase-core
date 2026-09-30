@@ -149,6 +149,16 @@ fn py_prompt_prediction_wire_schema_version() -> u32 {
     sase_core::prompt_prediction::PROMPT_PREDICTION_WIRE_SCHEMA_VERSION
 }
 
+/// True when a prompt row with no recorded origin looks machine-generated.
+///
+/// Thin boolean view over the legacy origin heuristic for one-time cleanup
+/// of origin-less history rows.
+#[pyfunction]
+#[pyo3(name = "prompt_looks_generated")]
+fn py_prompt_looks_generated(text: &str) -> bool {
+    sase_core::prompt_prediction::looks_generated(text)
+}
+
 /// Run a prequential replay over typed history rows.
 ///
 /// Inputs arrive as JSON strings so parse errors stay `ValueError`s like
@@ -190,6 +200,7 @@ pub(crate) fn register_prompt_prediction(
         py_prompt_prediction_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_prompt_looks_generated, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_prompt_prediction_replay, m)?)?;
     Ok(())
 }
