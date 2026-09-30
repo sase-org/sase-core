@@ -1277,6 +1277,7 @@ fn attachment_blob(name: &str, sha256: &str) -> BeadNoteAttachmentWire {
         mime_type: "image/png".to_string(),
         image: None,
         origin: Some("athena".to_string()),
+        visibility: None,
     }
 }
 

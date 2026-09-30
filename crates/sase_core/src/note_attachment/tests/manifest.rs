@@ -24,6 +24,7 @@ fn descriptor(name: &str, sha256: &str) -> BeadNoteAttachmentWire {
             height: 720,
         }),
         origin: Some("athena".to_string()),
+        visibility: None,
     }
 }
 
@@ -35,6 +36,7 @@ fn text_descriptor(name: &str, sha256: &str) -> BeadNoteAttachmentWire {
         mime_type: "text/plain".to_string(),
         image: None,
         origin: None,
+        visibility: None,
     }
 }
 

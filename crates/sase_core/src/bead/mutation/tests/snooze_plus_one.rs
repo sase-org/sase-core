@@ -817,6 +817,7 @@ fn plus_one_attachment(name: &str) -> BeadNoteAttachmentWire {
         mime_type: "image/png".to_string(),
         image: None,
         origin: None,
+        visibility: None,
     }
 }
 

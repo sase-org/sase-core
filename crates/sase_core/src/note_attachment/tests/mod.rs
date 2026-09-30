@@ -1,6 +1,9 @@
 //! Unit and corpus tests for note attachments.
 
+mod audience;
 mod manifest;
+mod secret_scanner;
+mod visibility;
 
 use crate::note_attachment::NOTE_ATTACHMENT_SCAN_WIRE_SCHEMA_VERSION;
 use crate::note_attachment::{

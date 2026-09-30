@@ -1042,6 +1042,7 @@ fn close_with_note_records_attachments_on_the_close_note() {
             mime_type: "image/png".to_string(),
             image: None,
             origin: None,
+            visibility: None,
         }]),
     )
     .unwrap();
@@ -1081,6 +1082,7 @@ fn close_note_attachments_requires_a_note() {
             mime_type: "image/png".to_string(),
             image: None,
             origin: None,
+            visibility: None,
         }]),
     )
     .unwrap_err();

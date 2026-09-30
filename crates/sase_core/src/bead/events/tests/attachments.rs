@@ -30,6 +30,7 @@ fn login_attachment() -> BeadNoteAttachmentWire {
             height: 720,
         }),
         origin: Some("athena".to_string()),
+        visibility: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn log_attachment() -> BeadNoteAttachmentWire {
         mime_type: "text/plain".to_string(),
         image: None,
         origin: None,
+        visibility: None,
     }
 }
 

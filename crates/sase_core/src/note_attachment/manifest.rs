@@ -21,6 +21,62 @@ pub struct AttachmentImageDimsWire {
     pub height: u32,
 }
 
+/// Audience of one attachment descriptor.
+///
+/// Serialized snake-case. Unknown future values deserialize as `Private`
+/// through the serde fallback, so old and future readers fail private.
+/// Absent (`None` on the descriptor) also means private.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentVisibilityWire {
+    Public,
+    #[default]
+    #[serde(other)]
+    Private,
+}
+
+impl AttachmentVisibilityWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+        }
+    }
+
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::Public)
+    }
+}
+
+/// Where one roster/reference row came from.
+///
+/// `Note` covers initial `IssueCreated` notes as well as appended and
+/// edited notes. `PlusOne` covers `TaskPlusOneRecorded` evidence, which
+/// has no note id: rows use the recording event's `event_id` as the
+/// stable `note`/`note_id` identifier and `0` as the roster ordinal
+/// (notes are 1-based), documented here so readers never invent a
+/// mutable note for evidence.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BeadAttachmentSourceWire {
+    #[default]
+    Note,
+    PlusOne,
+}
+
+impl BeadAttachmentSourceWire {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::PlusOne => "plus_one",
+        }
+    }
+}
+
 /// One content-addressed file attached to a bead note.
 ///
 /// Field names follow the existing core wires (`size_bytes`, `mime_type`).
@@ -35,9 +91,18 @@ pub struct BeadNoteAttachmentWire {
     pub image: Option<AttachmentImageDimsWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<AttachmentVisibilityWire>,
 }
 
 impl BeadNoteAttachmentWire {
+    /// Effective audience: explicit `Public` stays public; `None` (every
+    /// pre-visibility descriptor) and the unknown-value fallback reduce to
+    /// private.
+    pub fn effective_visibility(&self) -> AttachmentVisibilityWire {
+        self.visibility.unwrap_or(AttachmentVisibilityWire::Private)
+    }
+
     /// Validate one descriptor: the name is already sanitized, the digest is
     /// a lowercase SHA-256 hex string, the MIME type is shaped
     /// `type/subtype`, and image dimensions are greater than 0.
@@ -411,6 +476,9 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 /// One attachment on a bead's current roster: the latest note wins per name.
+///
+/// `plus_one` rows carry the recording event's `event_id` in `note_id`
+/// with `ordinal` 0; note rows carry the note id with a 1-based ordinal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadAttachmentRosterEntryWire {
     pub name: String,
@@ -419,13 +487,19 @@ pub struct BeadAttachmentRosterEntryWire {
     pub mime_type: String,
     pub note_id: String,
     /// 1-based position in the bead's note list, as shown by `sase bead show`.
+    /// `0` marks `plus_one` evidence, which has no note position.
     pub ordinal: u64,
+    #[serde(default)]
+    pub visibility: AttachmentVisibilityWire,
+    #[serde(default)]
+    pub source: BeadAttachmentSourceWire,
 }
 
 /// One attachment reference from the event store, current or historical.
 ///
 /// Objects stay pinned while any current _or historical_ event references
 /// them; this query feeds pinning, purge preview, and doctor.
+/// `plus_one` rows carry the recording event's `event_id` in `note`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadAttachmentReferenceWire {
     pub issue: String,
@@ -433,4 +507,8 @@ pub struct BeadAttachmentReferenceWire {
     pub name: String,
     pub sha256: String,
     pub current: bool,
+    #[serde(default)]
+    pub visibility: AttachmentVisibilityWire,
+    #[serde(default)]
+    pub source: BeadAttachmentSourceWire,
 }

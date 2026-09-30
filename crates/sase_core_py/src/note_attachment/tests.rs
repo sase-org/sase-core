@@ -21,6 +21,12 @@ fn note_attachment_bindings_are_registered() {
             "attachment_placement",
             "attachment_should_auto_fetch",
             "attachment_sensitive_path_reason",
+            "attachment_audience_decision",
+            "attachment_scan_file",
+            "attachment_scanner_rules_version",
+            "attachment_canonical_extension",
+            "attachment_public_object_relpath",
+            "attachment_object_digest_from_relpath",
         ] {
             assert!(module.getattr(name).is_ok(), "{name} is registered");
         }
@@ -91,6 +97,79 @@ fn uniquify_bumps_on_digest_conflict() {
             py_unique_attachment_name("login.png", &"a".repeat(64), existing)
                 .unwrap();
         assert_eq!(uniquified, "login-2.png");
+    });
+}
+
+#[test]
+fn audience_and_object_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        assert_eq!(py_attachment_scanner_rules_version(), 1);
+        assert_eq!(
+            py_attachment_canonical_extension("image/png").unwrap(),
+            "png"
+        );
+        assert!(
+            py_attachment_canonical_extension("application/octet-stream")
+                .is_none()
+        );
+        let digest =
+            "9f2c1e0b77aa4c10d5e6f3a2b1c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1";
+        let relpath =
+            py_attachment_public_object_relpath(digest, "image/png").unwrap();
+        assert_eq!(relpath, format!("files/objects/sha256/9f/{digest}.png"));
+        let back = py_attachment_object_digest_from_relpath(&relpath).unwrap();
+        assert_eq!(back, digest);
+        py_attachment_public_object_relpath("not-a-digest", "image/png")
+            .unwrap_err();
+        py_attachment_object_digest_from_relpath("files/objects/sha256/xx/yy")
+            .unwrap_err();
+
+        // Audience decision parses facts and returns a decision.
+        let facts = json_value_to_py(
+            py,
+            &json!({
+                "bead_store_visibility": "public",
+                "requested": "auto",
+                "actor": "human",
+                "confirmed": false,
+                "allow_sensitive": false,
+                "path": "/work/repo/build.log",
+                "home": "/home/bryan",
+                "sase_home": "/home/bryan/.sase",
+                "extra_sensitive_patterns": [],
+                "size_bytes": 1024,
+                "public_max_bytes": 26214400,
+                "class": "text",
+                "scan": {"outcome": "clean", "bytes_scanned": 1024, "rules_version": 1},
+                "owner_only": false,
+                "workspace_root": "/work/repo",
+                "scratch_roots": [],
+            }),
+        )
+        .unwrap();
+        let facts = facts.bind(py).downcast::<PyDict>().unwrap();
+        let decision = py_attachment_audience_decision(py, facts).unwrap();
+        let value = py_to_json_value(decision.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("public"));
+        assert_eq!(value["rule"], json!("public_evidence"));
+
+        // Scan file parses arguments and returns clean/skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("clean.log");
+        std::fs::write(&candidate, b"hello\n").unwrap();
+        let scan = py_attachment_scan_file(
+            py,
+            candidate.to_str().unwrap(),
+            1024 * 1024,
+            None,
+            "/home/bryan",
+            "/home/bryan/.sase",
+        )
+        .unwrap();
+        let value = py_to_json_value(scan.bind(py)).unwrap();
+        assert_eq!(value["outcome"], json!("clean"));
+        assert_eq!(value["rules_version"], json!(1));
     });
 }
 

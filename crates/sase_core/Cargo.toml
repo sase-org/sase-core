@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
+aho-corasick = { version = "1" }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 rand = { workspace = true }
