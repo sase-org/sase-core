@@ -1,11 +1,13 @@
 //! Memory history over git alone: subject identity across renames, shim aliasing, and the fixture corpus.
 
+pub mod classify;
 pub mod subjects;
 pub mod wire;
 
 #[cfg(test)]
 mod tests;
 
+pub use classify::classify_subjects;
 pub use subjects::{
     derive_subjects, memory_history_pathspecs, subject_path_aliases,
 };

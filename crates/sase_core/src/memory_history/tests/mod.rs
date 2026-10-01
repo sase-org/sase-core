@@ -1,4 +1,4 @@
-//! Subject-identity tests over the shared fixture corpus.
+//! Subject-identity and classification tests over the shared corpus.
 
 use super::subjects::{
     derive_subjects, memory_history_pathspecs, subject_path_aliases,
@@ -8,6 +8,7 @@ use crate::file_history::wire::FileChangeKindWire;
 use crate::file_history::{build_index, FileHistoryBudgetWire};
 use corpus::{build_project_corpus, Corpus, PROJECT_SCOPE_KEY};
 
+mod classify;
 mod corpus;
 
 fn budget() -> FileHistoryBudgetWire {
