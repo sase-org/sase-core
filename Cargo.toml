@@ -33,6 +33,7 @@ tower-http = { version = "0.5", features = ["trace"] }
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+sha1 = "0.10"
 libc = "0.2"
 tower-lsp-server = "0.21.1"
 lsp-types = "0.97"

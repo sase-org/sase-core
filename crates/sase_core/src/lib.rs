@@ -56,6 +56,7 @@ pub mod effort_override;
 pub mod external_pr;
 pub mod feature_flag_state;
 pub mod fenced_code;
+pub mod file_history;
 pub mod finalizer;
 pub mod fleet_agent_session;
 pub mod fleet_attention;
