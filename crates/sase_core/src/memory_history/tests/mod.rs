@@ -8,8 +8,10 @@ use crate::file_history::wire::FileChangeKindWire;
 use crate::file_history::{build_index, FileHistoryBudgetWire};
 use corpus::{build_project_corpus, Corpus, PROJECT_SCOPE_KEY};
 
+mod causes;
 mod classify;
 mod corpus;
+mod feed;
 
 fn budget() -> FileHistoryBudgetWire {
     FileHistoryBudgetWire::default()
