@@ -168,6 +168,13 @@ pub struct PromptPredictionRequestWire {
     pub confidence: String,
     #[serde(default = "default_include_draft")]
     pub include_draft: bool,
+    /// Opt-in current-word completion: when the text ends in a partial
+    /// word, complete it through the prefix-restricted gate and report the
+    /// suffix in `word_completion`. Old readers ignore the field; texts
+    /// ending in whitespace or boundary punctuation stay ordinary
+    /// boundary requests.
+    #[serde(default)]
+    pub complete_current_word: bool,
 }
 
 fn default_predict_limit() -> usize {
@@ -215,6 +222,16 @@ pub struct PromptPredictionCandidateWire {
     pub continuation: Vec<String>,
 }
 
+/// Gated current-word completion: the typed prefix, the completed word
+/// with the typed casing kept, and the characters to insert (empty when
+/// the typed word is already the predicted word).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionWordCompletionWire {
+    pub prefix: String,
+    pub word: String,
+    pub suffix: String,
+}
+
 /// Next-word prediction result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptPredictionResultWire {
@@ -229,6 +246,11 @@ pub struct PromptPredictionResultWire {
     pub ghost: Vec<String>,
     #[serde(default)]
     pub candidates: Vec<PromptPredictionCandidateWire>,
+    /// Present only on a gated current-word completion. `None` keeps the
+    /// serialized shape identical to the boundary result, so old readers
+    /// see no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_completion: Option<PromptPredictionWordCompletionWire>,
 }
 
 /// One prefix-rank request for current-word completion.
@@ -450,6 +472,60 @@ mod tests {
     }
 
     #[test]
+    fn completion_fields_default_for_old_readers() {
+        // Requests serialized without the opt-in field (old core, old
+        // Python) deserialize with completion off.
+        let json = serde_json::json!({
+            "schema_version": PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            "text_before_cursor": "help me impl",
+            "limit": 5,
+            "max_words": 4,
+            "confidence": "balanced",
+            "include_draft": true,
+        });
+        let request: PromptPredictionRequestWire =
+            serde_json::from_value(json).expect("deserialize");
+        assert!(!request.complete_current_word);
+        // Results without a completion carry no new key on the wire, so
+        // old Python readers see an unchanged shape.
+        let result = PromptPredictionResultWire {
+            schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            blocked_reason: None,
+            context_words: Vec::new(),
+            confident: false,
+            ghost: Vec::new(),
+            candidates: Vec::new(),
+            word_completion: None,
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        assert!(!json.contains("word_completion"), "json={json}");
+        let back: PromptPredictionResultWire =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(result, back);
+    }
+
+    #[test]
+    fn completion_wire_serde_round_trip() {
+        let result = PromptPredictionResultWire {
+            schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            blocked_reason: None,
+            context_words: vec!["help".to_string(), "me".to_string()],
+            confident: true,
+            ghost: vec!["it".to_string()],
+            candidates: Vec::new(),
+            word_completion: Some(PromptPredictionWordCompletionWire {
+                prefix: "impl".to_string(),
+                word: "implement".to_string(),
+                suffix: "ement".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&result).expect("serialize");
+        let back: PromptPredictionResultWire =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(result, back);
+    }
+
+    #[test]
     fn result_wire_serde_round_trip() {
         let result = PromptPredictionResultWire {
             schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
@@ -457,6 +533,7 @@ mod tests {
             context_words: vec!["help".to_string(), "me".to_string()],
             confident: true,
             ghost: vec!["implement".to_string()],
+            word_completion: None,
             candidates: vec![PromptPredictionCandidateWire {
                 word: "implement".to_string(),
                 key: "implement".to_string(),

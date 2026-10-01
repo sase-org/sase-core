@@ -31,7 +31,7 @@ pub use predict::{
 };
 pub use replay::evaluate_prompt_prediction_replay;
 pub use tokenize::{
-    canonical_surface, classify_word, tokenize_cursor_text,
+    canonical_surface, classify_word, split_partial_word, tokenize_cursor_text,
     tokenize_prompt_text, BLOCKED_FRONTMATTER, BLOCKED_NO_WORD_CONTEXT,
     BLOCKED_STRUCTURAL_TAIL, BLOCKED_UNCLOSED_ALTERNATION,
     BLOCKED_UNCLOSED_CODE_SPAN, BLOCKED_UNCLOSED_FENCE, BLOCKED_UNCLOSED_JINJA,
@@ -45,6 +45,7 @@ pub use wire::{
     PromptPredictionReplaySweepPointWire, PromptPredictionRequestWire,
     PromptPredictionResultWire, PromptPredictionRowWire,
     PromptPredictionSourceRole, PromptPredictionSourceSharesWire,
-    PromptPrefixRankMatchWire, PromptPrefixRankRequestWire,
-    PromptPrefixRankResultWire, PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+    PromptPredictionWordCompletionWire, PromptPrefixRankMatchWire,
+    PromptPrefixRankRequestWire, PromptPrefixRankResultWire,
+    PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
 };

@@ -13,20 +13,22 @@ use crate::prompt_prediction::corpus::{
     CompiledPromptPredictionCorpus, PromptSuccessorSource,
 };
 use crate::prompt_prediction::predict::{
-    parse_confidence, score_and_gate, score_candidates, ConfidencePreset,
-    DraftCounts, GatePass, ScoredWord, ScoringQuery, WeightedSource,
-    MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED, SHARE_ARCHIVE, SHARE_HISTORY,
-    SHARE_SESSION,
+    parse_confidence, score_and_gate, score_and_gate_restricted,
+    score_candidates, ConfidencePreset, DraftCounts, GatePass, ScoredWord,
+    ScoringQuery, WeightedSource, MODEL_MAX_CONTEXT_WORDS, PRESET_BALANCED,
+    SHARE_ARCHIVE, SHARE_HISTORY, SHARE_SESSION,
 };
 use crate::prompt_prediction::tokenize::{
-    tokenize_cursor_text, tokenize_prompt_text, CursorContext, SEQUENCE_START,
+    split_partial_word, tokenize_cursor_text, tokenize_prompt_text,
+    CursorContext, ProseSequence, SEQUENCE_START,
 };
 use crate::prompt_prediction::wire::{
     PromptPredictionCandidateWire, PromptPredictionModelConfigWire,
     PromptPredictionRequestWire, PromptPredictionResultWire,
     PromptPredictionSourceRole, PromptPredictionSourceSharesWire,
-    PromptPrefixRankMatchWire, PromptPrefixRankRequestWire,
-    PromptPrefixRankResultWire, PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+    PromptPredictionWordCompletionWire, PromptPrefixRankMatchWire,
+    PromptPrefixRankRequestWire, PromptPrefixRankResultWire,
+    PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
 };
 
 /// Maximum continuation preview words carried per menu candidate.
@@ -73,10 +75,23 @@ impl PromptPredictionModel {
     }
 
     /// Predict next words for the text before the cursor.
+    ///
+    /// With `complete_current_word` set and the text ending in a partial
+    /// word, this runs the prefix-restricted completion instead. Texts
+    /// ending in whitespace or boundary punctuation, and prefixes that
+    /// cannot be words, fall through to the ordinary boundary path, so
+    /// those results stay identical with the flag off.
     pub fn predict(
         &self,
         request: &PromptPredictionRequestWire,
     ) -> PromptPredictionResultWire {
+        if request.complete_current_word {
+            if let Some((text_before, prefix)) =
+                split_partial_word(&request.text_before_cursor)
+            {
+                return self.predict_completion(request, text_before, prefix);
+            }
+        }
         let context = tokenize_cursor_text(&request.text_before_cursor);
         let CursorContext::Ready {
             context: full_context,
@@ -95,6 +110,7 @@ impl PromptPredictionModel {
                 confident: false,
                 ghost: Vec::new(),
                 candidates: Vec::new(),
+                word_completion: None,
             };
         };
         let trimmed = trim_context(&full_context);
@@ -139,7 +155,207 @@ impl PromptPredictionModel {
             confident,
             ghost,
             candidates: menu,
+            word_completion: None,
         }
+    }
+
+    /// Gated current-word completion for a trailing partial word.
+    ///
+    /// The context is the text before the prefix, built the same way as
+    /// `rank_prefix`; a blocked context yields no completion. The
+    /// successor distribution is restricted to keys starting with the
+    /// casefolded prefix (including the exact prefix key) with a
+    /// conservative denominator, and the draft counts the sequences with
+    /// the partial word removed. On a gate pass, `ghost` holds the gated
+    /// continuation after the completed word: `max_words` counts the
+    /// completed word, so at most `max_words - 1` continuation words
+    /// follow it. The menu holds the prefix-restricted ranked words,
+    /// honoring `limit` with continuation previews.
+    fn predict_completion(
+        &self,
+        request: &PromptPredictionRequestWire,
+        text_before: &str,
+        prefix_typed: &str,
+    ) -> PromptPredictionResultWire {
+        if let CursorContext::Blocked { reason } =
+            tokenize_cursor_text(text_before)
+        {
+            return PromptPredictionResultWire {
+                schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+                blocked_reason: Some(reason.to_string()),
+                context_words: Vec::new(),
+                confident: false,
+                ghost: Vec::new(),
+                candidates: Vec::new(),
+                word_completion: None,
+            };
+        }
+        let sequences = tokenize_prompt_text(text_before);
+        let mut context: Vec<String> = Vec::new();
+        if let Some(last) = sequences.last() {
+            if last.started {
+                context.push(SEQUENCE_START.to_string());
+            }
+            context.extend(last.tokens.iter().map(|token| token.key.clone()));
+        }
+        let trimmed = trim_context(&context);
+        let draft = self.completion_draft(request, &sequences);
+        let project = request.project.as_deref();
+        let preset = parse_confidence(&request.confidence);
+        let prefix_fold = prefix_typed.to_lowercase().replace('’', "'");
+        let (ranked, gate) = self.completion_round(
+            &trimmed,
+            project,
+            draft.as_ref(),
+            preset,
+            &prefix_fold,
+        );
+        // A short prefix never completes: the result stays non-confident
+        // with no completion, while the menu still ranks the restricted
+        // words.
+        let gate = if prefix_typed.chars().count() >= preset.min_prefix_chars {
+            gate
+        } else {
+            None
+        };
+        let menu: Vec<PromptPredictionCandidateWire> = ranked
+            .into_iter()
+            .filter(|word| word.has_higher)
+            .take(request.limit)
+            .map(|word| {
+                self.candidate_wire(
+                    &trimmed,
+                    project,
+                    draft.as_ref(),
+                    &word,
+                    preset,
+                )
+            })
+            .collect();
+        let Some(pass) = gate else {
+            return PromptPredictionResultWire {
+                schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+                blocked_reason: None,
+                context_words: self.context_surfaces(&trimmed),
+                confident: false,
+                ghost: Vec::new(),
+                candidates: menu,
+                word_completion: None,
+            };
+        };
+        let surface = self.surface_for(&pass.word).unwrap_or(pass.word.clone());
+        let Some((word, suffix)) = completion_word(prefix_typed, &surface)
+        else {
+            return PromptPredictionResultWire {
+                schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+                blocked_reason: None,
+                context_words: self.context_surfaces(&trimmed),
+                confident: false,
+                ghost: Vec::new(),
+                candidates: menu,
+                word_completion: None,
+            };
+        };
+        // `continuation` needs no change: it only reads `pass.word`. Its
+        // first element is the completed word itself, so the ghost drops
+        // it and keeps at most `max_words - 1` following words.
+        let continued = self.continuation(
+            &trimmed,
+            project,
+            draft.as_ref(),
+            &pass,
+            request.max_words,
+            preset,
+        );
+        let ghost: Vec<String> = continued.into_iter().skip(1).collect();
+        PromptPredictionResultWire {
+            schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            blocked_reason: None,
+            context_words: self.context_surfaces(&trimmed),
+            confident: true,
+            ghost,
+            candidates: menu,
+            word_completion: Some(PromptPredictionWordCompletionWire {
+                prefix: prefix_typed.to_string(),
+                word,
+                suffix,
+            }),
+        }
+    }
+
+    /// Draft counts for a completion request: the sequences of the text
+    /// before the prefix, so the partial word is never observed as a
+    /// successor. This matches the boundary request and the replay's
+    /// `keys[..pos]`.
+    fn completion_draft(
+        &self,
+        request: &PromptPredictionRequestWire,
+        sequences: &[ProseSequence],
+    ) -> Option<DraftCounts> {
+        if !request.include_draft || self.config.draft_weight <= 0.0 {
+            return None;
+        }
+        let seqs: Vec<Vec<String>> = sequences
+            .iter()
+            .map(|seq| {
+                seq.tokens.iter().map(|token| token.key.clone()).collect()
+            })
+            .collect();
+        Some(DraftCounts::from_sequences(&seqs, MODEL_MAX_CONTEXT_WORDS))
+    }
+
+    /// Prefix-restricted candidate keys: every known key starting with
+    /// the casefolded prefix (including the exact prefix key) plus the
+    /// prefix-filtered draft words. Excluded words are never completed.
+    fn completion_candidates(
+        &self,
+        prefix_fold: &str,
+        draft: Option<&DraftCounts>,
+    ) -> Vec<String> {
+        let mut words: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for source in &self.sources {
+            for key in source.corpus.keys_with_prefix(prefix_fold) {
+                if seen.insert(key.clone()) {
+                    words.push(key);
+                }
+            }
+        }
+        if let Some(counts) = draft {
+            for key in counts.candidate_words() {
+                if key.starts_with(prefix_fold) && seen.insert(key.clone()) {
+                    words.push(key);
+                }
+            }
+        }
+        words.retain(|key| key != SEQUENCE_START && !self.is_excluded(key));
+        words
+    }
+
+    /// One fused prefix-restricted scoring round over the completion
+    /// context.
+    fn completion_round(
+        &self,
+        context: &[String],
+        project: Option<&str>,
+        draft: Option<&DraftCounts>,
+        preset: ConfidencePreset,
+        prefix_fold: &str,
+    ) -> (Vec<ScoredWord>, Option<GatePass>) {
+        let candidates = self.completion_candidates(prefix_fold, draft);
+        let weighted = self.weighted();
+        let query = ScoringQuery {
+            sources: &weighted,
+            project,
+            project_boost: self.config.project_boost,
+            backoff_alpha: self.config.backoff_alpha,
+            draft: draft_param(draft, &self.config),
+            context,
+            max_order: context.len(),
+            preset,
+            reject_conflicts: self.config.reject_conflicts,
+        };
+        score_and_gate_restricted(&query, &candidates, prefix_fold)
     }
 
     /// Rank current-word completions for a typed prefix.
@@ -458,6 +674,45 @@ fn trim_context(full: &[String]) -> Vec<String> {
     full[start..].to_vec()
 }
 
+/// Split the typed prefix and the canonical surface into the completed
+/// word and the suffix to insert: the typed prefix is kept exactly and
+/// the suffix comes from the surface. An all-caps prefix (2 or more
+/// letters) uppercases the suffix. Returns `None` when the surface's
+/// casefold does not extend the typed casefold character for character
+/// (`’` maps to `'`).
+fn completion_word(typed: &str, surface: &str) -> Option<(String, String)> {
+    let typed_fold = typed.to_lowercase().replace('’', "'");
+    let surface_fold = surface.to_lowercase().replace('’', "'");
+    if !surface_fold.starts_with(typed_fold.as_str()) {
+        return None;
+    }
+    // Folding preserves character counts for word characters (`’` maps
+    // to `'` one for one), so skipping the typed character count lands
+    // on the suffix start.
+    let mut suffix: String =
+        surface.chars().skip(typed.chars().count()).collect();
+    if is_all_caps_word(typed) {
+        suffix = suffix.to_uppercase();
+    }
+    let word = format!("{typed}{suffix}");
+    Some((word, suffix))
+}
+
+/// True when the typed prefix holds 2 or more letters and every letter
+/// is uppercase.
+fn is_all_caps_word(typed: &str) -> bool {
+    let mut letters = 0u32;
+    for ch in typed.chars() {
+        if ch.is_alphabetic() {
+            letters += 1;
+            if ch.is_lowercase() {
+                return false;
+            }
+        }
+    }
+    letters >= 2
+}
+
 fn trimmed_extended(context: &[String], word: &str) -> Vec<String> {
     let mut extended = context.to_vec();
     extended.push(word.to_string());
@@ -518,6 +773,7 @@ mod tests {
             max_words: 4,
             confidence: "balanced".to_string(),
             include_draft: true,
+            complete_current_word: false,
         }
     }
 
@@ -748,5 +1004,36 @@ mod tests {
             assert!(result.blocked_reason.is_some());
             assert!(result.ghost.is_empty());
         }
+    }
+
+    #[test]
+    fn completion_word_keeps_typed_prefix() {
+        assert_eq!(
+            completion_word("impl", "implement"),
+            Some(("implement".to_string(), "ement".to_string()))
+        );
+        assert_eq!(
+            completion_word("Impl", "Implement"),
+            Some(("Implement".to_string(), "ement".to_string()))
+        );
+        assert_eq!(
+            completion_word("IMPL", "Implement"),
+            Some(("IMPLEMENT".to_string(), "EMENT".to_string()))
+        );
+        // One capital letter is not all caps: the suffix keeps the
+        // canonical casing.
+        assert_eq!(
+            completion_word("I", "Implement"),
+            Some(("Implement".to_string(), "mplement".to_string()))
+        );
+        // The exact word completes with an empty suffix.
+        assert_eq!(
+            completion_word("implement", "implement"),
+            Some(("implement".to_string(), String::new()))
+        );
+        // A surface that does not extend the typed prefix completes
+        // nothing.
+        assert_eq!(completion_word("impl", "important"), None);
+        assert_eq!(completion_word("xyz", "implement"), None);
     }
 }

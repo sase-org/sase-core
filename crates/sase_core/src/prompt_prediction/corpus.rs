@@ -372,6 +372,44 @@ impl CompiledPromptPredictionCorpus {
             .unwrap_or((0.0, 0))
     }
 
+    /// Prefix-restricted sums at one packed context: the kept successor
+    /// mass and distinct support over keys starting with `prefix`, plus
+    /// the truncated (dropped) successor mass.
+    ///
+    /// The restricted gate builds its conservative denominator as
+    /// restricted mass plus dropped mass: the dropped tail upper-bounds
+    /// any truncated matching mass, so truncation never inflates `p`.
+    pub(crate) fn prefix_restricted_sums(
+        &self,
+        key: ContextKey,
+        prefix: &str,
+    ) -> (f64, u64, f64) {
+        let Some(stats) = self.inner.contexts.get(&key) else {
+            return (0.0, 0, 0.0);
+        };
+        restricted_sums(&self.inner.keys, stats, prefix)
+    }
+
+    /// Prefix-restricted sums for one project partition: the kept
+    /// successor mass over keys starting with `prefix`, plus the
+    /// truncated (dropped) successor mass.
+    pub(crate) fn project_prefix_restricted_sums(
+        &self,
+        project: &str,
+        key: ContextKey,
+        prefix: &str,
+    ) -> (f64, f64) {
+        let Some(map) = self.inner.projects.get(project) else {
+            return (0.0, 0.0);
+        };
+        let Some(stats) = map.get(&key) else {
+            return (0.0, 0.0);
+        };
+        let (mass, _, dropped) =
+            restricted_sums(&self.inner.keys, stats, prefix);
+        (mass, dropped)
+    }
+
     /// Every known key starting with `prefix`, via the sorted prefix
     /// index: O(log vocab + matches) instead of a full vocabulary scan.
     pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
@@ -426,6 +464,29 @@ fn successor_lookup(
         .iter()
         .find(|(id, _)| *id == word)
         .map(|(_, succ)| (succ.mass, succ.distinct))
+}
+
+/// Kept-successor sums over keys starting with `prefix`, plus the
+/// truncated mass: `(restricted_mass, restricted_distinct, dropped_mass)`.
+/// At most 32 successors are scanned; totals stay pre-truncation so the
+/// dropped tail bounds any truncated matching mass.
+fn restricted_sums(
+    keys: &[String],
+    stats: &ContextStats,
+    prefix: &str,
+) -> (f64, u64, f64) {
+    let mut restricted_mass = 0.0;
+    let mut restricted_distinct = 0u64;
+    let mut kept_mass = 0.0;
+    for (id, succ) in &stats.successors {
+        kept_mass += succ.mass;
+        if keys[*id as usize].starts_with(prefix) {
+            restricted_mass += succ.mass;
+            restricted_distinct += succ.distinct;
+        }
+    }
+    let dropped = (stats.total_mass - kept_mass).max(0.0);
+    (restricted_mass, restricted_distinct, dropped)
 }
 
 impl PromptSuccessorSource for CompiledPromptPredictionCorpus {

@@ -1133,6 +1133,7 @@ mod tests {
                 max_words: 4,
                 confidence: "balanced".to_string(),
                 include_draft: true,
+                complete_current_word: false,
             };
             let result = model.predict(&request);
             let menu_top3: Vec<&str> = result

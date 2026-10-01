@@ -23,6 +23,10 @@ pub struct ConfidencePreset {
     pub min_margin: f64,
     /// Minimum combined distinct support.
     pub min_support: u64,
+    /// Minimum typed prefix characters for current-word completion.
+    /// Seed values (phase `word-completion-calibration` sets the final
+    /// ones): cautious 3, balanced 2, eager 1.
+    pub min_prefix_chars: usize,
 }
 
 /// Cautious preset: precision first. Calibrated on the 2026-09-30
@@ -39,6 +43,7 @@ pub const PRESET_CAUTIOUS: ConfidencePreset = ConfidencePreset {
     min_p: 0.60,
     min_margin: 0.40,
     min_support: 5,
+    min_prefix_chars: 3,
 };
 /// Balanced preset: the default. Calibrated on the 2026-09-30 prequential
 /// replay over typed history (see `tools/prompt_prediction_replay` in
@@ -51,6 +56,7 @@ pub const PRESET_BALANCED: ConfidencePreset = ConfidencePreset {
     min_p: 0.75,
     min_margin: 0.2,
     min_support: 2,
+    min_prefix_chars: 2,
 };
 /// Eager preset: coverage first. Calibrated on the 2026-09-30 prequential
 /// replay over typed history (see `tools/prompt_prediction_replay` in
@@ -61,6 +67,7 @@ pub const PRESET_EAGER: ConfidencePreset = ConfidencePreset {
     min_p: 0.40,
     min_margin: 0.05,
     min_support: 1,
+    min_prefix_chars: 1,
 };
 
 /// Parse a confidence name; unknown names fall back to balanced.
@@ -231,6 +238,29 @@ impl DraftCounts {
             return (0.0, 0);
         };
         self.totals(key)
+    }
+
+    /// Prefix-restricted draft sums at one packed context: the mass and
+    /// distinct support over successor words starting with `prefix`. The
+    /// draft keeps every pair (no truncation), so no dropped mass
+    /// applies. `pairs` has no per-context index; the scan stays cheap
+    /// because a request draft holds only the current text.
+    pub(crate) fn prefix_restricted_sums(
+        &self,
+        context: ContextKey,
+        prefix: &str,
+    ) -> (f64, u64) {
+        let mut mass = 0.0;
+        let mut distinct = 0u64;
+        for ((pair_context, id), stats) in &self.pairs {
+            if *pair_context == context
+                && self.vocab[*id as usize].starts_with(prefix)
+            {
+                mass += stats.mass;
+                distinct += stats.distinct;
+            }
+        }
+        (mass, distinct)
     }
 }
 
@@ -617,6 +647,75 @@ impl MassTable {
     fn at(&self, candidate: usize, order: usize) -> CombinedMass {
         self.rows[candidate][order]
     }
+}
+
+impl PassCtx<'_> {
+    /// Restrict every per-order total to the prefix-filtered distribution
+    /// for current-word completion.
+    ///
+    /// Each source total becomes the restricted kept mass plus the
+    /// context's truncated (dropped) mass, so truncation never inflates
+    /// `p`; each distinct total becomes the restricted distinct support.
+    /// The draft has no truncation, so its totals become the restricted
+    /// sums directly. Word lookups are untouched: callers pass only
+    /// prefix-matching candidates, and `combined_at_order`,
+    /// `top_two_from_table`, and `gate_from_table` then work unchanged.
+    fn restrict_to_prefix(&mut self, prefix: &str) {
+        for (view_index, view) in self.views.iter_mut().enumerate() {
+            for order in 0..self.order_count {
+                let Some(context) = view.orders[order] else {
+                    continue;
+                };
+                let (restricted_mass, restricted_distinct, dropped) =
+                    view.corpus.prefix_restricted_sums(context, prefix);
+                view.masses[order] = restricted_mass + dropped;
+                view.distincts[order] = restricted_distinct;
+                self.project_masses[view_index][order] = match self.project {
+                    Some(name) => {
+                        let (project_mass, project_dropped) =
+                            view.corpus.project_prefix_restricted_sums(
+                                name, context, prefix,
+                            );
+                        project_mass + project_dropped
+                    }
+                    None => 0.0,
+                };
+            }
+        }
+        if let Some((counts, _)) = self.draft {
+            for order in 0..self.order_count {
+                let Some(context) = self.draft_orders[order] else {
+                    continue;
+                };
+                let (mass, distinct) =
+                    counts.prefix_restricted_sums(context, prefix);
+                self.draft_masses[order] = mass;
+                self.draft_distincts[order] = distinct;
+            }
+        }
+    }
+}
+
+/// Score prefix-matching candidates and apply the confidence gate over
+/// the prefix-restricted distribution with a conservative denominator.
+///
+/// `candidates` must hold only keys starting with `prefix` (including
+/// the exact prefix key); `prefix` is the casefolded typed prefix.
+pub fn score_and_gate_restricted(
+    query: &ScoringQuery<'_>,
+    candidates: &[String],
+    prefix: &str,
+) -> (Vec<ScoredWord>, Option<GatePass>) {
+    let max_order = query.max_order;
+    let suffixes = order_suffixes(query.context, max_order);
+    let mut ctx = PassCtx::of(query, &suffixes);
+    ctx.restrict_to_prefix(prefix);
+    let resolved = resolve_candidates(&ctx, candidates);
+    let table = MassTable::build(&ctx, &resolved);
+    let ranked = score_from_table(query, &resolved, &table);
+    let gate =
+        gate_from_table(&ctx, query, &suffixes, &ranked, &resolved, &table);
+    (ranked, gate)
 }
 
 /// Score every candidate with stupid backoff over orders `max_order..=0`.
@@ -1041,6 +1140,7 @@ mod tests {
                 min_p: 0.0,
                 min_margin: 0.0,
                 min_support: 4,
+                min_prefix_chars: 0,
             },
             reject_conflicts: false,
         };
@@ -1125,6 +1225,7 @@ mod tests {
             min_p: 0.0,
             min_margin: 0.0,
             min_support: 1,
+            min_prefix_chars: 0,
         };
         let strict = gate_query(&sources, &context, preset, true);
         let loose = gate_query(&sources, &context, preset, false);

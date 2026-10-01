@@ -740,6 +740,53 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric()
 }
 
+/// Split a trailing partial word off cursor text for current-word
+/// completion: `(text_before, prefix)` with `prefix` exactly as typed
+/// (leading affixes stripped).
+///
+/// Returns `None` when the text ends in whitespace or boundary
+/// punctuation (an ordinary boundary request), and when the trailing
+/// token cannot be a word (structural, hash-like, secret-like, over 32
+/// characters): those fall through to the ordinary path and block as
+/// today.
+pub fn split_partial_word(text: &str) -> Option<(&str, &str)> {
+    let token_start = text
+        .rfind([' ', '\t', '\n', '\r'])
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let token = text.get(token_start..).unwrap_or("");
+    if token.is_empty() {
+        return None;
+    }
+    // Leading affixes are not part of the typed prefix.
+    let mut prefix = token;
+    loop {
+        let next =
+            prefix.strip_prefix(['(', '"', '\'', '“', '‘', '*', '_', '`', '[']);
+        match next {
+            Some(rest) => prefix = rest,
+            None => break,
+        }
+    }
+    if prefix.is_empty() {
+        return None;
+    }
+    // The text must end in a word character under the tokenizer's word
+    // rules: an alphanumeric or a word-internal character (`classify_word`
+    // allows `'`, `’`, `-`, `_` inside words, so a trailing one can still
+    // continue the word). Anything else is a boundary request.
+    if !prefix.chars().last().is_some_and(|ch| {
+        ch.is_alphanumeric() || matches!(ch, '\'' | '’' | '-' | '_')
+    }) {
+        return None;
+    }
+    if is_structural_token(prefix) || classify_word(prefix).is_none() {
+        return None;
+    }
+    let prefix_offset = token.len() - prefix.len();
+    Some((&text[..token_start + prefix_offset], prefix))
+}
+
 /// Classify a raw token core as a word, returning (key, surface).
 pub fn classify_word(raw: &str) -> Option<(String, String)> {
     let cleaned = strip_affixes(raw);
@@ -1098,6 +1145,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn partial_word_split() {
+        assert_eq!(
+            split_partial_word("help me impl"),
+            Some(("help me ", "impl"))
+        );
+        assert_eq!(split_partial_word("hel"), Some(("", "hel")));
+        // Leading affixes stay in the text before the prefix.
+        assert_eq!(
+            split_partial_word("help me (impl"),
+            Some(("help me (", "impl"))
+        );
+        // A bare word ending is a partial word too: the flag decides,
+        // not the split.
+        assert_eq!(split_partial_word("help me"), Some(("help ", "me")));
+        // Word-internal trailing characters can still continue the word.
+        assert_eq!(
+            split_partial_word("help me don’"),
+            Some(("help me ", "don’"))
+        );
+        assert_eq!(
+            split_partial_word("help me well-"),
+            Some(("help me ", "well-"))
+        );
+        // Whitespace or boundary punctuation ends means a boundary
+        // request, not a partial word.
+        for text in ["help me ", "help me.", "help me impl."] {
+            assert_eq!(split_partial_word(text), None, "text={text:?}");
+        }
+        // Tokens that cannot be words never split: they block as today
+        // through the ordinary path.
+        assert_eq!(split_partial_word("help me src/foo"), None);
+        assert_eq!(split_partial_word("help me ghp_abc123"), None);
+        assert_eq!(split_partial_word("help me deadbeef123"), None);
+        assert_eq!(
+            split_partial_word("help me aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            None
+        );
+        assert_eq!(split_partial_word("help ("), None);
     }
 
     #[test]
