@@ -828,9 +828,9 @@ fn min_prefix_chars_gates_per_preset() {
     ]);
     // Six identical rows pass every preset on evidence (p, margin,
     // support), so only `min_prefix_chars` (cautious 3, balanced 2,
-    // eager 1) decides.
+    // eager 2) decides: eager no longer completes on a single char.
     for (text, cautious, balanced, eager) in [
-        ("help me i", false, false, true),
+        ("help me i", false, false, false),
         ("help me im", false, true, true),
         ("help me imp", true, true, true),
     ] {

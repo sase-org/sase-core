@@ -399,6 +399,37 @@ pub struct PromptPredictionReplaySweepPointWire {
     pub novel_precision: Option<f64>,
 }
 
+/// Mid-word metrics for one typed-prefix length: coverage (share of
+/// trials gated), precision (share of gated trials whose completed word
+/// equals the target; `None` when nothing gated), and the keystroke-savings
+/// rate (`target_chars - k` per gated-correct trial plus gated-correct
+/// continuation words, over scored-row chars).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayMidwordMetricsWire {
+    pub k: u64,
+    pub positions: u64,
+    pub coverage: f64,
+    pub precision: Option<f64>,
+    pub savings: f64,
+}
+
+/// One cohort slice of the mid-word report: per-k metrics for one cohort.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayMidwordCohortWire {
+    pub cohort: String,
+    pub by_k: Vec<PromptPredictionReplayMidwordMetricsWire>,
+}
+
+/// Mid-word completion metrics for one confidence preset: per-k metrics
+/// overall plus per cohort. Present only when the evaluator ran the
+/// mid-word pass; old readers ignore the field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPredictionReplayMidwordPresetWire {
+    pub preset: String,
+    pub by_k: Vec<PromptPredictionReplayMidwordMetricsWire>,
+    pub cohorts: Vec<PromptPredictionReplayMidwordCohortWire>,
+}
+
 /// Aggregate-only prequential replay report. It never carries prompt text:
 /// positions are counted, cohorts are named, and the sweep holds rates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -421,6 +452,11 @@ pub struct PromptPredictionReplayReportWire {
     pub corpus_bytes: u64,
     pub corpus_rows_used: u64,
     pub corpus_contexts: u64,
+    /// Mid-word trials per preset and per typed-prefix length. `None`
+    /// keeps the serialized shape identical to the boundary-only report,
+    /// so old readers see no change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midword: Option<Vec<PromptPredictionReplayMidwordPresetWire>>,
 }
 
 /// Corpus compile statistics.

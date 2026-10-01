@@ -19,14 +19,18 @@ use crate::prompt_prediction::corpus::{
     PromptSuccessorSource,
 };
 use crate::prompt_prediction::predict::{
-    DraftCounts, PRESET_BALANCED, PRESET_CAUTIOUS, PRESET_EAGER,
+    ConfidencePreset, DraftCounts, PRESET_BALANCED, PRESET_CAUTIOUS,
+    PRESET_EAGER,
 };
 use crate::prompt_prediction::tokenize::{
     tokenize_prompt_text, SEQUENCE_START,
 };
 use crate::prompt_prediction::wire::{
     PromptPredictionCorpusOptionsWire, PromptPredictionReplayCohortWire,
-    PromptPredictionReplayGateMetricsWire, PromptPredictionReplayOptionsWire,
+    PromptPredictionReplayGateMetricsWire,
+    PromptPredictionReplayMidwordCohortWire,
+    PromptPredictionReplayMidwordMetricsWire,
+    PromptPredictionReplayMidwordPresetWire, PromptPredictionReplayOptionsWire,
     PromptPredictionReplayReportWire, PromptPredictionReplaySweepPointWire,
     PromptPredictionRowWire, PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
 };
@@ -141,6 +145,7 @@ pub fn evaluate_prompt_prediction_replay(
         observe_row_text(&row.text, &mut prior_five, &mut prior_vocab);
     }
     let mut records: Vec<PositionRecord> = Vec::new();
+    let mut midword: Vec<MidwordTrial> = Vec::new();
     let mut cohort_chars = [0u64; 3];
     let mut rows_scored = 0u64;
     // Deterministic scoring stride: every K-th post-warm row is scored,
@@ -190,7 +195,25 @@ pub fn evaluate_prompt_prediction_replay(
                     cohort,
                     started,
                 );
+                let boundary_index = records.len();
                 records.push(record);
+                // Mid-word trials: each typed-prefix length of the target
+                // word is a completion trial through the restricted gate,
+                // with the boundary just scored as its continuation base.
+                score_midword_trials(
+                    &builder,
+                    &tuning,
+                    &context,
+                    &prefix,
+                    row.project.as_deref(),
+                    target,
+                    &keys,
+                    pos,
+                    row_index,
+                    cohort,
+                    boundary_index,
+                    &mut midword,
+                );
                 scored_any = true;
             }
         }
@@ -205,6 +228,7 @@ pub fn evaluate_prompt_prediction_replay(
         &tuning,
         &builder,
         &records,
+        &midword,
         &cohort_chars,
         rows_total(rows.len()),
         typed.len() as u64,
@@ -493,6 +517,419 @@ fn score_position(
     }
 }
 
+/// Typed-prefix lengths evaluated by the mid-word pass.
+const MIDWORD_KS: [u8; 4] = [1, 2, 3, 4];
+/// Cap on counted continuation words: production counts the completed word
+/// in `max_words` (default 4), so at most three words follow it.
+const MIDWORD_MAX_CONTINUATION: usize = 3;
+
+/// One mid-word completion trial: the restricted-distribution evidence for
+/// one typed-prefix length of one word-boundary target, plus the hooks the
+/// report needs to score gated continuation.
+///
+/// `record` holds the restricted evidence with `top1` set when the
+/// restricted top-1 equals the target (the completed word is correct), so
+/// the shared [`gate_passes`] applies unchanged; the `min_prefix_chars`
+/// cutoff is applied at report time, not here, so the trials stay valid
+/// when the preset constants move. `boundary_index` is the trial target's
+/// own word-boundary record in the boundary stream, and `follows` counts
+/// the same-sequence words after it (capped at
+/// [`MIDWORD_MAX_CONTINUATION`]) available as continuation.
+struct MidwordTrial {
+    record: PositionRecord,
+    k: u8,
+    boundary_index: usize,
+    follows: u8,
+}
+
+/// Score one mid-word trial per typed-prefix length of `target`.
+///
+/// For each `k` in 1..=4 with the target longer than `k` characters, the
+/// first `k` key characters form the typed prefix and the restricted gate
+/// runs over the prefix-matching candidates, mirroring production
+/// `score_and_gate_restricted`: per-word masses stay unrestricted while
+/// each order total becomes the restricted kept mass plus the dropped
+/// tail. The draft counts the sequences with the partial word removed,
+/// exactly like the boundary trial's draft. Excluded words never
+/// complete: they are filtered from the candidates, so an excluded target
+/// can never be top-1. Candidates come from the same truncated top-N union
+/// as the boundary path (production scans every key with the prefix), so
+/// a matching key outside every order's kept successors is missed here.
+#[allow(clippy::too_many_arguments)]
+fn score_midword_trials(
+    builder: &PromptPredictionBuilder,
+    tuning: &ReplayTuning,
+    context: &[String],
+    prefix_seqs: &[Vec<String>],
+    project: Option<&str>,
+    target: &str,
+    keys: &[String],
+    pos: usize,
+    row: u32,
+    cohort: u8,
+    boundary_index: usize,
+    out: &mut Vec<MidwordTrial>,
+) {
+    let target_chars = target.chars().count();
+    let draft = if tuning.draft_weight > 0.0 {
+        Some(DraftCounts::from_sequences(prefix_seqs, tuning.max_context))
+    } else {
+        None
+    };
+    let draft_param =
+        draft.as_ref().map(|counts| (counts, tuning.draft_weight));
+    let max_order = context.len();
+    let follows = keys
+        .len()
+        .saturating_sub(pos + 1)
+        .min(MIDWORD_MAX_CONTINUATION) as u8;
+    for k in MIDWORD_KS {
+        if target_chars <= usize::from(k) {
+            continue;
+        }
+        let typed: String = target.chars().take(usize::from(k)).collect();
+        let mut candidates: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for order in 0..=max_order {
+            let suffix = &context[context.len().saturating_sub(order)..];
+            let refs: Vec<&str> = suffix.iter().map(String::as_str).collect();
+            for (key, _, _) in builder.ranked_successors(&refs) {
+                if key.starts_with(typed.as_str()) && seen.insert(key.clone()) {
+                    candidates.push(key);
+                }
+            }
+        }
+        if let Some(counts) = &draft {
+            for key in counts.candidate_words() {
+                if key.starts_with(typed.as_str()) && seen.insert(key.clone()) {
+                    candidates.push(key);
+                }
+            }
+        }
+        candidates.retain(|key| {
+            key.as_str() != SEQUENCE_START && !tuning.excluded.contains(key)
+        });
+        // Restricted denominators, once per order and shared across
+        // candidates: each totals call scans every successor of its
+        // context.
+        let order_totals: Vec<(f64, u64)> = (0..=max_order)
+            .map(|order| {
+                let suffix = &context[context.len().saturating_sub(order)..];
+                let refs: Vec<&str> =
+                    suffix.iter().map(String::as_str).collect();
+                restricted_order_totals(
+                    builder,
+                    tuning,
+                    draft_param,
+                    project,
+                    suffix,
+                    &refs,
+                    typed.as_str(),
+                )
+            })
+            .collect();
+        let ranked = restricted_score_candidates(
+            builder,
+            tuning,
+            draft_param,
+            project,
+            context,
+            max_order,
+            &candidates,
+            &order_totals,
+        );
+        let top1 = ranked
+            .first()
+            .is_some_and(|word| word.key.as_str() == target);
+        let mut orders = vec![OrderEvidence::default(); max_order + 1];
+        if let Some(top) = ranked.first() {
+            let mut leaders: Vec<Option<String>> = vec![None; max_order + 1];
+            let mut runner_ups = vec![0.0f64; max_order + 1];
+            for order in 0..=max_order {
+                let (leader, runner) = restricted_top_two(
+                    builder,
+                    tuning,
+                    draft_param,
+                    project,
+                    context,
+                    order,
+                    &candidates,
+                    &order_totals,
+                );
+                leaders[order] = leader.map(|(key, _, _, _)| key);
+                runner_ups[order] = runner;
+            }
+            for order in 1..=max_order {
+                let suffix = &context[context.len().saturating_sub(order)..];
+                let real =
+                    suffix.iter().any(|token| token.as_str() != SEQUENCE_START);
+                let refs: Vec<&str> =
+                    suffix.iter().map(String::as_str).collect();
+                let (mass, total, support) = restricted_combined_at(
+                    builder,
+                    tuning,
+                    draft_param,
+                    project,
+                    suffix,
+                    &refs,
+                    order_totals[order].0,
+                    &top.key,
+                );
+                let distinct = order_totals[order].1;
+                let mut conflict_above = false;
+                for higher in order + 1..=max_order {
+                    if order_totals[higher].0 <= 0.0 {
+                        continue;
+                    }
+                    if leaders[higher].as_deref() != Some(top.key.as_str()) {
+                        conflict_above = true;
+                        break;
+                    }
+                }
+                orders[order] = OrderEvidence {
+                    real,
+                    distinct,
+                    top_mass: mass,
+                    top_total: total,
+                    top_support: support,
+                    leader: leaders[order].as_deref() == Some(top.key.as_str()),
+                    runner_up: runner_ups[order],
+                    conflict_above,
+                };
+            }
+        }
+        out.push(MidwordTrial {
+            record: PositionRecord {
+                row,
+                cohort,
+                scored: !ranked.is_empty(),
+                top1,
+                top3: false,
+                target_chars: target_chars as u32,
+                latency_us: 0,
+                orders,
+            },
+            k,
+            boundary_index,
+            follows,
+        });
+    }
+}
+
+/// Combined restricted total and distinct of one order suffix: history
+/// restricted mass plus dropped tail, the project-boosted partition, and
+/// the draft restricted sums (no truncation, so no draft dropped mass).
+/// Computed once per order and shared across candidates.
+fn restricted_order_totals(
+    builder: &PromptPredictionBuilder,
+    tuning: &ReplayTuning,
+    draft: Option<(&DraftCounts, f64)>,
+    project: Option<&str>,
+    suffix: &[String],
+    refs: &[&str],
+    prefix: &str,
+) -> (f64, u64) {
+    let (restricted_mass, restricted_distinct, dropped) =
+        builder.prefix_restricted_sums_by_str(refs, prefix);
+    let mut total = restricted_mass + dropped;
+    let mut distinct = restricted_distinct;
+    if let Some(name) = project {
+        let (proj_mass, proj_dropped) =
+            builder.project_prefix_restricted_sums_by_str(name, refs, prefix);
+        total += tuning.project_boost * (proj_mass + proj_dropped);
+    }
+    if let Some((counts, weight)) = draft {
+        if let Some(key) = counts.resolve_key(suffix) {
+            let (draft_mass, draft_distinct) =
+                counts.prefix_restricted_sums(key, prefix);
+            total += weight * draft_mass;
+            distinct += draft_distinct;
+        }
+    }
+    if tuning.prune_singletons && refs.len() >= 2 && distinct <= 1 {
+        return (0.0, 0);
+    }
+    (total, distinct)
+}
+
+/// Combined mass, total, and support of one word at one order under the
+/// restricted gate: the per-word mass stays unrestricted (history plus
+/// project-boosted partition plus draft, exactly like the boundary path)
+/// while the total is the precomputed prefix-restricted denominator.
+/// This mirrors production `combined_at_order` after `restrict_to_prefix`,
+/// where word lookups are untouched and only the per-order totals shrink.
+/// Totals come from [`restricted_order_totals`], computed once per order
+/// and shared across candidates: the totals scan every successor of the
+/// context, so per-candidate recomputation would blow the replay up.
+#[allow(clippy::too_many_arguments)]
+fn restricted_combined_at(
+    builder: &PromptPredictionBuilder,
+    tuning: &ReplayTuning,
+    draft: Option<(&DraftCounts, f64)>,
+    project: Option<&str>,
+    suffix: &[String],
+    refs: &[&str],
+    total: f64,
+    word: &str,
+) -> (f64, f64, u64) {
+    if total <= 0.0 {
+        return (0.0, 0.0, 0);
+    }
+    let (mut mass, mut support) = builder.successor_stats(refs, word);
+    if let Some(name) = project {
+        let (proj_mass, _) = builder.project_successor_stats(name, refs, word);
+        mass += tuning.project_boost * proj_mass;
+    }
+    if let Some((counts, weight)) = draft {
+        let (draft_mass, draft_distinct) = counts.pair_by_str(suffix, word);
+        mass += weight * draft_mass;
+        support += draft_distinct;
+    }
+    (mass, total, support)
+}
+
+/// Score prefix-matching candidates with stupid backoff over the
+/// restricted distribution. Mirrors [`score_candidates`]: same
+/// order-discounted shares, same deterministic tie-breaks, with
+/// [`restricted_combined_at`] as the mass source.
+#[allow(clippy::too_many_arguments)]
+fn restricted_score_candidates(
+    builder: &PromptPredictionBuilder,
+    tuning: &ReplayTuning,
+    draft: Option<(&DraftCounts, f64)>,
+    project: Option<&str>,
+    context: &[String],
+    max_order: usize,
+    candidates: &[String],
+    totals: &[(f64, u64)],
+) -> Vec<ReplayScored> {
+    let mut scored = Vec::new();
+    for key in candidates {
+        let mut best: Option<ReplayScored> = None;
+        let mut has_higher = false;
+        for order in (0..=max_order).rev() {
+            let suffix = &context[context.len().saturating_sub(order)..];
+            let refs: Vec<&str> = suffix.iter().map(String::as_str).collect();
+            let (mass, total, _) = restricted_combined_at(
+                builder,
+                tuning,
+                draft,
+                project,
+                suffix,
+                &refs,
+                totals[order].0,
+                key,
+            );
+            if total <= 0.0 || mass <= 0.0 {
+                continue;
+            }
+            if order >= 1 {
+                has_higher = true;
+            }
+            let probability = mass / total;
+            let score = probability
+                * tuning.backoff_alpha.powi((max_order - order) as i32);
+            let replace = match &best {
+                None => true,
+                Some(current) => {
+                    outranks(score, current.score, key, &current.key)
+                }
+            };
+            if replace {
+                best = Some(ReplayScored {
+                    key: key.clone(),
+                    score,
+                    has_higher: false,
+                });
+            }
+        }
+        if let Some(mut word) = best {
+            word.has_higher = has_higher;
+            scored.push(word);
+        }
+    }
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    scored
+}
+
+/// Top prefix-matching successor at one order by restricted combined
+/// mass (key ascending on ties), plus the restricted runner-up share.
+/// Mirrors [`top_two_at`] over the restricted distribution.
+#[allow(clippy::too_many_arguments)]
+fn restricted_top_two(
+    builder: &PromptPredictionBuilder,
+    tuning: &ReplayTuning,
+    draft: Option<(&DraftCounts, f64)>,
+    project: Option<&str>,
+    context: &[String],
+    order: usize,
+    candidates: &[String],
+    totals: &[(f64, u64)],
+) -> (Option<(String, f64, f64, u64)>, f64) {
+    let suffix = &context[context.len().saturating_sub(order)..];
+    let refs: Vec<&str> = suffix.iter().map(String::as_str).collect();
+    let mut best: Option<(String, f64, f64, u64)> = None;
+    for key in candidates {
+        if key.as_str() == SEQUENCE_START {
+            continue;
+        }
+        let (mass, total, support) = restricted_combined_at(
+            builder,
+            tuning,
+            draft,
+            project,
+            suffix,
+            &refs,
+            totals[order].0,
+            key,
+        );
+        if total <= 0.0 || mass <= 0.0 {
+            continue;
+        }
+        let share = mass / total;
+        let replace = match &best {
+            None => true,
+            Some((best_word, best_mass, _, _)) => {
+                outranks(mass, *best_mass, key, best_word)
+            }
+        };
+        if replace {
+            best = Some((key.clone(), mass, share, support));
+        }
+    }
+    let runner_up = best
+        .as_ref()
+        .map(|(top_key, _, _, _)| {
+            let mut second: f64 = 0.0;
+            for key in candidates {
+                if key == top_key {
+                    continue;
+                }
+                let (mass, total, _) = restricted_combined_at(
+                    builder,
+                    tuning,
+                    draft,
+                    project,
+                    suffix,
+                    &refs,
+                    totals[order].0,
+                    key,
+                );
+                if total > 0.0 {
+                    second = second.max(mass / total);
+                }
+            }
+            second
+        })
+        .unwrap_or(0.0);
+    (best, runner_up)
+}
+
 /// Combined mass, total, and support of one word at one order: history
 /// mass plus project-boosted partition mass plus draft mass.
 fn combined_at(
@@ -736,6 +1173,7 @@ fn assemble_report(
     tuning: &ReplayTuning,
     builder: &PromptPredictionBuilder,
     records: &[PositionRecord],
+    midword: &[MidwordTrial],
     cohort_chars: &[u64; 3],
     rows_total: u64,
     rows_typed: u64,
@@ -852,6 +1290,164 @@ fn assemble_report(
         corpus_bytes: stats.approx_bytes,
         corpus_rows_used: stats.rows_used,
         corpus_contexts: stats.contexts,
+        midword: Some(midword_report(tuning, records, midword, cohort_chars)),
+    }
+}
+
+/// Mid-word report section: per preset, per typed-prefix length, overall
+/// plus per cohort. Trials below the preset's `min_prefix_chars` never
+/// complete, so those cells report zero coverage with no precision.
+fn midword_report(
+    tuning: &ReplayTuning,
+    records: &[PositionRecord],
+    trials: &[MidwordTrial],
+    cohort_chars: &[u64; 3],
+) -> Vec<PromptPredictionReplayMidwordPresetWire> {
+    let presets = [
+        ("cautious", PRESET_CAUTIOUS),
+        ("balanced", PRESET_BALANCED),
+        ("eager", PRESET_EAGER),
+    ];
+    let total_chars: u64 = cohort_chars.iter().sum();
+    presets
+        .iter()
+        .map(|(name, preset)| {
+            let by_k = MIDWORD_KS
+                .iter()
+                .map(|k| {
+                    midword_metrics_for(
+                        tuning,
+                        records,
+                        trials,
+                        *k,
+                        preset,
+                        None,
+                        total_chars,
+                    )
+                })
+                .collect();
+            let cohorts = COHORT_NAMES
+                .iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    let by_k = MIDWORD_KS
+                        .iter()
+                        .map(|k| {
+                            midword_metrics_for(
+                                tuning,
+                                records,
+                                trials,
+                                *k,
+                                preset,
+                                Some(index as u8),
+                                cohort_chars[index],
+                            )
+                        })
+                        .collect();
+                    PromptPredictionReplayMidwordCohortWire {
+                        cohort: name.to_string(),
+                        by_k,
+                    }
+                })
+                .collect();
+            PromptPredictionReplayMidwordPresetWire {
+                preset: name.to_string(),
+                by_k,
+                cohorts,
+            }
+        })
+        .collect()
+}
+
+/// Metrics for one preset at one typed-prefix length: coverage, precision
+/// (completed word equals target), and keystroke savings over scored-row
+/// chars (`target_chars - k` per gated-correct trial plus each
+/// gated-correct continuation word's chars plus one separator, mirroring
+/// production's gated continuation after the completed word).
+#[allow(clippy::too_many_arguments)]
+fn midword_metrics_for(
+    tuning: &ReplayTuning,
+    records: &[PositionRecord],
+    trials: &[MidwordTrial],
+    k: u8,
+    preset: &ConfidencePreset,
+    cohort: Option<u8>,
+    total_chars: u64,
+) -> PromptPredictionReplayMidwordMetricsWire {
+    let mut positions = 0u64;
+    if usize::from(k) < preset.min_prefix_chars {
+        for trial in trials {
+            if trial.k == k
+                && cohort.is_none_or(|cohort| trial.record.cohort == cohort)
+            {
+                positions += 1;
+            }
+        }
+        return PromptPredictionReplayMidwordMetricsWire {
+            k: u64::from(k),
+            positions,
+            coverage: 0.0,
+            precision: None,
+            savings: 0.0,
+        };
+    }
+    let mut gated = 0u64;
+    let mut correct = 0u64;
+    let mut saved = 0u64;
+    for trial in trials {
+        if trial.k != k
+            || cohort.is_some_and(|cohort| trial.record.cohort != cohort)
+        {
+            continue;
+        }
+        positions += 1;
+        if !gate_passes(
+            &trial.record,
+            tuning,
+            preset.min_p,
+            preset.min_margin,
+            preset.min_support,
+        ) {
+            continue;
+        }
+        gated += 1;
+        if !trial.record.top1 {
+            continue;
+        }
+        correct += 1;
+        saved +=
+            u64::from(trial.record.target_chars).saturating_sub(u64::from(k));
+        // Gated continuation: the boundary run after the completed word,
+        // capped the way production caps the ghost at `max_words - 1`.
+        for step in 1..=usize::from(trial.follows) {
+            let Some(next) = records.get(trial.boundary_index + step) else {
+                break;
+            };
+            if next.row != trial.record.row
+                || !next.top1
+                || !gate_passes(
+                    next,
+                    tuning,
+                    preset.min_p,
+                    preset.min_margin,
+                    preset.min_support,
+                )
+            {
+                break;
+            }
+            saved += u64::from(next.target_chars) + 1;
+        }
+    }
+    PromptPredictionReplayMidwordMetricsWire {
+        k: u64::from(k),
+        positions,
+        coverage: rate(gated as usize, positions as usize),
+        precision: precision_of(correct as usize, gated as usize),
+        savings: if total_chars == 0 {
+            0.0
+        } else {
+            saved as f64 / total_chars as f64
+        },
     }
 }
 
@@ -1248,5 +1844,140 @@ mod tests {
             report.balanced.coverage,
             report.balanced.coverage
         );
+    }
+
+    #[test]
+    fn midword_replay_matches_production_completion() {
+        use crate::prompt_prediction::predict::PRESET_BALANCED;
+        // The mid-word scorer must agree with the frozen model on the
+        // same evidence: same restricted gate verdict and same completed
+        // word for a typed prefix of a formulaic target.
+        let rows = formulaic_rows();
+        let corpus =
+            crate::prompt_prediction::corpus::compile_prompt_prediction_corpus(
+                &rows[..7],
+                &PromptPredictionCorpusOptionsWire {
+                    now_epoch: 10_000,
+                    ..Default::default()
+                },
+            );
+        let model = PromptPredictionModel::new(
+            vec![(Arc::new(corpus), PromptPredictionSourceRole::History, 1.0)],
+            PromptPredictionModelConfigWire::default(),
+        );
+        let mut builder =
+            PromptPredictionBuilder::new(PromptPredictionCorpusOptionsWire {
+                now_epoch: 10_000,
+                ..Default::default()
+            });
+        for row in &rows[..7] {
+            assert!(builder.add_row(row));
+        }
+        let tuning = ReplayTuning {
+            max_context: 4,
+            backoff_alpha: 0.4,
+            project_boost: 1.0,
+            draft_weight: 1.0,
+            reject_conflicts: true,
+            prune_singletons: false,
+            excluded: FastHashSet::default(),
+        };
+        // Target "implement" at position 4 of its sequence; the draft sees
+        // the words before it, exactly like the production completion
+        // draft with the partial word removed.
+        let keys: Vec<String> = ["can", "you", "help", "me", "implement"]
+            .iter()
+            .map(|word| (*word).to_string())
+            .collect();
+        let pos = 4;
+        let context = replay_context(true, &keys[..pos], tuning.max_context);
+        let prefix_seqs = vec![keys[..pos].to_vec()];
+        let mut trials = Vec::new();
+        score_midword_trials(
+            &builder,
+            &tuning,
+            &context,
+            &prefix_seqs,
+            None,
+            &keys[pos],
+            &keys,
+            pos,
+            0,
+            COHORT_MID,
+            0,
+            &mut trials,
+        );
+        // "implement" is 9 chars: trials for k=1..=4.
+        assert_eq!(trials.len(), 4);
+        let request = PromptPredictionRequestWire {
+            schema_version: PROMPT_PREDICTION_WIRE_SCHEMA_VERSION,
+            text_before_cursor: "can you help me imp".to_string(),
+            project: None,
+            limit: 5,
+            max_words: 4,
+            confidence: "balanced".to_string(),
+            include_draft: true,
+            complete_current_word: true,
+        };
+        let result = model.predict(&request);
+        let completion = result.word_completion.expect("word_completion");
+        assert_eq!(completion.word, "implement");
+        assert_eq!(completion.suffix, "lement");
+        let trial =
+            trials.iter().find(|trial| trial.k == 3).expect("k=3 trial");
+        let replay_pass = gate_passes(
+            &trial.record,
+            &tuning,
+            PRESET_BALANCED.min_p,
+            PRESET_BALANCED.min_margin,
+            PRESET_BALANCED.min_support,
+        );
+        assert_eq!(
+            replay_pass, result.confident,
+            "restricted gate parity for 'imp'"
+        );
+        assert_eq!(
+            trial.record.top1,
+            completion.word == keys[pos],
+            "completion parity for 'imp'"
+        );
+    }
+
+    #[test]
+    fn midword_report_enforces_min_prefix_chars() {
+        let report = evaluate_prompt_prediction_replay(
+            &formulaic_rows(),
+            &replay_options(),
+        );
+        let midword = report.midword.expect("midword section");
+        assert_eq!(midword.len(), 3);
+        for preset in &midword {
+            assert_eq!(preset.by_k.len(), 4);
+            assert_eq!(preset.cohorts.len(), 3);
+            for cell in &preset.by_k {
+                assert!(
+                    (1..=4).contains(&cell.k),
+                    "k={} for {}",
+                    cell.k,
+                    preset.preset
+                );
+            }
+        }
+        let balanced = midword
+            .iter()
+            .find(|preset| preset.preset == "balanced")
+            .expect("balanced midword");
+        // Balanced needs 2 typed chars: the k=1 cell never completes.
+        let k1 = &balanced.by_k[0];
+        assert_eq!(k1.k, 1);
+        assert!(k1.positions > 0);
+        assert_eq!(k1.coverage, 0.0);
+        assert!(k1.precision.is_none());
+        // Longer prefixes trial real completions on formulaic prompts.
+        let k3 = &balanced.by_k[2];
+        assert_eq!(k3.k, 3);
+        assert!(k3.positions > 0);
+        assert!(k3.coverage > 0.0, "coverage={}", k3.coverage);
+        assert!(k3.precision.is_some());
     }
 }

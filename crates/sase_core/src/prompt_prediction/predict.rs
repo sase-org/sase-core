@@ -24,8 +24,8 @@ pub struct ConfidencePreset {
     /// Minimum combined distinct support.
     pub min_support: u64,
     /// Minimum typed prefix characters for current-word completion.
-    /// Seed values (phase `word-completion-calibration` sets the final
-    /// ones): cautious 3, balanced 2, eager 1.
+    /// Final values calibrated by phase `word-completion-calibration`
+    /// (2026-10-01 mid-word replay): cautious 3, balanced 2, eager 2.
     pub min_prefix_chars: usize,
 }
 
@@ -62,12 +62,16 @@ pub const PRESET_BALANCED: ConfidencePreset = ConfidencePreset {
 /// replay over typed history (see `tools/prompt_prediction_replay` in
 /// sase): the max-coverage grid point meeting overall precision >= 60%
 /// (62.9%), at 59.0% coverage. Overall headroom is thin (+2.9pp), so
-/// re-run the replay before loosening this preset.
+/// re-run the replay before loosening this preset. Mid-word replay
+/// (2026-10-01; 11,643 rows, 1,978 scored, 142,733 positions) sets
+/// `min_prefix_chars` to 2: k=1 reaches 75.9% overall but trails by
+/// 12.7 points on novel prompts (63.2%), while k=2 holds 84.9% overall
+/// with novel within 8.7 points (76.2%).
 pub const PRESET_EAGER: ConfidencePreset = ConfidencePreset {
     min_p: 0.40,
     min_margin: 0.05,
     min_support: 1,
-    min_prefix_chars: 1,
+    min_prefix_chars: 2,
 };
 
 /// Parse a confidence name; unknown names fall back to balanced.

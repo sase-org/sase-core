@@ -626,6 +626,71 @@ impl PromptPredictionBuilder {
         });
         (word_stats, totals)
     }
+
+    /// Prefix-restricted sums at one string context over the live maps:
+    /// successor mass and distinct support over keys starting with
+    /// `prefix`, plus the truncated (dropped) mass under the same
+    /// `(total - kept).max(0)` formula production uses. The live maps
+    /// hold every observation until `finish`, so dropped reads zero here
+    /// and the restricted denominator is exact; production adds its
+    /// truncated tail instead. Mirrors
+    /// [`CompiledPromptPredictionCorpus::prefix_restricted_sums`] for the
+    /// replay's string-level mid-word path.
+    pub(crate) fn prefix_restricted_sums_by_str(
+        &self,
+        context: &[&str],
+        prefix: &str,
+    ) -> (f64, u64, f64) {
+        let Some(key) = self.resolve_key(context) else {
+            return (0.0, 0, 0.0);
+        };
+        let Some(stats) = self.contexts.get(&key) else {
+            return (0.0, 0, 0.0);
+        };
+        Self::restricted_sums_for(&self.keys, stats, prefix)
+    }
+
+    /// Project-partition prefix-restricted sums: kept successor mass over
+    /// keys starting with `prefix`, plus the truncated (dropped) mass.
+    pub(crate) fn project_prefix_restricted_sums_by_str(
+        &self,
+        project: &str,
+        context: &[&str],
+        prefix: &str,
+    ) -> (f64, f64) {
+        let (Some(key), Some(map)) =
+            (self.resolve_key(context), self.projects.get(project))
+        else {
+            return (0.0, 0.0);
+        };
+        let Some(stats) = map.get(&key) else {
+            return (0.0, 0.0);
+        };
+        let (mass, _, dropped) =
+            Self::restricted_sums_for(&self.keys, stats, prefix);
+        (mass, dropped)
+    }
+
+    /// Kept-successor sums over keys starting with `prefix`, plus the
+    /// truncated mass, over one live build-context stats entry.
+    fn restricted_sums_for(
+        keys: &[String],
+        stats: &BuildContextStats,
+        prefix: &str,
+    ) -> (f64, u64, f64) {
+        let mut restricted_mass = 0.0;
+        let mut restricted_distinct = 0u64;
+        let mut kept_mass = 0.0;
+        for (id, succ) in &stats.successors {
+            kept_mass += succ.mass;
+            if keys[*id as usize].starts_with(prefix) {
+                restricted_mass += succ.mass;
+                restricted_distinct += succ.distinct;
+            }
+        }
+        let dropped = (stats.total_mass - kept_mass).max(0.0);
+        (restricted_mass, restricted_distinct, dropped)
+    }
 }
 
 impl PromptSuccessorSource for PromptPredictionBuilder {
