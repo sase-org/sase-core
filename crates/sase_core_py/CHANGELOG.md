@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.2](https://github.com/sase-org/sase-core/compare/v0.36.1...v0.36.2) - 2026-10-01
+
+### Added
+
+- *(memory-history)* add cache-backed query layer with python bindings
+- *(prose-diff)* add pure sase-core prose_diff module and Python binding
+- *(tool-run)* implement core-stats report for sase-1dm.3
+- *(notifications)* store generations, ack API, and lean unread index
+- *(tool-run)* record per-run demand context, usage, and worker grants
+- *(editor-completion)* add jinja completion bindings and tests
+- *(prompt-prediction)* flag chop and job tribe origins as generated
+
 ## [0.36.1](https://github.com/sase-org/sase-core/compare/v0.36.0...v0.36.1) - 2026-09-30
 
 ### Added

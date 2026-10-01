@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.2](https://github.com/sase-org/sase-core/compare/v0.36.1...v0.36.2) - 2026-10-01
+
+### Added
+
+- *(sase-1dr.5)* file history runner support in sase-core
+- *(prompt-prediction)* mid-word replay metrics and eager min_prefix_chars 2 (sase-1dq.2)
+- *(memory-history)* add cache-backed query layer with python bindings
+- *(tool-run)* land demand record and stats report
+- *(memory-history)* attribute instruction causes and build merged feed
+- *(prompt_prediction)* gated current-word completion
+- *(memory-history)* add subject classifier with priority list and summary
+- *(memory-history)* subject identity, shim aliasing, and fixture corpus
+- *(file-history)* generic git file-history index in sase-core
+- *(prose-diff)* add pure sase-core prose_diff module and Python binding
+- *(notifications)* 3-day archival retention and wait_checks 32-entry plus-one cap
+- *(tool-run)* add stage, backtest, and pressure sections to stats report
+- *(tool-run)* implement core-stats report for sase-1dm.3
+- *(jinja)* engine fixes for raw blocks, inert zones, docs, and catalog
+- *(notifications)* store generations, ack API, and lean unread index
+- *(tool-run)* record per-run demand context, usage, and worker grants
+- *(prompt-prediction)* recalibrate predict thresholds and add replay sampling
+- *(prompt-prediction)* flag chop and job tribe origins as generated
+- *(editor)* add jinja assist completion, scope vars, docs and hover
+- *(prompt-prediction)* add sase_core prompt prediction module
+- *(editor-completion)* add jinja completion bindings and tests
+
+### Fixed
+
+- *(file-history)* give the shallow-clone fixture an identity and run tests hermetically
+
 ## [0.36.1](https://github.com/sase-org/sase-core/compare/v0.36.0...v0.36.1) - 2026-09-30
 
 ### Added
