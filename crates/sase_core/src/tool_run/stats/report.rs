@@ -303,16 +303,19 @@ fn tool_entry(
     now_ts: i64,
     utc_offset_seconds: i32,
 ) -> ToolRunStatsToolWire {
+    // Bare-settled cohort: settled state, no extra args, and a
+    // recorded `duration_ms`. The settled-minus-running fallback in
+    // the effective duration stays for routes, kills, waste, and
+    // providers, but never enters this cohort.
     let bare: Vec<(&StatsRunRow, i64)> = rows
         .iter()
-        .filter(|(row, effective)| {
+        .filter(|(row, _)| {
             matches!(
                 row.state,
                 ToolRunStateWire::Succeeded | ToolRunStateWire::Failed
             ) && row.extra_args_digest == empty_extra_args_digest
-                && effective.is_some()
         })
-        .map(|(row, effective)| (*row, effective.unwrap_or(0)))
+        .filter_map(|(row, _)| row.duration_ms.map(|duration| (*row, duration)))
         .collect();
     let bare_durations: Vec<i64> =
         bare.iter().map(|(_, duration)| *duration).collect();
@@ -937,14 +940,14 @@ fn stage_section(stages: &[StatsStageRow]) -> Vec<ToolRunStatsStageWire> {
 
 /// Bare-settled series points: (order timestamp, tie-break id,
 /// value). The cohort matches the duration summary: settled state,
-/// no extra args, known effective duration. Whole-run points order by
+/// no extra args, recorded `duration_ms`. Whole-run points order by
 /// `running_ts` else `created_ts`; stage points order by `started_ts`.
 fn bare_points(
     rows: &[(&StatsRunRow, Option<i64>)],
     empty_extra_args_digest: &str,
 ) -> Vec<(i64, String, i64)> {
     let mut points = Vec::new();
-    for (row, effective) in rows {
+    for (row, _) in rows {
         if !matches!(
             row.state,
             ToolRunStateWire::Succeeded | ToolRunStateWire::Failed
@@ -954,13 +957,13 @@ fn bare_points(
         if row.extra_args_digest != empty_extra_args_digest {
             continue;
         }
-        let Some(duration) = effective else {
+        let Some(duration) = row.duration_ms else {
             continue;
         };
         points.push((
             row.running_ts.unwrap_or(row.created_ts),
             row.run_id.clone(),
-            *duration,
+            duration,
         ));
     }
     points

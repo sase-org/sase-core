@@ -914,3 +914,91 @@ fn pressure_empty_samples_leave_shares_missing() {
     assert_eq!(pressure.cpu_psi_p90, None);
     assert_eq!(pressure.load_per_cpu_p90, None);
 }
+
+#[test]
+fn backtest_min_prior_boundary() {
+    // Nineteen strictly earlier priors give no prediction; the
+    // twentieth gives one.
+    let window = vec![bare_run("run-1", 2_000_000, 10_000)];
+    let priors_19: Vec<StatsRunRow> = (0..19)
+        .map(|index| bare_run(&format!("prior-{index}"), 1000 + index, 10_000))
+        .collect();
+    assert_eq!(
+        group(report_full(&window, &priors_19, &[], &[], &[]))
+            .backtest
+            .predictions,
+        0
+    );
+    let priors_20: Vec<StatsRunRow> = (0..20)
+        .map(|index| bare_run(&format!("prior-{index}"), 1000 + index, 10_000))
+        .collect();
+    let with_twenty = group(report_full(&window, &priors_20, &[], &[], &[]));
+    assert_eq!(with_twenty.backtest.predictions, 1);
+    assert_eq!(with_twenty.backtest.covered, 1);
+}
+
+#[test]
+fn backtest_window_slides_past_sixty_priors() {
+    // Seventy priors: ten ancient 1 s outliers, then sixty flat
+    // 10 s runs. The window run's band draws on the sixty most
+    // recent priors only, so the outliers cannot move it.
+    let mut priors = Vec::new();
+    for index in 0..10 {
+        priors.push(bare_run(&format!("old-{index}"), 1000 + index, 1_000));
+    }
+    for index in 0..60 {
+        priors.push(bare_run(&format!("prior-{index}"), 2000 + index, 10_000));
+    }
+    let window = vec![bare_run("run-1", 3_000_000, 10_000)];
+    let group = group(report_full(&window, &priors, &[], &[], &[]));
+    assert_eq!(group.backtest.predictions, 1);
+    assert_eq!(group.backtest.covered, 1);
+    assert_eq!(group.backtest.median_width, Some(1.0));
+}
+
+#[test]
+fn pressure_counts_distinct_runs_once_and_ignores_buckets_without_psi() {
+    // Three samples from one run in the same 30 s bucket: one
+    // bucket, one distinct run, not busy alone.
+    let samples = vec![
+        sample_row("run-1", 5, Some(3.0), Some(12.0), Some(1.0), Some(2.0)),
+        sample_row("run-1", 10, Some(4.0), Some(13.0), Some(2.0), Some(3.0)),
+        sample_row("run-1", 20, Some(5.0), Some(14.0), Some(3.0), Some(4.0)),
+        // A second bucket with load only and no PSI fields: it
+        // counts as a bucket but stays out of the PSI shares and
+        // their denominators.
+        sample_row("run-2", 35, None, None, None, Some(9.0)),
+    ];
+    let result = report_full(&[], &[], &[], &[], &samples);
+    let pressure = &result.pressure;
+    assert_eq!(pressure.buckets, 2);
+    assert_eq!(pressure.busy_buckets, 0);
+    assert_eq!(pressure.buckets_with_psi, 1);
+    assert_eq!(pressure.memory_over_threshold_share, Some(1.0));
+    assert_eq!(pressure.busy_memory_over_threshold_share, None);
+    assert_eq!(pressure.cpu_psi_p90, Some(5.0));
+    assert_eq!(pressure.memory_psi_p90, Some(14.0));
+    assert_eq!(pressure.io_psi_p90, Some(3.0));
+    assert_eq!(pressure.load_per_cpu_p90, Some(9.0));
+}
+
+#[test]
+fn bare_cohort_requires_recorded_duration() {
+    // A succeeded run with NULL `duration_ms` but valid
+    // running/settled stamps stays out of the duration percentiles
+    // and the backtest series, while its effective duration still
+    // counts for routes.
+    let mut fallback = row("fallback");
+    fallback.created_ts = 1_000_000;
+    fallback.running_ts = Some(1_000_000);
+    fallback.settled_ts = Some(1_000_100);
+    fallback.duration_ms = None;
+    let priors: Vec<StatsRunRow> = (0..20)
+        .map(|index| bare_run(&format!("prior-{index}"), 1000 + index, 10_000))
+        .collect();
+    let window = vec![bare_run("run-1", 2_000_000, 10_000), fallback];
+    let group = group(report_full(&window, &priors, &[], &[], &[]));
+    assert_eq!(group.duration.count, 1);
+    assert_eq!(group.backtest.predictions, 1);
+    assert_eq!(route_runs(&group, "inline"), 2);
+}

@@ -66,8 +66,9 @@ pub fn tool_run_stats_report(
         )?;
         let (stages, prior_stages, stages_truncated) =
             load_stage_rows(conn, &window, &priors)?;
-        let (samples, samples_truncated) = load_sample_rows(conn, &window)?;
-        compute_stats_report(
+        let (samples, samples_truncated, skipped_samples) =
+            load_sample_rows(conn, &window)?;
+        let mut report = compute_stats_report(
             &window,
             &priors,
             &stages,
@@ -84,7 +85,13 @@ pub fn tool_run_stats_report(
                 stages_truncated,
                 samples_truncated,
             },
-        )
+        )?;
+        if skipped_samples > 0 {
+            report.diagnostics.push(format!(
+                "skipped {skipped_samples} unparseable load samples"
+            ));
+        }
+        Ok(report)
     })
 }
 
@@ -458,24 +465,30 @@ fn query_sample_chunk(
 }
 
 /// Sample rows of the loaded window runs for the report-level
-/// pressure section. A payload that fails to parse still counts its
-/// bucket, with no metrics. Keeps the newest rows under
-/// `STATS_MAX_SAMPLES`.
+/// pressure section. A payload that fails to parse is skipped and
+/// counted; the count surfaces as a result diagnostic. Keeps the
+/// newest rows under `STATS_MAX_SAMPLES`.
 fn load_sample_rows(
     conn: &Connection,
     window: &[StatsRunRow],
-) -> Result<(Vec<StatsSampleRow>, bool), ToolRunError> {
+) -> Result<(Vec<StatsSampleRow>, bool, usize), ToolRunError> {
     if !table_present(conn, "samples")? {
-        return Ok((Vec::new(), false));
+        return Ok((Vec::new(), false, 0));
     }
     let mut ids: Vec<&str> =
         window.iter().map(|row| row.run_id.as_str()).collect();
     ids.sort_unstable();
     let mut collected: Vec<StatsSampleRow> = Vec::new();
+    let mut skipped_unparseable = 0;
     for chunk in ids.chunks(500) {
         for (run_id, observed_ts, payload) in query_sample_chunk(conn, chunk)? {
-            let parsed: SamplePayload =
-                serde_json::from_str(&payload).unwrap_or_default();
+            let parsed: SamplePayload = match serde_json::from_str(&payload) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    skipped_unparseable += 1;
+                    continue;
+                }
+            };
             let load_per_cpu = match (parsed.loadavg_1, parsed.logical_cpus) {
                 (Some(load), Some(cpus)) if cpus > 0 => {
                     Some(load / f64::from(cpus))
@@ -500,5 +513,5 @@ fn load_sample_rows(
     });
     let truncated = collected.len() > STATS_MAX_SAMPLES;
     collected.truncate(STATS_MAX_SAMPLES);
-    Ok((collected, truncated))
+    Ok((collected, truncated, skipped_unparseable))
 }

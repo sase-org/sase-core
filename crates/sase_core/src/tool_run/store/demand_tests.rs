@@ -410,6 +410,42 @@ fn malformed_stored_demand_reads_as_absent_with_a_diagnostic() {
     assert!(recorded.demand.usage.is_some());
 }
 
+fn invalid_grant_request(run_id: &str) -> ToolRunRecordDemandRequestWire {
+    let mut request = demand_request(run_id);
+    let mut bad = grant("bad");
+    bad.grant_id = String::new();
+    request.worker_grants = vec![bad];
+    request
+}
+
+fn last_write_ts(path: &Path) -> String {
+    let conn = Connection::open(path).unwrap();
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'last_write_ts'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn replay_with_invalid_grant_reports_drops_without_rewriting() {
+    let (_temp, path) = store();
+    let run_id = begin_named(&path, 10);
+    let first = record(&path, invalid_grant_request(&run_id));
+    assert!(!first.replayed);
+    assert_eq!(first.diagnostics.len(), 1);
+    assert!(first.diagnostics[0].contains("dropped invalid worker grant"));
+    // Replaying the same request changes nothing, so it replays:
+    // the drop is still reported, but the store is untouched.
+    let before_ts = last_write_ts(&path);
+    let second = record(&path, invalid_grant_request(&run_id));
+    assert!(second.replayed);
+    assert_eq!(second.diagnostics, first.diagnostics);
+    assert_eq!(second.demand, first.demand);
+    assert_eq!(last_write_ts(&path), before_ts);
+}
+
 #[test]
 fn run_without_demand_serializes_without_the_field() {
     let (_temp, path) = store();

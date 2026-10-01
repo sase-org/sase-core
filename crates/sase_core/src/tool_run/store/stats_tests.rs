@@ -427,3 +427,122 @@ fn report_includes_stages_backtest_and_pressure() {
     assert!(!result.samples_truncated);
     assert!(result.diagnostics.is_empty());
 }
+
+#[test]
+fn malformed_sample_payload_is_skipped_with_a_diagnostic() {
+    let (_temp, path) = store();
+    let run_id = begin_run(&path, Some("check"), Some("sase"));
+    append_sample(&path, &run_id, "sample-1");
+    append_sample(&path, &run_id, "sample-2");
+    finish_state(&path, &run_id, ToolRunStateWire::Succeeded, 60_000, None);
+    // Corrupt one stored payload: it must not move any bucket.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE samples SET payload_json = 'not json{'
+         WHERE event_id = 'sample-1'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let result = stats(&path, Some("sase"), None, 7);
+    assert_eq!(result.pressure.buckets, 1);
+    assert_eq!(result.pressure.busy_buckets, 0);
+    assert_eq!(result.pressure.buckets_with_psi, 1);
+    assert_eq!(result.pressure.cpu_psi_p90, Some(3.0));
+    assert_eq!(result.diagnostics, ["skipped 1 unparseable load samples"]);
+}
+
+/// Synthetic 10k-run / 60k-sample stats timing. Ignored by default:
+/// run explicitly to record the number in the landing note.
+#[test]
+#[ignore]
+fn perf_stats_report_ten_thousand_runs() {
+    use super::super::catalog::extra_args_digest;
+
+    let (_temp, path) = store();
+    // One API-created run lays out the store; the bulk fixture is
+    // direct SQL so the bench spends its wall time in the report,
+    // not in 80k validated writes.
+    begin_run(&path, Some("check"), Some("sase"));
+    let empty_extra = extra_args_digest(&[]).unwrap();
+    let payload = r#"{"psi_cpu_some":3.0,"psi_memory_some":12.0,
+        "psi_io_some":1.0,"loadavg_1":4.0,"logical_cpus":2}"#
+        .replace([' ', '\n'], "");
+    let mut conn = rusqlite::Connection::open(&path).unwrap();
+    let tx = conn.transaction().unwrap();
+    for index in 0..10_000 {
+        let run_id = format!("perf-{index}");
+        tx.execute(
+            "INSERT INTO runs(
+                run_id, state, source, executor, tool_name,
+                definition_digest, extra_args_digest, display_argv_json,
+                project, agent, created_ts, running_ts, settled_ts,
+                duration_ms, evidence_json, diagnostics_json
+             ) VALUES (
+                ?1, 'succeeded', 'native', 'inline', 'check', 'def-1', ?2,
+                '[]', 'sase', 'agent-1', ?3, ?3, ?4, 60000, '[]', '[]'
+             )",
+            rusqlite::params![run_id, empty_extra, NOW, NOW + 60],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO attempts(
+                run_id, attempt, state, started_ts, settled_ts, exit_code,
+                signal, diagnostics_json
+             ) VALUES (?1, 1, 'succeeded', ?2, ?3, 0, NULL, '[]')",
+            rusqlite::params![run_id, NOW, NOW + 60],
+        )
+        .unwrap();
+        for sample in 0..6 {
+            tx.execute(
+                "INSERT INTO samples(
+                    sample_id, run_id, attempt, event_id, observed_ts,
+                    payload_json
+                 ) VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("perf-{index}-{sample}"),
+                    run_id,
+                    format!("perf-ev-{index}-{sample}"),
+                    NOW + 100,
+                    payload,
+                ],
+            )
+            .unwrap();
+        }
+        if index % 10 == 0 {
+            let started_ms = (NOW + index as i64) * 1000;
+            tx.execute(
+                "INSERT INTO stages(
+                    stage_id, run_id, attempt, event_id, description,
+                    started_ts, finished_ts, elapsed_ms, exit_code,
+                    output_bytes, incomplete, diagnostics_json
+                 ) VALUES (
+                    ?1, ?2, 1, ?3, 'lint', ?4, ?5, 5000, 0, 100, 0, '[]'
+                 )",
+                rusqlite::params![
+                    format!("perf-stage-{index}"),
+                    run_id,
+                    format!("perf-stage-ev-{index}"),
+                    started_ms,
+                    started_ms + 5000,
+                ],
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    drop(conn);
+    let start = std::time::Instant::now();
+    let result = stats(&path, Some("sase"), None, 7);
+    let elapsed = start.elapsed();
+    println!("stats report over 10k runs: {elapsed:?}");
+    assert_eq!(result.runs_scanned, 10_001);
+    assert_eq!(result.tools.len(), 1);
+    assert_eq!(result.tools[0].duration.count, 10_000);
+    assert!(!result.samples_truncated);
+    #[cfg(not(debug_assertions))]
+    assert!(
+        elapsed.as_secs_f64() < 2.0,
+        "stats report took {elapsed:?}, over the 2 s budget"
+    );
+}

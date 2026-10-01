@@ -160,7 +160,10 @@ pub fn record_demand(
                 *last = overflow;
             }
         }
-        let replayed = demand == before && call_diagnostics.is_empty();
+        // Replayed means the stored record is unchanged, even when
+        // this call dropped an invalid grant: the result still
+        // reports this call's diagnostics.
+        let replayed = demand == before;
         if !replayed {
             let json = serde_json::to_string(&demand)
                 .map_err(|error| ToolRunError::store(error.to_string()))?;
