@@ -42,6 +42,14 @@ A test that fails under `just check` but passes when rerun alone is probably a l
 flake. Before you treat it as yours, look for its `sase-core flake:` bead in
 `sase bead list -T flake`. Never weaken an assertion to get a green run.
 
+`just test` and `just check` run tests hermetically: no global or system git
+config, git identity guessing disabled (`user.useConfigOnly`), and ambient
+`GIT_*`, `SASE_*` and `EMAIL` cleared — the same on every host and on CI. A
+test that commits must set `user.name`/`user.email` in the repo it commits in
+(a clone does not inherit its source's local config); a test that needs a
+`SASE_*` variable sets it itself. The `hermetic_test_env` canary fails when
+tests run outside this environment.
+
 ## Conventions
 
 - Write free functions over `*Wire` serde structs, with errors as `thiserror` enums.

@@ -43,14 +43,20 @@ fn git(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+// A clone does not inherit its source's local config, so every repo a test
+// commits in needs its own identity.
+fn configure_identity(repo: &Path) {
+    git(repo, &["config", "user.name", "SASE Test"]);
+    git(repo, &["config", "user.email", "sase@example.com"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+}
+
 fn init_repo() -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "--initial-branch=master"]);
-    git(&repo, &["config", "user.name", "SASE Test"]);
-    git(&repo, &["config", "user.email", "sase@example.com"]);
-    git(&repo, &["config", "commit.gpgsign", "false"]);
+    configure_identity(&repo);
     Fixture { _tmp: tmp, repo }
 }
 
@@ -302,6 +308,7 @@ fn shallow_clone_marks_health_and_incomplete() {
         "clone failed: {}",
         String::from_utf8_lossy(&status.stderr)
     );
+    configure_identity(&shallow);
     let index =
         build_index(&shallow, &["f.md".to_string()], &budget()).unwrap();
     assert!(index.health.shallow);

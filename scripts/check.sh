@@ -78,7 +78,7 @@ usage: $(basename "${BASH_SOURCE[0]}") [fmt-check|fmt|features|check [args...]|c
   features    verify unified dependency features (cargo-hakari workspace-hack)
   check       cargo check --workspace --all-targets [args...] (inner loop)
   clippy      cargo clippy --workspace --all-targets [args...] -- -D warnings
-  test        cargo test --workspace [args...]
+  test        cargo test --workspace [args...] under the hermetic test environment
   script-test unittest the release-workflow helper scripts in .github/scripts
   modules     list each sase_core top-level module with its one-line //! summary
   all         fmt-check, features, clippy, test, then script-test (default)
@@ -230,12 +230,42 @@ cmd_clippy() {
     fi
 }
 
+# Hermetic test environment: test processes must observe the same git and
+# SASE inputs on every host and on CI. a031ee4 committed in a shallow clone
+# with no identity, which passed on dev hosts and macOS but failed only on
+# ubuntu-latest, because a clone does not inherit its source's local config
+# and each host guessed (or refused to guess) the missing identity
+# differently. GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM hide the developer's
+# global and system config; user.useConfigOnly stops git from inventing an
+# identity from the hostname on FQDN hosts (which is why clearing the global
+# config alone is not enough); and unsetting ambient GIT_*, SASE_* and EMAIL
+# drops agent-only overrides (GIT_AUTHOR_*, GIT_DIR, SASE_AGENT, ...) that CI
+# never has. fmt-check, fmt, features, check and clippy are untouched: they
+# run no test code, and cargo needs no git config here (Cargo.lock has no git
+# dependencies).
+run_hermetic_tests() {
+    (
+        local name
+        for name in $(compgen -e); do
+            case "$name" in
+                GIT_*|SASE_*|EMAIL) unset "$name" ;;
+            esac
+        done
+        export GIT_CONFIG_GLOBAL=/dev/null
+        export GIT_CONFIG_NOSYSTEM=1
+        export GIT_CONFIG_COUNT=1
+        export GIT_CONFIG_KEY_0=user.useConfigOnly
+        export GIT_CONFIG_VALUE_0=true
+        exec "$@"
+    )
+}
+
 cmd_test() {
     configure_pyo3_python
     if default_scope "$@"; then
-        cargo test --workspace "$@"
+        run_hermetic_tests cargo test --workspace "$@"
     else
-        cargo test "$@"
+        run_hermetic_tests cargo test "$@"
     fi
 }
 
