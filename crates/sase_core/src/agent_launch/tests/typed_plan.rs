@@ -598,6 +598,22 @@ fn typed_launch_clan_summary_keeps_unbalanced_inner_closer() {
 }
 
 #[test]
+fn typed_launch_clan_double_colon_eol_binds_next_line_summary() {
+    let prompt = "%clan:research::\nSummary\n%model:opus\nDo work";
+    let plan =
+        plan_typed_launch_units(prompt, Some("multi_prompt"), Some("sase"))
+            .unwrap();
+    match &plan.units[0].payload {
+        LaunchUnitPayloadWire::Agent(agent) => {
+            assert_eq!(agent.clan.as_deref(), Some("research"));
+            assert_eq!(agent.clan_summary.as_deref(), Some("Summary"));
+            assert_eq!(agent.prompt, "Do work");
+        }
+        other => panic!("expected agent payload, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_directive_args_text_block_corpus_matches_python() {
     use std::collections::BTreeMap;
 

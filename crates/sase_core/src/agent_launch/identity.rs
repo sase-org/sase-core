@@ -438,7 +438,9 @@ pub(crate) fn parse_clan_directive(
         }
     }
 
-    if prompt[directive.end..].starts_with(":: ") {
+    if let Some(text_start) =
+        clan_double_colon_payload_start(prompt, directive.end)
+    {
         if parsed.summary.is_some() || parsed.summary_script.is_some() {
             diagnostics.push(typed_unit_diagnostic(
                 "clan-shorthand-conflict",
@@ -448,7 +450,6 @@ pub(crate) fn parse_clan_directive(
             ));
             return parsed;
         }
-        let text_start = directive.end + 3;
         let text_end =
             clan_double_colon_text_end(prompt, text_start, ignored_ranges);
         let text = prompt[text_start..text_end].trim_end();
@@ -637,6 +638,41 @@ fn normalize_clan_summary(raw: &str, from_text_block: bool) -> String {
         }
     }
     out.join("\n").trim().to_string()
+}
+
+fn clan_double_colon_payload_start(
+    prompt: &str,
+    directive_end: usize,
+) -> Option<usize> {
+    let bytes = prompt.as_bytes();
+    if bytes.get(directive_end..directive_end + 2) != Some(b"::") {
+        return None;
+    }
+    if directive_end > 0 && bytes[directive_end - 1] == b':' {
+        return None;
+    }
+    if bytes.get(directive_end + 2) == Some(&b':') {
+        return None;
+    }
+    let mut cursor = directive_end + 2;
+    while cursor < bytes.len()
+        && (bytes[cursor] == b' ' || bytes[cursor] == b'\t')
+    {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() {
+        return Some(bytes.len());
+    }
+    if bytes[cursor] == b'\n' {
+        return Some(cursor + 1);
+    }
+    if bytes[cursor] == b'\r' && bytes.get(cursor + 1) == Some(&b'\n') {
+        return Some(cursor + 2);
+    }
+    if bytes[directive_end + 2] == b' ' {
+        return Some(directive_end + 3);
+    }
+    None
 }
 
 fn clan_double_colon_text_end(

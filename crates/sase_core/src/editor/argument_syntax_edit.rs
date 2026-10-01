@@ -245,6 +245,7 @@ mod tests {
             ("#foo::   <cursor>", "#foo()::   "),
             ("#foo:: <cursor>body", "#foo():: body"),
             ("#foo:: <cursor>  body", "#foo()::   body"),
+            ("#foo::<cursor>\nbody", "#foo()::\nbody"),
             ("#!ns/foo:: <cursor>", "#!ns/foo():: "),
             ("#foo!!:: <cursor>", "#foo!!():: "),
             ("#foo??:: <cursor>", "#foo??():: "),

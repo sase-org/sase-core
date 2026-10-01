@@ -20,9 +20,9 @@ use super::wire::{
     XpromptCallNameSpan,
 };
 use super::xprompt_args::{
-    find_matching_paren_for_args, parse_xprompt_calls,
-    parse_xprompt_like_call_at, top_level_commas_for_args, ParsedXpromptCall,
-    XpromptArgSyntax,
+    double_colon_payload_start, find_matching_paren_for_args,
+    parse_xprompt_calls, parse_xprompt_like_call_at, top_level_commas_for_args,
+    ParsedXpromptCall, XpromptArgSyntax,
 };
 
 type ValidityByArg = HashMap<usize, XpromptArgumentSpanValidity>;
@@ -345,10 +345,7 @@ fn emit_parenthesized_delimiters(
     );
 
     let after_close = close_idx + 1;
-    if text
-        .get(after_close..)
-        .is_some_and(|after| after.starts_with(":: "))
-    {
+    if double_colon_payload_start(text, after_close).is_some() {
         push_span(
             out,
             after_close,
@@ -882,6 +879,29 @@ mod tests {
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "tail");
         assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "block");
+    }
+
+    #[test]
+    fn double_colon_eol_emits_two_byte_delimiter_and_next_line_value() {
+        let text = "#foo(a=1)::\none\ntwo";
+        let found = spans(text);
+        assert_has(text, &found, XpromptArgumentSpanRole::ArgDelimiter, "::");
+        assert_has(text, &found, XpromptArgumentSpanRole::ArgValue, "one\ntwo");
+        let gap = text.find("::").unwrap() + 2;
+        assert!(
+            !found.iter().any(|span| span.start <= gap && gap < span.end),
+            "{found:?}"
+        );
+
+        let bare = "#foo::\none";
+        let bare_spans = spans(bare);
+        assert_has(
+            bare,
+            &bare_spans,
+            XpromptArgumentSpanRole::ArgDelimiter,
+            "::",
+        );
+        assert_has(bare, &bare_spans, XpromptArgumentSpanRole::ArgValue, "one");
     }
 
     #[test]

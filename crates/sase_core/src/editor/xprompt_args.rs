@@ -133,6 +133,41 @@ pub(crate) fn xprompt_argument_open_colon_at(
     })
 }
 
+pub(crate) fn double_colon_payload_start(
+    text: &str,
+    colon_idx: usize,
+) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(colon_idx..colon_idx + 2) != Some(b"::") {
+        return None;
+    }
+    if colon_idx > 0 && bytes[colon_idx - 1] == b':' {
+        return None;
+    }
+    if bytes.get(colon_idx + 2) == Some(&b':') {
+        return None;
+    }
+    let mut cursor = colon_idx + 2;
+    while cursor < bytes.len()
+        && (bytes[cursor] == b' ' || bytes[cursor] == b'\t')
+    {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() {
+        return Some(bytes.len());
+    }
+    if bytes[cursor] == b'\n' {
+        return Some(cursor + 1);
+    }
+    if bytes[cursor] == b'\r' && bytes.get(cursor + 1) == Some(&b'\n') {
+        return Some(cursor + 2);
+    }
+    if bytes[colon_idx + 2] == b' ' {
+        return Some(colon_idx + 3);
+    }
+    None
+}
+
 fn parse_call_suffix(
     text: &str,
     name: String,
@@ -190,8 +225,7 @@ fn parse_parenthesized(
     let Some(after) = text.get(after_close..) else {
         return;
     };
-    if after.starts_with(":: ") {
-        let value_start = after_close + 3;
+    if let Some(value_start) = double_colon_payload_start(text, after_close) {
         let value_end = find_double_colon_text_end(text, value_start);
         push_text_arg(text, value_start, value_end, call);
     } else if after.starts_with(": ") {
@@ -210,19 +244,18 @@ fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
         call.is_open = true;
         return;
     };
-    if after_colon.is_empty() {
-        call.is_open = true;
-        return;
-    }
-    if after_colon.starts_with(": ") {
+    if let Some(value_start) = double_colon_payload_start(text, colon_idx) {
         call.syntax = XpromptArgSyntax::DoubleColonText;
-        let value_start = colon_idx + 3;
         let value_end = find_double_colon_text_end(text, value_start);
         if value_start >= value_end {
             call.is_open = true;
             return;
         }
         push_text_arg(text, value_start, value_end, call);
+        return;
+    }
+    if after_colon.is_empty() {
+        call.is_open = true;
         return;
     }
     if after_colon.starts_with(' ') {
@@ -573,7 +606,7 @@ fn starts_with_xprompt_directive(text: &str) -> bool {
     let after_name = &after_hash[name_end..];
     after_name.starts_with('(')
         || after_name.starts_with(": ")
-        || after_name.starts_with(":: ")
+        || double_colon_payload_start(after_name, 0).is_some()
 }
 
 fn scan_name(text: &str) -> Option<(usize, String)> {
@@ -813,5 +846,44 @@ mod tests {
         assert_eq!(call.args[0].value, prose);
         assert_eq!(call.args[1].name.as_ref().unwrap().value, "wait");
         assert_eq!(call.args[1].value, "ready");
+    }
+
+    #[test]
+    fn double_colon_at_end_of_line_binds_next_line_payload() {
+        let call = one("#foo::\none\ntwo");
+        assert_eq!(call.syntax, XpromptArgSyntax::DoubleColonText);
+        assert_eq!(call.args.len(), 1);
+        assert_eq!(call.args[0].value, "one\ntwo");
+
+        let paren = one("#foo(a=1)::\none");
+        assert_eq!(paren.syntax, XpromptArgSyntax::Parenthesized);
+        assert_eq!(paren.args.len(), 2);
+        assert_eq!(paren.args[0].name.as_ref().unwrap().value, "a");
+        assert_eq!(paren.args[0].value, "1");
+        assert_eq!(paren.args[1].value, "one");
+
+        for source in ["#foo::  \none", "#foo::\r\none", "#foo::\t\none"] {
+            let spaced = one(source);
+            assert_eq!(
+                spaced.syntax,
+                XpromptArgSyntax::DoubleColonText,
+                "{source:?}"
+            );
+            assert_eq!(spaced.args.last().unwrap().value, "one");
+        }
+
+        let open = one("#foo::");
+        assert_eq!(open.syntax, XpromptArgSyntax::DoubleColonText);
+        assert!(open.is_open);
+        assert!(open.args.is_empty());
+
+        let calls = parse_xprompt_calls("#a:: x\n#b::\ny");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].args[0].value, "x");
+        assert_eq!(calls[1].args[0].value, "y");
+
+        let single = one("#foo:\nbar");
+        assert_eq!(single.syntax, XpromptArgSyntax::Colon);
+        assert!(single.is_open);
     }
 }
