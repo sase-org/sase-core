@@ -83,6 +83,7 @@ pub mod managed_origin;
 pub mod managed_tmp;
 pub mod managed_tmp_roots;
 pub mod markdown_link_refs;
+pub mod memory_history;
 pub mod migration;
 pub mod model_completion;
 pub mod model_route;
