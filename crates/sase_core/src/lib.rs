@@ -101,6 +101,7 @@ pub mod prompt_literals;
 pub mod prompt_prediction;
 mod prompt_rewrite;
 pub mod prompt_stash;
+pub mod prose_diff;
 pub mod provider_disable;
 pub mod provider_priority;
 pub mod provider_usage;

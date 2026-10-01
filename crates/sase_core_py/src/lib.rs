@@ -49,6 +49,7 @@ mod prelude;
 mod procs;
 mod project_tag;
 mod prompt_prediction;
+mod prose_diff;
 mod provider_policy;
 mod query;
 mod sudo;
@@ -85,6 +86,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     notifications::register_notifications(m)?;
     procs::register_procs(m)?;
     project_tag::register_project_tag(m)?;
+    prose_diff::register_prose_diff(m)?;
     agent_launch::register_agent_launch(m)?;
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;
