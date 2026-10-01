@@ -75,14 +75,21 @@ pub fn run_git_unchecked(
         .map_err(|error| {
             FileHistoryError::GitFailed(format!("spawn git: {error}"))
         })?;
+    // Drain stdout on a reader thread while polling for exit. Reading
+    // only after exit deadlocks once git writes more than the pipe
+    // buffer (64 KiB on Linux): git blocks on write while this thread
+    // blocks in `try_wait`, so the deadline always fires first.
+    let reader = child
+        .stdout
+        .take()
+        .map(|pipe| std::thread::spawn(move || drain_stdout(pipe, max_bytes)));
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait().map_err(|error| {
             FileHistoryError::GitFailed(format!("wait git: {error}"))
         })? {
             Some(status) => {
-                let (stdout, size_truncated) =
-                    read_capped(child.stdout.take(), max_bytes);
+                let (stdout, size_truncated) = join_reader(reader);
                 return Ok(GitResult {
                     code: status.code(),
                     stdout,
@@ -92,7 +99,7 @@ pub fn run_git_unchecked(
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let (stdout, _) = read_capped(child.stdout.take(), max_bytes);
+                let (stdout, _) = join_reader(reader);
                 return Ok(GitResult {
                     code: None,
                     stdout,
@@ -153,21 +160,40 @@ fn describe_args(args: &[&str]) -> String {
         .join(" ")
 }
 
-fn read_capped(pipe: Option<ChildStdout>, max_bytes: u64) -> (Vec<u8>, bool) {
-    let Some(pipe) = pipe else {
-        return (Vec::new(), false);
-    };
-    let limit =
-        usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
+/// Join a stdout reader thread, tolerating a missing or failed thread.
+fn join_reader(
+    reader: Option<std::thread::JoinHandle<(Vec<u8>, bool)>>,
+) -> (Vec<u8>, bool) {
+    reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
+
+/// Drain a child's stdout to EOF, keeping at most `max_bytes`.
+///
+/// The drain runs until the pipe closes even when the cap is exceeded:
+/// stopping early would leave git blocked on write and deadlock the
+/// wait loop for outputs larger than the pipe buffer. Excess bytes are
+/// discarded; the flag reports whether the cap was exceeded.
+fn drain_stdout(mut pipe: ChildStdout, max_bytes: u64) -> (Vec<u8>, bool) {
+    let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
     let mut buf = Vec::new();
-    let truncated = pipe.take(limit as u64).read_to_end(&mut buf).is_ok()
-        && buf.len() as u64 > max_bytes;
-    buf.truncate(
-        usize::try_from(max_bytes)
-            .unwrap_or(usize::MAX)
-            .min(buf.len()),
-    );
-    (buf, truncated)
+    let mut total: u64 = 0;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                total += read as u64;
+                if buf.len() < limit {
+                    let room = limit - buf.len();
+                    buf.extend_from_slice(&chunk[..read.min(room)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    (buf, total > max_bytes)
 }
 
 #[cfg(test)]
@@ -211,6 +237,55 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef01234567".to_string()),
         );
         assert_eq!(nonzero_oid("abc"), None);
+    }
+
+    #[test]
+    fn output_larger_than_the_pipe_buffer_does_not_deadlock() {
+        // One commit holding a 200 KiB file: `git show HEAD` writes far
+        // more than the 64 KiB pipe buffer. Reading stdout only after
+        // exit deadlocked here: git blocked on write while the wait
+        // loop polled, so the deadline always fired first.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "--initial-branch=master"]);
+        run(&["config", "user.name", "SASE Test"]);
+        run(&["config", "user.email", "sase@example.com"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("big.txt"), "x".repeat(200_000)).unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-m", "big"]);
+        let timeout = Duration::from_secs(30);
+        let result = run_git_unchecked(
+            &repo,
+            &["show", "HEAD"],
+            timeout,
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(
+            result.stdout.len() > 64 * 1024,
+            "output is {} bytes",
+            result.stdout.len()
+        );
+        assert!(!result.truncated);
+        // The byte cap still reports truncation without deadlocking:
+        // the drain runs to EOF and discards the excess.
+        let capped =
+            run_git_unchecked(&repo, &["show", "HEAD"], timeout, 1024).unwrap();
+        assert_eq!(capped.code, Some(0));
+        assert_eq!(capped.stdout.len(), 1024);
+        assert!(capped.truncated);
     }
 
     #[test]
