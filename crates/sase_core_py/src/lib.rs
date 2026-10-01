@@ -41,6 +41,7 @@ mod fleet;
 mod fleet_attention;
 mod goals;
 mod json_bridge;
+mod memory_history;
 mod migration;
 mod note_attachment;
 mod notifications;
@@ -87,6 +88,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     procs::register_procs(m)?;
     project_tag::register_project_tag(m)?;
     prose_diff::register_prose_diff(m)?;
+    memory_history::register_memory_history(m)?;
     agent_launch::register_agent_launch(m)?;
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;

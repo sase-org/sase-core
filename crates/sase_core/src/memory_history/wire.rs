@@ -20,7 +20,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_history::wire::FileChangeKindWire;
+use crate::file_history::wire::{
+    FileChangeKindWire, FileHistoryHealthWire, FileHistoryIndexWire,
+    PathStateWire,
+};
+use crate::prose_diff::ProseComparisonWire;
 
 /// Schema version for every memory-history snapshot payload.
 pub const MEMORY_HISTORY_WIRE_SCHEMA_VERSION: u32 = 1;
@@ -426,6 +430,264 @@ pub struct MemoryHistoryFeedWire {
     /// Changesets dropped by the hidden filter.
     #[serde(default)]
     pub hidden_changeset_count: u64,
+}
+
+/// Outcome of one snapshot sync: the cache was already current, new
+/// commits folded onto it, or it was rebuilt from scratch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryHistorySyncStatusWire {
+    /// Cached tip already equals HEAD; the snapshot is untouched.
+    Fresh,
+    /// New commits folded onto the cached tip by tip ancestry, then
+    /// the folded lineages reclassified in full.
+    Folded,
+    /// The snapshot was unusable (missing, corrupt, key mismatch,
+    /// rewrite, or branch switch) and was rebuilt from scratch.
+    Rebuilt,
+}
+
+/// The persisted per-scope snapshot: classified subjects plus the
+/// embedded file-history index they were derived from, under the
+/// cache key they were built with. Bodies are never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistorySnapshotWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    pub schema_version: u32,
+    /// Hex cache key this snapshot was built with.
+    pub cache_key: String,
+    /// Classified, cause-attributed subjects.
+    #[serde(default)]
+    pub subjects: Vec<MemoryHistorySubjectWire>,
+    /// The file-history index the subjects were derived from.
+    pub file_index: FileHistoryIndexWire,
+}
+
+/// The sync record: how current the snapshot is, what it holds, and
+/// how long the sync took. Every query syncs first, so this is also
+/// the health envelope behind the other responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistorySyncWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Whether the snapshot was already current, folded, or rebuilt.
+    pub status: MemoryHistorySyncStatusWire,
+    /// HEAD commit the snapshot was built at ("" for an unborn HEAD).
+    #[serde(default)]
+    pub tip: String,
+    /// Number of subjects in the snapshot.
+    #[serde(default)]
+    pub subject_count: u64,
+    /// Number of committed versions across all subjects.
+    #[serde(default)]
+    pub version_count: u64,
+    /// Committed versions hidden by default.
+    #[serde(default)]
+    pub hidden_version_count: u64,
+    /// Walk health labels, copied from the embedded file index.
+    pub health: FileHistoryHealthWire,
+    /// Commits the remote-tracking default is ahead over the walked
+    /// pathspecs (`None` with no origin ref; `Some(0)` means not
+    /// behind). Never fetched.
+    #[serde(default)]
+    pub upstream_ahead: Option<u64>,
+    /// Wall time of this sync in milliseconds.
+    #[serde(default)]
+    pub elapsed_ms: u64,
+}
+
+/// Request wire for [`crate::memory_history::query_sync`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistorySyncRequestWire {
+    /// Scope to sync.
+    pub scope: MemoryHistoryScopeWire,
+}
+
+/// Request wire for [`crate::memory_history::query_subjects`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistorySubjectsRequestWire {
+    /// Scope to sync and list.
+    pub scope: MemoryHistoryScopeWire,
+}
+
+/// Subject list without version bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistorySubjectsWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Subjects with empty version lists.
+    #[serde(default)]
+    pub subjects: Vec<MemoryHistorySubjectWire>,
+}
+
+/// Request wire for [`crate::memory_history::query_resolve`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryResolveRequestWire {
+    /// Scope to sync and search.
+    pub scope: MemoryHistoryScopeWire,
+    /// Exact subject id, exact repo-relative path (current or
+    /// historical), or unique basename.
+    pub selector: String,
+    /// Optional revision meaning "as of this revision".
+    #[serde(default)]
+    pub at_commit: Option<String>,
+}
+
+/// One resolved subject: the subject itself, whether it existed at
+/// the requested revision, and the matching version, if any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryResolveWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// The resolved subject.
+    pub subject: MemoryHistorySubjectWire,
+    /// False when `at_commit` names a revision the subject did not
+    /// exist at yet; the version is then absent.
+    #[serde(default)]
+    pub existed: bool,
+    /// Newest version without `at_commit`; the as-of version with it.
+    #[serde(default)]
+    pub version: Option<MemoryHistoryVersionWire>,
+}
+
+/// Request wire for [`crate::memory_history::query_timeline`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryTimelineRequestWire {
+    /// Scope to sync and search.
+    pub scope: MemoryHistoryScopeWire,
+    /// Exact subject id, exact repo-relative path (current or
+    /// historical), or unique basename.
+    pub selector: String,
+    /// Keep `hidden_by_default` versions. Defaults off.
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+/// One subject's history: committed versions (hidden ones dropped
+/// unless requested) with worktree pseudo-versions listed first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryTimelineWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Resolved subject id.
+    #[serde(default)]
+    pub subject_id: String,
+    /// Current repo-relative path the worktree status was read from.
+    #[serde(default)]
+    pub path: String,
+    /// Tracked / untracked / ignored / no_vcs classification.
+    pub state: PathStateWire,
+    /// Staged blob OID, if any.
+    #[serde(default)]
+    pub index_oid: Option<String>,
+    /// Worktree blob OID hashed in-process, if the file is readable.
+    #[serde(default)]
+    pub worktree_oid: Option<String>,
+    /// HEAD blob OID, if any.
+    #[serde(default)]
+    pub head_oid: Option<String>,
+    /// Number of diverged shim rows among the committed versions.
+    #[serde(default)]
+    pub diverged_count: u64,
+    /// Pseudo-versions first (`uncommitted`, then `staged`), then
+    /// committed rows newest-first. Pseudo-versions carry ordinal `0`:
+    /// they never invent a committed ordinal.
+    #[serde(default)]
+    pub versions: Vec<MemoryHistoryVersionWire>,
+}
+
+/// Request wire for [`crate::memory_history::query_version`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryVersionRequestWire {
+    /// Scope to sync and search.
+    pub scope: MemoryHistoryScopeWire,
+    /// Exact subject id, exact repo-relative path (current or
+    /// historical), or unique basename.
+    pub selector: String,
+    /// Ordinal (`7` or `v7`), `~N` (`~1` is newest), unique commit SHA
+    /// prefix, or `now` for the worktree file.
+    pub version: String,
+    /// Fetch the blob inside core. `now` always reads the worktree.
+    #[serde(default)]
+    pub include_body: bool,
+}
+
+/// One version plus its body, when requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryVersionResponseWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Resolved subject id.
+    #[serde(default)]
+    pub subject_id: String,
+    /// The selected version (`now` yields an `uncommitted` pseudo-row
+    /// with ordinal `0`).
+    pub version: MemoryHistoryVersionWire,
+    /// Version body. Empty when `include_body` is false (except
+    /// `now`) or when the object is missing.
+    #[serde(default)]
+    pub body: String,
+    /// True when the blob or worktree object was missing rather than
+    /// empty. Missing objects never fail the call.
+    #[serde(default)]
+    pub body_missing: bool,
+}
+
+/// Request wire for [`crate::memory_history::query_compare`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryCompareRequestWire {
+    /// Scope to sync and search.
+    pub scope: MemoryHistoryScopeWire,
+    /// Base subject selector (same grammar as `version`).
+    pub base_selector: String,
+    /// Base version selector (same grammar as `version`).
+    pub base_version: String,
+    /// Target subject selector (same grammar as `version`).
+    pub target_selector: String,
+    /// Target version selector (same grammar as `version`).
+    pub target_version: String,
+}
+
+/// A prose comparison embedded in the memory-history envelope: both
+/// blobs are fetched inside core. Assets compare as `plain`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryCompareWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Resolved base subject id.
+    #[serde(default)]
+    pub base_subject_id: String,
+    /// Resolved target subject id.
+    #[serde(default)]
+    pub target_subject_id: String,
+    /// Selected base version.
+    pub base: MemoryHistoryVersionWire,
+    /// Selected target version.
+    pub target: MemoryHistoryVersionWire,
+    /// The `compare_prose` result, with its own schema intact.
+    pub comparison: ProseComparisonWire,
+}
+
+/// Request wire for [`crate::memory_history::query_feed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryFeedRequestWire {
+    /// Scopes to sync and merge. One scope is the one-element case.
+    pub scopes: Vec<MemoryHistoryScopeWire>,
+    /// Optional inclusive epoch-second lower bound. Defaults off.
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Maximum changesets kept after filtering. Defaults off.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Keep hidden versions and `regen_only` changesets. Defaults off.
+    #[serde(default)]
+    pub include_hidden: bool,
 }
 
 /// Every failure the memory-history module can report.
