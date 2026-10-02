@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.3](https://github.com/sase-org/sase-core/compare/v0.36.2...v0.36.3) - 2026-10-02
+
+### Added
+
+- *(core-expand)* rename runtime wires toward macros with pinned legacy output
+- *(core-expand)* rename catalog and editor internals toward macros with pinned legacy output
+- *(core-expand)* rename modules and query shorthands toward macros
+- *(xprompt)* support :: at end of line for double-colon text shorthand
+
 ## [0.36.2](https://github.com/sase-org/sase-core/compare/v0.36.1...v0.36.2) - 2026-10-01
 
 ### Added
