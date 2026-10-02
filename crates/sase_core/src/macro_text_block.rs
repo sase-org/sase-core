@@ -57,7 +57,7 @@ use serde::Deserialize;
 
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
-pub(crate) struct XpromptArgsCorpusCase {
+pub(crate) struct MacroArgsCorpusCase {
     pub id: String,
     pub source: String,
     pub positional: Vec<String>,
@@ -67,14 +67,14 @@ pub(crate) struct XpromptArgsCorpusCase {
 
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
-struct XpromptArgsCorpusFile {
+struct MacroArgsCorpusFile {
     schema_version: u32,
-    cases: Vec<XpromptArgsCorpusCase>,
+    cases: Vec<MacroArgsCorpusCase>,
 }
 
 #[cfg(test)]
-pub(crate) fn xprompt_args_corpus() -> Vec<XpromptArgsCorpusCase> {
-    let file: XpromptArgsCorpusFile = serde_json::from_str(include_str!(
+pub(crate) fn macro_args_corpus() -> Vec<MacroArgsCorpusCase> {
+    let file: MacroArgsCorpusFile = serde_json::from_str(include_str!(
         "../tests/fixtures/xprompt_args_corpus.json"
     ))
     .expect("xprompt args corpus must parse");
@@ -136,6 +136,6 @@ mod tests {
 
     #[test]
     fn shared_corpus_loads() {
-        assert!(!xprompt_args_corpus().is_empty());
+        assert!(!macro_args_corpus().is_empty());
     }
 }

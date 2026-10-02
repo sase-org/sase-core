@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn shared_corpus_matches_python_parse_args() {
-        for case in crate::macro_text_block::xprompt_args_corpus() {
+        for case in crate::macro_text_block::macro_args_corpus() {
             let call = one(&format!("#foo({})", case.source));
             let mut positional = Vec::new();
             let mut named = BTreeMap::new();

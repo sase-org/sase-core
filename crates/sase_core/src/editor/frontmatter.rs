@@ -520,7 +520,7 @@ fn validate_name(
             "invalid_xprompt_frontmatter_name",
             "Xprompt name must not be empty",
         );
-    } else if !is_referenceable_xprompt_name(name) {
+    } else if !is_referenceable_macro_name(name) {
         builder.push(
             range,
             DiagnosticSeverity::Warning,
@@ -2444,7 +2444,7 @@ fn is_bool_spelling(raw: &str) -> bool {
     )
 }
 
-fn is_referenceable_xprompt_name(name: &str) -> bool {
+fn is_referenceable_macro_name(name: &str) -> bool {
     name.split('/').all(is_jinja_identifier)
 }
 

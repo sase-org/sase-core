@@ -25,7 +25,7 @@ pub fn analyze_document(
     document: &DocumentSnapshot,
     entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
-    let local_entries = local_xprompt_entries(document);
+    let local_entries = local_macro_entries(document);
     let combined_entries;
     let entries = if local_entries.is_empty() {
         entries
@@ -36,7 +36,7 @@ pub fn analyze_document(
 
     let mut diagnostics = Vec::new();
     diagnostics.extend(frontmatter::diagnostics(document));
-    diagnostics.extend(xprompt_diagnostics(document, entries));
+    diagnostics.extend(macro_diagnostics(document, entries));
     diagnostics.extend(slash_skill_diagnostics(document, entries));
     diagnostics.extend(directive_diagnostics(document));
     diagnostics.extend(alternation_diagnostics(document));
@@ -204,7 +204,7 @@ fn merged_entries(
     local_entries
 }
 
-fn xprompt_diagnostics(
+fn macro_diagnostics(
     document: &DocumentSnapshot,
     entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
@@ -543,7 +543,7 @@ fn input_for_position(
         .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
 }
 
-fn local_xprompt_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
+fn local_macro_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
     let Some(frontmatter) = frontmatter_mapping(document.text()) else {
         return Vec::new();
     };
@@ -565,7 +565,7 @@ fn local_xprompt_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
             if seen.contains(&name) {
                 continue;
             }
-            let Some(entry) = local_xprompt_entry_from_config(&name, value)
+            let Some(entry) = local_macro_entry_from_config(&name, value)
             else {
                 continue;
             };
@@ -576,11 +576,11 @@ fn local_xprompt_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
     entries
 }
 
-fn local_xprompt_entry_from_config(
+fn local_macro_entry_from_config(
     name: &str,
     value: &Value,
 ) -> Option<MacroAssistEntry> {
-    if !is_referenceable_xprompt_name(name) {
+    if !is_referenceable_macro_name(name) {
         return None;
     }
     let inputs = if value.as_str().is_some() {
@@ -779,9 +779,9 @@ pub(crate) fn value_as_string(value: &Value) -> Option<String> {
     }
 }
 
-/// Document-local xprompt names follow the ordinary reference grammar and may
+/// Document-local macro names follow the ordinary reference grammar and may
 /// never claim the reserved xprompt-memory namespace.
-fn is_referenceable_xprompt_name(name: &str) -> bool {
+fn is_referenceable_macro_name(name: &str) -> bool {
     !is_reserved_memory_reference(name)
         && name.split('/').all(is_jinja_identifier)
 }
