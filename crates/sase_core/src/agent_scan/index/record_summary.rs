@@ -17,7 +17,12 @@ pub(super) const MARKER_FILES: &[&str] = &[
     "pending_question.json",
     "workflow_state.json",
     "plan_path.json",
+    "macros.json",
+    // legacy xprompt spelling
     "xprompts.json",
+    "raw_prompt.md",
+    // legacy xprompt spelling
+    "raw_xprompt.md",
 ];
 
 #[derive(Default)]
@@ -315,7 +320,7 @@ impl MarkerSignatures {
             workflow_state: marker_signature(&dir.join("workflow_state.json")),
             plan_path: marker_signature(&dir.join("plan_path.json")),
             prompt_steps: None,
-            xprompts: marker_signature(&dir.join("xprompts.json")),
+            xprompts: durable_artifact_signature(&dir),
         };
 
         let mut step_sigs: Vec<String> = Vec::new();
@@ -342,6 +347,43 @@ impl MarkerSignatures {
         }
         sigs
     }
+}
+
+/// Signature for the durable macro/raw-prompt selection stored in the
+/// preserved `xprompts_sig` column (no schema change).
+///
+/// Observes the new-first selected `macros.json` and `raw_prompt.md` files
+/// with their selected filenames as identity, so late canonical creation,
+/// replacement, and deletion back to the legacy file all invalidate. A
+/// canonical and legacy file with equal size and mtime still differ because
+/// the filename prefix differs. Raw-prompt selection rides the same
+/// existing invalidation route so cached alias-history rows refresh.
+/// Independent of the legacy catalog option.
+fn durable_artifact_signature(dir: &Path) -> Option<String> {
+    let macros_path = crate::agent_scan::scanner::select_used_macros_path(dir);
+    let raw_path = crate::agent_scan::scanner::select_raw_prompt_path(dir);
+    let macros_sig = marker_signature(&macros_path);
+    let raw_sig = marker_signature(&raw_path);
+    if macros_sig.is_none() && raw_sig.is_none() {
+        return None;
+    }
+    let macros_name = macros_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("macros.json");
+    let raw_name = raw_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("raw_prompt.md");
+    let macros_part = match macros_sig {
+        Some(sig) => format!("{macros_name}:{sig}"),
+        None => "no-macros".to_string(),
+    };
+    let raw_part = match raw_sig {
+        Some(sig) => format!("{raw_name}:{sig}"),
+        None => "no-raw".to_string(),
+    };
+    Some(format!("{macros_part}|{raw_part}"))
 }
 
 pub(super) fn marker_signature(path: &Path) -> Option<String> {

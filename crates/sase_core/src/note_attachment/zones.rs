@@ -43,7 +43,11 @@ pub const SASE_PERSONAL_FILES: &[&str] = &[
     "prompt_misspellings.json",
     "prompt_word_deletions.json",
     "prompt_placeholders.json",
+    "vcs_macro_mru.json",
+    // legacy xprompt spelling
     "vcs_xprompt_mru.json",
+    "macro_save_state.json",
+    // legacy xprompt spelling
     "xprompt_save_state.json",
 ];
 
@@ -224,6 +228,10 @@ mod tests {
             "/home/bryan/.sase/mobile_gateway/state.json",
             "/home/bryan/.sase/prompt_history.json",
             "/home/bryan/.sase/command_history.json",
+            "/home/bryan/.sase/vcs_macro_mru.json",
+            "/home/bryan/.sase/vcs_xprompt_mru.json",
+            "/home/bryan/.sase/macro_save_state.json",
+            "/home/bryan/.sase/xprompt_save_state.json",
             "/home/bryan/.sase/chats/abc.md",
         ] {
             assert!(is_sase_personal_path(path, sase_home), "{path}");

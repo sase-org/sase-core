@@ -189,6 +189,104 @@ fn late_xprompts_file_refreshes_cached_record() {
 }
 
 #[test]
+fn durable_canonical_selection_refreshes_indexed_record() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let artifact_dir = artifact(&projects, "20260729121100");
+    write_json(
+        &artifact_dir.join("agent_meta.json"),
+        json!({"name": "durable-user"}),
+    );
+    write_json(
+        &artifact_dir.join("xprompts.json"),
+        json!([{"name": "legacy", "kind": "part"}]),
+    );
+    fs::write(artifact_dir.join("raw_xprompt.md"), "legacy prompt").unwrap();
+
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Late canonical creation wins and changes the preserved signature.
+    write_json(
+        &artifact_dir.join("macros.json"),
+        json!([{"name": "canonical", "kind": "workflow"}]),
+    );
+    fs::write(artifact_dir.join("raw_prompt.md"), "canonical prompt").unwrap();
+    let refreshed = query_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactIndexQueryWire::default(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(refreshed.records.len(), 1);
+    assert_eq!(refreshed.records[0].used_macros.len(), 1);
+    assert_eq!(refreshed.records[0].used_macros[0].name, "canonical");
+    assert_eq!(
+        refreshed.records[0].raw_prompt_snippet.as_deref(),
+        Some("canonical prompt")
+    );
+
+    let conn = Connection::open(&index).unwrap();
+    let (signature, record_json): (Option<String>, String) = conn
+        .query_row(
+            "SELECT xprompts_sig, record_json FROM agent_artifacts \
+             WHERE artifact_dir = ?1",
+            [artifact_dir.to_string_lossy().as_ref()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let signature = signature.expect("durable signature stored");
+    assert!(
+        signature.contains("macros.json"),
+        "identity must name selection: {signature}"
+    );
+    assert!(
+        signature.contains("raw_prompt.md"),
+        "raw selection rides same route: {signature}"
+    );
+    // Indexed storage keeps the legacy `used_xprompts` key.
+    assert!(record_json.contains("\"used_xprompts\""));
+    assert!(!record_json.contains("\"used_macros\""));
+    drop(conn);
+
+    // Source removal falls back to the legacy file with a new signature.
+    fs::remove_file(artifact_dir.join("macros.json")).unwrap();
+    fs::remove_file(artifact_dir.join("raw_prompt.md")).unwrap();
+    let fallen_back = query_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactIndexQueryWire::default(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(fallen_back.records.len(), 1);
+    assert_eq!(fallen_back.records[0].used_macros[0].name, "legacy");
+    assert_eq!(
+        fallen_back.records[0].raw_prompt_snippet.as_deref(),
+        Some("legacy prompt")
+    );
+    let conn = Connection::open(&index).unwrap();
+    let signature: Option<String> = conn
+        .query_row(
+            "SELECT xprompts_sig FROM agent_artifacts WHERE artifact_dir = ?1",
+            [artifact_dir.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let signature = signature.expect("fallback signature stored");
+    assert!(
+        signature.contains("xprompts.json"),
+        "fallback identity: {signature}"
+    );
+}
+
+#[test]
 fn cached_query_returns_rebuilt_records_without_revalidation() {
     let tmp = tempdir().unwrap();
     let projects = tmp.path().join("projects");

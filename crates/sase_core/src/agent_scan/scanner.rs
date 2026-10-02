@@ -46,11 +46,55 @@ use crate::queue_directive::{
     authored_queue_weight_is_valid, queue_weight_is_valid,
 };
 
-const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
+const USED_MACROS_FILE: &str = "macros.json";
+// legacy xprompt spelling
 const USED_XPROMPTS_FILE: &str = "xprompts.json";
+const RAW_PROMPT_MACROS_FILE: &str = "raw_prompt.md";
+// legacy xprompt spelling
+const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 const MAX_OUTPUT_VARIABLE_DEPTH: usize = 8;
 const MAX_OUTPUT_VARIABLE_NODES: usize = 1_024;
 const MAX_OUTPUT_VARIABLE_ENCODED_BYTES: usize = 65_536;
+
+/// Select the canonical artifact file when present, falling back to the
+/// legacy spelling only when the canonical file is absent.
+///
+/// A present-but-malformed canonical file still wins: callers follow the
+/// existing malformed-file behavior and must not consult the stale legacy
+/// file. This rule is shared by cold scans and indexed reads so both
+/// observe the same selection.
+fn select_canonical_or_legacy(
+    artifact_dir: &Path,
+    canonical_name: &str,
+    legacy_name: &str,
+) -> PathBuf {
+    let canonical = artifact_dir.join(canonical_name);
+    if canonical.exists() {
+        canonical
+    } else {
+        artifact_dir.join(legacy_name)
+    }
+}
+
+/// Prefer `macros.json`, falling back to `xprompts.json` only when the
+/// canonical file is absent. Independent of the legacy catalog option.
+pub(crate) fn select_used_macros_path(artifact_dir: &Path) -> PathBuf {
+    select_canonical_or_legacy(
+        artifact_dir,
+        USED_MACROS_FILE,
+        USED_XPROMPTS_FILE,
+    )
+}
+
+/// Prefer `raw_prompt.md`, falling back to `raw_xprompt.md` only when the
+/// canonical file is absent. Independent of the legacy catalog option.
+pub(crate) fn select_raw_prompt_path(artifact_dir: &Path) -> PathBuf {
+    select_canonical_or_legacy(
+        artifact_dir,
+        RAW_PROMPT_MACROS_FILE,
+        RAW_PROMPT_FILE,
+    )
+}
 
 #[derive(Debug)]
 struct ArtifactCandidate {
@@ -671,7 +715,7 @@ fn scan_artifact_dir(
     let used_macros = if options.capacity_only {
         Vec::new()
     } else {
-        load_used_macros(&artifact_dir.join(USED_XPROMPTS_FILE), stats)
+        load_used_macros(&select_used_macros_path(artifact_dir), stats)
     };
 
     AgentArtifactRecordWire {
@@ -734,11 +778,14 @@ fn load_marker_object(
     }
 }
 
-/// Read and normalize launch-boundary macro usage (`xprompts.json`).
+/// Read and normalize launch-boundary macro usage from the selected
+/// `macros.json`/`xprompts.json` path.
 ///
 /// Missing and unreadable files yield no usage. Malformed JSON and valid
 /// non-array payloads also yield no usage while incrementing the scanner's
-/// soft-error diagnostics.
+/// soft-error diagnostics. The caller selects new-first; a present
+/// malformed canonical file is reported here and never falls back to the
+/// legacy file.
 fn load_used_macros(
     path: &Path,
     stats: &mut AgentArtifactScanStatsWire,
@@ -819,7 +866,7 @@ fn read_raw_prompt_snippet(
     max_bytes: usize,
     stats: &mut AgentArtifactScanStatsWire,
 ) -> Option<String> {
-    let raw_path = artifact_dir.join(RAW_PROMPT_FILE);
+    let raw_path = select_raw_prompt_path(artifact_dir);
     let mut file = match fs::File::open(&raw_path) {
         Ok(f) => f,
         Err(err) => {
@@ -3077,6 +3124,173 @@ mod tests {
         data.insert("agent_tab".to_string(), tab);
         data.insert("agent_tab_source".to_string(), source);
         agent_meta_from_object(&data)
+    }
+
+    #[test]
+    fn durable_readers_prefer_canonical_macros_and_raw_prompt() {
+        use std::io::Write as _;
+
+        fn write_text(path: &Path, body: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut file = fs::File::create(path).unwrap();
+            file.write_all(body.as_bytes()).unwrap();
+        }
+
+        fn scan_single(projects: &Path) -> AgentArtifactRecordWire {
+            let snapshot = scan_agent_artifacts(
+                projects,
+                AgentArtifactScanOptionsWire::default(),
+            );
+            assert_eq!(snapshot.records.len(), 1);
+            snapshot.records.into_iter().next().unwrap()
+        }
+
+        fn artifact(projects: &Path) -> PathBuf {
+            projects
+                .join("proj")
+                .join("artifacts")
+                .join("ace-run")
+                .join("20260729120000")
+        }
+
+        // Old-only: legacy files are observed.
+        {
+            let tmp = tempdir().unwrap();
+            let projects = tmp.path().join("projects");
+            let dir = artifact(&projects);
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": "old-only"}),
+            );
+            write_json(
+                &dir.join("xprompts.json"),
+                json!([{"name": "legacy", "kind": "part"}]),
+            );
+            write_text(&dir.join("raw_xprompt.md"), "legacy prompt");
+            let record = scan_single(&projects);
+            assert_eq!(record.used_macros.len(), 1);
+            assert_eq!(record.used_macros[0].name, "legacy");
+            assert_eq!(
+                record.raw_prompt_snippet.as_deref(),
+                Some("legacy prompt")
+            );
+        }
+
+        // New-only: canonical files are observed.
+        {
+            let tmp = tempdir().unwrap();
+            let projects = tmp.path().join("projects");
+            let dir = artifact(&projects);
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": "new-only"}),
+            );
+            write_json(
+                &dir.join("macros.json"),
+                json!([{"name": "canonical", "kind": "workflow"}]),
+            );
+            write_text(&dir.join("raw_prompt.md"), "canonical prompt");
+            let record = scan_single(&projects);
+            assert_eq!(record.used_macros.len(), 1);
+            assert_eq!(record.used_macros[0].name, "canonical");
+            assert_eq!(
+                record.raw_prompt_snippet.as_deref(),
+                Some("canonical prompt")
+            );
+        }
+
+        // Both-present, late write, and source removal.
+        {
+            let tmp = tempdir().unwrap();
+            let projects = tmp.path().join("projects");
+            let dir = artifact(&projects);
+            write_json(&dir.join("agent_meta.json"), json!({"name": "both"}));
+            write_json(
+                &dir.join("xprompts.json"),
+                json!([{"name": "legacy", "kind": "part"}]),
+            );
+            write_text(&dir.join("raw_xprompt.md"), "legacy prompt");
+            // Late canonical write wins without touching the legacy file.
+            write_json(
+                &dir.join("macros.json"),
+                json!([{"name": "canonical", "kind": "swarm"}]),
+            );
+            write_text(&dir.join("raw_prompt.md"), "canonical prompt");
+            let record = scan_single(&projects);
+            assert_eq!(record.used_macros.len(), 1);
+            assert_eq!(record.used_macros[0].name, "canonical");
+            assert_eq!(
+                record.raw_prompt_snippet.as_deref(),
+                Some("canonical prompt")
+            );
+
+            // Source removal falls back to the legacy file.
+            fs::remove_file(dir.join("macros.json")).unwrap();
+            fs::remove_file(dir.join("raw_prompt.md")).unwrap();
+            let record = scan_single(&projects);
+            assert_eq!(record.used_macros.len(), 1);
+            assert_eq!(record.used_macros[0].name, "legacy");
+            assert_eq!(
+                record.raw_prompt_snippet.as_deref(),
+                Some("legacy prompt")
+            );
+        }
+
+        // Malformed canonical never falls back to the stale legacy file.
+        {
+            let tmp = tempdir().unwrap();
+            let projects = tmp.path().join("projects");
+            let dir = artifact(&projects);
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": "malformed"}),
+            );
+            write_json(
+                &dir.join("xprompts.json"),
+                json!([{"name": "legacy", "kind": "part"}]),
+            );
+            write_text(&dir.join("raw_prompt.md"), "canonical prompt");
+            fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            fs::write(dir.join("macros.json"), "{not json").unwrap();
+            let snapshot = scan_agent_artifacts(
+                &projects,
+                AgentArtifactScanOptionsWire::default(),
+            );
+            assert_eq!(snapshot.records.len(), 1);
+            assert!(snapshot.records[0].used_macros.is_empty());
+            assert!(snapshot.stats.json_decode_errors >= 1);
+            // Raw-prompt canonical still wins independently.
+            assert_eq!(
+                snapshot.records[0].raw_prompt_snippet.as_deref(),
+                Some("canonical prompt")
+            );
+        }
+
+        // Capacity-only skips both durable reads.
+        {
+            let tmp = tempdir().unwrap();
+            let projects = tmp.path().join("projects");
+            let dir = artifact(&projects);
+            write_json(
+                &dir.join("agent_meta.json"),
+                json!({"name": "capacity"}),
+            );
+            write_json(
+                &dir.join("macros.json"),
+                json!([{"name": "canonical", "kind": "part"}]),
+            );
+            write_text(&dir.join("raw_prompt.md"), "canonical prompt");
+            let snapshot = scan_agent_artifacts(
+                &projects,
+                AgentArtifactScanOptionsWire {
+                    capacity_only: true,
+                    ..AgentArtifactScanOptionsWire::default()
+                },
+            );
+            assert_eq!(snapshot.records.len(), 1);
+            assert!(snapshot.records[0].used_macros.is_empty());
+            assert!(snapshot.records[0].raw_prompt_snippet.is_none());
+        }
     }
 
     #[test]

@@ -8,7 +8,9 @@ use super::placeholders;
 use super::record_summary::MarkerSignatures;
 use super::selection::{pending_refresh_row_from_sql, PendingRefreshRow};
 use super::storage::{open_index, open_index_read_only};
-use crate::agent_scan::scanner::scan_agent_artifact_dir;
+use crate::agent_scan::scanner::{
+    scan_agent_artifact_dir, select_raw_prompt_path,
+};
 use crate::agent_scan::wire::{
     decode_agent_artifact_record_json, AgentArtifactScanOptionsWire,
     AgentMetaWire,
@@ -257,7 +259,6 @@ pub(super) fn alias_run_from_sql_row(
     }))
 }
 
-pub(super) const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
 pub(super) const ALIAS_HISTORY_PROMPT_SNIPPET_ELLIPSIS: &str = "...";
 
 pub(super) fn effective_model_alias_trail(meta: &AgentMetaWire) -> Vec<String> {
@@ -286,7 +287,7 @@ pub(super) fn read_alias_history_prompt_snippet(
     if max_bytes == 0 {
         return None;
     }
-    let path = Path::new(artifact_dir).join(RAW_PROMPT_FILE);
+    let path = select_raw_prompt_path(Path::new(artifact_dir));
     let file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(_) => return None,

@@ -801,6 +801,48 @@ fn alias_history_revalidate_refreshes_candidate_rows() {
 }
 
 #[test]
+fn alias_history_prefers_canonical_raw_prompt() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260816151515");
+    write_json(
+        &dir.join("agent_meta.json"),
+        json!({
+            "name": "snippet-user",
+            "model_alias": "large",
+            "model_alias_trail": ["large"],
+            "model_alias_origin": "directive"
+        }),
+    );
+    write_text(&dir.join("raw_xprompt.md"), "legacy snippet body");
+    write_text(&dir.join("raw_prompt.md"), "canonical snippet body");
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let history =
+        query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+    assert_eq!(history.groups[0].runs.len(), 1);
+    assert_eq!(
+        history.groups[0].runs[0].prompt_snippet.as_deref(),
+        Some("canonical snippet body")
+    );
+
+    // Source removal falls back to the legacy snippet through the same read.
+    std::fs::remove_file(dir.join("raw_prompt.md")).unwrap();
+    let history =
+        query_agent_alias_history(&index, alias_query(&["large"])).unwrap();
+    assert_eq!(
+        history.groups[0].runs[0].prompt_snippet.as_deref(),
+        Some("legacy snippet body")
+    );
+}
+
+#[test]
 fn prompt_snippet_truncation_stays_on_utf8_char_boundary() {
     let truncated = truncate_prompt_snippet("ab☃cd", 5);
     assert!(truncated.ends_with("..."));
