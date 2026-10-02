@@ -90,6 +90,7 @@ pub struct ProjectContentLayoutWire {
     pub namespace_root: LayoutPathWire,
     pub config: CompatibleLayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
@@ -103,6 +104,7 @@ pub struct HomeContentLayoutWire {
     pub root: String,
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
@@ -117,6 +119,7 @@ pub struct ChezmoiContentLayoutWire {
     pub source_root: String,
     pub namespace_root: LayoutPathWire,
     pub xprompts: CompatibleLayoutPathWire,
+    pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
     pub memory: CompatibleLayoutPathWire,
@@ -220,6 +223,7 @@ pub struct SaseContentLayoutWire {
     pub home: HomeContentLayoutWire,
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
     pub xprompt_sources: Vec<MacroSourceWire>,
+    pub macro_sources: Vec<MacroSourceWire>,
     pub skill_sources: Vec<SkillSourceWire>,
     pub memory_sources: Vec<MemorySourceWire>,
 }
@@ -469,6 +473,7 @@ pub fn sase_content_layout(
     let chezmoi = chezmoi_source_root.map(chezmoi_content_layout);
     let xprompt_sources =
         xprompt_sources(project_root, home_root, project_name);
+    let macro_sources = macro_sources(project_root, home_root, project_name);
     let skill_sources = skill_sources(project_root, home_root, project_name);
     let memory_sources = memory_sources(project_root, home_root);
     SaseContentLayoutWire {
@@ -477,6 +482,7 @@ pub fn sase_content_layout(
         home,
         chezmoi,
         xprompt_sources,
+        macro_sources,
         skill_sources,
         memory_sources,
     }
@@ -535,6 +541,14 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
+    // Canonical macro writer with retired xprompt directories as legacy
+    // candidates. // legacy xprompt spelling (retired `.xprompts`/`xprompts`)
+    let macros = compatible_path(
+        namespace_root.join("macros"),
+        [root.join(".xprompts"), root.join("xprompts")],
+        LayoutTrackingWire::SourceControlled,
+        LayoutCollisionPolicyWire::FirstWins,
+    );
     let memory = memory_compatible_path(root);
     let memory_readme = namespace_root.join("memory").join("README.md");
     ProjectContentLayoutWire {
@@ -546,6 +560,7 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         ),
         config,
         xprompts,
+        macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
         memory,
@@ -571,6 +586,14 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
+    // Canonical macro writer with retired xprompt directories as legacy
+    // candidates. // legacy xprompt spelling (retired `.xprompts`/`xprompts`)
+    let macros = compatible_path(
+        namespace_root.join("macros"),
+        [root.join(".xprompts"), root.join("xprompts")],
+        LayoutTrackingWire::SourceControlled,
+        LayoutCollisionPolicyWire::FirstWins,
+    );
     let memory = memory_compatible_path(root);
     HomeContentLayoutWire {
         root: path_string(root),
@@ -580,6 +603,7 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
             LayoutTrackingWire::SourceControlled,
         ),
         xprompts,
+        macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
         memory,
@@ -610,6 +634,20 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::FirstWins,
     );
+    // Canonical chezmoi macro path with its dot_macros counterpart and the
+    // retired dot_xprompts candidate.
+    // legacy xprompt spelling (retired `dot_xprompts`/`xprompts`)
+    let macros = compatible_path(
+        namespace_root.join("macros"),
+        [
+            root.join("dot_macros"),
+            root.join("dot_xprompts"),
+            root.join("macros"),
+            root.join("xprompts"),
+        ],
+        LayoutTrackingWire::SourceControlled,
+        LayoutCollisionPolicyWire::FirstWins,
+    );
     let memory = memory_compatible_path(root);
     ChezmoiContentLayoutWire {
         source_root: path_string(root),
@@ -619,6 +657,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
             LayoutTrackingWire::SourceControlled,
         ),
         xprompts,
+        macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
         memory,
@@ -816,6 +855,255 @@ fn xprompt_sources(
     sources
 }
 
+/// Canonical macro source list, new-first.
+///
+/// `xprompt_sources` stays byte-identical for compatibility; this separate
+/// list places canonical `sase/macros` directories before retired
+/// xprompt-named directories while preserving scope ordering within each
+/// family, first-wins behavior, project namespaces, config collision rules,
+/// and skill/memory placement. Explicit resources keep their precedence over
+/// inferred paths at load time.
+fn macro_sources(
+    project_root: Option<&Path>,
+    home_root: &Path,
+    project_name: Option<&str>,
+) -> Vec<MacroSourceWire> {
+    let mut sources = Vec::new();
+    // Canonical family first: project, home, then project-specific home.
+    if let Some(root) = project_root {
+        push_directory_source(
+            &mut sources,
+            "project_macros_canonical",
+            "project",
+            LayoutPathRoleWire::Canonical,
+            root.join("sase").join("macros"),
+            true,
+            true,
+        );
+    }
+    push_directory_source(
+        &mut sources,
+        "home_macros_canonical",
+        "home",
+        LayoutPathRoleWire::Canonical,
+        home_root.join("sase").join("macros"),
+        false,
+        true,
+    );
+    if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
+        push_directory_source(
+            &mut sources,
+            "home_project_macros_canonical",
+            "home_project",
+            LayoutPathRoleWire::Canonical,
+            home_root.join("sase").join("macros").join(project_name),
+            true,
+            true,
+        );
+    }
+
+    // Retired family: same scope order as the legacy list so an old-only
+    // installation keeps its precedence. Old `sase/xprompts` canonicals are
+    // retired here (Legacy role) while staying Canonical in `xprompt_sources`.
+    // legacy xprompt spelling
+    if let Some(root) = project_root {
+        push_directory_source(
+            &mut sources,
+            "project_xprompt_canonical",
+            "project",
+            LayoutPathRoleWire::Legacy,
+            root.join("sase").join("xprompts"),
+            true,
+            false,
+        );
+        push_directory_source(
+            &mut sources,
+            "project_legacy_hidden",
+            "project",
+            LayoutPathRoleWire::Legacy,
+            root.join(".xprompts"),
+            true,
+            false,
+        );
+        push_directory_source(
+            &mut sources,
+            "project_legacy_visible",
+            "project",
+            LayoutPathRoleWire::Legacy,
+            root.join("xprompts"),
+            true,
+            false,
+        );
+    }
+    push_directory_source(
+        &mut sources,
+        "home_xprompt_canonical",
+        "home",
+        LayoutPathRoleWire::Legacy,
+        home_root.join("sase").join("xprompts"),
+        false,
+        false,
+    );
+    push_directory_source(
+        &mut sources,
+        "home_legacy_hidden",
+        "home",
+        LayoutPathRoleWire::Legacy,
+        home_root.join(".xprompts"),
+        false,
+        false,
+    );
+    push_directory_source(
+        &mut sources,
+        "home_legacy_visible",
+        "home",
+        LayoutPathRoleWire::Legacy,
+        home_root.join("xprompts"),
+        false,
+        false,
+    );
+    if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
+        push_directory_source(
+            &mut sources,
+            "home_project_xprompt_canonical",
+            "home_project",
+            LayoutPathRoleWire::Legacy,
+            home_root.join("sase").join("xprompts").join(project_name),
+            true,
+            false,
+        );
+        push_directory_source(
+            &mut sources,
+            "home_project_legacy_config",
+            "home_project",
+            LayoutPathRoleWire::Legacy,
+            home_root
+                .join(".config")
+                .join("sase")
+                .join("xprompts")
+                .join(project_name),
+            true,
+            false,
+        );
+    }
+
+    if let Some(root) = project_root {
+        push_config_source(
+            &mut sources,
+            "project_config_canonical",
+            "project_config",
+            LayoutPathRoleWire::Canonical,
+            root.join("sase").join("sase.yml"),
+            Some("project_config"),
+            Some(LayoutCollisionPolicyWire::Error),
+            true,
+        );
+        push_config_source(
+            &mut sources,
+            "project_config_legacy",
+            "project_config",
+            LayoutPathRoleWire::Legacy,
+            root.join("sase.yml"),
+            Some("project_config"),
+            Some(LayoutCollisionPolicyWire::Error),
+            false,
+        );
+    }
+    push_config_source(
+        &mut sources,
+        "user_config_overlays",
+        "user_config",
+        LayoutPathRoleWire::Unchanged,
+        home_root.join(".config").join("sase").join("sase_*.yml"),
+        None,
+        None,
+        true,
+    );
+    if let Some(source) = sources.last_mut() {
+        source.ordering = Some("reverse_lexical_first_wins".to_string());
+    }
+    push_config_source(
+        &mut sources,
+        "user_config",
+        "user_config",
+        LayoutPathRoleWire::Unchanged,
+        home_root.join(".config").join("sase").join("sase.yml"),
+        None,
+        None,
+        true,
+    );
+    push_symbolic_source(
+        &mut sources,
+        "plugin_config",
+        "plugin",
+        "entrypoint:sase_config/default_config.yml",
+        vec!["config"],
+    );
+    push_symbolic_source(
+        &mut sources,
+        "package_default_config",
+        "package",
+        "package:default_config.yml",
+        vec!["config"],
+    );
+    // Canonical symbolic macro resources, new-first.
+    push_symbolic_source(
+        &mut sources,
+        "plugin_macro_resources",
+        "plugin",
+        "entrypoint:sase_macros/macros",
+        vec!["md", "yml", "yaml"],
+    );
+    push_symbolic_source(
+        &mut sources,
+        "package_macro_defaults",
+        "package",
+        "package:default_macros",
+        vec!["md"],
+    );
+    push_symbolic_source(
+        &mut sources,
+        "package_macro_internal",
+        "package",
+        "package:macros",
+        vec!["md", "yml", "yaml"],
+    );
+    if let Some(source) = sources.last_mut() {
+        source.steps_path = Some("package:macros/steps".to_string());
+    }
+    // Retired symbolic resources stay readable under the default policy.
+    // legacy xprompt spelling
+    push_symbolic_source(
+        &mut sources,
+        "plugin_resources",
+        "plugin",
+        "entrypoint:sase_xprompts/xprompts",
+        vec!["md", "yml", "yaml"],
+    );
+    push_symbolic_source(
+        &mut sources,
+        "package_defaults",
+        "package",
+        "package:default_xprompts",
+        vec!["md"],
+    );
+    push_symbolic_source(
+        &mut sources,
+        "package_internal",
+        "package",
+        "package:xprompts",
+        vec!["md", "yml", "yaml"],
+    );
+    if let Some(source) = sources.last_mut() {
+        source.steps_path = Some("package:xprompts/steps".to_string());
+    }
+
+    for (priority, source) in sources.iter_mut().enumerate() {
+        source.priority = (priority + 1) as u32;
+    }
+    sources
+}
+
 fn skill_sources(
     project_root: Option<&Path>,
     home_root: &Path,
@@ -850,11 +1138,25 @@ fn skill_sources(
             true,
         );
     }
+    // Canonical skill locators are additive: legacy entries keep their
+    // serialized values while new macro-family locators load first.
+    push_skill_symbolic_source(
+        &mut sources,
+        "plugin_macro_skills",
+        "plugin",
+        "entrypoint:sase_macros/skills",
+    );
     push_skill_symbolic_source(
         &mut sources,
         "plugin_skills",
         "plugin",
         "entrypoint:sase_xprompts/skills",
+    );
+    push_skill_symbolic_source(
+        &mut sources,
+        "package_macro_skills",
+        "package",
+        "package:macros/skills",
     );
     push_skill_symbolic_source(
         &mut sources,
@@ -1229,7 +1531,9 @@ mod tests {
                 "project_skills",
                 "home_skills",
                 "home_project_skills",
+                "plugin_macro_skills",
                 "plugin_skills",
+                "package_macro_skills",
                 "package_skills",
             ]
         );
@@ -1239,7 +1543,7 @@ mod tests {
                 .iter()
                 .map(|source| source.priority)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6, 7]
         );
         assert_eq!(
             layout.skill_sources[0].path.as_deref(),
@@ -1255,12 +1559,19 @@ mod tests {
         );
         assert!(layout.skill_sources[2].project_namespaced);
         assert!(!layout.skill_sources[1].project_namespaced);
-        // Package and plugin sources are symbolic and read-only.
+        // Legacy skill locators keep their serialized values; canonical
+        // macro-family locators load first without mutating them.
+        // legacy xprompt spelling (retired `sase_xprompts`/`xprompts` skill locators)
         assert_eq!(
             layout.skill_sources[3].locator,
+            "entrypoint:sase_macros/skills"
+        );
+        assert_eq!(
+            layout.skill_sources[4].locator,
             "entrypoint:sase_xprompts/skills"
         );
-        assert_eq!(layout.skill_sources[4].locator, "package:xprompts/skills");
+        assert_eq!(layout.skill_sources[5].locator, "package:macros/skills");
+        assert_eq!(layout.skill_sources[6].locator, "package:xprompts/skills");
         assert!(layout.skill_sources[3..]
             .iter()
             .all(|source| source.path.is_none() && !source.writable));
@@ -1363,7 +1674,13 @@ mod tests {
                 .iter()
                 .map(|source| source.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["home_skills", "plugin_skills", "package_skills"]
+            vec![
+                "home_skills",
+                "plugin_macro_skills",
+                "plugin_skills",
+                "package_macro_skills",
+                "package_skills",
+            ]
         );
         assert_eq!(
             layout
@@ -1373,6 +1690,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["home_memory"]
         );
+        assert!(layout
+            .macro_sources
+            .iter()
+            .all(|source| !source.id.starts_with("project_")));
+        assert_eq!(layout.macro_sources[0].id, "home_macros_canonical");
     }
 
     #[test]
@@ -1526,6 +1848,178 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MemoryTierWire>("\"long\"").unwrap(),
             MemoryTierWire::Reference
+        );
+    }
+
+    #[test]
+    fn macro_layouts_write_to_sase_macros_with_retired_legacy() {
+        let layout = sase_content_layout(
+            Some(Path::new("/repo")),
+            Path::new("/home/alice"),
+            Some(Path::new("/dotfiles/home")),
+            Some("demo"),
+        );
+        let project = layout.project.unwrap();
+        // Old layouts keep their previous values.
+        assert_eq!(project.xprompts.canonical.path, "/repo/sase/xprompts");
+        assert_eq!(project.xprompts.legacy[0].path, "/repo/.xprompts");
+        // Canonical macro writers resolve to `sase/macros`.
+        assert_eq!(project.macros.canonical.path, "/repo/sase/macros");
+        assert_eq!(project.macros.write_path, "/repo/sase/macros");
+        assert_eq!(
+            project.macros.read_policy,
+            LayoutCollisionPolicyWire::FirstWins
+        );
+        assert_eq!(
+            layout.home.macros.canonical.path,
+            "/home/alice/sase/macros"
+        );
+        assert_eq!(layout.home.macros.write_path, "/home/alice/sase/macros");
+        let chezmoi = layout.chezmoi.unwrap();
+        assert_eq!(chezmoi.macros.canonical.path, "/dotfiles/home/sase/macros");
+        assert_eq!(chezmoi.macros.write_path, "/dotfiles/home/sase/macros");
+        // Chezmoi exposes its dot_macros counterpart and the retired
+        // dot_xprompts candidate.
+        // legacy xprompt spelling (retired `dot_xprompts`/`xprompts`)
+        let legacy_paths = chezmoi
+            .macros
+            .legacy
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(legacy_paths.contains(&"/dotfiles/home/dot_macros"));
+        assert!(legacy_paths.contains(&"/dotfiles/home/dot_xprompts"));
+    }
+
+    #[test]
+    fn macro_sources_are_new_first_with_legacy_lists_unchanged() {
+        let layout = sase_content_layout(
+            Some(Path::new("/repo")),
+            Path::new("/home/alice"),
+            None,
+            Some("demo"),
+        );
+        // Legacy list stays byte-identical.
+        let legacy_ids = layout
+            .xprompt_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            legacy_ids,
+            vec![
+                "project_canonical",
+                "project_legacy_hidden",
+                "project_legacy_visible",
+                "home_canonical",
+                "home_legacy_hidden",
+                "home_legacy_visible",
+                "home_project_canonical",
+                "home_project_legacy_config",
+                "project_config_canonical",
+                "project_config_legacy",
+                "user_config_overlays",
+                "user_config",
+                "plugin_config",
+                "package_default_config",
+                "plugin_resources",
+                "package_defaults",
+                "package_internal",
+            ]
+        );
+        let ids = layout
+            .macro_sources
+            .iter()
+            .map(|source| source.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "project_macros_canonical",
+                "home_macros_canonical",
+                "home_project_macros_canonical",
+                "project_xprompt_canonical",
+                "project_legacy_hidden",
+                "project_legacy_visible",
+                "home_xprompt_canonical",
+                "home_legacy_hidden",
+                "home_legacy_visible",
+                "home_project_xprompt_canonical",
+                "home_project_legacy_config",
+                "project_config_canonical",
+                "project_config_legacy",
+                "user_config_overlays",
+                "user_config",
+                "plugin_config",
+                "package_default_config",
+                "plugin_macro_resources",
+                "package_macro_defaults",
+                "package_macro_internal",
+                "plugin_resources",
+                "package_defaults",
+                "package_internal",
+            ]
+        );
+        // Canonical directories precede retired ones with first-wins scope
+        // ordering preserved inside each family.
+        let canonical_positions =
+            ["project_macros_canonical", "home_macros_canonical"]
+                .into_iter()
+                .map(|id| ids.iter().position(|entry| *entry == id).unwrap())
+                .collect::<Vec<_>>();
+        let retired_positions = ["project_legacy_hidden", "home_legacy_hidden"]
+            .into_iter()
+            .map(|id| ids.iter().position(|entry| *entry == id).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            canonical_positions.iter().max() < retired_positions.iter().min()
+        );
+        // Canonical writers resolve to `sase/macros`.
+        assert_eq!(
+            layout.macro_sources[0].path.as_deref(),
+            Some("/repo/sase/macros")
+        );
+        assert_eq!(
+            layout.macro_sources[1].path.as_deref(),
+            Some("/home/alice/sase/macros")
+        );
+        assert_eq!(
+            layout.macro_sources[2].path.as_deref(),
+            Some("/home/alice/sase/macros/demo")
+        );
+        assert!(layout.macro_sources[..3]
+            .iter()
+            .all(|source| source.role == LayoutPathRoleWire::Canonical));
+        assert!(layout.macro_sources[3..11]
+            .iter()
+            .all(|source| source.role == LayoutPathRoleWire::Legacy));
+        // Config collision rules are preserved.
+        assert_eq!(
+            layout.macro_sources[11].collision_policy,
+            Some(LayoutCollisionPolicyWire::Error)
+        );
+        // Canonical symbolic locators are present without mutating legacy
+        // serialized lists.
+        let locators = layout
+            .macro_sources
+            .iter()
+            .map(|source| source.locator.as_str())
+            .collect::<Vec<_>>();
+        assert!(locators.contains(&"entrypoint:sase_macros/macros"));
+        assert!(locators.contains(&"package:macros"));
+        assert!(locators.contains(&"package:default_macros"));
+        let steps = layout
+            .macro_sources
+            .iter()
+            .filter_map(|source| source.steps_path.as_deref())
+            .collect::<Vec<_>>();
+        assert!(steps.contains(&"package:macros/steps"));
+        // legacy xprompt spelling (retired symbolic locators)
+        assert!(locators.contains(&"entrypoint:sase_xprompts/xprompts"));
+        assert!(locators.contains(&"package:default_xprompts"));
+        assert_eq!(
+            layout.macro_sources.last().unwrap().steps_path.as_deref(),
+            Some("package:xprompts/steps")
         );
     }
 }

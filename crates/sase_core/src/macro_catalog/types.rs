@@ -17,6 +17,16 @@ pub(super) const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
 pub(super) const SASE_SKILL_PLUGIN_DIRS_JSON_ENV: &str =
     "SASE_SKILL_PLUGIN_DIRS_JSON";
+// Canonical macro transport variables, resolved new-first with the
+// corresponding `SASE_XPROMPT_*` fallback.
+// legacy xprompt spelling (fallback env names)
+pub(super) const SASE_MACRO_PACKAGE_DIR_ENV: &str = "SASE_MACRO_PACKAGE_DIR";
+pub(super) const SASE_MACRO_BUILTIN_DIR_ENV: &str = "SASE_MACRO_BUILTIN_DIR";
+pub(super) const SASE_MACRO_DEFAULT_DIR_ENV: &str = "SASE_MACRO_DEFAULT_DIR";
+pub(super) const SASE_MACRO_PLUGIN_DIRS_JSON_ENV: &str =
+    "SASE_MACRO_PLUGIN_DIRS_JSON";
+pub(super) const SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
+    "SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON";
 
 /// The packaged Jinja frame that generated `SKILL.md` files are rendered
 /// through. It ships beside the bundled skill sources but is a template, not a
@@ -32,27 +42,44 @@ pub enum MacroCatalogLoadError {
     LayoutCollision(String),
 }
 
+fn default_accept_legacy_xprompt_names() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroCatalogLoadOptions {
     pub root_dir: Option<PathBuf>,
     pub package_xprompts_dir: Option<PathBuf>,
+    pub package_macros_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
     pub default_xprompts_dir: Option<PathBuf>,
+    pub default_macros_dir: Option<PathBuf>,
     pub default_config_path: Option<PathBuf>,
     pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
+    pub accept_legacy_xprompt_names: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MacroCatalogResourcePaths {
     pub package_xprompts_dir: Option<PathBuf>,
+    pub package_macros_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
     pub default_xprompts_dir: Option<PathBuf>,
+    pub default_macros_dir: Option<PathBuf>,
     pub default_config_path: Option<PathBuf>,
     pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    pub plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
+}
+
+impl Default for MacroCatalogLoadOptions {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
 impl MacroCatalogLoadOptions {
@@ -60,12 +87,16 @@ impl MacroCatalogLoadOptions {
         Self {
             root_dir,
             package_xprompts_dir: None,
+            package_macros_dir: None,
             package_skills_dir: None,
             default_xprompts_dir: None,
+            default_macros_dir: None,
             default_config_path: None,
             plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_macro_dirs: BTreeMap::new(),
             plugin_skill_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
+            accept_legacy_xprompt_names: default_accept_legacy_xprompt_names(),
         }
     }
 
@@ -74,12 +105,20 @@ impl MacroCatalogLoadOptions {
         resource_paths: MacroCatalogResourcePaths,
     ) -> Self {
         self.package_xprompts_dir = resource_paths.package_xprompts_dir;
+        self.package_macros_dir = resource_paths.package_macros_dir;
         self.package_skills_dir = resource_paths.package_skills_dir;
         self.default_xprompts_dir = resource_paths.default_xprompts_dir;
+        self.default_macros_dir = resource_paths.default_macros_dir;
         self.default_config_path = resource_paths.default_config_path;
         self.plugin_xprompt_dirs = resource_paths.plugin_xprompt_dirs;
+        self.plugin_macro_dirs = resource_paths.plugin_macro_dirs;
         self.plugin_skill_dirs = resource_paths.plugin_skill_dirs;
         self.plugin_config_paths = resource_paths.plugin_config_paths;
+        self
+    }
+
+    pub fn with_legacy_policy(mut self, accept: bool) -> Self {
+        self.accept_legacy_xprompt_names = accept;
         self
     }
 }

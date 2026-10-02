@@ -110,17 +110,19 @@ fn py_validate_snippet_trigger(
 
 #[pyfunction]
 #[pyo3(name = "load_editor_snippet_catalog")]
-#[pyo3(signature = (project = None, root_dir = None))]
+#[pyo3(signature = (project = None, root_dir = None, accept_legacy_xprompt_names = true))]
 fn py_load_editor_snippet_catalog(
     py: Python<'_>,
     project: Option<String>,
     root_dir: Option<String>,
+    accept_legacy_xprompt_names: bool,
 ) -> PyResult<PyObject> {
     let request = EditorSnippetCatalogRequestWire {
         schema_version: 1,
         project,
     };
-    let options = MacroCatalogLoadOptions::new(root_dir.map(PathBuf::from));
+    let options = MacroCatalogLoadOptions::new(root_dir.map(PathBuf::from))
+        .with_legacy_policy(accept_legacy_xprompt_names);
     let response = core_load_editor_snippet_catalog(&request, &options)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let value = serde_json::to_value(response).map_err(|error| {
@@ -129,19 +131,55 @@ fn py_load_editor_snippet_catalog(
     json_value_to_py(py, &value)
 }
 
-#[derive(Debug, Default, Deserialize)]
+fn default_py_accept_legacy() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
 struct PyXpromptCatalogOptions {
+    #[serde(default)]
     root_dir: Option<PathBuf>,
+    #[serde(default)]
     package_xprompts_dir: Option<PathBuf>,
+    #[serde(default)]
+    package_macros_dir: Option<PathBuf>,
+    #[serde(default)]
     package_skills_dir: Option<PathBuf>,
+    #[serde(default)]
     default_xprompts_dir: Option<PathBuf>,
+    #[serde(default)]
+    default_macros_dir: Option<PathBuf>,
+    #[serde(default)]
     default_config_path: Option<PathBuf>,
     #[serde(default)]
-    plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    plugin_xprompt_dirs: Option<BTreeMap<String, PathBuf>>,
     #[serde(default)]
-    plugin_skill_dirs: BTreeMap<String, PathBuf>,
+    plugin_macro_dirs: Option<BTreeMap<String, PathBuf>>,
     #[serde(default)]
-    plugin_config_paths: BTreeMap<String, PathBuf>,
+    plugin_skill_dirs: Option<BTreeMap<String, PathBuf>>,
+    #[serde(default)]
+    plugin_config_paths: Option<BTreeMap<String, PathBuf>>,
+    #[serde(default = "default_py_accept_legacy")]
+    accept_legacy_xprompt_names: bool,
+}
+
+impl Default for PyXpromptCatalogOptions {
+    fn default() -> Self {
+        Self {
+            root_dir: None,
+            package_xprompts_dir: None,
+            package_macros_dir: None,
+            package_skills_dir: None,
+            default_xprompts_dir: None,
+            default_macros_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: None,
+            plugin_macro_dirs: None,
+            plugin_skill_dirs: None,
+            plugin_config_paths: None,
+            accept_legacy_xprompt_names: true,
+        }
+    }
 }
 
 fn xprompt_catalog_options_from_py(
@@ -158,17 +196,39 @@ fn xprompt_catalog_options_from_py(
         })?,
         None => PyXpromptCatalogOptions::default(),
     };
+    if raw.package_xprompts_dir.is_some() && raw.package_macros_dir.is_some() {
+        return Err(PyValueError::new_err(
+            "xprompt catalog options are invalid: supply only one of \
+             `package_xprompts_dir` or `package_macros_dir`",
+        ));
+    }
+    if raw.default_xprompts_dir.is_some() && raw.default_macros_dir.is_some() {
+        return Err(PyValueError::new_err(
+            "xprompt catalog options are invalid: supply only one of \
+             `default_xprompts_dir` or `default_macros_dir`",
+        ));
+    }
+    if raw.plugin_xprompt_dirs.is_some() && raw.plugin_macro_dirs.is_some() {
+        return Err(PyValueError::new_err(
+            "xprompt catalog options are invalid: supply only one of \
+             `plugin_xprompt_dirs` or `plugin_macro_dirs`",
+        ));
+    }
     let resource_paths = MacroCatalogResourcePaths {
         package_xprompts_dir: raw.package_xprompts_dir,
+        package_macros_dir: raw.package_macros_dir,
         package_skills_dir: raw.package_skills_dir,
         default_xprompts_dir: raw.default_xprompts_dir,
+        default_macros_dir: raw.default_macros_dir,
         default_config_path: raw.default_config_path,
-        plugin_xprompt_dirs: raw.plugin_xprompt_dirs,
-        plugin_skill_dirs: raw.plugin_skill_dirs,
-        plugin_config_paths: raw.plugin_config_paths,
+        plugin_xprompt_dirs: raw.plugin_xprompt_dirs.unwrap_or_default(),
+        plugin_macro_dirs: raw.plugin_macro_dirs.unwrap_or_default(),
+        plugin_skill_dirs: raw.plugin_skill_dirs.unwrap_or_default(),
+        plugin_config_paths: raw.plugin_config_paths.unwrap_or_default(),
     };
     Ok(MacroCatalogLoadOptions::new(raw.root_dir)
-        .with_resource_paths(resource_paths))
+        .with_resource_paths(resource_paths)
+        .with_legacy_policy(raw.accept_legacy_xprompt_names))
 }
 
 #[pyfunction]

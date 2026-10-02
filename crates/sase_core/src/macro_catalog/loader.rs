@@ -15,17 +15,21 @@ use crate::content_layout::{
 use super::entries::*;
 use super::parsing::*;
 use super::types::*;
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct CatalogLoader {
     pub(super) root_dir: Option<PathBuf>,
     pub(super) home_dir: Option<PathBuf>,
     pub(super) package_xprompts_dir: Option<PathBuf>,
+    pub(super) package_macros_dir: Option<PathBuf>,
     pub(super) package_skills_dir: Option<PathBuf>,
     pub(super) default_xprompts_dir: Option<PathBuf>,
+    pub(super) default_macros_dir: Option<PathBuf>,
     pub(super) default_config_path: Option<PathBuf>,
     pub(super) plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
+    pub(super) plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_config_paths: BTreeMap<String, PathBuf>,
+    pub(super) accept_legacy_xprompt_names: bool,
     pub(super) known_workspaces: BTreeMap<String, PathBuf>,
     pub(super) canonical_project_refs: BTreeMap<String, String>,
     /// Definitions dropped by the canonical skill placement rules, recorded so
@@ -38,26 +42,86 @@ pub(super) struct CatalogLoader {
     pub(super) memory_issues: RefCell<Vec<MemoryMacroIssueWire>>,
 }
 
+impl Default for CatalogLoader {
+    fn default() -> Self {
+        Self {
+            root_dir: None,
+            home_dir: None,
+            package_xprompts_dir: None,
+            package_macros_dir: None,
+            package_skills_dir: None,
+            default_xprompts_dir: None,
+            default_macros_dir: None,
+            default_config_path: None,
+            plugin_xprompt_dirs: BTreeMap::new(),
+            plugin_macro_dirs: BTreeMap::new(),
+            plugin_skill_dirs: BTreeMap::new(),
+            plugin_config_paths: BTreeMap::new(),
+            accept_legacy_xprompt_names: true,
+            known_workspaces: BTreeMap::new(),
+            canonical_project_refs: BTreeMap::new(),
+            skill_issues: RefCell::new(Vec::new()),
+            memory_issues: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+fn plugin_map_new_first(
+    new_name: &str,
+    old_name: &str,
+) -> BTreeMap<String, PathBuf> {
+    let mut merged = plugin_path_map_from_env(old_name);
+    // New-first: macro entries win on conflicting module keys.
+    merged.extend(plugin_path_map_from_env(new_name));
+    merged
+}
+
 impl CatalogLoader {
     pub(super) fn new(options: &MacroCatalogLoadOptions) -> Self {
         let root_dir = options.root_dir.clone();
         let home_dir = env::var_os("HOME").map(PathBuf::from);
-        let package_root =
+        // Explicit resource options retain precedence over inferred
+        // environment/package paths.
+        let xprompt_package_root =
             env::var_os("SASE_XPROMPT_PACKAGE_DIR").map(PathBuf::from);
+        let macro_package_root = env::var_os(SASE_MACRO_PACKAGE_DIR_ENV)
+            .map(PathBuf::from)
+            .or_else(|| xprompt_package_root.clone());
         let package_xprompts_dir = options
             .package_xprompts_dir
             .clone()
             .or_else(|| env_path("SASE_XPROMPT_BUILTIN_DIR"))
             .or_else(|| {
-                package_root.as_ref().map(|root| root.join("xprompts"))
+                xprompt_package_root
+                    // legacy xprompt spelling (retired `xprompts` dir)
+                    .as_ref()
+                    .map(|root| root.join("xprompts"))
+            });
+        let package_macros_dir = options
+            .package_macros_dir
+            .clone()
+            .or_else(|| env_path(SASE_MACRO_BUILTIN_DIR_ENV))
+            .or_else(|| {
+                macro_package_root.as_ref().map(|root| root.join("macros"))
+            })
+            .or_else(|| {
+                xprompt_package_root
+                    .as_ref()
+                    .map(|root| root.join("macros"))
             });
         let package_skills_dir = options
             .package_skills_dir
             .clone()
             .or_else(|| env_path("SASE_SKILL_BUILTIN_DIR"))
             .or_else(|| {
-                package_root.as_ref().map(|root| {
+                xprompt_package_root.as_ref().map(|root| {
+                    // legacy xprompt spelling (retired `xprompts/skills`)
                     root.join("xprompts").join(SKILL_DIRECTORY_SEGMENT)
+                })
+            })
+            .or_else(|| {
+                macro_package_root.as_ref().map(|root| {
+                    root.join("macros").join(SKILL_DIRECTORY_SEGMENT)
                 })
             });
         let default_xprompts_dir = options
@@ -65,23 +129,51 @@ impl CatalogLoader {
             .clone()
             .or_else(|| env_path("SASE_XPROMPT_DEFAULT_DIR"))
             .or_else(|| {
-                package_root
+                xprompt_package_root
                     .as_ref()
+                    // legacy xprompt spelling (retired `default_xprompts`)
                     .map(|root| root.join("default_xprompts"))
+            });
+        let default_macros_dir = options
+            .default_macros_dir
+            .clone()
+            .or_else(|| env_path(SASE_MACRO_DEFAULT_DIR_ENV))
+            .or_else(|| {
+                macro_package_root
+                    .as_ref()
+                    .map(|root| root.join("default_macros"))
+            })
+            .or_else(|| {
+                xprompt_package_root
+                    .as_ref()
+                    .map(|root| root.join("default_macros"))
             });
         let default_config_path = options
             .default_config_path
             .clone()
             .or_else(|| env_path("SASE_DEFAULT_CONFIG_PATH"))
             .or_else(|| {
-                package_root
+                macro_package_root
+                    .as_ref()
+                    .map(|root| root.join("default_config.yml"))
+            })
+            .or_else(|| {
+                xprompt_package_root
                     .as_ref()
                     .map(|root| root.join("default_config.yml"))
             });
+        // Explicit plugin maps win over transport variables. Macro and
+        // retired families stay separate so both load with macro winning;
+        // each family resolves its own transport variable.
         let plugin_xprompt_dirs = if options.plugin_xprompt_dirs.is_empty() {
             plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV)
         } else {
             options.plugin_xprompt_dirs.clone()
+        };
+        let plugin_macro_dirs = if options.plugin_macro_dirs.is_empty() {
+            plugin_path_map_from_env(SASE_MACRO_PLUGIN_DIRS_JSON_ENV)
+        } else {
+            options.plugin_macro_dirs.clone()
         };
         let plugin_skill_dirs = if options.plugin_skill_dirs.is_empty() {
             plugin_path_map_from_env(SASE_SKILL_PLUGIN_DIRS_JSON_ENV)
@@ -89,7 +181,10 @@ impl CatalogLoader {
             options.plugin_skill_dirs.clone()
         };
         let plugin_config_paths = if options.plugin_config_paths.is_empty() {
-            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV)
+            plugin_map_new_first(
+                SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV,
+                SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV,
+            )
         } else {
             options.plugin_config_paths.clone()
         };
@@ -98,12 +193,16 @@ impl CatalogLoader {
             root_dir,
             home_dir,
             package_xprompts_dir,
+            package_macros_dir,
             package_skills_dir,
             default_xprompts_dir,
+            default_macros_dir,
             default_config_path,
             plugin_xprompt_dirs,
+            plugin_macro_dirs,
             plugin_skill_dirs,
             plugin_config_paths,
+            accept_legacy_xprompt_names: options.accept_legacy_xprompt_names,
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
             skill_issues: RefCell::new(Vec::new()),
@@ -303,15 +402,37 @@ impl CatalogLoader {
         }
     }
 
+    pub(super) fn accepts_legacy(&self) -> bool {
+        self.accept_legacy_xprompt_names
+    }
+
+    /// Whether a retired xprompt-named directory/resource source loads under
+    /// the current policy. Explicit retired options and plugin metadata are
+    /// skipped when false; canonical macro sources always load. Skills,
+    /// memory, config, and durable readers stay unconditional.
+    fn retired_allowed(&self) -> bool {
+        self.accept_legacy_xprompt_names
+    }
+
     pub(super) fn load_all_macros(
         &self,
         project: Option<&str>,
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
-        if let Some(dir) = &self.package_xprompts_dir {
+        // Retired first, canonical last so canonical wins on conflict.
+        // Explicit retired options are skipped when the policy is false.
+        if self.retired_allowed() {
+            if let Some(dir) = &self.package_xprompts_dir {
+                all.extend(self.load_macros_from_dir(dir, None, false)?);
+            }
+            if let Some(dir) = &self.default_xprompts_dir {
+                all.extend(self.load_macros_from_dir(dir, None, false)?);
+            }
+        }
+        if let Some(dir) = &self.package_macros_dir {
             all.extend(self.load_macros_from_dir(dir, None, false)?);
         }
-        if let Some(dir) = &self.default_xprompts_dir {
+        if let Some(dir) = &self.default_macros_dir {
             all.extend(self.load_macros_from_dir(dir, None, false)?);
         }
         all.extend(self.load_plugin_macros()?);
@@ -334,9 +455,15 @@ impl CatalogLoader {
         // Skills live in their own `skill/` reference namespace, so they can
         // never shadow (or be shadowed by) an ordinary xprompt of the same
         // bare name. Lowest priority first, so the canonical directory
-        // sources win.
+        // sources win. Skills and memory placement is preserved independent
+        // of the legacy policy.
+        // Probe `macros/skills` before `xprompts/skills`.
         if let Some(dir) = &self.package_skills_dir {
             all.extend(self.load_skills_from_dir(dir, None, false)?);
+        }
+        if let Some(macros_dir) = &self.package_macros_dir {
+            let skills = macros_dir.join(SKILL_DIRECTORY_SEGMENT);
+            all.extend(self.load_skills_from_dir(&skills, None, false)?);
         }
         all.extend(self.load_plugin_skills()?);
         for source in self
@@ -369,7 +496,12 @@ impl CatalogLoader {
         project: Option<&str>,
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
-        if let Some(dir) = &self.package_xprompts_dir {
+        if self.retired_allowed() {
+            if let Some(dir) = &self.package_xprompts_dir {
+                all.extend(self.load_workflows_from_dir(dir, None, false)?);
+            }
+        }
+        if let Some(dir) = &self.package_macros_dir {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }
         all.extend(self.load_plugin_workflows()?);
@@ -415,7 +547,7 @@ impl CatalogLoader {
         let home_root =
             self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
         sase_content_layout(project_root, home_root, None, project)
-            .xprompt_sources
+            .macro_sources
             .into_iter()
             .filter(|source| {
                 matches!(
@@ -426,6 +558,12 @@ impl CatalogLoader {
                         source.scope.as_str(),
                         "home" | "home_project"
                     ))
+                    // Retired definition directories are skipped when the
+                    // legacy policy is false. Config scopes never reach this
+                    // filter, so unrelated `Legacy` roles (config/memory)
+                    // are not filtered indiscriminately.
+                    && (self.retired_allowed()
+                        || source.role != crate::content_layout::LayoutPathRoleWire::Legacy)
             })
             .collect()
     }

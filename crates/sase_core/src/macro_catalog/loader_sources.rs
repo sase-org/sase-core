@@ -123,66 +123,127 @@ impl CatalogLoader {
         &self,
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
-        for (module, dir) in &self.plugin_xprompt_dirs {
-            for path in files_with_extensions(dir, &["md"])? {
-                let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
-                    continue;
-                };
-                let Some(filename) =
-                    path.file_name().and_then(|name| name.to_str())
-                else {
-                    continue;
-                };
-                let source = format!("plugin:{module}/{filename}");
-                if xprompt.is_skill {
-                    self.record_skill_issue(skill_placement_issue(
-                        &source,
-                        false,
-                        true,
-                        Some("the plugin's skills/ resource directory"),
-                    ));
-                    continue;
-                }
-                if self.reject_reserved_memory_name(&source, &xprompt.name) {
-                    continue;
-                }
-                xprompt.source_path = Some(source);
-                result.insert(xprompt.name.clone(), xprompt);
+        // Retired first, canonical last so canonical wins. Retired plugin
+        // metadata is skipped when the legacy policy is false.
+        if self.accepts_legacy() {
+            for (module, dir) in &self.plugin_xprompt_dirs {
+                result.extend(self.load_plugin_macros_from_dir(
+                    module,
+                    dir,
+                    "the plugin's skills/ resource directory",
+                )?);
             }
+        }
+        for (module, dir) in &self.plugin_macro_dirs {
+            result.extend(self.load_plugin_macros_from_dir(
+                module,
+                dir,
+                "the plugin's skills/ resource directory",
+            )?);
+        }
+        Ok(result)
+    }
+
+    fn load_plugin_macros_from_dir(
+        &self,
+        module: &str,
+        dir: &Path,
+        skill_destination: &str,
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        for path in files_with_extensions(dir, &["md"])? {
+            let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
+                continue;
+            };
+            let Some(filename) =
+                path.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            let source = format!("plugin:{module}/{filename}");
+            if xprompt.is_skill {
+                self.record_skill_issue(skill_placement_issue(
+                    &source,
+                    false,
+                    true,
+                    Some(skill_destination),
+                ));
+                continue;
+            }
+            if self.reject_reserved_memory_name(&source, &xprompt.name) {
+                continue;
+            }
+            xprompt.source_path = Some(source);
+            result.insert(xprompt.name.clone(), xprompt);
         }
         Ok(result)
     }
 
     /// Load skills from plugins' sibling `skills/` resource directories.
+    ///
+    /// Probe `macros/skills` before `xprompts/skills` with macro winning.
+    /// Skills stay unconditional under the legacy policy.
     pub(super) fn load_plugin_skills(
         &self,
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for (module, dir) in &self.plugin_skill_dirs {
-            for path in files_with_extensions(dir, &["md"])? {
-                let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
-                    continue;
-                };
-                let Some(filename) =
-                    path.file_name().and_then(|name| name.to_str())
-                else {
-                    continue;
-                };
-                let source = format!("plugin:{module}/{filename}");
-                if !xprompt.is_skill {
-                    self.record_skill_issue(skill_placement_issue(
-                        &source,
-                        true,
-                        false,
-                        Some("the plugin's xprompts/ resource directory"),
-                    ));
-                    continue;
-                }
-                xprompt.source_path = Some(source);
-                xprompt.skill_name = Some(xprompt.name.clone());
-                xprompt.name = skill_reference_name(None, &xprompt.name);
-                result.insert(xprompt.name.clone(), xprompt);
+            result.extend(self.load_plugin_skills_from_dir(
+                module,
+                dir,
+                "the plugin's xprompts/ resource directory",
+            )?);
+        }
+        for (module, dir) in &self.plugin_macro_dirs {
+            let skills = dir.join("skills");
+            // Only probe the sibling when it differs from an explicitly
+            // configured skills dir to avoid double-reporting the same file.
+            if self
+                .plugin_skill_dirs
+                .get(module)
+                .is_some_and(|explicit| explicit == &skills)
+            {
+                continue;
             }
+            result.extend(self.load_plugin_skills_from_dir(
+                module,
+                &skills,
+                "the plugin's macros/ resource directory",
+            )?);
+        }
+        Ok(result)
+    }
+
+    fn load_plugin_skills_from_dir(
+        &self,
+        module: &str,
+        dir: &Path,
+        macro_destination: &str,
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        for path in files_with_extensions(dir, &["md"])? {
+            let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
+                continue;
+            };
+            let Some(filename) =
+                path.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            let source = format!("plugin:{module}/{filename}");
+            if !xprompt.is_skill {
+                self.record_skill_issue(skill_placement_issue(
+                    &source,
+                    true,
+                    false,
+                    Some(macro_destination),
+                ));
+                continue;
+            }
+            xprompt.source_path = Some(source);
+            xprompt.skill_name = Some(xprompt.name.clone());
+            xprompt.name = skill_reference_name(None, &xprompt.name);
+            result.insert(xprompt.name.clone(), xprompt);
         }
         Ok(result)
     }
@@ -191,21 +252,36 @@ impl CatalogLoader {
         &self,
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
-        for (module, dir) in &self.plugin_xprompt_dirs {
-            for path in files_with_extensions(dir, &["yml", "yaml"])? {
-                let Some(mut workflow) = load_workflow_from_yaml_file(&path)?
-                else {
-                    continue;
-                };
-                let Some(filename) =
-                    path.file_name().and_then(|name| name.to_str())
-                else {
-                    continue;
-                };
-                workflow.source_path =
-                    Some(format!("plugin:{module}/{filename}"));
-                result.insert(workflow.name.clone(), workflow);
+        if self.accepts_legacy() {
+            for (module, dir) in &self.plugin_xprompt_dirs {
+                result
+                    .extend(self.load_plugin_workflows_from_dir(module, dir)?);
             }
+        }
+        for (module, dir) in &self.plugin_macro_dirs {
+            result.extend(self.load_plugin_workflows_from_dir(module, dir)?);
+        }
+        Ok(result)
+    }
+
+    fn load_plugin_workflows_from_dir(
+        &self,
+        module: &str,
+        dir: &Path,
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
+        let mut result = BTreeMap::new();
+        for path in files_with_extensions(dir, &["yml", "yaml"])? {
+            let Some(mut workflow) = load_workflow_from_yaml_file(&path)?
+            else {
+                continue;
+            };
+            let Some(filename) =
+                path.file_name().and_then(|name| name.to_str())
+            else {
+                continue;
+            };
+            workflow.source_path = Some(format!("plugin:{module}/{filename}"));
+            result.insert(workflow.name.clone(), workflow);
         }
         Ok(result)
     }

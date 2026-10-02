@@ -150,6 +150,7 @@ fn load_editor_snippet_catalog_binding_returns_plain_dict_shape() {
             py,
             None,
             Some(root.to_string_lossy().to_string()),
+            true,
         )
         .unwrap();
         let value = py_to_json_value(result.bind(py)).unwrap();
@@ -1310,6 +1311,86 @@ fn apply_snippet_session_event_binding_rejects_malformed_input() {
         assert!(
             call(&valid_state, &unknown_kind_event).is_err(),
             "an unrecognized event kind must be rejected"
+        );
+    });
+}
+
+#[test]
+fn catalog_options_accept_macro_aliases_with_duplicate_rejection() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let macros_dir = temp.path().join("macros");
+        let xprompts_dir = temp.path().join("xprompts");
+        std::fs::create_dir_all(&macros_dir).unwrap();
+        std::fs::create_dir_all(&xprompts_dir).unwrap();
+
+        // New keys are accepted.
+        let options = PyDict::new_bound(py);
+        options
+            .set_item(
+                "package_macros_dir",
+                macros_dir.to_string_lossy().to_string(),
+            )
+            .unwrap();
+        let parsed = xprompt_catalog_options_from_py(Some(&options)).unwrap();
+        assert_eq!(parsed.package_macros_dir, Some(macros_dir.clone()));
+        assert!(parsed.accept_legacy_xprompt_names);
+
+        // Old keys still work.
+        let options = PyDict::new_bound(py);
+        options
+            .set_item(
+                "package_xprompts_dir",
+                xprompts_dir.to_string_lossy().to_string(),
+            )
+            .unwrap();
+        let parsed = xprompt_catalog_options_from_py(Some(&options)).unwrap();
+        assert_eq!(parsed.package_xprompts_dir, Some(xprompts_dir.clone()));
+
+        // Both spellings together are an error, even for empty maps.
+        let options = PyDict::new_bound(py);
+        options.set_item("package_xprompts_dir", "a").unwrap();
+        options.set_item("package_macros_dir", "b").unwrap();
+        assert!(xprompt_catalog_options_from_py(Some(&options)).is_err());
+
+        let options = PyDict::new_bound(py);
+        options.set_item("default_xprompts_dir", "a").unwrap();
+        options.set_item("default_macros_dir", "b").unwrap();
+        assert!(xprompt_catalog_options_from_py(Some(&options)).is_err());
+
+        let empty_old = PyDict::new_bound(py);
+        empty_old
+            .set_item(
+                "plugin_xprompt_dirs",
+                json_value_to_py(py, &json!({})).unwrap(),
+            )
+            .unwrap();
+        // An empty old map alone is fine.
+        assert!(xprompt_catalog_options_from_py(Some(&empty_old)).is_ok());
+        empty_old
+            .set_item(
+                "plugin_macro_dirs",
+                json_value_to_py(py, &json!({})).unwrap(),
+            )
+            .unwrap();
+        // Both present, even empty, is a duplicate.
+        assert!(xprompt_catalog_options_from_py(Some(&empty_old)).is_err());
+
+        // Policy defaults true and is settable.
+        assert!(
+            xprompt_catalog_options_from_py(None)
+                .unwrap()
+                .accept_legacy_xprompt_names
+        );
+        let options = PyDict::new_bound(py);
+        options
+            .set_item("accept_legacy_xprompt_names", false)
+            .unwrap();
+        assert!(
+            !xprompt_catalog_options_from_py(Some(&options))
+                .unwrap()
+                .accept_legacy_xprompt_names
         );
     });
 }
