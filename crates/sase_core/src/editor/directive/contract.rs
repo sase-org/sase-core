@@ -3,8 +3,8 @@ use super::super::wire::{
     DirectiveSyntaxForm,
 };
 use super::metadata::{
-    DIRECTIVES, HIDDEN_COMPLETION_DIRECTIVES, IF_DIRECTIVE_OFF,
-    IF_DIRECTIVE_ON, QUEUE_DIRECTIVE_OFF, QUEUE_DIRECTIVE_ON,
+    DIRECTIVES, HIDDEN_COMPLETION_DIRECTIVES, HIDDEN_DIRECTIVE_ALIASES,
+    IF_DIRECTIVE_OFF, IF_DIRECTIVE_ON, QUEUE_DIRECTIVE_OFF, QUEUE_DIRECTIVE_ON,
 };
 use crate::queue_directive::queue_capacity_budget_enabled;
 
@@ -30,13 +30,18 @@ pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
     if raw == "(" || raw == "{" {
         return Some("alt");
     }
-    DIRECTIVES.iter().find_map(|directive| {
+    if let Some(canonical) = DIRECTIVES.iter().find_map(|directive| {
         if directive.name == raw || directive.alias == Some(raw) {
             Some(directive.name)
         } else {
             None
         }
-    })
+    }) {
+        return Some(canonical);
+    }
+    HIDDEN_DIRECTIVE_ALIASES
+        .iter()
+        .find_map(|(alias, canonical)| (*alias == raw).then_some(*canonical))
 }
 
 pub fn directive_metadata(raw: &str) -> Option<&'static DirectiveMetadata> {
