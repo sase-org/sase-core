@@ -12,7 +12,8 @@ pub use wire::AgentChangeSpecWorkStatsWire;
 pub use wire::{
     AgentActivityCountWire, AgentActivityStatsRequestWire,
     AgentActivityStatsResponseWire, AgentCommitDistributionWire,
-    AgentCommitStatsWire, AgentPatchWorkStatsWire, AgentPlanActivityStatsWire,
+    AgentCommitStatsWire, AgentMacroFocusWire, AgentMacroStatsRowWire,
+    AgentMacroStatsWire, AgentPatchWorkStatsWire, AgentPlanActivityStatsWire,
     AgentPlanStatsWire, AgentProjectWorkStatsWire, AgentProviderStatsWire,
     AgentQuestionActivityStatsWire, AgentQuestionStatsWire,
     AgentRetryStatsWire, AgentRunBucketWire, AgentRunStatsRequestWire,
@@ -20,7 +21,6 @@ pub use wire::{
     AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
-    AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
-    AgentXPromptStatsRowWire, AgentXPromptStatsWire,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };

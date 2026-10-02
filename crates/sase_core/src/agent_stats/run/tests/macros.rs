@@ -1,4 +1,4 @@
-//! XPrompt aggregation tests.
+//! Macro aggregation tests.
 
 use serde_json::json;
 use tempfile::tempdir;
@@ -108,19 +108,19 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
     .unwrap();
 
     let mut focused_request = request();
-    focused_request.xprompt_top_n = 2;
-    focused_request.xprompt_breakdown_top_n = 1;
-    focused_request.xprompt_focus = Some("gh".to_string());
+    focused_request.macro_top_n = 2;
+    focused_request.macro_breakdown_top_n = 1;
+    focused_request.macro_focus = Some("gh".to_string());
     let result = query_run_stats(&index, focused_request).unwrap();
     assert_eq!(result.schema_version, 7);
-    let xprompts = result.xprompts.as_ref().unwrap();
-    assert_eq!(xprompts.runs_with_xprompts, 3);
-    assert_eq!(xprompts.runs_without_xprompts, 1);
-    assert_eq!(xprompts.distinct_xprompts, 3);
-    assert_eq!(xprompts.total_references, 6);
-    assert_eq!(xprompts.truncated_rows, 1);
+    let macros = result.macros.as_ref().unwrap();
+    assert_eq!(macros.runs_with_macros, 3);
+    assert_eq!(macros.runs_without_macros, 1);
+    assert_eq!(macros.distinct_macros, 3);
+    assert_eq!(macros.total_references, 6);
+    assert_eq!(macros.truncated_rows, 1);
     assert_eq!(
-        xprompts
+        macros
             .rows
             .iter()
             .map(|row| row.name.as_str())
@@ -128,7 +128,7 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
         vec!["gh", "split_file"]
     );
 
-    let gh = &xprompts.rows[0];
+    let gh = &macros.rows[0];
     assert_eq!(gh.kind, "workflow");
     assert_eq!(gh.tags, vec!["vcs"]);
     assert_eq!(gh.runs, 2);
@@ -154,7 +154,7 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
     );
     assert_eq!(gh.partners_truncated, 0);
 
-    let focus = xprompts.focus.as_ref().unwrap();
+    let focus = macros.focus.as_ref().unwrap();
     assert!(focus.found);
     assert_eq!(focus.name, "gh");
     assert_eq!(focus.runs, 2);
@@ -208,18 +208,18 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
     let mut filtered_request = request();
     filtered_request.project = Some("alpha-project".to_string());
     let filtered = query_run_stats(&index, filtered_request).unwrap();
-    let filtered_xprompts = filtered.xprompts.unwrap();
-    assert_eq!(filtered_xprompts.runs_with_xprompts, 1);
-    assert_eq!(filtered_xprompts.runs_without_xprompts, 0);
+    let filtered_xprompts = filtered.macros.unwrap();
+    assert_eq!(filtered_xprompts.runs_with_macros, 1);
+    assert_eq!(filtered_xprompts.runs_without_macros, 0);
     assert_eq!(filtered_xprompts.total_references, 3);
     assert_eq!(filtered_xprompts.rows[0].projects.len(), 1);
     assert_eq!(filtered_xprompts.rows[0].projects[0].name, "alpha-project");
 
     let mut unknown_request = request();
-    unknown_request.xprompt_focus = Some("missing".to_string());
+    unknown_request.macro_focus = Some("missing".to_string());
     let unknown = query_run_stats(&index, unknown_request)
         .unwrap()
-        .xprompts
+        .macros
         .unwrap()
         .focus
         .unwrap();
@@ -231,10 +231,10 @@ fn aggregates_ranked_xprompt_usage_and_focused_breakdowns() {
     assert!(unknown.buckets.iter().all(|bucket| bucket.runs == 0));
 
     let mut no_duration_request = request();
-    no_duration_request.xprompt_focus = Some("plan".to_string());
+    no_duration_request.macro_focus = Some("plan".to_string());
     let no_duration = query_run_stats(&index, no_duration_request)
         .unwrap()
-        .xprompts
+        .macros
         .unwrap()
         .focus
         .unwrap();
@@ -284,10 +284,10 @@ fn aggregates_swarm_xprompt_kind_through_stats_wire() {
     .unwrap();
 
     let mut focused_request = request();
-    focused_request.xprompt_focus = Some("research_swarm".to_string());
+    focused_request.macro_focus = Some("research_swarm".to_string());
     let result = query_run_stats(&index, focused_request).unwrap();
-    let xprompts = result.xprompts.unwrap();
-    let row = xprompts
+    let macros = result.macros.unwrap();
+    let row = macros
         .rows
         .iter()
         .find(|row| row.name == "research_swarm")
@@ -304,7 +304,7 @@ fn aggregates_swarm_xprompt_kind_through_stats_wire() {
         vec![("gh", 1)]
     );
 
-    let focus = xprompts.focus.unwrap();
+    let focus = macros.focus.unwrap();
     assert!(focus.found);
     assert_eq!(focus.kind, "swarm");
     assert_eq!(focus.runs, 1);

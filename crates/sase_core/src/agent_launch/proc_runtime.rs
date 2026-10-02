@@ -16,7 +16,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const XPROMPT_PROC_ORIGIN: &str = "xprompt-proc";
+/// Origin emitted for stand-alone `%proc` dispatch. The value stays pinned
+/// to the legacy `xprompt-proc` spelling.
+pub const PROMPT_PROC_ORIGIN: &str = "xprompt-proc";
+// legacy xprompt spelling
+pub const XPROMPT_PROC_ORIGIN: &str = PROMPT_PROC_ORIGIN;
 pub const PROC_DISPATCH_WIRE_SCHEMA_VERSION: u32 = 2;
 pub const PROC_PHASE_WAITING: &str = "waiting";
 pub const PROC_PHASE_CHECKING: &str = "checking";
@@ -751,7 +755,8 @@ mod tests {
 
     #[test]
     fn phases_and_origin_are_stable() {
-        assert_eq!(XPROMPT_PROC_ORIGIN, "xprompt-proc");
+        assert_eq!(PROMPT_PROC_ORIGIN, "xprompt-proc");
+        assert_eq!(XPROMPT_PROC_ORIGIN, PROMPT_PROC_ORIGIN);
         assert_eq!(PROC_PHASE_WAITING, "waiting");
         assert_eq!(PROC_PHASE_CHECKING, "checking");
         assert_eq!(PROC_PHASE_ACQUIRING_WORKSPACE, "acquiring-workspace");

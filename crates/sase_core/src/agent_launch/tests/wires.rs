@@ -29,7 +29,7 @@ fn launch_request_round_trips_json_shape() {
         vcs_workflow_type: Some("gh".to_string()),
         vcs_ref: Some("feature/test".to_string()),
         deferred_workspace: true,
-        local_xprompts_file: Some("/tmp/xp.json".to_string()),
+        local_macros_file: Some("/tmp/xp.json".to_string()),
         extra_env,
         retry_transfer_from_pid: Some(10),
     };
@@ -119,4 +119,37 @@ fn timestamp_batch_rejects_invalid_format() {
         .unwrap_err();
 
     assert!(err.to_string().contains("expected YYmmdd_HHMMSS"));
+}
+
+#[test]
+fn launch_request_local_macros_alias_matches_legacy_key() {
+    let base = serde_json::json!({
+        "schema_version": AGENT_LAUNCH_WIRE_SCHEMA_VERSION,
+        "cl_name": "c",
+        "project_file": "p",
+        "workspace_dir": "w",
+        "workspace_num": 1,
+        "workflow_name": "wf",
+        "prompt": "fix",
+        "timestamp": "260501_120000",
+    });
+    let mut old_value = base.clone();
+    old_value["local_xprompts_file"] = json!("/tmp/xp.json");
+    let mut new_value = base.clone();
+    new_value["local_macros_file"] = json!("/tmp/xp.json");
+    let from_old: AgentLaunchRequestWire =
+        serde_json::from_value(old_value).unwrap();
+    let from_new: AgentLaunchRequestWire =
+        serde_json::from_value(new_value).unwrap();
+    assert_eq!(from_old, from_new);
+    assert_eq!(from_new.local_macros_file.as_deref(), Some("/tmp/xp.json"));
+
+    let emitted = serde_json::to_value(&from_new).unwrap();
+    assert_eq!(emitted["local_xprompts_file"], json!("/tmp/xp.json"));
+    assert!(emitted.get("local_macros_file").is_none());
+
+    let mut both = base.clone();
+    both["local_xprompts_file"] = json!("/tmp/a.json");
+    both["local_macros_file"] = json!("/tmp/b.json");
+    assert!(serde_json::from_value::<AgentLaunchRequestWire>(both).is_err());
 }

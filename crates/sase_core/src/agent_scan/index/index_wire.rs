@@ -1,4 +1,4 @@
-use crate::agent_scan::wire::{AgentArtifactRecordShapeWire, UsedXPromptWire};
+use crate::agent_scan::wire::{AgentArtifactRecordShapeWire, UsedMacroWire};
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 35;
@@ -98,8 +98,8 @@ pub struct AgentAliasRunWire {
     pub workspace_num: Option<i64>,
     #[serde(default)]
     pub prompt_snippet: Option<String>,
-    #[serde(default)]
-    pub used_xprompts: Vec<UsedXPromptWire>,
+    #[serde(default, rename = "used_xprompts", alias = "used_macros")]
+    pub used_macros: Vec<UsedMacroWire>,
 }
 
 /// History group for one requested alias.

@@ -34,9 +34,9 @@ use super::wire::{
     AgentSessionTurnWire, DoneMarkerWire, FinalizerStatusInstanceWire,
     FinalizerStatusRunnerWire, FinalizerStatusSummaryWire,
     ImportedSourceOwnerWire, OutputVariableValue, PendingQuestionMarkerWire,
-    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire,
-    UsedXPromptWire, WaitingMarkerWire, WorkflowStateWire,
-    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire, UsedMacroWire,
+    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
+    AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -668,10 +668,10 @@ fn scan_artifact_dir(
             None
         };
 
-    let used_xprompts = if options.capacity_only {
+    let used_macros = if options.capacity_only {
         Vec::new()
     } else {
-        load_used_xprompts(&artifact_dir.join(USED_XPROMPTS_FILE), stats)
+        load_used_macros(&artifact_dir.join(USED_XPROMPTS_FILE), stats)
     };
 
     AgentArtifactRecordWire {
@@ -693,7 +693,7 @@ fn scan_artifact_dir(
         plan_path,
         prompt_steps,
         raw_prompt_snippet,
-        used_xprompts,
+        used_macros,
         has_done_marker,
         record_shape: AgentArtifactRecordShapeWire::Full,
     }
@@ -734,15 +734,15 @@ fn load_marker_object(
     }
 }
 
-/// Read and normalize launch-boundary xprompt usage.
+/// Read and normalize launch-boundary macro usage (`xprompts.json`).
 ///
 /// Missing and unreadable files yield no usage. Malformed JSON and valid
 /// non-array payloads also yield no usage while incrementing the scanner's
 /// soft-error diagnostics.
-fn load_used_xprompts(
+fn load_used_macros(
     path: &Path,
     stats: &mut AgentArtifactScanStatsWire,
-) -> Vec<UsedXPromptWire> {
+) -> Vec<UsedMacroWire> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -763,7 +763,7 @@ fn load_used_xprompts(
         }
     };
 
-    let mut by_name: BTreeMap<String, UsedXPromptWire> = BTreeMap::new();
+    let mut by_name: BTreeMap<String, UsedMacroWire> = BTreeMap::new();
     for entry in entries {
         let Value::Object(object) = entry else {
             continue;
@@ -802,7 +802,7 @@ fn load_used_xprompts(
             .collect();
         by_name.insert(
             name.to_string(),
-            UsedXPromptWire {
+            UsedMacroWire {
                 name: name.to_string(),
                 kind: kind.to_string(),
                 tags,
@@ -2602,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_only_omits_plan_path_and_used_xprompts() {
+    fn capacity_only_omits_plan_path_and_used_macros() {
         let tmp = tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let running = projects
@@ -2630,14 +2630,14 @@ mod tests {
         );
         assert_eq!(capacity_scan.records.len(), 1);
         assert!(capacity_scan.records[0].plan_path.is_none());
-        assert!(capacity_scan.records[0].used_xprompts.is_empty());
+        assert!(capacity_scan.records[0].used_macros.is_empty());
 
         let full_scan = scan_agent_artifacts(
             &projects,
             AgentArtifactScanOptionsWire::default(),
         );
         assert!(full_scan.records[0].plan_path.is_some());
-        assert!(!full_scan.records[0].used_xprompts.is_empty());
+        assert!(!full_scan.records[0].used_macros.is_empty());
     }
 
     #[test]

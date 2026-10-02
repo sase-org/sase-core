@@ -241,7 +241,7 @@ pub(super) fn fixture_dead_agent_session_record(
         plan_path: None,
         prompt_steps: Vec::new(),
         raw_prompt_snippet: None,
-        used_xprompts: Vec::new(),
+        used_macros: Vec::new(),
         has_done_marker: true,
         record_shape: AgentArtifactRecordShapeWire::Full,
     }

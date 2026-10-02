@@ -283,7 +283,7 @@ pub use agent_launch::{
     LAUNCH_PLAN_WIRE_SCHEMA_VERSION, PROC_DISPATCH_WIRE_SCHEMA_VERSION,
     PROC_PHASE_ACQUIRING_WORKSPACE, PROC_PHASE_CHECKING,
     PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING, PROC_PHASE_SETTLING,
-    PROC_PHASE_WAITING, XPROMPT_PROC_ORIGIN,
+    PROC_PHASE_WAITING,
 };
 pub use agent_name_template::{
     agent_name_template_namespace_template, agent_name_template_tokens_after,
@@ -365,10 +365,9 @@ pub use agent_scan::{
     OutputVariableSelectorError, OutputVariableSelectorPathWire,
     OutputVariableSelectorScopeWire, OutputVariableSelectorWire,
     OutputVariableValue, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, UsedXPromptWire, WaitingMarkerWire,
-    WorkflowArtifactCandidate, WorkflowArtifactCandidates, WorkflowStateWire,
-    WorkflowStepStateWire, ACE_RUN_WORKFLOW_DIR,
-    AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
+    RunningMarkerWire, WaitingMarkerWire, WorkflowArtifactCandidate,
+    WorkflowArtifactCandidates, WorkflowStateWire, WorkflowStepStateWire,
+    ACE_RUN_WORKFLOW_DIR, AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_OUTPUT_VARIABLE_SELECTOR_WIRE_SCHEMA_VERSION,
@@ -396,8 +395,7 @@ pub use agent_stats::{
     AgentRunnerOccupancyWire, AgentRunnerStatsWire, AgentRunnerTrendSliceWire,
     AgentRuntimeGroupStatsWire, AgentStatsCountWire,
     AgentStatsDistributionWire, AgentStatsRuntimeGroupByWire,
-    AgentWorkStatsWire, AgentWorkspaceStatsWire, AgentXPromptFocusWire,
-    AgentXPromptStatsRowWire, AgentXPromptStatsWire,
+    AgentWorkStatsWire, AgentWorkspaceStatsWire,
     AGENT_STATS_WIRE_SCHEMA_VERSION,
 };
 pub use agent_tribe::{
@@ -1284,8 +1282,8 @@ pub use procs::{
     ProcReserveOutcomeWire, ProcReserveWire, ProcServiceWire,
     ProcSettlementWire, ProcStopRequestWire, ProcStoreError,
     ProcStoreSnapshotWire, ProcStoreStatsWire, ProcSupervisorClaimWire,
-    ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire, XpromptProcMetaWire,
-    PROC_WIRE_SCHEMA_VERSION, SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
+    ProcUpdateOutcomeWire, ProcUpdateWire, ProcWire, PROC_WIRE_SCHEMA_VERSION,
+    SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS,
 };
 pub use project_spec::{
     active_project_spec_filename, apply_project_aliases_update,

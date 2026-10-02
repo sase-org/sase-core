@@ -147,7 +147,7 @@ fn late_xprompts_file_refreshes_cached_record() {
     )
     .unwrap();
     assert_eq!(initial.records.len(), 1);
-    assert!(initial.records[0].used_xprompts.is_empty());
+    assert!(initial.records[0].used_macros.is_empty());
 
     write_json(
         &artifact_dir.join("xprompts.json"),
@@ -166,12 +166,12 @@ fn late_xprompts_file_refreshes_cached_record() {
     )
     .unwrap();
     assert_eq!(refreshed.records.len(), 1);
-    assert_eq!(refreshed.records[0].used_xprompts.len(), 2);
-    assert_eq!(refreshed.records[0].used_xprompts[0].name, "gh");
-    assert_eq!(refreshed.records[0].used_xprompts[0].references, 2);
-    assert_eq!(refreshed.records[0].used_xprompts[1].name, "research_swarm");
-    assert_eq!(refreshed.records[0].used_xprompts[1].kind, "swarm");
-    assert_eq!(refreshed.records[0].used_xprompts[1].references, 1);
+    assert_eq!(refreshed.records[0].used_macros.len(), 2);
+    assert_eq!(refreshed.records[0].used_macros[0].name, "gh");
+    assert_eq!(refreshed.records[0].used_macros[0].references, 2);
+    assert_eq!(refreshed.records[0].used_macros[1].name, "research_swarm");
+    assert_eq!(refreshed.records[0].used_macros[1].kind, "swarm");
+    assert_eq!(refreshed.records[0].used_macros[1].references, 1);
 
     let conn = Connection::open(&index).unwrap();
     let (signature, record_json): (Option<String>, String) = conn
@@ -185,7 +185,7 @@ fn late_xprompts_file_refreshes_cached_record() {
     assert!(signature.is_some());
     let stored: AgentArtifactRecordWire =
         serde_json::from_str(&record_json).unwrap();
-    assert_eq!(stored.used_xprompts, refreshed.records[0].used_xprompts);
+    assert_eq!(stored.used_macros, refreshed.records[0].used_macros);
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn cached_query_does_not_refresh_stale_marker_rows() {
     )
     .unwrap();
     assert_eq!(cached.records.len(), 1);
-    assert!(cached.records[0].used_xprompts.is_empty());
+    assert!(cached.records[0].used_macros.is_empty());
 
     let conn = Connection::open(&index).unwrap();
     let (signature, record_json): (Option<String>, String) = conn
@@ -284,7 +284,7 @@ fn cached_query_does_not_refresh_stale_marker_rows() {
     assert!(signature.is_none());
     let stored: AgentArtifactRecordWire =
         serde_json::from_str(&record_json).unwrap();
-    assert!(stored.used_xprompts.is_empty());
+    assert!(stored.used_macros.is_empty());
 }
 
 #[test]

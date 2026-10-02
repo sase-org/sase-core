@@ -563,7 +563,7 @@ mod tests {
             plan_path: None,
             prompt_steps: Vec::new(),
             raw_prompt_snippet: None,
-            used_xprompts: Vec::new(),
+            used_macros: Vec::new(),
             has_done_marker: false,
             record_shape: Default::default(),
         }

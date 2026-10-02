@@ -1,15 +1,15 @@
-//! XPrompt fold and finishing pass.
+//! Macro fold and finishing pass.
 //!
-//! `fold_xprompts` attributes used-xprompt references per run while
-//! `finish_xprompts` ranks names and builds the optional focus view.
+//! `fold_macros` attributes used-macro references per run while
+//! `finish_macros` ranks names and builds the optional focus view.
 
 use std::collections::BTreeMap;
 
 use crate::agent_scan::AgentArtifactRecordWire;
 
 use super::super::wire::{
+    AgentMacroFocusWire, AgentMacroStatsRowWire, AgentMacroStatsWire,
     AgentRunStatsRequestWire, AgentStatsRuntimeGroupByWire,
-    AgentXPromptFocusWire, AgentXPromptStatsRowWire, AgentXPromptStatsWire,
 };
 use super::finishing::{
     normalized, ranked_counts, ratio, runtime_group_values,
@@ -18,7 +18,7 @@ use super::query::increment_bucket;
 use super::types::*;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn fold_xprompts(
+pub(super) fn fold_macros(
     record: &AgentArtifactRecordWire,
     row: &IndexRunRow,
     launch_ts: f64,
@@ -26,38 +26,38 @@ pub(super) fn fold_xprompts(
     outcome: Option<&str>,
     attribution: &RunAttribution,
     request: &AgentRunStatsRequestWire,
-    xprompts: &mut XPromptAccumulators,
+    macros: &mut MacroAccumulators,
 ) {
-    let mut run_xprompts = BTreeMap::<String, RunXPrompt>::new();
-    for used in &record.used_xprompts {
+    let mut run_macros = BTreeMap::<String, RunMacro>::new();
+    for used in &record.used_macros {
         let entry =
-            run_xprompts.entry(used.name.clone()).or_insert_with(|| {
-                RunXPrompt {
+            run_macros
+                .entry(used.name.clone())
+                .or_insert_with(|| RunMacro {
                     kind: used.kind.clone(),
                     tags: used.tags.clone(),
                     references: 0,
-                }
-            });
+                });
         entry.references += used.references;
     }
-    if run_xprompts.is_empty() {
-        xprompts.runs_without_xprompts += 1;
+    if run_macros.is_empty() {
+        macros.runs_without_macros += 1;
         return;
     }
-    xprompts.runs_with_xprompts += 1;
+    macros.runs_with_macros += 1;
 
     let agent = normalized(row.agent_name.as_deref());
     let model = normalized(row.model.as_deref());
     let project = row.project_name.clone();
-    let partner_names = run_xprompts.keys().cloned().collect::<Vec<_>>();
+    let partner_names = run_macros.keys().cloned().collect::<Vec<_>>();
 
-    for (name, used) in &run_xprompts {
-        xprompts.total_references += used.references;
-        let value = xprompts.by_name.entry(name.clone()).or_insert_with(|| {
-            XPromptAccumulator {
+    for (name, used) in &run_macros {
+        macros.total_references += used.references;
+        let value = macros.by_name.entry(name.clone()).or_insert_with(|| {
+            MacroAccumulator {
                 kind: used.kind.clone(),
                 tags: used.tags.clone(),
-                ..XPromptAccumulator::default()
+                ..MacroAccumulator::default()
             }
         });
         let first_run = value.runs == 0;
@@ -85,8 +85,8 @@ pub(super) fn fold_xprompts(
             *value.partners.entry(partner.clone()).or_default() += 1;
         }
 
-        if request.xprompt_focus.as_deref() == Some(name.as_str()) {
-            let focus = xprompts
+        if request.macro_focus.as_deref() == Some(name.as_str()) {
+            let focus = macros
                 .focus
                 .as_mut()
                 .expect("focus accumulator exists for a focused request");
@@ -107,18 +107,18 @@ pub(super) fn fold_xprompts(
     }
 }
 
-pub(super) fn finish_xprompts(
-    mut xprompts: XPromptAccumulators,
+pub(super) fn finish_macros(
+    mut macros: MacroAccumulators,
     request: &AgentRunStatsRequestWire,
-) -> AgentXPromptStatsWire {
-    let distinct_xprompts = xprompts.by_name.len() as u64;
-    let focus = request.xprompt_focus.as_deref().map(|name| {
-        let extra = xprompts
+) -> AgentMacroStatsWire {
+    let distinct_macros = macros.by_name.len() as u64;
+    let focus = request.macro_focus.as_deref().map(|name| {
+        let extra = macros
             .focus
             .take()
             .expect("focus accumulator exists for a focused request");
-        if let Some(value) = xprompts.by_name.get(name) {
-            AgentXPromptFocusWire {
+        if let Some(value) = macros.by_name.get(name) {
+            AgentMacroFocusWire {
                 name: name.to_string(),
                 found: true,
                 kind: value.kind.clone(),
@@ -143,18 +143,18 @@ pub(super) fn finish_xprompts(
                 buckets: extra.buckets,
             }
         } else {
-            AgentXPromptFocusWire {
+            AgentMacroFocusWire {
                 name: name.to_string(),
                 found: false,
                 kind: UNKNOWN.to_string(),
                 buckets: extra.buckets,
-                ..AgentXPromptFocusWire::default()
+                ..AgentMacroFocusWire::default()
             }
         }
     });
 
-    let breakdown_top_n = request.xprompt_breakdown_top_n as usize;
-    let mut rows = xprompts
+    let breakdown_top_n = request.macro_breakdown_top_n as usize;
+    let mut rows = macros
         .by_name
         .into_iter()
         .map(|(name, value)| {
@@ -164,7 +164,7 @@ pub(super) fn finish_xprompts(
             let models = ranked_counts(value.models, Some(breakdown_top_n));
             let projects = ranked_counts(value.projects, Some(breakdown_top_n));
             let partners = ranked_counts(value.partners, Some(breakdown_top_n));
-            AgentXPromptStatsRowWire {
+            AgentMacroStatsRowWire {
                 name,
                 kind: value.kind,
                 tags: value.tags,
@@ -198,14 +198,14 @@ pub(super) fn finish_xprompts(
             .cmp(&left.runs)
             .then_with(|| left.name.cmp(&right.name))
     });
-    rows.truncate(request.xprompt_top_n as usize);
+    rows.truncate(request.macro_top_n as usize);
 
-    AgentXPromptStatsWire {
-        runs_with_xprompts: xprompts.runs_with_xprompts,
-        runs_without_xprompts: xprompts.runs_without_xprompts,
-        distinct_xprompts,
-        total_references: xprompts.total_references,
-        truncated_rows: distinct_xprompts.saturating_sub(rows.len() as u64),
+    AgentMacroStatsWire {
+        runs_with_macros: macros.runs_with_macros,
+        runs_without_macros: macros.runs_without_macros,
+        distinct_macros,
+        total_references: macros.total_references,
+        truncated_rows: distinct_macros.saturating_sub(rows.len() as u64),
         rows,
         focus,
     }

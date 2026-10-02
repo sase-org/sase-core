@@ -87,15 +87,23 @@ pub struct ProcWire {
     pub finished_by: Option<String>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub xprompt_proc: Option<XpromptProcMetaWire>,
+    #[serde(
+        default,
+        rename = "xprompt_proc",
+        alias = "prompt_proc",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt_proc: Option<PromptProcMetaWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ProcServiceWire>,
 }
 
 /// Additive `%proc` launch metadata stored on a native named-proc row.
+///
+/// The Rust type and field are prompt-named; the serialized key stays on
+/// the legacy `xprompt_proc` spelling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct XpromptProcMetaWire {
+pub struct PromptProcMetaWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,8 +192,13 @@ pub struct ProcReserveWire {
     pub reserved_by: String,
     pub timeout_seconds: Option<u64>,
     pub idle_timeout_seconds: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub xprompt_proc: Option<XpromptProcMetaWire>,
+    #[serde(
+        default,
+        rename = "xprompt_proc",
+        alias = "prompt_proc",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prompt_proc: Option<PromptProcMetaWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ProcServiceWire>,
 }
@@ -451,9 +464,11 @@ pub struct ProcUpdateWire {
     #[serde(
         default,
         deserialize_with = "deserialize_present_option",
+        rename = "xprompt_proc",
+        alias = "prompt_proc",
         skip_serializing_if = "Option::is_none"
     )]
-    pub xprompt_proc: Option<Option<XpromptProcMetaWire>>,
+    pub prompt_proc: Option<Option<PromptProcMetaWire>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

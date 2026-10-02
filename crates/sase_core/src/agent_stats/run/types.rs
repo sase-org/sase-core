@@ -85,7 +85,7 @@ pub(super) struct WorkAccumulators {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct XPromptAccumulator {
+pub(super) struct MacroAccumulator {
     pub(super) kind: String,
     pub(super) tags: Vec<String>,
     pub(super) runs: u64,
@@ -103,23 +103,23 @@ pub(super) struct XPromptAccumulator {
 }
 
 #[derive(Debug)]
-pub(super) struct XPromptFocusAccumulator {
+pub(super) struct MacroFocusAccumulator {
     pub(super) providers: BTreeMap<String, u64>,
     pub(super) tribes: BTreeMap<String, u64>,
     pub(super) buckets: Vec<AgentRunBucketWire>,
 }
 
 #[derive(Debug)]
-pub(super) struct XPromptAccumulators {
-    pub(super) runs_with_xprompts: u64,
-    pub(super) runs_without_xprompts: u64,
+pub(super) struct MacroAccumulators {
+    pub(super) runs_with_macros: u64,
+    pub(super) runs_without_macros: u64,
     pub(super) total_references: u64,
-    pub(super) by_name: BTreeMap<String, XPromptAccumulator>,
-    pub(super) focus: Option<XPromptFocusAccumulator>,
+    pub(super) by_name: BTreeMap<String, MacroAccumulator>,
+    pub(super) focus: Option<MacroFocusAccumulator>,
 }
 
 #[derive(Debug)]
-pub(super) struct RunXPrompt {
+pub(super) struct RunMacro {
     pub(super) kind: String,
     pub(super) tags: Vec<String>,
     pub(super) references: u64,

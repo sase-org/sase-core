@@ -130,7 +130,7 @@ pub(super) fn record_running() -> AgentArtifactRecordWire {
         plan_path: None,
         prompt_steps: Vec::new(),
         raw_prompt_snippet: Some("Implement the approved plan".to_string()),
-        used_xprompts: Vec::new(),
+        used_macros: Vec::new(),
         has_done_marker: false,
         record_shape: AgentArtifactRecordShapeWire::Full,
     }

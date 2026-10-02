@@ -91,9 +91,9 @@ pub(super) fn request() -> AgentRunStatsRequestWire {
         top_n: 10,
         project: None,
         work_top_n: 50,
-        xprompt_top_n: 40,
-        xprompt_breakdown_top_n: 5,
-        xprompt_focus: None,
+        macro_top_n: 40,
+        macro_breakdown_top_n: 5,
+        macro_focus: None,
     }
 }
 
@@ -125,9 +125,9 @@ pub(super) fn runner_request(
         top_n: 10,
         project: None,
         work_top_n: 50,
-        xprompt_top_n: 40,
-        xprompt_breakdown_top_n: 5,
-        xprompt_focus: None,
+        macro_top_n: 40,
+        macro_breakdown_top_n: 5,
+        macro_focus: None,
     }
 }
 

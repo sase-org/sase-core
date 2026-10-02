@@ -1190,8 +1190,11 @@ pub struct PlanPathMarkerWire {
 
 /// Compact projection of one launch-boundary `xprompts.json` entry,
 /// deduplicated by name.
+///
+/// The Rust type is macro-named; the serialized file and field keys stay on
+/// the legacy `xprompts` spelling (see `AgentArtifactRecordWire`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsedXPromptWire {
+pub struct UsedMacroWire {
     pub name: String,
     pub kind: String,
     #[serde(default)]
@@ -1243,8 +1246,8 @@ pub struct AgentArtifactRecordWire {
     pub prompt_steps: Vec<PromptStepMarkerWire>,
     #[serde(default)]
     pub raw_prompt_snippet: Option<String>,
-    #[serde(default)]
-    pub used_xprompts: Vec<UsedXPromptWire>,
+    #[serde(default, rename = "used_xprompts", alias = "used_macros")]
+    pub used_macros: Vec<UsedMacroWire>,
     #[serde(default)]
     pub has_done_marker: bool,
     #[serde(

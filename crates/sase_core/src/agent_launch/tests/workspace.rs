@@ -50,7 +50,7 @@ fn prepare_agent_launch_writes_prompt_and_shapes_process_data() {
         vcs_workflow_type: Some("gh".to_string()),
         vcs_ref: Some("feature/test".to_string()),
         deferred_workspace: false,
-        local_xprompts_file: Some("/tmp/xprompts.json".to_string()),
+        local_macros_file: Some("/tmp/xprompts.json".to_string()),
         extra_env,
         retry_transfer_from_pid: Some(99),
     };
@@ -118,7 +118,7 @@ fn prepare_agent_launch_deferred_and_home_claim_shapes() {
         vcs_workflow_type: Some("gh".to_string()),
         vcs_ref: Some("feature/test".to_string()),
         deferred_workspace: true,
-        local_xprompts_file: None,
+        local_macros_file: None,
         extra_env: BTreeMap::new(),
         retry_transfer_from_pid: None,
     };

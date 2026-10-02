@@ -163,9 +163,9 @@ fn aggregates_window_outcomes_metadata_and_runtime() {
     assert_eq!(result.totals.waiting, 1);
     assert_eq!(result.totals.in_progress, 0);
     assert_eq!(result.malformed_rows_skipped, 1);
-    let xprompts = result.xprompts.as_ref().unwrap();
-    assert_eq!(xprompts.runs_with_xprompts, 0);
-    assert_eq!(xprompts.runs_without_xprompts, 4);
+    let macros = result.macros.as_ref().unwrap();
+    assert_eq!(macros.runs_with_macros, 0);
+    assert_eq!(macros.runs_without_macros, 4);
     assert_eq!(
         result
             .outcomes

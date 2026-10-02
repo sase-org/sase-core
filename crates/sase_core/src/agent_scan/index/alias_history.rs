@@ -253,7 +253,7 @@ pub(super) fn alias_run_from_sql_row(
             &artifact_dir,
             prompt_snippet_bytes,
         ),
-        used_xprompts: record.used_xprompts,
+        used_macros: record.used_macros,
     }))
 }
 

@@ -776,7 +776,7 @@ fn proc_from_reserve_request(
         settled_at: None,
         finished_by: None,
         result: None,
-        xprompt_proc: request.xprompt_proc.clone(),
+        prompt_proc: request.prompt_proc.clone(),
         service: request.service.clone(),
     };
     normalize_and_validate_proc(&mut proc, ValidationMode::NamedProcWrite)?;
@@ -1068,8 +1068,8 @@ fn apply_update(
     if let Some(value) = &update.result {
         proc.result.clone_from(value);
     }
-    if let Some(value) = &update.xprompt_proc {
-        proc.xprompt_proc.clone_from(value);
+    if let Some(value) = &update.prompt_proc {
+        proc.prompt_proc.clone_from(value);
     }
 
     normalize_and_validate_proc(proc, ValidationMode::LegacyWrite)
@@ -1477,7 +1477,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::procs::wire::{ProcServiceWire, XpromptProcMetaWire};
+    use crate::procs::wire::{ProcServiceWire, PromptProcMetaWire};
 
     use super::*;
 
@@ -1531,7 +1531,7 @@ mod tests {
             settled_at: None,
             finished_by: None,
             result: None,
-            xprompt_proc: None,
+            prompt_proc: None,
             service: None,
         }
     }
@@ -1565,7 +1565,7 @@ mod tests {
             reserved_by: "agent-one".to_string(),
             timeout_seconds: Some(30),
             idle_timeout_seconds: Some(10),
-            xprompt_proc: None,
+            prompt_proc: None,
             service: None,
         }
     }
@@ -1679,19 +1679,19 @@ mod tests {
     }
 
     #[test]
-    fn xprompt_proc_meta_preserves_label_provenance() {
+    fn prompt_proc_meta_preserves_label_provenance() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("procs.jsonl");
         let mut request = reserve_request("proc-meta", "checks", "fp-meta");
-        request.xprompt_proc = Some(XpromptProcMetaWire {
+        request.prompt_proc = Some(PromptProcMetaWire {
             logical_id: Some("unit-1".to_string()),
             label: Some("Verify docs".to_string()),
             proc_name: Some("checks".to_string()),
-            ..XpromptProcMetaWire::default()
+            ..PromptProcMetaWire::default()
         });
 
         let reserved = reserve_proc(&path, &request, 10).unwrap().proc;
-        let meta = reserved.xprompt_proc.unwrap();
+        let meta = reserved.prompt_proc.unwrap();
         assert_eq!(meta.label.as_deref(), Some("Verify docs"));
         assert_eq!(meta.proc_name.as_deref(), Some("checks"));
 
@@ -1699,12 +1699,12 @@ mod tests {
             &path,
             &ProcUpdateWire {
                 proc_id: "proc-meta".to_string(),
-                xprompt_proc: Some(Some(XpromptProcMetaWire {
+                prompt_proc: Some(Some(PromptProcMetaWire {
                     logical_id: Some("unit-1".to_string()),
                     label: Some("Verify docs".to_string()),
                     proc_name: Some("checks".to_string()),
                     code_preview: Some("just check".to_string()),
-                    ..XpromptProcMetaWire::default()
+                    ..PromptProcMetaWire::default()
                 })),
                 ..ProcUpdateWire::default()
             },
@@ -1712,7 +1712,7 @@ mod tests {
         .unwrap()
         .proc
         .unwrap();
-        let meta = updated.xprompt_proc.unwrap();
+        let meta = updated.prompt_proc.unwrap();
         assert_eq!(meta.label.as_deref(), Some("Verify docs"));
         assert_eq!(meta.proc_name.as_deref(), Some("checks"));
         assert_eq!(meta.code_preview.as_deref(), Some("just check"));
@@ -2147,16 +2147,50 @@ mod tests {
     }
 
     #[test]
-    fn xprompt_proc_meta_emits_canonical_name_key_and_accepts_legacy() {
-        let meta = XpromptProcMetaWire {
+    fn prompt_proc_field_accepts_both_spellings_and_emits_legacy() {
+        let mut row = proc("named", "running", "2026-07-25T12:00:00Z");
+        row.prompt_proc = Some(PromptProcMetaWire {
+            logical_id: Some("unit-1".to_string()),
+            ..PromptProcMetaWire::default()
+        });
+        let emitted = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            emitted["xprompt_proc"],
+            serde_json::json!({"logical_id": "unit-1"})
+        );
+        assert!(emitted.get("prompt_proc").is_none());
+
+        let from_old: ProcWire =
+            serde_json::from_value(emitted.clone()).unwrap();
+        let mut renamed = emitted.clone();
+        let meta = renamed.as_object_mut().unwrap().remove("xprompt_proc");
+        renamed
+            .as_object_mut()
+            .unwrap()
+            .insert("prompt_proc".to_string(), meta.unwrap());
+        let from_new: ProcWire = serde_json::from_value(renamed).unwrap();
+        assert_eq!(from_old, from_new);
+        assert_eq!(from_new, row);
+
+        let mut both = emitted.clone();
+        both.as_object_mut().unwrap().insert(
+            "prompt_proc".to_string(),
+            serde_json::json!({"logical_id": "unit-1"}),
+        );
+        assert!(serde_json::from_value::<ProcWire>(both).is_err());
+    }
+
+    #[test]
+    fn prompt_proc_meta_emits_canonical_name_key_and_accepts_legacy() {
+        let meta = PromptProcMetaWire {
             proc_name: Some("agent--build".to_string()),
-            ..XpromptProcMetaWire::default()
+            ..PromptProcMetaWire::default()
         };
         let emitted = serde_json::to_value(&meta).unwrap();
         assert_eq!(emitted["proc_name"], json!("agent--build"));
         assert!(emitted.get("shell_name").is_none());
 
-        let legacy: XpromptProcMetaWire = serde_json::from_value(json!({
+        let legacy: PromptProcMetaWire = serde_json::from_value(json!({
             "shell_name": "agent--build",
         }))
         .unwrap();

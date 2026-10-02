@@ -802,7 +802,7 @@ mod tests {
             settled_at: None,
             finished_by: None,
             result: None,
-            xprompt_proc: None,
+            prompt_proc: None,
             service: None,
         }
     }

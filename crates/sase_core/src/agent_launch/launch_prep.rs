@@ -64,10 +64,10 @@ pub fn prepare_agent_launch(
         env_delta.insert(key.clone(), value.clone());
     }
 
-    if let Some(local_xprompts_file) = request.local_xprompts_file.as_ref() {
+    if let Some(local_macros_file) = request.local_macros_file.as_ref() {
         env_delta.insert(
             "SASE_AGENT_LOCAL_XPROMPTS".to_string(),
-            local_xprompts_file.clone(),
+            local_macros_file.clone(),
         );
     }
 

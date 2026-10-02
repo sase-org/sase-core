@@ -1,7 +1,7 @@
 //! Per-dimension folds for retries, commits, plans, questions, and
 //! workspaces.
 //!
-//! Each fold observes one durable facet of a run record. XPrompt and
+//! Each fold observes one durable facet of a run record. Macro and
 //! project/patch work folds live in their own modules beside the
 //! finishing passes that consume them.
 

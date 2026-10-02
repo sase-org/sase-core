@@ -61,7 +61,7 @@ pub use proc_runtime::{
     ProcDispatchRequestWire, PROC_DISPATCH_WIRE_SCHEMA_VERSION,
     PROC_PHASE_ACQUIRING_WORKSPACE, PROC_PHASE_CHECKING,
     PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING, PROC_PHASE_SETTLING,
-    PROC_PHASE_WAITING, XPROMPT_PROC_ORIGIN,
+    PROC_PHASE_WAITING, PROMPT_PROC_ORIGIN, XPROMPT_PROC_ORIGIN,
 };
 pub use typed_units::{
     plan_typed_launch_units, plan_typed_launch_units_with_flags,

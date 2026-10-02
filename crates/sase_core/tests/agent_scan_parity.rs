@@ -668,7 +668,7 @@ fn launch_xprompts_project_to_deduplicated_deterministic_records() {
     let snapshot =
         scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
     assert_eq!(snapshot.records.len(), 1);
-    let used = &snapshot.records[0].used_xprompts;
+    let used = &snapshot.records[0].used_macros;
     assert_eq!(
         used.iter()
             .map(|item| item.name.as_str())
@@ -720,7 +720,7 @@ fn launch_xprompts_preserves_swarm_kind() {
     let snapshot =
         scan_agent_artifacts(&root, AgentArtifactScanOptionsWire::default());
     assert_eq!(snapshot.records.len(), 1);
-    let used = &snapshot.records[0].used_xprompts;
+    let used = &snapshot.records[0].used_macros;
     assert_eq!(
         used.iter()
             .map(|item| item.name.as_str())
@@ -766,7 +766,7 @@ fn absent_and_invalid_xprompts_are_soft_scan_errors() {
     assert!(snapshot
         .records
         .iter()
-        .all(|record| record.used_xprompts.is_empty()));
+        .all(|record| record.used_macros.is_empty()));
     assert_eq!(snapshot.stats.json_decode_errors, 3);
     assert_eq!(snapshot.stats.os_errors, 0);
 }

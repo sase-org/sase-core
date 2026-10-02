@@ -112,17 +112,15 @@ pub(super) fn query_run_stats_with_liveness(
     let mut workspace_counts = BTreeMap::<(String, i64), u64>::new();
     let mut runtime_groups = BTreeMap::<String, DurationAccumulator>::new();
     let mut work = WorkAccumulators::default();
-    let mut xprompts = XPromptAccumulators {
-        runs_with_xprompts: 0,
-        runs_without_xprompts: 0,
+    let mut macros = MacroAccumulators {
+        runs_with_macros: 0,
+        runs_without_macros: 0,
         total_references: 0,
         by_name: BTreeMap::new(),
-        focus: request.xprompt_focus.as_ref().map(|_| {
-            XPromptFocusAccumulator {
-                providers: BTreeMap::new(),
-                tribes: BTreeMap::new(),
-                buckets: build_empty_buckets(&request, bucket_count),
-            }
+        focus: request.macro_focus.as_ref().map(|_| MacroFocusAccumulator {
+            providers: BTreeMap::new(),
+            tribes: BTreeMap::new(),
+            buckets: build_empty_buckets(&request, bucket_count),
         }),
     };
     let mut runner_stats = RunnerStatsBuilder::default();
@@ -198,7 +196,7 @@ pub(super) fn query_run_stats_with_liveness(
 
         let duration = run_duration_seconds(&record, &row);
         let attribution = resolve_run_attribution(&record, &row);
-        fold_xprompts(
+        fold_macros(
             &record,
             &row,
             launch_ts,
@@ -206,7 +204,7 @@ pub(super) fn query_run_stats_with_liveness(
             outcome.as_deref(),
             &attribution,
             &request,
-            &mut xprompts,
+            &mut macros,
         );
         let provider_key = provider_key(&record, &row);
         let provider_stats = providers.entry(provider_key).or_default();
@@ -279,7 +277,7 @@ pub(super) fn query_run_stats_with_liveness(
     response.runtime_groups =
         finish_runtime_groups(runtime_groups, request.top_n as usize);
     response.work = finish_work(work, request.work_top_n as usize);
-    response.xprompts = Some(finish_xprompts(xprompts, &request));
+    response.macros = Some(finish_macros(macros, &request));
     response.runners = runner_stats.finish(
         requested_start,
         requested_end,
