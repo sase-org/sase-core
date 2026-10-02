@@ -155,7 +155,7 @@ pub(super) fn artifact_ref_catalog_signature(
 /// Load the launcher-generated local artifact-reference catalog.
 ///
 /// The schema is version-gated and every failure degrades to no artifact
-/// assistance. [`XpromptLspServer::artifact_ref_catalog`] caches this parsed
+/// assistance. [`MacroLspServer::artifact_ref_catalog`] caches this parsed
 /// value together with the payload inventories and invalidates it by file
 /// signature, TTL, or explicit refresh.
 pub(super) fn load_artifact_ref_catalog(
@@ -220,7 +220,7 @@ pub(super) fn glossary_catalog_signature(
 /// Load and compile the launcher-generated project glossary catalog.
 ///
 /// The schema is version-gated and every failure degrades to no glossary
-/// semantics. [`XpromptLspServer::glossary_catalog`] caches this parsed value
+/// semantics. [`MacroLspServer::glossary_catalog`] caches this parsed value
 /// and invalidates it by file signature, TTL, explicit refresh, or watched
 /// config changes.
 pub(super) fn load_glossary_catalog(path: Option<&Path>) -> GlossaryCatalog {

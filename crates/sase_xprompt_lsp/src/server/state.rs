@@ -1,7 +1,8 @@
 use super::initialize::{
-    artifact_ref_catalog_path, glossary_catalog_path, machine_catalog_path,
-    model_catalog_path, queue_capacity_budget_from_env,
-    typed_launch_units_from_env, vcs_project_catalog_path,
+    accept_legacy_xprompt_names_from_env, artifact_ref_catalog_path,
+    glossary_catalog_path, machine_catalog_path, model_catalog_path,
+    queue_capacity_budget_from_env, typed_launch_units_from_env,
+    vcs_project_catalog_path,
 };
 use super::*;
 
@@ -35,6 +36,10 @@ pub(super) struct ServerConfig {
     pub(super) typed_launch_units: bool,
     /// Startup-resolved `queue_capacity_budget` sunset flag. Defaults on.
     pub(super) queue_capacity_budget: bool,
+    /// Startup-resolved legacy-loading policy. Defaults true; when false,
+    /// retired `xprompt` definition sources and authored keys are rejected.
+    /// Never re-read on keystrokes; part of the catalog cache identity.
+    pub(super) accept_legacy_xprompt_names: bool,
 }
 
 impl Default for ServerConfig {
@@ -52,6 +57,7 @@ impl Default for ServerConfig {
             glossary_catalog: glossary_catalog_path(),
             typed_launch_units: typed_launch_units_from_env(),
             queue_capacity_budget: queue_capacity_budget_from_env(),
+            accept_legacy_xprompt_names: accept_legacy_xprompt_names_from_env(),
         }
     }
 }
@@ -164,7 +170,7 @@ pub(super) struct RecentParenInsertion {
 }
 
 #[derive(Debug)]
-pub struct XpromptLspServer {
+pub struct MacroLspServer {
     pub(super) client: Client,
     pub(super) documents: RwLock<HashMap<String, OpenDocument>>,
     pub(super) catalog_cache: Arc<CatalogCache>,
@@ -173,7 +179,12 @@ pub struct XpromptLspServer {
     pub(super) config: RwLock<ServerConfig>,
 }
 
-impl XpromptLspServer {
+/// Legacy spelling retained for compatibility with existing tests and
+/// out-of-tree callers; new code uses [`MacroLspServer`].
+// legacy xprompt spelling
+pub type XpromptLspServer = MacroLspServer;
+
+impl MacroLspServer {
     pub fn new(client: Client) -> Self {
         Self {
             client,

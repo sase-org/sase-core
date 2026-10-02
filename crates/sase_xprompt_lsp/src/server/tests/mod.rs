@@ -3,6 +3,7 @@ mod catalog_loading;
 mod completion;
 mod documents;
 mod jinja;
+mod macro_lsp;
 mod model_completion;
 mod project_tags;
 mod shortcuts;

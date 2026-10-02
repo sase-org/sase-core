@@ -7,17 +7,16 @@ use super::completion_items::{
     bool_completion_list, directive_snippet_items, empty_completion_list,
     empty_completion_response, is_directive_argument_context,
     is_finalizer_value_context, is_rich_model_value_context,
-    model_alias_keys_from_catalog, model_alias_shortcut_completion,
-    model_completion_list, model_insertion_is_self_ref,
-    model_shortcut_completion, needs_agent_entries, needs_bead_entries,
-    needs_host_catalog, needs_machine_entries, needs_model_alias_keys,
-    ranked_vcs_repo_entries, replacement_ends_line, sase_snippet_items,
-    xprompt_snippet_items,
+    macro_snippet_items, model_alias_keys_from_catalog,
+    model_alias_shortcut_completion, model_completion_list,
+    model_insertion_is_self_ref, model_shortcut_completion,
+    needs_agent_entries, needs_bead_entries, needs_host_catalog,
+    needs_machine_entries, needs_model_alias_keys, ranked_vcs_repo_entries,
+    replacement_ends_line, sase_snippet_items,
 };
 use super::initialize::enabled_feature_flags;
 use super::state::{
-    ArtifactRefCatalogProject, ServerConfig, VcsProjectCatalog,
-    XpromptLspServer,
+    ArtifactRefCatalogProject, MacroLspServer, ServerConfig, VcsProjectCatalog,
 };
 use super::*;
 use crate::lsp_convert::jinja_completion_response;
@@ -30,7 +29,7 @@ use sase_core::snippet_variables::{
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-impl XpromptLspServer {
+impl MacroLspServer {
     pub async fn completion_for_text(
         &self,
         text: String,
@@ -284,7 +283,7 @@ impl XpromptLspServer {
         {
             let append_text_arg_space =
                 replacement_ends_line(&document, context.replacement_range);
-            return Some(CompletionResponse::Array(xprompt_snippet_items(
+            return Some(CompletionResponse::Array(macro_snippet_items(
                 list,
                 entries.as_slice(),
                 context.replacement_range,
@@ -706,9 +705,15 @@ impl XpromptLspServer {
         &self,
         config: &ServerConfig,
     ) -> Arc<Vec<MacroAssistEntry>> {
-        if !self.catalog_cache.stale_or_missing(&config.catalog_key) {
+        if !self.catalog_cache.stale_or_missing_with_policy(
+            &config.catalog_key,
+            config.accept_legacy_xprompt_names,
+        ) {
             if let Some(entries) =
-                self.catalog_cache.cached_entries(&config.catalog_key)
+                self.catalog_cache.cached_entries_with_policy(
+                    &config.catalog_key,
+                    config.accept_legacy_xprompt_names,
+                )
             {
                 return entries;
             }
@@ -716,10 +721,11 @@ impl XpromptLspServer {
 
         match self
             .catalog_cache
-            .refresh_for_completion(
+            .refresh_for_completion_with_policy(
                 config.catalog_key.clone(),
                 config.project.clone(),
                 config.root_dir.clone(),
+                config.accept_legacy_xprompt_names,
             )
             .await
         {
@@ -727,7 +733,10 @@ impl XpromptLspServer {
             Err(error) => {
                 self.warn_once(&error).await;
                 self.catalog_cache
-                    .cached_entries(&config.catalog_key)
+                    .cached_entries_with_policy(
+                        &config.catalog_key,
+                        config.accept_legacy_xprompt_names,
+                    )
                     .unwrap_or_else(|| Arc::new(Vec::new()))
             }
         }
@@ -737,13 +746,15 @@ impl XpromptLspServer {
         &self,
         config: &ServerConfig,
     ) -> Arc<Vec<EditorSnippetEntryWire>> {
-        if !self
-            .catalog_cache
-            .snippets_stale_or_missing(&config.catalog_key)
-        {
-            if let Some(entries) = self
-                .catalog_cache
-                .cached_snippet_entries(&config.catalog_key)
+        if !self.catalog_cache.snippets_stale_or_missing_with_policy(
+            &config.catalog_key,
+            config.accept_legacy_xprompt_names,
+        ) {
+            if let Some(entries) =
+                self.catalog_cache.cached_snippet_entries_with_policy(
+                    &config.catalog_key,
+                    config.accept_legacy_xprompt_names,
+                )
             {
                 return entries;
             }
@@ -751,10 +762,11 @@ impl XpromptLspServer {
 
         match self
             .catalog_cache
-            .refresh_snippets_for_completion(
+            .refresh_snippets_for_completion_with_policy(
                 config.catalog_key.clone(),
                 config.project.clone(),
                 config.root_dir.clone(),
+                config.accept_legacy_xprompt_names,
             )
             .await
         {
@@ -762,7 +774,10 @@ impl XpromptLspServer {
             Err(error) => {
                 self.warn_once(&error).await;
                 self.catalog_cache
-                    .cached_snippet_entries(&config.catalog_key)
+                    .cached_snippet_entries_with_policy(
+                        &config.catalog_key,
+                        config.accept_legacy_xprompt_names,
+                    )
                     .unwrap_or_else(|| Arc::new(Vec::new()))
             }
         }

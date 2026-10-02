@@ -5,12 +5,12 @@ use super::catalogs::{
 };
 use super::state::{
     ArtifactRefCache, ArtifactRefCatalog, ArtifactRefCatalogProject,
-    CachedArtifactRefPayload, GlossaryCache, GlossaryCatalog, OpenDocument,
-    ServerConfig, XpromptLspServer,
+    CachedArtifactRefPayload, GlossaryCache, GlossaryCatalog, MacroLspServer,
+    OpenDocument, ServerConfig,
 };
 use super::*;
 
-impl XpromptLspServer {
+impl MacroLspServer {
     pub(super) fn current_config(&self) -> ServerConfig {
         self.config
             .read()
@@ -172,24 +172,26 @@ impl XpromptLspServer {
         self.catalog_cache.invalidate_agent_catalogs();
         self.catalog_cache.invalidate_finalizer_catalogs();
         let config = self.current_config();
-        let xprompt_result = self
+        let macro_result = self
             .catalog_cache
-            .refresh_explicit(
+            .refresh_explicit_with_policy(
                 config.catalog_key.clone(),
                 config.project.clone(),
                 config.root_dir.clone(),
+                config.accept_legacy_xprompt_names,
             )
             .await;
         let snippet_result = self
             .catalog_cache
-            .refresh_snippets_explicit(
+            .refresh_snippets_explicit_with_policy(
                 config.catalog_key.clone(),
                 config.project.clone(),
                 config.root_dir.clone(),
+                config.accept_legacy_xprompt_names,
             )
             .await;
 
-        match (xprompt_result, snippet_result) {
+        match (macro_result, snippet_result) {
             (Ok(entries), Ok(snippets)) => {
                 self.client
                     .log_message(
@@ -211,8 +213,8 @@ impl XpromptLspServer {
                     .await;
                 self.warn_once(&snippet_error).await;
             }
-            (Err(xprompt_error), Ok(snippets)) => {
-                self.warn_once(&xprompt_error).await;
+            (Err(macro_error), Ok(snippets)) => {
+                self.warn_once(&macro_error).await;
                 self.client
                     .log_message(
                         MessageType::INFO,
@@ -220,8 +222,8 @@ impl XpromptLspServer {
                     )
                     .await;
             }
-            (Err(xprompt_error), Err(snippet_error)) => {
-                self.warn_once(&xprompt_error).await;
+            (Err(macro_error), Err(snippet_error)) => {
+                self.warn_once(&macro_error).await;
                 self.warn_once(&snippet_error).await;
             }
         }

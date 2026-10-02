@@ -47,7 +47,35 @@ pub(super) fn config_from_initialize(
             .unwrap_or_else(typed_launch_units_from_env),
         queue_capacity_budget: queue_capacity_budget_from_initialize(params)
             .unwrap_or_else(queue_capacity_budget_from_env),
+        accept_legacy_xprompt_names:
+            accept_legacy_xprompt_names_from_initialize(params)
+                .unwrap_or_else(accept_legacy_xprompt_names_from_env),
     }
+}
+
+pub(super) fn accept_legacy_xprompt_names_from_initialize(
+    params: &InitializeParams,
+) -> Option<bool> {
+    params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("accept_legacy_xprompt_names"))
+        .and_then(serde_json::Value::as_bool)
+}
+
+pub(super) fn accept_legacy_xprompt_names_from_env() -> bool {
+    // No transport env name for this policy; default true.
+    // An explicit `SASE_ACCEPT_LEGACY_XPROMPT_NAMES=0/false` opts out.
+    std::env::var("SASE_ACCEPT_LEGACY_XPROMPT_NAMES")
+        .ok()
+        .as_deref()
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
 }
 
 pub(super) fn typed_launch_units_from_initialize(
@@ -107,24 +135,36 @@ pub(super) fn enabled_feature_flags(
     flags
 }
 
+fn catalog_path_new_first(new_env: &str, old_env: &str) -> Option<PathBuf> {
+    std::env::var_os(new_env)
+        .or_else(|| std::env::var_os(old_env))
+        .map(PathBuf::from)
+}
+
 pub(super) fn vcs_project_catalog_path() -> Option<PathBuf> {
-    std::env::var_os(VCS_PROJECT_CATALOG_ENV).map(PathBuf::from)
+    catalog_path_new_first(
+        VCS_PROJECT_CATALOG_MACRO_ENV,
+        VCS_PROJECT_CATALOG_ENV,
+    )
 }
 
 pub(super) fn model_catalog_path() -> Option<PathBuf> {
-    std::env::var_os(MODEL_CATALOG_ENV).map(PathBuf::from)
+    catalog_path_new_first(MODEL_CATALOG_MACRO_ENV, MODEL_CATALOG_ENV)
 }
 
 pub(super) fn machine_catalog_path() -> Option<PathBuf> {
-    std::env::var_os(MACHINE_CATALOG_ENV).map(PathBuf::from)
+    catalog_path_new_first(MACHINE_CATALOG_MACRO_ENV, MACHINE_CATALOG_ENV)
 }
 
 pub(super) fn artifact_ref_catalog_path() -> Option<PathBuf> {
-    std::env::var_os(ARTIFACT_REF_CATALOG_ENV).map(PathBuf::from)
+    catalog_path_new_first(
+        ARTIFACT_REF_CATALOG_MACRO_ENV,
+        ARTIFACT_REF_CATALOG_ENV,
+    )
 }
 
 pub(super) fn glossary_catalog_path() -> Option<PathBuf> {
-    std::env::var_os(GLOSSARY_CATALOG_ENV).map(PathBuf::from)
+    catalog_path_new_first(GLOSSARY_CATALOG_MACRO_ENV, GLOSSARY_CATALOG_ENV)
 }
 
 pub(super) fn snippet_support(capabilities: &ClientCapabilities) -> bool {

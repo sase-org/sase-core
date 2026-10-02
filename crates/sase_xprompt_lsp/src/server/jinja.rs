@@ -24,7 +24,14 @@ pub fn jinja_scope_for_document(
     if path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts" | "default_xprompts")
+            // legacy xprompt spelling
+            Some(
+                "xprompts"
+                    | ".xprompts"
+                    | "default_xprompts"
+                    | "macros"
+                    | "default_macros"
+            )
         )
     }) {
         return Some(JinjaScopeKind::Xprompt);
@@ -76,11 +83,13 @@ mod tests {
     }
 
     #[test]
-    fn xprompt_directories_use_xprompt_scope() {
+    fn macro_directories_use_macro_scope() {
         for candidate in [
             "/repo/xprompts/review.md",
             "/repo/.xprompts/local.md",
             "/repo/default_xprompts/help.md",
+            "/repo/macros/review.md",
+            "/repo/default_macros/help.md",
         ] {
             assert_eq!(
                 jinja_scope_for_document(

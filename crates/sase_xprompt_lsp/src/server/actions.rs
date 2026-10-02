@@ -4,8 +4,7 @@ use super::catalogs::{
 };
 use super::initialize::enabled_feature_flags;
 use super::state::{
-    GlossaryCatalogProject, RecentParenInsertion, ServerConfig,
-    XpromptLspServer,
+    GlossaryCatalogProject, MacroLspServer, RecentParenInsertion, ServerConfig,
 };
 use super::*;
 use crate::project_tags::{
@@ -15,7 +14,7 @@ use crate::server::jinja::jinja_scope_for_document;
 use sase_core::editor::jinja::{jinja_hover, JinjaAssistRequestWire};
 use std::path::PathBuf;
 
-impl XpromptLspServer {
+impl MacroLspServer {
     pub async fn hover_for_text(
         &self,
         text: String,
@@ -171,8 +170,14 @@ impl XpromptLspServer {
         let glossary_catalog =
             self.glossary_catalog(config.glossary_catalog.as_deref());
         let argument_entries =
-            if !self.catalog_cache.stale_or_missing(&config.catalog_key) {
-                self.catalog_cache.cached_entries(&config.catalog_key)
+            if !self.catalog_cache.stale_or_missing_with_policy(
+                &config.catalog_key,
+                config.accept_legacy_xprompt_names,
+            ) {
+                self.catalog_cache.cached_entries_with_policy(
+                    &config.catalog_key,
+                    config.accept_legacy_xprompt_names,
+                )
             } else {
                 None
             };
@@ -785,7 +790,14 @@ pub(super) fn markdown_uri_eligible(uri: &Uri) -> bool {
     if path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts" | "default_xprompts")
+            // legacy xprompt spelling
+            Some(
+                "xprompts"
+                    | ".xprompts"
+                    | "default_xprompts"
+                    | "macros"
+                    | "default_macros"
+            )
         )
     }) {
         return true;
@@ -829,7 +841,13 @@ pub(super) fn should_invalidate_for_uri(uri: &Uri) -> bool {
     };
     if matches!(
         file_name,
-        "xprompts.yml" | "xprompts.yaml" | "sase.yml" | "default_config.yml"
+        // legacy xprompt spelling
+        "xprompts.yml"
+            | "xprompts.yaml"
+            | "macros.yml"
+            | "macros.yaml"
+            | "sase.yml"
+            | "default_config.yml"
     ) {
         return true;
     }
@@ -852,7 +870,15 @@ pub(super) fn should_invalidate_for_uri(uri: &Uri) -> bool {
     path.components().any(|component| {
         matches!(
             component.as_os_str().to_str(),
-            Some("xprompts" | ".xprompts" | "default_xprompts" | "refs")
+            // legacy xprompt spelling
+            Some(
+                "xprompts"
+                    | ".xprompts"
+                    | "default_xprompts"
+                    | "macros"
+                    | "default_macros"
+                    | "refs"
+            )
         )
     })
 }

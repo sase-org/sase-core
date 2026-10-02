@@ -26,9 +26,14 @@ const COMPLETION_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const EXPLICIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const CACHE_TTL: Duration = Duration::from_secs(30);
 const VCS_REPO_CACHE_TTL: Duration = Duration::from_secs(45);
+// legacy xprompt spelling
 const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str = "SASE_XPROMPT_PLUGIN_DIRS_JSON";
+// legacy xprompt spelling
 const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
+const SASE_MACRO_PLUGIN_DIRS_JSON_ENV: &str = "SASE_MACRO_PLUGIN_DIRS_JSON";
+const SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
+    "SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogFailure {
@@ -129,12 +134,24 @@ impl CatalogCache {
         }
     }
 
+    pub fn policy_key(base_key: &str, accept_legacy: bool) -> String {
+        format!("{base_key}|legacy={accept_legacy}")
+    }
+
     pub fn cached_entries(
         &self,
         key: &str,
     ) -> Option<Arc<Vec<MacroAssistEntry>>> {
         let catalogs = self.catalogs.read().ok()?;
         catalogs.get(key).map(|catalog| catalog.entries.clone())
+    }
+
+    pub fn cached_entries_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> Option<Arc<Vec<MacroAssistEntry>>> {
+        self.cached_entries(&Self::policy_key(base_key, accept_legacy))
     }
 
     pub fn stale_or_missing(&self, key: &str) -> bool {
@@ -147,12 +164,28 @@ impl CatalogCache {
             .unwrap_or(true)
     }
 
+    pub fn stale_or_missing_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> bool {
+        self.stale_or_missing(&Self::policy_key(base_key, accept_legacy))
+    }
+
     pub fn cached_snippet_entries(
         &self,
         key: &str,
     ) -> Option<Arc<Vec<EditorSnippetEntryWire>>> {
         let catalogs = self.snippet_catalogs.read().ok()?;
         catalogs.get(key).map(|catalog| catalog.entries.clone())
+    }
+
+    pub fn cached_snippet_entries_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> Option<Arc<Vec<EditorSnippetEntryWire>>> {
+        self.cached_snippet_entries(&Self::policy_key(base_key, accept_legacy))
     }
 
     pub fn snippets_stale_or_missing(&self, key: &str) -> bool {
@@ -163,6 +196,17 @@ impl CatalogCache {
             .get(key)
             .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
             .unwrap_or(true)
+    }
+
+    pub fn snippets_stale_or_missing_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> bool {
+        self.snippets_stale_or_missing(&Self::policy_key(
+            base_key,
+            accept_legacy,
+        ))
     }
 
     pub fn cached_vcs_repo_catalog(
@@ -196,8 +240,26 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
-        self.refresh(key, project, root_dir, COMPLETION_REFRESH_TIMEOUT)
+        self.refresh_for_completion_with_policy(key, project, root_dir, true)
             .await
+    }
+
+    pub async fn refresh_for_completion_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh(
+            key,
+            project,
+            root_dir,
+            COMPLETION_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
     }
 
     pub async fn refresh_explicit(
@@ -206,8 +268,26 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
-        self.refresh(key, project, root_dir, EXPLICIT_REFRESH_TIMEOUT)
+        self.refresh_explicit_with_policy(key, project, root_dir, true)
             .await
+    }
+
+    pub async fn refresh_explicit_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh(
+            key,
+            project,
+            root_dir,
+            EXPLICIT_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
     }
 
     pub async fn refresh_snippets_for_completion(
@@ -216,12 +296,27 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        self.refresh_snippets_for_completion_with_policy(
+            key, project, root_dir, true,
+        )
+        .await
+    }
+
+    pub async fn refresh_snippets_for_completion_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
         match self
             .refresh_snippets(
                 key.clone(),
                 project,
                 root_dir,
                 COMPLETION_REFRESH_TIMEOUT,
+                accept_legacy,
             )
             .await
         {
@@ -236,8 +331,26 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
-        self.refresh_snippets(key, project, root_dir, EXPLICIT_REFRESH_TIMEOUT)
+        self.refresh_snippets_explicit_with_policy(key, project, root_dir, true)
             .await
+    }
+
+    pub async fn refresh_snippets_explicit_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh_snippets(
+            key,
+            project,
+            root_dir,
+            EXPLICIT_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
     }
 
     pub async fn refresh_vcs_repo_for_completion(
@@ -482,6 +595,7 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
         timeout: Duration,
+        accept_legacy: bool,
     ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
         let request = EditorXpromptCatalogRequestWire {
             schema_version: 1,
@@ -494,8 +608,26 @@ impl CatalogCache {
             device_id: None,
         };
 
+        // When legacy names are rejected, only the policy-aware Rust loader
+        // is trusted: an old helper cannot prove its entries comply with
+        // false, so unverified helper data must never restore retired
+        // definitions. Stale same-policy cache is the only fallback, handled
+        // by the caller.
+        if !accept_legacy {
+            let entries =
+                refresh_with_rust_catalog(request, root_dir, accept_legacy)
+                    .await?;
+            return Ok(self.store(key, entries));
+        }
+
         if self.prefer_rust_catalog && self.plugin_metadata_present {
-            match refresh_with_rust_catalog(request.clone(), root_dir).await {
+            match refresh_with_rust_catalog(
+                request.clone(),
+                root_dir,
+                accept_legacy,
+            )
+            .await
+            {
                 Ok(entries) if !entries.is_empty() => {
                     return Ok(self.store(key, entries));
                 }
@@ -506,8 +638,12 @@ impl CatalogCache {
                 ),
             }
         } else if self.prefer_rust_catalog {
-            let rust_result =
-                refresh_with_rust_catalog(request.clone(), root_dir).await;
+            let rust_result = refresh_with_rust_catalog(
+                request.clone(),
+                root_dir,
+                accept_legacy,
+            )
+            .await;
             if let Err(error) = &rust_result {
                 warn!("rust xprompt catalog loader failed: {}", error.message);
             }
@@ -550,15 +686,31 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
         timeout: Duration,
+        accept_legacy: bool,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
         let request = EditorSnippetCatalogRequestWire {
             schema_version: 1,
             project,
         };
+        // Same policy rule as catalogs: under false, never merge unverified
+        // helper snippets; the Rust result (or its failure) is authoritative.
+        if !accept_legacy {
+            let entries = refresh_snippets_with_rust_catalog(
+                request,
+                root_dir,
+                accept_legacy,
+            )
+            .await?;
+            return Ok(self.store_snippets(key, entries));
+        }
         let rust_result = if self.prefer_rust_catalog {
             Some(
-                refresh_snippets_with_rust_catalog(request.clone(), root_dir)
-                    .await,
+                refresh_snippets_with_rust_catalog(
+                    request.clone(),
+                    root_dir,
+                    accept_legacy,
+                )
+                .await,
             )
         } else {
             None
@@ -804,11 +956,13 @@ fn merge_snippet_entries(
 async fn refresh_with_rust_catalog(
     request: EditorXpromptCatalogRequestWire,
     root_dir: Option<PathBuf>,
+    accept_legacy: bool,
 ) -> Result<Vec<MacroAssistEntry>, CatalogFailure> {
     let task = tokio::task::spawn_blocking(move || {
         load_editor_macro_catalog(
             &request,
-            &MacroCatalogLoadOptions::new(root_dir),
+            &MacroCatalogLoadOptions::new(root_dir)
+                .with_legacy_policy(accept_legacy),
         )
     });
     let response = match task.await {
@@ -832,11 +986,13 @@ async fn refresh_with_rust_catalog(
 async fn refresh_snippets_with_rust_catalog(
     request: EditorSnippetCatalogRequestWire,
     root_dir: Option<PathBuf>,
+    accept_legacy: bool,
 ) -> Result<Vec<EditorSnippetEntryWire>, CatalogFailure> {
     let task = tokio::task::spawn_blocking(move || {
         load_editor_snippet_catalog(
             &request,
-            &MacroCatalogLoadOptions::new(root_dir),
+            &MacroCatalogLoadOptions::new(root_dir)
+                .with_legacy_policy(accept_legacy),
         )
     });
     let response = match task.await {
@@ -884,6 +1040,8 @@ fn finalizer_catalog_key(project: Option<&str>) -> String {
 fn plugin_metadata_env_present() -> bool {
     env::var_os(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV).is_some()
         || env::var_os(SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV).is_some()
+        || env::var_os(SASE_MACRO_PLUGIN_DIRS_JSON_ENV).is_some()
+        || env::var_os(SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV).is_some()
 }
 
 #[cfg(test)]
@@ -1209,9 +1367,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(entries[0].trigger, "fix");
-        assert!(!cache.snippets_stale_or_missing("test"));
+        assert!(!cache.snippets_stale_or_missing_with_policy("test", true));
         assert_eq!(
-            cache.cached_snippet_entries("test").unwrap()[0].template,
+            cache
+                .cached_snippet_entries_with_policy("test", true)
+                .unwrap()[0]
+                .template,
             "fix $1$0"
         );
     }

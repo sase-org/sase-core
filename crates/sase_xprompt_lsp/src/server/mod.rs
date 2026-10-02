@@ -94,6 +94,8 @@ use crate::semantic_tokens::{document_semantic_tokens, legend};
 const SERVER_NAME: &str = "sase-xprompt-lsp";
 const REFRESH_COMMAND: &str = "sase.xpromptLsp.refreshCatalog";
 const OPEN_SOURCE_COMMAND: &str = "sase.xpromptLsp.openSource";
+const REFRESH_COMMAND_MACRO: &str = "sase.macroLsp.refreshCatalog";
+const OPEN_SOURCE_COMMAND_MACRO: &str = "sase.macroLsp.openSource";
 const ARTIFACT_REF_CACHE_TTL: Duration = Duration::from_secs(2);
 const GLOSSARY_CACHE_TTL: Duration = Duration::from_secs(2);
 
@@ -101,11 +103,21 @@ const GLOSSARY_CACHE_TTL: Duration = Duration::from_secs(2);
 /// (enabled-project entries + known VCS workflow names). Materialized by the
 /// Python launcher (`integrations/xprompt_lsp.py`) at LSP startup and re-read
 /// fresh on every `+` completion request so external rewrites are picked up.
+// legacy xprompt spelling
 const VCS_PROJECT_CATALOG_ENV: &str = "SASE_XPROMPT_VCS_PROJECT_CATALOG";
+const VCS_PROJECT_CATALOG_MACRO_ENV: &str = "SASE_MACRO_VCS_PROJECT_CATALOG";
+// legacy xprompt spelling
 const MODEL_CATALOG_ENV: &str = "SASE_XPROMPT_MODEL_CATALOG";
+const MODEL_CATALOG_MACRO_ENV: &str = "SASE_MACRO_MODEL_CATALOG";
+// legacy xprompt spelling
 const MACHINE_CATALOG_ENV: &str = "SASE_XPROMPT_MACHINE_CATALOG";
+const MACHINE_CATALOG_MACRO_ENV: &str = "SASE_MACRO_MACHINE_CATALOG";
+// legacy xprompt spelling
 const ARTIFACT_REF_CATALOG_ENV: &str = "SASE_XPROMPT_ARTIFACT_REF_CATALOG";
+const ARTIFACT_REF_CATALOG_MACRO_ENV: &str = "SASE_MACRO_ARTIFACT_REF_CATALOG";
+// legacy xprompt spelling
 const GLOSSARY_CATALOG_ENV: &str = "SASE_XPROMPT_GLOSSARY_CATALOG";
+const GLOSSARY_CATALOG_MACRO_ENV: &str = "SASE_MACRO_GLOSSARY_CATALOG";
 const TYPED_LAUNCH_UNITS_ENV: &str = "SASE_TYPED_LAUNCH_UNITS";
 const QUEUE_CAPACITY_BUDGET_ENV: &str = "SASE_QUEUE_CAPACITY_BUDGET";
 
@@ -121,13 +133,13 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::XpromptLspServer;
+pub use state::{MacroLspServer, XpromptLspServer};
 
 use self::actions::should_invalidate_for_uri;
 use self::catalogs::load_vcs_project_catalog;
 use self::initialize::config_from_initialize;
 
-impl LanguageServer for XpromptLspServer {
+impl LanguageServer for MacroLspServer {
     async fn initialize(
         &self,
         params: InitializeParams,
@@ -177,6 +189,8 @@ impl LanguageServer for XpromptLspServer {
                     commands: vec![
                         REFRESH_COMMAND.to_string(),
                         OPEN_SOURCE_COMMAND.to_string(),
+                        REFRESH_COMMAND_MACRO.to_string(),
+                        OPEN_SOURCE_COMMAND_MACRO.to_string(),
                     ],
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -403,9 +417,13 @@ impl LanguageServer for XpromptLspServer {
         &self,
         params: ExecuteCommandParams,
     ) -> Result<Option<LSPAny>> {
-        if params.command == REFRESH_COMMAND {
+        if params.command == REFRESH_COMMAND
+            || params.command == REFRESH_COMMAND_MACRO
+        {
             self.refresh_catalog_explicit().await;
-        } else if params.command == OPEN_SOURCE_COMMAND {
+        } else if params.command == OPEN_SOURCE_COMMAND
+            || params.command == OPEN_SOURCE_COMMAND_MACRO
+        {
             self.client
                 .log_message(MessageType::INFO, "open source command invoked")
                 .await;
@@ -433,6 +451,6 @@ impl LanguageServer for XpromptLspServer {
 pub async fn run_stdio() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(XpromptLspServer::new);
+    let (service, socket) = LspService::new(MacroLspServer::new);
     Server::new(stdin, stdout, socket).serve(service).await;
 }

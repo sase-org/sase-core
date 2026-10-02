@@ -128,7 +128,7 @@ pub(super) fn model_alias_keys_from_catalog(
     keys
 }
 
-pub(super) fn xprompt_snippet_items(
+pub(super) fn macro_snippet_items(
     list: CompletionList,
     entries: &[MacroAssistEntry],
     replacement_range: sase_core::EditorRange,
@@ -141,7 +141,7 @@ pub(super) fn xprompt_snippet_items(
                 entries.iter().find(|entry| entry.name == candidate.name)?;
             Some(snippet_completion_item(
                 candidate.display,
-                xprompt_completion_skeleton(entry, append_text_arg_space),
+                macro_completion_skeleton(entry, append_text_arg_space),
                 candidate.detail,
                 candidate.documentation,
                 replacement_range,
@@ -150,7 +150,19 @@ pub(super) fn xprompt_snippet_items(
         .collect()
 }
 
-pub(super) fn xprompt_completion_skeleton(
+/// Legacy spelling retained for out-of-tree callers.
+// legacy xprompt spelling
+#[allow(dead_code)]
+pub(super) fn xprompt_snippet_items(
+    list: CompletionList,
+    entries: &[MacroAssistEntry],
+    replacement_range: sase_core::EditorRange,
+    append_text_arg_space: bool,
+) -> Vec<CompletionItem> {
+    macro_snippet_items(list, entries, replacement_range, append_text_arg_space)
+}
+
+pub(super) fn macro_completion_skeleton(
     entry: &MacroAssistEntry,
     append_text_arg_space: bool,
 ) -> String {
@@ -175,6 +187,16 @@ pub(super) fn xprompt_completion_skeleton(
         [_] => format!("{}:", entry.insertion),
         _ => format!("{}($0)", entry.insertion),
     }
+}
+
+/// Legacy spelling retained for out-of-tree callers.
+// legacy xprompt spelling
+#[allow(dead_code)]
+pub(super) fn xprompt_completion_skeleton(
+    entry: &MacroAssistEntry,
+    append_text_arg_space: bool,
+) -> String {
+    macro_completion_skeleton(entry, append_text_arg_space)
 }
 
 /// Whether `range`'s end sits at the end of its line (no trailing text), so the

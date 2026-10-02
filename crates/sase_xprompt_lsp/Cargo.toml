@@ -11,6 +11,10 @@ description = "Language server for SASE xprompt editing."
 name = "sase-xprompt-lsp"
 path = "src/main.rs"
 
+[[bin]]
+name = "sase-macro-lsp"
+path = "src/main.rs"
+
 [dependencies]
 sase_core = { workspace = true }
 serde = { workspace = true }

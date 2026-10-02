@@ -139,8 +139,8 @@ pub(crate) fn document_semantic_tokens(
     if let Some(catalog) = glossary_catalog {
         raw_tokens.extend(raw_glossary_tokens(document, catalog));
     }
-    raw_tokens.extend(raw_xprompt_call_name_tokens(document));
-    raw_tokens.extend(raw_xprompt_argument_tokens(document, argument_entries));
+    raw_tokens.extend(raw_macro_call_name_tokens(document));
+    raw_tokens.extend(raw_macro_argument_tokens(document, argument_entries));
     raw_tokens.extend(raw_project_tag_tokens(
         document,
         project_tags,
@@ -388,7 +388,7 @@ fn raw_glossary_tokens(
         .collect()
 }
 
-fn raw_xprompt_argument_tokens(
+fn raw_macro_argument_tokens(
     document: &DocumentSnapshot,
     entries: Option<&[MacroAssistEntry]>,
 ) -> Vec<RawSemanticToken> {
@@ -410,7 +410,7 @@ fn raw_xprompt_argument_tokens(
         .collect()
 }
 
-fn raw_xprompt_call_name_tokens(
+fn raw_macro_call_name_tokens(
     document: &DocumentSnapshot,
 ) -> Vec<RawSemanticToken> {
     extract_macro_call_name_spans(document)

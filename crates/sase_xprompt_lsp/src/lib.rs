@@ -7,4 +7,4 @@ pub(crate) mod project_tags;
 mod semantic_tokens;
 pub mod server;
 
-pub use server::{run_stdio, XpromptLspServer};
+pub use server::{run_stdio, MacroLspServer, XpromptLspServer};
