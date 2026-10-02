@@ -147,6 +147,7 @@ pub(super) fn files_with_extensions(
 
 pub(super) fn load_macro_from_markdown(
     path: &Path,
+    accept_legacy_xprompt_names: bool,
 ) -> Result<Option<CatalogMacro>, MacroCatalogLoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -191,7 +192,10 @@ pub(super) fn load_macro_from_markdown(
     let source_path = path.to_string_lossy().into_owned();
     let local_macros = front_matter
         .as_ref()
-        .map(|data| parse_local_macros(data, &source_path))
+        .map(|data| {
+            parse_local_macros(data, &source_path, accept_legacy_xprompt_names)
+        })
+        .transpose()?
         .unwrap_or_default();
     Ok(Some(CatalogMacro {
         name: name.clone(),
@@ -289,6 +293,7 @@ pub(super) fn load_yaml_mapping(
 
 pub(super) fn load_workflow_from_yaml_file(
     path: &Path,
+    accept_legacy_xprompt_names: bool,
 ) -> Result<Option<CatalogWorkflow>, MacroCatalogLoadError> {
     let Some(mapping) = load_yaml_mapping(path)? else {
         return Ok(None);
@@ -300,8 +305,12 @@ pub(super) fn load_workflow_from_yaml_file(
     else {
         return Ok(None);
     };
-    let workflow =
-        workflow_from_mapping(&name, &mapping, &path.to_string_lossy());
+    let workflow = workflow_from_mapping(
+        &name,
+        &mapping,
+        &path.to_string_lossy(),
+        accept_legacy_xprompt_names,
+    )?;
     if workflow.steps.is_empty() {
         Ok(None)
     } else {
@@ -309,35 +318,100 @@ pub(super) fn load_workflow_from_yaml_file(
     }
 }
 
+/// Presence of an authored key, even with an empty or null value.
+fn has_authored_key(data: &serde_yaml::Mapping, key: &str) -> bool {
+    data.contains_key(Value::String(key.to_string()))
+}
+
+/// Select the authored local-definition sections of a mapping.
+///
+/// Both `macros:` (canonical) and `xprompts:` (retired) are detected by
+/// presence before their values are parsed, so empty or null input still
+/// counts. Supplying both spellings is an error, and a retired key is an
+/// error naming `macros` when the legacy policy is false.
+pub(super) fn authored_macro_sections<'a>(
+    data: &'a serde_yaml::Mapping,
+    source: &str,
+    accept_legacy_xprompt_names: bool,
+) -> Result<Vec<&'a serde_yaml::Mapping>, MacroCatalogLoadError> {
+    let has_legacy = has_authored_key(data, "xprompts");
+    let has_canonical = has_authored_key(data, "macros");
+    if has_legacy && has_canonical {
+        return Err(MacroCatalogLoadError::DuplicateAuthoredKeys(
+            source.to_string(),
+        ));
+    }
+    if has_legacy && !accept_legacy_xprompt_names {
+        return Err(MacroCatalogLoadError::RetiredAuthoredKey(
+            source.to_string(),
+        ));
+    }
+    let mut sections = Vec::new();
+    if has_canonical {
+        let value = mapping_get(data, "macros")
+            .expect("canonical authored key presence was checked");
+        if value.is_null() {
+            // A bare `macros:` key declares no helpers.
+        } else if let Some(section) = value.as_mapping() {
+            sections.push(section);
+        } else {
+            return Err(MacroCatalogLoadError::MalformedAuthoredSection(
+                source.to_string(),
+            ));
+        }
+    } else if has_legacy {
+        // Retired input stays lenient: a present-but-unparseable section
+        // loads as empty, matching previous behavior.
+        if let Some(section) =
+            mapping_get(data, "xprompts").and_then(Value::as_mapping)
+        {
+            sections.push(section);
+        }
+    }
+    Ok(sections)
+}
+
 fn parse_local_macros(
     data: &serde_yaml::Mapping,
     source_path: &str,
-) -> Vec<CatalogMacro> {
-    mapping_get(data, "xprompts")
-        .and_then(Value::as_mapping)
-        .map(|xprompts| {
-            xprompts
-                .iter()
-                .filter_map(|(name, value)| {
-                    let name = value_as_string(name)?;
-                    macro_from_config_entry(&name, value, source_path)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    accept_legacy_xprompt_names: bool,
+) -> Result<Vec<CatalogMacro>, MacroCatalogLoadError> {
+    let mut result = Vec::new();
+    for section in
+        authored_macro_sections(data, source_path, accept_legacy_xprompt_names)?
+    {
+        for (name, value) in section {
+            let Some(name) = value_as_string(name) else {
+                continue;
+            };
+            let Some(entry) = macro_from_config_entry(
+                &name,
+                value,
+                source_path,
+                accept_legacy_xprompt_names,
+            )?
+            else {
+                continue;
+            };
+            result.push(entry);
+        }
+    }
+    Ok(result)
 }
 
 fn workflow_from_mapping(
     name: &str,
     data: &serde_yaml::Mapping,
     source_path: &str,
-) -> CatalogWorkflow {
+    accept_legacy_xprompt_names: bool,
+) -> Result<CatalogWorkflow, MacroCatalogLoadError> {
     let tags = mapping_get(data, "tags")
         .map(parse_tags)
         .unwrap_or_default();
     let description =
         mapping_get(data, "description").and_then(value_as_string);
-    let local_macros = parse_local_macros(data, source_path);
+    let local_macros =
+        parse_local_macros(data, source_path, accept_legacy_xprompt_names)?;
     let mut inputs = mapping_get(data, "input")
         .map(parse_inputs)
         .unwrap_or_default();
@@ -373,7 +447,7 @@ fn workflow_from_mapping(
             });
         }
     }
-    CatalogWorkflow {
+    Ok(CatalogWorkflow {
         name: name.to_string(),
         inputs,
         steps,
@@ -381,7 +455,7 @@ fn workflow_from_mapping(
         source_path: Some(source_path.to_string()),
         tags,
         description,
-    }
+    })
 }
 
 fn parse_step(data: &serde_yaml::Mapping, index: usize) -> Option<CatalogStep> {
@@ -417,9 +491,10 @@ pub(super) fn macro_from_config_entry(
     name: &str,
     value: &Value,
     source_path: &str,
-) -> Option<CatalogMacro> {
+    accept_legacy_xprompt_names: bool,
+) -> Result<Option<CatalogMacro>, MacroCatalogLoadError> {
     if let Some(content) = value.as_str() {
-        return Some(CatalogMacro {
+        return Ok(Some(CatalogMacro {
             name: name.to_string(),
             content: content.to_string(),
             inputs: Vec::new(),
@@ -431,17 +506,27 @@ pub(super) fn macro_from_config_entry(
             skill_name: None,
             memory_type: None,
             snippet: None,
-        });
+        }));
     }
-    let data = value.as_mapping()?;
-    let content = mapping_get(data, "content").and_then(value_as_string)?;
-    Some(CatalogMacro {
+    let Some(data) = value.as_mapping() else {
+        return Ok(None);
+    };
+    let Some(content) = mapping_get(data, "content").and_then(value_as_string)
+    else {
+        return Ok(None);
+    };
+    // Nested local helpers declared inside this definition use the same
+    // authored-key rules as top-level sections.
+    let nested_source = format!("{source_path} macro `{name}`");
+    let local_macros =
+        parse_local_macros(data, &nested_source, accept_legacy_xprompt_names)?;
+    Ok(Some(CatalogMacro {
         name: name.to_string(),
         content,
         inputs: mapping_get(data, "input")
             .map(parse_inputs)
             .unwrap_or_default(),
-        local_macros: Vec::new(),
+        local_macros,
         source_path: Some(source_path.to_string()),
         tags: mapping_get(data, "tags")
             .map(parse_tags)
@@ -453,7 +538,7 @@ pub(super) fn macro_from_config_entry(
         skill_name: None,
         memory_type: None,
         snippet: mapping_get(data, "snippet").and_then(parse_snippet),
-    })
+    }))
 }
 
 pub(super) fn macro_to_workflow(xprompt: &CatalogMacro) -> CatalogWorkflow {

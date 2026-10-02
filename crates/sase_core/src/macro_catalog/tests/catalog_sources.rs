@@ -209,7 +209,7 @@ fn policy_false_skips_retired_but_keeps_skills_memory_and_config() {
     write_memory_note(&root, "glossary.md", "---\ntype: core\n---\nGloss");
     fs::write(
         root.join("sase/sase.yml"),
-        "xprompts:\n  cfg_keep:\n    content: Config body\n",
+        "macros:\n  cfg_keep:\n    content: Config body\n",
     )
     .unwrap();
 
@@ -252,7 +252,13 @@ fn policy_false_skips_explicit_retired_and_plugin_retired() {
             ..MacroCatalogResourcePaths::default()
         })
         .with_legacy_policy(false);
-    let all = CatalogLoader::new(&options).load_all_macros(None).unwrap();
+    // Pin home to an isolated temp dir: ambient ~/.config would otherwise
+    // leak a retired authored key into this false-policy load and fail it.
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut loader = CatalogLoader::new(&options);
+    loader.home_dir = Some(home);
+    let all = loader.load_all_macros(None).unwrap();
     assert!(!all.contains_key("old"));
     assert!(all.contains_key("new"));
     assert!(!all.contains_key("pold"));

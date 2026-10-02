@@ -99,6 +99,10 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
         "xprompts",
         "Defines local xprompts available only within the current file. Reference them from the body with `#name`.",
     ),
+    (
+        "macros",
+        "Defines local macros available only within the current file. Reference them from the body with `#name`.",
+    ),
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -426,6 +430,7 @@ fn validate_frontmatter_value(
     };
 
     validate_top_level_fields(builder);
+    validate_local_section_keys(builder, mapping);
     validate_name(builder, mapping);
     validate_input(builder, mapping);
     validate_tags(builder, mapping);
@@ -452,6 +457,36 @@ fn validate_top_level_fields(builder: &mut FrontmatterDiagnosticBuilder<'_>) {
             ),
         );
     }
+}
+
+/// Both `macros:` (canonical) and `xprompts:` (retired) are detected by
+/// presence before their values are parsed, so empty or null input still
+/// counts as a conflict. Supplying both spellings is an error naming
+/// `macros`; the retired spelling under a false legacy policy is rejected
+/// by catalog loading instead, which owns the policy.
+fn validate_local_section_keys(
+    builder: &mut FrontmatterDiagnosticBuilder<'_>,
+    mapping: &Mapping,
+) {
+    if yaml_mapping_get(mapping, "xprompts").is_none()
+        || yaml_mapping_get(mapping, "macros").is_none()
+    {
+        return;
+    }
+    let range = builder
+        .index
+        .fields
+        .iter()
+        .filter(|field| field.key == "xprompts" || field.key == "macros")
+        .max_by_key(|field| field.key_range.0)
+        .map(|field| field.key_range)
+        .unwrap_or(builder.index.fallback_range);
+    builder.push(
+        range,
+        DiagnosticSeverity::Error,
+        "duplicate_macro_frontmatter_section",
+        "Duplicate macro definition keys `xprompts` and `macros`; keep only `macros`",
+    );
 }
 
 fn top_level_field_doc(field: &str) -> Option<&'static str> {
@@ -2695,5 +2730,46 @@ mod tests {
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code == "invalid_xprompt_frontmatter_input_type"
         }));
+    }
+}
+
+#[cfg(test)]
+mod authored_inputs_tests {
+    use super::*;
+
+    fn has_error(diagnostics: &[EditorDiagnostic]) -> bool {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    }
+
+    #[test]
+    fn accepts_macros_section_without_unknown_field() {
+        let diagnostics =
+            validate("---\nmacros:\n  _helper:\n    content: Hi\n---\nBody");
+        assert!(
+            diagnostics.iter().all(|diagnostic| diagnostic.code
+                != "unknown_xprompt_frontmatter_field"),
+            "{diagnostics:?}"
+        );
+        assert!(!has_error(&diagnostics), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn duplicate_local_sections_are_an_error_naming_macros() {
+        for body in [
+            "xprompts:\n  a:\n    content: A\nmacros:\n  b:\n    content: B\n",
+            "xprompts:\nmacros:\n",
+        ] {
+            let diagnostics = validate(&format!("---\n{body}---\n"));
+            let hit = diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic.code == "duplicate_macro_frontmatter_section"
+                })
+                .expect("duplicate authored keys diagnose, {diagnostics:?}");
+            assert_eq!(hit.severity, DiagnosticSeverity::Error);
+            assert!(hit.message.contains("macros"), "{hit:?}");
+        }
     }
 }

@@ -617,8 +617,11 @@ fn xprompt_reference_re() -> &'static Regex {
 fn disabled_region_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // Both literal-zone directive families open and close regions,
+        // including mixed markers (`%macros_enabled:false` …
+        // `%xprompts_enabled:true`). The legacy directive is permanent.
         Regex::new(
-            r"(?ms)^[ \t]*%xprompts_enabled:false[ \t]*\n.*?(?:^[ \t]*|[ \t]+)%xprompts_enabled:true[ \t]*\n?",
+            r"(?ms)^[ \t]*%(?:xprompts|macros)_enabled:false[ \t]*\n.*?(?:^[ \t]*|[ \t]+)%(?:xprompts|macros)_enabled:true[ \t]*\n?",
         )
         .unwrap()
     })
@@ -628,7 +631,7 @@ fn disabled_marker_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^[ \t]*%xprompts_enabled:(?:false|true)[ \t]*\n?|[ \t]+%xprompts_enabled:(?:false|true)[ \t]*",
+            r"(?m)^[ \t]*%(?:xprompts|macros)_enabled:(?:false|true)[ \t]*\n?|[ \t]+%(?:xprompts|macros)_enabled:(?:false|true)[ \t]*",
         )
         .unwrap()
     })
@@ -637,4 +640,46 @@ fn disabled_marker_re() -> &'static Regex {
 pub(crate) fn leading_blank_line_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\s*\n").unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_regions_accept_both_families_and_mixed_markers() {
+        for (open, close) in [
+            ("xprompts", "xprompts"),
+            ("macros", "macros"),
+            ("macros", "xprompts"),
+            ("xprompts", "macros"),
+        ] {
+            let text = format!(
+                "%{open}_enabled:false\n#hidden\n%{close}_enabled:true\n#shown"
+            );
+            let ranges = disabled_region_ranges(&text);
+            assert_eq!(ranges.len(), 1, "{open}/{close}");
+            let hidden = text.find("#hidden").unwrap();
+            let shown = text.find("#shown").unwrap();
+            assert!(position_in_ranges(hidden, &ranges), "{open}/{close}");
+            assert!(!position_in_ranges(shown, &ranges), "{open}/{close}");
+            let stripped = strip_disabled_region_markers(&text);
+            assert!(!stripped.contains("_enabled"), "{stripped}");
+            assert!(stripped.contains("#shown"), "{stripped}");
+        }
+    }
+
+    #[test]
+    fn unclosed_new_family_marker_is_not_a_region() {
+        assert!(disabled_region_ranges("%macros_enabled:false\n#hidden\n")
+            .is_empty());
+    }
+
+    #[test]
+    fn new_family_marker_canonicalizes_to_legacy() {
+        let occurrences =
+            directive_occurrences("%macros_enabled:false").unwrap();
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].canonical_name, "xprompts_enabled");
+    }
 }

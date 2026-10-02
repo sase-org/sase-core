@@ -93,6 +93,10 @@ fn prepare_agent_launch_writes_prompt_and_shapes_process_data() {
         prepared.env_delta["SASE_AGENT_LOCAL_XPROMPTS"],
         "/tmp/xprompts.json"
     );
+    assert_eq!(
+        prepared.env_delta["SASE_AGENT_LOCAL_MACROS"],
+        "/tmp/xprompts.json"
+    );
     assert!(!prepared
         .env_delta
         .contains_key("SASE_AGENT_VCS_WORKFLOW_TYPE"));
@@ -148,6 +152,8 @@ fn prepare_agent_launch_deferred_and_home_claim_shapes() {
     .unwrap();
     assert!(home.claim_request.is_none());
     assert_eq!(home.argv[13], "1");
+    assert!(!deferred.env_delta.contains_key("SASE_AGENT_LOCAL_XPROMPTS"));
+    assert!(!deferred.env_delta.contains_key("SASE_AGENT_LOCAL_MACROS"));
 }
 
 #[test]

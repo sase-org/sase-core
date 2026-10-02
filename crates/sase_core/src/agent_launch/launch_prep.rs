@@ -65,8 +65,14 @@ pub fn prepare_agent_launch(
     }
 
     if let Some(local_macros_file) = request.local_macros_file.as_ref() {
+        // Both local-definition child environment variables carry exactly
+        // the same file.
         env_delta.insert(
             "SASE_AGENT_LOCAL_XPROMPTS".to_string(),
+            local_macros_file.clone(),
+        );
+        env_delta.insert(
+            "SASE_AGENT_LOCAL_MACROS".to_string(),
             local_macros_file.clone(),
         );
     }

@@ -1232,3 +1232,26 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
     assert_eq!(at_end("%model(medium, c"), ["coder="]);
     assert_eq!(at_end("%model(opus, coder="), ["opus"]);
 }
+
+#[test]
+fn macros_enabled_alias_canonicalizes_to_legacy() {
+    assert_eq!(
+        canonical_directive_name("macros_enabled"),
+        Some("xprompts_enabled")
+    );
+    assert_eq!(
+        directive_metadata("macros_enabled").map(|metadata| metadata.name),
+        Some("xprompts_enabled")
+    );
+    // Emitted metadata stays on the legacy spelling.
+    let contract = directive_contract();
+    assert!(contract
+        .iter()
+        .any(|entry| entry.name == "xprompts_enabled"));
+    assert!(!contract.iter().any(|entry| entry.name == "macros_enabled"));
+    let entry = contract
+        .iter()
+        .find(|entry| entry.name == "xprompts_enabled")
+        .expect("legacy contract entry");
+    assert_eq!(entry.alias.as_deref(), Some("macros_enabled"));
+}

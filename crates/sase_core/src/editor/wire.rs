@@ -1063,6 +1063,7 @@ fn directive_metadata_supports_colon(name: &str) -> bool {
             | "dispatch"
             | "tab"
             | "xprompts_enabled"
+            | "macros_enabled"
     )
 }
 

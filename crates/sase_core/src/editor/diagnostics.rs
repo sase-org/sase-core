@@ -547,19 +547,33 @@ fn local_xprompt_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
     let Some(frontmatter) = frontmatter_mapping(document.text()) else {
         return Vec::new();
     };
-    let Some(xprompts) =
-        mapping_get(&frontmatter, "xprompts").and_then(Value::as_mapping)
-    else {
-        return Vec::new();
-    };
-
-    xprompts
-        .iter()
-        .filter_map(|(name, value)| {
-            let name = value_as_string(name)?;
-            local_xprompt_entry_from_config(&name, value)
-        })
-        .collect()
+    // Discover helpers from both the canonical `macros:` section and the
+    // retired `xprompts:` spelling. The canonical entry wins on a name
+    // conflict; a malformed canonical entry falls back to the retired one.
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for key in ["macros", "xprompts"] {
+        let Some(section) =
+            mapping_get(&frontmatter, key).and_then(Value::as_mapping)
+        else {
+            continue;
+        };
+        for (name, value) in section {
+            let Some(name) = value_as_string(name) else {
+                continue;
+            };
+            if seen.contains(&name) {
+                continue;
+            }
+            let Some(entry) = local_xprompt_entry_from_config(&name, value)
+            else {
+                continue;
+            };
+            seen.insert(name);
+            entries.push(entry);
+        }
+    }
+    entries
 }
 
 fn local_xprompt_entry_from_config(
@@ -1772,5 +1786,42 @@ mod tests {
                 "{text}: {diagnostics:?}"
             );
         }
+    }
+
+    #[test]
+    fn discovers_macros_section_helpers_and_validates_args() {
+        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper(docs)\n#_missing\n";
+        let diagnostics = diagnostics_for(text);
+
+        assert!(
+            diagnostics.iter().all(|diagnostic| {
+                diagnostic.code != "unknown_xprompt"
+                    || !diagnostic.message.contains("_helper")
+            }),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "unknown_xprompt"
+                    && diagnostic.message.contains("_missing")
+            }),
+            "{diagnostics:?}"
+        );
+
+        let diagnostics =
+            diagnostics_for("---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper\n");
+        let diagnostic = diagnostic(&diagnostics, "missing_required_arg");
+        assert!(diagnostic.message.contains("topic"));
+        assert!(diagnostic.message.contains("_helper"));
+    }
+
+    #[test]
+    fn canonical_local_section_wins_on_helper_name_conflict() {
+        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Canonical {{ topic }}\nxprompts:\n  _helper:\n    content: Retired\n---\n#_helper\n";
+        let diagnostics = diagnostics_for(text);
+        // Canonical declares required `topic`, so the bare call is missing
+        // an argument; the retired spelling would accept it.
+        let diagnostic = diagnostic(&diagnostics, "missing_required_arg");
+        assert!(diagnostic.message.contains("_helper"));
     }
 }

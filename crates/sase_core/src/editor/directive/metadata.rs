@@ -806,7 +806,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
     },
     DirectiveMetadata {
         name: "xprompts_enabled",
-        alias: None,
+        alias: Some("macros_enabled"),
         description: "Enable or disable xprompt expansion for a region",
         argument_hint: ":false|true",
         takes_argument: true,

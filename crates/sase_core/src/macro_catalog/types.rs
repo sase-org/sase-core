@@ -40,6 +40,16 @@ pub enum MacroCatalogLoadError {
     Read(String),
     #[error("xprompt catalog layout collision: {0}")]
     LayoutCollision(String),
+    #[error(
+        "duplicate macro definition keys `xprompts` and `macros` in {0}; keep only `macros`"
+    )]
+    DuplicateAuthoredKeys(String),
+    #[error(
+        "retired authored `xprompts` key in {0}; rename it to `macros` or reload with legacy names accepted"
+    )]
+    RetiredAuthoredKey(String),
+    #[error("malformed authored `macros` section in {0}; expected a mapping")]
+    MalformedAuthoredSection(String),
 }
 
 fn default_accept_legacy_xprompt_names() -> bool {

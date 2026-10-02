@@ -19,6 +19,7 @@ use crate::{
     MobileXpromptCatalogStatsWire,
 };
 
+mod authored_inputs;
 mod catalog_sources;
 mod loading;
 mod memory;
