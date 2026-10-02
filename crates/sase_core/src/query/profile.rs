@@ -17,8 +17,8 @@ use crate::query::types::QueryErrorWire;
 /// Host-recognized single-character field sigils.
 pub const HOST_SIGIL_CHARS: &[char] = &['+', '^', '~', '&'];
 
-/// Host-recognized macro trigger characters.
-pub const HOST_MACRO_TRIGGERS: &[char] = &['%'];
+/// Host-recognized shorthand trigger characters.
+pub const HOST_SHORTHAND_TRIGGERS: &[char] = &['%'];
 
 /// Closed host predicate kinds and their fixed sigils.
 pub const HOST_PREDICATE_NAMES: &[&str] =
@@ -132,7 +132,7 @@ pub struct QuerySigilSpec {
 
 /// A `<trigger><letter>` shorthand for a fixed `field:value` pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryMacroSpec {
+pub struct QueryShorthandSpec {
     pub trigger: String,
     pub letter: String,
     pub field: String,
@@ -148,12 +148,12 @@ pub struct CompiledQueryProfile {
     pub sigils: Vec<QuerySigilSpec>,
     pub predicates: Vec<String>,
     pub any_special: bool,
-    pub macros: Vec<QueryMacroSpec>,
+    pub shorthands: Vec<QueryShorthandSpec>,
     pub free_text_hint: String,
     pub digest: String,
     field_by_key: HashMap<String, usize>,
     sigil_by_char: HashMap<char, String>,
-    macros_by_trigger_letter: HashMap<(char, char), (String, String)>,
+    shorthands_by_trigger_letter: HashMap<(char, char), (String, String)>,
     predicate_set: HashSet<String>,
 }
 
@@ -204,26 +204,29 @@ impl CompiledQueryProfile {
         self.sigil_by_char.get(&sigil).map(String::as_str)
     }
 
-    /// Resolve a declared macro to `(field, value)`.
-    pub fn macro_target(
+    /// Resolve a declared shorthand to `(field, value)`.
+    pub fn shorthand_target(
         &self,
         trigger: char,
         letter: char,
     ) -> Option<(&str, &str)> {
-        self.macros_by_trigger_letter
+        self.shorthands_by_trigger_letter
             .get(&(trigger, letter.to_ascii_lowercase()))
             .map(|(field, value)| (field.as_str(), value.as_str()))
     }
 
-    /// Macros declared for `trigger`, sorted by letter.
-    pub fn macros_for_trigger(&self, trigger: char) -> Vec<&QueryMacroSpec> {
-        let mut macros: Vec<&QueryMacroSpec> = self
-            .macros
+    /// Shorthands declared for `trigger`, sorted by letter.
+    pub fn shorthands_for_trigger(
+        &self,
+        trigger: char,
+    ) -> Vec<&QueryShorthandSpec> {
+        let mut shorthands: Vec<&QueryShorthandSpec> = self
+            .shorthands
             .iter()
             .filter(|item| item.trigger.starts_with(trigger))
             .collect();
-        macros.sort_by(|left, right| left.letter.cmp(&right.letter));
-        macros
+        shorthands.sort_by(|left, right| left.letter.cmp(&right.letter));
+        shorthands
     }
 
     /// Whether `name` is an enabled closed host predicate.
@@ -244,8 +247,8 @@ struct CompiledQueryProfileWire {
     predicates: Vec<String>,
     #[serde(default)]
     any_special: bool,
-    #[serde(default)]
-    macros: Vec<QueryMacroSpec>,
+    #[serde(default, alias = "shorthands")]
+    macros: Vec<QueryShorthandSpec>,
     #[serde(default)]
     free_text_hint: String,
     #[serde(default)]
@@ -327,13 +330,13 @@ fn compile_profile(
         }
     }
 
-    let mut macros = wire.macros.clone();
-    macros.sort_by(|left, right| {
+    let mut shorthands = wire.macros.clone();
+    shorthands.sort_by(|left, right| {
         left.trigger
             .cmp(&right.trigger)
             .then(left.letter.cmp(&right.letter))
     });
-    validate_macros(&macros, &field_keys)?;
+    validate_shorthands(&shorthands, &field_keys)?;
 
     let payload = canonical_payload(
         &wire.pane_id,
@@ -342,7 +345,7 @@ fn compile_profile(
         &sigils,
         &predicates,
         wire.any_special,
-        &macros,
+        &shorthands,
         &wire.free_text_hint,
     );
     let digest = digest_payload(&payload);
@@ -361,7 +364,7 @@ fn compile_profile(
         sigils,
         predicates,
         wire.any_special,
-        macros,
+        shorthands,
         wire.free_text_hint,
         digest,
     ))
@@ -461,42 +464,44 @@ fn validate_predicates(predicates: &[String]) -> Result<(), QueryErrorWire> {
     Ok(())
 }
 
-fn validate_macros(
-    macros: &[QueryMacroSpec],
+fn validate_shorthands(
+    shorthands: &[QueryShorthandSpec],
     field_keys: &HashSet<String>,
 ) -> Result<(), QueryErrorWire> {
     let mut seen = HashSet::new();
-    for macro_spec in macros {
-        if macro_spec.trigger.chars().count() != 1 {
+    for shorthand_spec in shorthands {
+        if shorthand_spec.trigger.chars().count() != 1 {
             return Err(QueryErrorWire::profile(format!(
                 "macro trigger '{}' is not host-recognized (valid triggers: %)",
-                macro_spec.trigger
+                shorthand_spec.trigger
             )));
         }
-        let trigger = macro_spec.trigger.chars().next().unwrap();
-        if !HOST_MACRO_TRIGGERS.contains(&trigger) {
+        let trigger = shorthand_spec.trigger.chars().next().unwrap();
+        if !HOST_SHORTHAND_TRIGGERS.contains(&trigger) {
             return Err(QueryErrorWire::profile(format!(
                 "macro trigger '{trigger}' is not host-recognized (valid triggers: %)"
             )));
         }
-        if macro_spec.letter.chars().count() != 1 {
+        if shorthand_spec.letter.chars().count() != 1 {
             return Err(QueryErrorWire::profile(format!(
                 "duplicate macro: {}{}",
-                macro_spec.trigger, macro_spec.letter
+                shorthand_spec.trigger, shorthand_spec.letter
             )));
         }
-        let letter = macro_spec.letter.chars().next().unwrap();
+        let letter = shorthand_spec.letter.chars().next().unwrap();
         let key = (trigger, letter.to_ascii_lowercase());
         if !seen.insert(key) {
             return Err(QueryErrorWire::profile(format!(
                 "duplicate macro: {}{}",
-                macro_spec.trigger, macro_spec.letter
+                shorthand_spec.trigger, shorthand_spec.letter
             )));
         }
-        if !field_keys.contains(&macro_spec.field.to_ascii_lowercase()) {
+        if !field_keys.contains(&shorthand_spec.field.to_ascii_lowercase()) {
             return Err(QueryErrorWire::profile(format!(
                 "macro {}{} targets undeclared field '{}'",
-                macro_spec.trigger, macro_spec.letter, macro_spec.field
+                shorthand_spec.trigger,
+                shorthand_spec.letter,
+                shorthand_spec.field
             )));
         }
     }
@@ -511,7 +516,7 @@ fn build_profile(
     sigils: Vec<QuerySigilSpec>,
     predicates: Vec<String>,
     any_special: bool,
-    macros: Vec<QueryMacroSpec>,
+    shorthands: Vec<QueryShorthandSpec>,
     free_text_hint: String,
     digest: String,
 ) -> CompiledQueryProfile {
@@ -525,8 +530,9 @@ fn build_profile(
             sigil_by_char.insert(ch, sigil.field.clone());
         }
     }
-    let mut macros_by_trigger_letter = HashMap::with_capacity(macros.len());
-    for item in &macros {
+    let mut shorthands_by_trigger_letter =
+        HashMap::with_capacity(shorthands.len());
+    for item in &shorthands {
         let trigger = item.trigger.chars().next().unwrap_or('%');
         let letter = item
             .letter
@@ -534,7 +540,7 @@ fn build_profile(
             .next()
             .unwrap_or(' ')
             .to_ascii_lowercase();
-        macros_by_trigger_letter.insert(
+        shorthands_by_trigger_letter.insert(
             (trigger, letter),
             (item.field.clone(), item.value.clone()),
         );
@@ -547,12 +553,12 @@ fn build_profile(
         sigils,
         predicates,
         any_special,
-        macros,
+        shorthands,
         free_text_hint,
         digest,
         field_by_key,
         sigil_by_char,
-        macros_by_trigger_letter,
+        shorthands_by_trigger_letter,
         predicate_set,
     }
 }
@@ -565,7 +571,7 @@ fn canonical_payload(
     sigils: &[QuerySigilSpec],
     predicates: &[String],
     any_special: bool,
-    macros: &[QueryMacroSpec],
+    shorthands: &[QueryShorthandSpec],
     free_text_hint: &str,
 ) -> Value {
     let mut payload = Map::new();
@@ -608,7 +614,7 @@ fn canonical_payload(
     payload.insert(
         "macros".into(),
         Value::Array(
-            macros
+            shorthands
                 .iter()
                 .map(|item| {
                     let mut map = Map::new();
@@ -813,13 +819,13 @@ fn build_patch_profile() -> CompiledQueryProfile {
         .iter()
         .map(|name| (*name).to_string())
         .collect::<Vec<_>>();
-    let macros = vec![
-        status_macro("d", "DRAFT"),
-        status_macro("m", "MAILED"),
-        status_macro("r", "REVERTED"),
-        status_macro("s", "SUBMITTED"),
-        status_macro("w", "WIP"),
-        status_macro("y", "READY"),
+    let shorthands = vec![
+        status_shorthand("d", "DRAFT"),
+        status_shorthand("m", "MAILED"),
+        status_shorthand("r", "REVERTED"),
+        status_shorthand("s", "SUBMITTED"),
+        status_shorthand("w", "WIP"),
+        status_shorthand("y", "READY"),
     ];
     let free_text_hint = "name, description, status, origin, project, refs, parent, pr_url, notes (implicit AND)";
     let payload = canonical_payload(
@@ -829,7 +835,7 @@ fn build_patch_profile() -> CompiledQueryProfile {
         &sigils,
         &predicates,
         true,
-        &macros,
+        &shorthands,
         free_text_hint,
     );
     let digest = digest_payload(&payload);
@@ -840,7 +846,7 @@ fn build_patch_profile() -> CompiledQueryProfile {
         sigils,
         predicates,
         true,
-        macros,
+        shorthands,
         free_text_hint.into(),
         digest,
     )
@@ -873,8 +879,8 @@ fn field(
     }
 }
 
-fn status_macro(letter: &str, value: &str) -> QueryMacroSpec {
-    QueryMacroSpec {
+fn status_shorthand(letter: &str, value: &str) -> QueryShorthandSpec {
+    QueryShorthandSpec {
         trigger: "%".into(),
         letter: letter.into(),
         field: "status".into(),
@@ -904,7 +910,7 @@ pub fn profile_from_parts(
     sigils: Vec<QuerySigilSpec>,
     predicates: Vec<String>,
     any_special: bool,
-    macros: Vec<QueryMacroSpec>,
+    shorthands: Vec<QueryShorthandSpec>,
 ) -> Result<CompiledQueryProfile, QueryErrorWire> {
     let payload = canonical_payload(
         pane_id,
@@ -913,7 +919,7 @@ pub fn profile_from_parts(
         &sigils,
         &predicates,
         any_special,
-        &macros,
+        &shorthands,
         "",
     );
     CompiledQueryProfile::from_wire(&payload)
@@ -937,7 +943,7 @@ mod tests {
             &profile.sigils,
             &profile.predicates,
             profile.any_special,
-            &profile.macros,
+            &profile.shorthands,
             &profile.free_text_hint,
         ) {
             Value::Object(map) => map,
@@ -991,5 +997,52 @@ mod tests {
         let err =
             CompiledQueryProfile::from_wire(&Value::Object(map)).unwrap_err();
         assert!(err.message.contains("digest"), "{err}");
+    }
+
+    #[test]
+    fn profile_accepts_shorthands_alias_for_macros_key() {
+        let shorthand = status_shorthand("d", "DRAFT");
+        let fields =
+            vec![field("status", FieldValueKind::String, true, true, "")];
+        let payload = canonical_payload(
+            "alias",
+            true,
+            &fields,
+            &[],
+            &[],
+            false,
+            std::slice::from_ref(&shorthand),
+            "",
+        );
+        let legacy_map = match payload.clone() {
+            Value::Object(map) => map,
+            other => panic!("expected object, got {other}"),
+        };
+        assert!(
+            legacy_map.contains_key("macros"),
+            "canonical payload must still emit `macros`"
+        );
+        let legacy =
+            CompiledQueryProfile::from_wire(&Value::Object(legacy_map))
+                .unwrap();
+        let mut alias_map = match payload {
+            Value::Object(mut map) => {
+                let macros_value = map.remove("macros").unwrap();
+                map.insert("shorthands".into(), macros_value);
+                map
+            }
+            other => panic!("expected object, got {other}"),
+        };
+        // Digest is computed over the canonical `macros` payload, so drop
+        // any digest before loading the alias spelling.
+        alias_map.remove("digest");
+        let aliased =
+            CompiledQueryProfile::from_wire(&Value::Object(alias_map)).unwrap();
+        assert_eq!(aliased.digest, legacy.digest);
+        assert_eq!(aliased.shorthands, legacy.shorthands);
+        assert_eq!(
+            aliased.shorthand_target('%', 'd'),
+            Some(("status", "DRAFT"))
+        );
     }
 }

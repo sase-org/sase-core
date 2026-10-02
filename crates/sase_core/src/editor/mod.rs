@@ -13,11 +13,11 @@ mod frontmatter;
 pub mod fuzzy;
 pub mod hover;
 pub mod jinja;
+mod macro_args;
 pub mod model_alias_shortcut;
 pub mod placeholder;
 pub mod token;
 pub mod wire;
-mod xprompt_args;
 
 pub use alternation::{
     scan_alternations, AlternationFormWire, AlternationScanWire,
@@ -90,6 +90,9 @@ pub use frontmatter::{
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::{hover_at_position, hover_at_position_with_flags};
+pub(crate) use macro_args::{
+    find_matching_bracket_for_args, parse_xprompt_reference_body,
+};
 pub use model_alias_shortcut::{
     detect_model_alias_shortcut_context,
     filter_explicit_model_shortcut_entries,
@@ -138,7 +141,4 @@ pub use wire::{
     XpromptCallNameSpan, XpromptInputHint, AGENT_CATALOG_SCHEMA_VERSION,
     EDITOR_WIRE_SCHEMA_VERSION, FINALIZER_CATALOG_SCHEMA_VERSION,
     VCS_PROJECT_CATALOG_SCHEMA_VERSION, VCS_REPO_CATALOG_SCHEMA_VERSION,
-};
-pub(crate) use xprompt_args::{
-    find_matching_bracket_for_args, parse_xprompt_reference_body,
 };

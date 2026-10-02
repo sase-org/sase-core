@@ -14,13 +14,13 @@ use super::alternation::{scan_alternations, AlternationFormWire};
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
+use super::macro_args::{
+    parse_xprompt_calls, ParsedXpromptArg, XpromptArgSyntax,
+};
 use super::placeholder::extract_placeholder_spans;
 use super::token::DocumentSnapshot;
 use super::wire::{
     DiagnosticSeverity, EditorDiagnostic, XpromptAssistEntry, XpromptInputHint,
-};
-use super::xprompt_args::{
-    parse_xprompt_calls, ParsedXpromptArg, XpromptArgSyntax,
 };
 
 pub fn analyze_document(
@@ -367,7 +367,7 @@ fn argument_diagnostics(
 fn validate_call_args(
     document: &DocumentSnapshot,
     entry: &XpromptAssistEntry,
-    call: &super::xprompt_args::ParsedXpromptCall,
+    call: &super::macro_args::ParsedXpromptCall,
     out: &mut Vec<EditorDiagnostic>,
 ) {
     for validation in validate_xprompt_call_args(entry, call) {
@@ -402,7 +402,7 @@ pub(crate) struct XpromptArgValidation {
 
 pub(crate) fn validate_xprompt_call_args(
     entry: &XpromptAssistEntry,
-    call: &super::xprompt_args::ParsedXpromptCall,
+    call: &super::macro_args::ParsedXpromptCall,
 ) -> Vec<XpromptArgValidation> {
     let mut out = Vec::new();
     let mut supplied_inputs = HashSet::new();

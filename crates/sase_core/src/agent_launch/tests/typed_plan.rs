@@ -617,7 +617,7 @@ fn typed_launch_clan_double_colon_eol_binds_next_line_summary() {
 fn parse_directive_args_text_block_corpus_matches_python() {
     use std::collections::BTreeMap;
 
-    for case in crate::xprompt_text_block::xprompt_args_corpus() {
+    for case in crate::macro_text_block::xprompt_args_corpus() {
         let parsed = parse_directive_args_with_names(&case.source, ',');
         let mut positional = Vec::new();
         let mut named = BTreeMap::new();

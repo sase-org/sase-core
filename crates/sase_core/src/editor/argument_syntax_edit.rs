@@ -4,9 +4,9 @@ use super::directive::{
 use super::exclusion::{
     excluded_literal_and_definition_ranges, position_in_ranges,
 };
+use super::macro_args::xprompt_argument_open_colon_at;
 use super::token::DocumentSnapshot;
 use super::wire::{EditorPosition, EditorTextEdit};
-use super::xprompt_args::xprompt_argument_open_colon_at;
 
 /// Plan deleting an invocation argument colon before a just-typed `(`.
 ///

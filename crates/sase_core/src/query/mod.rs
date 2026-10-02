@@ -47,8 +47,8 @@ pub use parser::{
 pub use profile::{
     host_date_bound_direction, host_duration_bound_direction,
     patch_query_profile, CompiledQueryProfile, FieldValueKind, QueryFieldSpec,
-    QueryMacroSpec, QuerySigilSpec, HOST_DATE_BOUND_KEYS,
-    HOST_DURATION_BOUND_KEYS, HOST_MACRO_TRIGGERS, HOST_PREDICATE_NAMES,
+    QueryShorthandSpec, QuerySigilSpec, HOST_DATE_BOUND_KEYS,
+    HOST_DURATION_BOUND_KEYS, HOST_PREDICATE_NAMES, HOST_SHORTHAND_TRIGGERS,
     HOST_SIGIL_CHARS,
 };
 pub use row::{

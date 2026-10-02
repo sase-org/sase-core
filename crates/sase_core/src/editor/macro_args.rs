@@ -1,7 +1,7 @@
 use regex::Regex;
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use crate::xprompt_text_block::find_text_block_close_for_args;
+use crate::macro_text_block::find_text_block_close_for_args;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum XpromptArgSyntax {
@@ -784,7 +784,7 @@ mod tests {
 
     #[test]
     fn shared_corpus_matches_python_parse_args() {
-        for case in crate::xprompt_text_block::xprompt_args_corpus() {
+        for case in crate::macro_text_block::xprompt_args_corpus() {
             let call = one(&format!("#foo({})", case.source));
             let mut positional = Vec::new();
             let mut named = BTreeMap::new();

@@ -8,7 +8,7 @@ use super::candidate_lists::mixes_positional_and_keyword_clauses;
 use super::contract::{
     canonical_directive_name, directive_allows_keywords, directive_metadata,
 };
-use crate::xprompt_text_block::find_text_block_close_for_args_bytes;
+use crate::macro_text_block::find_text_block_close_for_args_bytes;
 
 pub fn is_directive_like_token(token: &str) -> bool {
     token.starts_with('%') || token == "%(" || token == "%{"

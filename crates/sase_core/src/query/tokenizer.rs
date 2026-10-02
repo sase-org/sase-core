@@ -440,15 +440,15 @@ impl<'a> Tokenizer<'a> {
         trigger: char,
         start: usize,
     ) -> Result<Option<(String, String)>, QueryErrorWire> {
-        let macros = self.profile.macros_for_trigger(trigger);
-        if macros.is_empty() {
+        let shorthands = self.profile.shorthands_for_trigger(trigger);
+        if shorthands.is_empty() {
             return Ok(None);
         }
         self.pos += 1;
         let next = self.peek_at(0).map(|byte| byte as char);
         if let Some(letter) = next {
             if let Some((field, value)) =
-                self.profile.macro_target(trigger, letter)
+                self.profile.shorthand_target(trigger, letter)
             {
                 self.pos += 1;
                 return Ok(Some((field.to_string(), value.to_string())));
@@ -530,12 +530,12 @@ fn invalid_macro_message(
     trigger: char,
     profile: &CompiledQueryProfile,
 ) -> String {
-    let macros = profile.macros_for_trigger(trigger);
-    if macros.is_empty() {
+    let shorthands = profile.shorthands_for_trigger(trigger);
+    if shorthands.is_empty() {
         return format!("Invalid {trigger} shorthand");
     }
-    let field = macros[0].field.as_str();
-    let tokens: Vec<String> = macros
+    let field = shorthands[0].field.as_str();
+    let tokens: Vec<String> = shorthands
         .iter()
         .map(|item| format!("{trigger}{}", item.letter))
         .collect();

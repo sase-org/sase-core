@@ -79,6 +79,8 @@ pub mod host_liveness;
 pub mod launch_scratch_liveness;
 pub mod machine_hood;
 pub mod machine_setup;
+pub mod macro_catalog;
+mod macro_text_block;
 pub mod managed_origin;
 pub mod managed_tmp;
 pub mod managed_tmp_roots;
@@ -134,8 +136,6 @@ pub mod tool_run;
 pub mod vcs_log;
 pub mod wire;
 pub mod workspace_lease;
-pub mod xprompt_catalog;
-mod xprompt_text_block;
 
 /// Return launch-inert literal zones as UTF-8 byte ranges.
 ///
@@ -1163,6 +1163,14 @@ pub use machine_setup::{
     RECONCILE_STATUS_ENROLLED, RECONCILE_STATUS_NEW, RECONCILE_STATUS_REPAIR,
     SASE_GATEWAY_HEALTH_SERVICE, TAILNET_PROVIDER_REF,
 };
+pub use macro_catalog::{
+    load_editor_snippet_catalog, load_editor_xprompt_catalog,
+    resolve_xprompt_skill_definition, XpromptCatalogLoadError,
+    XpromptCatalogLoadOptions, XpromptCatalogResourcePaths,
+    XpromptSkillDefinitionCandidateWire, XpromptSkillDefinitionRequestWire,
+    XpromptSkillDefinitionResolutionWire,
+    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+};
 pub use managed_origin::{
     decide_managed_origin_reconciliation, ManagedOriginPushUrlRewriteWire,
     ManagedOriginReconciliationDecisionWire,
@@ -1404,8 +1412,8 @@ pub use query::{
     tokenize_query_with_profile, try_evaluate_query_many_in_corpus,
     CompiledQueryProfile, FieldValueKind, QueryCorpus, QueryErrorWire,
     QueryEvaluationContext, QueryExprWire, QueryFieldSpec, QueryFieldValues,
-    QueryMacroSpec, QueryPredicateFacts, QueryProgram, QueryProgramWire,
-    QueryRow, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
+    QueryPredicateFacts, QueryProgram, QueryProgramWire, QueryRow,
+    QueryShorthandSpec, QuerySigilSpec, QueryTokenKind, QueryTokenWire,
 };
 pub use queue_directive::{
     collect_queue_fields, collect_queue_fields_with_flags,
@@ -1644,12 +1652,4 @@ pub use workspace_lease::{
     LEGACY_PRIMARY_WORKSPACE_NUM, MACHINE_OWNED_MIN_WORKSPACE,
     OPERATIONAL_LEASE_POLICY_KIND, PRIMARY_WORKSPACE_NUM,
     UNIFIED_MAX_WORKSPACE,
-};
-pub use xprompt_catalog::{
-    load_editor_snippet_catalog, load_editor_xprompt_catalog,
-    resolve_xprompt_skill_definition, XpromptCatalogLoadError,
-    XpromptCatalogLoadOptions, XpromptCatalogResourcePaths,
-    XpromptSkillDefinitionCandidateWire, XpromptSkillDefinitionRequestWire,
-    XpromptSkillDefinitionResolutionWire,
-    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
 };

@@ -4,8 +4,8 @@
 //! Everything here is lexical: no launch planning, only positions.
 use super::wires::AgentLaunchFanoutPlanError;
 use crate::fenced_code::fenced_block_ranges;
+use crate::macro_text_block::find_text_block_close_for_args;
 use crate::prompt_literals::inline_code_ranges;
-use crate::xprompt_text_block::find_text_block_close_for_args;
 use regex::Regex;
 use std::sync::OnceLock;
 

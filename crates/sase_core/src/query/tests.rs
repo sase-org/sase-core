@@ -7,7 +7,7 @@
 
 use crate::query::profile::{
     profile_from_parts, CompiledQueryProfile, FieldValueKind, QueryFieldSpec,
-    QueryMacroSpec, QuerySigilSpec, HOST_DATE_BOUND_KEYS,
+    QueryShorthandSpec, QuerySigilSpec, HOST_DATE_BOUND_KEYS,
     HOST_DURATION_BOUND_KEYS,
 };
 use crate::query::row::{QueryFieldValues, QueryPredicateFacts, QueryRow};
@@ -895,7 +895,7 @@ fn boolean_custom_profile() -> CompiledQueryProfile {
             "running_process".into(),
         ],
         true,
-        vec![QueryMacroSpec {
+        vec![QueryShorthandSpec {
             trigger: "%".into(),
             letter: "x".into(),
             field: "label".into(),
