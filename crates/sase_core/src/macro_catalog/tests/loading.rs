@@ -19,9 +19,9 @@ fn loads_markdown_and_workflow_with_canonical_insertions() {
         )
         .unwrap();
 
-    let response = load_editor_xprompt_catalog(
+    let response = load_editor_macro_catalog(
         &request(),
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let by_name = response
@@ -75,7 +75,7 @@ fn rejects_misplaced_skill_definitions_in_both_directions() {
         home_dir: Some(home),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
     assert!(xprompts.is_empty(), "{:?}", xprompts.keys());
 
     // Nothing is dropped silently: each rejection names the source and
@@ -117,7 +117,7 @@ fn packaged_skill_frame_template_is_not_a_skill_source() {
         package_skills_dir: Some(package_skills),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     assert_eq!(xprompts.keys().collect::<Vec<_>>(), vec!["skill/sase_plan"]);
     assert!(
@@ -149,7 +149,7 @@ fn packaged_skills_load_from_nested_xprompts_skills_only() {
         package_skills_dir: Some(package.join("xprompts/skills")),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     assert!(xprompts.contains_key("skill/sase_plan"));
     assert!(!xprompts.contains_key("skill/legacy_plan"));
@@ -178,7 +178,7 @@ fn home_skills_use_the_skill_namespace_and_project_qualified_form() {
         home_dir: Some(home),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(Some("app")).unwrap();
+    let xprompts = loader.load_all_macros(Some("app")).unwrap();
     let names = xprompts.keys().cloned().collect::<Vec<_>>();
     assert_eq!(names, vec!["app/skill/scoped", "skill/bob_query"]);
     assert_eq!(

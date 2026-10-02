@@ -2,7 +2,7 @@
 
 use super::super::*;
 use crate::editor::wire::{
-    AgentCompletionEntry, EditorPosition, XpromptAssistEntry,
+    AgentCompletionEntry, EditorPosition, MacroAssistEntry,
 };
 use crate::{
     EditorXpromptCatalogEntryWire, MemoryTierWire, MobileXpromptInputWire,
@@ -26,7 +26,7 @@ pub(super) fn agent_target(
         documentation: String::new(),
     }
 }
-pub(super) fn entries() -> Vec<XpromptAssistEntry> {
+pub(super) fn entries() -> Vec<MacroAssistEntry> {
     assist_entries_from_catalog(&[
         EditorXpromptCatalogEntryWire {
             name: "review".to_string(),

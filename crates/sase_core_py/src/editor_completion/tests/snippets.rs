@@ -613,6 +613,102 @@ fn xprompt_argument_spans_binding_returns_open_structural_spans() {
 }
 
 #[test]
+fn macro_binding_aliases_agree_with_legacy_names() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_xprompt_argument_spans, &module).unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_macro_argument_spans, &module).unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(
+                    py_xprompt_skill_definition_wire_schema_version,
+                    &module
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(
+                    py_macro_skill_definition_wire_schema_version,
+                    &module
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_resolve_xprompt_skill_definition, &module)
+                    .unwrap(),
+            )
+            .unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_resolve_macro_skill_definition, &module)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let source = "#foo(key=1)";
+        let old = module
+            .getattr("xprompt_argument_spans")
+            .unwrap()
+            .call1((source,))
+            .unwrap();
+        let new = module
+            .getattr("macro_argument_spans")
+            .unwrap()
+            .call1((source,))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&old).unwrap(),
+            py_to_json_value(&new).unwrap()
+        );
+
+        let old_version: u64 = module
+            .getattr("xprompt_skill_definition_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract()
+            .unwrap();
+        let new_version: u64 = module
+            .getattr("macro_skill_definition_wire_schema_version")
+            .unwrap()
+            .call0()
+            .unwrap()
+            .extract()
+            .unwrap();
+        assert_eq!(old_version, new_version);
+        assert_eq!(old_version, 1);
+
+        let bad = PyDict::new_bound(py);
+        let old_err = module
+            .getattr("resolve_xprompt_skill_definition")
+            .unwrap()
+            .call1((&bad, py.None()))
+            .unwrap_err()
+            .to_string();
+        let new_err = module
+            .getattr("resolve_macro_skill_definition")
+            .unwrap()
+            .call1((&bad, py.None()))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(old_err, new_err);
+    });
+}
+
+#[test]
 fn model_alias_shortcut_bindings_return_plain_dict_shapes() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

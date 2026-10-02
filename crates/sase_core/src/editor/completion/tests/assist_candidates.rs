@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 #[test]
 fn builds_catalog_completions_with_marker_filters() {
     let catalog = entries();
-    let inline = build_xprompt_completion_candidates("#r", None, &catalog);
+    let inline = build_macro_completion_candidates("#r", None, &catalog);
     assert_eq!(
         inline
             .candidates
@@ -24,13 +24,13 @@ fn builds_catalog_completions_with_marker_filters() {
         vec!["#review", "#!run"]
     );
 
-    let standalone = build_xprompt_completion_candidates("#!r", None, &catalog);
+    let standalone = build_macro_completion_candidates("#!r", None, &catalog);
     assert_eq!(standalone.candidates[0].insertion, "#!run");
 
     // Slash completion offers the provider skill name, never the
     // namespaced xprompt reference, and a non-skill workflow that happens
     // to share the prefix is not a slash candidate.
-    let skill = build_xprompt_completion_candidates("/p", None, &catalog);
+    let skill = build_macro_completion_candidates("/p", None, &catalog);
     assert_eq!(
         skill
             .candidates
@@ -39,13 +39,13 @@ fn builds_catalog_completions_with_marker_filters() {
             .collect::<Vec<_>>(),
         vec!["/plan"]
     );
-    assert!(build_xprompt_completion_candidates("/r", None, &catalog)
+    assert!(build_macro_completion_candidates("/r", None, &catalog)
         .candidates
         .is_empty());
 
     // The same skill is reachable inline only through `#skill/plan`.
     let namespaced =
-        build_xprompt_completion_candidates("#skill/", None, &catalog);
+        build_macro_completion_candidates("#skill/", None, &catalog);
     assert_eq!(
         namespaced
             .candidates
@@ -55,11 +55,11 @@ fn builds_catalog_completions_with_marker_filters() {
         vec!["#skill/plan"]
     );
     assert!(
-        build_xprompt_completion_candidates("#skills/", None, &catalog)
+        build_macro_completion_candidates("#skills/", None, &catalog)
             .candidates
             .is_empty()
     );
-    assert!(build_xprompt_completion_candidates("#plan", None, &catalog)
+    assert!(build_macro_completion_candidates("#plan", None, &catalog)
         .candidates
         .is_empty());
 }
@@ -68,7 +68,7 @@ fn memory_completes_only_through_the_memory_namespace() {
     let catalog = entries();
 
     let namespaced =
-        build_xprompt_completion_candidates("#memory/", None, &catalog);
+        build_macro_completion_candidates("#memory/", None, &catalog);
     assert_eq!(
         namespaced
             .candidates
@@ -79,12 +79,12 @@ fn memory_completes_only_through_the_memory_namespace() {
     );
     // No bare alias exists, and a memory note is never a slash skill.
     assert!(
-        build_xprompt_completion_candidates("#glossary", None, &catalog)
+        build_macro_completion_candidates("#glossary", None, &catalog)
             .candidates
             .is_empty()
     );
     assert!(
-        build_xprompt_completion_candidates("/glossary", None, &catalog)
+        build_macro_completion_candidates("/glossary", None, &catalog)
             .candidates
             .is_empty()
     );
@@ -490,7 +490,7 @@ fn model_at_suffix_completes_effort_vocabulary() {
 #[test]
 fn builds_argument_name_completions() {
     let catalog = entries();
-    let list = build_xprompt_arg_name_candidates(
+    let list = build_macro_arg_name_candidates(
         &catalog[0],
         &BTreeSet::from(["path".to_string()]),
         "d",

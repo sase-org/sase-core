@@ -14,18 +14,16 @@ use super::alternation::{scan_alternations, AlternationFormWire};
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
-use super::macro_args::{
-    parse_xprompt_calls, ParsedXpromptArg, XpromptArgSyntax,
-};
+use super::macro_args::{parse_macro_calls, MacroArgSyntax, ParsedMacroArg};
 use super::placeholder::extract_placeholder_spans;
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DiagnosticSeverity, EditorDiagnostic, XpromptAssistEntry, XpromptInputHint,
+    DiagnosticSeverity, EditorDiagnostic, MacroAssistEntry, MacroInputHint,
 };
 
 pub fn analyze_document(
     document: &DocumentSnapshot,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
     let local_entries = local_xprompt_entries(document);
     let combined_entries;
@@ -199,19 +197,19 @@ fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
 }
 
 fn merged_entries(
-    mut local_entries: Vec<XpromptAssistEntry>,
-    entries: &[XpromptAssistEntry],
-) -> Vec<XpromptAssistEntry> {
+    mut local_entries: Vec<MacroAssistEntry>,
+    entries: &[MacroAssistEntry],
+) -> Vec<MacroAssistEntry> {
     local_entries.extend_from_slice(entries);
     local_entries
 }
 
 fn xprompt_diagnostics(
     document: &DocumentSnapshot,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
     let mut out = Vec::new();
-    for caps in xprompt_ref_re().captures_iter(document.text()) {
+    for caps in macro_ref_re().captures_iter(document.text()) {
         let Some(marker) = caps.name("marker") else {
             continue;
         };
@@ -254,7 +252,7 @@ fn xprompt_diagnostics(
 
 fn slash_skill_diagnostics(
     document: &DocumentSnapshot,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
     let mut out = Vec::new();
     for caps in slash_skill_re().captures_iter(document.text()) {
@@ -332,15 +330,15 @@ fn alternation_diagnostics(
 
 fn argument_diagnostics(
     document: &DocumentSnapshot,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Vec<EditorDiagnostic> {
     let mut out = Vec::new();
-    for call in parse_xprompt_calls(document.text()) {
+    for call in parse_macro_calls(document.text()) {
         let Some(entry) = entries.iter().find(|entry| entry.name == call.name)
         else {
             continue;
         };
-        if matches!(call.syntax, XpromptArgSyntax::Malformed) {
+        if matches!(call.syntax, MacroArgSyntax::Malformed) {
             let Some((start, end)) = call.malformed_span else {
                 continue;
             };
@@ -366,11 +364,11 @@ fn argument_diagnostics(
 
 fn validate_call_args(
     document: &DocumentSnapshot,
-    entry: &XpromptAssistEntry,
-    call: &super::macro_args::ParsedXpromptCall,
+    entry: &MacroAssistEntry,
+    call: &super::macro_args::ParsedMacroCall,
     out: &mut Vec<EditorDiagnostic>,
 ) {
-    for validation in validate_xprompt_call_args(entry, call) {
+    for validation in validate_macro_call_args(entry, call) {
         push_diagnostic(
             document,
             out,
@@ -383,7 +381,7 @@ fn validate_call_args(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum XpromptArgValidationKind {
+pub(crate) enum MacroArgValidationKind {
     DuplicateKey,
     UnknownKey,
     TypeMismatch,
@@ -392,18 +390,18 @@ pub(crate) enum XpromptArgValidationKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct XpromptArgValidation {
-    pub(crate) kind: XpromptArgValidationKind,
+pub(crate) struct MacroArgValidation {
+    pub(crate) kind: MacroArgValidationKind,
     pub(crate) arg_index: Option<usize>,
     pub(crate) span: (usize, usize),
     pub(crate) code: &'static str,
     pub(crate) message: String,
 }
 
-pub(crate) fn validate_xprompt_call_args(
-    entry: &XpromptAssistEntry,
-    call: &super::macro_args::ParsedXpromptCall,
-) -> Vec<XpromptArgValidation> {
+pub(crate) fn validate_macro_call_args(
+    entry: &MacroAssistEntry,
+    call: &super::macro_args::ParsedMacroCall,
+) -> Vec<MacroArgValidation> {
     let mut out = Vec::new();
     let mut supplied_inputs = HashSet::new();
     let mut seen_named_args = HashSet::new();
@@ -412,8 +410,8 @@ pub(crate) fn validate_xprompt_call_args(
     for (arg_index, arg) in call.args.iter().enumerate() {
         if let Some(name) = &arg.name {
             if !seen_named_args.insert(name.value.clone()) {
-                out.push(XpromptArgValidation {
-                    kind: XpromptArgValidationKind::DuplicateKey,
+                out.push(MacroArgValidation {
+                    kind: MacroArgValidationKind::DuplicateKey,
                     arg_index: Some(arg_index),
                     span: name.span,
                     code: "duplicate_xprompt_arg",
@@ -427,8 +425,8 @@ pub(crate) fn validate_xprompt_call_args(
             let Some(input) =
                 entry.inputs.iter().find(|input| input.name == name.value)
             else {
-                out.push(XpromptArgValidation {
-                    kind: XpromptArgValidationKind::UnknownKey,
+                out.push(MacroArgValidation {
+                    kind: MacroArgValidationKind::UnknownKey,
                     arg_index: Some(arg_index),
                     span: name.span,
                     code: "unknown_xprompt_arg",
@@ -444,8 +442,8 @@ pub(crate) fn validate_xprompt_call_args(
         } else {
             let Some(input) = input_for_position(entry, positional_index)
             else {
-                out.push(XpromptArgValidation {
-                    kind: XpromptArgValidationKind::TooManyArgs,
+                out.push(MacroArgValidation {
+                    kind: MacroArgValidationKind::TooManyArgs,
                     arg_index: Some(arg_index),
                     span: arg.value_span,
                     code: "too_many_args",
@@ -467,8 +465,8 @@ pub(crate) fn validate_xprompt_call_args(
         if supplied_inputs.contains(&input.name) {
             continue;
         }
-        out.push(XpromptArgValidation {
-            kind: XpromptArgValidationKind::MissingRequiredArg,
+        out.push(MacroArgValidation {
+            kind: MacroArgValidationKind::MissingRequiredArg,
             arg_index: None,
             span: call.name_span,
             code: "missing_required_arg",
@@ -482,17 +480,17 @@ pub(crate) fn validate_xprompt_call_args(
 }
 
 fn validate_type(
-    entry: &XpromptAssistEntry,
-    input: &XpromptInputHint,
+    entry: &MacroAssistEntry,
+    input: &MacroInputHint,
     arg_index: usize,
-    arg: &ParsedXpromptArg,
-    out: &mut Vec<XpromptArgValidation>,
+    arg: &ParsedMacroArg,
+    out: &mut Vec<MacroArgValidation>,
 ) {
     if arg.value == "null" || value_matches_input_type(&arg.value, input) {
         return;
     }
-    out.push(XpromptArgValidation {
-        kind: XpromptArgValidationKind::TypeMismatch,
+    out.push(MacroArgValidation {
+        kind: MacroArgValidationKind::TypeMismatch,
         arg_index: Some(arg_index),
         span: arg.value_span,
         code: "invalid_xprompt_arg_type",
@@ -503,8 +501,8 @@ fn validate_type(
     });
 }
 
-fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
-    if xprompt_arg_value_unresolvable(value) {
+fn value_matches_input_type(value: &str, input: &MacroInputHint) -> bool {
+    if macro_arg_value_unresolvable(value) {
         return true;
     }
     match input.r#type.as_str() {
@@ -524,7 +522,7 @@ fn value_matches_input_type(value: &str, input: &XpromptInputHint) -> bool {
     }
 }
 
-pub(crate) fn xprompt_arg_value_unresolvable(value: &str) -> bool {
+pub(crate) fn macro_arg_value_unresolvable(value: &str) -> bool {
     value.contains("{{")
         || value.contains("{%")
         || value.contains("{#")
@@ -536,18 +534,16 @@ pub(crate) fn xprompt_arg_value_unresolvable(value: &str) -> bool {
 }
 
 fn input_for_position(
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
     position: usize,
-) -> Option<&XpromptInputHint> {
+) -> Option<&MacroInputHint> {
     entry
         .inputs
         .get(position)
         .or_else(|| entry.inputs.last().filter(|input| input.repeatable))
 }
 
-fn local_xprompt_entries(
-    document: &DocumentSnapshot,
-) -> Vec<XpromptAssistEntry> {
+fn local_xprompt_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
     let Some(frontmatter) = frontmatter_mapping(document.text()) else {
         return Vec::new();
     };
@@ -569,7 +565,7 @@ fn local_xprompt_entries(
 fn local_xprompt_entry_from_config(
     name: &str,
     value: &Value,
-) -> Option<XpromptAssistEntry> {
+) -> Option<MacroAssistEntry> {
     if !is_referenceable_xprompt_name(name) {
         return None;
     }
@@ -583,7 +579,7 @@ fn local_xprompt_entry_from_config(
             .unwrap_or_default()
     };
     let insertion = format!("#{name}");
-    Some(XpromptAssistEntry {
+    Some(MacroAssistEntry {
         name: name.to_string(),
         display_label: name.to_string(),
         insertion,
@@ -605,7 +601,7 @@ fn local_xprompt_entry_from_config(
     })
 }
 
-pub(crate) fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
+pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
     if let Some(mapping) = value.as_mapping() {
         return mapping
             .iter()
@@ -614,7 +610,7 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
                 let name = value_as_string(name)?;
                 let (type_name, required, default_display, repeatable) =
                     parse_short_input_hint(raw);
-                Some(XpromptInputHint {
+                Some(MacroInputHint {
                     name,
                     r#type: type_name,
                     description: input_description(raw),
@@ -639,7 +635,7 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<XpromptInputHint> {
                     .map(|raw| parse_input_type_name(&raw))
                     .unwrap_or_else(|| "line".to_string());
                 let default = mapping_get(mapping, "default");
-                Some(XpromptInputHint {
+                Some(MacroInputHint {
                     name,
                     r#type: type_name,
                     description: mapping_get(mapping, "description")
@@ -804,7 +800,7 @@ fn push_diagnostic(
     });
 }
 
-fn xprompt_ref_re() -> &'static Regex {
+fn macro_ref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -845,9 +841,9 @@ mod tests {
     use super::*;
     use crate::{ArtifactRefBeadStoreWire, ArtifactRefDocumentRootWire};
 
-    fn catalog() -> Vec<XpromptAssistEntry> {
+    fn catalog() -> Vec<MacroAssistEntry> {
         vec![
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "review".to_string(),
                 display_label: "review".to_string(),
                 insertion: "#review".to_string(),
@@ -867,7 +863,7 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "run".to_string(),
                 display_label: "run".to_string(),
                 insertion: "#!run".to_string(),
@@ -887,7 +883,7 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "skill/plan".to_string(),
                 display_label: "skill/plan".to_string(),
                 insertion: "#skill/plan".to_string(),
@@ -907,7 +903,7 @@ mod tests {
                 skill_name: Some("plan".to_string()),
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "typed".to_string(),
                 display_label: "typed".to_string(),
                 insertion: "#typed".to_string(),
@@ -931,7 +927,7 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "pr".to_string(),
                 display_label: "pr".to_string(),
                 insertion: "#pr".to_string(),
@@ -951,7 +947,7 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "ns/foo".to_string(),
                 display_label: "ns/foo".to_string(),
                 insertion: "#ns/foo".to_string(),
@@ -971,7 +967,7 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: "merge".to_string(),
                 display_label: "merge".to_string(),
                 insertion: "#merge".to_string(),
@@ -999,8 +995,8 @@ mod tests {
         r#type: &str,
         required: bool,
         position: u32,
-    ) -> XpromptInputHint {
-        XpromptInputHint {
+    ) -> MacroInputHint {
+        MacroInputHint {
             name: name.to_string(),
             r#type: r#type.to_string(),
             description: None,
@@ -1016,8 +1012,8 @@ mod tests {
         r#type: &str,
         required: bool,
         position: u32,
-    ) -> XpromptInputHint {
-        XpromptInputHint {
+    ) -> MacroInputHint {
+        MacroInputHint {
             repeatable: true,
             ..input(name, r#type, required, position)
         }

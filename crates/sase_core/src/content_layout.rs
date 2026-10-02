@@ -126,7 +126,7 @@ pub struct ChezmoiContentLayoutWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptSourceWire {
+pub struct MacroSourceWire {
     pub id: String,
     pub priority: u32,
     pub scope: String,
@@ -219,7 +219,7 @@ pub struct SaseContentLayoutWire {
     pub project: Option<ProjectContentLayoutWire>,
     pub home: HomeContentLayoutWire,
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
-    pub xprompt_sources: Vec<XpromptSourceWire>,
+    pub xprompt_sources: Vec<MacroSourceWire>,
     pub skill_sources: Vec<SkillSourceWire>,
     pub memory_sources: Vec<MemorySourceWire>,
 }
@@ -227,7 +227,7 @@ pub struct SaseContentLayoutWire {
 /// Why a definition was rejected by the xprompt-memory rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MemoryXpromptRuleWire {
+pub enum MemoryMacroRuleWire {
     /// A definition that is not a memory note claims a name in the reserved
     /// `memory/` reference namespace.
     ReservedNamespace,
@@ -238,9 +238,9 @@ pub enum MemoryXpromptRuleWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryXpromptIssueWire {
+pub struct MemoryMacroIssueWire {
     pub source: String,
-    pub rule: MemoryXpromptRuleWire,
+    pub rule: MemoryMacroRuleWire,
     pub message: String,
 }
 
@@ -282,10 +282,10 @@ pub fn is_invokable_memory_stem(stem: &str) -> bool {
 pub fn reserved_memory_namespace_issue(
     source: &str,
     name: &str,
-) -> Option<MemoryXpromptIssueWire> {
-    is_reserved_memory_reference(name).then(|| MemoryXpromptIssueWire {
+) -> Option<MemoryMacroIssueWire> {
+    is_reserved_memory_reference(name).then(|| MemoryMacroIssueWire {
         source: source.to_string(),
-        rule: MemoryXpromptRuleWire::ReservedNamespace,
+        rule: MemoryMacroRuleWire::ReservedNamespace,
         message: format!(
             "{source} claims the reserved xprompt-memory reference \
              `#{name}`; the `{MEMORY_NAMESPACE_SEGMENT}/` namespace only names \
@@ -302,23 +302,23 @@ pub fn memory_note_issue(
     source: &str,
     stem: &str,
     note_type: Option<&str>,
-) -> Option<MemoryXpromptIssueWire> {
+) -> Option<MemoryMacroIssueWire> {
     if note_type.and_then(MemoryTierWire::parse).is_none() {
         let declared = note_type
             .map(|value| format!("`{value}`"))
             .unwrap_or_else(|| "no `type:` value".to_string());
-        return Some(MemoryXpromptIssueWire {
+        return Some(MemoryMacroIssueWire {
             source: source.to_string(),
-            rule: MemoryXpromptRuleWire::InvalidNoteType,
+            rule: MemoryMacroRuleWire::InvalidNoteType,
             message: format!(
                 "{source} declares {declared}; a SASE memory note must declare \
                  `type: core` or `type: reference` to be an xprompt memory"
             ),
         });
     }
-    (!is_invokable_memory_stem(stem)).then(|| MemoryXpromptIssueWire {
+    (!is_invokable_memory_stem(stem)).then(|| MemoryMacroIssueWire {
         source: source.to_string(),
-        rule: MemoryXpromptRuleWire::InvalidStem,
+        rule: MemoryMacroRuleWire::InvalidStem,
         message: format!(
             "{source} cannot be referenced as \
              `#{}`: rename the note so its filename stem starts with a letter \
@@ -640,7 +640,7 @@ fn xprompt_sources(
     project_root: Option<&Path>,
     home_root: &Path,
     project_name: Option<&str>,
-) -> Vec<XpromptSourceWire> {
+) -> Vec<MacroSourceWire> {
     let mut sources = Vec::new();
     if let Some(root) = project_root {
         push_directory_source(
@@ -928,7 +928,7 @@ fn refs_layout_path(namespace_root: &Path) -> LayoutPathWire {
 }
 
 fn push_directory_source(
-    sources: &mut Vec<XpromptSourceWire>,
+    sources: &mut Vec<MacroSourceWire>,
     id: &str,
     scope: &str,
     role: LayoutPathRoleWire,
@@ -937,7 +937,7 @@ fn push_directory_source(
     writable: bool,
 ) {
     let path = path_string(&path);
-    sources.push(XpromptSourceWire {
+    sources.push(MacroSourceWire {
         id: id.to_string(),
         priority: 0,
         scope: scope.to_string(),
@@ -956,7 +956,7 @@ fn push_directory_source(
 
 #[allow(clippy::too_many_arguments)]
 fn push_config_source(
-    sources: &mut Vec<XpromptSourceWire>,
+    sources: &mut Vec<MacroSourceWire>,
     id: &str,
     scope: &str,
     role: LayoutPathRoleWire,
@@ -966,7 +966,7 @@ fn push_config_source(
     writable: bool,
 ) {
     let path = path_string(&path);
-    sources.push(XpromptSourceWire {
+    sources.push(MacroSourceWire {
         id: id.to_string(),
         priority: 0,
         scope: scope.to_string(),
@@ -984,13 +984,13 @@ fn push_config_source(
 }
 
 fn push_symbolic_source(
-    sources: &mut Vec<XpromptSourceWire>,
+    sources: &mut Vec<MacroSourceWire>,
     id: &str,
     scope: &str,
     locator: &str,
     formats: Vec<&str>,
 ) {
-    sources.push(XpromptSourceWire {
+    sources.push(MacroSourceWire {
         id: id.to_string(),
         priority: 0,
         scope: scope.to_string(),
@@ -1447,7 +1447,7 @@ mod tests {
             "memory/glossary",
         )
         .unwrap();
-        assert_eq!(reserved.rule, MemoryXpromptRuleWire::ReservedNamespace);
+        assert_eq!(reserved.rule, MemoryMacroRuleWire::ReservedNamespace);
         assert!(
             reserved.message.contains("#memory/glossary"),
             "{reserved:?}"
@@ -1480,7 +1480,7 @@ mod tests {
         let bad_type =
             memory_note_issue("sase/memory/notes.md", "notes", Some("dynamic"))
                 .unwrap();
-        assert_eq!(bad_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
+        assert_eq!(bad_type.rule, MemoryMacroRuleWire::InvalidNoteType);
         assert!(
             bad_type.message.contains("`type: core`")
                 && bad_type.message.contains("`type: reference`"),
@@ -1488,11 +1488,11 @@ mod tests {
         );
         let missing_type =
             memory_note_issue("sase/memory/notes.md", "notes", None).unwrap();
-        assert_eq!(missing_type.rule, MemoryXpromptRuleWire::InvalidNoteType);
+        assert_eq!(missing_type.rule, MemoryMacroRuleWire::InvalidNoteType);
         let bad_stem =
             memory_note_issue("sase/memory/a-b.md", "a-b", Some("reference"))
                 .unwrap();
-        assert_eq!(bad_stem.rule, MemoryXpromptRuleWire::InvalidStem);
+        assert_eq!(bad_stem.rule, MemoryMacroRuleWire::InvalidStem);
         assert!(bad_stem.message.contains("#memory/a-b"), "{bad_stem:?}");
     }
 

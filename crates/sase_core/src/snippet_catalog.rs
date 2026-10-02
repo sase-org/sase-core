@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::editor::{
-    find_matching_bracket_for_args, parse_xprompt_reference_body,
+    find_matching_bracket_for_args, parse_macro_reference_body,
 };
 use crate::snippet_session::iter_unescaped_tabstops;
 
@@ -564,7 +564,7 @@ fn iter_raw_snippet_calls(template: &str) -> Vec<RawSnippetCall> {
             continue;
         };
         let body = &template[cursor + 2..close];
-        if let Some(reference) = parse_xprompt_reference_body(body) {
+        if let Some(reference) = parse_macro_reference_body(body) {
             calls.push(RawSnippetCall {
                 start: cursor,
                 end: close + 1,

@@ -130,7 +130,7 @@ pub(super) fn model_alias_keys_from_catalog(
 
 pub(super) fn xprompt_snippet_items(
     list: CompletionList,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
     replacement_range: sase_core::EditorRange,
     append_text_arg_space: bool,
 ) -> Vec<CompletionItem> {
@@ -151,7 +151,7 @@ pub(super) fn xprompt_snippet_items(
 }
 
 pub(super) fn xprompt_completion_skeleton(
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
     append_text_arg_space: bool,
 ) -> String {
     let required = entry

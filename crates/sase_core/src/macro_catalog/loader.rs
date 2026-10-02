@@ -7,9 +7,9 @@ use std::{
 
 use crate::content_layout::{
     memory_note_issue, memory_reference_name, reserved_memory_namespace_issue,
-    sase_content_layout, MemorySourceWire, MemoryTierWire,
-    MemoryXpromptIssueWire, SkillPlacementIssueWire, SkillSourceWire,
-    XpromptSourceWire, MEMORY_README_FILENAME, SKILL_DIRECTORY_SEGMENT,
+    sase_content_layout, MacroSourceWire, MemoryMacroIssueWire,
+    MemorySourceWire, MemoryTierWire, SkillPlacementIssueWire, SkillSourceWire,
+    MEMORY_README_FILENAME, SKILL_DIRECTORY_SEGMENT,
 };
 
 use super::entries::*;
@@ -35,11 +35,11 @@ pub(super) struct CatalogLoader {
     /// Definitions dropped by the xprompt-memory rules: a reserved `memory/`
     /// reference claimed by an ordinary definition, an unreachable note stem,
     /// or a file in a memory root that is not a valid memory note.
-    pub(super) memory_issues: RefCell<Vec<MemoryXpromptIssueWire>>,
+    pub(super) memory_issues: RefCell<Vec<MemoryMacroIssueWire>>,
 }
 
 impl CatalogLoader {
-    pub(super) fn new(options: &XpromptCatalogLoadOptions) -> Self {
+    pub(super) fn new(options: &MacroCatalogLoadOptions) -> Self {
         let root_dir = options.root_dir.clone();
         let home_dir = env::var_os("HOME").map(PathBuf::from);
         let package_root =
@@ -139,7 +139,7 @@ impl CatalogLoader {
     pub(super) fn gather_structured_sources(
         &self,
         project: Option<&str>,
-    ) -> Result<Vec<StructuredSource>, XpromptCatalogLoadError> {
+    ) -> Result<Vec<StructuredSource>, MacroCatalogLoadError> {
         let effective_project = project.or_else(|| self.root_project());
         let workflows = self.load_all_workflows(effective_project)?;
         let workflow_names = workflows.keys().cloned().collect::<BTreeSet<_>>();
@@ -167,7 +167,7 @@ impl CatalogLoader {
             }
         }
 
-        for (name, xprompt) in self.load_all_xprompts(effective_project)? {
+        for (name, xprompt) in self.load_all_macros(effective_project)? {
             if workflow_names.contains(&name) {
                 continue;
             }
@@ -177,7 +177,7 @@ impl CatalogLoader {
             }
             let (bucket, source_project) =
                 self.classify_source(xprompt.source_path.as_deref(), None);
-            let workflow = xprompt_to_workflow(&xprompt);
+            let workflow = macro_to_workflow(&xprompt);
             sources.push(StructuredSource {
                 name,
                 workflow,
@@ -201,17 +201,17 @@ impl CatalogLoader {
             None => self.known_workspaces.iter().collect::<Vec<_>>(),
         };
         for (project_name, workspace) in project_workspaces {
-            let mut project_xprompts =
-                self.load_project_local_xprompts(project_name, workspace)?;
-            project_xprompts.extend(
-                self.load_project_file_xprompts(project_name, workspace)?,
+            let mut project_macros =
+                self.load_project_local_macros(project_name, workspace)?;
+            project_macros.extend(
+                self.load_project_file_macros(project_name, workspace)?,
             );
-            for (name, xprompt) in project_xprompts {
+            for (name, xprompt) in project_macros {
                 let source = xprompt.source_path.clone().unwrap_or_default();
                 if !seen.insert((source, name.clone())) {
                     continue;
                 }
-                let workflow = xprompt_to_workflow(&xprompt);
+                let workflow = macro_to_workflow(&xprompt);
                 sources.push(StructuredSource {
                     name,
                     workflow,
@@ -245,7 +245,7 @@ impl CatalogLoader {
     pub(super) fn skill_lookup_sources(
         &self,
         project: Option<&str>,
-    ) -> Result<Vec<StructuredSource>, XpromptCatalogLoadError> {
+    ) -> Result<Vec<StructuredSource>, MacroCatalogLoadError> {
         if let Some(project) = project {
             return self.gather_structured_sources(Some(project)).map(
                 |sources| {
@@ -257,7 +257,7 @@ impl CatalogLoader {
             );
         }
 
-        self.load_all_xprompts(None).map(|xprompts| {
+        self.load_all_macros(None).map(|xprompts| {
             xprompts
                 .into_iter()
                 .filter_map(|(name, xprompt)| {
@@ -266,7 +266,7 @@ impl CatalogLoader {
                             xprompt.source_path.as_deref(),
                             None,
                         );
-                        let workflow = xprompt_to_workflow(&xprompt);
+                        let workflow = macro_to_workflow(&xprompt);
                         StructuredSource {
                             name,
                             workflow,
@@ -288,8 +288,8 @@ impl CatalogLoader {
     pub(super) fn skill_definition_candidate(
         &self,
         entry: &StructuredSource,
-    ) -> XpromptSkillDefinitionCandidateWire {
-        XpromptSkillDefinitionCandidateWire {
+    ) -> MacroSkillDefinitionCandidateWire {
+        MacroSkillDefinitionCandidateWire {
             reference: entry.name.clone(),
             skill_name: entry.skill_name.clone().unwrap_or_else(|| {
                 entry
@@ -303,28 +303,28 @@ impl CatalogLoader {
         }
     }
 
-    pub(super) fn load_all_xprompts(
+    pub(super) fn load_all_macros(
         &self,
         project: Option<&str>,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
         if let Some(dir) = &self.package_xprompts_dir {
-            all.extend(self.load_xprompts_from_dir(dir, None, false)?);
+            all.extend(self.load_macros_from_dir(dir, None, false)?);
         }
         if let Some(dir) = &self.default_xprompts_dir {
-            all.extend(self.load_xprompts_from_dir(dir, None, false)?);
+            all.extend(self.load_macros_from_dir(dir, None, false)?);
         }
-        all.extend(self.load_plugin_xprompts()?);
-        all.extend(self.load_config_xprompts(project)?);
+        all.extend(self.load_plugin_macros()?);
+        all.extend(self.load_config_macros(project)?);
         for source in self
-            .xprompt_directory_sources(self.root_dir.as_deref(), project)
+            .macro_directory_sources(self.root_dir.as_deref(), project)
             .into_iter()
             .rev()
         {
             let Some(path) = source.path.as_deref().map(Path::new) else {
                 continue;
             };
-            all.extend(self.load_xprompts_from_dir(
+            all.extend(self.load_macros_from_dir(
                 path,
                 project,
                 source.project_namespaced,
@@ -367,15 +367,14 @@ impl CatalogLoader {
     fn load_all_workflows(
         &self,
         project: Option<&str>,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
         if let Some(dir) = &self.package_xprompts_dir {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }
         all.extend(self.load_plugin_workflows()?);
         let sources =
-            self.xprompt_directory_sources(self.root_dir.as_deref(), project);
+            self.macro_directory_sources(self.root_dir.as_deref(), project);
         for scope in ["home_project", "home"] {
             for source in sources.iter().rev().filter(|s| s.scope == scope) {
                 let Some(path) = source.path.as_deref().map(Path::new) else {
@@ -408,11 +407,11 @@ impl CatalogLoader {
         Ok(all)
     }
 
-    pub(super) fn xprompt_directory_sources(
+    pub(super) fn macro_directory_sources(
         &self,
         project_root: Option<&Path>,
         project: Option<&str>,
-    ) -> Vec<XpromptSourceWire> {
+    ) -> Vec<MacroSourceWire> {
         let home_root =
             self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
         sase_content_layout(project_root, home_root, None, project)
@@ -485,7 +484,7 @@ impl CatalogLoader {
     fn load_memory_notes(
         &self,
         source: &MemorySourceWire,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let label = format!("{} memory", source.scope);
         let Some(root) = resolve_compatible_read_path(&source.paths, &label)?
         else {
@@ -524,11 +523,11 @@ impl CatalogLoader {
             let name = memory_reference_name(&note.stem);
             result.insert(
                 name.clone(),
-                CatalogXprompt {
+                CatalogMacro {
                     name,
                     content: note.body,
                     inputs: Vec::new(),
-                    local_xprompts: Vec::new(),
+                    local_macros: Vec::new(),
                     source_path: Some(display.into_owned()),
                     tags: BTreeSet::new(),
                     description: note.description,
@@ -545,7 +544,7 @@ impl CatalogLoader {
     /// Canonical skill directory for the scope owning `dir`, used as the
     /// migration destination when a skill declaration turns up in an ordinary
     /// xprompt directory.
-    pub(super) fn skill_destination_for_xprompt_dir(
+    pub(super) fn skill_destination_for_macro_dir(
         &self,
         dir: &Path,
     ) -> Option<String> {
@@ -567,7 +566,7 @@ impl CatalogLoader {
         }
     }
 
-    fn record_memory_issue(&self, issue: Option<MemoryXpromptIssueWire>) {
+    fn record_memory_issue(&self, issue: Option<MemoryMacroIssueWire>) {
         if let Some(issue) = issue {
             self.memory_issues.borrow_mut().push(issue);
         }

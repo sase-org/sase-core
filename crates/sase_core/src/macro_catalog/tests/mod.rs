@@ -7,9 +7,7 @@ use std::{
 use super::definition::filter_structured_sources;
 use super::entries::{structured_entry, workflow_prompt_part};
 use super::loader::CatalogLoader;
-use super::parsing::{
-    known_projects, xprompt_to_workflow, yaml_child_key_range,
-};
+use super::parsing::{known_projects, macro_to_workflow, yaml_child_key_range};
 use super::types::{
     CatalogStep, CatalogWorkflow, DefinitionSection, StepKind,
     StructuredSource, SKILL_FRAME_TEMPLATE_FILENAME,

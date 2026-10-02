@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use super::token::{
-    extract_token_at_position, slash_skill_reference_name,
-    xprompt_reference_name, DocumentSnapshot,
+    extract_token_at_position, macro_reference_name,
+    slash_skill_reference_name, DocumentSnapshot,
 };
-use super::wire::{EditorPosition, EditorRange, XpromptAssistEntry};
+use super::wire::{EditorPosition, EditorRange, MacroAssistEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionTarget {
@@ -15,7 +15,7 @@ pub struct DefinitionTarget {
 pub fn definition_at_position(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Option<DefinitionTarget> {
     let token = extract_token_at_position(document, position)?;
     let entry = entry_for_token(&token.text, entries)?;
@@ -28,9 +28,9 @@ pub fn definition_at_position(
 
 fn entry_for_token<'a>(
     token: &str,
-    entries: &'a [XpromptAssistEntry],
-) -> Option<&'a XpromptAssistEntry> {
-    if let Some(name) = xprompt_reference_name(token) {
+    entries: &'a [MacroAssistEntry],
+) -> Option<&'a MacroAssistEntry> {
+    if let Some(name) = macro_reference_name(token) {
         return entries.iter().find(|entry| entry.name == name);
     }
     if let Some(name) = slash_skill_reference_name(token) {
@@ -88,7 +88,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::editor::wire::XpromptInputHint;
+    use crate::editor::wire::MacroInputHint;
 
     fn pos(character: u32) -> EditorPosition {
         EditorPosition { line: 0, character }
@@ -99,8 +99,8 @@ mod tests {
         insertion: &str,
         definition_path: Option<String>,
         is_skill: bool,
-    ) -> XpromptAssistEntry {
-        XpromptAssistEntry {
+    ) -> MacroAssistEntry {
+        MacroAssistEntry {
             name: name.to_string(),
             display_label: name.to_string(),
             insertion: insertion.to_string(),
@@ -114,7 +114,7 @@ mod tests {
             project: None,
             tags: Vec::new(),
             input_signature: None,
-            inputs: Vec::<XpromptInputHint>::new(),
+            inputs: Vec::<MacroInputHint>::new(),
             content_preview: None,
             description: None,
             source_path_display: Some("display-only.md".to_string()),
@@ -135,7 +135,7 @@ mod tests {
         insertion: &str,
         definition_path: Option<String>,
         range: EditorRange,
-    ) -> XpromptAssistEntry {
+    ) -> MacroAssistEntry {
         let mut entry = entry(name, insertion, definition_path, false);
         entry.definition_range = Some(range);
         entry

@@ -1080,13 +1080,13 @@ pub(crate) fn unavailable_reason(
             .to_string();
     }
     match rule {
-        JinjaAvailabilityRule::XpromptOnly => xprompt_only_reason(),
+        JinjaAvailabilityRule::XpromptOnly => macro_only_reason(),
         JinjaAvailabilityRule::XpromptSkillOnly => skill_only_reason(),
         _ => "Unavailable in this scope".to_string(),
     }
 }
 
-pub(crate) fn xprompt_only_reason() -> String {
+pub(crate) fn macro_only_reason() -> String {
     "Only defined in xprompt scope".to_string()
 }
 

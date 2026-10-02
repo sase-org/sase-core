@@ -9,12 +9,12 @@ use super::vcs_candidates::{
 use crate::editor::directive::detect_directive_context_at_position;
 use crate::editor::placeholder::detect_placeholder_context_at_position;
 use crate::editor::token::{
-    extract_token_at_position, is_path_like_token, is_slash_skill_like_token,
-    is_snippet_trigger_token, is_xprompt_like_token, DocumentSnapshot,
+    extract_token_at_position, is_macro_like_token, is_path_like_token,
+    is_slash_skill_like_token, is_snippet_trigger_token, DocumentSnapshot,
 };
 use crate::editor::wire::{
-    CompletionContext, CompletionContextKind, EditorPosition, TokenInfo,
-    XpromptAssistEntry, XpromptInputHint,
+    CompletionContext, CompletionContextKind, EditorPosition, MacroAssistEntry,
+    MacroInputHint, TokenInfo,
 };
 use crate::ArtifactRefContextWire;
 use regex::Regex;
@@ -23,14 +23,14 @@ use std::sync::OnceLock;
 pub fn classify_completion_context(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Option<CompletionContext> {
     classify_completion_context_with_workflows(document, position, entries, &[])
 }
 pub fn classify_completion_context_with_workflows(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
     known_workflow_names: &[String],
 ) -> Option<CompletionContext> {
     classify_completion_context_with_artifacts_and_workflows(
@@ -44,7 +44,7 @@ pub fn classify_completion_context_with_workflows(
 pub fn classify_completion_context_with_artifacts_and_workflows(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
     known_workflow_names: &[String],
     artifact_context: Option<&ArtifactRefContextWire>,
 ) -> Option<CompletionContext> {
@@ -126,7 +126,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
                 replacement_range: document.byte_range_to_range(byte, byte)?,
             })
         }
-        Some(token) if is_xprompt_like_token(&token.text) => {
+        Some(token) if is_macro_like_token(&token.text) => {
             Some(context_for_token(CompletionContextKind::Xprompt, token))
         }
         Some(token) if is_slash_skill_like_token(&token.text) => {
@@ -141,7 +141,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
         _ => None,
     }
 }
-pub fn named_args_skeleton(entry: &XpromptAssistEntry) -> String {
+pub fn named_args_skeleton(entry: &MacroAssistEntry) -> String {
     let required: Vec<_> =
         entry.inputs.iter().filter(|input| input.required).collect();
     if required.is_empty() {
@@ -155,18 +155,18 @@ pub fn named_args_skeleton(entry: &XpromptAssistEntry) -> String {
         .join(", ");
     format!("{}({args})$0", entry.insertion)
 }
-pub fn colon_args_skeleton(entry: &XpromptAssistEntry) -> String {
+pub fn colon_args_skeleton(entry: &MacroAssistEntry) -> String {
     format!("{}:$0", entry.insertion)
 }
 fn detect_xprompt_arg_completion_at_position(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Option<CompletionContext> {
     let cursor = document.position_to_byte_offset(position)?;
     let text = document.text();
     let prefix = text.get(..cursor)?;
-    let captures = xprompt_ref_re().captures_iter(prefix);
+    let captures = macro_ref_re().captures_iter(prefix);
     for caps in captures {
         let whole = caps.get(0)?;
         let name = caps.name("name")?.as_str().replace("__", "/");
@@ -189,20 +189,20 @@ fn detect_xprompt_arg_completion_at_position(
     }
     None
 }
-struct XpromptArgCompletionTarget {
+struct MacroArgCompletionTarget {
     kind: CompletionContextKind,
-    active_input: XpromptInputHint,
+    active_input: MacroInputHint,
     token_start: usize,
     token_end: usize,
     selected_values: Vec<String>,
 }
 fn colon_arg_context(
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
     text: &str,
     base_end: usize,
     cursor: usize,
     suffix: &str,
-) -> Option<XpromptArgCompletionTarget> {
+) -> Option<MacroArgCompletionTarget> {
     let value = suffix.strip_prefix(':')?;
     if value.chars().any(char::is_whitespace)
         || value.contains('+')
@@ -231,7 +231,7 @@ fn colon_arg_context(
         .unwrap_or(body.len());
     let token_start = body_start + clause_start;
     let token_end = body_start + clause_end;
-    Some(XpromptArgCompletionTarget {
+    Some(MacroArgCompletionTarget {
         kind: completion_kind_for_input(&active_input),
         active_input,
         token_start,
@@ -240,12 +240,12 @@ fn colon_arg_context(
     })
 }
 fn paren_arg_context(
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
     text: &str,
     base_end: usize,
     cursor: usize,
     suffix: &str,
-) -> Option<XpromptArgCompletionTarget> {
+) -> Option<MacroArgCompletionTarget> {
     let prefix_body = suffix.strip_prefix('(')?;
     if prefix_body.contains(')') {
         return None;
@@ -282,7 +282,7 @@ fn paren_arg_context(
             .filter(|input| input.repeatable)
             .cloned()
         {
-            return Some(XpromptArgCompletionTarget {
+            return Some(MacroArgCompletionTarget {
                 kind: completion_kind_for_input(&active_input),
                 active_input,
                 token_start: value_start,
@@ -290,7 +290,7 @@ fn paren_arg_context(
                 selected_values: selected,
             });
         }
-        let placeholder = XpromptInputHint {
+        let placeholder = MacroInputHint {
             name: String::new(),
             r#type: String::new(),
             description: None,
@@ -299,8 +299,8 @@ fn paren_arg_context(
             position: 0,
             repeatable: false,
         };
-        return Some(XpromptArgCompletionTarget {
-            kind: CompletionContextKind::XpromptArgumentName,
+        return Some(MacroArgCompletionTarget {
+            kind: CompletionContextKind::MacroArgumentName,
             active_input: placeholder,
             token_start: value_start,
             token_end: value_end,
@@ -317,7 +317,7 @@ fn paren_arg_context(
         .clone();
     let value_leading_ws = value_part.len() - value_part.trim_start().len();
     let token_start = value_start + name_part.len() + 1 + value_leading_ws;
-    Some(XpromptArgCompletionTarget {
+    Some(MacroArgCompletionTarget {
         kind: completion_kind_for_input(&active_input),
         active_input,
         token_start,
@@ -328,8 +328,8 @@ fn paren_arg_context(
 fn arg_context(
     document: &DocumentSnapshot,
     cursor: usize,
-    entry: &XpromptAssistEntry,
-    target: XpromptArgCompletionTarget,
+    entry: &MacroAssistEntry,
+    target: MacroArgCompletionTarget,
 ) -> Option<CompletionContext> {
     let token_range =
         document.byte_range_to_range(target.token_start, cursor)?;
@@ -415,17 +415,15 @@ fn context_for_token(
         artifact_ref: None,
     }
 }
-fn completion_kind_for_input(
-    input: &XpromptInputHint,
-) -> CompletionContextKind {
+fn completion_kind_for_input(input: &MacroInputHint) -> CompletionContextKind {
     match input.r#type.as_str() {
-        "path" => CompletionContextKind::XpromptArgumentPath,
-        "bool" => CompletionContextKind::XpromptArgumentValue,
-        "agent" => CompletionContextKind::XpromptArgumentAgent,
-        _ => CompletionContextKind::XpromptArgumentTypeHint,
+        "path" => CompletionContextKind::MacroArgumentPath,
+        "bool" => CompletionContextKind::MacroArgumentValue,
+        "agent" => CompletionContextKind::MacroArgumentAgent,
+        _ => CompletionContextKind::MacroArgumentTypeHint,
     }
 }
-fn xprompt_ref_re() -> &'static Regex {
+fn macro_ref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(

@@ -12,11 +12,11 @@ fn resolves_xprompt_skill_definition_sources() {
         "---\nname: sase_plan\nskill: true\n---\nPlan body\n",
     )
     .unwrap();
-    let options = XpromptCatalogLoadOptions::new(Some(root.to_path_buf()));
+    let options = MacroCatalogLoadOptions::new(Some(root.to_path_buf()));
 
-    let explicit = resolve_xprompt_skill_definition(
-        &XpromptSkillDefinitionRequestWire {
-            schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    let explicit = resolve_macro_skill_definition(
+        &MacroSkillDefinitionRequestWire {
+            schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
             reference: "#skill/sase_plan".to_string(),
             project: None,
         },
@@ -32,9 +32,9 @@ fn resolves_xprompt_skill_definition_sources() {
         Some(source.canonicalize().unwrap().to_str().unwrap())
     );
 
-    let shorthand = resolve_xprompt_skill_definition(
-        &XpromptSkillDefinitionRequestWire {
-            schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    let shorthand = resolve_macro_skill_definition(
+        &MacroSkillDefinitionRequestWire {
+            schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
             reference: "#skill__sase_plan".to_string(),
             project: None,
         },
@@ -46,9 +46,9 @@ fn resolves_xprompt_skill_definition_sources() {
         Some("skill/sase_plan")
     );
 
-    let slash = resolve_xprompt_skill_definition(
-        &XpromptSkillDefinitionRequestWire {
-            schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    let slash = resolve_macro_skill_definition(
+        &MacroSkillDefinitionRequestWire {
+            schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
             reference: "/sase_plan".to_string(),
             project: None,
         },
@@ -57,9 +57,9 @@ fn resolves_xprompt_skill_definition_sources() {
     assert_eq!(slash.status, "success");
     assert_eq!(slash.skill_name.as_deref(), Some("sase_plan"));
 
-    let missing = resolve_xprompt_skill_definition(
-        &XpromptSkillDefinitionRequestWire {
-            schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    let missing = resolve_macro_skill_definition(
+        &MacroSkillDefinitionRequestWire {
+            schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
             reference: "#skill/missing".to_string(),
             project: None,
         },
@@ -119,7 +119,7 @@ fn pseudo_sources_do_not_get_definition_paths() {
                 prompt_part: Some("body".to_string()),
                 has_output: false,
             }],
-            local_xprompts: Vec::new(),
+            local_macros: Vec::new(),
             source_path: Some("plugin:module/plugin.md".to_string()),
             tags: BTreeSet::new(),
             description: None,
@@ -135,4 +135,28 @@ fn pseudo_sources_do_not_get_definition_paths() {
     };
 
     assert_eq!(structured_entry(&entry, &loader).definition_path, None);
+}
+
+#[test]
+fn macro_skill_wires_pin_legacy_schema_and_shape() {
+    assert_eq!(
+        MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION, 1,
+        "wire schema version is a protected contract value"
+    );
+    let request = MacroSkillDefinitionRequestWire {
+        schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+        reference: "#skill/foo".to_string(),
+        project: None,
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "schema_version": 1,
+            "reference": "#skill/foo",
+        })
+    );
+    let round_tripped: MacroSkillDefinitionRequestWire =
+        serde_json::from_value(json).unwrap();
+    assert_eq!(round_tripped, request);
 }

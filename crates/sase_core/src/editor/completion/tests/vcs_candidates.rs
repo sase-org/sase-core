@@ -6,9 +6,9 @@ use super::support::*;
 use crate::editor::token::{vcs_project_trigger_token, DocumentSnapshot};
 use crate::editor::wire::{
     CompletionCandidate, CompletionContext, CompletionContextKind,
-    CompletionList, EditorPosition, EditorTextEdit, TokenInfo,
-    VcsNamespaceEntry, VcsProjectEntry, VcsRepoEntry, XpromptAssistEntry,
-    XpromptInputHint,
+    CompletionList, EditorPosition, EditorTextEdit, MacroAssistEntry,
+    MacroInputHint, TokenInfo, VcsNamespaceEntry, VcsProjectEntry,
+    VcsRepoEntry,
 };
 use crate::project_tag::ProjectTagTargetWire;
 
@@ -17,8 +17,8 @@ const VCS_REPO_CURSOR: &str = "<CURSOR>";
 fn workflow_names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
 }
-fn gh_entry() -> XpromptAssistEntry {
-    XpromptAssistEntry {
+fn gh_entry() -> MacroAssistEntry {
+    MacroAssistEntry {
         name: "gh".to_string(),
         display_label: "gh".to_string(),
         insertion: "#gh".to_string(),
@@ -28,7 +28,7 @@ fn gh_entry() -> XpromptAssistEntry {
         project: None,
         tags: Vec::new(),
         input_signature: Some("(gh_ref: word)".to_string()),
-        inputs: vec![XpromptInputHint {
+        inputs: vec![MacroInputHint {
             name: "gh_ref".to_string(),
             r#type: "word".to_string(),
             description: None,
@@ -426,7 +426,7 @@ fn classifies_vcs_repo_then_vcs_ref_then_xprompt_args() {
         &names,
     )
     .unwrap();
-    assert_eq!(context.kind, CompletionContextKind::XpromptArgumentTypeHint);
+    assert_eq!(context.kind, CompletionContextKind::MacroArgumentTypeHint);
 }
 #[test]
 fn vcs_ref_trigger_negatives() {

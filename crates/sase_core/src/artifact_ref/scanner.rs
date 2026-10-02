@@ -136,7 +136,7 @@ pub fn scan_artifact_ref_document_links(
         links.push(link);
     }
 
-    for link in scan_explicit_xprompt_skill_refs(text, &occupied) {
+    for link in scan_explicit_macro_skill_refs(text, &occupied) {
         occupied.push((link.source_span.start, link.source_span.end));
         links.push(link);
     }
@@ -493,7 +493,7 @@ fn markdown_link_to_document_target(
     }
 
     if let Some(reference) =
-        canonical_xprompt_skill_ref_from_document_text(&link.destination)
+        canonical_macro_skill_ref_from_document_text(&link.destination)
     {
         return ArtifactRefDocumentTargetWire {
             schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
@@ -711,7 +711,7 @@ fn scan_document_urls(
     links
 }
 
-fn scan_explicit_xprompt_skill_refs(
+fn scan_explicit_macro_skill_refs(
     text: &str,
     occupied: &[(usize, usize)],
 ) -> Vec<ArtifactRefDocumentTargetWire> {
@@ -726,7 +726,7 @@ fn scan_explicit_xprompt_skill_refs(
             continue;
         }
         let Some(target) =
-            canonical_xprompt_skill_ref_token(&text[token_start..end])
+            canonical_macro_skill_ref_token(&text[token_start..end])
         else {
             continue;
         };
@@ -755,17 +755,17 @@ fn scan_xprompt_reference_end(text: &str, start: usize) -> usize {
     end
 }
 
-fn canonical_xprompt_skill_ref_from_document_text(raw: &str) -> Option<String> {
+fn canonical_macro_skill_ref_from_document_text(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let token = trimmed.strip_prefix('#')?;
     let end = scan_xprompt_reference_end(token, 0);
     if end == 0 {
         return None;
     }
-    canonical_xprompt_skill_ref_token(&token[..end])
+    canonical_macro_skill_ref_token(&token[..end])
 }
 
-fn canonical_xprompt_skill_ref_token(token: &str) -> Option<String> {
+fn canonical_macro_skill_ref_token(token: &str) -> Option<String> {
     let normalized = token.replace("__", "/");
     let (project, skill_name) = split_skill_reference_name(&normalized)?;
     Some(skill_reference_name(project, skill_name))

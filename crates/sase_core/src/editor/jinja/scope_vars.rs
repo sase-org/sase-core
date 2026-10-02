@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use super::assist::{
-    evaluate_rule, unavailable_reason, xprompt_only_reason, Availability,
+    evaluate_rule, macro_only_reason, unavailable_reason, Availability,
 };
 use super::catalog::jinja_catalog;
 use super::scope::jinja_document_scope;
@@ -87,7 +87,7 @@ pub fn jinja_scope_variables(
                 &mut unavailable,
                 &mut unavailable_seen,
                 "_args".to_string(),
-                xprompt_only_reason(),
+                macro_only_reason(),
             );
         }
         for index in 1..=positional_count {
@@ -99,7 +99,7 @@ pub fn jinja_scope_variables(
                 &mut unavailable,
                 &mut unavailable_seen,
                 name,
-                xprompt_only_reason(),
+                macro_only_reason(),
             );
         }
     }

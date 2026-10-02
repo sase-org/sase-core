@@ -32,7 +32,7 @@ fn loads_native_snippet_catalog_with_user_overrides() {
             schema_version: 1,
             project: None,
         },
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let by_trigger = response
@@ -77,7 +77,7 @@ fn converts_native_xprompt_snippet_templates() {
             schema_version: 1,
             project: None,
         },
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let by_trigger = response
@@ -138,7 +138,7 @@ fn native_snippet_catalog_resolves_references_after_user_merge() {
             schema_version: 1,
             project: None,
         },
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let by_trigger = response

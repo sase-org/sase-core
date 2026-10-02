@@ -5,8 +5,8 @@ use super::super::*;
 use super::support::*;
 use crate::editor::token::DocumentSnapshot;
 use crate::editor::wire::{
-    AgentCompletionEntry, CompletionContextKind, XpromptAssistEntry,
-    XpromptInputHint,
+    AgentCompletionEntry, CompletionContextKind, MacroAssistEntry,
+    MacroInputHint,
 };
 
 #[test]
@@ -64,25 +64,25 @@ fn detects_narrow_argument_contexts() {
         (
             "#review:",
             8,
-            CompletionContextKind::XpromptArgumentPath,
+            CompletionContextKind::MacroArgumentPath,
             Some("path"),
         ),
         (
             "#review(path=",
             13,
-            CompletionContextKind::XpromptArgumentPath,
+            CompletionContextKind::MacroArgumentPath,
             Some("path"),
         ),
         (
             "#review(de",
             10,
-            CompletionContextKind::XpromptArgumentName,
+            CompletionContextKind::MacroArgumentName,
             None,
         ),
         (
             "#review!!:",
             10,
-            CompletionContextKind::XpromptArgumentPath,
+            CompletionContextKind::MacroArgumentPath,
             Some("path"),
         ),
     ] {
@@ -94,7 +94,7 @@ fn detects_narrow_argument_contexts() {
     }
 
     let doc = DocumentSnapshot::new("#ns__foo(arg=");
-    let ns_entry = XpromptAssistEntry {
+    let ns_entry = MacroAssistEntry {
         name: "ns/foo".to_string(),
         display_label: "ns/foo".to_string(),
         insertion: "#ns/foo".to_string(),
@@ -104,7 +104,7 @@ fn detects_narrow_argument_contexts() {
         project: None,
         tags: Vec::new(),
         input_signature: None,
-        inputs: vec![XpromptInputHint {
+        inputs: vec![MacroInputHint {
             name: "arg".to_string(),
             r#type: "word".to_string(),
             description: None,
@@ -130,7 +130,7 @@ fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
     fork.name = "fork".to_string();
     fork.display_label = "fork".to_string();
     fork.insertion = "#fork".to_string();
-    fork.inputs = vec![XpromptInputHint {
+    fork.inputs = vec![MacroInputHint {
         name: "names".to_string(),
         r#type: "agent".to_string(),
         description: None,
@@ -145,7 +145,7 @@ fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
         let cursor = doc.byte_offset_to_position(text.len()).unwrap();
         let context =
             classify_completion_context(&doc, cursor, &[fork.clone()]).unwrap();
-        assert_eq!(context.kind, CompletionContextKind::XpromptArgumentAgent);
+        assert_eq!(context.kind, CompletionContextKind::MacroArgumentAgent);
         assert_eq!(context.active_input.as_deref(), Some("names"));
         let token_start = text.rfind("co").unwrap();
         assert_eq!(
@@ -159,7 +159,7 @@ fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
 fn repeatable_agent_context_replaces_earlier_element_and_filters_selected() {
     let mut fork = entries()[0].clone();
     fork.name = "fork".to_string();
-    fork.inputs = vec![XpromptInputHint {
+    fork.inputs = vec![MacroInputHint {
         name: "names".to_string(),
         r#type: "agent".to_string(),
         description: None,
@@ -174,7 +174,7 @@ fn repeatable_agent_context_replaces_earlier_element_and_filters_selected() {
         .byte_offset_to_position(text.find("co").unwrap() + 2)
         .unwrap();
     let context = classify_completion_context(&doc, cursor, &[fork]).unwrap();
-    assert_eq!(context.kind, CompletionContextKind::XpromptArgumentAgent);
+    assert_eq!(context.kind, CompletionContextKind::MacroArgumentAgent);
     assert_eq!(context.selected_values, vec!["planner"]);
     assert_eq!(
         context.replacement_range,

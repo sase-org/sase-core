@@ -5,10 +5,10 @@ use crate::{
 
 use super::loader::CatalogLoader;
 use super::types::*;
-pub fn resolve_xprompt_skill_definition(
-    request: &XpromptSkillDefinitionRequestWire,
-    options: &XpromptCatalogLoadOptions,
-) -> XpromptSkillDefinitionResolutionWire {
+pub fn resolve_macro_skill_definition(
+    request: &MacroSkillDefinitionRequestWire,
+    options: &MacroCatalogLoadOptions,
+) -> MacroSkillDefinitionResolutionWire {
     let authored_reference = request.reference.trim().to_string();
     let loader = CatalogLoader::new(options);
     let applicable_project = loader
@@ -143,7 +143,7 @@ fn parse_skill_lookup_reference(
             skill_name,
         });
     }
-    let token = explicit_xprompt_reference_token(raw)?;
+    let token = explicit_macro_reference_token(raw)?;
     let normalized = token.replace("__", "/");
     let (project, skill_name) = split_skill_reference_name(&normalized)?;
     let project = project.map(str::to_string);
@@ -158,7 +158,7 @@ fn parse_skill_lookup_reference(
     })
 }
 
-fn explicit_xprompt_reference_token(raw: &str) -> Option<&str> {
+fn explicit_macro_reference_token(raw: &str) -> Option<&str> {
     let rest = raw.trim().strip_prefix('#')?;
     let end = rest
         .char_indices()
@@ -206,8 +206,8 @@ fn slash_skill_name(raw: &str) -> Option<String> {
 fn resolution_for_candidate(
     authored_reference: String,
     skill_name: String,
-    candidate: XpromptSkillDefinitionCandidateWire,
-) -> XpromptSkillDefinitionResolutionWire {
+    candidate: MacroSkillDefinitionCandidateWire,
+) -> MacroSkillDefinitionResolutionWire {
     let Some(definition_path) = candidate.definition_path.clone() else {
         return skill_definition_resolution(
             "missing_source",
@@ -243,11 +243,11 @@ fn skill_definition_resolution(
     skill_name: Option<String>,
     project: Option<String>,
     definition_path: Option<String>,
-    candidates: Vec<XpromptSkillDefinitionCandidateWire>,
+    candidates: Vec<MacroSkillDefinitionCandidateWire>,
     diagnostic: Option<String>,
-) -> XpromptSkillDefinitionResolutionWire {
-    XpromptSkillDefinitionResolutionWire {
-        schema_version: XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+) -> MacroSkillDefinitionResolutionWire {
+    MacroSkillDefinitionResolutionWire {
+        schema_version: MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
         status: status.to_string(),
         authored_reference,
         canonical_reference,
@@ -292,9 +292,9 @@ pub(super) fn filter_structured_sources(
                     .filter_map(|input| input.description.as_deref())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let local_xprompt_text = entry
+                let local_macro_text = entry
                     .workflow
-                    .local_xprompts
+                    .local_macros
                     .iter()
                     .flat_map(|xprompt| {
                         xprompt
@@ -313,7 +313,7 @@ pub(super) fn filter_structured_sources(
                     entry.name,
                     entry.description.as_deref().unwrap_or_default(),
                     input_descriptions,
-                    local_xprompt_text,
+                    local_macro_text,
                     entry.content,
                     entry
                         .workflow

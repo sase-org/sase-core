@@ -43,11 +43,19 @@ pub enum CompletionContextKind {
     SlashSkill,
     FilePath,
     FileHistory,
-    XpromptArgumentName,
-    XpromptArgumentValue,
-    XpromptArgumentPath,
-    XpromptArgumentAgent,
-    XpromptArgumentTypeHint,
+    #[serde(rename = "xprompt_argument_name", alias = "macro_argument_name")]
+    MacroArgumentName,
+    #[serde(rename = "xprompt_argument_value", alias = "macro_argument_value")]
+    MacroArgumentValue,
+    #[serde(rename = "xprompt_argument_path", alias = "macro_argument_path")]
+    MacroArgumentPath,
+    #[serde(rename = "xprompt_argument_agent", alias = "macro_argument_agent")]
+    MacroArgumentAgent,
+    #[serde(
+        rename = "xprompt_argument_type_hint",
+        alias = "macro_argument_type_hint"
+    )]
+    MacroArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,
     DirectiveArgumentKeyword,
@@ -383,7 +391,7 @@ pub struct VcsRepoCatalogResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptInputHint {
+pub struct MacroInputHint {
     pub name: String,
     #[serde(rename = "type")]
     pub r#type: String,
@@ -397,7 +405,7 @@ pub struct XpromptInputHint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptAssistEntry {
+pub struct MacroAssistEntry {
     pub name: String,
     pub display_label: String,
     pub insertion: String,
@@ -407,7 +415,7 @@ pub struct XpromptAssistEntry {
     pub project: Option<String>,
     pub tags: Vec<String>,
     pub input_signature: Option<String>,
-    pub inputs: Vec<XpromptInputHint>,
+    pub inputs: Vec<MacroInputHint>,
     pub content_preview: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
@@ -433,17 +441,18 @@ pub struct XpromptAssistEntry {
 /// Prompt surface that owns an argument span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum XpromptArgumentSource {
-    Xprompt,
+pub enum MacroArgumentSource {
+    #[serde(rename = "xprompt", alias = "macro")]
+    Macro,
     Directive,
 }
 
 /// Byte-addressed invocation or directive name span shared by editor frontends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptCallNameSpan {
+pub struct MacroCallNameSpan {
     pub start: usize,
     pub end: usize,
-    pub source: XpromptArgumentSource,
+    pub source: MacroArgumentSource,
     /// Canonical call name. For directive aliases this may differ from the
     /// authored bytes covered by `start..end`.
     pub call_name: String,
@@ -452,7 +461,7 @@ pub struct XpromptCallNameSpan {
 /// Frontend-neutral role for one xprompt or directive argument span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum XpromptArgumentSpanRole {
+pub enum MacroArgumentSpanRole {
     ArgDelimiter,
     ArgKey,
     ArgAssign,
@@ -465,7 +474,7 @@ pub enum XpromptArgumentSpanRole {
 /// Catalog-aware validity classification for an argument span.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum XpromptArgumentSpanValidity {
+pub enum MacroArgumentSpanValidity {
     Ok,
     UnknownKey,
     TypeMismatch,
@@ -475,12 +484,12 @@ pub enum XpromptArgumentSpanValidity {
 
 /// Byte-addressed argument span shared by editor frontends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptArgumentSpan {
+pub struct MacroArgumentSpan {
     pub start: usize,
     pub end: usize,
-    pub role: XpromptArgumentSpanRole,
-    pub validity: XpromptArgumentSpanValidity,
-    pub source: XpromptArgumentSource,
+    pub role: MacroArgumentSpanRole,
+    pub validity: MacroArgumentSpanValidity,
+    pub source: MacroArgumentSource,
     pub call_name: String,
 }
 
@@ -1453,5 +1462,41 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&catalog).unwrap())
                 .unwrap();
         assert_eq!(round_tripped, catalog);
+    }
+
+    #[test]
+    fn macro_argument_source_accepts_old_and_new_spellings() {
+        let old: MacroArgumentSource =
+            serde_json::from_value(serde_json::json!("xprompt")).unwrap();
+        let new: MacroArgumentSource =
+            serde_json::from_value(serde_json::json!("macro")).unwrap();
+        assert_eq!(old, MacroArgumentSource::Macro);
+        assert_eq!(new, MacroArgumentSource::Macro);
+        assert_eq!(
+            serde_json::to_value(new).unwrap(),
+            serde_json::json!("xprompt")
+        );
+    }
+
+    #[test]
+    fn completion_context_macro_variants_pin_legacy_output() {
+        for (legacy, alias) in [
+            ("xprompt_argument_name", "macro_argument_name"),
+            ("xprompt_argument_value", "macro_argument_value"),
+            ("xprompt_argument_path", "macro_argument_path"),
+            ("xprompt_argument_agent", "macro_argument_agent"),
+            ("xprompt_argument_type_hint", "macro_argument_type_hint"),
+        ] {
+            let from_old: CompletionContextKind =
+                serde_json::from_value(serde_json::json!(legacy)).unwrap();
+            let from_new: CompletionContextKind =
+                serde_json::from_value(serde_json::json!(alias)).unwrap();
+            assert_eq!(from_old, from_new, "alias {alias} must parse");
+            assert_eq!(
+                serde_json::to_value(&from_new).unwrap(),
+                serde_json::json!(legacy),
+                "alias {alias} must emit legacy {legacy}"
+            );
+        }
     }
 }

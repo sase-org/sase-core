@@ -6,13 +6,13 @@ mod loader_sources;
 mod parsing;
 mod types;
 
-pub use definition::resolve_xprompt_skill_definition;
-pub use entries::{load_editor_snippet_catalog, load_editor_xprompt_catalog};
+pub use definition::resolve_macro_skill_definition;
+pub use entries::{load_editor_macro_catalog, load_editor_snippet_catalog};
 pub use types::{
-    XpromptCatalogLoadError, XpromptCatalogLoadOptions,
-    XpromptCatalogResourcePaths, XpromptSkillDefinitionCandidateWire,
-    XpromptSkillDefinitionRequestWire, XpromptSkillDefinitionResolutionWire,
-    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    MacroCatalogLoadError, MacroCatalogLoadOptions, MacroCatalogResourcePaths,
+    MacroSkillDefinitionCandidateWire, MacroSkillDefinitionRequestWire,
+    MacroSkillDefinitionResolutionWire,
+    MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
 };
 
 #[cfg(test)]

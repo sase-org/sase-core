@@ -103,7 +103,7 @@ fn project_config_collision_reports_split_state() {
     let error = loader.gather_structured_sources(None).unwrap_err();
     assert!(matches!(
         error,
-        XpromptCatalogLoadError::LayoutCollision(message)
+        MacroCatalogLoadError::LayoutCollision(message)
             if message.contains("multiple canonical/legacy")
                 && message.contains("sase/sase.yml")
                 && message.contains("sase.yml")

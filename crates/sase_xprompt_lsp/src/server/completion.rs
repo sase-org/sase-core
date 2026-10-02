@@ -207,7 +207,7 @@ impl XpromptLspServer {
                 &vcs_catalog,
             ));
         }
-        if context.kind == CompletionContextKind::XpromptArgumentAgent {
+        if context.kind == CompletionContextKind::MacroArgumentAgent {
             return Some(self.agent_completion(&context, &config).await);
         }
         if is_directive_argument_context(&context) {
@@ -705,7 +705,7 @@ impl XpromptLspServer {
     pub(super) async fn entries_for_completion(
         &self,
         config: &ServerConfig,
-    ) -> Arc<Vec<XpromptAssistEntry>> {
+    ) -> Arc<Vec<MacroAssistEntry>> {
         if !self.catalog_cache.stale_or_missing(&config.catalog_key) {
             if let Some(entries) =
                 self.catalog_cache.cached_entries(&config.catalog_key)
@@ -771,7 +771,7 @@ impl XpromptLspServer {
     pub(super) fn completion_list_for_context(
         &self,
         context: &sase_core::CompletionContext,
-        entries: &[XpromptAssistEntry],
+        entries: &[MacroAssistEntry],
         config: &ServerConfig,
         document: &DocumentSnapshot,
         position: Position,
@@ -799,14 +799,14 @@ impl XpromptLspServer {
             }
             CompletionContextKind::Xprompt
             | CompletionContextKind::SlashSkill => {
-                editor_build_xprompt_completion_candidates(
+                build_macro_completion_candidates(
                     token,
                     Some(context.replacement_range),
                     entries,
                 )
             }
             CompletionContextKind::FilePath
-            | CompletionContextKind::XpromptArgumentPath => {
+            | CompletionContextKind::MacroArgumentPath => {
                 editor_build_file_completion_candidates_with_base(
                     token,
                     config.root_dir.as_deref(),
@@ -831,14 +831,14 @@ impl XpromptLspServer {
                 // host inventories only for the active value role.
                 empty_completion_list()
             }
-            CompletionContextKind::XpromptArgumentName => context
+            CompletionContextKind::MacroArgumentName => context
                 .active_xprompt
                 .as_deref()
                 .and_then(|name| {
                     entries.iter().find(|entry| entry.name == name)
                 })
                 .map(|entry| {
-                    editor_build_xprompt_arg_name_candidates(
+                    build_macro_arg_name_candidates(
                         entry,
                         &Default::default(),
                         token,
@@ -846,13 +846,11 @@ impl XpromptLspServer {
                     )
                 })
                 .unwrap_or_else(empty_completion_list),
-            CompletionContextKind::XpromptArgumentValue => {
-                bool_completion_list()
-            }
-            CompletionContextKind::XpromptArgumentAgent => {
+            CompletionContextKind::MacroArgumentValue => bool_completion_list(),
+            CompletionContextKind::MacroArgumentAgent => {
                 empty_completion_list()
             }
-            CompletionContextKind::XpromptArgumentTypeHint => {
+            CompletionContextKind::MacroArgumentTypeHint => {
                 empty_completion_list()
             }
             CompletionContextKind::SnippetTrigger => empty_completion_list(),

@@ -15,16 +15,16 @@ use super::loader::CatalogLoader;
 use super::parsing::*;
 use super::types::*;
 impl CatalogLoader {
-    pub(super) fn load_xprompts_from_dir(
+    pub(super) fn load_macros_from_dir(
         &self,
         dir: &Path,
         project: Option<&str>,
         namespace_local: bool,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
-        let skill_destination = self.skill_destination_for_xprompt_dir(dir);
+        let skill_destination = self.skill_destination_for_macro_dir(dir);
         for path in files_with_extensions(dir, &["md"])? {
-            let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
+            let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
                 continue;
             };
             if xprompt.is_skill {
@@ -64,7 +64,7 @@ impl CatalogLoader {
         dir: &Path,
         project: Option<&str>,
         namespace_local: bool,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         let destination = dir.parent().map(|parent| {
             parent.join("xprompts").to_string_lossy().into_owned()
@@ -77,7 +77,7 @@ impl CatalogLoader {
             {
                 continue;
             }
-            let Some(mut xprompt) = load_xprompt_from_markdown(&path)? else {
+            let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
                 continue;
             };
             if !xprompt.is_skill {
@@ -102,8 +102,7 @@ impl CatalogLoader {
         dir: &Path,
         project: Option<&str>,
         namespace_local: bool,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for path in files_with_extensions(dir, &["yml", "yaml"])? {
             let Some(mut workflow) = load_workflow_from_yaml_file(&path)?
@@ -120,14 +119,13 @@ impl CatalogLoader {
         Ok(result)
     }
 
-    pub(super) fn load_plugin_xprompts(
+    pub(super) fn load_plugin_macros(
         &self,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for (module, dir) in &self.plugin_xprompt_dirs {
             for path in files_with_extensions(dir, &["md"])? {
-                let Some(mut xprompt) = load_xprompt_from_markdown(&path)?
-                else {
+                let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
                     continue;
                 };
                 let Some(filename) =
@@ -158,12 +156,11 @@ impl CatalogLoader {
     /// Load skills from plugins' sibling `skills/` resource directories.
     pub(super) fn load_plugin_skills(
         &self,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for (module, dir) in &self.plugin_skill_dirs {
             for path in files_with_extensions(dir, &["md"])? {
-                let Some(mut xprompt) = load_xprompt_from_markdown(&path)?
-                else {
+                let Some(mut xprompt) = load_macro_from_markdown(&path)? else {
                     continue;
                 };
                 let Some(filename) =
@@ -192,8 +189,7 @@ impl CatalogLoader {
 
     pub(super) fn load_plugin_workflows(
         &self,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for (module, dir) in &self.plugin_xprompt_dirs {
             for path in files_with_extensions(dir, &["yml", "yaml"])? {
@@ -218,7 +214,7 @@ impl CatalogLoader {
     /// a canonical skill directory so it has a source to generate from.
     fn reject_config_skill(
         &self,
-        xprompt: &CatalogXprompt,
+        xprompt: &CatalogMacro,
         source: &str,
     ) -> bool {
         if !xprompt.is_skill {
@@ -233,10 +229,10 @@ impl CatalogLoader {
         true
     }
 
-    pub(super) fn load_config_xprompts(
+    pub(super) fn load_config_macros(
         &self,
         project: Option<&str>,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for (source, path) in self.config_paths()? {
             let Some(data) = load_yaml_mapping(&path)? else {
@@ -253,7 +249,7 @@ impl CatalogLoader {
                     continue;
                 };
                 let Some(mut xprompt) =
-                    xprompt_from_config_entry(&name, value, &source)
+                    macro_from_config_entry(&name, value, &source)
                 else {
                     continue;
                 };
@@ -279,7 +275,7 @@ impl CatalogLoader {
 
     fn config_paths(
         &self,
-    ) -> Result<Vec<(String, PathBuf)>, XpromptCatalogLoadError> {
+    ) -> Result<Vec<(String, PathBuf)>, MacroCatalogLoadError> {
         let mut paths = Vec::new();
         if let Some(path) = &self.default_config_path {
             paths.push(("default_config".to_string(), path.clone()));
@@ -329,11 +325,11 @@ impl CatalogLoader {
         Ok(paths)
     }
 
-    pub(super) fn load_project_local_xprompts(
+    pub(super) fn load_project_local_macros(
         &self,
         project: &str,
         workspace: &Path,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let source = format!("project_local_config:{project}");
         let Some(config_path) = self.project_config_read_path(
             workspace,
@@ -357,7 +353,7 @@ impl CatalogLoader {
                 continue;
             };
             let Some(mut xprompt) =
-                xprompt_from_config_entry(&name, value, &source)
+                macro_from_config_entry(&name, value, &source)
             else {
                 continue;
             };
@@ -376,14 +372,14 @@ impl CatalogLoader {
         Ok(result)
     }
 
-    pub(super) fn load_project_file_xprompts(
+    pub(super) fn load_project_file_macros(
         &self,
         project: &str,
         workspace: &Path,
-    ) -> Result<BTreeMap<String, CatalogXprompt>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for source in self
-            .xprompt_directory_sources(Some(workspace), Some(project))
+            .macro_directory_sources(Some(workspace), Some(project))
             .into_iter()
             .rev()
             .filter(|source| source.scope == "project")
@@ -391,7 +387,7 @@ impl CatalogLoader {
             let Some(path) = source.path.as_deref().map(Path::new) else {
                 continue;
             };
-            result.extend(self.load_xprompts_from_dir(
+            result.extend(self.load_macros_from_dir(
                 path,
                 Some(project),
                 true,
@@ -419,11 +415,10 @@ impl CatalogLoader {
         &self,
         project: &str,
         workspace: &Path,
-    ) -> Result<BTreeMap<String, CatalogWorkflow>, XpromptCatalogLoadError>
-    {
+    ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for source in self
-            .xprompt_directory_sources(Some(workspace), Some(project))
+            .macro_directory_sources(Some(workspace), Some(project))
             .into_iter()
             .rev()
             .filter(|source| source.scope == "project")
@@ -442,7 +437,7 @@ impl CatalogLoader {
 
     pub(super) fn load_user_snippets(
         &self,
-    ) -> Result<BTreeMap<String, String>, XpromptCatalogLoadError> {
+    ) -> Result<BTreeMap<String, String>, MacroCatalogLoadError> {
         let mut snippets = BTreeMap::new();
         for (_source, path) in self.config_paths()? {
             let Some(data) = load_yaml_mapping(&path)? else {
@@ -477,7 +472,7 @@ impl CatalogLoader {
         &self,
         root: &Path,
         label: &str,
-    ) -> Result<Option<PathBuf>, XpromptCatalogLoadError> {
+    ) -> Result<Option<PathBuf>, MacroCatalogLoadError> {
         let home_root =
             self.home_dir.as_deref().unwrap_or_else(|| Path::new(""));
         let layout = sase_content_layout(Some(root), home_root, None, None);

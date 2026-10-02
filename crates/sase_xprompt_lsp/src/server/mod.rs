@@ -25,6 +25,10 @@ use lsp_types::{
     TextDocumentEdit, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextEdit, Uri, WorkDoneProgressOptions, WorkspaceEdit,
 };
+use sase_core::editor::wire::MacroAssistEntry;
+use sase_core::editor::{
+    build_macro_arg_name_candidates, build_macro_completion_candidates,
+};
 use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
     editor_analyze_artifact_refs, editor_analyze_document,
@@ -40,8 +44,6 @@ use sase_core::{
     editor_build_vcs_project_completion_candidates_with_targets,
     editor_build_vcs_ref_completion_candidates,
     editor_build_vcs_repo_completion_candidates,
-    editor_build_xprompt_arg_name_candidates,
-    editor_build_xprompt_completion_candidates,
     editor_classify_completion_context_with_artifacts_and_workflows,
     editor_classify_completion_context_with_workflows,
     editor_definition_at_position, editor_detect_at_reference_context,
@@ -67,7 +69,7 @@ use sase_core::{
     GlossaryCatalogWire, GlossaryEntryWire, GlossarySpanWire, HelperHostBridge,
     HoverPayload, ModelAliasShortcutContextWire, ModelCompletionEntryWire,
     ModelShortcutContextWire, ModelShortcutKind, VcsNamespaceEntry,
-    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry, XpromptAssistEntry,
+    VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
     MEMORY_NAMESPACE_SEGMENT,
 };
 use serde::Deserialize;

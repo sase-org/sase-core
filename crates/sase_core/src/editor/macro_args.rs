@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::OnceLock};
 use crate::macro_text_block::find_text_block_close_for_args;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum XpromptArgSyntax {
+pub(crate) enum MacroArgSyntax {
     None,
     Plus,
     Colon,
@@ -14,40 +14,40 @@ pub(crate) enum XpromptArgSyntax {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedXpromptCall {
+pub(crate) struct ParsedMacroCall {
     pub(crate) name: String,
     pub(crate) name_span: (usize, usize),
-    pub(crate) args: Vec<ParsedXpromptArg>,
-    pub(crate) syntax: XpromptArgSyntax,
+    pub(crate) args: Vec<ParsedMacroArg>,
+    pub(crate) syntax: MacroArgSyntax,
     pub(crate) is_open: bool,
     pub(crate) malformed_span: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedXpromptArg {
-    pub(crate) name: Option<ParsedXpromptArgName>,
+pub(crate) struct ParsedMacroArg {
+    pub(crate) name: Option<ParsedMacroArgName>,
     pub(crate) value: String,
     pub(crate) value_span: (usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedXpromptArgName {
+pub(crate) struct ParsedMacroArgName {
     pub(crate) value: String,
     pub(crate) span: (usize, usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedXpromptReference {
+pub(crate) struct ParsedMacroReference {
     pub(crate) name: String,
     pub(crate) positional_args: Vec<String>,
     pub(crate) named_args: BTreeMap<String, String>,
 }
 
-pub(crate) fn parse_xprompt_reference_body(
+pub(crate) fn parse_macro_reference_body(
     body: &str,
-) -> Option<ParsedXpromptReference> {
+) -> Option<ParsedMacroReference> {
     let text = format!("#{body}");
-    let call = parse_xprompt_calls(&text).into_iter().next()?;
+    let call = parse_macro_calls(&text).into_iter().next()?;
     let mut positional_args = Vec::new();
     let mut named_args = BTreeMap::new();
     for arg in call.args {
@@ -57,16 +57,16 @@ pub(crate) fn parse_xprompt_reference_body(
             positional_args.push(arg.value);
         }
     }
-    Some(ParsedXpromptReference {
+    Some(ParsedMacroReference {
         name: call.name,
         positional_args,
         named_args,
     })
 }
 
-pub(crate) fn parse_xprompt_calls(text: &str) -> Vec<ParsedXpromptCall> {
+pub(crate) fn parse_macro_calls(text: &str) -> Vec<ParsedMacroCall> {
     let mut calls = Vec::new();
-    for caps in xprompt_ref_re().captures_iter(text) {
+    for caps in macro_ref_re().captures_iter(text) {
         let Some(name_match) = caps.name("name") else {
             continue;
         };
@@ -85,12 +85,12 @@ pub(crate) fn parse_xprompt_calls(text: &str) -> Vec<ParsedXpromptCall> {
     calls
 }
 
-pub(crate) fn parse_xprompt_like_call_at(
+pub(crate) fn parse_macro_like_call_at(
     text: &str,
     marker_start: usize,
     marker_len: usize,
     allow_hitl_suffix: bool,
-) -> Option<ParsedXpromptCall> {
+) -> Option<ParsedMacroCall> {
     if marker_len == 0 {
         return None;
     }
@@ -114,14 +114,14 @@ pub(crate) fn parse_xprompt_like_call_at(
     ))
 }
 
-pub(crate) fn xprompt_argument_open_colon_at(
+pub(crate) fn macro_argument_open_colon_at(
     text: &str,
     colon_idx: usize,
 ) -> bool {
     if text.as_bytes().get(colon_idx) != Some(&b':') {
         return false;
     }
-    xprompt_ref_re().captures_iter(text).any(|caps| {
+    macro_ref_re().captures_iter(text).any(|caps| {
         let Some(name_match) = caps.name("name") else {
             return false;
         };
@@ -173,12 +173,12 @@ fn parse_call_suffix(
     name: String,
     name_span: (usize, usize),
     suffix_start: usize,
-) -> ParsedXpromptCall {
-    let mut call = ParsedXpromptCall {
+) -> ParsedMacroCall {
+    let mut call = ParsedMacroCall {
         name,
         name_span,
         args: Vec::new(),
-        syntax: XpromptArgSyntax::None,
+        syntax: MacroArgSyntax::None,
         is_open: false,
         malformed_span: None,
     };
@@ -186,8 +186,8 @@ fn parse_call_suffix(
         return call;
     };
     if suffix.starts_with('+') {
-        call.syntax = XpromptArgSyntax::Plus;
-        call.args.push(ParsedXpromptArg {
+        call.syntax = MacroArgSyntax::Plus;
+        call.args.push(ParsedMacroArg {
             name: None,
             value: "true".to_string(),
             value_span: (suffix_start, suffix_start + 1),
@@ -207,9 +207,9 @@ fn parse_call_suffix(
 fn parse_parenthesized(
     text: &str,
     open_idx: usize,
-    call: &mut ParsedXpromptCall,
+    call: &mut ParsedMacroCall,
 ) {
-    call.syntax = XpromptArgSyntax::Parenthesized;
+    call.syntax = MacroArgSyntax::Parenthesized;
     let close_idx = find_matching_paren_for_args(text, open_idx);
     let body_end = close_idx.unwrap_or_else(|| {
         call.is_open = true;
@@ -239,13 +239,13 @@ fn parse_parenthesized(
     }
 }
 
-fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
+fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedMacroCall) {
     let Some(after_colon) = text.get(colon_idx + 1..) else {
         call.is_open = true;
         return;
     };
     if let Some(value_start) = double_colon_payload_start(text, colon_idx) {
-        call.syntax = XpromptArgSyntax::DoubleColonText;
+        call.syntax = MacroArgSyntax::DoubleColonText;
         let value_end = find_double_colon_text_end(text, value_start);
         if value_start >= value_end {
             call.is_open = true;
@@ -259,7 +259,7 @@ fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
         return;
     }
     if after_colon.starts_with(' ') {
-        call.syntax = XpromptArgSyntax::Colon;
+        call.syntax = MacroArgSyntax::Colon;
         let value_start = colon_idx + 2;
         let value_end = find_shorthand_text_end(text, value_start);
         if value_start >= value_end {
@@ -270,7 +270,7 @@ fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
         return;
     }
 
-    call.syntax = XpromptArgSyntax::Colon;
+    call.syntax = MacroArgSyntax::Colon;
     let value_start = colon_idx + 1;
     let value_end = token_end(text, value_start);
     if value_start >= value_end {
@@ -278,7 +278,7 @@ fn parse_colon(text: &str, colon_idx: usize, call: &mut ParsedXpromptCall) {
         return;
     }
     if text[value_start..value_end].contains(['(', ')']) {
-        call.syntax = XpromptArgSyntax::Malformed;
+        call.syntax = MacroArgSyntax::Malformed;
         call.malformed_span = Some((value_start, value_end));
         return;
     }
@@ -291,7 +291,7 @@ fn parse_arg_body(
     text: &str,
     body_start: usize,
     body_end: usize,
-    call: &mut ParsedXpromptCall,
+    call: &mut ParsedMacroCall,
 ) {
     for (token_start, token_end) in split_commas(text, body_start, body_end) {
         if let Some(equal_idx) =
@@ -302,11 +302,11 @@ fn parse_arg_body(
             let (value_start, value_end) =
                 trim_span(text, equal_idx + 1, token_end);
             if name_start >= name_end {
-                call.syntax = XpromptArgSyntax::Malformed;
+                call.syntax = MacroArgSyntax::Malformed;
                 call.malformed_span = Some((token_start, token_end));
                 continue;
             }
-            let name = ParsedXpromptArgName {
+            let name = ParsedMacroArgName {
                 value: text[name_start..name_end].to_string(),
                 span: (name_start, name_end),
             };
@@ -328,13 +328,13 @@ fn push_text_arg(
     text: &str,
     value_start: usize,
     value_end: usize,
-    call: &mut ParsedXpromptCall,
+    call: &mut ParsedMacroCall,
 ) {
     let value_end = trim_end_ascii_ws(text, value_start, value_end);
     if value_start >= value_end {
         return;
     }
-    call.args.push(ParsedXpromptArg {
+    call.args.push(ParsedMacroArg {
         name: None,
         value: text[value_start..value_end].to_string(),
         value_span: (value_start, value_end),
@@ -345,12 +345,12 @@ fn push_value_arg(
     text: &str,
     start: usize,
     end: usize,
-    name: Option<ParsedXpromptArgName>,
+    name: Option<ParsedMacroArgName>,
     decode_plus: bool,
-    call: &mut ParsedXpromptCall,
+    call: &mut ParsedMacroCall,
 ) {
     let value = decoded_value(text, start, end, decode_plus);
-    call.args.push(ParsedXpromptArg {
+    call.args.push(ParsedMacroArg {
         name,
         value,
         value_span: (start, end),
@@ -379,7 +379,7 @@ fn decoded_value(
         return value[2..value.len() - 2].to_string();
     }
     if decode_plus {
-        decode_xprompt_arg_value(value)
+        decode_macro_arg_value(value)
     } else {
         value.to_string()
     }
@@ -500,7 +500,7 @@ fn find_matching_delimiter_for_args(
     None
 }
 
-fn decode_xprompt_arg_value(value: &str) -> String {
+fn decode_macro_arg_value(value: &str) -> String {
     value.replace('+', " ")
 }
 
@@ -585,9 +585,7 @@ fn find_double_colon_text_end(text: &str, start: usize) -> usize {
     let mut idx = start;
     while idx < text.len() {
         if bytes[idx] == b'\n'
-            && text
-                .get(idx + 1..)
-                .is_some_and(starts_with_xprompt_directive)
+            && text.get(idx + 1..).is_some_and(starts_with_macro_directive)
         {
             return idx;
         }
@@ -596,7 +594,7 @@ fn find_double_colon_text_end(text: &str, start: usize) -> usize {
     text.len()
 }
 
-fn starts_with_xprompt_directive(text: &str) -> bool {
+fn starts_with_macro_directive(text: &str) -> bool {
     let Some(after_hash) = text.strip_prefix('#') else {
         return false;
     };
@@ -662,7 +660,7 @@ fn is_name_continue(ch: u8) -> bool {
     ch.is_ascii_alphanumeric() || ch == b'_'
 }
 
-fn xprompt_ref_re() -> &'static Regex {
+fn macro_ref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
@@ -676,8 +674,8 @@ fn xprompt_ref_re() -> &'static Regex {
 mod tests {
     use super::*;
 
-    fn one(text: &str) -> ParsedXpromptCall {
-        let calls = parse_xprompt_calls(text);
+    fn one(text: &str) -> ParsedMacroCall {
+        let calls = parse_macro_calls(text);
         assert_eq!(calls.len(), 1, "{calls:?}");
         calls.into_iter().next().unwrap()
     }
@@ -686,7 +684,7 @@ mod tests {
     fn parses_parenthesized_named_and_positional_args() {
         let call = one("#foo(src/main.rs, enabled=true)");
         assert_eq!(call.name, "foo");
-        assert_eq!(call.syntax, XpromptArgSyntax::Parenthesized);
+        assert_eq!(call.syntax, MacroArgSyntax::Parenthesized);
         assert_eq!(call.args[0].value, "src/main.rs");
         assert_eq!(call.args[1].name.as_ref().unwrap().value, "enabled");
         assert_eq!(call.args[1].value, "true");
@@ -732,7 +730,7 @@ mod tests {
     fn parses_open_parenthesized_available_body() {
         let call = one("#foo(key=42, other=true");
         assert!(call.is_open);
-        assert_eq!(call.syntax, XpromptArgSyntax::Parenthesized);
+        assert_eq!(call.syntax, MacroArgSyntax::Parenthesized);
         assert_eq!(call.args.len(), 2);
         assert_eq!(call.args[0].name.as_ref().unwrap().value, "key");
         assert_eq!(call.args[0].value, "42");
@@ -822,13 +820,13 @@ mod tests {
         assert_eq!(one("#foo(`Compare C++`)").args[0].value, "`Compare C++`");
 
         let reference =
-            parse_xprompt_reference_body("foo:Application+Support").unwrap();
+            parse_macro_reference_body("foo:Application+Support").unwrap();
         assert_eq!(
             reference.positional_args,
             vec!["Application Support".to_string()]
         );
         let paren =
-            parse_xprompt_reference_body("foo(Application+Support)").unwrap();
+            parse_macro_reference_body("foo(Application+Support)").unwrap();
         assert_eq!(
             paren.positional_args,
             vec!["Application+Support".to_string()]
@@ -851,12 +849,12 @@ mod tests {
     #[test]
     fn double_colon_at_end_of_line_binds_next_line_payload() {
         let call = one("#foo::\none\ntwo");
-        assert_eq!(call.syntax, XpromptArgSyntax::DoubleColonText);
+        assert_eq!(call.syntax, MacroArgSyntax::DoubleColonText);
         assert_eq!(call.args.len(), 1);
         assert_eq!(call.args[0].value, "one\ntwo");
 
         let paren = one("#foo(a=1)::\none");
-        assert_eq!(paren.syntax, XpromptArgSyntax::Parenthesized);
+        assert_eq!(paren.syntax, MacroArgSyntax::Parenthesized);
         assert_eq!(paren.args.len(), 2);
         assert_eq!(paren.args[0].name.as_ref().unwrap().value, "a");
         assert_eq!(paren.args[0].value, "1");
@@ -866,24 +864,24 @@ mod tests {
             let spaced = one(source);
             assert_eq!(
                 spaced.syntax,
-                XpromptArgSyntax::DoubleColonText,
+                MacroArgSyntax::DoubleColonText,
                 "{source:?}"
             );
             assert_eq!(spaced.args.last().unwrap().value, "one");
         }
 
         let open = one("#foo::");
-        assert_eq!(open.syntax, XpromptArgSyntax::DoubleColonText);
+        assert_eq!(open.syntax, MacroArgSyntax::DoubleColonText);
         assert!(open.is_open);
         assert!(open.args.is_empty());
 
-        let calls = parse_xprompt_calls("#a:: x\n#b::\ny");
+        let calls = parse_macro_calls("#a:: x\n#b::\ny");
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].args[0].value, "x");
         assert_eq!(calls[1].args[0].value, "y");
 
         let single = one("#foo:\nbar");
-        assert_eq!(single.syntax, XpromptArgSyntax::Colon);
+        assert_eq!(single.syntax, MacroArgSyntax::Colon);
         assert!(single.is_open);
     }
 }

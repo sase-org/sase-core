@@ -5,10 +5,16 @@ use lsp_types::{
     SemanticTokensLegend,
 };
 use sase_core::editor::scan_alternations;
+use sase_core::editor::wire::{
+    MacroArgumentSource, MacroArgumentSpanRole, MacroArgumentSpanValidity,
+    MacroAssistEntry,
+};
+use sase_core::editor::{
+    extract_macro_argument_spans, extract_macro_argument_spans_with_catalog,
+    extract_macro_call_name_spans,
+};
 use sase_core::{
-    editor_extract_xprompt_argument_spans,
-    editor_extract_xprompt_argument_spans_with_catalog,
-    editor_extract_xprompt_call_name_spans, fenced_block_details,
+    fenced_block_details,
     project_tag::{
         resolve_project_tag, scan_project_tags, ProjectTagResolutionWire,
         ProjectTagTargetWire,
@@ -16,8 +22,6 @@ use sase_core::{
     prompt_literal_zone_ranges, scan_artifact_refs,
     scan_directive_owned_fences, ArtifactRefContextWire, ArtifactRefSpanWire,
     CompiledGlossaryCatalog, DocumentSnapshot, VcsProjectEntry,
-    XpromptArgumentSource, XpromptArgumentSpanRole,
-    XpromptArgumentSpanValidity, XpromptAssistEntry,
 };
 
 use crate::project_tags::{accent_index_for_target, is_disabled_target};
@@ -123,7 +127,7 @@ pub(crate) fn document_semantic_tokens(
     document: &DocumentSnapshot,
     artifact_context: Option<&ArtifactRefContextWire>,
     glossary_catalog: Option<&CompiledGlossaryCatalog>,
-    argument_entries: Option<&[XpromptAssistEntry]>,
+    argument_entries: Option<&[MacroAssistEntry]>,
     project_tags: &[ProjectTagTargetWire],
     project_entries: &[VcsProjectEntry],
 ) -> SemanticTokens {
@@ -386,12 +390,12 @@ fn raw_glossary_tokens(
 
 fn raw_xprompt_argument_tokens(
     document: &DocumentSnapshot,
-    entries: Option<&[XpromptAssistEntry]>,
+    entries: Option<&[MacroAssistEntry]>,
 ) -> Vec<RawSemanticToken> {
     let spans = if let Some(entries) = entries {
-        editor_extract_xprompt_argument_spans_with_catalog(document, entries)
+        extract_macro_argument_spans_with_catalog(document, entries)
     } else {
-        editor_extract_xprompt_argument_spans(document)
+        extract_macro_argument_spans(document)
     };
 
     spans
@@ -409,14 +413,14 @@ fn raw_xprompt_argument_tokens(
 fn raw_xprompt_call_name_tokens(
     document: &DocumentSnapshot,
 ) -> Vec<RawSemanticToken> {
-    editor_extract_xprompt_call_name_spans(document)
+    extract_macro_call_name_spans(document)
         .into_iter()
         .map(|span| RawSemanticToken {
             byte_start: span.start,
             byte_end: span.end,
             token_type: match span.source {
-                XpromptArgumentSource::Xprompt => FUNCTION_TOKEN_TYPE,
-                XpromptArgumentSource::Directive => MACRO_TOKEN_TYPE,
+                MacroArgumentSource::Macro => FUNCTION_TOKEN_TYPE,
+                MacroArgumentSource::Directive => MACRO_TOKEN_TYPE,
             },
             token_modifiers_bitset: 0,
             priority: NAME_PRIORITY,
@@ -424,25 +428,25 @@ fn raw_xprompt_call_name_tokens(
         .collect()
 }
 
-fn argument_token_type(role: XpromptArgumentSpanRole) -> u32 {
+fn argument_token_type(role: MacroArgumentSpanRole) -> u32 {
     match role {
-        XpromptArgumentSpanRole::ArgDelimiter
-        | XpromptArgumentSpanRole::ArgAssign => OPERATOR_TOKEN_TYPE,
-        XpromptArgumentSpanRole::ArgKey => PARAMETER_TOKEN_TYPE,
-        XpromptArgumentSpanRole::ArgValue
-        | XpromptArgumentSpanRole::ArgValueString => PAYLOAD_TOKEN_TYPE,
-        XpromptArgumentSpanRole::ArgValueNumber => FRAGMENT_TOKEN_TYPE,
-        XpromptArgumentSpanRole::ArgValueBool => KEYWORD_TOKEN_TYPE,
+        MacroArgumentSpanRole::ArgDelimiter
+        | MacroArgumentSpanRole::ArgAssign => OPERATOR_TOKEN_TYPE,
+        MacroArgumentSpanRole::ArgKey => PARAMETER_TOKEN_TYPE,
+        MacroArgumentSpanRole::ArgValue
+        | MacroArgumentSpanRole::ArgValueString => PAYLOAD_TOKEN_TYPE,
+        MacroArgumentSpanRole::ArgValueNumber => FRAGMENT_TOKEN_TYPE,
+        MacroArgumentSpanRole::ArgValueBool => KEYWORD_TOKEN_TYPE,
     }
 }
 
-fn argument_token_modifiers(validity: XpromptArgumentSpanValidity) -> u32 {
+fn argument_token_modifiers(validity: MacroArgumentSpanValidity) -> u32 {
     match validity {
-        XpromptArgumentSpanValidity::UnknownKey => DEPRECATED_MODIFIER,
-        XpromptArgumentSpanValidity::Ok
-        | XpromptArgumentSpanValidity::TypeMismatch
-        | XpromptArgumentSpanValidity::DuplicateKey
-        | XpromptArgumentSpanValidity::Unresolvable => 0,
+        MacroArgumentSpanValidity::UnknownKey => DEPRECATED_MODIFIER,
+        MacroArgumentSpanValidity::Ok
+        | MacroArgumentSpanValidity::TypeMismatch
+        | MacroArgumentSpanValidity::DuplicateKey
+        | MacroArgumentSpanValidity::Unresolvable => 0,
     }
 }
 
@@ -647,9 +651,8 @@ fn span_len(token: &RawSemanticToken) -> usize {
 #[cfg(test)]
 mod tests {
     use lsp_types::SemanticToken;
-    use sase_core::{
-        compile_glossary_catalog, GlossaryInputEntryWire, XpromptInputHint,
-    };
+    use sase_core::editor::wire::MacroInputHint;
+    use sase_core::{compile_glossary_catalog, GlossaryInputEntryWire};
 
     use super::*;
 
@@ -664,9 +667,9 @@ mod tests {
 
     fn assist_entry(
         name: &str,
-        inputs: Vec<XpromptInputHint>,
-    ) -> XpromptAssistEntry {
-        XpromptAssistEntry {
+        inputs: Vec<MacroInputHint>,
+    ) -> MacroAssistEntry {
+        MacroAssistEntry {
             name: name.to_string(),
             display_label: name.to_string(),
             insertion: format!("#{name}"),
@@ -688,8 +691,8 @@ mod tests {
         }
     }
 
-    fn input(name: &str, r#type: &str, position: u32) -> XpromptInputHint {
-        XpromptInputHint {
+    fn input(name: &str, r#type: &str, position: u32) -> MacroInputHint {
+        MacroInputHint {
             name: name.to_string(),
             r#type: r#type.to_string(),
             description: None,

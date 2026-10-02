@@ -15,7 +15,7 @@ use super::types::*;
 pub(super) fn resolve_compatible_read_path(
     compatible: &CompatibleLayoutPathWire,
     label: &str,
-) -> Result<Option<PathBuf>, XpromptCatalogLoadError> {
+) -> Result<Option<PathBuf>, MacroCatalogLoadError> {
     let candidates = std::iter::once(&compatible.canonical)
         .chain(compatible.legacy.iter())
         .map(|entry| PathBuf::from(&entry.path))
@@ -34,7 +34,7 @@ pub(super) fn resolve_compatible_read_path(
             .map(|index| candidates[*index].to_string_lossy())
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(XpromptCatalogLoadError::LayoutCollision(format!(
+        return Err(MacroCatalogLoadError::LayoutCollision(format!(
             "{label} exists in multiple canonical/legacy locations: {rendered}; migrate to the canonical path instead of merging split state"
         )));
     }
@@ -127,7 +127,7 @@ pub(super) fn known_projects(home: Option<&Path>) -> KnownProjects {
 pub(super) fn files_with_extensions(
     dir: &Path,
     extensions: &[&str],
-) -> Result<Vec<PathBuf>, XpromptCatalogLoadError> {
+) -> Result<Vec<PathBuf>, MacroCatalogLoadError> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Ok(Vec::new());
     };
@@ -145,9 +145,9 @@ pub(super) fn files_with_extensions(
     Ok(paths)
 }
 
-pub(super) fn load_xprompt_from_markdown(
+pub(super) fn load_macro_from_markdown(
     path: &Path,
-) -> Result<Option<CatalogXprompt>, XpromptCatalogLoadError> {
+) -> Result<Option<CatalogMacro>, MacroCatalogLoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => return Ok(None),
@@ -189,15 +189,15 @@ pub(super) fn load_xprompt_from_markdown(
         .and_then(|data| mapping_get(data, "snippet"))
         .and_then(parse_snippet);
     let source_path = path.to_string_lossy().into_owned();
-    let local_xprompts = front_matter
+    let local_macros = front_matter
         .as_ref()
-        .map(|data| parse_local_xprompts(data, &source_path))
+        .map(|data| parse_local_macros(data, &source_path))
         .unwrap_or_default();
-    Ok(Some(CatalogXprompt {
+    Ok(Some(CatalogMacro {
         name: name.clone(),
         content: body,
         inputs,
-        local_xprompts,
+        local_macros,
         source_path: Some(source_path),
         tags,
         description,
@@ -220,7 +220,7 @@ pub(super) struct LoadedMemoryNote {
 /// Read a memory note, stripping its frontmatter from the prompt body.
 pub(super) fn load_memory_note(
     path: &Path,
-) -> Result<Option<LoadedMemoryNote>, XpromptCatalogLoadError> {
+) -> Result<Option<LoadedMemoryNote>, MacroCatalogLoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => return Ok(None),
@@ -277,7 +277,7 @@ fn parse_front_matter(text: &str) -> (Option<serde_yaml::Mapping>, String) {
 
 pub(super) fn load_yaml_mapping(
     path: &Path,
-) -> Result<Option<serde_yaml::Mapping>, XpromptCatalogLoadError> {
+) -> Result<Option<serde_yaml::Mapping>, MacroCatalogLoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => return Ok(None),
@@ -289,7 +289,7 @@ pub(super) fn load_yaml_mapping(
 
 pub(super) fn load_workflow_from_yaml_file(
     path: &Path,
-) -> Result<Option<CatalogWorkflow>, XpromptCatalogLoadError> {
+) -> Result<Option<CatalogWorkflow>, MacroCatalogLoadError> {
     let Some(mapping) = load_yaml_mapping(path)? else {
         return Ok(None);
     };
@@ -309,10 +309,10 @@ pub(super) fn load_workflow_from_yaml_file(
     }
 }
 
-fn parse_local_xprompts(
+fn parse_local_macros(
     data: &serde_yaml::Mapping,
     source_path: &str,
-) -> Vec<CatalogXprompt> {
+) -> Vec<CatalogMacro> {
     mapping_get(data, "xprompts")
         .and_then(Value::as_mapping)
         .map(|xprompts| {
@@ -320,7 +320,7 @@ fn parse_local_xprompts(
                 .iter()
                 .filter_map(|(name, value)| {
                     let name = value_as_string(name)?;
-                    xprompt_from_config_entry(&name, value, source_path)
+                    macro_from_config_entry(&name, value, source_path)
                 })
                 .collect::<Vec<_>>()
         })
@@ -337,7 +337,7 @@ fn workflow_from_mapping(
         .unwrap_or_default();
     let description =
         mapping_get(data, "description").and_then(value_as_string);
-    let local_xprompts = parse_local_xprompts(data, source_path);
+    let local_macros = parse_local_macros(data, source_path);
     let mut inputs = mapping_get(data, "input")
         .map(parse_inputs)
         .unwrap_or_default();
@@ -377,7 +377,7 @@ fn workflow_from_mapping(
         name: name.to_string(),
         inputs,
         steps,
-        local_xprompts,
+        local_macros,
         source_path: Some(source_path.to_string()),
         tags,
         description,
@@ -413,17 +413,17 @@ fn parse_step(data: &serde_yaml::Mapping, index: usize) -> Option<CatalogStep> {
     })
 }
 
-pub(super) fn xprompt_from_config_entry(
+pub(super) fn macro_from_config_entry(
     name: &str,
     value: &Value,
     source_path: &str,
-) -> Option<CatalogXprompt> {
+) -> Option<CatalogMacro> {
     if let Some(content) = value.as_str() {
-        return Some(CatalogXprompt {
+        return Some(CatalogMacro {
             name: name.to_string(),
             content: content.to_string(),
             inputs: Vec::new(),
-            local_xprompts: Vec::new(),
+            local_macros: Vec::new(),
             source_path: Some(source_path.to_string()),
             tags: BTreeSet::new(),
             description: None,
@@ -435,13 +435,13 @@ pub(super) fn xprompt_from_config_entry(
     }
     let data = value.as_mapping()?;
     let content = mapping_get(data, "content").and_then(value_as_string)?;
-    Some(CatalogXprompt {
+    Some(CatalogMacro {
         name: name.to_string(),
         content,
         inputs: mapping_get(data, "input")
             .map(parse_inputs)
             .unwrap_or_default(),
-        local_xprompts: Vec::new(),
+        local_macros: Vec::new(),
         source_path: Some(source_path.to_string()),
         tags: mapping_get(data, "tags")
             .map(parse_tags)
@@ -456,7 +456,7 @@ pub(super) fn xprompt_from_config_entry(
     })
 }
 
-pub(super) fn xprompt_to_workflow(xprompt: &CatalogXprompt) -> CatalogWorkflow {
+pub(super) fn macro_to_workflow(xprompt: &CatalogMacro) -> CatalogWorkflow {
     CatalogWorkflow {
         name: xprompt.name.clone(),
         inputs: xprompt.inputs.clone(),
@@ -466,7 +466,7 @@ pub(super) fn xprompt_to_workflow(xprompt: &CatalogXprompt) -> CatalogWorkflow {
             prompt_part: Some(xprompt.content.clone()),
             has_output: false,
         }],
-        local_xprompts: xprompt.local_xprompts.clone(),
+        local_macros: xprompt.local_macros.clone(),
         source_path: xprompt.source_path.clone(),
         tags: xprompt.tags.clone(),
         description: xprompt.description.clone(),

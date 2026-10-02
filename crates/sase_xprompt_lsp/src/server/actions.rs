@@ -450,8 +450,8 @@ impl XpromptLspServer {
 
 pub(super) fn entry_for_token<'a>(
     token: &str,
-    entries: &'a [XpromptAssistEntry],
-) -> Option<&'a XpromptAssistEntry> {
+    entries: &'a [MacroAssistEntry],
+) -> Option<&'a MacroAssistEntry> {
     if let Some(name) =
         token.strip_prefix("#!").or_else(|| token.strip_prefix('#'))
     {
@@ -472,7 +472,7 @@ pub(super) fn canonical_marker_action(
     uri: &Uri,
     range: EditorRange,
     token: &str,
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
 ) -> Option<CodeAction> {
     if token.starts_with(&entry.reference_prefix) {
         return None;
@@ -596,7 +596,7 @@ pub(super) fn text_edit_action(
     }
 }
 
-pub(super) fn plain_named_args_skeleton(entry: &XpromptAssistEntry) -> String {
+pub(super) fn plain_named_args_skeleton(entry: &MacroAssistEntry) -> String {
     let required = entry
         .inputs
         .iter()
@@ -613,7 +613,7 @@ pub(super) fn plain_named_args_skeleton(entry: &XpromptAssistEntry) -> String {
 pub(super) fn definition_uri_at_position(
     document: &DocumentSnapshot,
     position: sase_core::EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Option<Uri> {
     let target = editor_definition_at_position(document, position, entries)?;
     Uri::from_file_path(target.path)

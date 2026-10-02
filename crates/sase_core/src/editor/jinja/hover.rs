@@ -97,7 +97,7 @@ fn hover_variable(
             "positional",
             "Positional argument.",
             Some(&example),
-            &super::assist::xprompt_only_reason(),
+            &super::assist::macro_only_reason(),
         ));
     }
     let catalog = jinja_catalog();

@@ -11,14 +11,14 @@ use crate::editor::directive::{
 use crate::editor::wire::{
     AgentCompletionEntry, CompletionCandidate, CompletionContext,
     CompletionList, DirectiveCompletionInventories, DirectiveSyntaxForm,
-    EditorRange, EditorTextEdit, XpromptAssistEntry, XpromptInputHint,
+    EditorRange, EditorTextEdit, MacroAssistEntry, MacroInputHint,
 };
 use crate::{EditorSnippetEntryWire, EditorXpromptCatalogEntryWire};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn assist_entries_from_catalog(
     entries: &[EditorXpromptCatalogEntryWire],
-) -> Vec<XpromptAssistEntry> {
+) -> Vec<MacroAssistEntry> {
     entries
         .iter()
         .map(|entry| {
@@ -28,7 +28,7 @@ pub fn assist_entries_from_catalog(
                 .insertion
                 .clone()
                 .unwrap_or_else(|| format!("{reference_prefix}{}", entry.name));
-            XpromptAssistEntry {
+            MacroAssistEntry {
                 name: entry.name.clone(),
                 display_label: entry.display_label.clone(),
                 insertion,
@@ -41,7 +41,7 @@ pub fn assist_entries_from_catalog(
                 inputs: entry
                     .inputs
                     .iter()
-                    .map(|input| XpromptInputHint {
+                    .map(|input| MacroInputHint {
                         name: input.name.clone(),
                         r#type: input.r#type.clone(),
                         description: input.description.clone(),
@@ -63,10 +63,10 @@ pub fn assist_entries_from_catalog(
         })
         .collect()
 }
-pub fn build_xprompt_completion_candidates(
+pub fn build_macro_completion_candidates(
     token: &str,
     replacement_range: Option<EditorRange>,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> CompletionList {
     let slash_skill = token.starts_with('/');
     let standalone_only = token.starts_with("#!");
@@ -134,8 +134,8 @@ pub fn build_xprompt_completion_candidates(
         candidates,
     }
 }
-pub fn build_xprompt_arg_name_candidates(
-    entry: &XpromptAssistEntry,
+pub fn build_macro_arg_name_candidates(
+    entry: &MacroAssistEntry,
     used_arg_names: &BTreeSet<String>,
     token: &str,
     replacement_range: Option<EditorRange>,
@@ -630,12 +630,12 @@ pub fn build_snippet_completion_candidates(
         candidates,
     }
 }
-fn input_label(input: &XpromptInputHint) -> String {
+fn input_label(input: &MacroInputHint) -> String {
     let suffix = if input.required { "" } else { "?" };
     let repeatable = if input.repeatable { "…" } else { "" };
     format!("{}{repeatable}{suffix}: {}", input.name, input.r#type)
 }
-fn input_documentation(input: &XpromptInputHint) -> Option<String> {
+fn input_documentation(input: &MacroInputHint) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(description) = input
         .description

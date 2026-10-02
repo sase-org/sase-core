@@ -30,7 +30,7 @@ fn memory_notes_load_as_namespaced_no_argument_xprompt_memories() {
         home_dir: Some(home),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     assert_eq!(
         xprompts.keys().collect::<Vec<_>>(),
@@ -62,9 +62,9 @@ fn memory_entries_render_as_memory_with_a_navigable_definition() {
         "---\ntype: long\ndescription: SASE terms\n---\nGlossary body\n",
     );
 
-    let response = load_editor_xprompt_catalog(
+    let response = load_editor_macro_catalog(
         &request(),
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let entry = response
@@ -119,7 +119,7 @@ fn project_memory_shadows_home_memory_of_the_same_stem() {
         home_dir: Some(home),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     assert_eq!(xprompts["memory/glossary"].content, "Project");
     // Home still supplies notes the project does not define.
@@ -148,12 +148,12 @@ fn explicit_project_selection_picks_that_projects_memory_only() {
 
     // Selecting a registered project changes which root supplies
     // `#memory/foo`; the reference name never gains a project prefix.
-    let selected = loader.load_all_xprompts(Some("other")).unwrap();
+    let selected = loader.load_all_macros(Some("other")).unwrap();
     assert_eq!(selected["memory/glossary"].content, "Other");
     assert!(selected.contains_key("memory/only"));
 
     // The ambient catalog never mixes another project's memory in.
-    let ambient = loader.load_all_xprompts(None).unwrap();
+    let ambient = loader.load_all_macros(None).unwrap();
     assert_eq!(ambient["memory/glossary"].content, "Root");
     assert!(!ambient.contains_key("memory/only"));
 }
@@ -173,9 +173,9 @@ fn split_canonical_and_legacy_memory_state_is_a_collision_error() {
         root_dir: Some(root),
         ..CatalogLoader::default()
     };
-    let error = loader.load_all_xprompts(None).unwrap_err();
+    let error = loader.load_all_macros(None).unwrap_err();
 
-    let XpromptCatalogLoadError::LayoutCollision(message) = error else {
+    let MacroCatalogLoadError::LayoutCollision(message) = error else {
         panic!("expected a memory layout collision");
     };
     assert!(message.contains("project memory"), "{message}");
@@ -197,7 +197,7 @@ fn invalid_memory_notes_become_diagnostics_instead_of_silent_gaps() {
         root_dir: Some(root),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     assert_eq!(xprompts.keys().collect::<Vec<_>>(), vec!["memory/ok"]);
     let warnings = loader.placement_warnings().join("\n");
@@ -226,7 +226,7 @@ fn ordinary_definitions_cannot_claim_the_reserved_memory_namespace() {
         root_dir: Some(root),
         ..CatalogLoader::default()
     };
-    let xprompts = loader.load_all_xprompts(None).unwrap();
+    let xprompts = loader.load_all_macros(None).unwrap();
 
     // Load order never decides the winner: the colliding definitions are
     // rejected outright, and only the real memory note is reachable.

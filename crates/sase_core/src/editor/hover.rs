@@ -2,17 +2,17 @@ use super::completion::classify_completion_context;
 use super::directive::directive_metadata_with_flags;
 use super::frontmatter;
 use super::token::{
-    extract_token_at_position, slash_skill_reference_name,
-    xprompt_reference_name, DocumentSnapshot,
+    extract_token_at_position, macro_reference_name,
+    slash_skill_reference_name, DocumentSnapshot,
 };
 use super::wire::{
-    CompletionContextKind, EditorPosition, HoverPayload, XpromptAssistEntry,
+    CompletionContextKind, EditorPosition, HoverPayload, MacroAssistEntry,
 };
 
 pub fn hover_at_position(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
 ) -> Option<HoverPayload> {
     hover_at_position_with_flags(document, position, entries, &[])
 }
@@ -20,7 +20,7 @@ pub fn hover_at_position(
 pub fn hover_at_position_with_flags(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    entries: &[XpromptAssistEntry],
+    entries: &[MacroAssistEntry],
     enabled_feature_flags: &[String],
 ) -> Option<HoverPayload> {
     if let Some(context) =
@@ -28,10 +28,10 @@ pub fn hover_at_position_with_flags(
     {
         if matches!(
             context.kind,
-            CompletionContextKind::XpromptArgumentName
-                | CompletionContextKind::XpromptArgumentPath
-                | CompletionContextKind::XpromptArgumentValue
-                | CompletionContextKind::XpromptArgumentTypeHint
+            CompletionContextKind::MacroArgumentName
+                | CompletionContextKind::MacroArgumentPath
+                | CompletionContextKind::MacroArgumentValue
+                | CompletionContextKind::MacroArgumentTypeHint
         ) {
             let entry_name = context.active_xprompt.as_ref()?;
             let entry =
@@ -83,7 +83,7 @@ pub fn hover_at_position_with_flags(
     }
 
     let token = extract_token_at_position(document, position)?;
-    if let Some(name) = xprompt_reference_name(&token.text) {
+    if let Some(name) = macro_reference_name(&token.text) {
         let entry = entries.iter().find(|entry| entry.name == name)?;
         return Some(HoverPayload {
             range: token.range,
@@ -102,7 +102,7 @@ pub fn hover_at_position_with_flags(
     None
 }
 
-fn xprompt_markdown(entry: &XpromptAssistEntry) -> String {
+fn xprompt_markdown(entry: &MacroAssistEntry) -> String {
     let mut lines = vec![format!("**{}**", entry.insertion)];
     let mut meta = Vec::new();
     if let Some(kind) = &entry.kind {
@@ -167,7 +167,7 @@ fn bounded_preview(preview: &str) -> String {
 }
 
 fn active_input_markdown(
-    entry: &XpromptAssistEntry,
+    entry: &MacroAssistEntry,
     active_input: Option<&str>,
 ) -> String {
     let mut lines = vec![format!("**{} inputs**", entry.name)];
@@ -213,13 +213,11 @@ fn active_input_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        content_layout::MemoryTierWire, editor::wire::XpromptInputHint,
-    };
+    use crate::{content_layout::MemoryTierWire, editor::wire::MacroInputHint};
 
     #[test]
     fn hovers_a_skill_through_both_of_its_names() {
-        let entries = vec![XpromptAssistEntry {
+        let entries = vec![MacroAssistEntry {
             name: "skill/sase_plan".to_string(),
             display_label: "skill/sase_plan".to_string(),
             insertion: "#skill/sase_plan".to_string(),
@@ -263,7 +261,7 @@ mod tests {
 
     #[test]
     fn hovers_an_xprompt_memory_with_its_kind_and_tier() {
-        let entries = vec![XpromptAssistEntry {
+        let entries = vec![MacroAssistEntry {
             name: "memory/glossary".to_string(),
             display_label: "memory/glossary".to_string(),
             insertion: "#memory/glossary".to_string(),
@@ -306,7 +304,7 @@ mod tests {
 
     #[test]
     fn builds_xprompt_and_argument_hover() {
-        let entries = vec![XpromptAssistEntry {
+        let entries = vec![MacroAssistEntry {
             name: "review".to_string(),
             display_label: "review".to_string(),
             insertion: "#review".to_string(),
@@ -316,7 +314,7 @@ mod tests {
             project: None,
             tags: Vec::new(),
             input_signature: Some("(path: path)".to_string()),
-            inputs: vec![XpromptInputHint {
+            inputs: vec![MacroInputHint {
                 name: "path".to_string(),
                 r#type: "path".to_string(),
                 description: Some("Path to review".to_string()),

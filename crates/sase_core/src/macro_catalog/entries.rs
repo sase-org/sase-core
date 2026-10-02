@@ -18,10 +18,10 @@ use crate::{
 use super::definition::filter_structured_sources;
 use super::loader::CatalogLoader;
 use super::types::*;
-pub fn load_editor_xprompt_catalog(
+pub fn load_editor_macro_catalog(
     request: &EditorXpromptCatalogRequestWire,
-    options: &XpromptCatalogLoadOptions,
-) -> Result<EditorXpromptCatalogResponseWire, XpromptCatalogLoadError> {
+    options: &MacroCatalogLoadOptions,
+) -> Result<EditorXpromptCatalogResponseWire, MacroCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
     let mut options = options.clone();
     options.root_dir = root_dir;
@@ -82,8 +82,8 @@ pub fn load_editor_xprompt_catalog(
 
 pub fn load_editor_snippet_catalog(
     request: &EditorSnippetCatalogRequestWire,
-    options: &XpromptCatalogLoadOptions,
-) -> Result<EditorSnippetCatalogResponseWire, XpromptCatalogLoadError> {
+    options: &MacroCatalogLoadOptions,
+) -> Result<EditorSnippetCatalogResponseWire, MacroCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
     let mut options = options.clone();
     options.root_dir = root_dir;
@@ -91,11 +91,9 @@ pub fn load_editor_snippet_catalog(
     let mut entries_by_trigger =
         BTreeMap::<String, EditorSnippetEntryWire>::new();
 
-    for xprompt in loader
-        .load_all_xprompts(request.project.as_deref())?
-        .values()
+    for xprompt in loader.load_all_macros(request.project.as_deref())?.values()
     {
-        let Some(entry) = snippet_entry_from_xprompt(xprompt) else {
+        let Some(entry) = snippet_entry_from_macro(xprompt) else {
             continue;
         };
         entries_by_trigger
@@ -304,8 +302,8 @@ pub(super) fn workflow_prompt_part(workflow: &CatalogWorkflow) -> String {
         .unwrap_or_default()
 }
 
-fn snippet_entry_from_xprompt(
-    xprompt: &CatalogXprompt,
+fn snippet_entry_from_macro(
+    xprompt: &CatalogMacro,
 ) -> Option<EditorSnippetEntryWire> {
     let snippet = xprompt.snippet.as_ref()?;
     let trigger = match snippet {
@@ -321,7 +319,7 @@ fn snippet_entry_from_xprompt(
         return None;
     }
     let template =
-        xprompt_to_snippet_template(&xprompt.content, &xprompt.inputs)?;
+        macro_to_snippet_template(&xprompt.content, &xprompt.inputs)?;
     Some(EditorSnippetEntryWire {
         trigger,
         template,
@@ -332,7 +330,7 @@ fn snippet_entry_from_xprompt(
     })
 }
 
-fn xprompt_to_snippet_template(
+fn macro_to_snippet_template(
     content: &str,
     inputs: &[CatalogInput],
 ) -> Option<String> {

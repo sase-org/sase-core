@@ -7,25 +7,25 @@ use crate::{
 };
 
 use super::diagnostics::{
-    validate_xprompt_call_args, xprompt_arg_value_unresolvable,
-    XpromptArgValidationKind,
+    macro_arg_value_unresolvable, validate_macro_call_args,
+    MacroArgValidationKind,
 };
 use super::directive::{
     canonical_directive_name, directive_allows_keywords, directive_metadata,
 };
 use super::macro_args::{
     double_colon_payload_start, find_matching_paren_for_args,
-    parse_xprompt_calls, parse_xprompt_like_call_at, top_level_commas_for_args,
-    ParsedXpromptCall, XpromptArgSyntax,
+    parse_macro_calls, parse_macro_like_call_at, top_level_commas_for_args,
+    MacroArgSyntax, ParsedMacroCall,
 };
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DirectiveSyntaxForm, XpromptArgumentSource, XpromptArgumentSpan,
-    XpromptArgumentSpanRole, XpromptArgumentSpanValidity, XpromptAssistEntry,
-    XpromptCallNameSpan,
+    DirectiveSyntaxForm, MacroArgumentSource, MacroArgumentSpan,
+    MacroArgumentSpanRole, MacroArgumentSpanValidity, MacroAssistEntry,
+    MacroCallNameSpan,
 };
 
-type ValidityByArg = HashMap<usize, XpromptArgumentSpanValidity>;
+type ValidityByArg = HashMap<usize, MacroArgumentSpanValidity>;
 
 #[derive(Default)]
 struct SpanSemantics {
@@ -34,30 +34,30 @@ struct SpanSemantics {
 }
 
 /// Return structural xprompt and directive argument spans.
-pub fn extract_xprompt_argument_spans(
+pub fn extract_macro_argument_spans(
     document: &DocumentSnapshot,
-) -> Vec<XpromptArgumentSpan> {
-    extract_xprompt_argument_spans_inner(document, None)
+) -> Vec<MacroArgumentSpan> {
+    extract_macro_argument_spans_inner(document, None)
 }
 
 /// Return structural argument spans plus catalog-derived validity.
-pub fn extract_xprompt_argument_spans_with_catalog(
+pub fn extract_macro_argument_spans_with_catalog(
     document: &DocumentSnapshot,
-    entries: &[XpromptAssistEntry],
-) -> Vec<XpromptArgumentSpan> {
-    extract_xprompt_argument_spans_inner(document, Some(entries))
+    entries: &[MacroAssistEntry],
+) -> Vec<MacroArgumentSpan> {
+    extract_macro_argument_spans_inner(document, Some(entries))
 }
 
 /// Return xprompt invocation and directive name spans.
-pub fn extract_xprompt_call_name_spans(
+pub fn extract_macro_call_name_spans(
     document: &DocumentSnapshot,
-) -> Vec<XpromptCallNameSpan> {
+) -> Vec<MacroCallNameSpan> {
     let text = document.text();
     let literal_ranges = argument_literal_ranges(text);
     let mut spans = Vec::new();
 
-    for call in parse_xprompt_calls(text) {
-        let marker_start = xprompt_marker_start(text, &call);
+    for call in parse_macro_calls(text) {
+        let marker_start = macro_marker_start(text, &call);
         if ranges_intersect_any(
             (marker_start, call.name_span.1),
             &literal_ranges,
@@ -67,7 +67,7 @@ pub fn extract_xprompt_call_name_spans(
         push_name_span(
             &mut spans,
             call.name_span,
-            XpromptArgumentSource::Xprompt,
+            MacroArgumentSource::Macro,
             call.name,
         );
     }
@@ -76,7 +76,7 @@ pub fn extract_xprompt_call_name_spans(
         push_name_span(
             &mut spans,
             call.name_span,
-            XpromptArgumentSource::Directive,
+            MacroArgumentSource::Directive,
             call_name,
         );
     }
@@ -89,24 +89,24 @@ pub fn extract_xprompt_call_name_spans(
             span.start,
             span.end,
             match span.source {
-                XpromptArgumentSource::Xprompt => 0u8,
-                XpromptArgumentSource::Directive => 1u8,
+                MacroArgumentSource::Macro => 0u8,
+                MacroArgumentSource::Directive => 1u8,
             },
         )
     });
     spans
 }
 
-fn extract_xprompt_argument_spans_inner(
+fn extract_macro_argument_spans_inner(
     document: &DocumentSnapshot,
-    entries: Option<&[XpromptAssistEntry]>,
-) -> Vec<XpromptArgumentSpan> {
+    entries: Option<&[MacroAssistEntry]>,
+) -> Vec<MacroArgumentSpan> {
     let text = document.text();
     let literal_ranges = argument_literal_ranges(text);
     let mut spans = Vec::new();
 
-    for call in parse_xprompt_calls(text) {
-        let marker_start = xprompt_marker_start(text, &call);
+    for call in parse_macro_calls(text) {
+        let marker_start = macro_marker_start(text, &call);
         if ranges_intersect_any(
             (marker_start, call.name_span.1),
             &literal_ranges,
@@ -120,12 +120,12 @@ fn extract_xprompt_argument_spans_inner(
                 })?
             })
             .filter(|entry| !entry.inputs.is_empty())
-            .map(|entry| xprompt_semantics(entry, &call))
+            .map(|entry| macro_semantics(entry, &call))
             .unwrap_or_default();
         emit_call_spans(
             text,
             &call,
-            XpromptArgumentSource::Xprompt,
+            MacroArgumentSource::Macro,
             call.name.clone(),
             &semantics,
             &mut spans,
@@ -137,7 +137,7 @@ fn extract_xprompt_argument_spans_inner(
         emit_call_spans(
             text,
             &call,
-            XpromptArgumentSource::Directive,
+            MacroArgumentSource::Directive,
             call_name,
             &semantics,
             &mut spans,
@@ -151,41 +151,39 @@ fn extract_xprompt_argument_spans_inner(
     spans
 }
 
-fn xprompt_semantics(
-    entry: &XpromptAssistEntry,
-    call: &ParsedXpromptCall,
+fn macro_semantics(
+    entry: &MacroAssistEntry,
+    call: &ParsedMacroCall,
 ) -> SpanSemantics {
     let mut semantics = SpanSemantics::default();
-    for validation in validate_xprompt_call_args(entry, call) {
+    for validation in validate_macro_call_args(entry, call) {
         let Some(arg_index) = validation.arg_index else {
             continue;
         };
         match validation.kind {
-            XpromptArgValidationKind::DuplicateKey => {
-                semantics.key_validity.insert(
-                    arg_index,
-                    XpromptArgumentSpanValidity::DuplicateKey,
-                );
-            }
-            XpromptArgValidationKind::UnknownKey => {
+            MacroArgValidationKind::DuplicateKey => {
                 semantics
                     .key_validity
-                    .insert(arg_index, XpromptArgumentSpanValidity::UnknownKey);
+                    .insert(arg_index, MacroArgumentSpanValidity::DuplicateKey);
             }
-            XpromptArgValidationKind::TypeMismatch => {
-                semantics.value_validity.insert(
-                    arg_index,
-                    XpromptArgumentSpanValidity::TypeMismatch,
-                );
+            MacroArgValidationKind::UnknownKey => {
+                semantics
+                    .key_validity
+                    .insert(arg_index, MacroArgumentSpanValidity::UnknownKey);
             }
-            XpromptArgValidationKind::TooManyArgs
-            | XpromptArgValidationKind::MissingRequiredArg => {}
+            MacroArgValidationKind::TypeMismatch => {
+                semantics
+                    .value_validity
+                    .insert(arg_index, MacroArgumentSpanValidity::TypeMismatch);
+            }
+            MacroArgValidationKind::TooManyArgs
+            | MacroArgValidationKind::MissingRequiredArg => {}
         }
     }
     semantics
 }
 
-fn directive_semantics(call: &ParsedXpromptCall) -> SpanSemantics {
+fn directive_semantics(call: &ParsedMacroCall) -> SpanSemantics {
     let mut semantics = SpanSemantics::default();
     if call.is_open {
         return semantics;
@@ -217,14 +215,14 @@ fn directive_semantics(call: &ParsedXpromptCall) -> SpanSemantics {
         if !known {
             semantics
                 .key_validity
-                .insert(arg_index, XpromptArgumentSpanValidity::UnknownKey);
+                .insert(arg_index, MacroArgumentSpanValidity::UnknownKey);
             continue;
         }
         let repeatable = keyword.is_some_and(|item| item.repeatable);
         if !repeatable && !seen.insert(name.value.clone()) {
             semantics
                 .key_validity
-                .insert(arg_index, XpromptArgumentSpanValidity::DuplicateKey);
+                .insert(arg_index, MacroArgumentSpanValidity::DuplicateKey);
         }
     }
     semantics
@@ -232,25 +230,25 @@ fn directive_semantics(call: &ParsedXpromptCall) -> SpanSemantics {
 
 fn emit_call_spans(
     text: &str,
-    call: &ParsedXpromptCall,
-    source: XpromptArgumentSource,
+    call: &ParsedMacroCall,
+    source: MacroArgumentSource,
     call_name: String,
     semantics: &SpanSemantics,
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
 ) {
     let suffix_start = call_suffix_start(text, call, source);
     match call.syntax {
-        XpromptArgSyntax::None => {}
-        XpromptArgSyntax::Plus => push_span(
+        MacroArgSyntax::None => {}
+        MacroArgSyntax::Plus => push_span(
             out,
             suffix_start,
             suffix_start + 1,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            XpromptArgumentSpanValidity::Ok,
+            MacroArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanValidity::Ok,
             source,
             &call_name,
         ),
-        XpromptArgSyntax::Colon => {
+        MacroArgSyntax::Colon => {
             push_colon_delimiter(
                 text,
                 suffix_start,
@@ -266,7 +264,7 @@ fn emit_call_spans(
                 push_commas_between_args(text, call, source, &call_name, out);
             }
         }
-        XpromptArgSyntax::DoubleColonText => push_colon_delimiter(
+        MacroArgSyntax::DoubleColonText => push_colon_delimiter(
             text,
             suffix_start,
             true,
@@ -274,7 +272,7 @@ fn emit_call_spans(
             &call_name,
             out,
         ),
-        XpromptArgSyntax::Parenthesized => {
+        MacroArgSyntax::Parenthesized => {
             emit_parenthesized_delimiters(
                 text,
                 suffix_start,
@@ -283,7 +281,7 @@ fn emit_call_spans(
                 out,
             );
         }
-        XpromptArgSyntax::Malformed => {
+        MacroArgSyntax::Malformed => {
             if text.as_bytes().get(suffix_start) == Some(&b':') {
                 push_colon_delimiter(
                     text,
@@ -302,9 +300,9 @@ fn emit_call_spans(
 fn emit_parenthesized_delimiters(
     text: &str,
     open_idx: usize,
-    source: XpromptArgumentSource,
+    source: MacroArgumentSource,
     call_name: &str,
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
 ) {
     if text.as_bytes().get(open_idx) != Some(&b'(') {
         return;
@@ -313,8 +311,8 @@ fn emit_parenthesized_delimiters(
         out,
         open_idx,
         open_idx + 1,
-        XpromptArgumentSpanRole::ArgDelimiter,
-        XpromptArgumentSpanValidity::Ok,
+        MacroArgumentSpanRole::ArgDelimiter,
+        MacroArgumentSpanValidity::Ok,
         source,
         call_name,
     );
@@ -325,8 +323,8 @@ fn emit_parenthesized_delimiters(
             out,
             comma,
             comma + 1,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            XpromptArgumentSpanValidity::Ok,
+            MacroArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanValidity::Ok,
             source,
             call_name,
         );
@@ -338,8 +336,8 @@ fn emit_parenthesized_delimiters(
         out,
         close_idx,
         close_idx + 1,
-        XpromptArgumentSpanRole::ArgDelimiter,
-        XpromptArgumentSpanValidity::Ok,
+        MacroArgumentSpanRole::ArgDelimiter,
+        MacroArgumentSpanValidity::Ok,
         source,
         call_name,
     );
@@ -350,8 +348,8 @@ fn emit_parenthesized_delimiters(
             out,
             after_close,
             after_close + 2,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            XpromptArgumentSpanValidity::Ok,
+            MacroArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanValidity::Ok,
             source,
             call_name,
         );
@@ -363,8 +361,8 @@ fn emit_parenthesized_delimiters(
             out,
             after_close,
             after_close + 1,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            XpromptArgumentSpanValidity::Ok,
+            MacroArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanValidity::Ok,
             source,
             call_name,
         );
@@ -373,11 +371,11 @@ fn emit_parenthesized_delimiters(
 
 fn emit_arg_spans(
     text: &str,
-    call: &ParsedXpromptCall,
-    source: XpromptArgumentSource,
+    call: &ParsedMacroCall,
+    source: MacroArgumentSource,
     call_name: String,
     semantics: &SpanSemantics,
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
 ) {
     for (index, arg) in call.args.iter().enumerate() {
         if let Some(name) = &arg.name {
@@ -385,12 +383,12 @@ fn emit_arg_spans(
                 out,
                 name.span.0,
                 name.span.1,
-                XpromptArgumentSpanRole::ArgKey,
+                MacroArgumentSpanRole::ArgKey,
                 semantics
                     .key_validity
                     .get(&index)
                     .copied()
-                    .unwrap_or(XpromptArgumentSpanValidity::Ok),
+                    .unwrap_or(MacroArgumentSpanValidity::Ok),
                 source,
                 &call_name,
             );
@@ -401,8 +399,8 @@ fn emit_arg_spans(
                     out,
                     start,
                     end,
-                    XpromptArgumentSpanRole::ArgAssign,
-                    XpromptArgumentSpanValidity::Ok,
+                    MacroArgumentSpanRole::ArgAssign,
+                    MacroArgumentSpanValidity::Ok,
                     source,
                     &call_name,
                 );
@@ -410,14 +408,14 @@ fn emit_arg_spans(
         }
         if arg.value_span.0 < arg.value_span.1 {
             let role = value_role(text, arg.value_span, &arg.value);
-            let validity = if xprompt_arg_value_unresolvable(&arg.value) {
-                XpromptArgumentSpanValidity::Unresolvable
+            let validity = if macro_arg_value_unresolvable(&arg.value) {
+                MacroArgumentSpanValidity::Unresolvable
             } else {
                 semantics
                     .value_validity
                     .get(&index)
                     .copied()
-                    .unwrap_or(XpromptArgumentSpanValidity::Ok)
+                    .unwrap_or(MacroArgumentSpanValidity::Ok)
             };
             push_span(
                 out,
@@ -436,9 +434,9 @@ fn push_colon_delimiter(
     text: &str,
     start: usize,
     double_colon: bool,
-    source: XpromptArgumentSource,
+    source: MacroArgumentSource,
     call_name: &str,
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
 ) {
     let width = if double_colon
         && text.as_bytes().get(start..start + 2) == Some(b"::")
@@ -451,8 +449,8 @@ fn push_colon_delimiter(
         out,
         start,
         start + width,
-        XpromptArgumentSpanRole::ArgDelimiter,
-        XpromptArgumentSpanValidity::Ok,
+        MacroArgumentSpanRole::ArgDelimiter,
+        MacroArgumentSpanValidity::Ok,
         source,
         call_name,
     );
@@ -460,10 +458,10 @@ fn push_colon_delimiter(
 
 fn push_commas_between_args(
     text: &str,
-    call: &ParsedXpromptCall,
-    source: XpromptArgumentSource,
+    call: &ParsedMacroCall,
+    source: MacroArgumentSource,
     call_name: &str,
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
 ) {
     for pair in call.args.windows(2) {
         let left = &pair[0];
@@ -478,8 +476,8 @@ fn push_commas_between_args(
                 out,
                 comma,
                 comma + 1,
-                XpromptArgumentSpanRole::ArgDelimiter,
-                XpromptArgumentSpanValidity::Ok,
+                MacroArgumentSpanRole::ArgDelimiter,
+                MacroArgumentSpanValidity::Ok,
                 source,
                 call_name,
             );
@@ -488,15 +486,15 @@ fn push_commas_between_args(
 }
 
 fn push_name_span(
-    out: &mut Vec<XpromptCallNameSpan>,
+    out: &mut Vec<MacroCallNameSpan>,
     span: (usize, usize),
-    source: XpromptArgumentSource,
+    source: MacroArgumentSource,
     call_name: String,
 ) {
     if span.0 >= span.1 {
         return;
     }
-    out.push(XpromptCallNameSpan {
+    out.push(MacroCallNameSpan {
         start: span.0,
         end: span.1,
         source,
@@ -505,18 +503,18 @@ fn push_name_span(
 }
 
 fn push_span(
-    out: &mut Vec<XpromptArgumentSpan>,
+    out: &mut Vec<MacroArgumentSpan>,
     start: usize,
     end: usize,
-    role: XpromptArgumentSpanRole,
-    validity: XpromptArgumentSpanValidity,
-    source: XpromptArgumentSource,
+    role: MacroArgumentSpanRole,
+    validity: MacroArgumentSpanValidity,
+    source: MacroArgumentSource,
     call_name: &str,
 ) {
     if start >= end {
         return;
     }
-    out.push(XpromptArgumentSpan {
+    out.push(MacroArgumentSpan {
         start,
         end,
         role,
@@ -529,7 +527,7 @@ fn push_span(
 fn directive_calls(
     text: &str,
     literal_ranges: &[(usize, usize)],
-) -> Vec<(ParsedXpromptCall, String)> {
+) -> Vec<(ParsedMacroCall, String)> {
     let mut calls = Vec::new();
     for caps in directive_re().captures_iter(text) {
         let Some(marker) = caps.name("marker") else {
@@ -555,11 +553,11 @@ fn directive_calls(
 fn parse_directive_call_at(
     text: &str,
     marker_start: usize,
-) -> Option<ParsedXpromptCall> {
+) -> Option<ParsedMacroCall> {
     if text.as_bytes().get(marker_start) != Some(&b'%') {
         return None;
     }
-    parse_xprompt_like_call_at(text, marker_start, 1, false)
+    parse_macro_like_call_at(text, marker_start, 1, false)
 }
 
 fn argument_literal_ranges(text: &str) -> Vec<(usize, usize)> {
@@ -607,23 +605,23 @@ fn code_directive_call_ranges_for_highlight(text: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn directive_call_end(text: &str, call: &ParsedXpromptCall) -> usize {
+fn directive_call_end(text: &str, call: &ParsedMacroCall) -> usize {
     let suffix_start =
-        call_suffix_start(text, call, XpromptArgumentSource::Directive);
+        call_suffix_start(text, call, MacroArgumentSource::Directive);
     match call.syntax {
-        XpromptArgSyntax::None => call.name_span.1,
-        XpromptArgSyntax::Plus => suffix_start + 1,
-        XpromptArgSyntax::Parenthesized => {
+        MacroArgSyntax::None => call.name_span.1,
+        MacroArgSyntax::Plus => suffix_start + 1,
+        MacroArgSyntax::Parenthesized => {
             find_matching_paren_for_args(text, suffix_start)
                 .map(|close| close + 1)
                 .unwrap_or_else(|| text.len())
         }
-        XpromptArgSyntax::Colon | XpromptArgSyntax::DoubleColonText => call
+        MacroArgSyntax::Colon | MacroArgSyntax::DoubleColonText => call
             .args
             .last()
             .map(|arg| arg.value_span.1)
             .unwrap_or(suffix_start + 1),
-        XpromptArgSyntax::Malformed => call
+        MacroArgSyntax::Malformed => call
             .malformed_span
             .map(|span| span.1)
             .unwrap_or(call.name_span.1),
@@ -647,7 +645,7 @@ fn subtract_range(
     pieces
 }
 
-fn xprompt_marker_start(text: &str, call: &ParsedXpromptCall) -> usize {
+fn macro_marker_start(text: &str, call: &ParsedMacroCall) -> usize {
     if call.name_span.0 >= 2
         && text.get(call.name_span.0 - 2..call.name_span.0) == Some("#!")
     {
@@ -659,11 +657,11 @@ fn xprompt_marker_start(text: &str, call: &ParsedXpromptCall) -> usize {
 
 fn call_suffix_start(
     text: &str,
-    call: &ParsedXpromptCall,
-    source: XpromptArgumentSource,
+    call: &ParsedMacroCall,
+    source: MacroArgumentSource,
 ) -> usize {
     let mut start = call.name_span.1;
-    if source == XpromptArgumentSource::Xprompt
+    if source == MacroArgumentSource::Macro
         && text
             .get(start..start + 2)
             .is_some_and(|suffix| suffix == "!!" || suffix == "??")
@@ -674,18 +672,18 @@ fn call_suffix_start(
 }
 
 fn directive_syntax_form(
-    syntax: XpromptArgSyntax,
+    syntax: MacroArgSyntax,
 ) -> Option<DirectiveSyntaxForm> {
     match syntax {
-        XpromptArgSyntax::Plus => Some(DirectiveSyntaxForm::Plus),
-        XpromptArgSyntax::Colon => Some(DirectiveSyntaxForm::Colon),
-        XpromptArgSyntax::DoubleColonText => {
+        MacroArgSyntax::Plus => Some(DirectiveSyntaxForm::Plus),
+        MacroArgSyntax::Colon => Some(DirectiveSyntaxForm::Colon),
+        MacroArgSyntax::DoubleColonText => {
             Some(DirectiveSyntaxForm::DoubleColon)
         }
-        XpromptArgSyntax::Parenthesized => {
+        MacroArgSyntax::Parenthesized => {
             Some(DirectiveSyntaxForm::Parenthesized)
         }
-        XpromptArgSyntax::None | XpromptArgSyntax::Malformed => None,
+        MacroArgSyntax::None | MacroArgSyntax::Malformed => None,
     }
 }
 
@@ -703,24 +701,24 @@ fn value_role(
     text: &str,
     span: (usize, usize),
     decoded_value: &str,
-) -> XpromptArgumentSpanRole {
+) -> MacroArgumentSpanRole {
     let raw = text.get(span.0..span.1).unwrap_or("").trim();
     if is_string_literal(raw) {
-        return XpromptArgumentSpanRole::ArgValueString;
+        return MacroArgumentSpanRole::ArgValueString;
     }
     let lower = decoded_value.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
         "true" | "1" | "yes" | "on" | "false" | "0" | "no" | "off"
     ) {
-        return XpromptArgumentSpanRole::ArgValueBool;
+        return MacroArgumentSpanRole::ArgValueBool;
     }
     if decoded_value.parse::<i64>().is_ok()
         || decoded_value.parse::<f64>().is_ok()
     {
-        return XpromptArgumentSpanRole::ArgValueNumber;
+        return MacroArgumentSpanRole::ArgValueNumber;
     }
-    XpromptArgumentSpanRole::ArgValue
+    MacroArgumentSpanRole::ArgValue
 }
 
 fn is_string_literal(raw: &str) -> bool {
@@ -750,15 +748,15 @@ fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
     left.0 < right.1 && right.0 < left.1
 }
 
-fn role_rank(role: XpromptArgumentSpanRole) -> u8 {
+fn role_rank(role: MacroArgumentSpanRole) -> u8 {
     match role {
-        XpromptArgumentSpanRole::ArgDelimiter => 0,
-        XpromptArgumentSpanRole::ArgKey => 1,
-        XpromptArgumentSpanRole::ArgAssign => 2,
-        XpromptArgumentSpanRole::ArgValue => 3,
-        XpromptArgumentSpanRole::ArgValueString => 4,
-        XpromptArgumentSpanRole::ArgValueNumber => 5,
-        XpromptArgumentSpanRole::ArgValueBool => 6,
+        MacroArgumentSpanRole::ArgDelimiter => 0,
+        MacroArgumentSpanRole::ArgKey => 1,
+        MacroArgumentSpanRole::ArgAssign => 2,
+        MacroArgumentSpanRole::ArgValue => 3,
+        MacroArgumentSpanRole::ArgValueString => 4,
+        MacroArgumentSpanRole::ArgValueNumber => 5,
+        MacroArgumentSpanRole::ArgValueBool => 6,
     }
 }
 
@@ -774,21 +772,21 @@ fn directive_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::super::wire::XpromptInputHint;
+    use super::super::wire::MacroInputHint;
     use super::*;
 
-    fn spans(text: &str) -> Vec<XpromptArgumentSpan> {
-        extract_xprompt_argument_spans(&DocumentSnapshot::new(text))
+    fn spans(text: &str) -> Vec<MacroArgumentSpan> {
+        extract_macro_argument_spans(&DocumentSnapshot::new(text))
     }
 
-    fn catalog_spans(text: &str) -> Vec<XpromptArgumentSpan> {
-        extract_xprompt_argument_spans_with_catalog(
+    fn catalog_spans(text: &str) -> Vec<MacroArgumentSpan> {
+        extract_macro_argument_spans_with_catalog(
             &DocumentSnapshot::new(text),
             &catalog(),
         )
     }
 
-    fn catalog() -> Vec<XpromptAssistEntry> {
+    fn catalog() -> Vec<MacroAssistEntry> {
         vec![
             entry(
                 "typed",
@@ -802,8 +800,8 @@ mod tests {
         ]
     }
 
-    fn entry(name: &str, inputs: Vec<XpromptInputHint>) -> XpromptAssistEntry {
-        XpromptAssistEntry {
+    fn entry(name: &str, inputs: Vec<MacroInputHint>) -> MacroAssistEntry {
+        MacroAssistEntry {
             name: name.to_string(),
             display_label: name.to_string(),
             insertion: format!("#{name}"),
@@ -831,8 +829,8 @@ mod tests {
         required: bool,
         position: u32,
         repeatable: bool,
-    ) -> XpromptInputHint {
-        XpromptInputHint {
+    ) -> MacroInputHint {
+        MacroInputHint {
             name: name.to_string(),
             r#type: r#type.to_string(),
             description: None,
@@ -843,14 +841,14 @@ mod tests {
         }
     }
 
-    fn span_text<'a>(text: &'a str, span: &XpromptArgumentSpan) -> &'a str {
+    fn span_text<'a>(text: &'a str, span: &MacroArgumentSpan) -> &'a str {
         &text[span.start..span.end]
     }
 
     fn assert_has(
         text: &str,
-        spans: &[XpromptArgumentSpan],
-        role: XpromptArgumentSpanRole,
+        spans: &[MacroArgumentSpan],
+        role: MacroArgumentSpanRole,
         value: &str,
     ) {
         assert!(
@@ -871,22 +869,22 @@ mod tests {
             assert_has(
                 text,
                 &spans,
-                XpromptArgumentSpanRole::ArgDelimiter,
+                MacroArgumentSpanRole::ArgDelimiter,
                 delimiter,
             );
         }
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "a");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "tail");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "block");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "a");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgAssign, "=");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValue, "tail");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValue, "block");
     }
 
     #[test]
     fn double_colon_eol_emits_two_byte_delimiter_and_next_line_value() {
         let text = "#foo(a=1)::\none\ntwo";
         let found = spans(text);
-        assert_has(text, &found, XpromptArgumentSpanRole::ArgDelimiter, "::");
-        assert_has(text, &found, XpromptArgumentSpanRole::ArgValue, "one\ntwo");
+        assert_has(text, &found, MacroArgumentSpanRole::ArgDelimiter, "::");
+        assert_has(text, &found, MacroArgumentSpanRole::ArgValue, "one\ntwo");
         let gap = text.find("::").unwrap() + 2;
         assert!(
             !found.iter().any(|span| span.start <= gap && gap < span.end),
@@ -898,18 +896,17 @@ mod tests {
         assert_has(
             bare,
             &bare_spans,
-            XpromptArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanRole::ArgDelimiter,
             "::",
         );
-        assert_has(bare, &bare_spans, XpromptArgumentSpanRole::ArgValue, "one");
+        assert_has(bare, &bare_spans, MacroArgumentSpanRole::ArgValue, "one");
     }
 
     #[test]
     fn emits_name_spans_for_xprompts_directives_and_aliases() {
         let text =
             "#foo #bar:value #baz:: body\n%q(capacity=2)\n```\n#nope %wait\n```";
-        let spans =
-            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+        let spans = extract_macro_call_name_spans(&DocumentSnapshot::new(text));
         let actual = spans
             .into_iter()
             .map(|span| {
@@ -926,22 +923,22 @@ mod tests {
             vec![
                 (
                     "foo".to_string(),
-                    XpromptArgumentSource::Xprompt,
+                    MacroArgumentSource::Macro,
                     "foo".to_string()
                 ),
                 (
                     "bar".to_string(),
-                    XpromptArgumentSource::Xprompt,
+                    MacroArgumentSource::Macro,
                     "bar".to_string()
                 ),
                 (
                     "baz".to_string(),
-                    XpromptArgumentSource::Xprompt,
+                    MacroArgumentSource::Macro,
                     "baz".to_string()
                 ),
                 (
                     "q".to_string(),
-                    XpromptArgumentSource::Directive,
+                    MacroArgumentSource::Directive,
                     "queue".to_string()
                 ),
             ]
@@ -953,29 +950,24 @@ mod tests {
         let text = "#foo(query=a=b, quoted=\"a,b(c)\", block=[[a,b(c)]], nested=call(a,b))\n#foo: first line\nsecond line";
         let spans = spans(text);
 
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "a=b");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValue, "a=b");
         assert_has(
             text,
             &spans,
-            XpromptArgumentSpanRole::ArgValueString,
+            MacroArgumentSpanRole::ArgValueString,
             "\"a,b(c)\"",
         );
         assert_has(
             text,
             &spans,
-            XpromptArgumentSpanRole::ArgValueString,
+            MacroArgumentSpanRole::ArgValueString,
             "[[a,b(c)]]",
         );
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValue, "call(a,b)");
         assert_has(
             text,
             &spans,
-            XpromptArgumentSpanRole::ArgValue,
-            "call(a,b)",
-        );
-        assert_has(
-            text,
-            &spans,
-            XpromptArgumentSpanRole::ArgValue,
+            MacroArgumentSpanRole::ArgValue,
             "first line\nsecond line",
         );
     }
@@ -985,31 +977,21 @@ mod tests {
         let text = "#foo(key=42, other=true";
         let open_spans = spans(text);
 
+        assert_has(text, &open_spans, MacroArgumentSpanRole::ArgDelimiter, "(");
+        assert_has(text, &open_spans, MacroArgumentSpanRole::ArgDelimiter, ",");
+        assert_has(text, &open_spans, MacroArgumentSpanRole::ArgKey, "key");
+        assert_has(text, &open_spans, MacroArgumentSpanRole::ArgAssign, "=");
         assert_has(
             text,
             &open_spans,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            "(",
-        );
-        assert_has(
-            text,
-            &open_spans,
-            XpromptArgumentSpanRole::ArgDelimiter,
-            ",",
-        );
-        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgKey, "key");
-        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgAssign, "=");
-        assert_has(
-            text,
-            &open_spans,
-            XpromptArgumentSpanRole::ArgValueNumber,
+            MacroArgumentSpanRole::ArgValueNumber,
             "42",
         );
-        assert_has(text, &open_spans, XpromptArgumentSpanRole::ArgKey, "other");
+        assert_has(text, &open_spans, MacroArgumentSpanRole::ArgKey, "other");
         assert_has(
             text,
             &open_spans,
-            XpromptArgumentSpanRole::ArgValueBool,
+            MacroArgumentSpanRole::ArgValueBool,
             "true",
         );
 
@@ -1018,19 +1000,19 @@ mod tests {
         assert_has(
             empty_value,
             &empty_spans,
-            XpromptArgumentSpanRole::ArgKey,
+            MacroArgumentSpanRole::ArgKey,
             "key",
         );
         assert_has(
             empty_value,
             &empty_spans,
-            XpromptArgumentSpanRole::ArgAssign,
+            MacroArgumentSpanRole::ArgAssign,
             "=",
         );
         assert!(
             !empty_spans
                 .iter()
-                .any(|span| span.role == XpromptArgumentSpanRole::ArgValue),
+                .any(|span| span.role == MacroArgumentSpanRole::ArgValue),
             "{empty_spans:?}"
         );
     }
@@ -1040,16 +1022,16 @@ mod tests {
         let text = "é prefix #foo(café=[[one,\ntwo]], other=δ";
         let spans = spans(text);
 
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "café");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "café");
         assert_has(
             text,
             &spans,
-            XpromptArgumentSpanRole::ArgValueString,
+            MacroArgumentSpanRole::ArgValueString,
             "[[one,\ntwo]]",
         );
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, ",");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "other");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgValue, "δ");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgDelimiter, ",");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "other");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValue, "δ");
         for span in spans {
             assert!(
                 text.is_char_boundary(span.start)
@@ -1064,11 +1046,11 @@ mod tests {
         let text = "```\n#foo(a=1)\n```\n#foo(b=2)";
         let spans = spans(text);
 
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "b");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "b");
         assert!(
             !spans
                 .iter()
-                .any(|span| span.role == XpromptArgumentSpanRole::ArgKey
+                .any(|span| span.role == MacroArgumentSpanRole::ArgKey
                     && span_text(text, span) == "a"),
             "{spans:?}"
         );
@@ -1078,8 +1060,7 @@ mod tests {
     fn highlights_static_if_directive_arguments_outside_literals() {
         let text = "%if(should_run=false)";
         let spans = spans(text);
-        let names =
-            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+        let names = extract_macro_call_name_spans(&DocumentSnapshot::new(text));
 
         assert_eq!(
             names
@@ -1090,26 +1071,20 @@ mod tests {
                     span.call_name.as_str(),
                 ))
                 .collect::<Vec<_>>(),
-            vec![("if", XpromptArgumentSource::Directive, "if")]
+            vec![("if", MacroArgumentSource::Directive, "if")]
         );
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, "(");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "should_run");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
-        assert_has(
-            text,
-            &spans,
-            XpromptArgumentSpanRole::ArgValueBool,
-            "false",
-        );
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgDelimiter, ")");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgDelimiter, "(");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "should_run");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgAssign, "=");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgValueBool, "false");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgDelimiter, ")");
     }
 
     #[test]
     fn still_skips_static_if_directives_inside_code_literals() {
         let text = "```\n%if(should_run=false)\n```\n`%if(should_run=false)`";
         let spans = spans(text);
-        let names =
-            extract_xprompt_call_name_spans(&DocumentSnapshot::new(text));
+        let names = extract_macro_call_name_spans(&DocumentSnapshot::new(text));
 
         assert!(spans.is_empty(), "{spans:?}");
         assert!(names.is_empty(), "{names:?}");
@@ -1125,44 +1100,41 @@ mod tests {
             spans
                 .iter()
                 .find(|span| {
-                    span.role == XpromptArgumentSpanRole::ArgKey
+                    span.role == MacroArgumentSpanRole::ArgKey
                         && span_text(text, span) == value
                 })
                 .map(|span| span.validity)
         };
         assert_eq!(
             key_validity("nope"),
-            Some(XpromptArgumentSpanValidity::UnknownKey)
+            Some(MacroArgumentSpanValidity::UnknownKey)
         );
         let duplicate_path = spans
             .iter()
             .rfind(|span| {
-                span.role == XpromptArgumentSpanRole::ArgKey
+                span.role == MacroArgumentSpanRole::ArgKey
                     && span_text(text, span) == "path"
             })
             .unwrap();
         assert_eq!(
             duplicate_path.validity,
-            XpromptArgumentSpanValidity::DuplicateKey
+            MacroArgumentSpanValidity::DuplicateKey
         );
         let mismatch = spans
             .iter()
             .find(|span| {
-                span.role == XpromptArgumentSpanRole::ArgValue
+                span.role == MacroArgumentSpanRole::ArgValue
                     && span_text(text, span) == "nope"
             })
             .unwrap();
-        assert_eq!(
-            mismatch.validity,
-            XpromptArgumentSpanValidity::TypeMismatch
-        );
+        assert_eq!(mismatch.validity, MacroArgumentSpanValidity::TypeMismatch);
         let unresolvable = spans
             .iter()
             .find(|span| span_text(text, span) == "{{ flag }}")
             .unwrap();
         assert_eq!(
             unresolvable.validity,
-            XpromptArgumentSpanValidity::Unresolvable
+            MacroArgumentSpanValidity::Unresolvable
         );
     }
 
@@ -1177,27 +1149,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             closed_unknown.validity,
-            XpromptArgumentSpanValidity::UnknownKey
+            MacroArgumentSpanValidity::UnknownKey
         );
         let closed_mismatch = closed
             .iter()
             .find(|span| {
-                span.role == XpromptArgumentSpanRole::ArgValue
+                span.role == MacroArgumentSpanRole::ArgValue
                     && span_text("#typed(nope=1, count=nope)", span) == "nope"
             })
             .unwrap();
         assert_eq!(
             closed_mismatch.validity,
-            XpromptArgumentSpanValidity::TypeMismatch
+            MacroArgumentSpanValidity::TypeMismatch
         );
 
         let open_text = "#typed(nope=1, count=nope";
         let open = catalog_spans(open_text);
-        assert_has(open_text, &open, XpromptArgumentSpanRole::ArgKey, "nope");
-        assert_has(open_text, &open, XpromptArgumentSpanRole::ArgKey, "count");
+        assert_has(open_text, &open, MacroArgumentSpanRole::ArgKey, "nope");
+        assert_has(open_text, &open, MacroArgumentSpanRole::ArgKey, "count");
         assert!(open
             .iter()
-            .all(|span| span.validity == XpromptArgumentSpanValidity::Ok));
+            .all(|span| span.validity == MacroArgumentSpanValidity::Ok));
     }
 
     #[test]
@@ -1207,7 +1179,7 @@ mod tests {
 
         assert!(spans.iter().all(|span| {
             span_text(text, span) != "coder"
-                || span.validity == XpromptArgumentSpanValidity::Ok
+                || span.validity == MacroArgumentSpanValidity::Ok
         }));
     }
 
@@ -1216,22 +1188,19 @@ mod tests {
         let text = "%id(worker, tribe=research, nope=x, tribe=ops)";
         let spans = spans(text);
 
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgKey, "tribe");
-        assert_has(text, &spans, XpromptArgumentSpanRole::ArgAssign, "=");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgKey, "tribe");
+        assert_has(text, &spans, MacroArgumentSpanRole::ArgAssign, "=");
         let unknown = spans
             .iter()
             .find(|span| span_text(text, span) == "nope")
             .unwrap();
-        assert_eq!(unknown.source, XpromptArgumentSource::Directive);
-        assert_eq!(unknown.validity, XpromptArgumentSpanValidity::UnknownKey);
+        assert_eq!(unknown.source, MacroArgumentSource::Directive);
+        assert_eq!(unknown.validity, MacroArgumentSpanValidity::UnknownKey);
         let duplicate = spans
             .iter()
             .rfind(|span| span_text(text, span) == "tribe")
             .unwrap();
-        assert_eq!(
-            duplicate.validity,
-            XpromptArgumentSpanValidity::DuplicateKey
-        );
+        assert_eq!(duplicate.validity, MacroArgumentSpanValidity::DuplicateKey);
     }
 
     #[test]
@@ -1242,36 +1211,36 @@ mod tests {
         assert_has(
             text,
             &directive_spans,
-            XpromptArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanRole::ArgDelimiter,
             "(",
         );
         assert_has(
             text,
             &directive_spans,
-            XpromptArgumentSpanRole::ArgKey,
+            MacroArgumentSpanRole::ArgKey,
             "capacity",
         );
         assert_has(
             text,
             &directive_spans,
-            XpromptArgumentSpanRole::ArgValueNumber,
+            MacroArgumentSpanRole::ArgValueNumber,
             "2",
         );
         assert_has(
             text,
             &directive_spans,
-            XpromptArgumentSpanRole::ArgDelimiter,
+            MacroArgumentSpanRole::ArgDelimiter,
             ",",
         );
         assert_has(
             text,
             &directive_spans,
-            XpromptArgumentSpanRole::ArgKey,
+            MacroArgumentSpanRole::ArgKey,
             "priority",
         );
         assert!(directive_spans.iter().all(|span| {
-            span.source == XpromptArgumentSource::Directive
-                && span.validity == XpromptArgumentSpanValidity::Ok
+            span.source == MacroArgumentSource::Directive
+                && span.validity == MacroArgumentSpanValidity::Ok
         }));
 
         let unknown = "%id(nope=";
@@ -1280,6 +1249,6 @@ mod tests {
             .iter()
             .find(|span| span_text(unknown, span) == "nope")
             .unwrap();
-        assert_eq!(key.validity, XpromptArgumentSpanValidity::Ok);
+        assert_eq!(key.validity, MacroArgumentSpanValidity::Ok);
     }
 }

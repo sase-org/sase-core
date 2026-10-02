@@ -1101,12 +1101,9 @@ pub(crate) use sase_core::{
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
-    resolve_xprompt_skill_definition as core_resolve_xprompt_skill_definition,
     validate_snippet_trigger as core_validate_snippet_trigger, EditorPosition,
     EditorSnippetCatalogRequestWire, ModelCompletionEntryWire,
-    XpromptCatalogLoadOptions, XpromptCatalogResourcePaths,
-    XpromptSkillDefinitionRequestWire, MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
-    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    MODEL_COMPLETION_ENTRY_WIRE_FIELDS,
 };
 pub(crate) use sase_core::{
     runner_capacity_policy_schema_version as core_runner_capacity_policy_schema_version,

@@ -10,7 +10,7 @@ use crate::{content_layout::MemoryTierWire, MobileInputChoiceWire};
 
 pub(super) const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
 pub(super) const SCHEMA_VERSION: u32 = 1;
-pub const XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION: u64 = 1;
+pub const MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION: u64 = 1;
 pub(super) const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 pub(super) const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
@@ -25,7 +25,7 @@ pub(super) const SKILL_FRAME_TEMPLATE_FILENAME: &str =
     "SKILL.frame.template.md";
 
 #[derive(Debug, Error)]
-pub enum XpromptCatalogLoadError {
+pub enum MacroCatalogLoadError {
     #[error("failed to read xprompt catalog: {0}")]
     Read(String),
     #[error("xprompt catalog layout collision: {0}")]
@@ -33,7 +33,7 @@ pub enum XpromptCatalogLoadError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct XpromptCatalogLoadOptions {
+pub struct MacroCatalogLoadOptions {
     pub root_dir: Option<PathBuf>,
     pub package_xprompts_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
@@ -45,7 +45,7 @@ pub struct XpromptCatalogLoadOptions {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct XpromptCatalogResourcePaths {
+pub struct MacroCatalogResourcePaths {
     pub package_xprompts_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
     pub default_xprompts_dir: Option<PathBuf>,
@@ -55,7 +55,7 @@ pub struct XpromptCatalogResourcePaths {
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
 }
 
-impl XpromptCatalogLoadOptions {
+impl MacroCatalogLoadOptions {
     pub fn new(root_dir: Option<PathBuf>) -> Self {
         Self {
             root_dir,
@@ -71,7 +71,7 @@ impl XpromptCatalogLoadOptions {
 
     pub fn with_resource_paths(
         mut self,
-        resource_paths: XpromptCatalogResourcePaths,
+        resource_paths: MacroCatalogResourcePaths,
     ) -> Self {
         self.package_xprompts_dir = resource_paths.package_xprompts_dir;
         self.package_skills_dir = resource_paths.package_skills_dir;
@@ -85,8 +85,8 @@ impl XpromptCatalogLoadOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptSkillDefinitionRequestWire {
-    #[serde(default = "xprompt_skill_definition_schema_version")]
+pub struct MacroSkillDefinitionRequestWire {
+    #[serde(default = "macro_skill_definition_schema_version")]
     pub schema_version: u64,
     pub reference: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,7 +94,7 @@ pub struct XpromptSkillDefinitionRequestWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptSkillDefinitionCandidateWire {
+pub struct MacroSkillDefinitionCandidateWire {
     pub reference: String,
     pub skill_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,7 +104,7 @@ pub struct XpromptSkillDefinitionCandidateWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptSkillDefinitionResolutionWire {
+pub struct MacroSkillDefinitionResolutionWire {
     pub schema_version: u64,
     pub status: String,
     pub authored_reference: String,
@@ -117,13 +117,13 @@ pub struct XpromptSkillDefinitionResolutionWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_path: Option<String>,
     #[serde(default)]
-    pub candidates: Vec<XpromptSkillDefinitionCandidateWire>,
+    pub candidates: Vec<MacroSkillDefinitionCandidateWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
 }
 
-fn xprompt_skill_definition_schema_version() -> u64 {
-    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
+fn macro_skill_definition_schema_version() -> u64 {
+    MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,18 +161,18 @@ pub(super) struct CatalogWorkflow {
     pub(super) name: String,
     pub(super) inputs: Vec<CatalogInput>,
     pub(super) steps: Vec<CatalogStep>,
-    pub(super) local_xprompts: Vec<CatalogXprompt>,
+    pub(super) local_macros: Vec<CatalogMacro>,
     pub(super) source_path: Option<String>,
     pub(super) tags: BTreeSet<String>,
     pub(super) description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CatalogXprompt {
+pub(super) struct CatalogMacro {
     pub(super) name: String,
     pub(super) content: String,
     pub(super) inputs: Vec<CatalogInput>,
-    pub(super) local_xprompts: Vec<CatalogXprompt>,
+    pub(super) local_macros: Vec<CatalogMacro>,
     pub(super) source_path: Option<String>,
     pub(super) tags: BTreeSet<String>,
     pub(super) description: Option<String>,

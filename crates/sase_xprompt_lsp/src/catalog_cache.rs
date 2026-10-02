@@ -6,15 +6,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+use sase_core::editor::wire::MacroAssistEntry;
+use sase_core::macro_catalog::{
+    load_editor_macro_catalog, MacroCatalogLoadOptions,
+};
 use sase_core::{
     editor_assist_entries_from_catalog, load_editor_snippet_catalog,
-    load_editor_xprompt_catalog, AgentCatalogRequest, AgentCatalogResponse,
-    CommandHelperHostBridge, DynHelperHostBridge,
-    EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
-    EditorXpromptCatalogRequestWire, FinalizerCatalogRequest,
-    FinalizerCatalogResponse, HelperHostBridge, HostBridgeError,
-    VcsRepoCatalogRequest, VcsRepoCatalogResponse, XpromptAssistEntry,
-    XpromptCatalogLoadOptions, FINALIZER_CATALOG_SCHEMA_VERSION,
+    AgentCatalogRequest, AgentCatalogResponse, CommandHelperHostBridge,
+    DynHelperHostBridge, EditorSnippetCatalogRequestWire,
+    EditorSnippetEntryWire, EditorXpromptCatalogRequestWire,
+    FinalizerCatalogRequest, FinalizerCatalogResponse, HelperHostBridge,
+    HostBridgeError, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    FINALIZER_CATALOG_SCHEMA_VERSION,
 };
 use tokio::time;
 use tracing::warn;
@@ -35,7 +38,7 @@ pub struct CatalogFailure {
 
 #[derive(Debug, Clone)]
 struct CachedCatalog {
-    entries: Arc<Vec<XpromptAssistEntry>>,
+    entries: Arc<Vec<MacroAssistEntry>>,
     refreshed_at: Instant,
 }
 
@@ -129,7 +132,7 @@ impl CatalogCache {
     pub fn cached_entries(
         &self,
         key: &str,
-    ) -> Option<Arc<Vec<XpromptAssistEntry>>> {
+    ) -> Option<Arc<Vec<MacroAssistEntry>>> {
         let catalogs = self.catalogs.read().ok()?;
         catalogs.get(key).map(|catalog| catalog.entries.clone())
     }
@@ -192,7 +195,7 @@ impl CatalogCache {
         key: String,
         project: Option<String>,
         root_dir: Option<PathBuf>,
-    ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
         self.refresh(key, project, root_dir, COMPLETION_REFRESH_TIMEOUT)
             .await
     }
@@ -202,7 +205,7 @@ impl CatalogCache {
         key: String,
         project: Option<String>,
         root_dir: Option<PathBuf>,
-    ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
         self.refresh(key, project, root_dir, EXPLICIT_REFRESH_TIMEOUT)
             .await
     }
@@ -479,7 +482,7 @@ impl CatalogCache {
         project: Option<String>,
         root_dir: Option<PathBuf>,
         timeout: Duration,
-    ) -> Result<Arc<Vec<XpromptAssistEntry>>, CatalogFailure> {
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
         let request = EditorXpromptCatalogRequestWire {
             schema_version: 1,
             project,
@@ -612,7 +615,7 @@ impl CatalogCache {
         &self,
         request: &EditorXpromptCatalogRequestWire,
         timeout: Duration,
-    ) -> Result<Vec<XpromptAssistEntry>, CatalogFailure> {
+    ) -> Result<Vec<MacroAssistEntry>, CatalogFailure> {
         let bridge = self.bridge.clone();
         let request = request.clone();
         let task = tokio::task::spawn_blocking(move || {
@@ -707,8 +710,8 @@ impl CatalogCache {
     fn store(
         &self,
         key: String,
-        entries: Vec<XpromptAssistEntry>,
-    ) -> Arc<Vec<XpromptAssistEntry>> {
+        entries: Vec<MacroAssistEntry>,
+    ) -> Arc<Vec<MacroAssistEntry>> {
         let entries = Arc::new(entries);
         let cached = CachedCatalog {
             entries: entries.clone(),
@@ -761,9 +764,9 @@ impl CatalogCache {
 }
 
 fn merge_catalog_entries(
-    mut helper_entries: Vec<XpromptAssistEntry>,
-    rust_entries: Vec<XpromptAssistEntry>,
-) -> Vec<XpromptAssistEntry> {
+    mut helper_entries: Vec<MacroAssistEntry>,
+    rust_entries: Vec<MacroAssistEntry>,
+) -> Vec<MacroAssistEntry> {
     let mut indexes = helper_entries
         .iter()
         .enumerate()
@@ -801,11 +804,11 @@ fn merge_snippet_entries(
 async fn refresh_with_rust_catalog(
     request: EditorXpromptCatalogRequestWire,
     root_dir: Option<PathBuf>,
-) -> Result<Vec<XpromptAssistEntry>, CatalogFailure> {
+) -> Result<Vec<MacroAssistEntry>, CatalogFailure> {
     let task = tokio::task::spawn_blocking(move || {
-        load_editor_xprompt_catalog(
+        load_editor_macro_catalog(
             &request,
-            &XpromptCatalogLoadOptions::new(root_dir),
+            &MacroCatalogLoadOptions::new(root_dir),
         )
     });
     let response = match task.await {
@@ -833,7 +836,7 @@ async fn refresh_snippets_with_rust_catalog(
     let task = tokio::task::spawn_blocking(move || {
         load_editor_snippet_catalog(
             &request,
-            &XpromptCatalogLoadOptions::new(root_dir),
+            &MacroCatalogLoadOptions::new(root_dir),
         )
     });
     let response = match task.await {

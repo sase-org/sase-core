@@ -196,7 +196,7 @@ pub fn extract_token_at_position(
     token_info(document, start, end)
 }
 
-pub fn is_xprompt_like_token(token: &str) -> bool {
+pub fn is_macro_like_token(token: &str) -> bool {
     token.starts_with('#')
         && !token.is_empty()
         && !token.chars().any(char::is_whitespace)
@@ -262,7 +262,7 @@ pub fn vcs_project_trigger_token(
     token_info(document, trigger.start, trigger.end)
 }
 
-pub fn xprompt_reference_name(token: &str) -> Option<String> {
+pub fn macro_reference_name(token: &str) -> Option<String> {
     token
         .strip_prefix("#!")
         .or_else(|| token.strip_prefix('#'))

@@ -4,7 +4,7 @@ use super::directive::{
 use super::exclusion::{
     excluded_literal_and_definition_ranges, position_in_ranges,
 };
-use super::macro_args::xprompt_argument_open_colon_at;
+use super::macro_args::macro_argument_open_colon_at;
 use super::token::DocumentSnapshot;
 use super::wire::{EditorPosition, EditorTextEdit};
 
@@ -35,7 +35,7 @@ pub fn plan_argument_colon_to_parentheses_edit(
     ) {
         return None;
     }
-    if !(xprompt_argument_open_colon_at(text, colon_idx)
+    if !(macro_argument_open_colon_at(text, colon_idx)
         || directive_argument_open_colon_at(text, colon_idx))
     {
         return None;
@@ -80,7 +80,7 @@ pub fn plan_argument_double_colon_to_parentheses_edit(
     ) {
         return None;
     }
-    if !(xprompt_argument_open_colon_at(text, first_colon)
+    if !(macro_argument_open_colon_at(text, first_colon)
         || directive_argument_open_double_colon_at(text, first_colon))
     {
         return None;

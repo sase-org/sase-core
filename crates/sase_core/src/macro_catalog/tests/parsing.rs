@@ -29,9 +29,9 @@ fn projects_repeatable_agent_input_metadata() {
         )
         .unwrap();
 
-    let response = load_editor_xprompt_catalog(
+    let response = load_editor_macro_catalog(
         &request(),
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let entry = response
@@ -56,9 +56,9 @@ fn filters_step_inputs_and_formats_defaults() {
         )
         .unwrap();
 
-    let response = load_editor_xprompt_catalog(
+    let response = load_editor_macro_catalog(
         &request(),
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let entry = response
@@ -116,9 +116,9 @@ fn parses_xprompt_workflow_and_input_descriptions() {
         )
         .unwrap();
 
-    let response = load_editor_xprompt_catalog(
+    let response = load_editor_macro_catalog(
         &request(),
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     let by_name = response
@@ -146,9 +146,9 @@ fn parses_xprompt_workflow_and_input_descriptions() {
     );
     let mut filtered_request = request();
     filtered_request.query = Some("local helper summary".to_string());
-    let filtered = load_editor_xprompt_catalog(
+    let filtered = load_editor_macro_catalog(
         &filtered_request,
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     assert_eq!(
@@ -160,9 +160,9 @@ fn parses_xprompt_workflow_and_input_descriptions() {
         vec!["ship"]
     );
     filtered_request.query = Some("local topic description".to_string());
-    let filtered = load_editor_xprompt_catalog(
+    let filtered = load_editor_macro_catalog(
         &filtered_request,
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     assert_eq!(
@@ -186,18 +186,16 @@ fn parses_markdown_frontmatter_local_xprompts_without_global_entry() {
         )
         .unwrap();
 
-    let loader = CatalogLoader::new(&XpromptCatalogLoadOptions::new(Some(
+    let loader = CatalogLoader::new(&MacroCatalogLoadOptions::new(Some(
         root.to_path_buf(),
     )));
-    let loaded = loader
-        .load_xprompts_from_dir(&xprompts, None, false)
-        .unwrap();
+    let loaded = loader.load_macros_from_dir(&xprompts, None, false).unwrap();
     assert!(loaded.contains_key("reads"));
     assert!(!loaded.contains_key("_article_search_agent"));
 
-    let workflow = xprompt_to_workflow(loaded.get("reads").unwrap());
-    assert_eq!(workflow.local_xprompts.len(), 1);
-    let helper = &workflow.local_xprompts[0];
+    let workflow = macro_to_workflow(loaded.get("reads").unwrap());
+    assert_eq!(workflow.local_macros.len(), 1);
+    let helper = &workflow.local_macros[0];
     assert_eq!(helper.name, "_article_search_agent");
     assert_eq!(
         helper.description.as_deref(),
@@ -211,9 +209,9 @@ fn parses_markdown_frontmatter_local_xprompts_without_global_entry() {
 
     let mut filtered_request = request();
     filtered_request.query = Some("local article helper summary".to_string());
-    let filtered = load_editor_xprompt_catalog(
+    let filtered = load_editor_macro_catalog(
         &filtered_request,
-        &XpromptCatalogLoadOptions::new(Some(root.to_path_buf())),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
     )
     .unwrap();
     assert_eq!(

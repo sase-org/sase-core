@@ -23,11 +23,11 @@ pub use artifact_ref::{
 };
 pub use assist_candidates::{
     assist_entries_from_catalog, build_agent_completion_candidates,
-    build_identity_target_candidates, build_snippet_completion_candidates,
+    build_identity_target_candidates, build_macro_arg_name_candidates,
+    build_macro_completion_candidates, build_snippet_completion_candidates,
     build_wait_completion_candidates,
     build_wait_completion_candidates_for_form,
     build_wait_completion_candidates_for_form_with_flags,
-    build_xprompt_arg_name_candidates, build_xprompt_completion_candidates,
 };
 pub use directive_candidates::build_directive_clause_candidates;
 pub use trigger_context::{

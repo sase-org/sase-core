@@ -2,6 +2,16 @@
 
 use crate::prelude::*;
 
+use sase_core::editor::wire::MacroAssistEntry;
+use sase_core::editor::{
+    extract_macro_argument_spans, extract_macro_argument_spans_with_catalog,
+};
+use sase_core::macro_catalog::{
+    resolve_macro_skill_definition, MacroCatalogLoadOptions,
+    MacroCatalogResourcePaths, MacroSkillDefinitionRequestWire,
+    MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+};
+
 use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 
 use pyo3::wrap_pyfunction;
@@ -110,7 +120,7 @@ fn py_load_editor_snippet_catalog(
         schema_version: 1,
         project,
     };
-    let options = XpromptCatalogLoadOptions::new(root_dir.map(PathBuf::from));
+    let options = MacroCatalogLoadOptions::new(root_dir.map(PathBuf::from));
     let response = core_load_editor_snippet_catalog(&request, &options)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let value = serde_json::to_value(response).map_err(|error| {
@@ -136,7 +146,7 @@ struct PyXpromptCatalogOptions {
 
 fn xprompt_catalog_options_from_py(
     options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<XpromptCatalogLoadOptions> {
+) -> PyResult<MacroCatalogLoadOptions> {
     let raw = match options {
         Some(options) => serde_json::from_value::<PyXpromptCatalogOptions>(
             py_to_json_value(options.as_any())?,
@@ -148,7 +158,7 @@ fn xprompt_catalog_options_from_py(
         })?,
         None => PyXpromptCatalogOptions::default(),
     };
-    let resource_paths = XpromptCatalogResourcePaths {
+    let resource_paths = MacroCatalogResourcePaths {
         package_xprompts_dir: raw.package_xprompts_dir,
         package_skills_dir: raw.package_skills_dir,
         default_xprompts_dir: raw.default_xprompts_dir,
@@ -157,7 +167,7 @@ fn xprompt_catalog_options_from_py(
         plugin_skill_dirs: raw.plugin_skill_dirs,
         plugin_config_paths: raw.plugin_config_paths,
     };
-    Ok(XpromptCatalogLoadOptions::new(raw.root_dir)
+    Ok(MacroCatalogLoadOptions::new(raw.root_dir)
         .with_resource_paths(resource_paths))
 }
 
@@ -169,7 +179,7 @@ fn py_resolve_xprompt_skill_definition<'py>(
     request: &Bound<'py, PyDict>,
     options: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<PyObject> {
-    let request: XpromptSkillDefinitionRequestWire =
+    let request: MacroSkillDefinitionRequestWire =
         serde_json::from_value(py_to_json_value(request.as_any())?).map_err(
             |error| {
                 PyValueError::new_err(format!(
@@ -178,7 +188,7 @@ fn py_resolve_xprompt_skill_definition<'py>(
             },
         )?;
     let options = xprompt_catalog_options_from_py(options)?;
-    let resolution = core_resolve_xprompt_skill_definition(&request, &options);
+    let resolution = resolve_macro_skill_definition(&request, &options);
     let value = serde_json::to_value(resolution).map_err(|error| {
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
@@ -188,7 +198,24 @@ fn py_resolve_xprompt_skill_definition<'py>(
 #[pyfunction]
 #[pyo3(name = "xprompt_skill_definition_wire_schema_version")]
 fn py_xprompt_skill_definition_wire_schema_version() -> u64 {
-    XPROMPT_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
+    MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
+#[pyo3(name = "resolve_macro_skill_definition")]
+#[pyo3(signature = (request, options = None))]
+fn py_resolve_macro_skill_definition<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+    options: Option<&Bound<'py, PyDict>>,
+) -> PyResult<PyObject> {
+    py_resolve_xprompt_skill_definition(py, request, options)
+}
+
+#[pyfunction]
+#[pyo3(name = "macro_skill_definition_wire_schema_version")]
+fn py_macro_skill_definition_wire_schema_version() -> u64 {
+    py_xprompt_skill_definition_wire_schema_version()
 }
 
 #[pyfunction]
@@ -644,7 +671,7 @@ fn py_xprompt_argument_spans(
 ) -> PyResult<PyObject> {
     let document = sase_core::DocumentSnapshot::new(text);
     let spans = if let Some(entries) = entries {
-        let entries = serde_json::from_value::<Vec<sase_core::XpromptAssistEntry>>(
+        let entries = serde_json::from_value::<Vec<MacroAssistEntry>>(
             py_to_json_value(entries.as_any())?,
         )
         .map_err(|error| {
@@ -652,16 +679,25 @@ fn py_xprompt_argument_spans(
                 "entries is not a valid list of XpromptAssistEntry dicts: {error}"
             ))
         })?;
-        sase_core::editor_extract_xprompt_argument_spans_with_catalog(
-            &document, &entries,
-        )
+        extract_macro_argument_spans_with_catalog(&document, &entries)
     } else {
-        sase_core::editor_extract_xprompt_argument_spans(&document)
+        extract_macro_argument_spans(&document)
     };
     let value = serde_json::to_value(&spans).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(name = "macro_argument_spans")]
+#[pyo3(signature = (text, entries = None))]
+fn py_macro_argument_spans(
+    py: Python<'_>,
+    text: &str,
+    entries: Option<Bound<'_, PyList>>,
+) -> PyResult<PyObject> {
+    py_xprompt_argument_spans(py, text, entries)
 }
 
 /// Return ordered summaries for the prompt's unique raw placeholders.
@@ -924,8 +960,13 @@ pub(crate) fn register_editor_completion(
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_xprompt_skill_definition, m)?)?;
+    m.add_function(wrap_pyfunction!(py_resolve_macro_skill_definition, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_xprompt_skill_definition_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_macro_skill_definition_wire_schema_version,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_filter_model_completion_entries, m)?)?;
@@ -962,6 +1003,7 @@ pub(crate) fn register_editor_completion(
     m.add_function(wrap_pyfunction!(py_placeholder_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_xprompt_argument_spans, m)?)?;
+    m.add_function(wrap_pyfunction!(py_macro_argument_spans, m)?)?;
     m.add_function(wrap_pyfunction!(py_raw_placeholder_fields, m)?)?;
     m.add_function(wrap_pyfunction!(py_substitute_raw_placeholders, m)?)?;
     m.add_function(wrap_pyfunction!(py_placeholder_input_names, m)?)?;
