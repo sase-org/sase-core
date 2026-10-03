@@ -53,6 +53,8 @@ fn memory_history_bindings_are_registered() {
             "memory_history_version",
             "memory_history_compare",
             "memory_history_feed",
+            "memory_history_review_state",
+            "memory_history_mark_reviewed",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }
@@ -94,5 +96,54 @@ fn memory_history_sync_and_subjects_round_trip() {
             .as_array()
             .unwrap()
             .is_empty());
+    });
+}
+
+#[test]
+fn memory_history_review_state_and_mark_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    let (_tmp, repo, cache) = tiny_repo();
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let state = _tmp.path().join("state");
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_memory_history(&module).unwrap();
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "scopes": [tiny_scope(&repo, &cache)],
+                "state_dir": state.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let before = py_memory_history_review_state(py, request).unwrap();
+        let before = py_to_json_value(before.bind(py)).unwrap();
+        assert_eq!(before["schema_version"], json!(1));
+        assert_eq!(before["store_corrupt"], json!(false));
+        assert_eq!(before["scopes"][0]["watermark"], json!(null));
+        assert_eq!(before["scopes"][0]["new_count"], json!(0));
+        assert_eq!(before["scopes"][0]["newest_commit"], json!(head));
+
+        let mark = json_value_to_py(
+            py,
+            &json!({
+                "scope": tiny_scope(&repo, &cache),
+                "through_commit": head,
+                "state_dir": state.to_string_lossy(),
+            }),
+        )
+        .unwrap();
+        let mark = mark.bind(py).downcast::<PyDict>().unwrap();
+        let marked = py_memory_history_mark_reviewed(py, mark).unwrap();
+        let marked = py_to_json_value(marked.bind(py)).unwrap();
+        assert_eq!(marked["scope_key"], json!("project:tiny"));
+        assert_eq!(marked["watermark"]["commit"], json!(head));
+
+        let after = py_memory_history_review_state(py, request).unwrap();
+        let after = py_to_json_value(after.bind(py)).unwrap();
+        assert_eq!(after["scopes"][0]["watermark"]["commit"], json!(head));
+        assert_eq!(after["scopes"][0]["new_count"], json!(0));
     });
 }

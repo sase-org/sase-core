@@ -706,3 +706,92 @@ pub enum MemoryHistoryError {
     #[error(transparent)]
     FileHistory(#[from] crate::file_history::FileHistoryError),
 }
+
+/// One per-scope review watermark: the commit the scope was marked
+/// reviewed through, that commit's committer time, and when the mark
+/// was recorded. Keyed by scope key in the review store, so every
+/// workspace clone of a project shares it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryReviewWatermarkWire {
+    /// Full commit SHA the scope was marked reviewed through.
+    pub commit: String,
+    /// That commit's committer time, epoch seconds.
+    pub committer_time: i64,
+    /// When the mark was recorded, epoch seconds wall-clock.
+    pub marked_at: i64,
+}
+
+/// Review state of one scope: its watermark (if any), how many
+/// default-visible changesets are newer, and the newest changeset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryReviewScopeStateWire {
+    /// Owning scope key.
+    pub scope_key: String,
+    /// The stored watermark, if the scope was ever marked reviewed.
+    #[serde(default)]
+    pub watermark: Option<MemoryHistoryReviewWatermarkWire>,
+    /// Default-visible changesets (not hidden, not regen-only) that
+    /// are strict first-parent descendants of the watermark commit,
+    /// or newer by committer time when this checkout does not know
+    /// that commit. Zero with no watermark.
+    #[serde(default)]
+    pub new_count: u64,
+    /// Newest default-visible changeset's commit ("" when none).
+    #[serde(default)]
+    pub newest_commit: String,
+    /// Its committer time, epoch seconds (0 when none).
+    #[serde(default)]
+    pub newest_committer_time: i64,
+}
+
+/// Request wire for [`crate::memory_history::query_review_state`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryReviewStateRequestWire {
+    /// Scopes to report review state for.
+    pub scopes: Vec<MemoryHistoryScopeWire>,
+    /// Caller-supplied state directory holding the review store.
+    /// SASE's state area, never the disposable snapshot cache.
+    pub state_dir: String,
+}
+
+/// Per-scope review state plus store health.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryReviewStateWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// One entry per requested scope, in request order.
+    #[serde(default)]
+    pub scopes: Vec<MemoryHistoryReviewScopeStateWire>,
+    /// True when the review store exists but could not be read
+    /// (missing, corrupt, or wrong schema): every scope then reads
+    /// as unreviewed. The store is never repaired or rewritten on
+    /// read.
+    #[serde(default)]
+    pub store_corrupt: bool,
+}
+
+/// Request wire for [`crate::memory_history::query_mark_reviewed`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryMarkReviewedRequestWire {
+    /// Scope to mark reviewed.
+    pub scope: MemoryHistoryScopeWire,
+    /// Full commit SHA to mark reviewed through (the scope's newest
+    /// changeset commit). Must exist in the scope's repository.
+    pub through_commit: String,
+    /// Caller-supplied state directory holding the review store.
+    pub state_dir: String,
+}
+
+/// The recorded mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHistoryMarkReviewedWire {
+    /// Wire schema version (see [`MEMORY_HISTORY_WIRE_SCHEMA_VERSION`]).
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Marked scope key.
+    #[serde(default)]
+    pub scope_key: String,
+    /// The stored watermark.
+    pub watermark: MemoryHistoryReviewWatermarkWire,
+}

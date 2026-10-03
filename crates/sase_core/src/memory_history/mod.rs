@@ -5,6 +5,7 @@ pub mod causes;
 pub mod classify;
 pub mod feed;
 pub mod query;
+pub mod review;
 pub mod subjects;
 pub mod upstream;
 pub mod wire;
@@ -23,6 +24,11 @@ pub use query::{
     query_compare, query_feed, query_resolve, query_subjects, query_sync,
     query_timeline, query_version, resolve_subject,
 };
+pub use review::{
+    load_review_store, query_mark_reviewed, query_review_state,
+    review_store_path, ReviewWatermark, REVIEW_STORE_FILENAME,
+    REVIEW_STORE_SCHEMA_VERSION,
+};
 pub use subjects::{
     derive_subjects, memory_history_pathspecs, subject_path_aliases,
 };
@@ -35,8 +41,11 @@ pub use wire::{
     MemoryHistoryError, MemoryHistoryFeedEntryWire,
     MemoryHistoryFeedRequestWire, MemoryHistoryFeedWire,
     MemoryHistoryFooterTagWire, MemoryHistoryInstructionFileWire,
+    MemoryHistoryMarkReviewedRequestWire, MemoryHistoryMarkReviewedWire,
     MemoryHistoryProvenanceWire, MemoryHistoryResolveRequestWire,
-    MemoryHistoryResolveWire, MemoryHistoryScopeKindWire,
+    MemoryHistoryResolveWire, MemoryHistoryReviewScopeStateWire,
+    MemoryHistoryReviewStateRequestWire, MemoryHistoryReviewStateWire,
+    MemoryHistoryReviewWatermarkWire, MemoryHistoryScopeKindWire,
     MemoryHistoryScopeWire, MemoryHistorySnapshotWire,
     MemoryHistorySubjectKindWire, MemoryHistorySubjectWire,
     MemoryHistorySubjectsRequestWire, MemoryHistorySubjectsWire,

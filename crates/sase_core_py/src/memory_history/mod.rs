@@ -9,10 +9,12 @@ use pyo3::wrap_pyfunction;
 use sase_core::memory_history::{
     memory_history_wire_schema_version as core_wire_version,
     query_compare as core_compare, query_feed as core_feed,
-    query_resolve as core_resolve, query_subjects as core_subjects,
+    query_mark_reviewed as core_mark_reviewed, query_resolve as core_resolve,
+    query_review_state as core_review_state, query_subjects as core_subjects,
     query_sync as core_sync, query_timeline as core_timeline,
     query_version as core_version, MemoryHistoryCompareRequestWire,
-    MemoryHistoryFeedRequestWire, MemoryHistoryResolveRequestWire,
+    MemoryHistoryFeedRequestWire, MemoryHistoryMarkReviewedRequestWire,
+    MemoryHistoryResolveRequestWire, MemoryHistoryReviewStateRequestWire,
     MemoryHistorySubjectsRequestWire, MemoryHistorySyncRequestWire,
     MemoryHistoryTimelineRequestWire, MemoryHistoryVersionRequestWire,
 };
@@ -148,6 +150,36 @@ fn py_memory_history_feed<'py>(
     serialize_to_py(py, &out)
 }
 
+/// Review state (watermarks plus N-new counts) for scopes.
+#[pyfunction]
+#[pyo3(name = "memory_history_review_state")]
+fn py_memory_history_review_state<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: MemoryHistoryReviewStateRequestWire =
+        parse_request(request, "MemoryHistoryReviewStateRequestWire")?;
+    let out = py
+        .allow_threads(|| core_review_state(&request))
+        .map_err(core_error_to_pyerr)?;
+    serialize_to_py(py, &out)
+}
+
+/// Record one scope's review watermark through a commit.
+#[pyfunction]
+#[pyo3(name = "memory_history_mark_reviewed")]
+fn py_memory_history_mark_reviewed<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: MemoryHistoryMarkReviewedRequestWire =
+        parse_request(request, "MemoryHistoryMarkReviewedRequestWire")?;
+    let out = py
+        .allow_threads(|| core_mark_reviewed(&request))
+        .map_err(core_error_to_pyerr)?;
+    serialize_to_py(py, &out)
+}
+
 pub(crate) fn register_memory_history(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_memory_history_wire_schema_version,
@@ -160,6 +192,8 @@ pub(crate) fn register_memory_history(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_memory_history_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_history_compare, m)?)?;
     m.add_function(wrap_pyfunction!(py_memory_history_feed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_history_review_state, m)?)?;
+    m.add_function(wrap_pyfunction!(py_memory_history_mark_reviewed, m)?)?;
     Ok(())
 }
 

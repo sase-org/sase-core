@@ -13,6 +13,7 @@ mod causes;
 mod classify;
 mod corpus;
 mod feed;
+mod review;
 
 fn budget() -> FileHistoryBudgetWire {
     FileHistoryBudgetWire::default()
