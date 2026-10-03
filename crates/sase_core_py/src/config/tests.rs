@@ -1179,3 +1179,67 @@ fn launch_scratch_liveness_binding_round_trips_wire() {
         assert_eq!(result["candidates"][0]["complete"], json!(false));
     });
 }
+
+#[test]
+fn macro_layer_normalize_binding_round_trips_python_dicts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert!(module.getattr("normalize_macro_config_layer").is_ok());
+
+        // Accepted legacy input normalizes with source-qualified diagnostics.
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "layer": {
+                    "xprompts": {"a": {}},
+                    "ace": {"prompt_completion": {"auto_xprompt_menu": true}},
+                },
+                "accept_legacy_xprompt_names": true,
+                "source": "user",
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_normalize_macro_config_layer(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result["canonical"]["macros"], json!({"a": {}}));
+        assert_eq!(
+            result["canonical"]["ace"]["prompt_completion"]["auto_macro_menu"],
+            json!(true)
+        );
+        assert_eq!(result["diagnostics"].as_array().unwrap().len(), 2);
+        assert_eq!(result["diagnostics"][0]["source"], json!("user"));
+
+        // Rejected legacy input surfaces the retirement error.
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "layer": {"xprompts": {"a": {}}},
+                "accept_legacy_xprompt_names": false,
+                "source": "user",
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let err = py_normalize_macro_config_layer(py, request).unwrap_err();
+        assert!(err.to_string().contains("xprompts is retired; use macros"));
+
+        // Both spellings collide in both flag states.
+        for accept in [true, false] {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "layer": {"xprompts": {"a": {}}, "macros": {"b": {}}},
+                    "accept_legacy_xprompt_names": accept,
+                    "source": "user",
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let err = py_normalize_macro_config_layer(py, request).unwrap_err();
+            assert!(err.to_string().contains("cannot be combined"));
+        }
+    });
+}

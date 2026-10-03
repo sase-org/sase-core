@@ -16,6 +16,7 @@
 //! never silently diverge (see the parity tests).
 
 pub mod axe;
+pub mod macro_syntax;
 pub mod merge;
 pub mod plan;
 pub mod provenance;
@@ -31,6 +32,10 @@ pub use axe::{
     AxeEntryMutationRequestWire, AxeEntryPreviewWire, AxeEntrySelectorWire,
     AxeFieldOperationWire, AxeFieldProvenanceWire, AxeInventoryEntryWire,
     AxeRawContributionWire,
+};
+pub use macro_syntax::{
+    normalize_macro_config_layer, MacroLayerNormalizeRequestWire,
+    MacroLayerNormalizeWire, MacroSyntaxDiagnosticWire,
 };
 pub use wire::{
     ConfigConstraintsWire, ConfigContributionWire, ConfigDiagnosticWire,

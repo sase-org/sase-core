@@ -651,6 +651,35 @@ fn py_config_validate<'py>(
     json_value_to_py(py, &json)
 }
 
+/// Normalize one authored macro-config layer to canonical macro spellings.
+///
+/// *request* is a `MacroLayerNormalizeRequestWire`-shape dict: `layer` (the
+/// already-decoded mapping), `accept_legacy_xprompt_names` (explicit policy
+/// bit), and optional `source` (layer identity for diagnostics). The caller
+/// passes the flag state explicitly so raw flag-bootstrap layers never
+/// recurse into flag resolution.
+#[pyfunction]
+#[pyo3(name = "normalize_macro_config_layer")]
+fn py_normalize_macro_config_layer<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let req: sase_core::config::macro_syntax::MacroLayerNormalizeRequestWire =
+        serde_json::from_value(value).map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid macro layer normalize request: {e}"
+            ))
+        })?;
+    let result =
+        sase_core::config::macro_syntax::normalize_macro_config_layer(&req)
+            .map_err(config_error_to_pyerr)?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &json)
+}
+
 fn feature_flag_state_error_to_pyerr(
     err: FeatureFlagStateDomainError,
 ) -> PyErr {
@@ -769,6 +798,7 @@ pub(crate) fn register_config(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_config_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_plan_edit, m)?)?;
     m.add_function(wrap_pyfunction!(py_config_validate, m)?)?;
+    m.add_function(wrap_pyfunction!(py_normalize_macro_config_layer, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_compose, m)?)?;
     m.add_function(wrap_pyfunction!(py_axe_config_plan_entry, m)?)?;
     m.add_function(wrap_pyfunction!(py_service_config_compose, m)?)?;
