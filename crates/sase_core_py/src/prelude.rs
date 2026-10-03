@@ -1004,6 +1004,10 @@ pub(crate) use sase_core::sidecar_publication::{
     decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
     SidecarPublicationDecisionWire,
 };
+pub(crate) use sase_core::agent_session_manifest::{
+    classify_session_manifest_files as core_classify_session_manifest_files,
+    SessionManifestClassifyRequestWire, SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
+};
 pub(crate) use sase_core::snippet_session::{
     apply_session_event as core_apply_snippet_session_event,
     SnippetSessionEvent, SnippetSessionState,

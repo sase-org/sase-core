@@ -26,6 +26,7 @@ pub mod agent_publication_batches;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_session;
+pub mod agent_session_manifest;
 pub mod agent_stats;
 pub mod agent_tab;
 pub mod agent_tribe;
@@ -381,6 +382,15 @@ pub use agent_session::{
     AgentSessionParentCandidateWire, AgentSessionParentResolutionRequestWire,
     AgentSessionParentResolutionWire,
     AGENT_SESSION_RESOLUTION_WIRE_SCHEMA_VERSION,
+};
+pub use agent_session_manifest::{
+    canonical_session_manifest_files, classify_session_manifest_files,
+    SessionManifestClassifyRequestWire, SessionManifestClassifyResponseWire,
+    SessionManifestContainerWire, SessionManifestError,
+    SessionManifestSnapshotWire, SESSION_MANIFEST_CLASS_CURRENT,
+    SESSION_MANIFEST_CLASS_INVALID, SESSION_MANIFEST_CLASS_SLIM,
+    SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY,
+    SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 /// Legacy Rust alias retained for compatibility with older stats callers.
 pub use agent_stats::AgentChangeSpecWorkStatsWire;

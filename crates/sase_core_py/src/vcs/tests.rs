@@ -271,6 +271,77 @@ fn pending_commit_checkpoint_bindings_round_trip_json_shapes() {
 }
 
 #[test]
+fn session_manifest_binding_classifies_current_legacy_and_slim() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        assert_eq!(py_session_manifest_wire_schema_version(), 1);
+        let snapshot = json!({
+            "owner_username": "alice",
+            "owner_machine": "athena",
+            "local_hood": "foo",
+            "run_global_names": ["alice.athena.foo.bar"],
+            "run_file_paths": ["agents/alice.athena.foo.bar/meta.json"],
+            "containers": [
+                {"kind": "session", "global_name": "alice.athena.foo.bar.baz"}
+            ],
+        });
+        let canonical: Vec<String> = {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "snapshot": snapshot,
+                    "explicit_files": null,
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_session_manifest_files(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value["classification"], json!("slim"));
+            value["canonical_files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert!(canonical.contains(
+            &"sessions/alice.athena.foo.bar.baz.md".to_string()
+        ));
+        for (explicit, expected) in [
+            (serde_json::Value::Array(
+                canonical.iter().map(|item| json!(item)).collect(),
+            ), "current"),
+            (
+                serde_json::Value::Array(
+                    canonical
+                        .iter()
+                        .filter(|path| !path.starts_with("sessions/"))
+                        .map(|item| json!(item))
+                        .collect(),
+                ),
+                "supported_legacy",
+            ),
+        ] {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "schema_version": 1,
+                    "snapshot": snapshot,
+                    "explicit_files": explicit,
+                }),
+            )
+            .unwrap();
+            let request = request.bind(py).downcast::<PyDict>().unwrap();
+            let result = py_classify_session_manifest_files(py, request).unwrap();
+            let value = py_to_json_value(result.bind(py)).unwrap();
+            assert_eq!(value["classification"], json!(expected));
+        }
+    });
+}
+
+#[test]
 fn sidecar_publication_binding_returns_plain_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

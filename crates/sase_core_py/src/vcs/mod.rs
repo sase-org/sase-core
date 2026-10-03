@@ -385,6 +385,38 @@ fn sidecar_publication_decision_to_py<'py>(
     Ok(dict)
 }
 
+/// Return the wire schema version for agent-session manifest compatibility.
+#[pyfunction]
+#[pyo3(name = "session_manifest_wire_schema_version")]
+fn py_session_manifest_wire_schema_version() -> u32 {
+    SESSION_MANIFEST_WIRE_SCHEMA_VERSION
+}
+
+/// Derive the canonical file sets and classify one explicit manifest list.
+///
+/// Mirrors the Python `SessionManifestSnapshotWire` dict shape. The response
+/// dict carries `canonical_files`, `legacy_files`, `classification`, and
+/// `reason` so the Python facade can enforce the compatibility rule without
+/// reimplementing path policy.
+#[pyfunction]
+#[pyo3(name = "classify_session_manifest_files")]
+fn py_classify_session_manifest_files<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: SessionManifestClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid SessionManifestClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_classify_session_manifest_files(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 // --- vcs_log parser + aggregator bindings --------------------------------
 /// Serialize a `VcsCommitWire` into a `PyDict` mirroring the Python
 /// `VcsCommitWire` dataclass JSON shape.
@@ -592,6 +624,14 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_failure_retryability, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_decide_sidecar_publication_after_push,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_session_manifest_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_classify_session_manifest_files,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
