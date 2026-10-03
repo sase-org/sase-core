@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.4](https://github.com/sase-org/sase-core/compare/v0.36.3...v0.36.4) - 2026-10-03
+
+### Added
+
+- *(compat)* shared Rust config normalization contract
+- *(memory-history)* add review state store with query and mark-reviewed
+- *(core-expand)* add canonical macro sources and legacy loading policy
+
 ## [0.36.3](https://github.com/sase-org/sase-core/compare/v0.36.2...v0.36.3) - 2026-10-02
 
 ### Added
