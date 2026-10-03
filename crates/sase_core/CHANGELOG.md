@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.4](https://github.com/sase-org/sase-core/compare/v0.36.3...v0.36.4) - 2026-10-03
+
+### Added
+
+- *(compat)* shared Rust config normalization contract
+- *(memory-history)* add review state store with query and mark-reviewed
+- *(core)* add memory history query and cache coverage
+- *(directive)* keep legacy directive contract byte-identical with hidden macros_enabled alias
+- *(core-expand)* audit residual macro terminology against starting core
+- *(core-expand)* read new macro artifact filenames with legacy fallbacks
+- *(core-expand)* accept macro authored keys and permanent directive aliases
+- *(core-expand)* add canonical macro sources and legacy loading policy
+
 ## [0.36.3](https://github.com/sase-org/sase-core/compare/v0.36.2...v0.36.3) - 2026-10-02
 
 ### Added
