@@ -23,6 +23,7 @@ pub mod agent_launch;
 pub mod agent_name_template;
 pub mod agent_ownership;
 pub mod agent_publication_batches;
+pub mod agent_publication_recovery;
 pub mod agent_runtime;
 pub mod agent_scan;
 pub mod agent_session;

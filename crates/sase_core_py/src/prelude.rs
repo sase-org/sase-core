@@ -163,6 +163,14 @@ pub(crate) use sase_core::agent_publication_batches::{
     plan_agent_publication_batches as core_plan_agent_publication_batches,
     AgentPublicationPathRecordWire,
 };
+pub(crate) use sase_core::agent_publication_recovery::{
+    classify_deferred_prompt_obligation as core_classify_deferred_prompt_obligation,
+    decide_publication_request_completion as core_decide_publication_request_completion,
+    select_publication_retries as core_select_publication_retries,
+    DeferredPromptClassifyRequestWire, PublicationCompletionRequestWire,
+    PublicationRetrySelectionRequestWire,
+    PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION,
+};
 pub(crate) use sase_core::agent_runtime::{
     aggregate_clan_runtime as core_aggregate_clan_runtime,
     ClanRuntimeMemberWire,
@@ -205,6 +213,10 @@ pub(crate) use sase_core::agent_scan::{
 pub(crate) use sase_core::agent_session::{
     resolve_agent_session_parent as core_resolve_agent_session_parent,
     AgentSessionParentResolutionRequestWire,
+};
+pub(crate) use sase_core::agent_session_manifest::{
+    classify_session_manifest_files as core_classify_session_manifest_files,
+    SessionManifestClassifyRequestWire, SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::agent_stats::{
     query_activity_stats as core_query_activity_stats,
@@ -1003,10 +1015,6 @@ pub(crate) use sase_core::service::status::{
 pub(crate) use sase_core::sidecar_publication::{
     decide_sidecar_publication_after_push as core_decide_sidecar_publication_after_push,
     SidecarPublicationDecisionWire,
-};
-pub(crate) use sase_core::agent_session_manifest::{
-    classify_session_manifest_files as core_classify_session_manifest_files,
-    SessionManifestClassifyRequestWire, SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 pub(crate) use sase_core::snippet_session::{
     apply_session_event as core_apply_snippet_session_event,

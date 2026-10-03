@@ -55,7 +55,9 @@ pub struct SessionManifestClassifyResponseWire {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionManifestError {
-    #[error("unsupported SessionManifestClassifyRequestWire schema_version {0}")]
+    #[error(
+        "unsupported SessionManifestClassifyRequestWire schema_version {0}"
+    )]
     UnsupportedSchema(u32),
     #[error("invalid session manifest snapshot: {0}")]
     InvalidSnapshot(String),
@@ -114,7 +116,8 @@ pub fn classify_session_manifest_files(
             request.schema_version,
         ));
     }
-    let (canonical, legacy) = canonical_session_manifest_files(&request.snapshot)?;
+    let (canonical, legacy) =
+        canonical_session_manifest_files(&request.snapshot)?;
     let has_sessions = canonical.len() != legacy.len();
     let Some(explicit) = request.explicit_files.as_ref() else {
         return Ok(SessionManifestClassifyResponseWire {
@@ -147,7 +150,8 @@ pub fn classify_session_manifest_files(
             canonical_files: canonical,
             legacy_files: legacy,
             classification: SESSION_MANIFEST_CLASS_CURRENT.to_string(),
-            reason: "explicit files equal the current canonical set".to_string(),
+            reason: "explicit files equal the current canonical set"
+                .to_string(),
         });
     }
     if has_sessions && *explicit == legacy {
@@ -212,7 +216,10 @@ fn validate_snapshot(
     Ok(())
 }
 
-fn validate_component(value: &str, label: &str) -> Result<(), SessionManifestError> {
+fn validate_component(
+    value: &str,
+    label: &str,
+) -> Result<(), SessionManifestError> {
     if value.is_empty()
         || value == "."
         || value == ".."
@@ -277,7 +284,9 @@ mod tests {
             owner_machine: "athena".to_string(),
             local_hood: "foo".to_string(),
             run_global_names: vec!["alice.athena.foo.bar".to_string()],
-            run_file_paths: vec!["agents/alice.athena.foo.bar/meta.json".to_string()],
+            run_file_paths: vec![
+                "agents/alice.athena.foo.bar/meta.json".to_string()
+            ],
             containers: vec![SessionManifestContainerWire {
                 kind: "session".to_string(),
                 global_name: "alice.athena.foo.bar.baz".to_string(),
@@ -285,7 +294,9 @@ mod tests {
         }
     }
 
-    fn request(explicit: Option<Vec<String>>) -> SessionManifestClassifyRequestWire {
+    fn request(
+        explicit: Option<Vec<String>>,
+    ) -> SessionManifestClassifyRequestWire {
         SessionManifestClassifyRequestWire {
             schema_version: SESSION_MANIFEST_WIRE_SCHEMA_VERSION,
             snapshot: snapshot(),
@@ -295,19 +306,25 @@ mod tests {
 
     #[test]
     fn canonical_set_contains_both_page_paths() {
-        let (canonical, legacy) = canonical_session_manifest_files(&snapshot()).unwrap();
-        assert!(canonical.contains(&"sessions/alice.athena.foo.bar.baz.md".to_string()));
-        assert!(canonical.contains(&"families/alice.athena.foo.bar.baz.md".to_string()));
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
+        assert!(canonical
+            .contains(&"sessions/alice.athena.foo.bar.baz.md".to_string()));
+        assert!(canonical
+            .contains(&"families/alice.athena.foo.bar.baz.md".to_string()));
         assert!(!legacy.iter().any(|path| path.starts_with("sessions/")));
-        assert!(legacy.contains(&"families/alice.athena.foo.bar.baz.md".to_string()));
+        assert!(legacy
+            .contains(&"families/alice.athena.foo.bar.baz.md".to_string()));
     }
 
     #[test]
     fn legacy_family_kind_counts_as_session_container() {
         let mut snap = snapshot();
         snap.containers[0].kind = "family".to_string();
-        let (canonical, legacy) = canonical_session_manifest_files(&snap).unwrap();
-        assert!(canonical.contains(&"sessions/alice.athena.foo.bar.baz.md".to_string()));
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snap).unwrap();
+        assert!(canonical
+            .contains(&"sessions/alice.athena.foo.bar.baz.md".to_string()));
         assert_eq!(canonical.len(), legacy.len() + 1);
     }
 
@@ -315,7 +332,8 @@ mod tests {
     fn clan_containers_add_no_pages() {
         let mut snap = snapshot();
         snap.containers[0].kind = "clan".to_string();
-        let (canonical, legacy) = canonical_session_manifest_files(&snap).unwrap();
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snap).unwrap();
         assert_eq!(canonical, legacy);
         assert!(!canonical.iter().any(|path| path.starts_with("sessions/")));
         assert!(!canonical.iter().any(|path| path.starts_with("families/")));
@@ -325,7 +343,8 @@ mod tests {
     fn hood_without_sessions_has_no_legacy_exception() {
         let mut snap = snapshot();
         snap.containers.clear();
-        let (canonical, legacy) = canonical_session_manifest_files(&snap).unwrap();
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snap).unwrap();
         assert_eq!(canonical, legacy);
         let response = classify_session_manifest_files(
             &SessionManifestClassifyRequestWire {
@@ -346,33 +365,41 @@ mod tests {
 
     #[test]
     fn exact_current_and_legacy_sets_classify() {
-        let (canonical, legacy) = canonical_session_manifest_files(&snapshot()).unwrap();
-        let current = classify_session_manifest_files(&request(Some(canonical))).unwrap();
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
+        let current =
+            classify_session_manifest_files(&request(Some(canonical))).unwrap();
         assert_eq!(current.classification, SESSION_MANIFEST_CLASS_CURRENT);
-        let old = classify_session_manifest_files(&request(Some(legacy))).unwrap();
+        let old =
+            classify_session_manifest_files(&request(Some(legacy))).unwrap();
         assert_eq!(old.classification, SESSION_MANIFEST_CLASS_SUPPORTED_LEGACY);
     }
 
     #[test]
     fn partial_migration_is_invalid() {
-        let (canonical, legacy) = canonical_session_manifest_files(&snapshot()).unwrap();
+        let (canonical, legacy) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
         let mut partial = legacy[..legacy.len() - 1].to_vec();
         partial.sort();
-        let response = classify_session_manifest_files(&request(Some(partial))).unwrap();
+        let response =
+            classify_session_manifest_files(&request(Some(partial))).unwrap();
         assert_eq!(response.classification, SESSION_MANIFEST_CLASS_INVALID);
         let mut extra = canonical.clone();
         extra.push("sessions/alice.athena.foo.bar.nonexistent.md".to_string());
         extra.sort();
-        let response = classify_session_manifest_files(&request(Some(extra))).unwrap();
+        let response =
+            classify_session_manifest_files(&request(Some(extra))).unwrap();
         assert_eq!(response.classification, SESSION_MANIFEST_CLASS_INVALID);
     }
 
     #[test]
     fn unsorted_or_unsafe_lists_are_invalid() {
-        let (canonical, _) = canonical_session_manifest_files(&snapshot()).unwrap();
+        let (canonical, _) =
+            canonical_session_manifest_files(&snapshot()).unwrap();
         let mut unsorted = canonical.clone();
         unsorted.reverse();
-        let response = classify_session_manifest_files(&request(Some(unsorted))).unwrap();
+        let response =
+            classify_session_manifest_files(&request(Some(unsorted))).unwrap();
         assert_eq!(response.classification, SESSION_MANIFEST_CLASS_INVALID);
         let response = classify_session_manifest_files(&request(Some(vec![
             "../escape".to_string(),

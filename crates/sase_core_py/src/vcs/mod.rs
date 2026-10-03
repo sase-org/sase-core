@@ -392,6 +392,73 @@ fn py_session_manifest_wire_schema_version() -> u32 {
     SESSION_MANIFEST_WIRE_SCHEMA_VERSION
 }
 
+/// Return the wire schema version for retired-request recovery policy.
+#[pyfunction]
+#[pyo3(name = "publication_recovery_wire_schema_version")]
+fn py_publication_recovery_wire_schema_version() -> u32 {
+    PUBLICATION_RECOVERY_WIRE_SCHEMA_VERSION
+}
+
+/// Select retired and/or quarantined publication rows for one explicit retry.
+#[pyfunction]
+#[pyo3(name = "select_publication_retries")]
+fn py_select_publication_retries<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationRetrySelectionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid PublicationRetrySelectionRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_select_publication_retries(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Decide whether a publication request's canonical page and revision exist.
+#[pyfunction]
+#[pyo3(name = "decide_publication_request_completion")]
+fn py_decide_publication_request_completion<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: PublicationCompletionRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid PublicationCompletionRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_decide_publication_request_completion(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
+/// Classify one deferred prompt as restored, archived, n/a, unavailable, or failed.
+#[pyfunction]
+#[pyo3(name = "classify_deferred_prompt_obligation")]
+fn py_classify_deferred_prompt_obligation<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: DeferredPromptClassifyRequestWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid DeferredPromptClassifyRequestWire dict: {error}"
+        ))
+    })?;
+    let result = core_classify_deferred_prompt_obligation(&request)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialize_to_py(py, &result)
+}
+
 /// Derive the canonical file sets and classify one explicit manifest list.
 ///
 /// Mirrors the Python `SessionManifestSnapshotWire` dict shape. The response
@@ -630,8 +697,18 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_session_manifest_wire_schema_version,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_classify_session_manifest_files, m)?)?;
     m.add_function(wrap_pyfunction!(
-        py_classify_session_manifest_files,
+        py_publication_recovery_wire_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_select_publication_retries, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decide_publication_request_completion,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_classify_deferred_prompt_obligation,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_vcs_log_wire_schema_version, m)?)?;
