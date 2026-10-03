@@ -7,7 +7,9 @@
 //! historical), then unique basename; ambiguous basenames error with
 //! the candidate ids. Version selectors accept an ordinal (`7` or
 //! `v7`), `~N` (`~1` is the newest committed version), a unique
-//! commit SHA prefix, or `now` for the worktree file.
+//! commit SHA prefix, `blob:<oid>` (a full blob OID or a unique
+//! prefix of at least 7 hex characters, resolving to the newest
+//! committed version with that blob), or `now` for the worktree file.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,6 +28,7 @@ use super::wire::{
     MemoryHistoryVersionResponseWire, MemoryHistoryVersionWire,
     MEMORY_HISTORY_WIRE_SCHEMA_VERSION,
 };
+use crate::file_history::wire::FileChangeKindWire;
 use crate::file_history::{
     path_status, read_blobs, run_git_unchecked, safe_revision_token,
     BlobReadBudget, FileHistoryBudgetWire,
@@ -163,7 +166,7 @@ pub fn query_timeline(
     })
 }
 
-/// One version by ordinal, `~N`, unique SHA prefix, or `now`.
+/// One version by ordinal, `~N`, unique SHA prefix, `blob:<oid>`, or `now`.
 /// `include_body` fetches the blob inside core; a deleted version's
 /// body is its tombstone blob. `now` reads the worktree file. A
 /// missing object returns an empty body with `body_missing: true`
@@ -450,12 +453,18 @@ fn select_version_with_body(
 }
 
 /// Select one committed version: `~N` (`~1` is newest), ordinal
-/// (`7` or `v7`), or unique commit SHA prefix. Rows stay
+/// (`7` or `v7`), unique commit SHA prefix, or `blob:<oid>` (a full
+/// blob OID or a unique prefix of at least 7 hex characters,
+/// resolving to the newest committed version with that blob; a
+/// deleted row's tombstone blob never matches). Rows stay
 /// newest-first; ordinals still run oldest-first on the rows.
 fn select_committed<'a>(
     subject: &'a MemoryHistorySubjectWire,
     selector: &str,
 ) -> Result<&'a MemoryHistoryVersionWire, MemoryHistoryError> {
+    if selector.len() >= 5 && selector[..5].eq_ignore_ascii_case("blob:") {
+        return select_by_blob(subject, selector);
+    }
     if let Some(rest) = selector.strip_prefix('~') {
         let position: usize = rest.parse().map_err(|_| {
             MemoryHistoryError::InvalidPath(format!(
@@ -523,6 +532,63 @@ fn select_committed<'a>(
     Ok(first)
 }
 
+/// Select the newest committed version whose blob OID matches a
+/// `blob:<oid>` selector: a full OID or a unique prefix of at least 7
+/// hex characters. Matching is case-insensitive over `blob_oid`;
+/// deleted rows never match (their tombstone blob names removed
+/// content, not a readable version). A reverted blob resolves to its
+/// newest match. A prefix matching more than one distinct blob is
+/// ambiguous; a prefix matching no blob is missing. Both errors name
+/// the full `blob:<oid>` selector.
+fn select_by_blob<'a>(
+    subject: &'a MemoryHistorySubjectWire,
+    selector: &str,
+) -> Result<&'a MemoryHistoryVersionWire, MemoryHistoryError> {
+    let raw = &selector[5..];
+    let valid =
+        raw.len() >= 7 && raw.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid {
+        return Err(MemoryHistoryError::InvalidPath(format!(
+            "invalid version selector: {selector}"
+        )));
+    }
+    let lowered = raw.to_ascii_lowercase();
+    // Rows stay newest-first, so the first match is the newest.
+    let mut first: Option<&'a MemoryHistoryVersionWire> = None;
+    let mut distinct: Vec<String> = Vec::new();
+    for version in &subject.versions {
+        if version.kind == FileChangeKindWire::Deleted {
+            continue;
+        }
+        let Some(blob) = version.blob_oid.as_deref() else {
+            continue;
+        };
+        if !blob.to_ascii_lowercase().starts_with(&lowered) {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(version);
+        }
+        let full = blob.to_ascii_lowercase();
+        if !distinct.contains(&full) {
+            distinct.push(full);
+        }
+    }
+    let Some(newest) = first else {
+        return Err(MemoryHistoryError::InvalidPath(format!(
+            "no version {selector} for subject {}",
+            subject.id
+        )));
+    };
+    if distinct.len() > 1 {
+        return Err(MemoryHistoryError::InvalidPath(format!(
+            "ambiguous blob prefix {selector} for subject {}",
+            subject.id
+        )));
+    }
+    Ok(newest)
+}
+
 /// A query-time pseudo-version: ordinal `0`, no commit, never stored.
 fn pseudo_version(
     path: &str,
@@ -553,5 +619,165 @@ fn pseudo_version(
         provenance: Default::default(),
         boilerplate: false,
         cause: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod blob_selector_tests {
+    use super::super::wire::{
+        MemoryHistorySubjectKindWire, MemoryHistorySubjectWire,
+    };
+    use super::{select_committed, MemoryHistoryVersionWire};
+    use crate::file_history::wire::FileChangeKindWire;
+
+    fn version_row(
+        ordinal: u64,
+        blob: Option<&str>,
+        kind: FileChangeKindWire,
+    ) -> MemoryHistoryVersionWire {
+        MemoryHistoryVersionWire {
+            ordinal,
+            commit: format!("c{ordinal:040}"),
+            parents: Vec::new(),
+            committer_time: ordinal as i64,
+            author_time: ordinal as i64,
+            author_name: String::new(),
+            author_email: String::new(),
+            path: "sase/memory/note.md".to_string(),
+            blob_oid: blob.map(str::to_string),
+            prev_blob_oid: None,
+            kind,
+            similarity: None,
+            gap_before: false,
+            diverged: false,
+            source_path: "sase/memory/note.md".to_string(),
+            aliased_paths: Vec::new(),
+            class: Default::default(),
+            hidden_by_default: false,
+            summary: Default::default(),
+            provenance: Default::default(),
+            boilerplate: false,
+            cause: Default::default(),
+        }
+    }
+
+    fn subject_with(
+        rows: Vec<MemoryHistoryVersionWire>,
+    ) -> MemoryHistorySubjectWire {
+        MemoryHistorySubjectWire {
+            id: "note:test/note".to_string(),
+            kind: MemoryHistorySubjectKindWire::Note,
+            display_name: "note".to_string(),
+            generated: false,
+            managed: false,
+            template: false,
+            diverged_count: 0,
+            paths: vec!["sase/memory/note.md".to_string()],
+            versions: rows,
+        }
+    }
+
+    const BLOB_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const BLOB_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const BLOB_C: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+    #[test]
+    fn blob_full_oid_resolves_newest_match() {
+        // Newest-first rows; the same blob at v1 and v3 resolves to v3.
+        let subject = subject_with(vec![
+            version_row(3, Some(BLOB_A), FileChangeKindWire::Edited),
+            version_row(2, Some(BLOB_B), FileChangeKindWire::Edited),
+            version_row(1, Some(BLOB_A), FileChangeKindWire::Edited),
+        ]);
+        let found =
+            select_committed(&subject, &format!("blob:{BLOB_A}")).unwrap();
+        assert_eq!(found.ordinal, 3);
+    }
+
+    #[test]
+    fn blob_unique_prefix_resolves() {
+        let subject = subject_with(vec![
+            version_row(2, Some(BLOB_B), FileChangeKindWire::Edited),
+            version_row(1, Some(BLOB_A), FileChangeKindWire::Edited),
+        ]);
+        let prefix = &BLOB_A[..12];
+        let found =
+            select_committed(&subject, &format!("blob:{prefix}")).unwrap();
+        assert_eq!(found.ordinal, 1);
+    }
+
+    #[test]
+    fn blob_prefix_shorter_than_seven_is_invalid() {
+        let subject = subject_with(vec![version_row(
+            1,
+            Some(BLOB_A),
+            FileChangeKindWire::Edited,
+        )]);
+        let err = select_committed(&subject, "blob:abc123").unwrap_err();
+        assert!(err.to_string().contains("invalid version selector"));
+        assert!(err.to_string().contains("blob:abc123"));
+    }
+
+    #[test]
+    fn blob_non_hex_is_invalid() {
+        let subject = subject_with(vec![version_row(
+            1,
+            Some(BLOB_A),
+            FileChangeKindWire::Edited,
+        )]);
+        let err = select_committed(&subject, "blob:zzzzzzz").unwrap_err();
+        assert!(err.to_string().contains("invalid version selector"));
+    }
+
+    #[test]
+    fn blob_ambiguous_prefix_errors_and_names_blob() {
+        // Two distinct blobs sharing a 7-char prefix.
+        let blob_one = "1234567aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let blob_two = "1234567bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let subject = subject_with(vec![
+            version_row(2, Some(blob_two), FileChangeKindWire::Edited),
+            version_row(1, Some(blob_one), FileChangeKindWire::Edited),
+        ]);
+        let err = select_committed(&subject, "blob:1234567").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("ambiguous blob prefix"));
+        assert!(message.contains("blob:1234567"));
+    }
+
+    #[test]
+    fn blob_missing_errors_and_names_blob() {
+        let subject = subject_with(vec![version_row(
+            1,
+            Some(BLOB_A),
+            FileChangeKindWire::Edited,
+        )]);
+        let missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let err =
+            select_committed(&subject, &format!("blob:{missing}")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&format!("blob:{missing}")));
+    }
+
+    #[test]
+    fn blob_tombstone_row_does_not_count() {
+        // The deleted row names the removed blob; only the live v1 matches.
+        let subject = subject_with(vec![
+            version_row(2, Some(BLOB_A), FileChangeKindWire::Deleted),
+            version_row(1, Some(BLOB_A), FileChangeKindWire::Edited),
+        ]);
+        let found =
+            select_committed(&subject, &format!("blob:{BLOB_A}")).unwrap();
+        assert_eq!(found.ordinal, 1);
+    }
+
+    #[test]
+    fn blob_tombstone_only_blob_is_missing() {
+        let subject = subject_with(vec![
+            version_row(2, Some(BLOB_C), FileChangeKindWire::Deleted),
+            version_row(1, Some(BLOB_A), FileChangeKindWire::Edited),
+        ]);
+        let err =
+            select_committed(&subject, &format!("blob:{BLOB_C}")).unwrap_err();
+        assert!(err.to_string().contains(&format!("blob:{BLOB_C}")));
     }
 }

@@ -480,3 +480,91 @@ fn feed_query_merges_synced_scopes() {
         );
     }
 }
+
+#[test]
+fn blob_selector_resolves_newest_match_on_corpus() {
+    use super::super::wire::MemoryHistoryVersionRequestWire;
+
+    let corpus = build_project_corpus();
+    let holder = tempfile::tempdir().unwrap();
+    let scope = scope_cache(&corpus, holder.path());
+
+    let timeline = query_timeline(&MemoryHistoryTimelineRequestWire {
+        scope: scope.clone(),
+        selector: lint_id(),
+        include_hidden: true,
+    })
+    .unwrap();
+    let committed: Vec<_> = timeline
+        .versions
+        .iter()
+        .filter(|version| version.ordinal >= 1)
+        .collect();
+    assert!(!committed.is_empty(), "lint subject has committed versions");
+    // Skip deleted rows: their tombstone blob must not resolve through blob:.
+    let live = committed
+        .iter()
+        .find(|version| {
+            version.kind
+                != crate::file_history::wire::FileChangeKindWire::Deleted
+                && version.blob_oid.is_some()
+        })
+        .expect("lint subject has a live blob version");
+    let blob = live.blob_oid.clone().unwrap();
+    let expected_newest = committed
+        .iter()
+        .filter(|version| {
+            version.kind
+                != crate::file_history::wire::FileChangeKindWire::Deleted
+                && version.blob_oid.as_deref() == Some(blob.as_str())
+        })
+        .map(|version| version.ordinal)
+        .max()
+        .unwrap();
+
+    let by_blob = query_version(&MemoryHistoryVersionRequestWire {
+        scope: scope.clone(),
+        selector: lint_id(),
+        version: format!("blob:{blob}"),
+        include_body: false,
+    })
+    .unwrap();
+    assert_eq!(by_blob.version.ordinal, expected_newest);
+
+    // A unique 12-char prefix names the same row when unambiguous.
+    let prefix = blob[..12].to_string();
+    let distinct = committed
+        .iter()
+        .filter(|version| {
+            version.kind
+                != crate::file_history::wire::FileChangeKindWire::Deleted
+        })
+        .filter_map(|version| version.blob_oid.clone())
+        .filter(|other| {
+            other
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if distinct.len() == 1 {
+        let by_prefix = query_version(&MemoryHistoryVersionRequestWire {
+            scope: scope.clone(),
+            selector: lint_id(),
+            version: format!("blob:{prefix}"),
+            include_body: false,
+        })
+        .unwrap();
+        assert_eq!(by_prefix.version.ordinal, expected_newest);
+    }
+
+    // A missing blob names the blob in its error.
+    let missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+    let err = query_version(&MemoryHistoryVersionRequestWire {
+        scope,
+        selector: lint_id(),
+        version: format!("blob:{missing}"),
+        include_body: false,
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains(&missing));
+}
