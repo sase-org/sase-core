@@ -1099,6 +1099,7 @@ pub(crate) use sase_core::{
     editor_plan_argument_colon_to_parentheses_edit as core_plan_argument_colon_to_parentheses_edit,
     editor_plan_argument_double_colon_to_parentheses_edit as core_plan_argument_double_colon_to_parentheses_edit,
     editor_plan_model_alias_shortcut_edit as core_plan_model_alias_shortcut_edit,
+    editor_plan_xprompt_completion_spacer_to_parentheses_edit as core_plan_xprompt_completion_spacer_to_parentheses_edit,
     filter_model_completion_entries as core_filter_model_completion_entries,
     load_editor_snippet_catalog as core_load_editor_snippet_catalog,
     validate_snippet_trigger as core_validate_snippet_trigger, EditorPosition,

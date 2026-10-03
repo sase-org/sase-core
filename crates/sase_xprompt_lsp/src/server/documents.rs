@@ -134,6 +134,10 @@ impl MacroLspServer {
             language_id,
             text,
             recent_paren_insertion: None,
+            generation: 0,
+            served_spacers: Vec::new(),
+            pending_spacer: None,
+            confirmed_spacer: None,
         }
     }
 
@@ -152,11 +156,61 @@ impl MacroLspServer {
                 document.recent_paren_insertion,
             )
         });
+        let generation = previous
+            .map(|document| document.generation.wrapping_add(1))
+            .unwrap_or(0);
+        let served_spacers = previous
+            .map(|document| document.served_spacers.clone())
+            .unwrap_or_default();
+        let mut pending_spacer =
+            previous.and_then(|document| document.pending_spacer.clone());
+        let mut confirmed_spacer =
+            previous.and_then(|document| document.confirmed_spacer.clone());
+        // Promote a pending acceptance when the new text contains its owned
+        // spacer (plain acceptance, or a coalesced acceptance plus `(`/`()`).
+        // Discard it when the new text no longer matches (stale/unrelated).
+        if let Some(pending) = pending_spacer.clone() {
+            let confirmed = super::spacer::AcceptArgs {
+                uri: uri.to_string(),
+                reference_text: pending.reference_text.clone(),
+                reference_start: pending.reference_start,
+                spacer_start: pending.spacer_start,
+                has_optional_inputs: pending.has_optional_inputs,
+            }
+            .to_confirmed();
+            if super::spacer::owned_spacer_byte(&text, &confirmed).is_some() {
+                confirmed_spacer = Some(confirmed);
+            } else {
+                // Coalesced acceptance plus opener still contains the owned
+                // space; `owned_spacer_byte` already covers `(` / `()` since
+                // it only checks the reference plus single space prefix.
+                // Anything else is stale.
+            }
+            // Pending is one-shot: it is consumed by this change either way.
+            pending_spacer = None;
+        }
+        // Fold confirmed state across document changes. A normalized deletion
+        // acknowledgement clears it; a still-owned spacer (plain or with an
+        // opener) keeps it so completion and formatting cannot consume one
+        // another's evidence; anything else invalidates it.
+        if let Some(confirmed) = confirmed_spacer.clone() {
+            if super::spacer::is_normalized_after_deletion(&text, &confirmed) {
+                confirmed_spacer = None;
+            } else if super::spacer::owned_spacer_byte(&text, &confirmed)
+                .is_none()
+            {
+                confirmed_spacer = None;
+            }
+        }
         OpenDocument {
             eligible: document_eligible(uri, &language_id, &config),
             language_id,
             text,
             recent_paren_insertion,
+            generation,
+            served_spacers,
+            pending_spacer,
+            confirmed_spacer,
         }
     }
 

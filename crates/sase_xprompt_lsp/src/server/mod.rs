@@ -77,6 +77,8 @@ use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server, UriExt};
 use tracing::{info, warn};
 
+use self::spacer as spacer_util;
+
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     agent_completion_response, apply_replacement,
@@ -128,6 +130,7 @@ mod completion_items;
 mod documents;
 mod initialize;
 pub(crate) mod jinja;
+mod spacer;
 mod state;
 
 #[cfg(test)]
@@ -191,6 +194,8 @@ impl LanguageServer for MacroLspServer {
                         OPEN_SOURCE_COMMAND.to_string(),
                         REFRESH_COMMAND_MACRO.to_string(),
                         OPEN_SOURCE_COMMAND_MACRO.to_string(),
+                        spacer::ACCEPT_COMMAND.to_string(),
+                        spacer::ACCEPT_COMMAND_MACRO.to_string(),
                     ],
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: Some(false),
@@ -315,21 +320,60 @@ impl LanguageServer for MacroLspServer {
         if !document.eligible {
             return Ok(None);
         }
+        // Confirmed pending transition (`#optional (` or `#optional ()`):
+        // derive argument completion from a temporary normalized document
+        // with the owned space removed, then map candidate ranges back.
+        // Only for a confirmed acceptance; arbitrary prose resembling the
+        // transition never takes this path.
+        let (trigger_kind_opt, trigger_character_opt) = match &params.context {
+            Some(context) => (
+                Some(context.trigger_kind),
+                context.trigger_character.clone(),
+            ),
+            None => (None, None),
+        };
+        if let Some(confirmed) = document.confirmed_spacer.clone() {
+            if let Some(spacer_byte) =
+                spacer_util::transition_spacer_byte(&document.text, &confirmed)
+            {
+                if let Some(mapped) = self
+                    .transition_argument_completion(
+                        &uri,
+                        &document,
+                        &confirmed,
+                        spacer_byte,
+                        params.text_document_position.position,
+                        trigger_kind_opt,
+                        trigger_character_opt.clone(),
+                    )
+                    .await
+                {
+                    return Ok(Some(mapped));
+                }
+                // Fall through to the ordinary route when the transition
+                // view cannot be built; never use normalized coordinates.
+            }
+        }
         let source_path = uri.to_file_path().map(|path| path.into_owned());
-        let (trigger_kind, trigger_character) = params
-            .context
-            .map(|context| (context.trigger_kind, context.trigger_character))
-            .unzip();
-        Ok(self
+        let (trigger_kind, trigger_character) =
+            (trigger_kind_opt, trigger_character_opt);
+        let response = self
             .completion_for_document(
-                document.text,
+                document.text.clone(),
                 params.text_document_position.position,
                 source_path,
                 &document.language_id,
                 trigger_kind,
-                trigger_character.flatten(),
+                trigger_character,
             )
-            .await)
+            .await;
+        let mut response = match response {
+            Some(response) => response,
+            None => return Ok(None),
+        };
+        self.attach_spacer_acceptance(&uri, &document, &mut response)
+            .await;
+        Ok(Some(response))
     }
 
     async fn completion_resolve(
@@ -349,6 +393,18 @@ impl LanguageServer for MacroLspServer {
         };
         if !document.eligible {
             return Ok(None);
+        }
+        // Confirmed owned spacer first; the shared core planner validates the
+        // exact reference, single space, adjacency, and excluded regions.
+        // Preserves the typed opener, any editor-inserted closer, and every
+        // suffix character. Repeated requests on one unchanged snapshot stay
+        // consistent; the state clears only on the normalizing `didChange`.
+        if let Some(edits) = self.spacer_on_type(
+            &document,
+            params.text_document_position.position,
+            &params.ch,
+        ) {
+            return Ok(Some(edits));
         }
         Ok(self.on_type_formatting_for_text_with_recent(
             document.text,
@@ -427,6 +483,19 @@ impl LanguageServer for MacroLspServer {
             self.client
                 .log_message(MessageType::INFO, "open source command invoked")
                 .await;
+        } else if params.command == spacer::ACCEPT_COMMAND
+            || params.command == spacer::ACCEPT_COMMAND_MACRO
+        {
+            // Server-owned acceptance: the only effect is to record that the
+            // user accepted an eligible completion. The later on-type
+            // response performs the edit. Rejects stale commands after
+            // unrelated changes or document close/reopen, and never infers
+            // acceptance from buffer text alone.
+            for argument in params.arguments {
+                if self.handle_accept_command(&argument) {
+                    break;
+                }
+            }
         }
         Ok(None)
     }

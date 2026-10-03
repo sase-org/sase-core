@@ -578,6 +578,94 @@ fn argument_double_colon_to_parentheses_binding_returns_plain_edit_or_none() {
 }
 
 #[test]
+fn xprompt_spacer_to_parentheses_binding_round_trips_utf16() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(
+                    py_xprompt_completion_spacer_to_parentheses_edit,
+                    &module
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let position =
+            json_value_to_py(py, &json!({"line": 0, "character": 10})).unwrap();
+        let record = json_value_to_py(
+            py,
+            &json!({
+                "reference_text": "#optional",
+                "reference_start": {"line": 0, "character": 0},
+                "spacer_start": {"line": 0, "character": 9},
+                "has_optional_inputs": true
+            }),
+        )
+        .unwrap();
+        let edit = module
+            .getattr("xprompt_completion_spacer_to_parentheses_edit")
+            .unwrap()
+            .call1(("#optional ", position.clone_ref(py), record))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&edit).unwrap(),
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 9},
+                    "end": {"line": 0, "character": 10}
+                },
+                "new_text": ""
+            })
+        );
+
+        let zero_input_record = json_value_to_py(
+            py,
+            &json!({
+                "reference_text": "#plain",
+                "reference_start": {"line": 0, "character": 0},
+                "spacer_start": {"line": 0, "character": 6},
+                "has_optional_inputs": false
+            }),
+        )
+        .unwrap();
+        let zero_position =
+            json_value_to_py(py, &json!({"line": 0, "character": 7})).unwrap();
+        let ordinary = module
+            .getattr("xprompt_completion_spacer_to_parentheses_edit")
+            .unwrap()
+            .call1(("#plain ", zero_position, zero_input_record))
+            .unwrap();
+        assert!(ordinary.is_none());
+
+        let utf16_position =
+            json_value_to_py(py, &json!({"line": 1, "character": 15})).unwrap();
+        let utf16_record = json_value_to_py(
+            py,
+            &json!({
+                "reference_text": "#optional",
+                "reference_start": {"line": 1, "character": 5},
+                "spacer_start": {"line": 1, "character": 14},
+                "has_optional_inputs": true
+            }),
+        )
+        .unwrap();
+        let utf16_edit = module
+            .getattr("xprompt_completion_spacer_to_parentheses_edit")
+            .unwrap()
+            .call1(("é🙂\nText #optional ", utf16_position, utf16_record))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&utf16_edit).unwrap()["range"],
+            json!({
+                "start": {"line": 1, "character": 14},
+                "end": {"line": 1, "character": 15}
+            })
+        );
+    });
+}
+
+#[test]
 fn xprompt_argument_spans_binding_returns_open_structural_spans() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

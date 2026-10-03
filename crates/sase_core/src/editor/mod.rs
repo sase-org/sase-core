@@ -27,8 +27,12 @@ pub use argument_spans::{
     extract_macro_call_name_spans,
 };
 pub use argument_syntax_edit::{
+    map_normalized_byte_offset_to_actual, map_normalized_range_to_actual,
+    normalize_xprompt_spacer_transition,
     plan_argument_colon_to_parentheses_edit,
     plan_argument_double_colon_to_parentheses_edit,
+    plan_xprompt_completion_spacer_to_parentheses_edit,
+    XpromptCompletionSpacerWire,
 };
 pub use at_reference::{
     build_at_reference_menu, build_at_reference_menu_with_options,

@@ -350,6 +350,31 @@ fn py_argument_double_colon_to_parentheses_edit(
         .transpose()
 }
 
+#[pyfunction]
+#[pyo3(name = "xprompt_completion_spacer_to_parentheses_edit")]
+fn py_xprompt_completion_spacer_to_parentheses_edit(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+    record: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    let record: sase_core::XpromptCompletionSpacerWire =
+        serde_json::from_value(py_to_json_value(record.as_any())?).map_err(
+            |error| {
+                PyValueError::new_err(format!(
+                    "record is not a valid XpromptCompletionSpacerWire dict: {error}"
+                ))
+            },
+        )?;
+    let document = sase_core::DocumentSnapshot::new(text);
+    core_plan_xprompt_completion_spacer_to_parentheses_edit(
+        &document, position, &record,
+    )
+    .map(|edit| serialize_to_py(py, &edit))
+    .transpose()
+}
+
 /// Filter a `%model:`-shaped catalog down to concrete model rows a
 /// `==query` shortcut may expand to, in canonical catalog order.
 #[pyfunction]
@@ -1038,6 +1063,10 @@ pub(crate) fn register_editor_completion(
     )?)?;
     m.add_function(wrap_pyfunction!(
         py_argument_double_colon_to_parentheses_edit,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_xprompt_completion_spacer_to_parentheses_edit,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

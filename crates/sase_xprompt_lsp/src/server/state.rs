@@ -155,12 +155,33 @@ pub(super) struct GlossaryCache {
     pub(super) catalog: GlossaryCatalog,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ServedSpacer {
+    pub(super) reference_text: String,
+    pub(super) reference_start: sase_core::EditorPosition,
+    pub(super) spacer_start: sase_core::EditorPosition,
+    pub(super) has_optional_inputs: bool,
+    pub(super) served_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConfirmedSpacer {
+    pub(super) reference_text: String,
+    pub(super) reference_start: sase_core::EditorPosition,
+    pub(super) spacer_start: sase_core::EditorPosition,
+    pub(super) has_optional_inputs: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct OpenDocument {
     pub(super) text: String,
     pub(super) language_id: String,
     pub(super) eligible: bool,
     pub(super) recent_paren_insertion: Option<RecentParenInsertion>,
+    pub(super) generation: u64,
+    pub(super) served_spacers: Vec<ServedSpacer>,
+    pub(super) pending_spacer: Option<ServedSpacer>,
+    pub(super) confirmed_spacer: Option<ConfirmedSpacer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

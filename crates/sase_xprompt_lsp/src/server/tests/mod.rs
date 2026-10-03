@@ -8,6 +8,7 @@ mod model_completion;
 mod project_tags;
 mod shortcuts;
 mod snippets;
+mod spacer;
 mod support;
 mod surfaces;
 mod vcs_completion;
