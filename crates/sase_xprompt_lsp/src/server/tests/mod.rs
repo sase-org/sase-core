@@ -1,3 +1,4 @@
+mod argument_list_continuation;
 mod at_references;
 mod catalog_loading;
 mod completion;

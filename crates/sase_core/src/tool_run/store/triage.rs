@@ -942,9 +942,9 @@ pub fn triage_show(
                             super::super::triage::ToolRunTriageExtractionStatusWire::Parsed
                         )
                     });
-                let is_stageful = !(stages.iter().all(|stage| {
+                let is_stageful = !stages.iter().all(|stage| {
                     stage.stage_key == TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT
-                }) && !stages.is_empty());
+                }) || stages.is_empty();
                 let request = ToolRunTriageVerdictRequestWire {
                     schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
                     exit_code: exit_code.map(|code| code as i32),

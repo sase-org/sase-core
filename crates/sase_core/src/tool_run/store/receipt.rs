@@ -401,9 +401,9 @@ fn load_triage_facts(
         subject.state == "failed" && (has_completed_stage || !items.is_empty());
     let has_unparsed = stages.iter().any(|(_, status)| status != "parsed")
         && subject.state == "failed";
-    let is_stageful = !(stages.iter().all(|(key, _)| {
+    let is_stageful = !stages.iter().all(|(key, _)| {
         key == super::super::triage::TOOL_RUN_TRIAGE_STAGE_KEY_RUN_OUTPUT
-    }) && !stages.is_empty());
+    }) || stages.is_empty();
     let verdict_items: Vec<ToolRunTriageVerdictItemWire> = items
         .iter()
         .map(|(_, _, _, class)| ToolRunTriageVerdictItemWire {

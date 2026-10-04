@@ -351,6 +351,20 @@ fn py_argument_double_colon_to_parentheses_edit(
 }
 
 #[pyfunction]
+#[pyo3(name = "argument_list_continuation_edit")]
+fn py_argument_list_continuation_edit(
+    py: Python<'_>,
+    text: &str,
+    position: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyObject>> {
+    let position = editor_position_from_py(position)?;
+    let document = sase_core::DocumentSnapshot::new(text);
+    sase_core::editor::plan_argument_list_continuation_edit(&document, position)
+        .map(|edit| serialize_to_py(py, &edit))
+        .transpose()
+}
+
+#[pyfunction]
 #[pyo3(name = "xprompt_completion_spacer_to_parentheses_edit")]
 fn py_xprompt_completion_spacer_to_parentheses_edit(
     py: Python<'_>,
@@ -1065,6 +1079,7 @@ pub(crate) fn register_editor_completion(
         py_argument_double_colon_to_parentheses_edit,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_argument_list_continuation_edit, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_xprompt_completion_spacer_to_parentheses_edit,
         m

@@ -482,11 +482,11 @@ pub(super) fn repair_abandoned_agent_artifact_index_rows(
             else {
                 continue;
             };
-            if !record
+            if record
                 .done
                 .as_ref()
                 .and_then(|done| done.outcome.as_deref())
-                .is_some_and(|outcome| outcome == ABANDONED_DONE_OUTCOME)
+                .is_none_or(|outcome| outcome != ABANDONED_DONE_OUTCOME)
             {
                 continue;
             }

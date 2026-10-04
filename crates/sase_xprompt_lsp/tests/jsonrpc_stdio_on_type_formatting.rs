@@ -1,4 +1,4 @@
-//! JSON-RPC stdio coverage for `(` on-type argument-colon conversion.
+//! JSON-RPC stdio coverage for `(` on-type argument syntax conversion.
 
 use std::sync::Arc;
 
@@ -289,7 +289,6 @@ async fn stdio_jsonrpc_on_type_formatting_moves_double_colon_delimiter() {
         (14, "#foo::\t(", 8),
         (15, "#foo:::(", 8),
         (16, "%if:: (", 7),
-        (17, "#foo(args):: (", 14),
     ] {
         did_change(&mut client_writer, uri, version, text).await;
         assert_eq!(
@@ -299,6 +298,206 @@ async fn stdio_jsonrpc_on_type_formatting_moves_double_colon_delimiter() {
                 uri,
                 i64::from(version),
                 character,
+                "(",
+            )
+            .await,
+            Value::Null,
+            "{text}"
+        );
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response(&mut client_reader, 99).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_on_type_formatting_continues_macro_argument_list() {
+    let (mut client_writer, server_stdin) = duplex(16384);
+    let (server_stdout, mut client_reader) = duplex(16384);
+    let (service, socket) = LspService::new(|client| {
+        XpromptLspServer::with_bridge(client, Arc::new(NoopBridge))
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    read_response(&mut client_reader, 1).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+
+    let uri = "file:///tmp/sase_prompt_argument_continuation.md";
+    did_open(&mut client_writer, uri, "#foo(bar=1)").await;
+    did_change(&mut client_writer, uri, 2, "#foo(bar=1)(").await;
+    let unpaired = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        2,
+        12,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        unpaired,
+        json!([
+            {
+                "range": {
+                    "start": {"line": 0, "character": 10},
+                    "end": {"line": 0, "character": 12}
+                },
+                "newText": ","
+            },
+            {
+                "range": {
+                    "start": {"line": 0, "character": 12},
+                    "end": {"line": 0, "character": 12}
+                },
+                "newText": ")"
+            }
+        ])
+    );
+    assert_eq!(apply_text_edits("#foo(bar=1)(", &unpaired), "#foo(bar=1,)");
+
+    let double_colon = "#foo(bar=1):: (Some text";
+    did_change(&mut client_writer, uri, 3, double_colon).await;
+    let moved_delimiter = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        3,
+        double_colon.find("Some text").unwrap() as u32,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits(double_colon, &moved_delimiter),
+        "#foo(bar=1,):: Some text"
+    );
+
+    did_change(&mut client_writer, uri, 4, "#foo(bar=1)").await;
+    did_change(&mut client_writer, uri, 5, "#foo(bar=1)()").await;
+    let paired = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        4,
+        12,
+        "(",
+    )
+    .await;
+    assert_eq!(apply_text_edits("#foo(bar=1)()", &paired), "#foo(bar=1,)");
+
+    did_change(&mut client_writer, uri, 6, "#foo(bar=1):: Some text").await;
+    did_change(&mut client_writer, uri, 7, "#foo(bar=1):: ()Some text").await;
+    let paired_delimiter = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        5,
+        15,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits("#foo(bar=1):: ()Some text", &paired_delimiter),
+        "#foo(bar=1,):: Some text"
+    );
+
+    // A closer already in the opened buffer is preserved because it was not
+    // inserted as the matching pair for this `(`.
+    let existing_uri = "file:///tmp/sase_prompt_argument_existing_closer.md";
+    did_open(&mut client_writer, existing_uri, "#foo(bar=1)()").await;
+    let existing_closer = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        existing_uri,
+        6,
+        12,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits("#foo(bar=1)()", &existing_closer),
+        "#foo(bar=1,))"
+    );
+
+    did_change(&mut client_writer, uri, 8, "#foo()(").await;
+    let empty =
+        request_on_type(&mut client_writer, &mut client_reader, uri, 7, 7, "(")
+            .await;
+    assert_eq!(apply_text_edits("#foo()(", &empty), "#foo()");
+
+    let cursor_uri = "file:///tmp/sase_prompt_argument_trigger_at_cursor.md";
+    did_open(&mut client_writer, cursor_uri, "#foo(bar=1)(").await;
+    let trigger_at_cursor = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        cursor_uri,
+        8,
+        11,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits("#foo(bar=1)(", &trigger_at_cursor),
+        "#foo(bar=1,)"
+    );
+
+    let multiline_uri = "file:///tmp/sase_prompt_argument_multiline.md";
+    did_open(&mut client_writer, multiline_uri, "🙂\n#foo(bar=1)(").await;
+    let multiline = request_on_type_at(
+        &mut client_writer,
+        &mut client_reader,
+        multiline_uri,
+        9,
+        1,
+        12,
+        "(",
+    )
+    .await;
+    assert_eq!(
+        apply_text_edits("🙂\n#foo(bar=1)(", &multiline),
+        "🙂\n#foo(bar=1,)"
+    );
+
+    for (id, text) in [(10, "%q(a)("), (11, "foo(bar)("), (12, "#foo(a) (")] {
+        did_change(&mut client_writer, uri, id as i32 + 10, text).await;
+        assert_eq!(
+            request_on_type(
+                &mut client_writer,
+                &mut client_reader,
+                uri,
+                id,
+                text.len() as u32,
                 "(",
             )
             .await,

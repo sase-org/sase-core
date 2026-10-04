@@ -477,8 +477,8 @@ pub fn validate_observation_retry_after(value: f64) -> Result<f64> {
 /// Validate an attempt `min_interval_seconds` polling floor.
 pub fn validate_probe_floor(value: f64) -> Result<f64> {
     if !value.is_finite()
-        || value < MIN_PROBE_INTERVAL_SECONDS
-        || value > MAX_PROBE_INTERVAL_SECONDS
+        || !(MIN_PROBE_INTERVAL_SECONDS..=MAX_PROBE_INTERVAL_SECONDS)
+            .contains(&value)
     {
         return Err(validation(format!(
             "min_interval_seconds must be finite and in [{MIN_PROBE_INTERVAL_SECONDS}, {MAX_PROBE_INTERVAL_SECONDS}]"
@@ -503,7 +503,7 @@ pub fn validate_active_cadence(value: f64) -> Result<f64> {
 
 /// Validate a due/admit `warn_percent` hot threshold.
 pub fn validate_hot_warn_percent(value: f64) -> Result<f64> {
-    if !value.is_finite() || value < 0.0 || value > 100.0 {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
         return Err(validation("warn_percent must be finite and in [0, 100]"));
     }
     Ok(value)

@@ -236,10 +236,9 @@ pub fn is_runner_eligible_record(record: &AgentArtifactRecordWire) -> bool {
     let Some(meta) = record.agent_meta.as_ref() else {
         return false;
     };
-    !meta
-        .parent_timestamp
+    meta.parent_timestamp
         .as_deref()
-        .is_some_and(|value| !value.is_empty())
+        .is_none_or(|value| value.is_empty())
         || meta.agent_session_parallel
 }
 

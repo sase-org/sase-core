@@ -133,6 +133,31 @@ pub(crate) fn macro_argument_open_colon_at(
     })
 }
 
+/// Return the `(` index when `close_idx` closes a `#` macro reference's
+/// parenthesized argument list.
+pub(crate) fn macro_argument_list_open_paren_for_close(
+    text: &str,
+    close_idx: usize,
+) -> Option<usize> {
+    if text.as_bytes().get(close_idx) != Some(&b')') {
+        return None;
+    }
+    macro_ref_re().captures_iter(text).find_map(|caps| {
+        let name_match = caps.name("name")?;
+        let suffix_start = caps
+            .name("hitl")
+            .map(|hitl| hitl.end())
+            .unwrap_or_else(|| name_match.end());
+        if text.as_bytes().get(suffix_start) != Some(&b'(') {
+            return None;
+        }
+        (suffix_start < close_idx
+            && find_matching_paren_for_args(text, suffix_start)
+                == Some(close_idx))
+        .then_some(suffix_start)
+    })
+}
+
 pub(crate) fn double_colon_payload_start(
     text: &str,
     colon_idx: usize,
@@ -695,6 +720,46 @@ mod tests {
         assert_eq!(one("#foo+").args[0].value, "true");
         assert_eq!(one("#foo:a,b").args.len(), 2);
         assert_eq!(one("#ns__foo!!(arg=1)").name, "ns/foo");
+    }
+
+    #[test]
+    fn finds_macro_argument_open_paren_for_matching_close() {
+        for text in [
+            "#foo(a=1)",
+            "#!foo(a=1)",
+            "#ns/foo(a=1)",
+            "#ns__foo(a=1)",
+            "#foo!!(a=1)",
+            "#foo??(a=1)",
+            "#outer(#inner(a=1))",
+            "#foo(a=\")\")",
+            "#foo(a=[[x)y]])",
+        ] {
+            let close = text.rfind(')').expect("closing paren");
+            let expected = text.find('(').expect("opening paren");
+            assert_eq!(
+                macro_argument_list_open_paren_for_close(text, close),
+                Some(expected),
+                "{text}"
+            );
+        }
+
+        let nested = "#outer(#inner(a=1))";
+        let inner_close = nested.find(")").expect("inner close");
+        assert_eq!(
+            macro_argument_list_open_paren_for_close(nested, inner_close),
+            Some(nested.find('(').expect("outer open") + "#outer".len() + 1)
+        );
+
+        for (text, close) in
+            [("#foo(a)", 0), ("#foo(a))", 7), ("%q(a)", 4), ("#foo(a", 5)]
+        {
+            assert_eq!(
+                macro_argument_list_open_paren_for_close(text, close),
+                None,
+                "{text} at {close}"
+            );
+        }
     }
 
     #[test]

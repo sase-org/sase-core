@@ -31,6 +31,7 @@ pub use argument_syntax_edit::{
     normalize_xprompt_spacer_transition,
     plan_argument_colon_to_parentheses_edit,
     plan_argument_double_colon_to_parentheses_edit,
+    plan_argument_list_continuation_edit,
     plan_xprompt_completion_spacer_to_parentheses_edit,
     XpromptCompletionSpacerWire,
 };

@@ -666,14 +666,13 @@ fn apply_journal_event(segment: &mut JournalSegmentFacts, row: &JsonValue) {
                     .map(|code| cap_chars(&code, 120)),
             });
         }
-        "recovery_turn_started" => {
-            if segment.recovery.is_none() {
-                segment.recovery = Some(RunViewRecoveryTurnWire {
-                    ok: None,
-                    code: None,
-                });
-            }
+        "recovery_turn_started" if segment.recovery.is_none() => {
+            segment.recovery = Some(RunViewRecoveryTurnWire {
+                ok: None,
+                code: None,
+            });
         }
+        "recovery_turn_started" => {}
         "instance_started" => {
             if let Some(instance_id) = event_string(row, "instance_id") {
                 segment.active_instance_id = Some(instance_id);
@@ -1068,15 +1067,14 @@ pub(crate) fn decode_meta(text: &str) -> MetaFacts {
     {
         for entry in entries.iter().take(64) {
             match entry {
-                JsonValue::String(message) => {
-                    if !message.is_empty() {
-                        facts.drift.push(RunViewDriftWire {
-                            instance_id: None,
-                            code: None,
-                            message: cap_output(message),
-                        });
-                    }
+                JsonValue::String(message) if !message.is_empty() => {
+                    facts.drift.push(RunViewDriftWire {
+                        instance_id: None,
+                        code: None,
+                        message: cap_output(message),
+                    });
                 }
+                JsonValue::String(_) => {}
                 JsonValue::Object(_) => {
                     let message = entry
                         .get("message")

@@ -578,6 +578,92 @@ fn argument_double_colon_to_parentheses_binding_returns_plain_edit_or_none() {
 }
 
 #[test]
+fn argument_list_continuation_binding_returns_plain_edit_or_none() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        module
+            .add_function(
+                wrap_pyfunction!(py_argument_list_continuation_edit, &module)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let position =
+            json_value_to_py(py, &json!({"line": 0, "character": 11})).unwrap();
+        let edit = module
+            .getattr("argument_list_continuation_edit")
+            .unwrap()
+            .call1(("#foo(bar=1)", position.clone_ref(py)))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&edit).unwrap(),
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 10},
+                    "end": {"line": 0, "character": 10}
+                },
+                "new_text": ","
+            })
+        );
+
+        let empty_position =
+            json_value_to_py(py, &json!({"line": 0, "character": 6})).unwrap();
+        let empty = module
+            .getattr("argument_list_continuation_edit")
+            .unwrap()
+            .call1(("#foo()", empty_position))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&empty).unwrap(),
+            json!({
+                "range": {
+                    "start": {"line": 0, "character": 5},
+                    "end": {"line": 0, "character": 5}
+                },
+                "new_text": ""
+            })
+        );
+
+        let ordinary = module
+            .getattr("argument_list_continuation_edit")
+            .unwrap()
+            .call1(("%q(a)", position.clone_ref(py)))
+            .unwrap();
+        assert!(ordinary.is_none());
+
+        let utf16_position =
+            json_value_to_py(py, &json!({"line": 0, "character": 15})).unwrap();
+        let utf16 = module
+            .getattr("argument_list_continuation_edit")
+            .unwrap()
+            .call1(("é🙂 #foo(bar=1)", utf16_position))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&utf16).unwrap()["range"],
+            json!({
+                "start": {"line": 0, "character": 14},
+                "end": {"line": 0, "character": 14}
+            })
+        );
+
+        let malformed_position =
+            json_value_to_py(py, &json!({"line": "0", "character": 11}))
+                .unwrap();
+        let error = module
+            .getattr("argument_list_continuation_edit")
+            .unwrap()
+            .call1(("#foo(bar=1)", malformed_position))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("position is not a valid EditorPosition"),
+            "unexpected error: {error}"
+        );
+    });
+}
+
+#[test]
 fn xprompt_spacer_to_parentheses_binding_round_trips_utf16() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

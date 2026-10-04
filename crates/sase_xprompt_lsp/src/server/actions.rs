@@ -12,6 +12,7 @@ use crate::project_tags::{
 };
 use crate::server::jinja::jinja_scope_for_document;
 use sase_core::editor::jinja::{jinja_hover, JinjaAssistRequestWire};
+use sase_core::editor::plan_argument_list_continuation_edit;
 use std::path::PathBuf;
 
 impl MacroLspServer {
@@ -406,7 +407,8 @@ impl MacroLspServer {
             String::with_capacity(text.len().saturating_sub(1));
         pre_insert_text.push_str(text.get(..opener_idx)?);
         pre_insert_text.push_str(text.get(after_opener_idx..)?);
-        let pre_insert_document = DocumentSnapshot::new(pre_insert_text);
+        let pre_insert_document =
+            DocumentSnapshot::new(pre_insert_text.clone());
         let pre_insert_position =
             pre_insert_document.byte_offset_to_position(opener_idx)?;
         if let Some(edit) =
@@ -430,6 +432,57 @@ impl MacroLspServer {
                 TextEdit {
                     range: to_lsp_range(edit.range),
                     new_text: String::new(),
+                },
+                TextEdit {
+                    range: to_lsp_range(
+                        document.byte_range_to_range(
+                            after_opener_idx,
+                            closer_end,
+                        )?,
+                    ),
+                    new_text: format!("){delimiter}"),
+                },
+            ]);
+        }
+        if let Some(edit) = plan_argument_list_continuation_edit(
+            &pre_insert_document,
+            pre_insert_position,
+        ) {
+            let start = pre_insert_document
+                .position_to_byte_offset(edit.range.start)?;
+            let close =
+                pre_insert_document.position_to_byte_offset(edit.range.end)?;
+            if pre_insert_text.as_bytes().get(close) != Some(&b')') {
+                return None;
+            }
+            let delimiter = pre_insert_text.get(close + 1..opener_idx)?;
+            if !delimiter.is_empty()
+                && (!delimiter.starts_with("::")
+                    || !delimiter.as_bytes()[2..]
+                        .iter()
+                        .all(|byte| *byte == b' '))
+            {
+                return None;
+            }
+            let closer_end = if recent_paren_insertion.is_some_and(|recent| {
+                recent.opener_idx == opener_idx
+                    && recent.closer_idx == Some(after_opener_idx)
+            }) && text.as_bytes().get(after_opener_idx)
+                == Some(&b')')
+            {
+                after_opener_idx + 1
+            } else {
+                after_opener_idx
+            };
+            // Keep the edit boundary at the caret so clients that preserve
+            // cursor positions at edit boundaries leave it before the `)`.
+            return Some(vec![
+                TextEdit {
+                    range: to_lsp_range(
+                        document
+                            .byte_range_to_range(start, after_opener_idx)?,
+                    ),
+                    new_text: edit.new_text,
                 },
                 TextEdit {
                     range: to_lsp_range(

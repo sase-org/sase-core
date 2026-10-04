@@ -437,10 +437,10 @@ pub fn derive_owner_record_facts(
                 && !meta.plan_approved
                 && plan_action.is_none()
                 && !auto_approved
-                && !meta
+                && meta
                     .stopped_at
                     .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+                    .is_none_or(|value| value.is_empty())
                 && !record.has_done_marker
                 && record.done.is_none()
                 && liveness == OwnerLivenessWire::Alive;
