@@ -41,6 +41,7 @@ mod fleet;
 mod fleet_attention;
 mod goals;
 mod json_bridge;
+mod macro_input_types;
 mod memory_history;
 mod migration;
 mod note_attachment;
@@ -73,6 +74,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     vcs::register_vcs(m)?;
     config::register_config(m)?;
     editor_completion::register_editor_completion(m)?;
+    macro_input_types::register_macro_input_types(m)?;
     editor_content::register_editor_content(m)?;
     agent_scan::register_agent_scan(m)?;
     agent_tab::register_agent_tab(m)?;

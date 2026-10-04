@@ -82,6 +82,7 @@ pub mod launch_scratch_liveness;
 pub mod machine_hood;
 pub mod machine_setup;
 pub mod macro_catalog;
+pub mod macro_input_types;
 mod macro_text_block;
 pub mod managed_origin;
 pub mod managed_tmp;
