@@ -194,10 +194,8 @@ impl MacroLspServer {
         // opener) keeps it so completion and formatting cannot consume one
         // another's evidence; anything else invalidates it.
         if let Some(confirmed) = confirmed_spacer.clone() {
-            if super::spacer::is_normalized_after_deletion(&text, &confirmed) {
-                confirmed_spacer = None;
-            } else if super::spacer::owned_spacer_byte(&text, &confirmed)
-                .is_none()
+            if super::spacer::is_normalized_after_deletion(&text, &confirmed)
+                || super::spacer::owned_spacer_byte(&text, &confirmed).is_none()
             {
                 confirmed_spacer = None;
             }

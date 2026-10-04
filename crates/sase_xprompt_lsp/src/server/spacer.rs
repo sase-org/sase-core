@@ -148,10 +148,7 @@ pub(super) fn is_normalized_after_deletion(
     // Reference is intact; the owned space must be gone and `(` must follow
     // directly. Any other shape (space still present, different punctuation,
     // missing opener) is not the deletion acknowledgement.
-    match text.as_bytes().get(reference_byte) {
-        Some(b'(') => true,
-        _ => false,
-    }
+    text.as_bytes().get(reference_byte) == Some(&b'(')
 }
 
 /// UTF-16 length of an ASCII-heavy reference (references are ASCII names).
@@ -308,6 +305,7 @@ impl MacroLspServer {
     /// removes the space. After the deletion `didChange`, the ordinary route
     /// runs with no extra deletion. Never uses normalized coordinates against
     /// the unnormalized buffer.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn transition_argument_completion(
         &self,
         uri: &Uri,
