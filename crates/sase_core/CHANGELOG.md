@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.5](https://github.com/sase-org/sase-core/compare/v0.36.4...v0.36.5) - 2026-10-04
+
+### Added
+
+- *(agent-publication-recovery)* retry selection, page+SHA completion, and prompt status
+- *(agent-session-manifest)* canonical file-set derivation and classification
+- *(core)* add xprompt completion-spacer planner, binding, and LSP paren handling
+
 ## [0.36.4](https://github.com/sase-org/sase-core/compare/v0.36.3...v0.36.4) - 2026-10-03
 
 ### Added
