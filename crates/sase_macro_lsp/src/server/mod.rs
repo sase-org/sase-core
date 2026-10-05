@@ -8,12 +8,13 @@ use std::{
 };
 
 use lsp_types::{
-    ClientCapabilities, CodeAction, CodeActionKind, CodeActionOptions,
-    CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    CodeActionResponse, Command, CompletionItem, CompletionOptions,
-    CompletionParams, CompletionResponse, CompletionTriggerKind,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentChanges,
+    ClientCapabilities, CodeAction, CodeActionContext, CodeActionKind,
+    CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, Command, CompletionItem,
+    CompletionOptions, CompletionParams, CompletionResponse,
+    CompletionTriggerKind, Diagnostic, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentChanges,
     DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
     ExecuteCommandOptions, ExecuteCommandParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
@@ -65,9 +66,10 @@ use sase_core::{
     CompletionCandidate, CompletionContextKind, CompletionList,
     DirectiveClauseKind, DirectiveCompletionInventories, DirectiveMachineEntry,
     DirectiveModelAliasKey, DirectiveSyntaxForm, DirectiveValueRole,
-    DocumentSnapshot, EditorPosition, EditorRange, EditorSnippetEntryWire,
-    GlossaryCatalogWire, GlossaryEntryWire, GlossarySpanWire, HelperHostBridge,
-    HoverPayload, ModelAliasShortcutContextWire, ModelCompletionEntryWire,
+    DocumentSnapshot, EditorDiagnosticData, EditorPosition, EditorRange,
+    EditorSnippetEntryWire, GlossaryCatalogWire, GlossaryEntryWire,
+    GlossarySpanWire, HelperHostBridge, HoverPayload,
+    ModelAliasShortcutContextWire, ModelCompletionEntryWire,
     ModelShortcutContextWire, ModelShortcutKind, VcsNamespaceEntry,
     VcsProjectEntry, VcsRepoCatalogResponse, VcsRepoEntry,
     MEMORY_NAMESPACE_SEGMENT,
@@ -450,8 +452,13 @@ impl LanguageServer for MacroLspServer {
             return Ok(Some(Vec::new()));
         }
         Ok(Some(
-            self.code_actions_for_text(uri, document.text, params.range)
-                .await,
+            self.code_actions_for_request(
+                uri,
+                document.text,
+                params.range,
+                params.context,
+            )
+            .await,
         ))
     }
 

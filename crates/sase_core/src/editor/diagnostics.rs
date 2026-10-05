@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use crate::macro_input_types::{
-    check_input_value, resolve_input_type, validate_enum_choices_yaml,
-    InputChoice, InputTypeRegistry, ResolvedInputType,
+    check_input_value, resolve_input_type, suggest_closest,
+    validate_enum_choices_yaml, InputChoice, InputTypeRegistry,
+    ResolvedInputType,
 };
 use crate::{
     content_layout::is_reserved_memory_reference, fenced_block_ranges,
@@ -19,12 +20,19 @@ use super::alternation::{scan_alternations, AlternationFormWire};
 use super::at_reference::BUILTIN_ARTIFACT_REF_KINDS;
 use super::directive::canonical_directive_name;
 use super::frontmatter;
+use super::macro_arg_choices::quote_macro_arg_value;
 use super::macro_args::{parse_macro_calls, MacroArgSyntax, ParsedMacroArg};
 use super::placeholder::extract_placeholder_spans;
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DiagnosticSeverity, EditorDiagnostic, MacroAssistEntry, MacroInputHint,
+    DiagnosticSeverity, EditorDiagnostic, EditorDiagnosticData,
+    EditorDiagnosticSuggestion, EditorTextEdit, MacroAssistEntry,
+    MacroInputHint,
 };
+
+/// Externally visible code for an invalid closed-set argument value.
+pub(crate) const INVALID_XPROMPT_ARG_CHOICE: &str =
+    "invalid_xprompt_arg_choice";
 
 pub fn analyze_document(
     document: &DocumentSnapshot,
@@ -141,11 +149,13 @@ pub fn typed_launch_directive_diagnostics(
         .filter_map(|diagnostic| {
             document
                 .byte_range_to_range(diagnostic.span[0], diagnostic.span[1])
-                .map(|range| EditorDiagnostic {
-                    range,
-                    severity: DiagnosticSeverity::Error,
-                    code: format!("typed_launch_{}", diagnostic.code),
-                    message: diagnostic.message,
+                .map(|range| {
+                    EditorDiagnostic::new(
+                        range,
+                        DiagnosticSeverity::Error,
+                        format!("typed_launch_{}", diagnostic.code),
+                        diagnostic.message,
+                    )
                 })
         })
         .collect()
@@ -173,15 +183,15 @@ fn disabled_typed_launch_directive_diagnostics(
                 return None;
             }
             document.byte_range_to_range(span.0, span.1).map(|range| {
-                EditorDiagnostic {
+                EditorDiagnostic::new(
                     range,
-                    severity: DiagnosticSeverity::Error,
-                    code: "typed_launch_units_disabled".to_string(),
-                    message: format!(
+                    DiagnosticSeverity::Error,
+                    "typed_launch_units_disabled",
+                    format!(
                         "%{name} requires the {} feature flag",
                         typed_launch_units_flag_key()
                     ),
-                }
+                )
             })
         })
         .collect()
@@ -227,12 +237,12 @@ fn macro_diagnostics(
             if let Some(range) =
                 document.byte_range_to_range(marker.start(), name_match.end())
             {
-                out.push(EditorDiagnostic {
+                out.push(EditorDiagnostic::new(
                     range,
-                    severity: DiagnosticSeverity::Warning,
-                    code: "unknown_macro".to_string(),
-                    message: format!("Unknown macro `{name}`"),
-                });
+                    DiagnosticSeverity::Warning,
+                    "unknown_macro",
+                    format!("Unknown macro `{name}`"),
+                ));
             }
             continue;
         };
@@ -240,15 +250,15 @@ fn macro_diagnostics(
             if let Some(range) =
                 document.byte_range_to_range(marker.start(), marker.end())
             {
-                out.push(EditorDiagnostic {
+                out.push(EditorDiagnostic::new(
                     range,
-                    severity: DiagnosticSeverity::Information,
-                    code: "canonical_marker_mismatch".to_string(),
-                    message: format!(
+                    DiagnosticSeverity::Information,
+                    "canonical_marker_mismatch",
+                    format!(
                         "`{}` is canonical for `{}`",
                         entry.reference_prefix, entry.name
                     ),
-                });
+                ));
             }
         }
     }
@@ -273,12 +283,12 @@ fn slash_skill_diagnostics(
         if let Some(range) =
             document.byte_range_to_range(skill.start() - 1, skill.end())
         {
-            out.push(EditorDiagnostic {
+            out.push(EditorDiagnostic::new(
                 range,
-                severity: DiagnosticSeverity::Warning,
-                code: "unknown_slash_skill".to_string(),
-                message: format!("Unknown slash skill `/{}`", skill.as_str()),
-            });
+                DiagnosticSeverity::Warning,
+                "unknown_slash_skill",
+                format!("Unknown slash skill `/{}`", skill.as_str()),
+            ));
         }
     }
     out
@@ -296,12 +306,12 @@ fn directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
         if let Some(range) =
             document.byte_range_to_range(name.start() - 1, name.end())
         {
-            out.push(EditorDiagnostic {
+            out.push(EditorDiagnostic::new(
                 range,
-                severity: DiagnosticSeverity::Information,
-                code: "unknown_directive".to_string(),
-                message: format!("Unknown directive `%{}`", name.as_str()),
-            });
+                DiagnosticSeverity::Information,
+                "unknown_directive",
+                format!("Unknown directive `%{}`", name.as_str()),
+            ));
         }
     }
     out
@@ -374,13 +384,19 @@ fn validate_call_args(
     out: &mut Vec<EditorDiagnostic>,
 ) {
     for validation in validate_macro_call_args(entry, call) {
-        push_diagnostic(
+        let data = choice_suggestion_data(
+            document,
+            validation.span,
+            &validation.suggestion_values,
+        );
+        push_diagnostic_with_data(
             document,
             out,
             validation.span.0,
             validation.span.1,
             validation.code,
             validation.message,
+            data,
         );
     }
 }
@@ -401,6 +417,24 @@ pub(crate) struct MacroArgValidation {
     pub(crate) span: (usize, usize),
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    pub(crate) suggestion_values: Vec<String>,
+}
+
+fn arg_validation(
+    kind: MacroArgValidationKind,
+    arg_index: Option<usize>,
+    span: (usize, usize),
+    code: &'static str,
+    message: String,
+) -> MacroArgValidation {
+    MacroArgValidation {
+        kind,
+        arg_index,
+        span,
+        code,
+        message,
+        suggestion_values: Vec::new(),
+    }
 }
 
 pub(crate) fn validate_macro_call_args(
@@ -415,31 +449,28 @@ pub(crate) fn validate_macro_call_args(
     for (arg_index, arg) in call.args.iter().enumerate() {
         if let Some(name) = &arg.name {
             if !seen_named_args.insert(name.value.clone()) {
-                out.push(MacroArgValidation {
-                    kind: MacroArgValidationKind::DuplicateKey,
-                    arg_index: Some(arg_index),
-                    span: name.span,
-                    code: "duplicate_macro_arg",
-                    message: format!(
-                        "Duplicate macro argument `{}`",
-                        name.value
-                    ),
-                });
+                out.push(arg_validation(
+                    MacroArgValidationKind::DuplicateKey,
+                    Some(arg_index),
+                    name.span,
+                    "duplicate_macro_arg",
+                    format!("Duplicate macro argument `{}`", name.value),
+                ));
                 continue;
             }
             let Some(input) =
                 entry.inputs.iter().find(|input| input.name == name.value)
             else {
-                out.push(MacroArgValidation {
-                    kind: MacroArgValidationKind::UnknownKey,
-                    arg_index: Some(arg_index),
-                    span: name.span,
-                    code: "unknown_macro_arg",
-                    message: format!(
+                out.push(arg_validation(
+                    MacroArgValidationKind::UnknownKey,
+                    Some(arg_index),
+                    name.span,
+                    "unknown_macro_arg",
+                    format!(
                         "Unknown argument `{}` for macro `{}`",
                         name.value, entry.name
                     ),
-                });
+                ));
                 continue;
             };
             supplied_inputs.insert(input.name.clone());
@@ -447,16 +478,16 @@ pub(crate) fn validate_macro_call_args(
         } else {
             let Some(input) = input_for_position(entry, positional_index)
             else {
-                out.push(MacroArgValidation {
-                    kind: MacroArgValidationKind::TooManyArgs,
-                    arg_index: Some(arg_index),
-                    span: arg.value_span,
-                    code: "too_many_args",
-                    message: format!(
+                out.push(arg_validation(
+                    MacroArgValidationKind::TooManyArgs,
+                    Some(arg_index),
+                    arg.value_span,
+                    "too_many_args",
+                    format!(
                         "Too many positional arguments for `{}`",
                         entry.name
                     ),
-                });
+                ));
                 positional_index += 1;
                 continue;
             };
@@ -470,16 +501,16 @@ pub(crate) fn validate_macro_call_args(
         if supplied_inputs.contains(&input.name) {
             continue;
         }
-        out.push(MacroArgValidation {
-            kind: MacroArgValidationKind::MissingRequiredArg,
-            arg_index: None,
-            span: call.name_span,
-            code: "missing_required_arg",
-            message: format!(
+        out.push(arg_validation(
+            MacroArgValidationKind::MissingRequiredArg,
+            None,
+            call.name_span,
+            "missing_required_arg",
+            format!(
                 "Missing required argument `{}` for macro `{}`",
                 input.name, entry.name
             ),
-        });
+        ));
     }
     out
 }
@@ -491,21 +522,42 @@ fn validate_type(
     arg: &ParsedMacroArg,
     out: &mut Vec<MacroArgValidation>,
 ) {
-    if arg.value == "null" || value_matches_input_type(&arg.value, input) {
+    if arg.value == "null" || macro_arg_value_unresolvable(&arg.value) {
         return;
     }
-    out.push(MacroArgValidation {
-        kind: MacroArgValidationKind::TypeMismatch,
-        arg_index: Some(arg_index),
-        span: arg.value_span,
-        code: "invalid_macro_arg_type",
-        message: enum_value_mismatch(input, &arg.value).unwrap_or_else(|| {
-            format!(
-                "Argument `{}` for macro `{}` expects {}",
-                input.name, entry.name, input.r#type
-            )
-        }),
-    });
+    if !input.choices.is_empty() {
+        let resolved = resolved_hint(input);
+        if let Err(message) =
+            check_input_value(&resolved, &input.name, &arg.value)
+        {
+            let suggestion_values = suggest_closest(
+                &arg.value,
+                input.choices.iter().map(|choice| choice.value.as_str()),
+            );
+            out.push(MacroArgValidation {
+                kind: MacroArgValidationKind::TypeMismatch,
+                arg_index: Some(arg_index),
+                span: arg.value_span,
+                code: INVALID_XPROMPT_ARG_CHOICE,
+                message,
+                suggestion_values,
+            });
+        }
+        return;
+    }
+    if value_matches_input_type(&arg.value, input) {
+        return;
+    }
+    out.push(arg_validation(
+        MacroArgValidationKind::TypeMismatch,
+        Some(arg_index),
+        arg.value_span,
+        "invalid_macro_arg_type",
+        format!(
+            "Argument `{}` for macro `{}` expects {}",
+            input.name, entry.name, input.r#type
+        ),
+    ));
 }
 
 fn value_matches_input_type(value: &str, input: &MacroInputHint) -> bool {
@@ -533,14 +585,11 @@ fn value_matches_input_type(value: &str, input: &MacroInputHint) -> bool {
     }
 }
 
-fn enum_value_mismatch(input: &MacroInputHint, value: &str) -> Option<String> {
-    if input.r#type != "enum" {
-        return None;
-    }
-    let resolved = ResolvedInputType {
-        base: "enum".to_string(),
-        named_type: None,
-        value_role: None,
+fn resolved_hint(input: &MacroInputHint) -> ResolvedInputType {
+    ResolvedInputType {
+        base: input.r#type.clone(),
+        named_type: input.named_type.clone(),
+        value_role: input.value_role.clone(),
         choices: input
             .choices
             .iter()
@@ -551,8 +600,33 @@ fn enum_value_mismatch(input: &MacroInputHint, value: &str) -> Option<String> {
             })
             .collect(),
         deprecated: false,
-    };
-    check_input_value(&resolved, &input.name, value).err()
+    }
+}
+
+fn choice_suggestion_data(
+    document: &DocumentSnapshot,
+    span: (usize, usize),
+    suggestion_values: &[String],
+) -> Option<EditorDiagnosticData> {
+    if suggestion_values.is_empty() {
+        return None;
+    }
+    let range = document.byte_range_to_range(span.0, span.1)?;
+    Some(EditorDiagnosticData {
+        suggestions: suggestion_values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| EditorDiagnosticSuggestion {
+                value: value.clone(),
+                title: format!("Replace with `{value}`"),
+                edit: EditorTextEdit {
+                    range,
+                    new_text: quote_macro_arg_value(value),
+                },
+                preferred: index == 0,
+            })
+            .collect(),
+    })
 }
 
 pub(crate) fn macro_arg_value_unresolvable(value: &str) -> bool {
@@ -655,32 +729,24 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
             .enumerate()
             .filter_map(|(position, (name, raw))| {
                 let name = value_as_string(name)?;
-                let (
-                    type_name,
-                    required,
-                    default_display,
-                    repeatable,
-                    named_type,
-                    value_role,
-                    resolved_choices,
-                ) = parse_short_input_hint(raw);
+                let parsed = parse_short_input_hint(raw);
                 let declared = input_choices(raw);
                 let choices = if declared.is_empty() {
-                    resolved_choices
+                    parsed.resolved_choices
                 } else {
                     declared
                 };
                 Some(MacroInputHint {
                     name,
-                    r#type: type_name,
+                    r#type: parsed.type_name,
                     description: input_description(raw),
-                    required,
-                    default_display,
+                    required: parsed.required,
+                    default_display: parsed.default_display,
                     position: position as u32,
-                    repeatable,
+                    repeatable: parsed.repeatable,
                     choices,
-                    named_type,
-                    value_role,
+                    named_type: parsed.named_type,
+                    value_role: parsed.value_role,
                 })
             })
             .collect();
@@ -730,17 +796,17 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
     Vec::new()
 }
 
-fn parse_short_input_hint(
-    value: &Value,
-) -> (
-    String,
-    bool,
-    Option<String>,
-    bool,
-    Option<String>,
-    Option<String>,
-    Vec<MobileInputChoiceWire>,
-) {
+struct ParsedShortInputHint {
+    type_name: String,
+    required: bool,
+    default_display: Option<String>,
+    repeatable: bool,
+    named_type: Option<String>,
+    value_role: Option<String>,
+    resolved_choices: Vec<MobileInputChoiceWire>,
+}
+
+fn parse_short_input_hint(value: &Value) -> ParsedShortInputHint {
     if let Some(mapping) = value.as_mapping() {
         let (type_name, named_type, value_role, resolved_choices) =
             mapping_get(mapping, "type")
@@ -750,31 +816,31 @@ fn parse_short_input_hint(
                     ("line".to_string(), None, None, Vec::new())
                 });
         let default = mapping_get(mapping, "default");
-        (
+        ParsedShortInputHint {
             type_name,
-            default.is_none(),
-            default.and_then(default_display),
-            mapping_get(mapping, "repeatable")
+            required: default.is_none(),
+            default_display: default.and_then(default_display),
+            repeatable: mapping_get(mapping, "repeatable")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             named_type,
             value_role,
             resolved_choices,
-        )
+        }
     } else {
         let (type_name, named_type, value_role, resolved_choices) =
             resolve_local_rich(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
             );
-        (
+        ParsedShortInputHint {
             type_name,
-            true,
-            None,
-            false,
+            required: true,
+            default_display: None,
+            repeatable: false,
             named_type,
             value_role,
             resolved_choices,
-        )
+        }
     }
 }
 
@@ -919,22 +985,34 @@ fn push_diagnostic(
     code: &str,
     message: String,
 ) {
+    push_diagnostic_with_data(document, out, start, end, code, message, None);
+}
+
+fn push_diagnostic_with_data(
+    document: &DocumentSnapshot,
+    out: &mut Vec<EditorDiagnostic>,
+    start: usize,
+    end: usize,
+    code: &str,
+    message: String,
+    data: Option<EditorDiagnosticData>,
+) {
     let Some(range) = document.byte_range_to_range(start, end) else {
         return;
     };
-    out.push(EditorDiagnostic {
-        range,
-        severity: DiagnosticSeverity::Error,
-        code: code.to_string(),
-        message,
-    });
+    let mut diagnostic =
+        EditorDiagnostic::new(range, DiagnosticSeverity::Error, code, message);
+    if let Some(data) = data {
+        diagnostic = diagnostic.with_data(data);
+    }
+    out.push(diagnostic);
 }
 
 fn macro_ref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?m)(?:^|[\s\(\[\{"'])(?P<marker>#!|#)(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:/|__)[A-Za-z_][A-Za-z0-9_]*)*)(?:!!|\?\?)?"#,
+            r#"(?m)(?:^|[\s\(\[\{"']|[^\x00-\x7F])(?P<marker>#!|#)(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:/|__)[A-Za-z_][A-Za-z0-9_]*)*)(?:!!|\?\?)?"#,
         )
         .unwrap()
     })
@@ -1117,6 +1195,61 @@ mod tests {
                 skill_name: None,
                 memory_type: None,
             },
+            MacroAssistEntry {
+                name: "choose".to_string(),
+                display_label: "choose".to_string(),
+                insertion: "#choose".to_string(),
+                reference_prefix: "#".to_string(),
+                kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: vec![enum_input(
+                    "edition",
+                    true,
+                    0,
+                    false,
+                    &[
+                        ("brief", Some("Brief"), Some("Short edition")),
+                        ("full", Some("Full"), Some("Complete edition")),
+                    ],
+                )],
+                content_preview: None,
+                description: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+                is_skill: false,
+                skill_name: None,
+                memory_type: None,
+            },
+            MacroAssistEntry {
+                name: "editions".to_string(),
+                display_label: "editions".to_string(),
+                insertion: "#editions".to_string(),
+                reference_prefix: "#".to_string(),
+                kind: None,
+                source_bucket: "builtin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: vec![enum_input(
+                    "edition",
+                    false,
+                    0,
+                    true,
+                    &[("brief", None, None), ("full", None, None)],
+                )],
+                content_preview: None,
+                description: None,
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+                is_skill: false,
+                skill_name: None,
+                memory_type: None,
+            },
         ]
     }
 
@@ -1150,6 +1283,26 @@ mod tests {
             repeatable: true,
             ..input(name, r#type, required, position)
         }
+    }
+
+    fn enum_input(
+        name: &str,
+        required: bool,
+        position: u32,
+        repeatable: bool,
+        choices: &[(&str, Option<&str>, Option<&str>)],
+    ) -> MacroInputHint {
+        let mut hint = input(name, "enum", required, position);
+        hint.repeatable = repeatable;
+        hint.choices = choices
+            .iter()
+            .map(|(value, label, description)| crate::MobileInputChoiceWire {
+                value: (*value).to_string(),
+                label: label.map(str::to_string),
+                description: description.map(str::to_string),
+            })
+            .collect();
+        hint
     }
 
     fn diagnostic_text(text: &str, diagnostic: &EditorDiagnostic) -> String {
@@ -1695,11 +1848,76 @@ mod tests {
 
         let text = "---\nmacros:\n  choose:\n    input:\n      edition:\n        type: enum\n        choices: [brief, full]\n    content: Choose an edition\n---\n#choose(edition=breif)";
         let diagnostics = diagnostics_for(text);
-        let mismatch = diagnostic(&diagnostics, "invalid_macro_arg_type");
+        let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
         assert_eq!(
             mismatch.message,
             "Argument `edition` expects one of brief | full, got `breif`; did you mean `brief`?"
         );
+        let data = mismatch.data.as_ref().expect("choice diagnostic data");
+        assert_eq!(data.suggestions[0].value, "brief");
+        assert_eq!(data.suggestions[0].title, "Replace with `brief`");
+        assert!(data.suggestions[0].preferred);
+        assert_eq!(data.suggestions[0].edit.new_text, "brief");
+        assert_eq!(diagnostic_text(text, mismatch), "breif");
+    }
+
+    #[test]
+    fn closed_set_diagnostics_cover_forms_labels_and_repeatable_elements() {
+        for text in
+            ["#choose(edition=breif)", "#choose(breif)", "#choose:breif"]
+        {
+            let diagnostics = diagnostics_for(text);
+            let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
+            assert_eq!(diagnostic_text(text, mismatch), "breif");
+            assert_eq!(
+                mismatch.data.as_ref().unwrap().suggestions[0].value,
+                "brief"
+            );
+        }
+
+        let label = diagnostics_for("#choose(edition=Brief)");
+        let mismatch = diagnostic(&label, INVALID_XPROMPT_ARG_CHOICE);
+        assert!(mismatch.message.contains("got `Brief`"));
+
+        let valid = diagnostics_for("#choose(edition=brief)");
+        assert_eq!(diagnostic_count(&valid, INVALID_XPROMPT_ARG_CHOICE), 0);
+
+        let defaulted = diagnostics_for("#choose(edition=null)");
+        assert_eq!(diagnostic_count(&defaulted, INVALID_XPROMPT_ARG_CHOICE), 0);
+
+        let repeatable = diagnostics_for("#editions(brief, ful)");
+        assert_eq!(
+            diagnostic_count(&repeatable, INVALID_XPROMPT_ARG_CHOICE),
+            1
+        );
+        assert_eq!(
+            diagnostic_text(
+                "#editions(brief, ful)",
+                diagnostic(&repeatable, INVALID_XPROMPT_ARG_CHOICE)
+            ),
+            "ful"
+        );
+
+        let text = "😀#choose(edition=breif)";
+        let diagnostics = diagnostics_for(text);
+        let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
+        assert_eq!(diagnostic_text(text, mismatch), "breif");
+        assert_eq!(
+            mismatch.range.start.character,
+            3 + "choose(edition=".len() as u32
+        );
+    }
+
+    #[test]
+    fn old_diagnostic_payloads_deserialize_without_data() {
+        let json = r#"{
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "severity": "error",
+            "code": "unknown_macro",
+            "message": "Unknown macro `missing`"
+        }"#;
+        let diagnostic: EditorDiagnostic = serde_json::from_str(json).unwrap();
+        assert!(diagnostic.data.is_none());
     }
 
     #[test]

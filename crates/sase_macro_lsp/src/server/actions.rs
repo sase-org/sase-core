@@ -210,11 +210,34 @@ impl MacroLspServer {
         text: String,
         range: Range,
     ) -> CodeActionResponse {
+        self.code_actions_for_request(
+            uri,
+            text,
+            range,
+            CodeActionContext::default(),
+        )
+        .await
+    }
+
+    pub async fn code_actions_for_request(
+        &self,
+        uri: Uri,
+        text: String,
+        range: Range,
+        context: CodeActionContext,
+    ) -> CodeActionResponse {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
         let position = to_editor_position(range.start);
         let mut actions = Vec::new();
+        if kind_allowed(&context.only, &CodeActionKind::QUICKFIX) {
+            actions.extend(diagnostic_quickfixes(
+                &uri,
+                range,
+                &context.diagnostics,
+            ));
+        }
 
         if let Some(token) =
             editor_extract_token_at_position(&document, position)
@@ -607,6 +630,81 @@ fn tag_edit_action(
     kind: CodeActionKind,
 ) -> CodeAction {
     text_edit_action(&edit.title, uri, edit.range, edit.new_text, kind, false)
+}
+
+fn diagnostic_quickfixes(
+    uri: &Uri,
+    request_range: Range,
+    diagnostics: &[Diagnostic],
+) -> Vec<CodeActionOrCommand> {
+    let mut actions = Vec::new();
+    for diagnostic in diagnostics {
+        if !lsp_ranges_overlap(diagnostic.range, request_range) {
+            continue;
+        }
+        let Some(raw) = diagnostic.data.clone() else {
+            continue;
+        };
+        let Ok(data) = serde_json::from_value::<EditorDiagnosticData>(raw)
+        else {
+            continue;
+        };
+        for suggestion in data.suggestions {
+            if suggestion.title.is_empty() {
+                continue;
+            }
+            let new_text = if suggestion.edit.new_text.is_empty() {
+                suggestion.value.clone()
+            } else {
+                suggestion.edit.new_text
+            };
+            if new_text.is_empty() {
+                continue;
+            }
+            actions.push(
+                text_edit_action(
+                    &suggestion.title,
+                    uri,
+                    suggestion.edit.range,
+                    new_text,
+                    CodeActionKind::QUICKFIX,
+                    suggestion.preferred,
+                )
+                .into(),
+            );
+        }
+    }
+    actions
+}
+
+fn kind_allowed(
+    only: &Option<Vec<CodeActionKind>>,
+    kind: &CodeActionKind,
+) -> bool {
+    let Some(only) = only else {
+        return true;
+    };
+    if only.is_empty() {
+        return true;
+    }
+    only.iter().any(|requested| {
+        kind.as_str() == requested.as_str()
+            || kind
+                .as_str()
+                .starts_with(&format!("{}.", requested.as_str()))
+    })
+}
+
+fn lsp_ranges_overlap(left: Range, right: Range) -> bool {
+    fn endpoint(position: Position) -> (u32, u32) {
+        (position.line, position.character)
+    }
+    let (first, second) = if endpoint(left.start) <= endpoint(right.start) {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    endpoint(first.end) >= endpoint(second.start)
 }
 
 fn editor_ranges_overlap(left: EditorRange, right: EditorRange) -> bool {

@@ -3,14 +3,15 @@ use std::collections::{HashMap, HashSet};
 
 use crate::macro_input_types::{
     builtin_catalog, check_closed_set_default,
-    pyyaml_plain_scalar_is_non_string, resolve_input_type,
+    pyyaml_plain_scalar_is_non_string, resolve_input_type, suggest_closest,
     unquoted_plain_scalar_choice_error, validate_enum_choices_yaml,
     ChoiceIssueSeverity, InputChoice, InputTypeRegistry,
 };
 
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
+    DiagnosticSeverity, EditorDiagnostic, EditorDiagnosticData,
+    EditorDiagnosticSuggestion, EditorPosition, EditorRange, EditorTextEdit,
     FrontmatterFieldKind, FrontmatterFieldSchema, FrontmatterInputType,
     HoverPayload,
 };
@@ -403,17 +404,52 @@ impl<'a> FrontmatterDiagnosticBuilder<'a> {
         code: &str,
         message: impl Into<String>,
     ) {
+        self.push_with_data(range, severity, code, message, None);
+    }
+
+    fn push_with_data(
+        &mut self,
+        range: (usize, usize),
+        severity: DiagnosticSeverity,
+        code: &str,
+        message: impl Into<String>,
+        data: Option<EditorDiagnosticData>,
+    ) {
         let start = self.frontmatter_start + range.0;
         let end = self.frontmatter_start + range.1;
-        let Some(range) = self.document.byte_range_to_range(start, end) else {
+        let Some(editor_range) = self.document.byte_range_to_range(start, end)
+        else {
             return;
         };
-        self.diagnostics.push(EditorDiagnostic {
-            range,
-            severity,
-            code: code.to_string(),
-            message: message.into(),
-        });
+        let mut diagnostic =
+            EditorDiagnostic::new(editor_range, severity, code, message);
+        if let Some(data) = data {
+            diagnostic = diagnostic.with_data(data);
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn replace_fix(
+        &self,
+        range: (usize, usize),
+        title: String,
+        value: String,
+        preferred: bool,
+    ) -> Option<EditorDiagnosticData> {
+        let start = self.frontmatter_start + range.0;
+        let end = self.frontmatter_start + range.1;
+        let editor_range = self.document.byte_range_to_range(start, end)?;
+        Some(EditorDiagnosticData {
+            suggestions: vec![EditorDiagnosticSuggestion {
+                value: value.clone(),
+                title,
+                edit: EditorTextEdit {
+                    range: editor_range,
+                    new_text: value,
+                },
+                preferred,
+            }],
+        })
     }
 
     fn field_key_range(&self, key: &str) -> (usize, usize) {
@@ -1005,25 +1041,86 @@ fn validate_explicit_input_type(
     match resolve_input_type(input_name, &raw, &InputTypeRegistry::builtin()) {
         Ok(resolved) => {
             if resolved.deprecated {
-                builder.push(
+                let data = builder.replace_fix(
+                    range,
+                    "Use `line`".to_string(),
+                    "line".to_string(),
+                    true,
+                );
+                builder.push_with_data(
                     range,
                     DiagnosticSeverity::Warning,
                     "deprecated_macro_frontmatter_input_type",
                     "Input type `string` is deprecated; use `line` instead",
+                    data,
                 );
             }
             (InputType::from_base(&resolved.base), true)
         }
         Err(error) => {
-            builder.push(
+            let names = advertised_type_names();
+            let suggestions =
+                suggest_closest(&raw, names.iter().map(String::as_str));
+            let data = type_change_fixes(builder, range, &suggestions);
+            builder.push_with_data(
                 range,
                 DiagnosticSeverity::Error,
                 "invalid_macro_frontmatter_input_type",
                 error.message,
+                data,
             );
             (InputType::Line, false)
         }
     }
+}
+
+fn advertised_type_names() -> Vec<String> {
+    builtin_catalog()
+        .into_iter()
+        .filter(|entry| entry.advertised)
+        .flat_map(|entry| std::iter::once(entry.name).chain(entry.aliases))
+        .collect()
+}
+
+fn type_change_fixes(
+    builder: &FrontmatterDiagnosticBuilder<'_>,
+    range: (usize, usize),
+    suggestions: &[String],
+) -> Option<EditorDiagnosticData> {
+    if suggestions.is_empty() {
+        return None;
+    }
+    let start = builder.frontmatter_start + range.0;
+    let end = builder.frontmatter_start + range.1;
+    let editor_range = builder.document.byte_range_to_range(start, end)?;
+    Some(EditorDiagnosticData {
+        suggestions: suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, value)| EditorDiagnosticSuggestion {
+                value: value.clone(),
+                title: format!("Change type to `{value}`"),
+                edit: EditorTextEdit {
+                    range: editor_range,
+                    new_text: value.clone(),
+                },
+                preferred: index == 0,
+            })
+            .collect(),
+    })
+}
+
+fn quote_yaml_plain(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for ch in raw.chars() {
+        if ch == '"' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
 }
 
 /// Validate a declared `input`'s `choices` and return valid catalog choices.
@@ -1085,11 +1182,24 @@ fn validate_input_choices(
         if let Some(message) = value_range.and_then(|value_range| {
             unquoted_choice_error(&builder.index.text, value_range)
         }) {
-            builder.push(
-                value_range.unwrap_or(item_range),
+            let quote_range = value_range.unwrap_or(item_range);
+            let raw = builder
+                .index
+                .text
+                .get(quote_range.0..quote_range.1)
+                .unwrap_or_default();
+            let data = builder.replace_fix(
+                quote_range,
+                format!("Quote `{raw}`"),
+                quote_yaml_plain(raw),
+                true,
+            );
+            builder.push_with_data(
+                quote_range,
                 DiagnosticSeverity::Error,
                 "invalid_macro_frontmatter_input_choices",
                 message,
+                data,
             );
             continue;
         }
@@ -1147,11 +1257,21 @@ fn validate_input_default(
         if let Some(message) = source_range.and_then(|source_range| {
             unquoted_choice_error(&builder.index.text, source_range)
         }) {
-            builder.push(
+            let raw = source_range
+                .and_then(|span| builder.index.text.get(span.0..span.1))
+                .unwrap_or_default();
+            let data = builder.replace_fix(
+                range,
+                format!("Quote `{raw}`"),
+                quote_yaml_plain(raw),
+                true,
+            );
+            builder.push_with_data(
                 range,
                 DiagnosticSeverity::Error,
                 "invalid_macro_frontmatter_input_default",
                 message,
+                data,
             );
             return;
         }
@@ -3038,6 +3158,16 @@ mod tests {
             warning.message,
             "Input type `string` is deprecated; use `line` instead"
         );
+        let string_fix = warning.data.as_ref().expect("string quick fix");
+        assert_eq!(string_fix.suggestions[0].title, "Use `line`");
+        assert_eq!(string_fix.suggestions[0].edit.new_text, "line");
+        assert!(string_fix.suggestions[0].preferred);
+
+        let type_fix =
+            diagnostic.data.as_ref().expect("unknown type quick fix");
+        assert_eq!(type_fix.suggestions[0].title, "Change type to `enum`");
+        assert_eq!(type_fix.suggestions[0].edit.new_text, "enum");
+        assert!(type_fix.suggestions[0].preferred);
     }
 
     #[test]
@@ -3102,6 +3232,10 @@ mod tests {
                 diagnostic.message,
                 "choice `yes` must be quoted (\"yes\"): YAML reads it as a boolean"
             );
+            let quote = diagnostic.data.as_ref().expect("quote quick fix");
+            assert_eq!(quote.suggestions[0].title, "Quote `yes`");
+            assert_eq!(quote.suggestions[0].edit.new_text, "\"yes\"");
+            assert_eq!(diagnostic_text(text, diagnostic), "yes");
         }
     }
 

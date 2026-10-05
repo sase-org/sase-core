@@ -1312,6 +1312,49 @@ pub struct EditorDiagnostic {
     pub severity: DiagnosticSeverity,
     pub code: String,
     pub message: String,
+    /// Structured suggestions and edits. Absent on existing diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<EditorDiagnosticData>,
+}
+
+/// Canonical suggestions plus explicit quick-fix titles and edits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorDiagnosticData {
+    #[serde(default)]
+    pub suggestions: Vec<EditorDiagnosticSuggestion>,
+}
+
+/// One diagnostic-driven quick fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorDiagnosticSuggestion {
+    /// Canonical replacement value (never a label).
+    pub value: String,
+    pub title: String,
+    pub edit: EditorTextEdit,
+    #[serde(default)]
+    pub preferred: bool,
+}
+
+impl EditorDiagnostic {
+    pub fn new(
+        range: EditorRange,
+        severity: DiagnosticSeverity,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            range,
+            severity,
+            code: code.into(),
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn with_data(mut self, data: EditorDiagnosticData) -> Self {
+        self.data = Some(data);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

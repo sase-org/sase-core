@@ -318,26 +318,26 @@ pub(crate) fn tag_diagnostics(
                     continue;
                 };
                 if is_disabled_target(target) {
-                    diagnostics.push(EditorDiagnostic {
+                    diagnostics.push(EditorDiagnostic::new(
                         range,
-                        severity: DiagnosticSeverity::Warning,
-                        code: "disabled_project_tag".to_string(),
-                        message: format!(
+                        DiagnosticSeverity::Warning,
+                        "disabled_project_tag",
+                        format!(
                             "`+{}` is disabled — `sase project enable {}`",
                             span.name, target.name,
                         ),
-                    });
+                    ));
                 } else if target.workflow_type.is_none() {
-                    diagnostics.push(EditorDiagnostic {
+                    diagnostics.push(EditorDiagnostic::new(
                         range,
-                        severity: DiagnosticSeverity::Warning,
-                        code: "providerless_project_tag".to_string(),
-                        message: format!(
+                        DiagnosticSeverity::Warning,
+                        "providerless_project_tag",
+                        format!(
                             "`+{}` resolves to `{}` but no VCS provider \
                              was detected for its workspace",
                             span.name, target.key,
                         ),
-                    });
+                    ));
                 }
             }
             ProjectTagResolutionWire::Ambiguous { candidates } => {
@@ -347,17 +347,17 @@ pub(crate) fn tag_diagnostics(
                     .map(|target| format!("`{}`", target.name))
                     .collect::<Vec<_>>()
                     .join(", ");
-                diagnostics.push(EditorDiagnostic {
+                diagnostics.push(EditorDiagnostic::new(
                     range,
-                    severity: DiagnosticSeverity::Error,
-                    code: "ambiguous_project_tag".to_string(),
-                    message: format!(
+                    DiagnosticSeverity::Error,
+                    "ambiguous_project_tag",
+                    format!(
                         "Ambiguous project tag `+{}` (line {line}): \
                          matches {names}. Run `sase doctor` to resolve \
                          the collision",
                         span.name,
                     ),
-                });
+                ));
             }
             ProjectTagResolutionWire::Unknown { suggestions } => {
                 if !span.anchored {
@@ -373,12 +373,12 @@ pub(crate) fn tag_diagnostics(
                     );
                 }
                 message.push_str(format!(". Known: {known_list}").as_str());
-                diagnostics.push(EditorDiagnostic {
+                diagnostics.push(EditorDiagnostic::new(
                     range,
-                    severity: DiagnosticSeverity::Warning,
-                    code: "unknown_project_tag".to_string(),
+                    DiagnosticSeverity::Warning,
+                    "unknown_project_tag",
                     message,
-                });
+                ));
             }
         }
     }

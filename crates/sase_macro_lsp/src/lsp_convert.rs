@@ -989,12 +989,17 @@ pub fn hover(payload: HoverPayload) -> lsp_types::Hover {
 }
 
 pub fn diagnostic(diagnostic: EditorDiagnostic) -> lsp_types::Diagnostic {
+    let data = diagnostic
+        .data
+        .as_ref()
+        .and_then(|data| serde_json::to_value(data).ok());
     lsp_types::Diagnostic {
         range: to_lsp_range(diagnostic.range),
         severity: Some(to_lsp_diagnostic_severity(diagnostic.severity)),
         code: Some(NumberOrString::String(diagnostic.code)),
         source: Some("sase-macro".to_string()),
         message: diagnostic.message,
+        data,
         ..Default::default()
     }
 }

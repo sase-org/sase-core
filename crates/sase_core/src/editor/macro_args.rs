@@ -693,7 +693,7 @@ fn macro_ref_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r#"(?m)(?:^|[\s\(\[\{"'])(?P<marker>#!|#)(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:/|__)[A-Za-z_][A-Za-z0-9_]*)*)(?P<hitl>!!|\?\?)?"#,
+            r#"(?m)(?:^|[\s\(\[\{"']|[^\x00-\x7F])(?P<marker>#!|#)(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:(?:/|__)[A-Za-z_][A-Za-z0-9_]*)*)(?P<hitl>!!|\?\?)?"#,
         )
         .unwrap()
     })
