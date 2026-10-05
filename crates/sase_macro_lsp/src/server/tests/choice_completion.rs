@@ -161,6 +161,97 @@ async fn colon_and_positional_forms_complete_enum_values() {
 }
 
 #[tokio::test]
+async fn builtin_effort_argument_completes_seven_levels_in_order() {
+    use sase_core::effort::EFFORT_LEVELS_WITH_DESCRIPTIONS;
+
+    let mut effort = input_hint("effort", "enum", true, 0);
+    effort.named_type = Some("effort".to_string());
+    effort.choices = EFFORT_LEVELS_WITH_DESCRIPTIONS
+        .iter()
+        .map(|(value, description)| MobileInputChoiceWire {
+            value: (*value).to_string(),
+            label: None,
+            description: Some((*description).to_string()),
+        })
+        .collect();
+    let (service, _) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(vec![catalog_entry(
+                "run",
+                "#run",
+                Some("(effort: effort (7))".to_string()),
+                vec![effort],
+                None,
+            )])),
+        )
+    });
+    let server = service.inner();
+    let response = server
+        .completion_for_text("#run(effort=".to_string(), Position::new(0, 12))
+        .await
+        .unwrap();
+    let (effort_items, incomplete) = items(response);
+    assert!(!incomplete, "untruncated effort list must be complete");
+    let expected: Vec<(&str, &str)> = EFFORT_LEVELS_WITH_DESCRIPTIONS
+        .iter()
+        .map(|(value, description)| (*value, *description))
+        .collect();
+    assert_eq!(
+        effort_items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>(),
+        expected.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+    );
+    for (index, (item, (_, description))) in
+        effort_items.iter().zip(expected.iter()).enumerate()
+    {
+        assert_eq!(item.kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(item.filter_text.as_deref(), Some(item.label.as_str()));
+        assert_eq!(
+            item.sort_text.as_deref(),
+            Some(format!("{index:04}").as_str())
+        );
+        let Some(Documentation::MarkupContent(doc)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected shared effort description documentation");
+        };
+        assert!(
+            doc.value.contains(description),
+            "effort `{}` documentation must contain shared text",
+            item.label
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected full-value text edit");
+        };
+        assert_eq!(edit.new_text, item.label);
+        assert_eq!(edit.range.start, Position::new(0, 12));
+        assert_eq!(edit.range.end, Position::new(0, 12));
+    }
+    let response = server
+        .completion_for_text(
+            "#run(effort=med".to_string(),
+            Position::new(0, 15),
+        )
+        .await
+        .unwrap();
+    let (filtered, _) = items(response);
+    let item = filtered
+        .iter()
+        .find(|item| item.label == "medium")
+        .expect("medium");
+    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref() else {
+        panic!("expected text edit");
+    };
+    assert_eq!(edit.range.start, Position::new(0, 12));
+    assert_eq!(edit.range.end, Position::new(0, 15));
+    assert_eq!(edit.new_text, "medium");
+}
+
+#[tokio::test]
 async fn bool_arguments_use_the_shared_choice_builder() {
     let (items, incomplete) = complete("#review(deep=", 13).await;
     assert!(!incomplete);
