@@ -341,3 +341,110 @@ fn suggest_closest_ranks_equality_and_prefix_first() {
     assert_eq!(suggestions[0], "enum");
     assert!(suggestions.contains(&"entry".to_string()));
 }
+
+fn write_manifest(dir: &std::path::Path, name: &str, text: &str) -> String {
+    let path = dir.join(name);
+    std::fs::write(&path, text).expect("write manifest");
+    path.to_string_lossy().into_owned()
+}
+
+fn record(distribution: &str, module: &str, path: &str) -> PluginInputTypeFileRecord {
+    PluginInputTypeFileRecord {
+        distribution: distribution.to_string(),
+        module: module.to_string(),
+        path: path.to_string(),
+    }
+}
+
+#[test]
+fn plugin_loader_accepts_valid_sibling_and_skips_bad_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "sase-plugin-types-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = write_manifest(
+        &dir,
+        "input_types.yml",
+        "schema_version: 1\ntypes:\n  audio_edition:\n    description: Narration length.\n    choices:\n      - { value: brief, description: About 4 minutes }\n      - { value: full, label: Full edition, description: About 16 minutes }\n  bad_type:\n    description: Bad.\n    choices: [\"in progress\", \"null\", \"prod\", \"prod\"]\n",
+    );
+    let (registry, diagnostics) = load_plugin_input_type_registry(&[
+        record("sase-research-artifacts", "plugin_module", &manifest),
+    ]);
+    assert!(registry.has_plugin("sase-research-artifacts"));
+    let resolved = resolve_input_type(
+        "edition",
+        "sase-research-artifacts@audio_edition",
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(resolved.base, "enum");
+    assert_eq!(
+        resolved.named_type.as_deref(),
+        Some("sase-research-artifacts@audio_edition")
+    );
+    assert_eq!(
+        resolved
+            .choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>(),
+        ["brief", "full"]
+    );
+    let full = resolved
+        .choices
+        .iter()
+        .find(|choice| choice.value == "full")
+        .unwrap();
+    assert_eq!(full.label.as_deref(), Some("Full edition"));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.type_id.as_deref() == Some("bad_type")
+    }));
+    // Bad type is wholly skipped while the valid sibling resolves.
+    assert!(resolve_input_type(
+        "edition",
+        "sase-research-artifacts@bad_type",
+        &registry,
+    )
+    .is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn plugin_loader_rejects_envelope_and_normalizes_distribution() {
+    let dir = std::env::temp_dir().join(format!(
+        "sase-plugin-types-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad_envelope = write_manifest(
+        &dir,
+        "bad.yml",
+        "schema_version: 2\ntypes: {}\nextra: 1\n",
+    );
+    let unquoted_yes = write_manifest(
+        &dir,
+        "yes.yml",
+        "schema_version: 1\ntypes:\n  edition:\n    description: Length.\n    choices:\n      - yes\n",
+    );
+    let (registry, diagnostics) = load_plugin_input_type_registry(&[
+        record("Sase_Research.Artifacts", "mod_a", &bad_envelope),
+        record("other-dist", "mod_b", &unquoted_yes),
+    ]);
+    assert!(registry.has_plugin("sase-research-artifacts"));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("schema_version")
+            || diagnostic.message.contains("unknown key")
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("must be quoted")
+            && diagnostic.message.contains("yes")
+    }));
+    std::fs::remove_dir_all(&dir).ok();
+}

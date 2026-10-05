@@ -2,10 +2,10 @@ use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
 
 use crate::macro_input_types::{
-    builtin_catalog, check_closed_set_default,
-    pyyaml_plain_scalar_is_non_string, resolve_input_type, suggest_closest,
-    unquoted_plain_scalar_choice_error, validate_enum_choices_yaml,
-    ChoiceIssueSeverity, InputChoice, InputTypeRegistry,
+    check_closed_set_default, pyyaml_plain_scalar_is_non_string,
+    resolve_input_type, suggest_closest, unquoted_plain_scalar_choice_error,
+    validate_enum_choices_yaml, ChoiceIssueSeverity, InputChoice,
+    InputTypeRegistry,
 };
 use crate::model_validity::ModelValiditySnapshot;
 
@@ -183,22 +183,54 @@ enum InputType {
     Code,
 }
 
-pub(super) fn diagnostics(
-    document: &DocumentSnapshot,
-) -> Vec<EditorDiagnostic> {
-    diagnostics_with_snapshot(document, None)
-}
-
 pub(super) fn diagnostics_with_snapshot(
     document: &DocumentSnapshot,
     snapshot: Option<&ModelValiditySnapshot>,
+) -> Vec<EditorDiagnostic> {
+    diagnostics_with_registry_and_snapshot(
+        document,
+        snapshot,
+        &registry_from_env(),
+    )
+}
+
+fn registry_from_env() -> InputTypeRegistry {
+    let raw = std::env::var(
+        crate::macro_catalog::SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV,
+    )
+    .unwrap_or_default();
+    if raw.trim().is_empty() {
+        return InputTypeRegistry::builtin();
+    }
+    let files: Vec<crate::macro_input_types::PluginInputTypeFileRecord> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    let (registry, _diagnostics) =
+        crate::macro_input_types::load_plugin_input_type_registry(&files);
+    registry
+}
+
+pub fn diagnostics_with_registry(
+    document: &DocumentSnapshot,
+    registry: &InputTypeRegistry,
+) -> Vec<EditorDiagnostic> {
+    diagnostics_with_registry_and_snapshot(document, None, registry)
+}
+
+pub fn diagnostics_with_registry_and_snapshot(
+    document: &DocumentSnapshot,
+    snapshot: Option<&ModelValiditySnapshot>,
+    registry: &InputTypeRegistry,
 ) -> Vec<EditorDiagnostic> {
     let Some(frontmatter) = extract_frontmatter(document.text()) else {
         return Vec::new();
     };
     let index = FrontmatterSourceIndex::new(frontmatter.text);
-    let mut builder =
-        FrontmatterDiagnosticBuilder::new(document, frontmatter.start, index);
+    let mut builder = FrontmatterDiagnosticBuilder::new(
+        document,
+        frontmatter.start,
+        index,
+        registry.clone(),
+    );
 
     let value = match serde_yaml::from_str::<Value>(frontmatter.text) {
         Ok(value) => value,
@@ -271,8 +303,17 @@ pub fn field_schema() -> Vec<FrontmatterFieldSchema> {
 
 /// A projection of the shared macro input-type catalog for frontmatter editors.
 pub fn input_type_schema() -> Vec<FrontmatterInputType> {
-    builtin_catalog()
-        .into_iter()
+    input_type_schema_with_registry(&InputTypeRegistry::builtin())
+}
+
+/// Registry-aware projection of the shared input-type catalog.
+pub fn input_type_schema_with_registry(
+    registry: &InputTypeRegistry,
+) -> Vec<FrontmatterInputType> {
+    registry
+        .entries()
+        .iter()
+        .cloned()
         .map(|entry| FrontmatterInputType {
             name: entry.name,
             aliases: entry.aliases,
@@ -336,11 +377,22 @@ pub fn input_type_completion_at(
 /// form the panel serializes) or a bare YAML body without delimiters; either
 /// is normalized to a complete block before validation.
 pub fn validate(text: &str) -> Vec<EditorDiagnostic> {
+    validate_with_registry(text, &InputTypeRegistry::builtin())
+}
+
+/// Registry-aware frontmatter validation.
+pub fn validate_with_registry(
+    text: &str,
+    registry: &InputTypeRegistry,
+) -> Vec<EditorDiagnostic> {
     if extract_frontmatter(text).is_some() {
-        return diagnostics(&DocumentSnapshot::new(text));
+        return diagnostics_with_registry(&DocumentSnapshot::new(text), registry);
     }
     let body = strip_delimiter_lines(text);
-    diagnostics(&DocumentSnapshot::new(format!("---\n{body}\n---\n")))
+    diagnostics_with_registry(
+        &DocumentSnapshot::new(format!("---\n{body}\n---\n")),
+        registry,
+    )
 }
 
 /// Validate a single field's value in isolation, returning diagnostics that
@@ -350,6 +402,15 @@ pub fn validate(text: &str) -> Vec<EditorDiagnostic> {
 /// placed inline; a multi-line value is indented as a YAML block so list and
 /// structured values validate as written.
 pub fn validate_field(field: &str, value: &str) -> Vec<EditorDiagnostic> {
+    validate_field_with_registry(field, value, &InputTypeRegistry::builtin())
+}
+
+/// Registry-aware single-field validation.
+pub fn validate_field_with_registry(
+    field: &str,
+    value: &str,
+    registry: &InputTypeRegistry,
+) -> Vec<EditorDiagnostic> {
     let body = if value.contains('\n') {
         let indented = value
             .lines()
@@ -360,7 +421,7 @@ pub fn validate_field(field: &str, value: &str) -> Vec<EditorDiagnostic> {
     } else {
         format!("{field}: {value}")
     };
-    validate(&body)
+    validate_with_registry(&body, registry)
 }
 
 /// Strip leading/trailing `---` delimiter lines so a bare body or a partially
@@ -385,6 +446,7 @@ struct FrontmatterDiagnosticBuilder<'a> {
     frontmatter_start: usize,
     index: FrontmatterSourceIndex,
     diagnostics: Vec<EditorDiagnostic>,
+    registry: InputTypeRegistry,
 }
 
 impl<'a> FrontmatterDiagnosticBuilder<'a> {
@@ -392,12 +454,14 @@ impl<'a> FrontmatterDiagnosticBuilder<'a> {
         document: &'a DocumentSnapshot,
         frontmatter_start: usize,
         index: FrontmatterSourceIndex,
+        registry: InputTypeRegistry,
     ) -> Self {
         Self {
             document,
             frontmatter_start,
             index,
             diagnostics: Vec::new(),
+            registry,
         }
     }
 
@@ -1062,7 +1126,7 @@ fn validate_explicit_input_type(
         );
         return (InputType::Line, false, None, Vec::new());
     };
-    match resolve_input_type(input_name, &raw, &InputTypeRegistry::builtin()) {
+    match resolve_input_type(input_name, &raw, &builder.registry.clone()) {
         Ok(resolved) => {
             if resolved.deprecated {
                 let data = builder.replace_fix(
@@ -1087,7 +1151,7 @@ fn validate_explicit_input_type(
             )
         }
         Err(error) => {
-            let names = advertised_type_names();
+            let names = advertised_type_names_with_registry(&builder.registry.clone());
             let suggestions =
                 suggest_closest(&raw, names.iter().map(String::as_str));
             let data = type_change_fixes(builder, range, &suggestions);
@@ -1103,11 +1167,16 @@ fn validate_explicit_input_type(
     }
 }
 
-fn advertised_type_names() -> Vec<String> {
-    builtin_catalog()
-        .into_iter()
+fn advertised_type_names_with_registry(
+    registry: &InputTypeRegistry,
+) -> Vec<String> {
+    registry
+        .entries()
+        .iter()
         .filter(|entry| entry.advertised)
-        .flat_map(|entry| std::iter::once(entry.name).chain(entry.aliases))
+        .flat_map(|entry| {
+            std::iter::once(entry.name.clone()).chain(entry.aliases.clone())
+        })
         .collect()
 }
 
@@ -3016,6 +3085,7 @@ pub(crate) fn value_is_truthy(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::macro_input_types::builtin_catalog;
 
     fn has_error(diagnostics: &[EditorDiagnostic]) -> bool {
         diagnostics

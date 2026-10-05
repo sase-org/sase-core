@@ -24,8 +24,11 @@ impl CatalogLoader {
         let mut result = BTreeMap::new();
         let skill_destination = self.skill_destination_for_macro_dir(dir);
         for path in files_with_extensions(dir, &["md"])? {
-            let Some(mut xprompt) =
-                load_macro_from_markdown(&path, self.accepts_legacy())?
+            let Some(mut xprompt) = load_macro_from_markdown(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -79,8 +82,11 @@ impl CatalogLoader {
             {
                 continue;
             }
-            let Some(mut xprompt) =
-                load_macro_from_markdown(&path, self.accepts_legacy())?
+            let Some(mut xprompt) = load_macro_from_markdown(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -109,8 +115,11 @@ impl CatalogLoader {
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for path in files_with_extensions(dir, &["yml", "yaml"])? {
-            let Some(mut workflow) =
-                load_workflow_from_yaml_file(&path, self.accepts_legacy())?
+            let Some(mut workflow) = load_workflow_from_yaml_file(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -157,8 +166,11 @@ impl CatalogLoader {
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for path in files_with_extensions(dir, &["md"])? {
-            let Some(mut xprompt) =
-                load_macro_from_markdown(&path, self.accepts_legacy())?
+            let Some(mut xprompt) = load_macro_from_markdown(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -229,8 +241,11 @@ impl CatalogLoader {
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for path in files_with_extensions(dir, &["md"])? {
-            let Some(mut xprompt) =
-                load_macro_from_markdown(&path, self.accepts_legacy())?
+            let Some(mut xprompt) = load_macro_from_markdown(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -280,8 +295,11 @@ impl CatalogLoader {
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
         for path in files_with_extensions(dir, &["yml", "yaml"])? {
-            let Some(mut workflow) =
-                load_workflow_from_yaml_file(&path, self.accepts_legacy())?
+            let Some(mut workflow) = load_workflow_from_yaml_file(
+                &path,
+                self.accepts_legacy(),
+                self.input_type_registry(),
+            )?
             else {
                 continue;
             };
@@ -336,6 +354,7 @@ impl CatalogLoader {
                         value,
                         &source,
                         self.accepts_legacy(),
+                        self.input_type_registry(),
                     )?
                     else {
                         continue;
@@ -443,6 +462,7 @@ impl CatalogLoader {
                     value,
                     &source,
                     self.accepts_legacy(),
+                    self.input_type_registry(),
                 )?
                 else {
                     continue;

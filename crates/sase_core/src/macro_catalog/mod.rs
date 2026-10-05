@@ -13,6 +13,7 @@ pub use types::{
     MacroSkillDefinitionCandidateWire, MacroSkillDefinitionRequestWire,
     MacroSkillDefinitionResolutionWire,
     MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION,
+    SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV,
 };
 
 #[cfg(test)]

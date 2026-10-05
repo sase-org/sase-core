@@ -19,6 +19,7 @@ fn macro_input_type_bindings_are_registered() {
         register_macro_input_types(&module).unwrap();
         for name in [
             "macro_input_type_catalog",
+            "load_macro_input_type_registry",
             "resolve_input_type",
             "validate_enum_choices",
             "pyyaml_plain_scalar_is_non_string",
@@ -34,7 +35,7 @@ fn macro_input_type_bindings_are_registered() {
 fn catalog_binding_round_trips_contract_rows() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
-        let result = py_macro_input_type_catalog(py).unwrap();
+        let result = py_macro_input_type_catalog(py, None).unwrap();
         let value = py_to_json_value(result.bind(py)).unwrap();
         let names: Vec<&str> = value
             .as_array()
@@ -192,6 +193,48 @@ fn classify_binding_round_trips_accept_and_reject() {
             }}),
         );
         assert!(py_classify_model_value(py, &request).is_err());
+    });
+}
+
+#[test]
+fn load_registry_binding_round_trips_entries_and_diagnostics() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let dir = std::env::temp_dir().join(format!(
+            "sase-py-registry-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("input_types.yml");
+        std::fs::write(
+            &path,
+            "schema_version: 1\ntypes:\n  audio_edition:\n    description: Length.\n    choices:\n      - brief\n      - full\n",
+        )
+        .unwrap();
+        let request = request_dict(
+            py,
+            &json!({
+                "files": [{
+                    "distribution": "sase-research-artifacts",
+                    "module": "fake_plugin",
+                    "path": path.to_string_lossy(),
+                }],
+            }),
+        );
+        let result = py_load_macro_input_type_registry(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        let names: Vec<&str> = value["registry"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"sase-research-artifacts@audio_edition"));
+        assert!(value["diagnostics"].as_array().unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     });
 }
 

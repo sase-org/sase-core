@@ -88,11 +88,16 @@ pub use file::{
     build_file_history_completion_candidates,
 };
 pub use frontmatter::{
+    diagnostics_with_registry as frontmatter_diagnostics_with_registry,
+    diagnostics_with_registry_and_snapshot as frontmatter_diagnostics_with_registry_and_snapshot,
     field_schema as frontmatter_field_schema,
     input_type_completion_at as frontmatter_input_type_completion_at,
     input_type_schema as frontmatter_input_type_schema,
+    input_type_schema_with_registry as frontmatter_input_type_schema_with_registry,
     validate as validate_frontmatter,
     validate_field as validate_frontmatter_field,
+    validate_field_with_registry as validate_frontmatter_field_with_registry,
+    validate_with_registry as validate_frontmatter_with_registry,
     FrontmatterInputTypeCompletion,
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};

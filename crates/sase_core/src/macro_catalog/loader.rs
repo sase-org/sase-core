@@ -15,6 +15,43 @@ use crate::content_layout::{
 use super::entries::*;
 use super::parsing::*;
 use super::types::*;
+
+fn load_input_type_registry(
+    option_files: &[crate::macro_input_types::PluginInputTypeFileRecord],
+) -> crate::macro_input_types::InputTypeRegistry {
+    let mut files: Vec<crate::macro_input_types::PluginInputTypeFileRecord> =
+        option_files.to_vec();
+    files.extend(plugin_input_type_files_from_env());
+    // Deduplicate by (distribution, path, module) for determinism; the
+    // loader itself dedupes same-file aliases.
+    files.sort_by(|a, b| {
+        (
+            a.distribution.as_str(),
+            a.path.as_str(),
+            a.module.as_str(),
+        )
+            .cmp(&(
+                b.distribution.as_str(),
+                b.path.as_str(),
+                b.module.as_str(),
+            ))
+    });
+    files.dedup();
+    let (registry, _diagnostics) =
+        crate::macro_input_types::load_plugin_input_type_registry(&files);
+    registry
+}
+
+fn plugin_input_type_files_from_env(
+) -> Vec<crate::macro_input_types::PluginInputTypeFileRecord> {
+    let Ok(raw) = env::var(SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<
+        Vec<crate::macro_input_types::PluginInputTypeFileRecord>,
+    >(&raw)
+    .unwrap_or_default()
+}
 #[derive(Debug, Clone)]
 pub(super) struct CatalogLoader {
     pub(super) root_dir: Option<PathBuf>,
@@ -29,6 +66,8 @@ pub(super) struct CatalogLoader {
     pub(super) plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_config_paths: BTreeMap<String, PathBuf>,
+    pub(super) input_type_registry:
+        crate::macro_input_types::InputTypeRegistry,
     pub(super) accept_legacy_xprompt_names: bool,
     pub(super) known_workspaces: BTreeMap<String, PathBuf>,
     pub(super) canonical_project_refs: BTreeMap<String, String>,
@@ -57,6 +96,8 @@ impl Default for CatalogLoader {
             plugin_macro_dirs: BTreeMap::new(),
             plugin_skill_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
+            input_type_registry:
+                crate::macro_input_types::InputTypeRegistry::builtin(),
             accept_legacy_xprompt_names: true,
             known_workspaces: BTreeMap::new(),
             canonical_project_refs: BTreeMap::new(),
@@ -189,6 +230,8 @@ impl CatalogLoader {
             options.plugin_config_paths.clone()
         };
         let known_projects = known_projects(home_dir.as_deref());
+        let input_type_registry =
+            load_input_type_registry(&options.plugin_input_type_files);
         Self {
             root_dir,
             home_dir,
@@ -202,12 +245,19 @@ impl CatalogLoader {
             plugin_macro_dirs,
             plugin_skill_dirs,
             plugin_config_paths,
+            input_type_registry,
             accept_legacy_xprompt_names: options.accept_legacy_xprompt_names,
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
             skill_issues: RefCell::new(Vec::new()),
             memory_issues: RefCell::new(Vec::new()),
         }
+    }
+
+    pub(super) fn input_type_registry(
+        &self,
+    ) -> &crate::macro_input_types::InputTypeRegistry {
+        &self.input_type_registry
     }
 
     pub(super) fn canonical_project(

@@ -19,7 +19,11 @@ pub use pyyaml::{
     pyyaml_plain_scalar_is_non_string, unquoted_plain_scalar_choice_error,
     PyyamlScalarKind,
 };
-pub use registry::InputTypeRegistry;
+pub use registry::{
+    load_plugin_input_type_registry,
+    load_plugin_input_type_registry_with_known, InputTypeRegistry,
+    PluginInputTypeFileRecord, PluginRegistryDiagnostic,
+};
 pub use resolve::{
     resolve_input_type, ResolveInputTypeError, ResolvedInputType,
 };

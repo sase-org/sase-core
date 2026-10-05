@@ -8,8 +8,10 @@ use crate::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use sase_core::macro_input_types::{
-    builtin_catalog, check_input_value, pyyaml_plain_scalar_is_non_string,
-    resolve_input_type, validate_enum_choices, InputTypeRegistry,
+    builtin_catalog, check_input_value,
+    load_plugin_input_type_registry_with_known,
+    pyyaml_plain_scalar_is_non_string, resolve_input_type,
+    validate_enum_choices, InputTypeRegistry, PluginInputTypeFileRecord,
     ResolvedInputType,
 };
 use sase_core::model_validity::{
@@ -25,6 +27,22 @@ struct ResolveInputTypeRequestWire {
     raw: String,
     #[serde(default)]
     plugins: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    registry: Option<InputTypeRegistry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadRegistryRequestWire {
+    #[serde(default)]
+    files: Vec<PluginInputTypeFileRecord>,
+    #[serde(default)]
+    known_distributions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogRequestWire {
+    #[serde(default)]
+    registry: Option<InputTypeRegistry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,8 +59,52 @@ struct CheckInputValueRequestWire {
 
 #[pyfunction]
 #[pyo3(name = "macro_input_type_catalog")]
-fn py_macro_input_type_catalog(py: Python<'_>) -> PyResult<PyObject> {
-    serialize_to_py(py, &builtin_catalog())
+#[pyo3(signature = (request=None))]
+fn py_macro_input_type_catalog(
+    py: Python<'_>,
+    request: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let registry = match request {
+        None => None,
+        Some(request) => {
+            let value = py_to_json_value(request.as_any())?;
+            // Accept either `{registry: {...}}` or a bare registry snapshot.
+            match serde_json::from_value::<CatalogRequestWire>(value.clone())
+            {
+                Ok(wire) if wire.registry.is_some() => wire.registry,
+                _ => serde_json::from_value::<InputTypeRegistry>(value).ok(),
+            }
+        }
+    };
+    match registry {
+        Some(registry) => serialize_to_py(py, &registry.entries()),
+        None => serialize_to_py(py, &builtin_catalog()),
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "load_macro_input_type_registry")]
+fn py_load_macro_input_type_registry(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: LoadRegistryRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid load_macro_input_type_registry dict: {error}"
+            ))
+        })?;
+    let (registry, diagnostics) =
+        load_plugin_input_type_registry_with_known(
+            &request.files,
+            &request.known_distributions,
+        );
+    let response = serde_json::json!({
+        "registry": registry,
+        "diagnostics": diagnostics,
+    });
+    serialize_to_py(py, &response)
 }
 
 #[pyfunction]
@@ -58,7 +120,9 @@ fn py_resolve_input_type(
                 "request is not a valid resolve_input_type dict: {error}"
             ))
         })?;
-    let registry = if request.plugins.is_empty() {
+    let registry = if let Some(snapshot) = request.registry {
+        snapshot
+    } else if request.plugins.is_empty() {
         InputTypeRegistry::builtin()
     } else {
         InputTypeRegistry::with_plugins(request.plugins)
@@ -134,6 +198,10 @@ pub(crate) fn register_macro_input_types(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_macro_input_type_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_load_macro_input_type_registry,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_resolve_input_type, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_enum_choices, m)?)?;
     m.add_function(wrap_pyfunction!(py_pyyaml_plain_scalar_is_non_string, m)?)?;

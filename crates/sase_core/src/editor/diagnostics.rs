@@ -957,6 +957,21 @@ fn parse_local_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
         .collect()
 }
 
+fn registry_from_env() -> InputTypeRegistry {
+    let raw = std::env::var(
+        crate::macro_catalog::SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV,
+    )
+    .unwrap_or_default();
+    if raw.trim().is_empty() {
+        return InputTypeRegistry::builtin();
+    }
+    let files: Vec<crate::macro_input_types::PluginInputTypeFileRecord> =
+        serde_json::from_str(&raw).unwrap_or_default();
+    let (registry, _diagnostics) =
+        crate::macro_input_types::load_plugin_input_type_registry(&files);
+    registry
+}
+
 fn resolve_local_rich(
     raw: &str,
 ) -> (
@@ -965,7 +980,7 @@ fn resolve_local_rich(
     Option<String>,
     Vec<MobileInputChoiceWire>,
 ) {
-    match resolve_input_type("input", raw, &InputTypeRegistry::builtin()) {
+    match resolve_input_type("input", raw, &registry_from_env()) {
         Ok(resolved) => (
             resolved.base,
             resolved.named_type,

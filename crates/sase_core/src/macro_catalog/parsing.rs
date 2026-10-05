@@ -151,6 +151,7 @@ pub(super) fn files_with_extensions(
 pub(super) fn load_macro_from_markdown(
     path: &Path,
     accept_legacy_xprompt_names: bool,
+    registry: &InputTypeRegistry,
 ) -> Result<Option<CatalogMacro>, MacroCatalogLoadError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -172,7 +173,7 @@ pub(super) fn load_macro_from_markdown(
     let inputs = front_matter
         .as_ref()
         .and_then(|data| mapping_get(data, "input"))
-        .map(parse_inputs)
+        .map(|value| parse_inputs(value, registry))
         .unwrap_or_default();
     let tags = front_matter
         .as_ref()
@@ -196,7 +197,12 @@ pub(super) fn load_macro_from_markdown(
     let local_macros = front_matter
         .as_ref()
         .map(|data| {
-            parse_local_macros(data, &source_path, accept_legacy_xprompt_names)
+            parse_local_macros(
+                data,
+                &source_path,
+                accept_legacy_xprompt_names,
+                registry,
+            )
         })
         .transpose()?
         .unwrap_or_default();
@@ -297,6 +303,7 @@ pub(super) fn load_yaml_mapping(
 pub(super) fn load_workflow_from_yaml_file(
     path: &Path,
     accept_legacy_xprompt_names: bool,
+    registry: &InputTypeRegistry,
 ) -> Result<Option<CatalogWorkflow>, MacroCatalogLoadError> {
     let Some(mapping) = load_yaml_mapping(path)? else {
         return Ok(None);
@@ -313,6 +320,7 @@ pub(super) fn load_workflow_from_yaml_file(
         &mapping,
         &path.to_string_lossy(),
         accept_legacy_xprompt_names,
+        registry,
     )?;
     if workflow.steps.is_empty() {
         Ok(None)
@@ -378,6 +386,7 @@ fn parse_local_macros(
     data: &serde_yaml::Mapping,
     source_path: &str,
     accept_legacy_xprompt_names: bool,
+    registry: &InputTypeRegistry,
 ) -> Result<Vec<CatalogMacro>, MacroCatalogLoadError> {
     let mut result = Vec::new();
     for section in
@@ -392,6 +401,7 @@ fn parse_local_macros(
                 value,
                 source_path,
                 accept_legacy_xprompt_names,
+                registry,
             )?
             else {
                 continue;
@@ -407,16 +417,21 @@ fn workflow_from_mapping(
     data: &serde_yaml::Mapping,
     source_path: &str,
     accept_legacy_xprompt_names: bool,
+    registry: &InputTypeRegistry,
 ) -> Result<CatalogWorkflow, MacroCatalogLoadError> {
     let tags = mapping_get(data, "tags")
         .map(parse_tags)
         .unwrap_or_default();
     let description =
         mapping_get(data, "description").and_then(value_as_string);
-    let local_macros =
-        parse_local_macros(data, source_path, accept_legacy_xprompt_names)?;
+    let local_macros = parse_local_macros(
+        data,
+        source_path,
+        accept_legacy_xprompt_names,
+        registry,
+    )?;
     let mut inputs = mapping_get(data, "input")
-        .map(parse_inputs)
+        .map(|value| parse_inputs(value, registry))
         .unwrap_or_default();
     let mut steps = Vec::new();
     if let Some(step_values) =
@@ -497,6 +512,7 @@ pub(super) fn macro_from_config_entry(
     value: &Value,
     source_path: &str,
     accept_legacy_xprompt_names: bool,
+    registry: &InputTypeRegistry,
 ) -> Result<Option<CatalogMacro>, MacroCatalogLoadError> {
     if let Some(content) = value.as_str() {
         return Ok(Some(CatalogMacro {
@@ -523,13 +539,17 @@ pub(super) fn macro_from_config_entry(
     // Nested local helpers declared inside this definition use the same
     // authored-key rules as top-level sections.
     let nested_source = format!("{source_path} macro `{name}`");
-    let local_macros =
-        parse_local_macros(data, &nested_source, accept_legacy_xprompt_names)?;
+    let local_macros = parse_local_macros(
+        data,
+        &nested_source,
+        accept_legacy_xprompt_names,
+        registry,
+    )?;
     Ok(Some(CatalogMacro {
         name: name.to_string(),
         content,
         inputs: mapping_get(data, "input")
-            .map(parse_inputs)
+            .map(|value| parse_inputs(value, registry))
             .unwrap_or_default(),
         local_macros,
         source_path: Some(source_path.to_string()),
@@ -563,7 +583,10 @@ pub(super) fn macro_to_workflow(xprompt: &CatalogMacro) -> CatalogWorkflow {
     }
 }
 
-fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
+fn parse_inputs(
+    value: &Value,
+    registry: &InputTypeRegistry,
+) -> Vec<CatalogInput> {
     if let Some(mapping) = value.as_mapping() {
         return mapping
             .iter()
@@ -578,7 +601,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     named_type,
                     value_role,
                     resolved_choices,
-                } = parse_short_input_value(raw);
+                } = parse_short_input_value(raw, registry);
                 let declared = short_input_choices(raw);
                 let choices = if declared.is_empty() {
                     resolved_choices
@@ -611,9 +634,12 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                 let raw_type =
                     mapping_get(mapping, "type").and_then(value_as_string);
                 let (type_name, named_type, value_role, resolved_choices) =
-                    raw_type.as_deref().map(resolve_rich).unwrap_or_else(
-                        || ("line".to_string(), None, None, Vec::new()),
-                    );
+                    raw_type
+                        .as_deref()
+                        .map(|raw| resolve_rich(raw, registry))
+                        .unwrap_or_else(|| {
+                            ("line".to_string(), None, None, Vec::new())
+                        });
                 let default = mapping_get(mapping, "default");
                 let description = mapping_get(mapping, "description")
                     .and_then(value_as_string);
@@ -657,12 +683,15 @@ struct ShortInputValue {
     resolved_choices: Vec<MobileInputChoiceWire>,
 }
 
-fn parse_short_input_value(value: &Value) -> ShortInputValue {
+fn parse_short_input_value(
+    value: &Value,
+    registry: &InputTypeRegistry,
+) -> ShortInputValue {
     if let Some(mapping) = value.as_mapping() {
         let (type_name, named_type, value_role, resolved_choices) =
             mapping_get(mapping, "type")
                 .and_then(value_as_string)
-                .map(|raw| resolve_rich(&raw))
+                .map(|raw| resolve_rich(&raw, registry))
                 .unwrap_or_else(|| {
                     ("line".to_string(), None, None, Vec::new())
                 });
@@ -683,6 +712,7 @@ fn parse_short_input_value(value: &Value) -> ShortInputValue {
         let (type_name, named_type, value_role, resolved_choices) =
             resolve_rich(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
+                registry,
             );
         ShortInputValue {
             type_name,
@@ -699,13 +729,14 @@ fn parse_short_input_value(value: &Value) -> ShortInputValue {
 
 fn resolve_rich(
     raw: &str,
+    registry: &InputTypeRegistry,
 ) -> (
     String,
     Option<String>,
     Option<String>,
     Vec<MobileInputChoiceWire>,
 ) {
-    match resolve_input_type("input", raw, &InputTypeRegistry::builtin()) {
+    match resolve_input_type("input", raw, registry) {
         Ok(resolved) => (
             resolved.base,
             resolved.named_type,

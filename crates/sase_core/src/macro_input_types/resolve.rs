@@ -98,8 +98,20 @@ fn resolve_qualified(
              installed; run `sase plugin install {canonical}`"
         )));
     }
-    let ids = registry.plugin_type_ids(&canonical).unwrap_or(&[]);
+    if let Some(entry) = registry.plugin_entry(&canonical, id) {
+        return Ok(ResolvedInputType {
+            base: "enum".to_string(),
+            named_type: Some(format!("{canonical}@{id}")),
+            value_role: None,
+            choices: entry.choices.clone(),
+            deprecated: false,
+        });
+    }
+    let ids = registry.plugin_type_ids(&canonical).unwrap_or_default();
     if ids.iter().any(|declared| declared == id) {
+        // Fixture-only path: an ID-only map with no loaded choices stays
+        // compatible for existing callers, but production registries never
+        // use it because the loader populates real entries above.
         return Ok(ResolvedInputType {
             base: "enum".to_string(),
             named_type: Some(format!("{canonical}@{id}")),
@@ -108,7 +120,7 @@ fn resolve_qualified(
             deprecated: false,
         });
     }
-    let suggestions = suggest_closest(id, ids);
+    let suggestions = suggest_closest(id, &ids);
     Err(ResolveInputTypeError::new(format!(
         "plugin `{canonical}` declares no input type `{id}`{}",
         did_you_mean_suffix(&suggestions)

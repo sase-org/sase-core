@@ -303,8 +303,31 @@ pub(super) fn sase_snippet_items(
         .collect()
 }
 
+pub(super) fn current_plugin_registry(
+) -> sase_core::macro_input_types::InputTypeRegistry {
+    let raw = std::env::var(
+        sase_core::macro_catalog::SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV,
+    )
+    .unwrap_or_default();
+    if raw.trim().is_empty() {
+        return sase_core::macro_input_types::InputTypeRegistry::builtin();
+    }
+    let files: Vec<
+        sase_core::macro_input_types::PluginInputTypeFileRecord,
+    > = serde_json::from_str(&raw).unwrap_or_default();
+    let (registry, _diagnostics) =
+        sase_core::macro_input_types::load_plugin_input_type_registry(&files);
+    registry
+}
+
 pub(super) fn advertised_input_types() -> Vec<sase_core::FrontmatterInputType> {
-    sase_core::editor::frontmatter_input_type_schema()
+    advertised_input_types_with_registry(&current_plugin_registry())
+}
+
+pub(super) fn advertised_input_types_with_registry(
+    registry: &sase_core::macro_input_types::InputTypeRegistry,
+) -> Vec<sase_core::FrontmatterInputType> {
+    sase_core::editor::frontmatter_input_type_schema_with_registry(registry)
         .into_iter()
         .filter(|input_type| input_type.advertised)
         .collect()

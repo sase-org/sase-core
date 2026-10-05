@@ -27,6 +27,8 @@ pub(super) const SASE_MACRO_PLUGIN_DIRS_JSON_ENV: &str =
     "SASE_MACRO_PLUGIN_DIRS_JSON";
 pub(super) const SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON";
+pub const SASE_MACRO_PLUGIN_INPUT_TYPES_JSON_ENV: &str =
+    "SASE_MACRO_PLUGIN_INPUT_TYPES_JSON";
 
 /// The packaged Jinja frame that generated `SKILL.md` files are rendered
 /// through. It ships beside the bundled skill sources but is a template, not a
@@ -69,6 +71,8 @@ pub struct MacroCatalogLoadOptions {
     pub plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
+    pub plugin_input_type_files:
+        Vec<crate::macro_input_types::PluginInputTypeFileRecord>,
     pub accept_legacy_xprompt_names: bool,
 }
 
@@ -106,6 +110,7 @@ impl MacroCatalogLoadOptions {
             plugin_macro_dirs: BTreeMap::new(),
             plugin_skill_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
+            plugin_input_type_files: Vec::new(),
             accept_legacy_xprompt_names: default_accept_legacy_xprompt_names(),
         }
     }

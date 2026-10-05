@@ -548,11 +548,55 @@ fn py_frontmatter_field_schema(py: Python<'_>) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+fn input_type_registry_from_py(
+    registry: Option<&Bound<'_, PyDict>>,
+) -> PyResult<sase_core::macro_input_types::InputTypeRegistry> {
+    match registry {
+        None => Ok(sase_core::macro_input_types::InputTypeRegistry::builtin()),
+        Some(request) => {
+            let value = py_to_json_value(request.as_any())?;
+            // Accept either `{registry: {...}}` or a bare snapshot.
+            match serde_json::from_value::<
+                sase_core::macro_input_types::InputTypeRegistry,
+            >(value.clone())
+            {
+                Ok(snapshot) => Ok(snapshot),
+                Err(_) => {
+                    #[derive(Debug, serde::Deserialize)]
+                    struct Wrapper {
+                        #[serde(default)]
+                        registry: Option<
+                            sase_core::macro_input_types::InputTypeRegistry,
+                        >,
+                    }
+                    match serde_json::from_value::<Wrapper>(value) {
+                        Ok(wrapper) if wrapper.registry.is_some() => {
+                            Ok(wrapper.registry.unwrap())
+                        }
+                        _ => Ok(
+                            sase_core::macro_input_types::InputTypeRegistry::builtin(
+                            ),
+                        ),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Return the supported `input` type catalog as a list of dicts.
 #[pyfunction]
 #[pyo3(name = "frontmatter_input_type_schema")]
-fn py_frontmatter_input_type_schema(py: Python<'_>) -> PyResult<PyObject> {
-    let schema = sase_core::editor_frontmatter_input_type_schema();
+#[pyo3(signature = (registry=None))]
+fn py_frontmatter_input_type_schema(
+    py: Python<'_>,
+    registry: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let registry = input_type_registry_from_py(registry)?;
+    let schema =
+        sase_core::editor::frontmatter_input_type_schema_with_registry(
+            &registry,
+        );
     let value = serde_json::to_value(&schema).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -562,8 +606,15 @@ fn py_frontmatter_input_type_schema(py: Python<'_>) -> PyResult<PyObject> {
 /// Validate a whole frontmatter block. Returns LSP-shape diagnostic dicts.
 #[pyfunction]
 #[pyo3(name = "validate_frontmatter")]
-fn py_validate_frontmatter(py: Python<'_>, text: &str) -> PyResult<PyObject> {
-    let diagnostics = sase_core::editor_validate_frontmatter(text);
+#[pyo3(signature = (text, registry=None))]
+fn py_validate_frontmatter(
+    py: Python<'_>,
+    text: &str,
+    registry: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let registry = input_type_registry_from_py(registry)?;
+    let diagnostics =
+        sase_core::editor::validate_frontmatter_with_registry(text, &registry);
     let value = serde_json::to_value(&diagnostics).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
@@ -574,13 +625,18 @@ fn py_validate_frontmatter(py: Python<'_>, text: &str) -> PyResult<PyObject> {
 /// dicts. `value` is the YAML text that would follow `field:`.
 #[pyfunction]
 #[pyo3(name = "validate_frontmatter_field")]
+#[pyo3(signature = (field, value, registry=None))]
 fn py_validate_frontmatter_field(
     py: Python<'_>,
     field: &str,
     value: &str,
+    registry: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
+    let registry = input_type_registry_from_py(registry)?;
     let diagnostics =
-        sase_core::editor_validate_frontmatter_field(field, value);
+        sase_core::editor::validate_frontmatter_field_with_registry(
+            field, value, &registry,
+        );
     let json = serde_json::to_value(&diagnostics).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;
