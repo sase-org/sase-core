@@ -82,8 +82,9 @@ use self::spacer as spacer_util;
 use crate::catalog_cache::{CatalogCache, CatalogFailure};
 use crate::lsp_convert::{
     agent_completion_response, apply_replacement,
-    at_reference_completion_response, completion_response,
-    diagnostic as lsp_diagnostic, finalizer_completion_response,
+    at_reference_completion_response, choice_completion_response,
+    completion_response, diagnostic as lsp_diagnostic,
+    finalizer_completion_response, frontmatter_input_type_completion_response,
     hover as lsp_hover, model_alias_shortcut_completion_response,
     model_completion_response, model_shortcut_completion_response,
     placeholder_completion_response, sase_snippet_completion_item,

@@ -88,9 +88,11 @@ pub use file::{
 };
 pub use frontmatter::{
     field_schema as frontmatter_field_schema,
+    input_type_completion_at as frontmatter_input_type_completion_at,
     input_type_schema as frontmatter_input_type_schema,
     validate as validate_frontmatter,
     validate_field as validate_frontmatter_field,
+    FrontmatterInputTypeCompletion,
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::{hover_at_position, hover_at_position_with_flags};

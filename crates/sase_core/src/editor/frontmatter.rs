@@ -10,8 +10,9 @@ use crate::macro_input_types::{
 
 use super::token::DocumentSnapshot;
 use super::wire::{
-    DiagnosticSeverity, EditorDiagnostic, EditorPosition, FrontmatterFieldKind,
-    FrontmatterFieldSchema, FrontmatterInputType, HoverPayload,
+    DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
+    FrontmatterFieldKind, FrontmatterFieldSchema, FrontmatterInputType,
+    HoverPayload,
 };
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
@@ -275,6 +276,50 @@ pub fn input_type_schema() -> Vec<FrontmatterInputType> {
         .collect()
 }
 
+/// Cursor is in a frontmatter input type-value slot.
+///
+/// The source index recognizes shortform scalars (`env: word`) and
+/// dict/longform `type:` values even when the YAML is incomplete. The
+/// replacement covers the whole current type token so accepting a row
+/// does not leave a suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterInputTypeCompletion {
+    pub replacement_range: EditorRange,
+    pub partial: String,
+}
+
+/// Detect catalog-backed `type` completion in a macro frontmatter block.
+pub fn input_type_completion_at(
+    document: &DocumentSnapshot,
+    position: EditorPosition,
+) -> Option<FrontmatterInputTypeCompletion> {
+    let frontmatter = extract_frontmatter(document.text())?;
+    let cursor = document.position_to_byte_offset(position)?;
+    if cursor < frontmatter.start {
+        return None;
+    }
+    let rel = cursor - frontmatter.start;
+    if rel > frontmatter.text.len() {
+        return None;
+    }
+    let index = FrontmatterSourceIndex::new(frontmatter.text);
+    let (start, end) = type_value_slot_at(&index, rel)?;
+    let abs_start = frontmatter.start + start;
+    let abs_end = frontmatter.start + end;
+    let replacement_range = document.byte_range_to_range(abs_start, abs_end)?;
+    let partial_end = rel.clamp(start, end);
+    let partial = frontmatter
+        .text
+        .get(start..partial_end)
+        .unwrap_or_default()
+        .trim_start_matches(['"', '\''])
+        .to_string();
+    Some(FrontmatterInputTypeCompletion {
+        replacement_range,
+        partial,
+    })
+}
+
 /// Validate a whole frontmatter block, returning diagnostics that match the
 /// macro LSP output exactly (it runs the same engine).
 ///
@@ -413,6 +458,94 @@ impl FrontmatterSourceIndex {
     fn field(&self, key: &str) -> Option<&KeyValueSource> {
         self.fields.iter().find(|field| field.key == key)
     }
+}
+
+fn type_value_slot_at(
+    index: &FrontmatterSourceIndex,
+    cursor: usize,
+) -> Option<(usize, usize)> {
+    type_value_slots(index)
+        .into_iter()
+        .find(|(start, end)| *start <= cursor && cursor <= *end)
+}
+
+fn type_value_slots(index: &FrontmatterSourceIndex) -> Vec<(usize, usize)> {
+    let Some(input) = &index.input else {
+        return Vec::new();
+    };
+    let mut slots = Vec::new();
+    for short in &input.shortform {
+        if let Some(field) = short.field("type") {
+            if let Some(slot) = slot_for_field(&index.text, field) {
+                slots.push(slot);
+            }
+        } else if let Some(slot) = slot_for_shortform_scalar(&index.text, short)
+        {
+            slots.push(slot);
+        }
+    }
+    for long in &input.longform {
+        if let Some(field) = long.field("type") {
+            if let Some(slot) = slot_for_field(&index.text, field) {
+                slots.push(slot);
+            }
+        }
+    }
+    slots
+}
+
+fn slot_for_field(
+    text: &str,
+    field: &KeyValueSource,
+) -> Option<(usize, usize)> {
+    same_line_type_slot(text, field.value_range, field.scalar.as_ref())
+}
+
+fn slot_for_shortform_scalar(
+    text: &str,
+    source: &ShortInputSource,
+) -> Option<(usize, usize)> {
+    if !source.fields.is_empty() {
+        return None;
+    }
+    same_line_type_slot(text, source.value_range, source.type_value.as_ref())
+}
+
+fn same_line_type_slot(
+    text: &str,
+    value_range: (usize, usize),
+    scalar: Option<&ScalarSource>,
+) -> Option<(usize, usize)> {
+    if let Some(scalar) = scalar {
+        return Some(scalar.range);
+    }
+    let line_end = text
+        .get(value_range.0..)
+        .and_then(|rest| rest.find('\n').map(|idx| value_range.0 + idx))
+        .unwrap_or(text.len());
+    let start = value_range.0.min(line_end);
+    let raw = text.get(start..line_end)?;
+    if let Some((rel_start, rel_end, _)) = scalar_value_range(raw) {
+        return Some((start + rel_start, start + rel_end));
+    }
+    let trimmed_start = start + leading_whitespace_len(raw);
+    let rest = text.get(trimmed_start..line_end).unwrap_or("");
+    if rest.is_empty() || rest.starts_with('#') {
+        return Some((trimmed_start, trimmed_start));
+    }
+    if rest.starts_with('{')
+        || rest.starts_with('[')
+        || rest.starts_with('|')
+        || rest.starts_with('>')
+    {
+        return None;
+    }
+    let token_len = rest
+        .find(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '#' | ',' | '}' | ']')
+        })
+        .unwrap_or(rest.len());
+    Some((trimmed_start, trimmed_start + token_len))
 }
 
 fn validate_frontmatter_value(
@@ -2720,6 +2853,94 @@ mod tests {
             string.kind,
             crate::macro_input_types::InputTypeKind::Scalar
         );
+    }
+
+    fn type_slot(
+        text: &str,
+        cursor_needle: &str,
+    ) -> FrontmatterInputTypeCompletion {
+        let document = DocumentSnapshot::new(text);
+        let byte = text
+            .find(cursor_needle)
+            .unwrap_or_else(|| panic!("missing {cursor_needle:?}"))
+            + cursor_needle.len();
+        let position = document.byte_offset_to_position(byte).unwrap();
+        input_type_completion_at(&document, position).unwrap_or_else(|| {
+            panic!("expected type slot at {cursor_needle:?}")
+        })
+    }
+
+    fn type_slot_text(
+        text: &str,
+        completion: &FrontmatterInputTypeCompletion,
+    ) -> String {
+        let document = DocumentSnapshot::new(text);
+        let start = document
+            .position_to_byte_offset(completion.replacement_range.start)
+            .unwrap();
+        let end = document
+            .position_to_byte_offset(completion.replacement_range.end)
+            .unwrap();
+        text[start..end].to_string()
+    }
+
+    #[test]
+    fn completes_shortform_scalar_type_even_when_yaml_is_incomplete() {
+        let text = "---\nname: deploy\ninput:\n  env: wo\n---\nbody\n";
+        let completion = type_slot(text, "env: wo");
+        assert_eq!(completion.partial, "wo");
+        assert_eq!(type_slot_text(text, &completion), "wo");
+    }
+
+    #[test]
+    fn completes_empty_shortform_scalar_type() {
+        let text = "---\nname: deploy\ninput:\n  env: \n---\n";
+        let completion = type_slot(text, "env: ");
+        assert_eq!(completion.partial, "");
+        assert_eq!(type_slot_text(text, &completion), "");
+    }
+
+    #[test]
+    fn completes_longform_type_field() {
+        let text = "---\ninput:\n  - name: env\n    type: en\n---\n";
+        let completion = type_slot(text, "type: en");
+        assert_eq!(completion.partial, "en");
+        assert_eq!(type_slot_text(text, &completion), "en");
+    }
+
+    #[test]
+    fn completes_dict_type_field() {
+        let text = "---\ninput:\n  env:\n    type: \n    choices: [a]\n---\n";
+        let completion = type_slot(text, "type: ");
+        assert_eq!(completion.partial, "");
+    }
+
+    #[test]
+    fn replaces_the_whole_current_type_value() {
+        let text = "---\ninput:\n  env: word\n---\n";
+        let document = DocumentSnapshot::new(text);
+        let byte = text.find("wo").unwrap() + 2;
+        let position = document.byte_offset_to_position(byte).unwrap();
+        let completion = input_type_completion_at(&document, position).unwrap();
+        assert_eq!(completion.partial, "wo");
+        assert_eq!(type_slot_text(text, &completion), "word");
+    }
+
+    #[test]
+    fn does_not_complete_type_names_in_unrelated_yaml_or_body() {
+        let text = "---\nname: deploy\ndescription: word\ninput:\n  env: word\n---\nbody word\n";
+        let document = DocumentSnapshot::new(text);
+        for byte in [
+            text.find("description: word").unwrap() + "description: word".len(),
+            text.find("name: deploy").unwrap() + "name: deploy".len(),
+            text.find("body word").unwrap() + "body word".len(),
+        ] {
+            let position = document.byte_offset_to_position(byte).unwrap();
+            assert!(
+                input_type_completion_at(&document, position).is_none(),
+                "unexpected type slot at byte {byte}"
+            );
+        }
     }
 
     #[test]

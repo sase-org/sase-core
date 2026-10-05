@@ -8,14 +8,18 @@ use sase_core::editor::jinja::{
     JinjaAvailabilityState, JinjaCompletionItemKind, JinjaCompletionItemWire,
     JinjaCompletionSource, JinjaCompletionWire,
 };
+use sase_core::editor::{
+    FrontmatterInputTypeCompletion, MacroChoiceCandidateWire,
+};
 use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
     AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
     AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
     DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
-    EditorTextEdit, HoverPayload, ModelAliasShortcutContextWire,
-    ModelAliasShortcutEditWire, ModelShortcutContextWire,
-    ModelShortcutEditWire, ModelShortcutKind, VcsProjectEntry, VcsRepoEntry,
+    EditorTextEdit, FrontmatterInputType, HoverPayload,
+    ModelAliasShortcutContextWire, ModelAliasShortcutEditWire,
+    ModelShortcutContextWire, ModelShortcutEditWire, ModelShortcutKind,
+    VcsProjectEntry, VcsRepoEntry,
 };
 
 use crate::project_tags::{
@@ -46,6 +50,97 @@ pub fn completion_response(
             .map(|candidate| completion_item(candidate, replacement_range))
             .collect(),
     )
+}
+
+/// Closed-set macro argument choices from the shared candidate builder.
+///
+/// Insertion is the encoded value only. Default is display metadata.
+/// `isIncomplete` is true only when the caller truncated the list.
+pub fn choice_completion_response(
+    candidates: Vec<MacroChoiceCandidateWire>,
+    replacement_range: EditorRange,
+    truncated: bool,
+) -> CompletionResponse {
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: truncated,
+        items: candidates
+            .into_iter()
+            .map(|candidate| {
+                choice_completion_item(candidate, replacement_range)
+            })
+            .collect(),
+    })
+}
+
+fn choice_completion_item(
+    candidate: MacroChoiceCandidateWire,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let documentation = candidate.description.filter(|text| !text.is_empty());
+    CompletionItem {
+        label: candidate.value.clone(),
+        label_details: Some(CompletionItemLabelDetails {
+            detail: candidate.is_default.then(|| " default".to_string()),
+            description: candidate.label.filter(|text| !text.is_empty()),
+        }),
+        kind: Some(CompletionItemKind::ENUM_MEMBER),
+        documentation: documentation.map(markdown_doc),
+        filter_text: Some(candidate.value),
+        sort_text: Some(format!("{:04}", candidate.index)),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: candidate.insertion,
+        })),
+        ..Default::default()
+    }
+}
+
+/// Frontmatter `type:` / shortform type-value items from the shared catalog.
+pub fn frontmatter_input_type_completion_response(
+    types: Vec<FrontmatterInputType>,
+    context: &FrontmatterInputTypeCompletion,
+    truncated: bool,
+) -> CompletionResponse {
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: truncated,
+        items: types
+            .into_iter()
+            .enumerate()
+            .map(|(index, input_type)| {
+                frontmatter_input_type_completion_item(
+                    input_type,
+                    context.replacement_range,
+                    index,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn frontmatter_input_type_completion_item(
+    input_type: FrontmatterInputType,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let documentation = if !input_type.description.is_empty() {
+        Some(input_type.description)
+    } else if !input_type.rule.is_empty() {
+        Some(input_type.rule)
+    } else {
+        None
+    };
+    CompletionItem {
+        label: input_type.name.clone(),
+        kind: Some(CompletionItemKind::ENUM_MEMBER),
+        documentation: documentation.map(markdown_doc),
+        filter_text: Some(input_type.name.clone()),
+        sort_text: Some(format!("{index:04}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: input_type.name,
+        })),
+        ..Default::default()
+    }
 }
 
 /// Render the `@` reference menu as an *incomplete* list whose items all filter
@@ -1349,6 +1444,92 @@ mod tests {
             panic!("expected array response");
         };
         assert!(items[0].text_edit.is_some());
+    }
+
+    #[test]
+    fn choice_items_use_enum_member_full_value_edits_and_metadata() {
+        let range = editor_range(0, 12, 0, 14);
+        let candidates = vec![
+            MacroChoiceCandidateWire {
+                value: "staging".to_string(),
+                insertion: "staging".to_string(),
+                label: Some("Staging".to_string()),
+                description: Some("Pre-prod".to_string()),
+                index: 0,
+                is_default: true,
+            },
+            MacroChoiceCandidateWire {
+                value: "prod".to_string(),
+                insertion: "prod".to_string(),
+                label: Some("Production".to_string()),
+                description: None,
+                index: 1,
+                is_default: false,
+            },
+        ];
+        let CompletionResponse::List(list) =
+            choice_completion_response(candidates, range, false)
+        else {
+            panic!("expected completion list");
+        };
+        assert!(!list.is_incomplete);
+        assert_eq!(list.items[0].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(list.items[0].label, "staging");
+        assert_eq!(list.items[0].filter_text.as_deref(), Some("staging"));
+        assert_eq!(list.items[0].sort_text.as_deref(), Some("0000"));
+        assert_eq!(
+            list.items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("Staging")
+        );
+        assert_eq!(
+            list.items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" default")
+        );
+        let Some(CompletionTextEdit::Edit(edit)) =
+            list.items[0].text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.new_text, "staging");
+        assert_eq!(edit.range.start.character, 12);
+        assert_eq!(edit.range.end.character, 14);
+        let Some(Documentation::MarkupContent(doc)) =
+            list.items[0].documentation.as_ref()
+        else {
+            panic!("expected documentation");
+        };
+        assert!(doc.value.contains("Pre-prod"));
+        assert_eq!(list.items[1].sort_text.as_deref(), Some("0001"));
+        assert!(list.items[1]
+            .label_details
+            .as_ref()
+            .and_then(|details| details.detail.as_ref())
+            .is_none());
+    }
+
+    #[test]
+    fn choice_list_sets_incomplete_when_truncated() {
+        let range = editor_range(0, 0, 0, 0);
+        let candidates = vec![MacroChoiceCandidateWire {
+            value: "staging".to_string(),
+            insertion: "staging".to_string(),
+            label: None,
+            description: None,
+            index: 0,
+            is_default: false,
+        }];
+        let CompletionResponse::List(list) =
+            choice_completion_response(candidates, range, true)
+        else {
+            panic!("expected completion list");
+        };
+        assert!(list.is_incomplete);
     }
 
     fn editor_range(

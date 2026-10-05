@@ -303,26 +303,44 @@ pub(super) fn sase_snippet_items(
         .collect()
 }
 
-pub(super) fn bool_completion_list() -> CompletionList {
-    CompletionList {
-        candidates: ["false", "true"]
-            .into_iter()
-            .map(|value| CompletionCandidate {
-                display: value.to_string(),
-                insertion: value.to_string(),
-                detail: None,
-                documentation: None,
-                is_dir: false,
-                name: value.to_string(),
-                replacement: None,
-                additional_edits: Vec::new(),
-                kind: String::new(),
-                project: String::new(),
-                status: String::new(),
-            })
-            .collect(),
-        shared_extension: String::new(),
+pub(super) fn advertised_input_types() -> Vec<sase_core::FrontmatterInputType> {
+    sase_core::editor::frontmatter_input_type_schema()
+        .into_iter()
+        .filter(|input_type| input_type.advertised)
+        .collect()
+}
+
+pub(super) fn filter_input_types(
+    types: Vec<sase_core::FrontmatterInputType>,
+    partial: &str,
+) -> Vec<sase_core::FrontmatterInputType> {
+    if partial.is_empty() {
+        return types;
     }
+    let lower = partial.to_lowercase();
+    let mut prefix = Vec::new();
+    let mut fuzzy = Vec::new();
+    for input_type in types {
+        let name_match = input_type.name.to_lowercase().starts_with(&lower);
+        let alias_match = input_type
+            .aliases
+            .iter()
+            .any(|alias| alias.to_lowercase().starts_with(&lower));
+        if name_match || alias_match {
+            prefix.push(input_type);
+            continue;
+        }
+        let fuzzy_name =
+            sase_core::editor::fuzzy_match(partial, &input_type.name).is_some();
+        let fuzzy_alias = input_type.aliases.iter().any(|alias| {
+            sase_core::editor::fuzzy_match(partial, alias).is_some()
+        });
+        if fuzzy_name || fuzzy_alias {
+            fuzzy.push(input_type);
+        }
+    }
+    prefix.extend(fuzzy);
+    prefix
 }
 
 pub(super) fn empty_completion_list() -> CompletionList {

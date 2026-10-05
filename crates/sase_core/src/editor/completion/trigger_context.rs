@@ -291,7 +291,10 @@ fn paren_arg_context(
     }
     let body_start = base_end + 1;
     let cursor_in_body = cursor.checked_sub(body_start)?;
-    let body_end = find_matching_paren(text, base_end).unwrap_or(cursor);
+    // Unclosed lists match the argument parser: the body runs to EOF
+    // so a mid-value cursor still replaces the whole current value
+    // (`#deploy(env=staging` at `st|aging` covers `staging`).
+    let body_end = find_matching_paren(text, base_end).unwrap_or(text.len());
     if cursor > body_end {
         return None;
     }

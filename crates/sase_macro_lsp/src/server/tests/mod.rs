@@ -1,6 +1,7 @@
 mod argument_list_continuation;
 mod at_references;
 mod catalog_loading;
+mod choice_completion;
 mod completion;
 mod documents;
 mod jinja;

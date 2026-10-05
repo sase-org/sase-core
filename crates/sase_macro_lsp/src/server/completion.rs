@@ -4,15 +4,15 @@ use super::catalogs::{
     known_at_reference_kinds, load_machine_catalog, load_vcs_project_catalog,
 };
 use super::completion_items::{
-    bool_completion_list, directive_snippet_items, empty_completion_list,
-    empty_completion_response, is_directive_argument_context,
-    is_finalizer_value_context, is_rich_model_value_context,
-    macro_snippet_items, model_alias_keys_from_catalog,
-    model_alias_shortcut_completion, model_completion_list,
-    model_insertion_is_self_ref, model_shortcut_completion,
-    needs_agent_entries, needs_bead_entries, needs_host_catalog,
-    needs_machine_entries, needs_model_alias_keys, ranked_vcs_repo_entries,
-    replacement_ends_line, sase_snippet_items,
+    advertised_input_types, directive_snippet_items, empty_completion_list,
+    empty_completion_response, filter_input_types,
+    is_directive_argument_context, is_finalizer_value_context,
+    is_rich_model_value_context, macro_snippet_items,
+    model_alias_keys_from_catalog, model_alias_shortcut_completion,
+    model_completion_list, model_insertion_is_self_ref,
+    model_shortcut_completion, needs_agent_entries, needs_bead_entries,
+    needs_host_catalog, needs_machine_entries, needs_model_alias_keys,
+    ranked_vcs_repo_entries, replacement_ends_line, sase_snippet_items,
 };
 use super::initialize::enabled_feature_flags;
 use super::state::{
@@ -22,7 +22,10 @@ use super::*;
 use crate::lsp_convert::jinja_completion_response;
 use crate::server::jinja::jinja_scope_for_document;
 use sase_core::editor::jinja::{jinja_completion, JinjaAssistRequestWire};
-use sase_core::editor::vcs_project_entry_targets;
+use sase_core::editor::{
+    frontmatter_input_type_completion_at, macro_argument_choice_candidates,
+    vcs_project_entry_targets,
+};
 use sase_core::snippet_variables::{
     substitute_snippet_variables, PROJECT_SNIPPET_VARIABLE,
 };
@@ -89,6 +92,16 @@ impl MacroLspServer {
         // pop a menu.
         if matches!(trigger_character.as_deref(), Some("{") | Some("|")) {
             return None;
+        }
+
+        if let Some(context) =
+            frontmatter_input_type_completion_at(&document, editor_position)
+        {
+            let types =
+                filter_input_types(advertised_input_types(), &context.partial);
+            return Some(frontmatter_input_type_completion_response(
+                types, &context, false,
+            ));
         }
 
         // Placeholder completion is document-local. Classify it before any
@@ -208,6 +221,14 @@ impl MacroLspServer {
         }
         if context.kind == CompletionContextKind::MacroArgumentAgent {
             return Some(self.agent_completion(&context, &config).await);
+        }
+        if context.kind == CompletionContextKind::MacroArgumentValue {
+            return Some(self.choice_completion(
+                &context,
+                &entries,
+                &document,
+                editor_position,
+            ));
         }
         if is_directive_argument_context(&context) {
             return Some(
@@ -453,6 +474,54 @@ impl MacroLspServer {
             document, context, &entries,
         );
         vcs_repo_completion_response(list, context.replacement_range, &entries)
+    }
+
+    pub(super) fn choice_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        entries: &[MacroAssistEntry],
+        document: &DocumentSnapshot,
+        position: EditorPosition,
+    ) -> CompletionResponse {
+        let Some(hint) = entries
+            .iter()
+            .find(|entry| {
+                Some(entry.name.as_str()) == context.active_macro.as_deref()
+            })
+            .and_then(|entry| {
+                entry.inputs.iter().find(|input| {
+                    Some(input.name.as_str()) == context.active_input.as_deref()
+                })
+            })
+        else {
+            return empty_completion_response();
+        };
+        let Some(start) =
+            document.position_to_byte_offset(context.replacement_range.start)
+        else {
+            return empty_completion_response();
+        };
+        let Some(end) =
+            document.position_to_byte_offset(context.replacement_range.end)
+        else {
+            return empty_completion_response();
+        };
+        let Some(cursor) = document.position_to_byte_offset(position) else {
+            return empty_completion_response();
+        };
+        let current_value = document.text().get(start..end).unwrap_or("");
+        let partial = document
+            .text()
+            .get(start..cursor.clamp(start, end))
+            .unwrap_or("")
+            .trim_start_matches(['"', '\'']);
+        let candidates = macro_argument_choice_candidates(
+            hint,
+            partial,
+            current_value,
+            &context.selected_values,
+        );
+        choice_completion_response(candidates, context.replacement_range, false)
     }
 
     pub(super) async fn agent_completion(
@@ -861,7 +930,9 @@ impl MacroLspServer {
                     )
                 })
                 .unwrap_or_else(empty_completion_list),
-            CompletionContextKind::MacroArgumentValue => bool_completion_list(),
+            CompletionContextKind::MacroArgumentValue => {
+                empty_completion_list()
+            }
             CompletionContextKind::MacroArgumentAgent => {
                 empty_completion_list()
             }
