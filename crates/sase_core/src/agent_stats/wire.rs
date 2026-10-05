@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 7;
+pub const AGENT_STATS_WIRE_SCHEMA_VERSION: u32 = 8;
 
 fn default_bucket_seconds() -> u64 {
     24 * 60 * 60
@@ -62,21 +62,13 @@ pub struct AgentRunStatsRequestWire {
     #[serde(default = "default_work_top_n")]
     pub work_top_n: u32,
     /// Maximum number of ranked macro rows returned.
-    #[serde(
-        default = "default_macro_top_n",
-        rename = "xprompt_top_n",
-        alias = "macro_top_n"
-    )]
+    #[serde(default = "default_macro_top_n")]
     pub macro_top_n: u32,
     /// Maximum number of model/project/partner rows per ranked macro.
-    #[serde(
-        default = "default_macro_breakdown_n",
-        rename = "xprompt_breakdown_top_n",
-        alias = "macro_breakdown_top_n"
-    )]
+    #[serde(default = "default_macro_breakdown_n")]
     pub macro_breakdown_top_n: u32,
     /// Exact macro name to include as an unbounded focused breakdown.
-    #[serde(default, rename = "xprompt_focus", alias = "macro_focus")]
+    #[serde(default)]
     pub macro_focus: Option<String>,
 }
 
@@ -329,16 +321,10 @@ pub struct AgentMacroFocusWire {
 }
 
 /// Launch-boundary macro usage across the selected run window.
-///
-/// The Rust type and fields are macro-named; every serialized key stays on
-/// the legacy `xprompt` spelling.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentMacroStatsWire {
-    #[serde(rename = "runs_with_xprompts", alias = "runs_with_macros")]
     pub runs_with_macros: u64,
-    #[serde(rename = "runs_without_xprompts", alias = "runs_without_macros")]
     pub runs_without_macros: u64,
-    #[serde(rename = "distinct_xprompts", alias = "distinct_macros")]
     pub distinct_macros: u64,
     pub total_references: u64,
     pub rows: Vec<AgentMacroStatsRowWire>,
@@ -443,8 +429,7 @@ pub struct AgentRunStatsResponseWire {
     #[serde(default)]
     pub runners: Option<AgentRunnerStatsWire>,
     /// Launch-boundary macro usage is absent in older response payloads.
-    /// Emits the legacy `xprompts` key.
-    #[serde(default, rename = "xprompts", alias = "macros")]
+    #[serde(default)]
     pub macros: Option<AgentMacroStatsWire>,
     /// In-window rows whose cached `record_json` could not be decoded.
     pub malformed_rows_skipped: u64,

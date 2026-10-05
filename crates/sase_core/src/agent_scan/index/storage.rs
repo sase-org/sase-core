@@ -88,7 +88,7 @@ pub(super) fn open_index_with_busy_timeout(
             workflow_state_sig TEXT,
             plan_path_sig TEXT,
             prompt_steps_sig TEXT,
-            xprompts_sig TEXT,
+            macros_sig TEXT,
             record_json TEXT NOT NULL,
             indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -243,7 +243,7 @@ pub(super) fn open_index_with_busy_timeout(
         migrate_record_json_refresh_v18(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 19) {
-        ensure_agent_artifacts_column(&conn, "xprompts_sig", "TEXT")?;
+        ensure_agent_artifacts_column(&conn, "macros_sig", "TEXT")?;
         migrate_record_json_refresh_v19(&mut conn)?;
     }
     if prior_version.is_none_or(|v| v < 20) {
@@ -295,6 +295,9 @@ pub(super) fn open_index_with_busy_timeout(
     }
     if prior_version.is_none_or(|v| v < 35) {
         migrate_gate_turn_id_column_v35(&mut conn)?;
+    }
+    if prior_version.is_none_or(|v| v < 36) {
+        migrate_macros_sig_column_v36(&mut conn)?;
     }
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS idx_agent_artifacts_agent_session \
@@ -870,6 +873,15 @@ pub(super) fn migrate_record_json_refresh_v34(
     conn: &mut Connection,
 ) -> Result<(), String> {
     conn.execute_batch("").map_err(|e| e.to_string())
+}
+
+/// v36 renames the `xprompts_sig` column to `macros_sig` in place, so an
+/// upgraded index keeps every durable macro/raw-prompt signature instead of
+/// rescanning the artifact archive on open.
+pub(super) fn migrate_macros_sig_column_v36(
+    conn: &mut Connection,
+) -> Result<(), String> {
+    rename_legacy_agent_artifacts_column(conn, "xprompts_sig", "macros_sig")
 }
 
 /// v35 renames the legacy `gate_shell_id` column to `gate_turn_id` in

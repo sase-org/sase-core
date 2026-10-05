@@ -175,10 +175,19 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             {
                 "method": "GET",
+                "path": "/api/v1/macros/catalog",
+                "auth": true,
+                "query": "MobileMacroCatalogRequestWire fields as URL query parameters",
+                "success": "MobileMacroCatalogResponseWire",
+                "errors": ["ApiErrorWire"]
+            },
+            {
+                "method": "GET",
                 "path": "/api/v1/xprompts/catalog",
                 "auth": true,
-                "query": "MobileXpromptCatalogRequestWire fields as URL query parameters",
-                "success": "MobileXpromptCatalogResponseWire",
+                "deprecated": true,
+                "query": "MobileMacroCatalogRequestWire fields as URL query parameters",
+                "success": "MobileMacroCatalogResponseWire",
                 "errors": ["ApiErrorWire"]
             },
             {
@@ -599,7 +608,7 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "workflow": "string|null",
                 "source_path_display": "string|null"
             },
-            "MobileXpromptCatalogRequestWire": {
+            "MobileMacroCatalogRequestWire": {
                 "schema_version": "u32",
                 "project": "string|null",
                 "source": "string|null",
@@ -609,15 +618,15 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "limit": "u32|null",
                 "device_id": "string|null; host-injected before bridge dispatch"
             },
-            "MobileXpromptCatalogResponseWire": {
+            "MobileMacroCatalogResponseWire": {
                 "schema_version": "u32",
                 "result": "MobileHelperResultWire",
                 "context": "MobileHelperProjectContextWire",
-                "entries": "MobileXpromptCatalogEntryWire[]",
-                "stats": "MobileXpromptCatalogStatsWire",
-                "catalog_attachment": "MobileXpromptCatalogAttachmentWire|null"
+                "entries": "MobileMacroCatalogEntryWire[]",
+                "stats": "MobileMacroCatalogStatsWire",
+                "catalog_attachment": "MobileMacroCatalogAttachmentWire|null"
             },
-            "MobileXpromptCatalogEntryWire": {
+            "MobileMacroCatalogEntryWire": {
                 "name": "string",
                 "display_label": "string",
                 "insertion": "string|null; fallback to #<name> when absent",
@@ -628,14 +637,14 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "project": "string|null",
                 "tags": "string[]",
                 "input_signature": "string|null",
-                "inputs": "MobileXpromptInputWire[]; default [] when absent",
+                "inputs": "MobileMacroInputWire[]; default [] when absent",
                 "is_skill": "bool",
                 "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
                 "memory_type": "string|null; `core` or `reference` (legacy `short`/`long` still accepted) for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
                 "content_preview": "string|null",
                 "source_path_display": "string|null"
             },
-            "MobileXpromptInputWire": {
+            "MobileMacroInputWire": {
                 "name": "string",
                 "type": "string",
                 "description": "string|null; default null when absent",
@@ -650,14 +659,14 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "label": "string|null",
                 "description": "string|null; default null when absent"
             },
-            "MobileXpromptCatalogStatsWire": {
+            "MobileMacroCatalogStatsWire": {
                 "total_count": "u64",
                 "project_count": "u64",
                 "skill_count": "u64",
                 "memory_count": "u64; default 0 when absent",
                 "pdf_requested": "bool"
             },
-            "MobileXpromptCatalogAttachmentWire": {
+            "MobileMacroCatalogAttachmentWire": {
                 "display_name": "string",
                 "content_type": "string|null",
                 "byte_size": "u64|null",

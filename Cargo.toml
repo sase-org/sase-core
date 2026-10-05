@@ -5,7 +5,7 @@ members = [
     "crates/sase_core_py",
     "crates/sase_gateway",
     "crates/sase_workspace_hack",
-    "crates/sase_xprompt_lsp",
+    "crates/sase_macro_lsp",
 ]
 
 [workspace.package]

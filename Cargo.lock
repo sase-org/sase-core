@@ -1486,6 +1486,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sase_macro_lsp"
+version = "0.36.5"
+dependencies = [
+ "lsp-types",
+ "sase_core",
+ "sase_workspace_hack",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower-lsp-server",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "sase_workspace_hack"
 version = "0.1.0"
 dependencies = [
@@ -1516,22 +1532,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sase_xprompt_lsp"
-version = "0.36.5"
-dependencies = [
- "lsp-types",
- "sase_core",
- "sase_workspace_hack",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower-lsp-server",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

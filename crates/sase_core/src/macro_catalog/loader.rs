@@ -287,7 +287,7 @@ impl CatalogLoader {
                 skill_name: xprompt.skill_name,
                 memory_type: xprompt.memory_type,
                 content: xprompt.content,
-                definition_section: DefinitionSection::Xprompts,
+                definition_section: DefinitionSection::Macros,
             });
         }
 
@@ -321,7 +321,7 @@ impl CatalogLoader {
                     skill_name: xprompt.skill_name,
                     memory_type: xprompt.memory_type,
                     content: xprompt.content,
-                    definition_section: DefinitionSection::Xprompts,
+                    definition_section: DefinitionSection::Macros,
                 });
             }
         }
@@ -376,7 +376,7 @@ impl CatalogLoader {
                             skill_name: xprompt.skill_name,
                             memory_type: xprompt.memory_type,
                             content: xprompt.content,
-                            definition_section: DefinitionSection::Xprompts,
+                            definition_section: DefinitionSection::Macros,
                         }
                     })
                 })

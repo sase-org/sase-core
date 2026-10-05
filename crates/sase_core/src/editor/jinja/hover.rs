@@ -80,7 +80,7 @@ fn hover_variable(
         !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
     }) {
         let _ = number;
-        if req.scope == JinjaScopeKind::Xprompt {
+        if req.scope == JinjaScopeKind::Macro {
             let index = token[1..].to_string();
             let summary = format!("Positional argument {index}.");
             // Shadow note when a builtin of the same name exists
@@ -346,7 +346,7 @@ mod tests {
     fn hovers_a_conditional_with_hint() {
         let text = "{{ n }}";
         let hover =
-            hover_at(text, text.find('n').unwrap(), JinjaScopeKind::Xprompt)
+            hover_at(text, text.find('n').unwrap(), JinjaScopeKind::Macro)
                 .unwrap();
         assert!(hover.markdown.contains("**n**"));
         assert!(hover.markdown.contains("%repeat"));

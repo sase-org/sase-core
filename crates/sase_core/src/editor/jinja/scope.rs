@@ -25,13 +25,13 @@ use crate::editor::exclusion::{frontmatter_block_len, position_in_ranges};
 use crate::editor::frontmatter::value_is_truthy;
 use crate::prompt_literal_zone_ranges;
 
-/// Prompt scope (a top-level agent prompt) or xprompt scope (an xprompt
+/// Prompt scope (a top-level agent prompt) or macro scope (a macro
 /// definition body). The assist phase reads this from the request wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JinjaScopeKind {
     Prompt,
-    Xprompt,
+    Macro,
 }
 
 /// One declared `input:` / `inputs:` entry from frontmatter.

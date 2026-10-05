@@ -41,22 +41,14 @@ pub enum CompletionContextKind {
     Placeholder,
     ArtifactRefKind,
     ArtifactRefPayload,
-    Xprompt,
+    Macro,
     SlashSkill,
     FilePath,
     FileHistory,
-    #[serde(rename = "xprompt_argument_name", alias = "macro_argument_name")]
     MacroArgumentName,
-    #[serde(rename = "xprompt_argument_value", alias = "macro_argument_value")]
     MacroArgumentValue,
-    #[serde(rename = "xprompt_argument_path", alias = "macro_argument_path")]
     MacroArgumentPath,
-    #[serde(rename = "xprompt_argument_agent", alias = "macro_argument_agent")]
     MacroArgumentAgent,
-    #[serde(
-        rename = "xprompt_argument_type_hint",
-        alias = "macro_argument_type_hint"
-    )]
     MacroArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,
@@ -97,7 +89,7 @@ pub struct CompletionContext {
     pub kind: CompletionContextKind,
     pub token: Option<TokenInfo>,
     #[serde(default)]
-    pub active_xprompt: Option<String>,
+    pub active_macro: Option<String>,
     #[serde(default)]
     pub active_input: Option<String>,
     #[serde(default)]
@@ -446,7 +438,6 @@ pub struct MacroAssistEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MacroArgumentSource {
-    #[serde(rename = "xprompt", alias = "macro")]
     Macro,
     Directive,
 }

@@ -254,7 +254,7 @@ pub(super) fn select_terminalization_candidates(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig FROM agent_artifacts \
+         prompt_steps_sig, macros_sig FROM agent_artifacts \
          WHERE has_done_marker = 0 \
            AND has_running_marker = 0 \
            AND has_waiting_marker = 0 \
@@ -515,6 +515,6 @@ pub(super) fn refresh_stale_rows_sql(where_sql: &str) -> String {
         "SELECT artifact_dir, projects_root, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig FROM agent_artifacts {where_sql}"
+         prompt_steps_sig, macros_sig FROM agent_artifacts {where_sql}"
     )
 }

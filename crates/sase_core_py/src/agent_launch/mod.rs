@@ -721,15 +721,9 @@ fn py_proc_dispatch_wire_schema_version() -> u32 {
 }
 
 #[pyfunction]
-#[pyo3(name = "xprompt_proc_origin")]
-fn py_xprompt_proc_origin() -> &'static str {
-    PROMPT_PROC_ORIGIN
-}
-
-#[pyfunction]
 #[pyo3(name = "prompt_proc_origin")]
 fn py_prompt_proc_origin() -> &'static str {
-    py_xprompt_proc_origin()
+    PROMPT_PROC_ORIGIN
 }
 
 #[pyfunction]
@@ -1195,7 +1189,6 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_build_condition_context, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_launch_condition, m)?)?;
     m.add_function(wrap_pyfunction!(py_proc_dispatch_wire_schema_version, m)?)?;
-    m.add_function(wrap_pyfunction!(py_xprompt_proc_origin, m)?)?;
     m.add_function(wrap_pyfunction!(py_prompt_proc_origin, m)?)?;
     m.add_function(wrap_pyfunction!(py_prepare_proc_script, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_proc_duration_seconds, m)?)?;

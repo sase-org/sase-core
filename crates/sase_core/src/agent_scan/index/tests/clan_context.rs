@@ -687,7 +687,7 @@ fn schema_v18_upgrade_adds_xprompts_signature_column() {
     {
         let conn = Connection::open(&index).unwrap();
         conn.execute_batch(
-            "ALTER TABLE agent_artifacts DROP COLUMN xprompts_sig;
+            "ALTER TABLE agent_artifacts DROP COLUMN macros_sig;
              INSERT OR REPLACE INTO meta(key, value)
              VALUES ('schema_version', '18');",
         )
@@ -703,7 +703,8 @@ fn schema_v18_upgrade_adds_xprompts_signature_column() {
         let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
         rows.collect::<Result<Vec<_>, _>>().unwrap()
     };
-    assert!(columns.iter().any(|column| column == "xprompts_sig"));
+    // v18 adds the signature column and v36 renames it to `macros_sig`.
+    assert!(columns.iter().any(|column| column == "macros_sig"));
     let version: String = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",

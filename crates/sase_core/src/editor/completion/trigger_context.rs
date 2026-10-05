@@ -59,7 +59,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
                 byte_start: placeholder.prefix_byte_start,
                 byte_end: placeholder.cursor_byte,
             }),
-            active_xprompt: None,
+            active_macro: None,
             active_input: None,
             directive_name: None,
             selected_values: Vec::new(),
@@ -115,7 +115,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
             Some(CompletionContext {
                 kind: CompletionContextKind::FileHistory,
                 token: None,
-                active_xprompt: None,
+                active_macro: None,
                 active_input: None,
                 directive_name: None,
                 selected_values: Vec::new(),
@@ -127,7 +127,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
             })
         }
         Some(token) if is_macro_like_token(&token.text) => {
-            Some(context_for_token(CompletionContextKind::Xprompt, token))
+            Some(context_for_token(CompletionContextKind::Macro, token))
         }
         Some(token) if is_slash_skill_like_token(&token.text) => {
             Some(context_for_token(CompletionContextKind::SlashSkill, token))
@@ -344,7 +344,7 @@ fn arg_context(
             byte_start: target.token_start,
             byte_end: cursor,
         }),
-        active_xprompt: Some(entry.name.clone()),
+        active_macro: Some(entry.name.clone()),
         active_input: (!target.active_input.name.is_empty())
             .then_some(target.active_input.name),
         directive_name: None,
@@ -406,7 +406,7 @@ fn context_for_token(
         kind,
         replacement_range: token.range,
         token: Some(token),
-        active_xprompt: None,
+        active_macro: None,
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),

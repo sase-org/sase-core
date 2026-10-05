@@ -75,18 +75,18 @@ fn resolves_xprompt_skill_definition_sources() {
 fn catalog_payloads_without_memory_fields_still_deserialize() {
     // Helper payloads written before xprompt memories existed omit the
     // additive fields entirely.
-    let entry: MobileXpromptCatalogEntryWire = serde_json::from_str(
+    let entry: MobileMacroCatalogEntryWire = serde_json::from_str(
             r##"{"name":"foo","display_label":"foo","insertion":"#foo","reference_prefix":"#","kind":"xprompt","description":null,"source_bucket":"config","project":null,"tags":[],"input_signature":null,"is_skill":false,"content_preview":null,"source_path_display":null}"##,
         )
         .unwrap();
     assert_eq!(entry.memory_type, None);
-    let stats: MobileXpromptCatalogStatsWire = serde_json::from_str(
+    let stats: MobileMacroCatalogStatsWire = serde_json::from_str(
             r#"{"total_count":1,"project_count":0,"skill_count":0,"pdf_requested":false}"#,
         )
         .unwrap();
     assert_eq!(stats.memory_count, 0);
     // A memory entry serializes its tier as the current canonical value.
-    let rendered = serde_json::to_value(MobileXpromptCatalogEntryWire {
+    let rendered = serde_json::to_value(MobileMacroCatalogEntryWire {
         memory_type: Some(MemoryTierWire::Reference),
         ..entry
     })
@@ -131,7 +131,7 @@ fn pseudo_sources_do_not_get_definition_paths() {
         skill_name: None,
         memory_type: None,
         content: "body".to_string(),
-        definition_section: DefinitionSection::Xprompts,
+        definition_section: DefinitionSection::Macros,
     };
 
     assert_eq!(structured_entry(&entry, &loader).definition_path, None);

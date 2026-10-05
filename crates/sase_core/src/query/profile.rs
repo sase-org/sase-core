@@ -247,8 +247,8 @@ struct CompiledQueryProfileWire {
     predicates: Vec<String>,
     #[serde(default)]
     any_special: bool,
-    #[serde(default, alias = "shorthands")]
-    macros: Vec<QueryShorthandSpec>,
+    #[serde(default, alias = "macros")] // legacy xprompt spelling
+    shorthands: Vec<QueryShorthandSpec>,
     #[serde(default)]
     free_text_hint: String,
     #[serde(default)]
@@ -330,7 +330,7 @@ fn compile_profile(
         }
     }
 
-    let mut shorthands = wire.macros.clone();
+    let mut shorthands = wire.shorthands.clone();
     shorthands.sort_by(|left, right| {
         left.trigger
             .cmp(&right.trigger)
@@ -612,7 +612,7 @@ fn canonical_payload(
     );
     payload.insert("any_special".into(), Value::Bool(any_special));
     payload.insert(
-        "macros".into(),
+        "shorthands".into(),
         Value::Array(
             shorthands
                 .iter()
@@ -1014,34 +1014,35 @@ mod tests {
             std::slice::from_ref(&shorthand),
             "",
         );
-        let legacy_map = match payload.clone() {
+        let canonical_map = match payload.clone() {
             Value::Object(map) => map,
             other => panic!("expected object, got {other}"),
         };
         assert!(
-            legacy_map.contains_key("macros"),
-            "canonical payload must still emit `macros`"
+            canonical_map.contains_key("shorthands"),
+            "canonical payload must emit `shorthands`"
         );
-        let legacy =
-            CompiledQueryProfile::from_wire(&Value::Object(legacy_map))
+        let canonical =
+            CompiledQueryProfile::from_wire(&Value::Object(canonical_map))
                 .unwrap();
-        let mut alias_map = match payload {
+        let mut legacy_map = match payload {
             Value::Object(mut map) => {
-                let macros_value = map.remove("macros").unwrap();
-                map.insert("shorthands".into(), macros_value);
+                let shorthands_value = map.remove("shorthands").unwrap();
+                map.insert("macros".into(), shorthands_value); // legacy xprompt spelling
                 map
             }
             other => panic!("expected object, got {other}"),
         };
-        // Digest is computed over the canonical `macros` payload, so drop
-        // any digest before loading the alias spelling.
-        alias_map.remove("digest");
-        let aliased =
-            CompiledQueryProfile::from_wire(&Value::Object(alias_map)).unwrap();
-        assert_eq!(aliased.digest, legacy.digest);
-        assert_eq!(aliased.shorthands, legacy.shorthands);
+        // Digest is computed over the canonical `shorthands` payload, so drop
+        // any digest before loading the legacy spelling.
+        legacy_map.remove("digest");
+        let legacy =
+            CompiledQueryProfile::from_wire(&Value::Object(legacy_map))
+                .unwrap();
+        assert_eq!(legacy.digest, canonical.digest);
+        assert_eq!(legacy.shorthands, canonical.shorthands);
         assert_eq!(
-            aliased.shorthand_target('%', 'd'),
+            legacy.shorthand_target('%', 'd'),
             Some(("status", "DRAFT"))
         );
     }

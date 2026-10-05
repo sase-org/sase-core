@@ -350,7 +350,9 @@ pub enum ArtifactRefDocumentTargetKindWire {
     ArtifactRef,
     Url,
     FilePath,
-    XpromptSkill,
+    #[serde(rename = "macro_skill", alias = "xprompt_skill")]
+    // legacy xprompt spelling
+    MacroSkill,
 }
 
 impl ArtifactRefDocumentTargetKindWire {
@@ -359,7 +361,7 @@ impl ArtifactRefDocumentTargetKindWire {
             Self::ArtifactRef => "artifact_ref",
             Self::Url => "url",
             Self::FilePath => "file_path",
-            Self::XpromptSkill => "xprompt_skill",
+            Self::MacroSkill => "macro_skill",
         }
     }
 }

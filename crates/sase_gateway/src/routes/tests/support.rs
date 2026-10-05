@@ -20,8 +20,8 @@ use crate::wire::{
     MobileAgentResumeOptionsResponseWire, MobileAgentRetryResultWire,
     MobileAgentTextLaunchRequestWire, MobileBeadListResponseWire,
     MobileBeadShowResponseWire, MobileChangeSpecTagListResponseWire,
-    MobileUpdateStartResponseWire, MobileUpdateStatusResponseWire,
-    MobileXpromptCatalogResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
+    MobileMacroCatalogResponseWire, MobileUpdateStartResponseWire,
+    MobileUpdateStatusResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 use axum::body::to_bytes;
@@ -765,11 +765,11 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
                 }],
                 total_count: 1,
             },
-            xprompt_catalog_response: MobileXpromptCatalogResponseWire {
+            macro_catalog_response: MobileMacroCatalogResponseWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 result: result.clone(),
                 context: context.clone(),
-                entries: vec![crate::wire::MobileXpromptCatalogEntryWire {
+                entries: vec![crate::wire::MobileMacroCatalogEntryWire {
                     name: "gh".to_string(),
                     display_label: "GitHub workflow".to_string(),
                     insertion: Some("#!gh".to_string()),
@@ -780,7 +780,7 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
                     project: Some("sase".to_string()),
                     tags: vec!["changespec".to_string()],
                     input_signature: Some("topic".to_string()),
-                    inputs: vec![crate::wire::MobileXpromptInputWire {
+                    inputs: vec![crate::wire::MobileMacroInputWire {
                         name: "topic".to_string(),
                         r#type: "word".to_string(),
                         description: Some("Workflow topic".to_string()),
@@ -800,7 +800,7 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
                     definition_path: None,
                     definition_range: None,
                 }],
-                stats: crate::wire::MobileXpromptCatalogStatsWire {
+                stats: crate::wire::MobileMacroCatalogStatsWire {
                     total_count: 1,
                     project_count: 1,
                     skill_count: 0,
@@ -951,7 +951,7 @@ case "$operation" in
   changespec-tags)
 printf '%s\n' '{"schema_version":1,"result":{"status":"partial_success","message":"loaded tags","warnings":[],"skipped":[{"target":"sase/skipped","reason":"could not detect workflow type"}],"partial_failure_count":1},"context":{"project":"sase","scope":"explicit"},"tags":[{"tag":"#gh:feature","project":"sase","changespec":"feature","title":null,"status":"WIP","workflow":"gh","source_path_display":null}],"total_count":1}'
 ;;
-  xprompt-catalog)
+  macro-catalog)
 printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":"loaded helper records","warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"name":"bd/work_phase_bead","display_label":"bd/work_phase_bead","insertion":"#bd/work_phase_bead","reference_prefix":"#","kind":"xprompt","description":null,"source_bucket":"built_in","project":null,"tags":["work_phase_bead"],"input_signature":"(bead_id: word)","inputs":[{"name":"bead_id","type":"word","required":true,"default_display":null,"position":0}],"is_skill":false,"content_preview":"Complete a phase bead.","source_path_display":"default_config"}],"stats":{"total_count":1,"project_count":0,"skill_count":0,"pdf_requested":false},"catalog_attachment":null}'
 ;;
   update-start)

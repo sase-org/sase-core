@@ -71,7 +71,7 @@ pub fn jinja_scope_variables(
     // Dynamic positional `_1` .. `_k`.
     let input_count = scope.inputs.len();
     let positional_count = input_count.max(1);
-    if req.scope == JinjaScopeKind::Xprompt {
+    if req.scope == JinjaScopeKind::Macro {
         if seen.insert("_args".to_string()) {
             // `_args` already pushed via catalog when available; keep order.
         }
@@ -113,7 +113,7 @@ pub fn jinja_scope_variables(
     }
     JinjaScopeVariablesWire {
         known,
-        positional_pattern: req.scope == JinjaScopeKind::Xprompt,
+        positional_pattern: req.scope == JinjaScopeKind::Macro,
         unavailable,
     }
 }

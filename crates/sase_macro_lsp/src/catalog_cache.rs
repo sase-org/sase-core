@@ -1,0 +1,1679 @@
+use std::{
+    collections::{BTreeSet, HashMap},
+    env,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
+
+use sase_core::editor::wire::MacroAssistEntry;
+use sase_core::macro_catalog::{
+    load_editor_macro_catalog, MacroCatalogLoadOptions,
+};
+use sase_core::{
+    editor_assist_entries_from_catalog, load_editor_snippet_catalog,
+    AgentCatalogRequest, AgentCatalogResponse, CommandHelperHostBridge,
+    DynHelperHostBridge, EditorMacroCatalogRequestWire,
+    EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
+    FinalizerCatalogRequest, FinalizerCatalogResponse, HelperHostBridge,
+    HostBridgeError, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    FINALIZER_CATALOG_SCHEMA_VERSION,
+};
+use tokio::time;
+use tracing::warn;
+
+const COMPLETION_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPLICIT_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const CACHE_TTL: Duration = Duration::from_secs(30);
+const VCS_REPO_CACHE_TTL: Duration = Duration::from_secs(45);
+const SASE_MACRO_PLUGIN_DIRS_JSON_ENV: &str = "SASE_MACRO_PLUGIN_DIRS_JSON";
+const SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
+    "SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogFailure {
+    pub class: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCatalog {
+    entries: Arc<Vec<MacroAssistEntry>>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedSnippetCatalog {
+    entries: Arc<Vec<EditorSnippetEntryWire>>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedVcsRepoCatalog {
+    response: Arc<VcsRepoCatalogResponse>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAgentCatalog {
+    response: Arc<AgentCatalogResponse>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedFinalizerCatalog {
+    response: Arc<FinalizerCatalogResponse>,
+    refreshed_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct CatalogCache {
+    bridge: DynHelperHostBridge,
+    prefer_rust_catalog: bool,
+    plugin_metadata_present: bool,
+    catalogs: RwLock<HashMap<String, CachedCatalog>>,
+    snippet_catalogs: RwLock<HashMap<String, CachedSnippetCatalog>>,
+    vcs_repo_catalogs: RwLock<HashMap<(String, String), CachedVcsRepoCatalog>>,
+    agent_catalogs: RwLock<HashMap<String, CachedAgentCatalog>>,
+    finalizer_catalogs: RwLock<HashMap<String, CachedFinalizerCatalog>>,
+    warned_failure_classes: RwLock<BTreeSet<String>>,
+}
+
+impl CatalogCache {
+    pub fn command_backed() -> Self {
+        Self::new_with_rust_catalog(Arc::new(CommandHelperHostBridge::new(
+            CommandHelperHostBridge::default_command(),
+        )))
+    }
+
+    pub fn new(bridge: Arc<dyn HelperHostBridge>) -> Self {
+        Self::new_inner(bridge, false)
+    }
+
+    fn new_with_rust_catalog(bridge: Arc<dyn HelperHostBridge>) -> Self {
+        Self::new_inner(bridge, true)
+    }
+
+    fn new_inner(
+        bridge: Arc<dyn HelperHostBridge>,
+        prefer_rust_catalog: bool,
+    ) -> Self {
+        Self {
+            bridge: DynHelperHostBridge::new(bridge),
+            prefer_rust_catalog,
+            plugin_metadata_present: plugin_metadata_env_present(),
+            catalogs: RwLock::new(HashMap::new()),
+            snippet_catalogs: RwLock::new(HashMap::new()),
+            vcs_repo_catalogs: RwLock::new(HashMap::new()),
+            agent_catalogs: RwLock::new(HashMap::new()),
+            finalizer_catalogs: RwLock::new(HashMap::new()),
+            warned_failure_classes: RwLock::new(BTreeSet::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_rust_catalog_and_plugin_metadata(
+        bridge: Arc<dyn HelperHostBridge>,
+        plugin_metadata_present: bool,
+    ) -> Self {
+        Self {
+            bridge: DynHelperHostBridge::new(bridge),
+            prefer_rust_catalog: true,
+            plugin_metadata_present,
+            catalogs: RwLock::new(HashMap::new()),
+            snippet_catalogs: RwLock::new(HashMap::new()),
+            vcs_repo_catalogs: RwLock::new(HashMap::new()),
+            agent_catalogs: RwLock::new(HashMap::new()),
+            finalizer_catalogs: RwLock::new(HashMap::new()),
+            warned_failure_classes: RwLock::new(BTreeSet::new()),
+        }
+    }
+
+    pub fn policy_key(base_key: &str, accept_legacy: bool) -> String {
+        format!("{base_key}|legacy={accept_legacy}")
+    }
+
+    pub fn cached_entries(
+        &self,
+        key: &str,
+    ) -> Option<Arc<Vec<MacroAssistEntry>>> {
+        let catalogs = self.catalogs.read().ok()?;
+        catalogs.get(key).map(|catalog| catalog.entries.clone())
+    }
+
+    pub fn cached_entries_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> Option<Arc<Vec<MacroAssistEntry>>> {
+        self.cached_entries(&Self::policy_key(base_key, accept_legacy))
+    }
+
+    pub fn stale_or_missing(&self, key: &str) -> bool {
+        let Ok(catalogs) = self.catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(key)
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub fn stale_or_missing_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> bool {
+        self.stale_or_missing(&Self::policy_key(base_key, accept_legacy))
+    }
+
+    pub fn cached_snippet_entries(
+        &self,
+        key: &str,
+    ) -> Option<Arc<Vec<EditorSnippetEntryWire>>> {
+        let catalogs = self.snippet_catalogs.read().ok()?;
+        catalogs.get(key).map(|catalog| catalog.entries.clone())
+    }
+
+    pub fn cached_snippet_entries_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> Option<Arc<Vec<EditorSnippetEntryWire>>> {
+        self.cached_snippet_entries(&Self::policy_key(base_key, accept_legacy))
+    }
+
+    pub fn snippets_stale_or_missing(&self, key: &str) -> bool {
+        let Ok(catalogs) = self.snippet_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(key)
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub fn snippets_stale_or_missing_with_policy(
+        &self,
+        base_key: &str,
+        accept_legacy: bool,
+    ) -> bool {
+        self.snippets_stale_or_missing(&Self::policy_key(
+            base_key,
+            accept_legacy,
+        ))
+    }
+
+    pub fn cached_vcs_repo_catalog(
+        &self,
+        workflow: &str,
+        namespace: &str,
+    ) -> Option<Arc<VcsRepoCatalogResponse>> {
+        let catalogs = self.vcs_repo_catalogs.read().ok()?;
+        catalogs
+            .get(&(workflow.to_string(), namespace.to_string()))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn vcs_repo_catalog_stale_or_missing(
+        &self,
+        workflow: &str,
+        namespace: &str,
+    ) -> bool {
+        let Ok(catalogs) = self.vcs_repo_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&(workflow.to_string(), namespace.to_string()))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= VCS_REPO_CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub async fn refresh_for_completion(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        self.refresh_for_completion_with_policy(key, project, root_dir, true)
+            .await
+    }
+
+    pub async fn refresh_for_completion_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh(
+            key,
+            project,
+            root_dir,
+            COMPLETION_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
+    }
+
+    pub async fn refresh_explicit(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        self.refresh_explicit_with_policy(key, project, root_dir, true)
+            .await
+    }
+
+    pub async fn refresh_explicit_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh(
+            key,
+            project,
+            root_dir,
+            EXPLICIT_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
+    }
+
+    pub async fn refresh_snippets_for_completion(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        self.refresh_snippets_for_completion_with_policy(
+            key, project, root_dir, true,
+        )
+        .await
+    }
+
+    pub async fn refresh_snippets_for_completion_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        match self
+            .refresh_snippets(
+                key.clone(),
+                project,
+                root_dir,
+                COMPLETION_REFRESH_TIMEOUT,
+                accept_legacy,
+            )
+            .await
+        {
+            Ok(entries) => Ok(entries),
+            Err(error) => self.cached_snippet_entries(&key).ok_or(error),
+        }
+    }
+
+    pub async fn refresh_snippets_explicit(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        self.refresh_snippets_explicit_with_policy(key, project, root_dir, true)
+            .await
+    }
+
+    pub async fn refresh_snippets_explicit_with_policy(
+        &self,
+        base_key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let key = Self::policy_key(&base_key, accept_legacy);
+        self.refresh_snippets(
+            key,
+            project,
+            root_dir,
+            EXPLICIT_REFRESH_TIMEOUT,
+            accept_legacy,
+        )
+        .await
+    }
+
+    pub async fn refresh_vcs_repo_for_completion(
+        &self,
+        workflow: String,
+        namespace: String,
+    ) -> Result<Arc<VcsRepoCatalogResponse>, CatalogFailure> {
+        match self
+            .refresh_vcs_repo_catalog(
+                workflow.clone(),
+                namespace.clone(),
+                COMPLETION_REFRESH_TIMEOUT,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => self
+                .cached_vcs_repo_catalog(&workflow, &namespace)
+                .ok_or(error),
+        }
+    }
+
+    pub fn cached_agent_catalog(
+        &self,
+        project: Option<&str>,
+    ) -> Option<Arc<AgentCatalogResponse>> {
+        let catalogs = self.agent_catalogs.read().ok()?;
+        catalogs
+            .get(&agent_catalog_key(project))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn agent_catalog_stale_or_missing(
+        &self,
+        project: Option<&str>,
+    ) -> bool {
+        let Ok(catalogs) = self.agent_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&agent_catalog_key(project))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub async fn agent_catalog_for_completion(
+        &self,
+        project: Option<String>,
+    ) -> Result<Arc<AgentCatalogResponse>, CatalogFailure> {
+        if !self.agent_catalog_stale_or_missing(project.as_deref()) {
+            if let Some(response) =
+                self.cached_agent_catalog(project.as_deref())
+            {
+                return Ok(response);
+            }
+        }
+        match self.refresh_agent_catalog(project.clone()).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.cached_agent_catalog(project.as_deref()).ok_or(error)
+            }
+        }
+    }
+
+    async fn refresh_agent_catalog(
+        &self,
+        project: Option<String>,
+    ) -> Result<Arc<AgentCatalogResponse>, CatalogFailure> {
+        let request = AgentCatalogRequest {
+            schema_version: 1,
+            project: project.clone(),
+        };
+        let bridge = self.bridge.clone();
+        let task =
+            tokio::task::spawn_blocking(move || bridge.agent_catalog(&request));
+        let response = match time::timeout(COMPLETION_REFRESH_TIMEOUT, task)
+            .await
+        {
+            Ok(Ok(Ok(response))) => Arc::new(response),
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(error, "agent catalog"));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!("agent catalog helper failed: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "agent catalog helper timed out".to_string(),
+                });
+            }
+        };
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.insert(
+                agent_catalog_key(project.as_deref()),
+                CachedAgentCatalog {
+                    response: response.clone(),
+                    refreshed_at: Instant::now(),
+                },
+            );
+        }
+        Ok(response)
+    }
+
+    pub fn cached_finalizer_catalog(
+        &self,
+        project: Option<&str>,
+    ) -> Option<Arc<FinalizerCatalogResponse>> {
+        let catalogs = self.finalizer_catalogs.read().ok()?;
+        catalogs
+            .get(&finalizer_catalog_key(project))
+            .map(|catalog| catalog.response.clone())
+    }
+
+    pub fn finalizer_catalog_stale_or_missing(
+        &self,
+        project: Option<&str>,
+    ) -> bool {
+        let Ok(catalogs) = self.finalizer_catalogs.read() else {
+            return true;
+        };
+        catalogs
+            .get(&finalizer_catalog_key(project))
+            .map(|catalog| catalog.refreshed_at.elapsed() >= CACHE_TTL)
+            .unwrap_or(true)
+    }
+
+    pub async fn finalizer_catalog_for_completion(
+        &self,
+        project: Option<String>,
+    ) -> Result<Arc<FinalizerCatalogResponse>, CatalogFailure> {
+        if !self.finalizer_catalog_stale_or_missing(project.as_deref()) {
+            if let Some(response) =
+                self.cached_finalizer_catalog(project.as_deref())
+            {
+                return Ok(response);
+            }
+        }
+        match self
+            .refresh_finalizer_catalog_with_timeout(
+                project.clone(),
+                COMPLETION_REFRESH_TIMEOUT,
+            )
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => self
+                .cached_finalizer_catalog(project.as_deref())
+                .ok_or(error),
+        }
+    }
+
+    async fn refresh_finalizer_catalog_with_timeout(
+        &self,
+        project: Option<String>,
+        timeout: Duration,
+    ) -> Result<Arc<FinalizerCatalogResponse>, CatalogFailure> {
+        let request = FinalizerCatalogRequest {
+            schema_version: FINALIZER_CATALOG_SCHEMA_VERSION,
+            project: project.clone(),
+        };
+        let bridge = self.bridge.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.finalizer_catalog(&request)
+        });
+        let response = match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => Arc::new(response),
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(
+                    error,
+                    "finalizer catalog",
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!(
+                        "finalizer catalog helper failed: {error}"
+                    ),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "finalizer catalog helper timed out".to_string(),
+                });
+            }
+        };
+        if let Ok(mut catalogs) = self.finalizer_catalogs.write() {
+            catalogs.insert(
+                finalizer_catalog_key(project.as_deref()),
+                CachedFinalizerCatalog {
+                    response: response.clone(),
+                    refreshed_at: Instant::now(),
+                },
+            );
+        }
+        Ok(response)
+    }
+
+    pub fn should_warn(&self, class: &str) -> bool {
+        let Ok(mut warned) = self.warned_failure_classes.write() else {
+            return false;
+        };
+        warned.insert(class.to_string())
+    }
+
+    pub fn invalidate_agent_catalogs(&self) {
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.clear();
+        }
+    }
+
+    pub fn invalidate_finalizer_catalogs(&self) {
+        if let Ok(mut catalogs) = self.finalizer_catalogs.write() {
+            catalogs.clear();
+        }
+    }
+
+    pub fn invalidate_all(&self) {
+        if let Ok(mut catalogs) = self.catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.snippet_catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.vcs_repo_catalogs.write() {
+            catalogs.clear();
+        }
+        if let Ok(mut catalogs) = self.agent_catalogs.write() {
+            catalogs.clear();
+        }
+        self.invalidate_finalizer_catalogs();
+    }
+
+    async fn refresh(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        timeout: Duration,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<MacroAssistEntry>>, CatalogFailure> {
+        let request = EditorMacroCatalogRequestWire {
+            schema_version: 1,
+            project,
+            source: None,
+            tag: None,
+            query: None,
+            include_pdf: false,
+            limit: None,
+            device_id: None,
+        };
+
+        // When legacy names are rejected, only the policy-aware Rust loader
+        // is trusted: an old helper cannot prove its entries comply with
+        // false, so unverified helper data must never restore retired
+        // definitions. Stale same-policy cache is the only fallback, handled
+        // by the caller.
+        if !accept_legacy {
+            let entries =
+                refresh_with_rust_catalog(request, root_dir, accept_legacy)
+                    .await?;
+            return Ok(self.store(key, entries));
+        }
+
+        if self.prefer_rust_catalog && self.plugin_metadata_present {
+            match refresh_with_rust_catalog(
+                request.clone(),
+                root_dir,
+                accept_legacy,
+            )
+            .await
+            {
+                Ok(entries) if !entries.is_empty() => {
+                    return Ok(self.store(key, entries));
+                }
+                Ok(_) => {}
+                Err(error) => warn!(
+                    "rust xprompt catalog loader failed: {}",
+                    error.message
+                ),
+            }
+        } else if self.prefer_rust_catalog {
+            let rust_result = refresh_with_rust_catalog(
+                request.clone(),
+                root_dir,
+                accept_legacy,
+            )
+            .await;
+            if let Err(error) = &rust_result {
+                warn!("rust xprompt catalog loader failed: {}", error.message);
+            }
+            match self.refresh_with_helper(&request, timeout).await {
+                Ok(entries) if !entries.is_empty() => {
+                    let entries = match rust_result {
+                        Ok(rust_entries) if !rust_entries.is_empty() => {
+                            merge_catalog_entries(entries, rust_entries)
+                        }
+                        _ => entries,
+                    };
+                    return Ok(self.store(key, entries));
+                }
+                Ok(_) => {
+                    if let Ok(entries) = rust_result {
+                        if !entries.is_empty() {
+                            return Ok(self.store(key, entries));
+                        }
+                    }
+                    return Ok(self.store(key, Vec::new()));
+                }
+                Err(error) => {
+                    if let Ok(entries) = rust_result {
+                        if !entries.is_empty() {
+                            return Ok(self.store(key, entries));
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        let entries = self.refresh_with_helper(&request, timeout).await?;
+        Ok(self.store(key, entries))
+    }
+
+    async fn refresh_snippets(
+        &self,
+        key: String,
+        project: Option<String>,
+        root_dir: Option<PathBuf>,
+        timeout: Duration,
+        accept_legacy: bool,
+    ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
+        let request = EditorSnippetCatalogRequestWire {
+            schema_version: 1,
+            project,
+        };
+        // Same policy rule as catalogs: under false, never merge unverified
+        // helper snippets; the Rust result (or its failure) is authoritative.
+        if !accept_legacy {
+            let entries = refresh_snippets_with_rust_catalog(
+                request,
+                root_dir,
+                accept_legacy,
+            )
+            .await?;
+            return Ok(self.store_snippets(key, entries));
+        }
+        let rust_result = if self.prefer_rust_catalog {
+            Some(
+                refresh_snippets_with_rust_catalog(
+                    request.clone(),
+                    root_dir,
+                    accept_legacy,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let entries =
+            match self.refresh_snippets_with_helper(&request, timeout).await {
+                Ok(helper_entries) => match rust_result {
+                    Some(Ok(rust_entries)) if !rust_entries.is_empty() => {
+                        merge_snippet_entries(helper_entries, rust_entries)
+                    }
+                    Some(Err(error)) => {
+                        warn!(
+                            "rust snippet catalog loader failed: {}",
+                            error.message
+                        );
+                        helper_entries
+                    }
+                    _ => helper_entries,
+                },
+                Err(helper_error) => match rust_result {
+                    Some(Ok(rust_entries)) if !rust_entries.is_empty() => {
+                        rust_entries
+                    }
+                    Some(Err(error)) => {
+                        warn!(
+                            "rust snippet catalog loader failed: {}",
+                            error.message
+                        );
+                        return Err(helper_error);
+                    }
+                    _ => return Err(helper_error),
+                },
+            };
+        Ok(self.store_snippets(key, entries))
+    }
+
+    async fn refresh_vcs_repo_catalog(
+        &self,
+        workflow: String,
+        namespace: String,
+        timeout: Duration,
+    ) -> Result<Arc<VcsRepoCatalogResponse>, CatalogFailure> {
+        let request = VcsRepoCatalogRequest {
+            schema_version: 1,
+            workflow: workflow.clone(),
+            namespace: namespace.clone(),
+        };
+        let response =
+            self.refresh_vcs_repo_with_helper(&request, timeout).await?;
+        Ok(self.store_vcs_repo_catalog(workflow, namespace, response))
+    }
+
+    async fn refresh_with_helper(
+        &self,
+        request: &EditorMacroCatalogRequestWire,
+        timeout: Duration,
+    ) -> Result<Vec<MacroAssistEntry>, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
+        let task =
+            tokio::task::spawn_blocking(move || bridge.macro_catalog(&request));
+        let response = match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(
+                    error,
+                    "xprompt catalog",
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!("xprompt catalog helper failed: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "xprompt catalog helper timed out".to_string(),
+                });
+            }
+        };
+
+        Ok(editor_assist_entries_from_catalog(&response.entries))
+    }
+
+    async fn refresh_snippets_with_helper(
+        &self,
+        request: &EditorSnippetCatalogRequestWire,
+        timeout: Duration,
+    ) -> Result<Vec<EditorSnippetEntryWire>, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.snippet_catalog(&request)
+        });
+        let response = match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => response,
+            Ok(Ok(Err(error))) => {
+                return Err(failure_from_bridge_error(
+                    error,
+                    "snippet catalog",
+                ));
+            }
+            Ok(Err(error)) => {
+                return Err(CatalogFailure {
+                    class: "helper_join".to_string(),
+                    message: format!("snippet catalog helper failed: {error}"),
+                });
+            }
+            Err(_) => {
+                return Err(CatalogFailure {
+                    class: "helper_timeout".to_string(),
+                    message: "snippet catalog helper timed out".to_string(),
+                });
+            }
+        };
+
+        Ok(response.entries)
+    }
+
+    async fn refresh_vcs_repo_with_helper(
+        &self,
+        request: &VcsRepoCatalogRequest,
+        timeout: Duration,
+    ) -> Result<VcsRepoCatalogResponse, CatalogFailure> {
+        let bridge = self.bridge.clone();
+        let request = request.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            bridge.vcs_repo_catalog(&request)
+        });
+        match time::timeout(timeout, task).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Ok(Ok(Err(error))) => {
+                Err(failure_from_bridge_error(error, "vcs repo catalog"))
+            }
+            Ok(Err(error)) => Err(CatalogFailure {
+                class: "helper_join".to_string(),
+                message: format!("vcs repo catalog helper failed: {error}"),
+            }),
+            Err(_) => Err(CatalogFailure {
+                class: "helper_timeout".to_string(),
+                message: "vcs repo catalog helper timed out".to_string(),
+            }),
+        }
+    }
+
+    fn store(
+        &self,
+        key: String,
+        entries: Vec<MacroAssistEntry>,
+    ) -> Arc<Vec<MacroAssistEntry>> {
+        let entries = Arc::new(entries);
+        let cached = CachedCatalog {
+            entries: entries.clone(),
+            refreshed_at: Instant::now(),
+        };
+        if let Ok(mut catalogs) = self.catalogs.write() {
+            catalogs.insert(key, cached);
+        } else {
+            warn!("failed to lock xprompt catalog cache for write");
+        }
+        entries
+    }
+
+    fn store_snippets(
+        &self,
+        key: String,
+        entries: Vec<EditorSnippetEntryWire>,
+    ) -> Arc<Vec<EditorSnippetEntryWire>> {
+        let entries = Arc::new(entries);
+        let cached = CachedSnippetCatalog {
+            entries: entries.clone(),
+            refreshed_at: Instant::now(),
+        };
+        if let Ok(mut catalogs) = self.snippet_catalogs.write() {
+            catalogs.insert(key, cached);
+        } else {
+            warn!("failed to lock snippet catalog cache for write");
+        }
+        entries
+    }
+
+    fn store_vcs_repo_catalog(
+        &self,
+        workflow: String,
+        namespace: String,
+        response: VcsRepoCatalogResponse,
+    ) -> Arc<VcsRepoCatalogResponse> {
+        let response = Arc::new(response);
+        let cached = CachedVcsRepoCatalog {
+            response: response.clone(),
+            refreshed_at: Instant::now(),
+        };
+        if let Ok(mut catalogs) = self.vcs_repo_catalogs.write() {
+            catalogs.insert((workflow, namespace), cached);
+        } else {
+            warn!("failed to lock vcs repo catalog cache for write");
+        }
+        response
+    }
+}
+
+fn merge_catalog_entries(
+    mut helper_entries: Vec<MacroAssistEntry>,
+    rust_entries: Vec<MacroAssistEntry>,
+) -> Vec<MacroAssistEntry> {
+    let mut indexes = helper_entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for rust_entry in rust_entries {
+        if let Some(index) = indexes.get(&rust_entry.name).copied() {
+            helper_entries[index] = rust_entry;
+        } else {
+            indexes.insert(rust_entry.name.clone(), helper_entries.len());
+            helper_entries.push(rust_entry);
+        }
+    }
+    helper_entries
+}
+
+fn merge_snippet_entries(
+    mut helper_entries: Vec<EditorSnippetEntryWire>,
+    rust_entries: Vec<EditorSnippetEntryWire>,
+) -> Vec<EditorSnippetEntryWire> {
+    let mut indexes = helper_entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.trigger.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for rust_entry in rust_entries {
+        if !indexes.contains_key(&rust_entry.trigger) {
+            indexes.insert(rust_entry.trigger.clone(), helper_entries.len());
+            helper_entries.push(rust_entry);
+        }
+    }
+    helper_entries
+}
+
+async fn refresh_with_rust_catalog(
+    request: EditorMacroCatalogRequestWire,
+    root_dir: Option<PathBuf>,
+    accept_legacy: bool,
+) -> Result<Vec<MacroAssistEntry>, CatalogFailure> {
+    let task = tokio::task::spawn_blocking(move || {
+        load_editor_macro_catalog(
+            &request,
+            &MacroCatalogLoadOptions::new(root_dir)
+                .with_legacy_policy(accept_legacy),
+        )
+    });
+    let response = match task.await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(CatalogFailure {
+                class: "rust_catalog_error".to_string(),
+                message: format!("rust xprompt catalog loader failed: {error}"),
+            });
+        }
+        Err(error) => {
+            return Err(CatalogFailure {
+                class: "rust_catalog_join".to_string(),
+                message: format!("rust xprompt catalog loader failed: {error}"),
+            });
+        }
+    };
+    Ok(editor_assist_entries_from_catalog(&response.entries))
+}
+
+async fn refresh_snippets_with_rust_catalog(
+    request: EditorSnippetCatalogRequestWire,
+    root_dir: Option<PathBuf>,
+    accept_legacy: bool,
+) -> Result<Vec<EditorSnippetEntryWire>, CatalogFailure> {
+    let task = tokio::task::spawn_blocking(move || {
+        load_editor_snippet_catalog(
+            &request,
+            &MacroCatalogLoadOptions::new(root_dir)
+                .with_legacy_policy(accept_legacy),
+        )
+    });
+    let response = match task.await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(CatalogFailure {
+                class: "rust_snippet_catalog_error".to_string(),
+                message: format!("rust snippet catalog loader failed: {error}"),
+            });
+        }
+        Err(error) => {
+            return Err(CatalogFailure {
+                class: "rust_snippet_catalog_join".to_string(),
+                message: format!("rust snippet catalog loader failed: {error}"),
+            });
+        }
+    };
+    Ok(response.entries)
+}
+
+fn failure_from_bridge_error(
+    error: HostBridgeError,
+    operation: &str,
+) -> CatalogFailure {
+    let class = match &error {
+        HostBridgeError::BridgeUnavailable(_) => "helper_unavailable",
+        HostBridgeError::HelperNotFound(_) => "helper_not_found",
+        _ => "helper_error",
+    }
+    .to_string();
+    CatalogFailure {
+        class,
+        message: format!("{operation} helper failed: {error}"),
+    }
+}
+
+fn agent_catalog_key(project: Option<&str>) -> String {
+    project.unwrap_or_default().to_string()
+}
+
+fn finalizer_catalog_key(project: Option<&str>) -> String {
+    project.unwrap_or_default().to_string()
+}
+
+fn plugin_metadata_env_present() -> bool {
+    env::var_os(SASE_MACRO_PLUGIN_DIRS_JSON_ENV).is_some()
+        || env::var_os(SASE_MACRO_PLUGIN_CONFIG_PATHS_JSON_ENV).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sase_core::{
+        AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
+        DirectiveFinalizerEntry, EditorSnippetCatalogRequestWire,
+        EditorSnippetCatalogResponseWire, EditorSnippetCatalogStatsWire,
+        EditorSnippetEntryWire, FinalizerCatalogRequest,
+        FinalizerCatalogResponse, HelperHostBridge, HostBridgeError,
+        MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
+        MobileHelperResultWire, MobileHelperStatusWire,
+        MobileMacroCatalogEntryWire, MobileMacroCatalogRequestWire,
+        MobileMacroCatalogResponseWire, MobileMacroCatalogStatsWire,
+        VcsRepoCatalogRequest, VcsRepoCatalogResponse, VcsRepoEntry,
+    };
+    use std::fs;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct FixtureBridge {
+        entry_name: String,
+    }
+
+    impl HelperHostBridge for FixtureBridge {
+        fn macro_catalog(
+            &self,
+            _request: &MobileMacroCatalogRequestWire,
+        ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
+            Ok(catalog_response(&self.entry_name))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnavailableBridge;
+
+    impl HelperHostBridge for UnavailableBridge {}
+
+    #[derive(Debug)]
+    struct SnippetFixtureBridge {
+        trigger: String,
+    }
+
+    impl HelperHostBridge for SnippetFixtureBridge {
+        fn snippet_catalog(
+            &self,
+            _request: &EditorSnippetCatalogRequestWire,
+        ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+            Ok(snippet_response(&self.trigger))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstSnippetBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstSnippetBridge {
+        fn snippet_catalog(
+            &self,
+            _request: &EditorSnippetCatalogRequestWire,
+        ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(snippet_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct VcsRepoFixtureBridge {
+        response: VcsRepoCatalogResponse,
+    }
+
+    impl HelperHostBridge for VcsRepoFixtureBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstVcsRepoBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstVcsRepoBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(vcs_repo_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowVcsRepoBridge;
+
+    impl HelperHostBridge for SlowVcsRepoBridge {
+        fn vcs_repo_catalog(
+            &self,
+            _request: &VcsRepoCatalogRequest,
+        ) -> Result<VcsRepoCatalogResponse, HostBridgeError> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(vcs_repo_response("slow"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct AgentCatalogFixtureBridge {
+        response: AgentCatalogResponse,
+    }
+
+    impl HelperHostBridge for AgentCatalogFixtureBridge {
+        fn agent_catalog(
+            &self,
+            _request: &AgentCatalogRequest,
+        ) -> Result<AgentCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FinalizerCatalogFixtureBridge {
+        response: FinalizerCatalogResponse,
+    }
+
+    impl HelperHostBridge for FinalizerCatalogFixtureBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterFirstFinalizerBridge {
+        calls: Mutex<u32>,
+    }
+
+    impl HelperHostBridge for FailingAfterFirstFinalizerBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                Ok(finalizer_catalog_response("cached"))
+            } else {
+                Err(HostBridgeError::BridgeUnavailable(
+                    "helper_bridge".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct SlowFinalizerBridge;
+
+    impl HelperHostBridge for SlowFinalizerBridge {
+        fn finalizer_catalog(
+            &self,
+            _request: &FinalizerCatalogRequest,
+        ) -> Result<FinalizerCatalogResponse, HostBridgeError> {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(finalizer_catalog_response("slow"))
+        }
+    }
+
+    fn finalizer_catalog_response(name: &str) -> FinalizerCatalogResponse {
+        FinalizerCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![DirectiveFinalizerEntry {
+                value: name.to_string(),
+                provider_ref: "builtin@commit".to_string(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn agent_catalog_response(name: &str) -> AgentCatalogResponse {
+        AgentCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![AgentCompletionEntry {
+                name: name.to_string(),
+                status: "RUNNING".to_string(),
+                project: "sase".to_string(),
+                kind: "agent".to_string(),
+                member_count: 1,
+                detail: String::new(),
+                documentation: String::new(),
+            }],
+            beads: Vec::new(),
+        }
+    }
+
+    fn catalog_response(name: &str) -> MobileMacroCatalogResponseWire {
+        MobileMacroCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: None,
+                scope: MobileHelperProjectScopeWire::AllKnown,
+            },
+            entries: vec![MobileMacroCatalogEntryWire {
+                name: name.to_string(),
+                display_label: name.to_string(),
+                insertion: Some(format!("#{name}")),
+                reference_prefix: Some("#".to_string()),
+                kind: Some("xprompt".to_string()),
+                description: None,
+                source_bucket: "plugin".to_string(),
+                project: None,
+                tags: Vec::new(),
+                input_signature: None,
+                inputs: Vec::new(),
+                is_skill: false,
+                skill_name: None,
+                memory_type: None,
+                content_preview: Some("body".to_string()),
+                source_path_display: None,
+                definition_path: None,
+                definition_range: None,
+            }],
+            stats: MobileMacroCatalogStatsWire {
+                total_count: 1,
+                project_count: 0,
+                skill_count: 0,
+                memory_count: 0,
+                pdf_requested: false,
+            },
+            catalog_attachment: None,
+        }
+    }
+
+    fn snippet_response(trigger: &str) -> EditorSnippetCatalogResponseWire {
+        EditorSnippetCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: None,
+                scope: MobileHelperProjectScopeWire::AllKnown,
+            },
+            entries: vec![EditorSnippetEntryWire {
+                trigger: trigger.to_string(),
+                template: format!("{trigger} $1$0"),
+                source: "user_config".to_string(),
+                xprompt_name: None,
+                description: None,
+                source_path_display: Some("ace.snippets".to_string()),
+            }],
+            stats: EditorSnippetCatalogStatsWire { total_count: 1 },
+        }
+    }
+
+    fn vcs_repo_response(name: &str) -> VcsRepoCatalogResponse {
+        VcsRepoCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            error_kind: None,
+            message: String::new(),
+            provider_display: "GitHub".to_string(),
+            stale: false,
+            entries: vec![VcsRepoEntry {
+                name: name.to_string(),
+                r#ref: format!("bbugyi200/{name}"),
+                description: format!("{name} repo"),
+                visibility: "public".to_string(),
+                is_fork: false,
+                is_archived: false,
+                pushed_at: Some("2026-07-07T18:00:00Z".to_string()),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(SnippetFixtureBridge {
+            trigger: "fix".to_string(),
+        }));
+
+        let entries = cache
+            .refresh_snippets_for_completion(
+                "test".to_string(),
+                Some("sase".to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(entries[0].trigger, "fix");
+        assert!(!cache.snippets_stale_or_missing_with_policy("test", true));
+        assert_eq!(
+            cache
+                .cached_snippet_entries_with_policy("test", true)
+                .unwrap()[0]
+                .template,
+            "fix $1$0"
+        );
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_returns_stale_entries_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstSnippetBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache
+            .refresh_snippets_for_completion("test".to_string(), None, None)
+            .await
+            .unwrap();
+        let second = cache
+            .refresh_snippets_for_completion("test".to_string(), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(first[0].trigger, "cached");
+        assert_eq!(second[0].trigger, "cached");
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(VcsRepoFixtureBridge {
+            response: vcs_repo_response("sase"),
+        }));
+
+        let response = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].name, "sase");
+        assert!(!cache.vcs_repo_catalog_stale_or_missing("gh", "bbugyi200"));
+        assert_eq!(
+            cache
+                .cached_vcs_repo_catalog("gh", "bbugyi200")
+                .unwrap()
+                .entries[0]
+                .r#ref,
+            "bbugyi200/sase"
+        );
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_returns_stale_response_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstVcsRepoBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+        let second = cache
+            .refresh_vcs_repo_for_completion(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.entries[0].name, "cached");
+        assert_eq!(second.entries[0].name, "cached");
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_cache_refreshes_from_helper() {
+        let cache = CatalogCache::new(Arc::new(AgentCatalogFixtureBridge {
+            response: agent_catalog_response("planner"),
+        }));
+
+        let response = cache
+            .agent_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].name, "planner");
+        assert!(!cache.agent_catalog_stale_or_missing(Some("sase")));
+        assert_eq!(
+            cache.cached_agent_catalog(Some("sase")).unwrap().entries[0].name,
+            "planner"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_catalog_cache_reports_helper_failure_without_cached_rows() {
+        let cache = CatalogCache::new(Arc::new(UnavailableBridge));
+        let error = cache.agent_catalog_for_completion(None).await.unwrap_err();
+        assert_eq!(error.class, "helper_unavailable");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_refreshes_from_helper() {
+        let cache =
+            CatalogCache::new(Arc::new(FinalizerCatalogFixtureBridge {
+                response: finalizer_catalog_response("commit"),
+            }));
+
+        let response = cache
+            .finalizer_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(response.entries[0].value, "commit");
+        assert!(!cache.finalizer_catalog_stale_or_missing(Some("sase")));
+        assert_eq!(
+            cache
+                .cached_finalizer_catalog(Some("sase"))
+                .unwrap()
+                .entries[0]
+                .value,
+            "commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_returns_stale_rows_on_helper_failure() {
+        let cache =
+            CatalogCache::new(Arc::new(FailingAfterFirstFinalizerBridge {
+                calls: Mutex::new(0),
+            }));
+
+        let first = cache.finalizer_catalog_for_completion(None).await.unwrap();
+        let second =
+            cache.finalizer_catalog_for_completion(None).await.unwrap();
+
+        assert_eq!(first.entries[0].value, "cached");
+        assert_eq!(second.entries[0].value, "cached");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_reports_helper_timeout() {
+        let cache = CatalogCache::new(Arc::new(SlowFinalizerBridge));
+        let error = cache
+            .refresh_finalizer_catalog_with_timeout(
+                None,
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.class, "helper_timeout");
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_invalidate_all_drops_cached_rows() {
+        let cache =
+            CatalogCache::new(Arc::new(FinalizerCatalogFixtureBridge {
+                response: finalizer_catalog_response("commit"),
+            }));
+        cache
+            .finalizer_catalog_for_completion(Some("sase".to_string()))
+            .await
+            .unwrap();
+        assert!(cache.cached_finalizer_catalog(Some("sase")).is_some());
+        cache.invalidate_all();
+        assert!(cache.cached_finalizer_catalog(Some("sase")).is_none());
+        assert!(cache.finalizer_catalog_stale_or_missing(Some("sase")));
+    }
+
+    #[tokio::test]
+    async fn finalizer_catalog_cache_reports_helper_failure_without_cached_rows(
+    ) {
+        let cache = CatalogCache::new(Arc::new(UnavailableBridge));
+        let error = cache
+            .finalizer_catalog_for_completion(None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.class, "helper_unavailable");
+    }
+
+    #[tokio::test]
+    async fn vcs_repo_cache_reports_helper_timeout() {
+        let cache = CatalogCache::new(Arc::new(SlowVcsRepoBridge));
+
+        let error = cache
+            .refresh_vcs_repo_catalog(
+                "gh".to_string(),
+                "bbugyi200".to_string(),
+                Duration::from_millis(10),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.class, "helper_timeout");
+    }
+
+    #[tokio::test]
+    async fn snippet_cache_uses_rust_fallback_when_helper_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let xprompts = temp.path().join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
+        fs::write(
+            xprompts.join("nativezz.md"),
+            "---\nsnippet: nativezz\ninput: {target: word}\n---\nfix {{ target }}.",
+        )
+        .unwrap();
+        let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
+            Arc::new(UnavailableBridge),
+            false,
+        );
+
+        let entries = cache
+            .refresh_snippets_for_completion(
+                "test".to_string(),
+                None,
+                Some(temp.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+
+        let lower = entries
+            .iter()
+            .find(|entry| entry.trigger == "nativezz")
+            .unwrap();
+        assert_eq!(lower.template, "fix $1.$0");
+        let capitalized = entries
+            .iter()
+            .find(|entry| entry.trigger == "Nativezz")
+            .unwrap();
+        assert_eq!(capitalized.template, "Fix $1.$0");
+        assert_eq!(capitalized.source, lower.source);
+        assert_eq!(capitalized.xprompt_name, lower.xprompt_name);
+        assert_eq!(capitalized.description, lower.description);
+        assert_eq!(capitalized.source_path_display, lower.source_path_display);
+    }
+
+    fn root_with_rust_entry() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let xprompts = temp.path().join("sase/xprompts");
+        fs::create_dir_all(&xprompts).unwrap();
+        fs::write(xprompts.join("rust_builtin.md"), "rust body").unwrap();
+        temp
+    }
+
+    #[tokio::test]
+    async fn direct_launch_without_plugin_metadata_merges_helper_and_rust_catalogs(
+    ) {
+        let temp = root_with_rust_entry();
+        let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
+            Arc::new(FixtureBridge {
+                entry_name: "helper_plugin".to_string(),
+            }),
+            false,
+        );
+
+        let entries = cache
+            .refresh_for_completion(
+                "test".to_string(),
+                None,
+                Some(temp.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+
+        assert!(entries.iter().any(|entry| entry.name == "helper_plugin"));
+        assert!(entries.iter().any(|entry| entry.name == "rust_builtin"));
+    }
+
+    #[tokio::test]
+    async fn wrapper_launch_with_plugin_metadata_uses_fast_rust_catalog() {
+        let temp = root_with_rust_entry();
+        let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
+            Arc::new(FixtureBridge {
+                entry_name: "helper_plugin".to_string(),
+            }),
+            true,
+        );
+
+        let entries = cache
+            .refresh_for_completion(
+                "test".to_string(),
+                None,
+                Some(temp.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+
+        assert!(entries.iter().any(|entry| entry.name == "rust_builtin"));
+        assert!(!entries.iter().any(|entry| entry.name == "helper_plugin"));
+    }
+
+    #[tokio::test]
+    async fn direct_launch_keeps_rust_catalog_when_helper_unavailable() {
+        let temp = root_with_rust_entry();
+        let cache = CatalogCache::new_with_rust_catalog_and_plugin_metadata(
+            Arc::new(UnavailableBridge),
+            false,
+        );
+
+        let entries = cache
+            .refresh_for_completion(
+                "test".to_string(),
+                None,
+                Some(temp.path().to_path_buf()),
+            )
+            .await
+            .unwrap();
+
+        assert!(entries.iter().any(|entry| entry.name == "rust_builtin"));
+    }
+}

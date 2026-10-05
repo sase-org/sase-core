@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 5;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 6;
 
 /// Directory name holding canonical xprompt-backed skill sources.
 ///
@@ -222,7 +222,6 @@ pub struct SaseContentLayoutWire {
     pub project: Option<ProjectContentLayoutWire>,
     pub home: HomeContentLayoutWire,
     pub chezmoi: Option<ChezmoiContentLayoutWire>,
-    pub xprompt_sources: Vec<MacroSourceWire>,
     pub macro_sources: Vec<MacroSourceWire>,
     pub skill_sources: Vec<SkillSourceWire>,
     pub memory_sources: Vec<MemorySourceWire>,
@@ -471,8 +470,6 @@ pub fn sase_content_layout(
     let project = project_root.map(project_content_layout);
     let home = home_content_layout(home_root);
     let chezmoi = chezmoi_source_root.map(chezmoi_content_layout);
-    let xprompt_sources =
-        xprompt_sources(project_root, home_root, project_name);
     let macro_sources = macro_sources(project_root, home_root, project_name);
     let skill_sources = skill_sources(project_root, home_root, project_name);
     let memory_sources = memory_sources(project_root, home_root);
@@ -481,7 +478,6 @@ pub fn sase_content_layout(
         project,
         home,
         chezmoi,
-        xprompt_sources,
         macro_sources,
         skill_sources,
         memory_sources,
@@ -675,6 +671,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
     }
 }
 
+#[allow(dead_code)]
 fn xprompt_sources(
     project_root: Option<&Path>,
     home_root: &Path,
@@ -857,11 +854,10 @@ fn xprompt_sources(
 
 /// Canonical macro source list, new-first.
 ///
-/// `xprompt_sources` stays byte-identical for compatibility; this separate
-/// list places canonical `sase/macros` directories before retired
-/// xprompt-named directories while preserving scope ordering within each
-/// family, first-wins behavior, project namespaces, config collision rules,
-/// and skill/memory placement. Explicit resources keep their precedence over
+/// Places canonical `sase/macros` directories before retired xprompt-named
+/// directories while preserving scope ordering within each family,
+/// first-wins behavior, project namespaces, config collision rules, and
+/// skill/memory placement. Explicit resources keep their precedence over
 /// inferred paths at load time.
 fn macro_sources(
     project_root: Option<&Path>,
@@ -1415,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn xprompt_priority_covers_canonical_legacy_config_plugin_and_package() {
+    fn macro_priority_covers_canonical_legacy_config_plugin_and_package() {
         let layout = sase_content_layout(
             Some(Path::new("/repo")),
             Path::new("/home/alice"),
@@ -1423,44 +1419,20 @@ mod tests {
             Some("demo"),
         );
         let ids = layout
-            .xprompt_sources
+            .macro_sources
             .iter()
             .map(|source| source.id.as_str())
             .collect::<Vec<_>>();
+        assert!(ids.contains(&"project_macros_canonical"));
+        assert!(ids.contains(&"home_macros_canonical"));
+        assert!(ids.contains(&"plugin_macro_resources"));
+        assert!(ids.contains(&"package_macro_defaults"));
+        assert!(ids.contains(&"package_macro_internal"));
+        // Retired xprompt spellings stay readable. // legacy xprompt spelling
+        assert!(ids.contains(&"project_xprompt_canonical"));
+        assert!(ids.contains(&"plugin_resources"));
         assert_eq!(
-            ids,
-            vec![
-                "project_canonical",
-                "project_legacy_hidden",
-                "project_legacy_visible",
-                "home_canonical",
-                "home_legacy_hidden",
-                "home_legacy_visible",
-                "home_project_canonical",
-                "home_project_legacy_config",
-                "project_config_canonical",
-                "project_config_legacy",
-                "user_config_overlays",
-                "user_config",
-                "plugin_config",
-                "package_default_config",
-                "plugin_resources",
-                "package_defaults",
-                "package_internal",
-            ]
-        );
-        assert!(layout
-            .xprompt_sources
-            .iter()
-            .take(8)
-            .all(|source| source.formats == strings(&["md", "yml", "yaml"])
-                && source.steps_path.is_some()));
-        assert_eq!(
-            layout.xprompt_sources[8].collision_policy,
-            Some(LayoutCollisionPolicyWire::Error)
-        );
-        assert_eq!(
-            layout.xprompt_sources.last().unwrap().steps_path.as_deref(),
+            layout.macro_sources.last().unwrap().steps_path.as_deref(),
             Some("package:xprompts/steps")
         );
     }
@@ -1663,10 +1635,10 @@ mod tests {
             sase_content_layout(None, Path::new("/home/alice"), None, None);
         assert!(layout.project.is_none());
         assert!(layout
-            .xprompt_sources
+            .macro_sources
             .iter()
             .all(|source| !source.id.starts_with("project_")));
-        assert_eq!(layout.xprompt_sources[0].id, "home_canonical");
+        assert_eq!(layout.macro_sources[0].id, "home_macros_canonical");
         assert_eq!(layout.home.skills.path, "/home/alice/sase/skills");
         assert_eq!(
             layout
@@ -1898,34 +1870,6 @@ mod tests {
             Path::new("/home/alice"),
             None,
             Some("demo"),
-        );
-        // Legacy list stays byte-identical.
-        let legacy_ids = layout
-            .xprompt_sources
-            .iter()
-            .map(|source| source.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            legacy_ids,
-            vec![
-                "project_canonical",
-                "project_legacy_hidden",
-                "project_legacy_visible",
-                "home_canonical",
-                "home_legacy_hidden",
-                "home_legacy_visible",
-                "home_project_canonical",
-                "home_project_legacy_config",
-                "project_config_canonical",
-                "project_config_legacy",
-                "user_config_overlays",
-                "user_config",
-                "plugin_config",
-                "package_default_config",
-                "plugin_resources",
-                "package_defaults",
-                "package_internal",
-            ]
         );
         let ids = layout
             .macro_sources

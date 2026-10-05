@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::serde_option::deserialize_present_option;
 
-pub const PROC_WIRE_SCHEMA_VERSION: u32 = 4;
-pub const SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS: [u32; 4] =
-    [1, 2, 3, PROC_WIRE_SCHEMA_VERSION];
+pub const PROC_WIRE_SCHEMA_VERSION: u32 = 5;
+pub const SUPPORTED_PROC_WIRE_SCHEMA_VERSIONS: [u32; 5] =
+    [1, 2, 3, 4, PROC_WIRE_SCHEMA_VERSION];
 pub const PROC_RUNTIME_RETENTION_WIRE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,8 +89,8 @@ pub struct ProcWire {
     pub result: Option<serde_json::Value>,
     #[serde(
         default,
-        rename = "xprompt_proc",
-        alias = "prompt_proc",
+        rename = "prompt_proc",
+        alias = "xprompt_proc", // legacy xprompt spelling
         skip_serializing_if = "Option::is_none"
     )]
     pub prompt_proc: Option<PromptProcMetaWire>,
@@ -100,8 +100,8 @@ pub struct ProcWire {
 
 /// Additive `%proc` launch metadata stored on a native named-proc row.
 ///
-/// The Rust type and field are prompt-named; the serialized key stays on
-/// the legacy `xprompt_proc` spelling.
+/// The Rust type and field are prompt-named; the serialized key is
+/// `prompt_proc` (legacy `xprompt_proc` still reads).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PromptProcMetaWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,8 +194,8 @@ pub struct ProcReserveWire {
     pub idle_timeout_seconds: Option<u64>,
     #[serde(
         default,
-        rename = "xprompt_proc",
-        alias = "prompt_proc",
+        rename = "prompt_proc",
+        alias = "xprompt_proc", // legacy xprompt spelling
         skip_serializing_if = "Option::is_none"
     )]
     pub prompt_proc: Option<PromptProcMetaWire>,
@@ -464,8 +464,8 @@ pub struct ProcUpdateWire {
     #[serde(
         default,
         deserialize_with = "deserialize_present_option",
-        rename = "xprompt_proc",
-        alias = "prompt_proc",
+        rename = "prompt_proc",
+        alias = "xprompt_proc", // legacy xprompt spelling
         skip_serializing_if = "Option::is_none"
     )]
     pub prompt_proc: Option<Option<PromptProcMetaWire>>,

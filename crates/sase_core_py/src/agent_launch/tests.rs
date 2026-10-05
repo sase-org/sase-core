@@ -97,18 +97,12 @@ fn standalone_named_proc_validator_has_no_legacy_binding_name() {
 }
 
 #[test]
-fn prompt_proc_origin_alias_agrees_with_legacy_name() {
+fn prompt_proc_origin_returns_canonical_and_legacy_is_absent() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
         crate::sase_core_rs(py, &module).unwrap();
-        let old: String = module
-            .getattr("xprompt_proc_origin")
-            .unwrap()
-            .call0()
-            .unwrap()
-            .extract()
-            .unwrap();
+        assert!(module.getattr("xprompt_proc_origin").is_err());
         let new: String = module
             .getattr("prompt_proc_origin")
             .unwrap()
@@ -116,7 +110,6 @@ fn prompt_proc_origin_alias_agrees_with_legacy_name() {
             .unwrap()
             .extract()
             .unwrap();
-        assert_eq!(old, new);
-        assert_eq!(new, "xprompt-proc");
+        assert_eq!(new, "prompt-proc");
     });
 }

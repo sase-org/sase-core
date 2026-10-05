@@ -13,7 +13,7 @@ use crate::editor::wire::{
 fn classifies_primary_completion_modes() {
     let catalog = entries();
     for (text, col, kind) in [
-        ("#re", 3, CompletionContextKind::Xprompt),
+        ("#re", 3, CompletionContextKind::Macro),
         ("/ru", 3, CompletionContextKind::SlashSkill),
         ("./sr", 4, CompletionContextKind::FilePath),
         ("", 0, CompletionContextKind::FileHistory),

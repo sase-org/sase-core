@@ -13,11 +13,11 @@ use crate::editor::wire::{
     CompletionList, DirectiveCompletionInventories, DirectiveSyntaxForm,
     EditorRange, EditorTextEdit, MacroAssistEntry, MacroInputHint,
 };
-use crate::{EditorSnippetEntryWire, EditorXpromptCatalogEntryWire};
+use crate::{EditorMacroCatalogEntryWire, EditorSnippetEntryWire};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn assist_entries_from_catalog(
-    entries: &[EditorXpromptCatalogEntryWire],
+    entries: &[EditorMacroCatalogEntryWire],
 ) -> Vec<MacroAssistEntry> {
     entries
         .iter()

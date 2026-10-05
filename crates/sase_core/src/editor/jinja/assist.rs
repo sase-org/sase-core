@@ -397,7 +397,7 @@ fn variable_candidates(
         });
     }
     // Dynamic positional `_1` .. `_k`.
-    if scope_kind == JinjaScopeKind::Xprompt {
+    if scope_kind == JinjaScopeKind::Macro {
         let count = scope.inputs.len().max(1);
         for index in 1..=count {
             let name = format!("_{index}");
@@ -1018,15 +1018,15 @@ pub(crate) fn evaluate_rule(
                 Availability::Conditional
             }
         }
-        JinjaAvailabilityRule::XpromptOnly => {
-            if scope_kind == JinjaScopeKind::Xprompt {
+        JinjaAvailabilityRule::MacroOnly => {
+            if scope_kind == JinjaScopeKind::Macro {
                 Availability::Available
             } else {
                 Availability::Unavailable
             }
         }
-        JinjaAvailabilityRule::XpromptSkillOnly => {
-            if scope_kind == JinjaScopeKind::Xprompt && scope.skill {
+        JinjaAvailabilityRule::MacroSkillOnly => {
+            if scope_kind == JinjaScopeKind::Macro && scope.skill {
                 Availability::Available
             } else {
                 Availability::Unavailable
@@ -1080,8 +1080,8 @@ pub(crate) fn unavailable_reason(
             .to_string();
     }
     match rule {
-        JinjaAvailabilityRule::XpromptOnly => macro_only_reason(),
-        JinjaAvailabilityRule::XpromptSkillOnly => skill_only_reason(),
+        JinjaAvailabilityRule::MacroOnly => macro_only_reason(),
+        JinjaAvailabilityRule::MacroSkillOnly => skill_only_reason(),
         _ => "Unavailable in this scope".to_string(),
     }
 }
@@ -1246,13 +1246,12 @@ mod tests {
     fn xprompt_scope_offers_positional_and_marks_pattern() {
         let text = "{{ }}";
         let completion =
-            jinja_completion(&request(text, 3, JinjaScopeKind::Xprompt))
-                .unwrap();
+            jinja_completion(&request(text, 3, JinjaScopeKind::Macro)).unwrap();
         assert!(names(&completion.items).contains(&"_args"));
         assert!(names(&completion.items).contains(&"_1"));
         let variables = jinja_scope_variables(&JinjaScopeRequestWire {
             text: text.to_string(),
-            scope: JinjaScopeKind::Xprompt,
+            scope: JinjaScopeKind::Macro,
             frontmatter: None,
         });
         assert!(variables.positional_pattern);
@@ -1267,13 +1266,12 @@ mod tests {
     fn provider_vars_need_skill_flag() {
         let text = "{{ }}";
         let without =
-            jinja_completion(&request(text, 3, JinjaScopeKind::Xprompt))
-                .unwrap();
+            jinja_completion(&request(text, 3, JinjaScopeKind::Macro)).unwrap();
         assert!(!names(&without.items).contains(&"provider_name"));
         let skill = "---\nskill: true\n---\n{{ }}";
         let cursor = skill.find("{{ }}").unwrap() + 3;
         let with =
-            jinja_completion(&request(skill, cursor, JinjaScopeKind::Xprompt))
+            jinja_completion(&request(skill, cursor, JinjaScopeKind::Macro))
                 .unwrap();
         assert!(names(&with.items).contains(&"provider_name"));
     }
@@ -1283,7 +1281,7 @@ mod tests {
         let text = "---\ninput:\n  n: word\n---\n{{ }}";
         let cursor = text.find("{{ }}").unwrap() + 3;
         let completion =
-            jinja_completion(&request(text, cursor, JinjaScopeKind::Xprompt))
+            jinja_completion(&request(text, cursor, JinjaScopeKind::Macro))
                 .unwrap();
         let matches = completion
             .items

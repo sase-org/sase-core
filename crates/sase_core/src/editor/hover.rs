@@ -33,7 +33,7 @@ pub fn hover_at_position_with_flags(
                 | CompletionContextKind::MacroArgumentValue
                 | CompletionContextKind::MacroArgumentTypeHint
         ) {
-            let entry_name = context.active_xprompt.as_ref()?;
+            let entry_name = context.active_macro.as_ref()?;
             let entry =
                 entries.iter().find(|entry| &entry.name == entry_name)?;
             return Some(HoverPayload {

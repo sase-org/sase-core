@@ -6,22 +6,22 @@ use std::{
 use crate::{
     content_layout::MEMORY_NAMESPACE_SEGMENT,
     snippet_catalog::{compose_snippet_catalog, is_valid_snippet_trigger},
+    EditorMacroCatalogRequestWire, EditorMacroCatalogResponseWire,
     EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
     EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
-    EditorXpromptCatalogRequestWire, EditorXpromptCatalogResponseWire,
     MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
     MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
-    MobileXpromptCatalogEntryWire, MobileXpromptCatalogStatsWire,
-    MobileXpromptInputWire,
+    MobileMacroCatalogEntryWire, MobileMacroCatalogStatsWire,
+    MobileMacroInputWire,
 };
 
 use super::definition::filter_structured_sources;
 use super::loader::CatalogLoader;
 use super::types::*;
 pub fn load_editor_macro_catalog(
-    request: &EditorXpromptCatalogRequestWire,
+    request: &EditorMacroCatalogRequestWire,
     options: &MacroCatalogLoadOptions,
-) -> Result<EditorXpromptCatalogResponseWire, MacroCatalogLoadError> {
+) -> Result<EditorMacroCatalogResponseWire, MacroCatalogLoadError> {
     let root_dir = options.root_dir.clone().or_else(|| env::current_dir().ok());
     let mut options = options.clone();
     options.root_dir = root_dir;
@@ -43,7 +43,7 @@ pub fn load_editor_macro_catalog(
         .map(|entry| structured_entry(entry, &loader))
         .collect::<Vec<_>>();
 
-    Ok(EditorXpromptCatalogResponseWire {
+    Ok(EditorMacroCatalogResponseWire {
         schema_version: SCHEMA_VERSION,
         result: MobileHelperResultWire {
             status: MobileHelperStatusWire::Success,
@@ -60,7 +60,7 @@ pub fn load_editor_macro_catalog(
                 MobileHelperProjectScopeWire::AllKnown
             },
         },
-        stats: MobileXpromptCatalogStatsWire {
+        stats: MobileMacroCatalogStatsWire {
             total_count,
             project_count: entries
                 .iter()
@@ -164,10 +164,10 @@ pub fn load_editor_snippet_catalog(
 pub(super) fn structured_entry(
     entry: &StructuredSource,
     loader: &CatalogLoader,
-) -> MobileXpromptCatalogEntryWire {
+) -> MobileMacroCatalogEntryWire {
     let kind = workflow_kind(&entry.workflow);
     let reference_prefix = workflow_reference_prefix(&entry.workflow);
-    MobileXpromptCatalogEntryWire {
+    MobileMacroCatalogEntryWire {
         name: entry.name.clone(),
         display_label: display_label(&entry.name),
         insertion: Some(format!("{reference_prefix}{}", entry.name)),
@@ -189,12 +189,12 @@ pub(super) fn structured_entry(
     }
 }
 
-fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileXpromptInputWire> {
+fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileMacroInputWire> {
     inputs
         .iter()
         .filter(|input| !input.is_step_input)
         .enumerate()
-        .map(|(position, input)| MobileXpromptInputWire {
+        .map(|(position, input)| MobileMacroInputWire {
             name: input.name.clone(),
             r#type: input.type_name.clone(),
             description: input.description.clone(),
@@ -257,7 +257,7 @@ fn workflow_kind(workflow: &CatalogWorkflow) -> WorkflowKind {
         .filter(|step| step.kind == StepKind::PromptPart)
         .count();
     if workflow.steps.len() == 1 && prompt_part_count == 1 {
-        WorkflowKind::SimpleXprompt
+        WorkflowKind::SimpleMacro
     } else if prompt_part_count > 0 {
         WorkflowKind::EmbeddableWorkflow
     } else {
@@ -281,7 +281,7 @@ fn entry_kind_value(
 
 fn workflow_kind_value(kind: WorkflowKind) -> &'static str {
     match kind {
-        WorkflowKind::SimpleXprompt => "xprompt",
+        WorkflowKind::SimpleMacro => "macro",
         WorkflowKind::EmbeddableWorkflow => "embeddable_workflow",
         WorkflowKind::StandaloneWorkflow => "standalone_workflow",
     }

@@ -34,8 +34,9 @@ name = "sase_gateway"
 release = false
 
 [[package]]
-name = "sase_xprompt_lsp"
+name = "sase_macro_lsp"
 release = false
+git_tag_name = "sase_macro_lsp-v{{ version }}"
 
 [[package]]
 name = "sase_workspace_hack"

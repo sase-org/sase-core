@@ -289,7 +289,7 @@ fn definition_range_prefers_macros_section() {
         skill_name: None,
         memory_type: None,
         content: "body".to_string(),
-        definition_section: DefinitionSection::Xprompts,
+        definition_section: DefinitionSection::Macros,
     };
     let range = loader.definition_range(&entry).expect("range resolves");
     assert_eq!(range.start.line, 1);

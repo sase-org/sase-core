@@ -120,13 +120,8 @@ pub struct AgentLaunchRequestWire {
     pub vcs_ref: Option<String>,
     #[serde(default)]
     pub deferred_workspace: bool,
-    /// Local macro definitions file. Emits the legacy
-    /// `local_xprompts_file` key.
-    #[serde(
-        default,
-        rename = "local_xprompts_file",
-        alias = "local_macros_file"
-    )]
+    /// Local macro definitions file.
+    #[serde(default)]
     pub local_macros_file: Option<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,

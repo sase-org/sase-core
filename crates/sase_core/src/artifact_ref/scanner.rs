@@ -497,7 +497,7 @@ fn markdown_link_to_document_target(
     {
         return ArtifactRefDocumentTargetWire {
             schema_version: ARTIFACT_REF_DOCUMENT_SCAN_WIRE_SCHEMA_VERSION,
-            target_kind: ArtifactRefDocumentTargetKindWire::XpromptSkill,
+            target_kind: ArtifactRefDocumentTargetKindWire::MacroSkill,
             text: text[link.source_span.start..link.source_span.end]
                 .to_string(),
             target: reference,
@@ -731,7 +731,7 @@ fn scan_explicit_macro_skill_refs(
             continue;
         };
         links.push(simple_document_link(
-            ArtifactRefDocumentTargetKindWire::XpromptSkill,
+            ArtifactRefDocumentTargetKindWire::MacroSkill,
             start,
             end,
             token_start,
@@ -1274,17 +1274,17 @@ mod tests {
             targets,
             [
                 (
-                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    ArtifactRefDocumentTargetKindWire::MacroSkill,
                     "#skill/sase_plan",
                     "skill/sase_plan",
                 ),
                 (
-                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    ArtifactRefDocumentTargetKindWire::MacroSkill,
                     "#sase/skill/demo",
                     "sase/skill/demo",
                 ),
                 (
-                    ArtifactRefDocumentTargetKindWire::XpromptSkill,
+                    ArtifactRefDocumentTargetKindWire::MacroSkill,
                     "#skill__sase_repo",
                     "skill/sase_repo",
                 ),
@@ -1301,7 +1301,7 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(
             links[0].target_kind,
-            ArtifactRefDocumentTargetKindWire::XpromptSkill
+            ArtifactRefDocumentTargetKindWire::MacroSkill
         );
         assert_eq!(links[0].target, "skill/sase_plan");
         assert_eq!(

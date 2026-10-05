@@ -520,7 +520,7 @@ fn validate_chop_config(
     map_name: Option<&str>,
     diagnostics: &mut Vec<ConfigDiagnosticWire>,
 ) {
-    for migration_key in ["agent", "xprompt"] {
+    for migration_key in ["agent", "macro"] {
         if config.contains_key(migration_key) {
             diagnostics.push(diagnostic(
                 request,
@@ -535,7 +535,7 @@ fn validate_chop_config(
     let mut allowed_chop_keys = CHOP_KEYS.to_vec();
     // These receive the more actionable migration diagnostic above instead
     // of a redundant generic unknown-key error.
-    allowed_chop_keys.extend(["agent", "xprompt"]);
+    allowed_chop_keys.extend(["agent", "macro"]);
     unknown_keys(request, config, &allowed_chop_keys, path, diagnostics);
     if let (Some(expected), Some(actual)) =
         (map_name, config.get("name").and_then(Value::as_str))

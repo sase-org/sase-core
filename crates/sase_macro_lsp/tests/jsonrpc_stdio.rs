@@ -1,0 +1,1816 @@
+use std::{env, fs, sync::Arc};
+
+use lsp_types::Uri;
+use sase_core::{
+    AgentCatalogRequest, AgentCatalogResponse, AgentCompletionEntry,
+    EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
+    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire, HelperHostBridge,
+    HostBridgeError, MobileHelperProjectContextWire,
+    MobileHelperProjectScopeWire, MobileHelperResultWire,
+    MobileHelperStatusWire, MobileMacroCatalogEntryWire,
+    MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
+    MobileMacroCatalogStatsWire, MobileMacroInputWire,
+};
+use sase_macro_lsp::MacroLspServer;
+use serde_json::{json, Value};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tower_lsp_server::UriExt;
+use tower_lsp_server::{LspService, Server};
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = env::var_os(key);
+        env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = &self.previous {
+            env::set_var(self.key, value);
+        } else {
+            env::remove_var(self.key);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FixtureBridge {
+    definition_path: String,
+}
+
+impl HelperHostBridge for FixtureBridge {
+    fn agent_catalog(
+        &self,
+        _request: &AgentCatalogRequest,
+    ) -> Result<AgentCatalogResponse, HostBridgeError> {
+        Ok(AgentCatalogResponse {
+            schema_version: 1,
+            status: "ok".to_string(),
+            message: String::new(),
+            entries: vec![
+                AgentCompletionEntry {
+                    name: "planner".to_string(),
+                    status: "RUNNING".to_string(),
+                    project: "sase".to_string(),
+                    kind: String::new(),
+                    member_count: 0,
+                    detail: String::new(),
+                    documentation: String::new(),
+                },
+                AgentCompletionEntry {
+                    name: "coder".to_string(),
+                    status: "DONE".to_string(),
+                    project: "sase-core".to_string(),
+                    kind: String::new(),
+                    member_count: 0,
+                    detail: String::new(),
+                    documentation: String::new(),
+                },
+            ],
+            beads: vec![sase_core::BeadCompletionEntry {
+                id: "sase-a".to_string(),
+                title: "Active bug".to_string(),
+                status: "in_progress".to_string(),
+                type_label: "task".to_string(),
+                created_at: "2026-08-01T00:00:00Z".to_string(),
+                updated_at: "2026-08-20T12:00:00Z".to_string(),
+                task_type: "bug".to_string(),
+                project: "sase".to_string(),
+            }],
+        })
+    }
+
+    fn macro_catalog(
+        &self,
+        _request: &MobileMacroCatalogRequestWire,
+    ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
+        Ok(MobileMacroCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: Some("sase".to_string()),
+                scope: MobileHelperProjectScopeWire::Explicit,
+            },
+            entries: vec![
+                MobileMacroCatalogEntryWire {
+                    name: "foo".to_string(),
+                    display_label: "foo".to_string(),
+                    insertion: Some("#foo".to_string()),
+                    reference_prefix: Some("#".to_string()),
+                    kind: Some("prompt".to_string()),
+                    description: Some("Foo prompt".to_string()),
+                    source_bucket: "builtin".to_string(),
+                    project: None,
+                    tags: Vec::new(),
+                    input_signature: None,
+                    inputs: vec![MobileMacroInputWire {
+                        name: "path".to_string(),
+                        r#type: "path".to_string(),
+                        description: Some("File to process".to_string()),
+                        required: true,
+                        default_display: None,
+                        position: 0,
+                        repeatable: false,
+                        choices: Vec::new(),
+                    }],
+                    is_skill: false,
+                    skill_name: None,
+                    memory_type: None,
+                    content_preview: None,
+                    source_path_display: None,
+                    definition_path: Some(self.definition_path.clone()),
+                    definition_range: None,
+                },
+                MobileMacroCatalogEntryWire {
+                    name: "fork".to_string(),
+                    display_label: "fork".to_string(),
+                    insertion: Some("#fork".to_string()),
+                    reference_prefix: Some("#".to_string()),
+                    kind: Some("workflow".to_string()),
+                    description: Some("Fork conversations".to_string()),
+                    source_bucket: "builtin".to_string(),
+                    project: None,
+                    tags: Vec::new(),
+                    input_signature: Some("(names…?: agent)".to_string()),
+                    inputs: vec![MobileMacroInputWire {
+                        name: "names".to_string(),
+                        r#type: "agent".to_string(),
+                        description: None,
+                        required: false,
+                        default_display: None,
+                        position: 0,
+                        repeatable: true,
+                        choices: Vec::new(),
+                    }],
+                    is_skill: false,
+                    skill_name: None,
+                    memory_type: None,
+                    content_preview: None,
+                    source_path_display: None,
+                    definition_path: None,
+                    definition_range: None,
+                },
+            ],
+            stats: MobileMacroCatalogStatsWire {
+                total_count: 2,
+                project_count: 0,
+                skill_count: 0,
+                memory_count: 0,
+                pdf_requested: false,
+            },
+            catalog_attachment: None,
+        })
+    }
+
+    fn snippet_catalog(
+        &self,
+        _request: &EditorSnippetCatalogRequestWire,
+    ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
+        Ok(EditorSnippetCatalogResponseWire {
+            schema_version: 1,
+            result: MobileHelperResultWire {
+                status: MobileHelperStatusWire::Success,
+                message: None,
+                warnings: Vec::new(),
+                skipped: Vec::new(),
+                partial_failure_count: None,
+            },
+            context: MobileHelperProjectContextWire {
+                project: Some("sase".to_string()),
+                scope: MobileHelperProjectScopeWire::Explicit,
+            },
+            entries: vec![EditorSnippetEntryWire {
+                trigger: "foo".to_string(),
+                template: "body $1$0".to_string(),
+                source: "ace.snippets".to_string(),
+                xprompt_name: None,
+                description: Some("Foo snippet".to_string()),
+                source_path_display: Some("ace.snippets".to_string()),
+            }],
+            stats: EditorSnippetCatalogStatsWire { total_count: 1 },
+        })
+    }
+}
+
+fn write_semantic_artifact_catalog(path: &std::path::Path) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "default_project": "sase",
+            "projects": [
+                {
+                    "name": "sase",
+                    "key": "sase",
+                    "aliases": [],
+                    "context": {
+                        "schema_version": 1,
+                        "document_roots": [],
+                        "repositories": [],
+                        "projects": []
+                    }
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_initialize_and_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    let initialize_response = read_message(&mut client_reader).await;
+    assert_eq!(
+        initialize_response.get("id").and_then(Value::as_i64),
+        Some(1)
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "#foo"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_missing_arg_diagnostic = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            saw_missing_arg_diagnostic = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "sase-macro"
+                            && diagnostic["severity"] == 1
+                            && diagnostic["code"] == "missing_required_arg"
+                    })
+                });
+            if saw_missing_arg_diagnostic {
+                break;
+            }
+        }
+    }
+    assert!(saw_missing_arg_diagnostic);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "version": 2
+                },
+                "contentChanges": [{"text": "#fork:planner,co"}]
+            }
+        }),
+    )
+    .await;
+    let mut saw_repeatable_diagnostics = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            let diagnostics = message["params"]["diagnostics"]
+                .as_array()
+                .expect("diagnostic array");
+            saw_repeatable_diagnostics = diagnostics.iter().all(|diagnostic| {
+                diagnostic["code"] != "too_many_args"
+                    && diagnostic["code"] != "invalid_xprompt_arg_type"
+            });
+            if saw_repeatable_diagnostics {
+                break;
+            }
+        }
+    }
+    assert!(saw_repeatable_diagnostics);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
+                "position": {"line": 0, "character": 16}
+            }
+        }),
+    )
+    .await;
+    let mut saw_agent_completion = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            let items = message["result"]
+                .as_array()
+                .or_else(|| message["result"]["items"].as_array())
+                .unwrap_or_else(|| {
+                    panic!("unexpected agent completion response: {message}")
+                });
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["label"], "coder");
+            assert_eq!(items[0]["detail"], "DONE · sase-core");
+            assert_eq!(
+                items[0]["textEdit"]["range"],
+                json!({
+                    "start": {"line": 0, "character": 14},
+                    "end": {"line": 0, "character": 16}
+                })
+            );
+            assert_eq!(items[0]["textEdit"]["newText"], "coder");
+            saw_agent_completion = true;
+            break;
+        }
+    }
+    assert!(saw_agent_completion);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "version": 3
+                },
+                "contentChanges": [{"text": "#foo"}]
+            }
+        }),
+    )
+    .await;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
+                "position": {"line": 0, "character": 3}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_completion = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            let items = message["result"]
+                .as_array()
+                .or_else(|| message["result"]["items"].as_array())
+                .unwrap_or_else(|| {
+                    panic!("unexpected completion response: {message}")
+                });
+            saw_completion = items.iter().any(|item| item["label"] == "#foo");
+            break;
+        }
+    }
+
+    assert!(saw_completion);
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_rpc.md"},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_definition = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            let result = &message["result"];
+            saw_definition = result["uri"]
+                == serde_json::Value::String(
+                    Uri::from_file_path(&definition_path).unwrap().to_string(),
+                )
+                && result["range"]["start"]["line"] == 0
+                && result["range"]["start"]["character"] == 0
+                && result["range"]["end"]["line"] == 0
+                && result["range"]["end"]["character"] == 0;
+            break;
+        }
+    }
+
+    assert!(saw_definition);
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(4)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_semantic_tokens_include_argument_structure() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+    let artifact_catalog_path = temp.path().join("artifact_catalog.json");
+    write_semantic_artifact_catalog(&artifact_catalog_path);
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let _artifact_catalog_env = EnvVarGuard::set(
+        "SASE_MACRO_ARTIFACT_REF_CATALOG",
+        &artifact_catalog_path,
+    );
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    read_response_result(&mut client_reader, 1).await;
+
+    let uri = "file:///tmp/sase_prompt_semantic_tokens.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "#foo(path=\"a\", count=2, enabled=true)"
+                }
+            }
+        }),
+    )
+    .await;
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let semantic_result = read_response_result(&mut client_reader, 2).await;
+    let absolute =
+        absolute_semantic_tokens_from_value(&semantic_result["data"]);
+
+    assert!(absolute.contains(&(0, 1, 3, 4, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 5, 4, 6, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 9, 1, 7, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 10, 3, 1, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 21, 1, 2, 0)), "{absolute:?}");
+    assert!(absolute.contains(&(0, 32, 4, 8, 0)), "{absolute:?}");
+    assert_no_semantic_token_overlaps(&absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 2
+                },
+                "contentChanges": [{"text": "#foo(path=\"a\", count=2"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let open_result = read_response_result(&mut client_reader, 3).await;
+    let open_absolute =
+        absolute_semantic_tokens_from_value(&open_result["data"]);
+    assert!(
+        open_absolute.contains(&(0, 1, 3, 4, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 4, 1, 7, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 5, 4, 6, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        open_absolute.contains(&(0, 21, 1, 2, 0)),
+        "{open_absolute:?}"
+    );
+    assert!(
+        !open_absolute.contains(&(0, 22, 1, 7, 0)),
+        "{open_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&open_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 3
+                },
+                "contentChanges": [{
+                    "text": "🙂 #foo(text=[[alpha\r\nbeta 🙂\r\ngamma]])\n%q(capacity=2)"
+                }]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let multiline_result = read_response_result(&mut client_reader, 4).await;
+    let multiline_absolute =
+        absolute_semantic_tokens_from_value(&multiline_result["data"]);
+    assert!(
+        multiline_absolute.contains(&(0, 4, 3, 4, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(0, 13, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(1, 0, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(2, 0, 7, 1, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert!(
+        multiline_absolute.contains(&(3, 1, 1, 5, 0)),
+        "{multiline_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&multiline_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 4
+                },
+                "contentChanges": [{
+                    "text": "#foo(path=pre @file:README.md post)"
+                }]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let artifact_result = read_response_result(&mut client_reader, 5).await;
+    let artifact_absolute =
+        absolute_semantic_tokens_from_value(&artifact_result["data"]);
+    assert!(
+        artifact_absolute.contains(&(0, 15, 4, 0, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 20, 9, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 10, 5, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 19, 1, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert!(
+        artifact_absolute.contains(&(0, 29, 5, 1, 0)),
+        "{artifact_absolute:?}"
+    );
+    assert_no_semantic_token_overlaps(&artifact_absolute);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "version": 5
+                },
+                "contentChanges": [{"text": "```\n#foo(path=\"a\")\n```"}]
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "textDocument/semanticTokens/full",
+            "params": {"textDocument": {"uri": uri}}
+        }),
+    )
+    .await;
+    let fenced_result = read_response_result(&mut client_reader, 6).await;
+    assert_eq!(fenced_result["data"], json!([]));
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 7, "method": "shutdown", "params": null}),
+    )
+    .await;
+    read_response_result(&mut client_reader, 7).await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_unsupported_markdown_has_no_xprompt_behavior() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let unsupported_uri =
+        "file:///tmp/project/sdd/research/202605/memory_system_prior_art.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": unsupported_uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "#foo"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_empty_diagnostics = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+            && message["params"]["uri"] == unsupported_uri
+        {
+            saw_empty_diagnostics = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| diagnostics.is_empty());
+            break;
+        }
+    }
+    assert!(saw_empty_diagnostics);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": unsupported_uri},
+                "position": {"line": 0, "character": 3}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_no_completion = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            saw_no_completion = message["result"].is_null();
+            break;
+        }
+    }
+    assert!(saw_no_completion);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_frontmatter_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase/xprompts/bad_pick_plan_xprompt.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "---\nowner: me\ninput:\n  target: wordd\nsnippet: bad-trigger!\nkeywords: [topic]\nskill: true\n---\nBody"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_frontmatter_diagnostic = false;
+    for _ in 0..4 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            saw_frontmatter_diagnostic = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| {
+                    let expected_codes = [
+                        "unknown_xprompt_frontmatter_field",
+                        "invalid_xprompt_frontmatter_input_type",
+                        "invalid_xprompt_frontmatter_snippet_trigger",
+                        "missing_xprompt_skill_description",
+                    ];
+                    expected_codes.iter().all(|code| {
+                        diagnostics.iter().any(|diagnostic| {
+                            diagnostic["source"] == "sase-macro"
+                                && diagnostic["code"] == *code
+                        })
+                    }) && diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "sase-macro"
+                            && diagnostic["severity"] == 1
+                            && diagnostic["code"]
+                                == "invalid_xprompt_frontmatter_input_type"
+                            && diagnostic["range"]["start"]["line"] == 3
+                            && diagnostic["range"]["start"]["character"] == 10
+                            && diagnostic["range"]["end"]["line"] == 3
+                            && diagnostic["range"]["end"]["character"] == 15
+                    })
+                });
+            if saw_frontmatter_diagnostic {
+                break;
+            }
+        }
+    }
+    assert!(saw_frontmatter_diagnostic);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(2)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_bare_snippet_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {
+                    "textDocument": {
+                        "completion": {
+                            "completionItem": {"snippetSupport": true}
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_snippet.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "fo"
+                }
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": "file:///tmp/sase_prompt_snippet.md"},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+
+    let mut saw_snippet = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            let items = message["result"]
+                .as_array()
+                .or_else(|| message["result"]["items"].as_array())
+                .unwrap_or_else(|| {
+                    panic!("unexpected completion response: {message}")
+                });
+            saw_snippet = items.iter().any(|item| {
+                item["label"] == "foo"
+                    && item["kind"] == 15
+                    && item["insertTextFormat"] == 2
+                    && item["textEdit"]["newText"] == "body $1$0"
+            });
+            break;
+        }
+    }
+
+    assert!(saw_snippet);
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_placeholder_completion_uses_open_document_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_placeholder.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "<the plan> then <>"
+                }
+            }
+        }),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 17}
+            }
+        }),
+    )
+    .await;
+
+    let mut completion_item = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            completion_item = message["result"]
+                .as_array()
+                .and_then(|items| items.first())
+                .cloned();
+            break;
+        }
+    }
+    let item = completion_item.expect("expected placeholder completion item");
+    assert_eq!(item["label"], "the plan");
+    assert_eq!(item["kind"], 6);
+    assert_eq!(item["textEdit"]["range"]["start"]["character"], 17);
+    assert_eq!(item["textEdit"]["range"]["end"]["character"], 18);
+    assert_eq!(item["textEdit"]["newText"], "the plan>");
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(3)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_id_kwargs_diagnostics_completion_and_snippets() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {
+                    "textDocument": {
+                        "completion": {
+                            "completionItem": {"snippetSupport": true}
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_id_kwargs.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "%clan(research.@, tribe=research)\n%c(research, tr)\n%id(worker, se)\n%i(worker, tr)\n%tribe:review\n%t:review\n%family:old\n%group:old"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut unknown_directives = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            unknown_directives = message["params"]["diagnostics"]
+                .as_array()
+                .expect("diagnostic array")
+                .iter()
+                .filter(|diagnostic| diagnostic["code"] == "unknown_directive")
+                .filter_map(|diagnostic| diagnostic["message"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert_eq!(
+        unknown_directives,
+        [
+            "Unknown directive `%tribe`",
+            "Unknown directive `%t`",
+            "Unknown directive `%family`",
+            "Unknown directive `%group`",
+        ]
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 14}
+            }
+        }),
+    )
+    .await;
+    let mut session_completion = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            session_completion = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "session=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let session_completion =
+        session_completion.expect("expected session= completion item");
+    assert_eq!(
+        session_completion["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 14}
+            },
+            "newText": "session="
+        })
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 3, "character": 13}
+            }
+        }),
+    )
+    .await;
+    let mut tribe_completion = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            tribe_completion = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "tribe=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let tribe_completion =
+        tribe_completion.expect("expected tribe= completion item");
+    assert_eq!(
+        tribe_completion["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 3, "character": 11},
+                "end": {"line": 3, "character": 13}
+            },
+            "newText": "tribe="
+        })
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": "%i"}]
+            }
+        }),
+    )
+    .await;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 2}
+            }
+        }),
+    )
+    .await;
+    let mut completion_items = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            completion_items = message["result"]
+                .as_array()
+                .expect("completion array")
+                .clone();
+            break;
+        }
+    }
+    let labels: Vec<&str> = completion_items
+        .iter()
+        .filter_map(|item| item["label"].as_str())
+        .collect();
+    for expected in [
+        "%id",
+        "%id:...",
+        "%id(..., clan=...)",
+        "%id(..., session=...)",
+        "%id(tribe=...)",
+    ] {
+        assert!(labels.contains(&expected), "{labels:?}");
+    }
+    assert!(!labels.iter().any(|label| label.starts_with("%tribe")));
+
+    for (label, new_text) in [
+        ("%id(..., clan=...)", "%id(${1:id}, clan=${2:clan})$0"),
+        (
+            "%id(..., session=...)",
+            "%id(${1:suffix}, session=${2:session})$0",
+        ),
+        ("%id(tribe=...)", "%id(tribe=${1:tribe})$0"),
+    ] {
+        let item = completion_items
+            .iter()
+            .find(|item| item["label"] == label)
+            .expect("expected snippet label");
+        assert_eq!(item["textEdit"]["newText"], json!(new_text));
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(5)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn stdio_jsonrpc_directive_value_roles() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(1)
+    {}
+
+    let uri = "file:///tmp/sase_prompt_directive_values.md";
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "%wait(bead=\n%wait:t\n%wait(café, be"
+                }
+            }
+        }),
+    )
+    .await;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            break;
+        }
+    }
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 0, "character": 11}
+            }
+        }),
+    )
+    .await;
+    let mut bead_labels = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(2) {
+            bead_labels = message["result"]
+                .as_array()
+                .expect("bead completion array")
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert_eq!(bead_labels, vec!["sase-a"]);
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 1, "character": 7}
+            }
+        }),
+    )
+    .await;
+    let mut colon_labels = Vec::new();
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(3) {
+            colon_labels = message["result"]
+                .as_array()
+                .expect("colon wait completion array")
+                .iter()
+                .filter_map(|item| item["label"].as_str())
+                .map(str::to_string)
+                .collect();
+            break;
+        }
+    }
+    assert!(
+        colon_labels.iter().all(|label| !label.ends_with('=')),
+        "{colon_labels:?}"
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "textDocument/completion",
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": 2, "character": 14}
+            }
+        }),
+    )
+    .await;
+    let mut unicode_item = None;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(4) {
+            unicode_item = message["result"]
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| item["label"] == "bead=")
+                })
+                .cloned();
+            break;
+        }
+    }
+    let unicode_item = unicode_item.expect("bead= after unicode clause");
+    assert_eq!(
+        unicode_item["textEdit"],
+        json!({
+            "range": {
+                "start": {"line": 2, "character": 12},
+                "end": {"line": 2, "character": 14}
+            },
+            "newText": "bead="
+        })
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
+    )
+    .await;
+    while read_message(&mut client_reader)
+        .await
+        .get("id")
+        .and_then(Value::as_i64)
+        != Some(5)
+    {}
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {
+    let body = value.to_string();
+    writer
+        .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(body.as_bytes()).await.unwrap();
+}
+
+async fn read_message(reader: &mut tokio::io::DuplexStream) -> Value {
+    let mut header = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).await.unwrap();
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let header = String::from_utf8(header).unwrap();
+    let length = header
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap();
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn read_response_result(
+    reader: &mut tokio::io::DuplexStream,
+    id: i64,
+) -> Value {
+    for _ in 0..16 {
+        let message = read_message(reader).await;
+        if message.get("id").and_then(Value::as_i64) == Some(id) {
+            return message["result"].clone();
+        }
+    }
+    panic!("missing response id {id}");
+}
+
+fn absolute_semantic_tokens_from_value(
+    data: &Value,
+) -> Vec<(u32, u32, u32, u32, u32)> {
+    let chunks = data.as_array().expect("semantic token data array");
+    assert_eq!(chunks.len() % 5, 0, "semantic token chunk length");
+    let mut line = 0u32;
+    let mut start = 0u32;
+    chunks
+        .chunks(5)
+        .map(|chunk| {
+            let delta_line = chunk[0].as_u64().unwrap() as u32;
+            let delta_start = chunk[1].as_u64().unwrap() as u32;
+            line += delta_line;
+            if delta_line == 0 {
+                start += delta_start;
+            } else {
+                start = delta_start;
+            }
+            (
+                line,
+                start,
+                chunk[2].as_u64().unwrap() as u32,
+                chunk[3].as_u64().unwrap() as u32,
+                chunk[4].as_u64().unwrap() as u32,
+            )
+        })
+        .collect()
+}
+
+fn assert_no_semantic_token_overlaps(tokens: &[(u32, u32, u32, u32, u32)]) {
+    for pair in tokens.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if left.0 == right.0 {
+            assert!(
+                left.1 + left.2 <= right.1,
+                "overlapping semantic tokens: {tokens:?}"
+            );
+        }
+    }
+}

@@ -83,7 +83,7 @@ pub(super) fn refresh_alias_history_candidates(
         "SELECT artifact_dir, projects_root, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig FROM agent_artifacts \
+         prompt_steps_sig, macros_sig FROM agent_artifacts \
          WHERE {}",
         clauses.join(" AND ")
     );

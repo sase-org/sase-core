@@ -687,7 +687,7 @@ impl CatalogLoader {
         // Probe the canonical `macros:` section before the retired
         // `xprompts:` spelling so go-to-definition follows the new key.
         let sections: &[&str] = match entry.definition_section {
-            DefinitionSection::Xprompts => &["macros", "xprompts"],
+            DefinitionSection::Macros => &["macros", "xprompts"],
             DefinitionSection::Workflows => {
                 &[entry.definition_section.as_str()]
             }

@@ -64,8 +64,8 @@ The HTTP status code carries transport status, while `code` is the stable client
   and preserves an optional `request_id` on the new launch context.
 - `GET /api/v1/changespec-tags` lists active ChangeSpec workflow tags, optionally filtered by known project and limit.
 - `GET /api/v1/patch-tags` is the canonical counterpart of `/api/v1/changespec-tags`; it lists the same helper data with `patch` as the JSON field.
-- `GET /api/v1/xprompts/catalog` returns structured xprompt picker records, with optional best-effort PDF attachment
-  metadata when `include_pdf=true`.
+- `GET /api/v1/macros/catalog` returns structured macro picker records, with optional best-effort PDF attachment
+  metadata when `include_pdf=true`. `GET /api/v1/xprompts/catalog` remains as a deprecated alias serving the same payload.
 - `GET /api/v1/beads` lists open/in-progress beads by default, with known-project, cross-project, status/type/tier,
   closed, and limit filters.
 - `GET /api/v1/beads/{id}` returns a structured bead detail record, including linked plan/design path display metadata
@@ -87,14 +87,14 @@ client-supplied host paths.
 
 Workflow helper routes call fixed `sase mobile helper-bridge <operation>` commands through the helper host bridge. They
 do not accept mobile-supplied shell commands, cwd values, environment variables, project file paths, or arbitrary bridge
-argv. Patch, xprompt, and bead helpers are read-only; the only mutating helper route starts the preconfigured
+argv. Patch, macro, and bead helpers are read-only; the only mutating helper route starts the preconfigured
 update worker.
 
-`GET /api/v1/xprompts/catalog` preserves the Python helper bridge's xprompt editor metadata. Entries may include
+`GET /api/v1/macros/catalog` preserves the Python helper bridge's macro editor metadata. Entries may include
 `insertion`, `reference_prefix`, `kind`, and structured `inputs` records with `name`, `type`, `required`,
 `default_display`, `position`, and `repeatable`; clients should tolerate older helper output where those additive fields
 are absent (`repeatable` defaults to false).
-The Rust gateway does not parse xprompt arguments itself.
+The Rust gateway does not parse macro arguments itself.
 
 ## Sudo Runner
 

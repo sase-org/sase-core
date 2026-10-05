@@ -5,7 +5,7 @@ use crate::editor::wire::{
     AgentCompletionEntry, EditorPosition, MacroAssistEntry,
 };
 use crate::{
-    EditorXpromptCatalogEntryWire, MemoryTierWire, MobileXpromptInputWire,
+    EditorMacroCatalogEntryWire, MemoryTierWire, MobileMacroInputWire,
 };
 pub(super) fn pos(character: u32) -> EditorPosition {
     EditorPosition { line: 0, character }
@@ -28,7 +28,7 @@ pub(super) fn agent_target(
 }
 pub(super) fn entries() -> Vec<MacroAssistEntry> {
     assist_entries_from_catalog(&[
-        EditorXpromptCatalogEntryWire {
+        EditorMacroCatalogEntryWire {
             name: "review".to_string(),
             display_label: "review".to_string(),
             insertion: Some("#review".to_string()),
@@ -40,7 +40,7 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
             tags: vec![],
             input_signature: Some("(path: path, deep?: bool)".to_string()),
             inputs: vec![
-                MobileXpromptInputWire {
+                MobileMacroInputWire {
                     name: "path".to_string(),
                     r#type: "path".to_string(),
                     description: Some("Path to review".to_string()),
@@ -50,7 +50,7 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
                     repeatable: false,
                     choices: Vec::new(),
                 },
-                MobileXpromptInputWire {
+                MobileMacroInputWire {
                     name: "deep".to_string(),
                     r#type: "bool".to_string(),
                     description: Some("Run a deeper pass".to_string()),
@@ -69,7 +69,7 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
             definition_path: Some("/tmp/sase/xprompts/review.md".to_string()),
             definition_range: None,
         },
-        EditorXpromptCatalogEntryWire {
+        EditorMacroCatalogEntryWire {
             name: "run".to_string(),
             display_label: "run".to_string(),
             insertion: Some("#!run".to_string()),
@@ -89,7 +89,7 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
             definition_path: None,
             definition_range: None,
         },
-        EditorXpromptCatalogEntryWire {
+        EditorMacroCatalogEntryWire {
             name: "memory/glossary".to_string(),
             display_label: "memory/glossary".to_string(),
             insertion: Some("#memory/glossary".to_string()),
@@ -109,7 +109,7 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
             definition_path: Some("/tmp/sase/memory/glossary.md".to_string()),
             definition_range: None,
         },
-        EditorXpromptCatalogEntryWire {
+        EditorMacroCatalogEntryWire {
             name: "skill/plan".to_string(),
             display_label: "skill/plan".to_string(),
             insertion: Some("#skill/plan".to_string()),

@@ -208,7 +208,7 @@ fn classifies_vcs_repo_then_vcs_ref_before_xprompt_argument_hints() {
     )
     .unwrap();
     assert_eq!(context.kind, CompletionContextKind::VcsRef);
-    assert_eq!(context.active_xprompt.as_deref(), None);
+    assert_eq!(context.active_macro.as_deref(), None);
 
     let doc = DocumentSnapshot::new("#foo:bbugyi200/");
     let context =

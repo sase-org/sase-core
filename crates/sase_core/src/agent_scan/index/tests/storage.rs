@@ -176,7 +176,7 @@ fn late_xprompts_file_refreshes_cached_record() {
     let conn = Connection::open(&index).unwrap();
     let (signature, record_json): (Option<String>, String) = conn
         .query_row(
-            "SELECT xprompts_sig, record_json FROM agent_artifacts \
+            "SELECT macros_sig, record_json FROM agent_artifacts \
              WHERE artifact_dir = ?1",
             [artifact_dir.to_string_lossy().as_ref()],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -235,7 +235,7 @@ fn durable_canonical_selection_refreshes_indexed_record() {
     let conn = Connection::open(&index).unwrap();
     let (signature, record_json): (Option<String>, String) = conn
         .query_row(
-            "SELECT xprompts_sig, record_json FROM agent_artifacts \
+            "SELECT macros_sig, record_json FROM agent_artifacts \
              WHERE artifact_dir = ?1",
             [artifact_dir.to_string_lossy().as_ref()],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -250,9 +250,10 @@ fn durable_canonical_selection_refreshes_indexed_record() {
         signature.contains("raw_prompt.md"),
         "raw selection rides same route: {signature}"
     );
-    // Indexed storage keeps the legacy `used_xprompts` key.
-    assert!(record_json.contains("\"used_xprompts\""));
-    assert!(!record_json.contains("\"used_macros\""));
+    // Indexed storage emits the `used_macros` key (legacy `used_xprompts`
+    // still reads). // legacy xprompt spelling
+    assert!(record_json.contains("\"used_macros\""));
+    assert!(!record_json.contains("\"used_xprompts\""));
     drop(conn);
 
     // Source removal falls back to the legacy file with a new signature.
@@ -274,7 +275,7 @@ fn durable_canonical_selection_refreshes_indexed_record() {
     let conn = Connection::open(&index).unwrap();
     let signature: Option<String> = conn
         .query_row(
-            "SELECT xprompts_sig FROM agent_artifacts WHERE artifact_dir = ?1",
+            "SELECT macros_sig FROM agent_artifacts WHERE artifact_dir = ?1",
             [artifact_dir.to_string_lossy().as_ref()],
             |row| row.get(0),
         )
@@ -373,7 +374,7 @@ fn cached_query_does_not_refresh_stale_marker_rows() {
     let conn = Connection::open(&index).unwrap();
     let (signature, record_json): (Option<String>, String) = conn
         .query_row(
-            "SELECT xprompts_sig, record_json FROM agent_artifacts \
+            "SELECT macros_sig, record_json FROM agent_artifacts \
              WHERE artifact_dir = ?1",
             [artifact_dir.to_string_lossy().as_ref()],
             |row| Ok((row.get(0)?, row.get(1)?)),

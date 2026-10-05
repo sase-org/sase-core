@@ -16,10 +16,10 @@ use super::wire::{
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
 ///
-/// This is the field set the prompt frontmatter panel offers (xprompt `.md`
+/// This is the field set the prompt frontmatter panel offers (macro `.md`
 /// parity). Descriptions are not duplicated here; they are sourced from
 /// [`TOP_LEVEL_FIELD_DOCS`] via [`top_level_field_doc`] so the panel and the
-/// hover/LSP guidance never drift. `keywords` is a valid xprompt field but is
+/// hover/LSP guidance never drift. `keywords` is a valid macro field but is
 /// intentionally outside the ad-hoc prompt panel's parity set.
 const PANEL_FIELD_SCHEMA: &[(
     &str,
@@ -47,7 +47,7 @@ const PANEL_FIELD_SCHEMA: &[(
         "service: word",
     ),
     (
-        "xprompts",
+        "macros",
         FrontmatterFieldKind::Structured,
         None,
         "_rules: \"Follow the team review checklist\"",
@@ -69,11 +69,11 @@ const PANEL_FIELD_SCHEMA: &[(
 const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     (
         "name",
-        "Overrides the xprompt reference name used in catalogs and completions.",
+        "Overrides the macro reference name used in catalogs and completions.",
     ),
     (
         "input",
-        "Declares named inputs accepted by this xprompt. Supports shortform mappings and longform sequences.",
+        "Declares named inputs accepted by this macro. Supports shortform mappings and longform sequences.",
     ),
     (
         "tags",
@@ -85,23 +85,23 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
     ),
     (
         "skill",
-        "Marks this xprompt as a slash skill. Use true, false, or a provider list.",
+        "Marks this macro as a slash skill. Use true, false, or a provider list.",
     ),
     (
         "snippet",
-        "Exposes this xprompt as a completion snippet. Use true, false, or a custom trigger.",
+        "Exposes this macro as a completion snippet. Use true, false, or a custom trigger.",
     ),
     (
         "log_skill_use",
-        "Controls whether generated skill files include the `sase skill use ...` audit directive. Use true or false; defaults to true and only applies to skill xprompts.",
+        "Controls whether generated skill files include the `sase skill use ...` audit directive. Use true or false; defaults to true and only applies to skill macros.",
     ),
     (
         "keywords",
-        "Legacy xprompt metadata retained for compatibility; it does not trigger memory matching.",
+        "Legacy macro metadata retained for compatibility; it does not trigger memory matching.",
     ),
     (
-        "xprompts",
-        "Defines local xprompts available only within the current file. Reference them from the body with `#name`.",
+        "macros",
+        "Defines local macros available only within the current file. Reference them from the body with `#name`.",
     ),
     (
         "macros",
@@ -198,8 +198,8 @@ pub(super) fn diagnostics(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_yaml",
-                format!("Invalid xprompt frontmatter YAML: {error}"),
+                "invalid_macro_frontmatter_yaml",
+                format!("Invalid macro frontmatter YAML: {error}"),
             );
             return builder.finish();
         }
@@ -240,7 +240,7 @@ pub(super) fn hover(
 ///
 /// Shared source of truth for the prompt frontmatter panel's "add property"
 /// picker and inline guidance. Descriptions come from the same constant that
-/// powers hover and the xprompt LSP, so the panel never drifts from the editor.
+/// powers hover and the macro LSP, so the panel never drifts from the editor.
 pub fn field_schema() -> Vec<FrontmatterFieldSchema> {
     PANEL_FIELD_SCHEMA
         .iter()
@@ -276,7 +276,7 @@ pub fn input_type_schema() -> Vec<FrontmatterInputType> {
 }
 
 /// Validate a whole frontmatter block, returning diagnostics that match the
-/// xprompt LSP output exactly (it runs the same engine).
+/// macro LSP output exactly (it runs the same engine).
 ///
 /// `text` may be a complete `---`-delimited frontmatter block (the canonical
 /// form the panel serializes) or a bare YAML body without delimiters; either
@@ -423,8 +423,8 @@ fn validate_frontmatter_value(
         builder.push(
             builder.index.fallback_range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_shape",
-            "Xprompt frontmatter must be a YAML mapping",
+            "invalid_macro_frontmatter_shape",
+            "Macro frontmatter must be a YAML mapping",
         );
         return;
     };
@@ -450,9 +450,9 @@ fn validate_top_level_fields(builder: &mut FrontmatterDiagnosticBuilder<'_>) {
         builder.push(
             field.key_range,
             DiagnosticSeverity::Information,
-            "unknown_xprompt_frontmatter_field",
+            "unknown_macro_frontmatter_field",
             format!(
-                "Unknown xprompt frontmatter field `{}` will be ignored",
+                "Unknown macro frontmatter field `{}` will be ignored",
                 field.key
             ),
         );
@@ -468,8 +468,9 @@ fn validate_local_section_keys(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     mapping: &Mapping,
 ) {
-    if yaml_mapping_get(mapping, "xprompts").is_none()
-        || yaml_mapping_get(mapping, "macros").is_none()
+    if yaml_mapping_get(mapping, "macros").is_none()
+        || yaml_mapping_get(mapping, "xprompts").is_none()
+    // legacy xprompt spelling
     {
         return;
     }
@@ -477,7 +478,7 @@ fn validate_local_section_keys(
         .index
         .fields
         .iter()
-        .filter(|field| field.key == "xprompts" || field.key == "macros")
+        .filter(|field| field.key == "macros" || field.key == "xprompts") // legacy xprompt spelling
         .max_by_key(|field| field.key_range.0)
         .map(|field| field.key_range)
         .unwrap_or(builder.index.fallback_range);
@@ -485,7 +486,7 @@ fn validate_local_section_keys(
         range,
         DiagnosticSeverity::Error,
         "duplicate_macro_frontmatter_section",
-        "Duplicate macro definition keys `xprompts` and `macros`; keep only `macros`",
+        "Duplicate macro definition keys `macros` and `xprompts`; keep only `macros`", // legacy xprompt spelling
     );
 }
 
@@ -507,8 +508,8 @@ fn validate_name(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_name",
-            "Xprompt name must be a non-empty scalar",
+            "invalid_macro_frontmatter_name",
+            "Macro name must be a non-empty scalar",
         );
         return;
     };
@@ -517,15 +518,15 @@ fn validate_name(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_name",
-            "Xprompt name must not be empty",
+            "invalid_macro_frontmatter_name",
+            "Macro name must not be empty",
         );
     } else if !is_referenceable_macro_name(name) {
         builder.push(
             range,
             DiagnosticSeverity::Warning,
-            "unreferenceable_xprompt_frontmatter_name",
-            "Xprompt name cannot be referenced with the current #name grammar",
+            "unreferenceable_macro_frontmatter_name",
+            "Macro name cannot be referenced with the current #name grammar",
         );
     }
 }
@@ -546,8 +547,8 @@ fn validate_input(
         builder.push(
             input_range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_shape",
-            "Xprompt input must be a mapping or sequence",
+            "invalid_macro_frontmatter_input_shape",
+            "Macro input must be a mapping or sequence",
         );
     }
 }
@@ -578,8 +579,8 @@ fn validate_shortform_inputs(
             builder.push(
                 name_range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_name",
-                "Xprompt input name must be a non-empty scalar",
+                "invalid_macro_frontmatter_input_name",
+                "Macro input name must be a non-empty scalar",
             );
             continue;
         };
@@ -657,8 +658,8 @@ fn validate_longform_inputs(
             builder.push(
                 item_range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_item",
-                "Longform xprompt input items must be mappings",
+                "invalid_macro_frontmatter_input_item",
+                "Longform macro input items must be mappings",
             );
             continue;
         };
@@ -684,16 +685,16 @@ fn validate_longform_inputs(
                     builder.push(
                         name_range,
                         DiagnosticSeverity::Error,
-                        "duplicate_xprompt_frontmatter_input",
-                        format!("Duplicate xprompt input `{name}`"),
+                        "duplicate_macro_frontmatter_input",
+                        format!("Duplicate macro input `{name}`"),
                     );
                 }
             }
             None => builder.push(
                 name_range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_name",
-                "Longform xprompt input item needs a non-empty scalar name",
+                "invalid_macro_frontmatter_input_name",
+                "Longform macro input item needs a non-empty scalar name",
             ),
         }
 
@@ -768,8 +769,8 @@ fn validate_shortform_duplicates(
         builder.push(
             source.name_range,
             DiagnosticSeverity::Error,
-            "duplicate_xprompt_frontmatter_input",
-            format!("Duplicate xprompt input `{}`", source.name),
+            "duplicate_macro_frontmatter_input",
+            format!("Duplicate macro input `{}`", source.name),
         );
     }
 }
@@ -784,15 +785,15 @@ fn validate_input_name(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_name",
-            "Xprompt input name must not be empty",
+            "invalid_macro_frontmatter_input_name",
+            "Macro input name must not be empty",
         );
     } else if !is_jinja_identifier(name) {
         builder.push(
             range,
             DiagnosticSeverity::Warning,
-            "invalid_xprompt_frontmatter_input_identifier",
-            "Xprompt input name should be a valid named-argument identifier",
+            "invalid_macro_frontmatter_input_identifier",
+            "Macro input name should be a valid named-argument identifier",
         );
     }
 }
@@ -863,8 +864,8 @@ fn validate_explicit_input_type(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_type",
-            "Xprompt input type must be a scalar",
+            "invalid_macro_frontmatter_input_type",
+            "Macro input type must be a scalar",
         );
         return (InputType::Line, false);
     };
@@ -874,7 +875,7 @@ fn validate_explicit_input_type(
                 builder.push(
                     range,
                     DiagnosticSeverity::Warning,
-                    "deprecated_xprompt_frontmatter_input_type",
+                    "deprecated_macro_frontmatter_input_type",
                     "Input type `string` is deprecated; use `line` instead",
                 );
             }
@@ -884,7 +885,7 @@ fn validate_explicit_input_type(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_type",
+                "invalid_macro_frontmatter_input_type",
                 error.message,
             );
             (InputType::Line, false)
@@ -919,8 +920,8 @@ fn validate_input_choices(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_choices",
-                "Xprompt input choices is only valid for type `enum`",
+                "invalid_macro_frontmatter_input_choices",
+                "Macro input choices is only valid for type `enum`",
             );
         }
         return Vec::new();
@@ -931,8 +932,8 @@ fn validate_input_choices(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_choices",
-                "Xprompt input type `enum` requires a non-empty `choices` list",
+                "invalid_macro_frontmatter_input_choices",
+                "Macro input type `enum` requires a non-empty `choices` list",
             );
             return Vec::new();
         }
@@ -954,7 +955,7 @@ fn validate_input_choices(
             builder.push(
                 value_range.unwrap_or(item_range),
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_choices",
+                "invalid_macro_frontmatter_input_choices",
                 message,
             );
             continue;
@@ -969,7 +970,7 @@ fn validate_input_choices(
             builder.push(
                 value_range.unwrap_or(item_range),
                 severity,
-                "invalid_xprompt_frontmatter_input_choices",
+                "invalid_macro_frontmatter_input_choices",
                 issue.message,
             );
         }
@@ -980,7 +981,7 @@ fn validate_input_choices(
             builder.push(
                 value_range.unwrap_or(item_range),
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_choices",
+                "invalid_macro_frontmatter_input_choices",
                 format!("choice `{}` is declared twice", choice.value),
             );
             continue;
@@ -1016,7 +1017,7 @@ fn validate_input_default(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_default",
+                "invalid_macro_frontmatter_input_default",
                 message,
             );
             return;
@@ -1030,7 +1031,7 @@ fn validate_input_default(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_default",
+                "invalid_macro_frontmatter_input_default",
                 message,
             );
             return;
@@ -1039,7 +1040,7 @@ fn validate_input_default(
             builder.push(
                 range,
                 DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_default",
+                "invalid_macro_frontmatter_input_default",
                 message,
             );
         }
@@ -1049,8 +1050,8 @@ fn validate_input_default(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_default",
-            "Xprompt input default must be a scalar or null",
+            "invalid_macro_frontmatter_input_default",
+            "Macro input default must be a scalar or null",
         );
         return;
     };
@@ -1071,7 +1072,7 @@ fn validate_input_default(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_default",
+            "invalid_macro_frontmatter_input_default",
             format!(
                 "Default value does not match input type `{}`",
                 declared_type_name(declared_type)
@@ -1099,8 +1100,8 @@ fn validate_input_repeatable(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_repeatable",
-            "Xprompt input repeatable must be true or false",
+            "invalid_macro_frontmatter_input_repeatable",
+            "Macro input repeatable must be true or false",
         );
         return;
     };
@@ -1108,8 +1109,8 @@ fn validate_input_repeatable(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "non_final_xprompt_frontmatter_repeatable_input",
-            "A repeatable xprompt input must be the final positional input",
+            "non_final_macro_frontmatter_repeatable_input",
+            "A repeatable macro input must be the final positional input",
         );
     }
 }
@@ -1132,8 +1133,8 @@ fn validate_input_description(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_description",
-            "Xprompt input description must be a scalar string value",
+            "invalid_macro_frontmatter_input_description",
+            "Macro input description must be a scalar string value",
         );
         return;
     };
@@ -1141,8 +1142,8 @@ fn validate_input_description(
         builder.push(
             range,
             DiagnosticSeverity::Warning,
-            "multiline_xprompt_frontmatter_input_description",
-            "Xprompt input description should be a single line",
+            "multiline_macro_frontmatter_input_description",
+            "Macro input description should be a single line",
         );
     }
 }
@@ -1164,9 +1165,9 @@ fn validate_nested_input_unknown_keys(
         builder.push(
             field.key_range,
             DiagnosticSeverity::Information,
-            "unknown_xprompt_frontmatter_input_field",
+            "unknown_macro_frontmatter_input_field",
             format!(
-                "Unknown xprompt input field `{}` will be ignored",
+                "Unknown macro input field `{}` will be ignored",
                 field.key
             ),
         );
@@ -1195,9 +1196,9 @@ fn validate_longform_unknown_keys(
         builder.push(
             field.key_range,
             DiagnosticSeverity::Information,
-            "unknown_xprompt_frontmatter_input_field",
+            "unknown_macro_frontmatter_input_field",
             format!(
-                "Unknown xprompt input field `{}` will be ignored",
+                "Unknown macro input field `{}` will be ignored",
                 field.key
             ),
         );
@@ -1218,8 +1219,8 @@ fn validate_tags(
         builder.push(
             builder.field_value_range("tags"),
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_tags",
-            "Xprompt tags must be a comma-separated string or sequence",
+            "invalid_macro_frontmatter_tags",
+            "Macro tags must be a comma-separated string or sequence",
         );
         return;
     };
@@ -1237,8 +1238,8 @@ fn validate_tags(
                 .copied()
                 .unwrap_or_else(|| builder.field_value_range("tags")),
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_tags",
-            "Xprompt tag entries must be non-empty scalars",
+            "invalid_macro_frontmatter_tags",
+            "Macro tag entries must be non-empty scalars",
         );
     }
 }
@@ -1255,8 +1256,8 @@ fn validate_description(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_description",
-            "Xprompt description must be a scalar string value",
+            "invalid_macro_frontmatter_description",
+            "Macro description must be a scalar string value",
         );
         return;
     };
@@ -1264,8 +1265,8 @@ fn validate_description(
         builder.push(
             range,
             DiagnosticSeverity::Warning,
-            "multiline_xprompt_frontmatter_description",
-            "Xprompt description should be a single line",
+            "multiline_macro_frontmatter_description",
+            "Macro description should be a single line",
         );
     }
 }
@@ -1285,8 +1286,8 @@ fn validate_skill(
         builder.push(
             builder.field_value_range("skill"),
             DiagnosticSeverity::Warning,
-            "invalid_xprompt_frontmatter_skill",
-            "Xprompt skill must be true, false, or a provider list",
+            "invalid_macro_frontmatter_skill",
+            "Macro skill must be true, false, or a provider list",
         );
         return;
     };
@@ -1294,8 +1295,8 @@ fn validate_skill(
         builder.push(
             builder.field_value_range("skill"),
             DiagnosticSeverity::Warning,
-            "empty_xprompt_frontmatter_skill",
-            "Xprompt skill provider list should not be empty",
+            "empty_macro_frontmatter_skill",
+            "Macro skill provider list should not be empty",
         );
         return;
     }
@@ -1314,8 +1315,8 @@ fn validate_skill(
                 .copied()
                 .unwrap_or_else(|| builder.field_value_range("skill")),
             DiagnosticSeverity::Warning,
-            "invalid_xprompt_frontmatter_skill",
-            "Xprompt skill providers must be non-empty strings",
+            "invalid_macro_frontmatter_skill",
+            "Macro skill providers must be non-empty strings",
         );
     }
     validate_skill_description(builder, mapping);
@@ -1335,8 +1336,8 @@ fn validate_skill_description(
         builder.push(
             builder.field_key_range("skill"),
             DiagnosticSeverity::Warning,
-            "missing_xprompt_skill_description",
-            "Skill xprompts should include a useful description",
+            "missing_macro_skill_description",
+            "Skill macros should include a useful description",
         );
     }
 }
@@ -1356,8 +1357,8 @@ fn validate_snippet(
         builder.push(
             range,
             DiagnosticSeverity::Warning,
-            "invalid_xprompt_frontmatter_snippet",
-            "Xprompt snippet must be true, false, or a trigger string",
+            "invalid_macro_frontmatter_snippet",
+            "Macro snippet must be true, false, or a trigger string",
         );
         return;
     };
@@ -1365,8 +1366,8 @@ fn validate_snippet(
         builder.push(
             range,
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_snippet_trigger",
-            "Xprompt snippet trigger must use only ASCII letters, digits, or underscores",
+            "invalid_macro_frontmatter_snippet_trigger",
+            "Macro snippet trigger must use only ASCII letters, digits, or underscores",
         );
     }
 }
@@ -1384,8 +1385,8 @@ fn validate_log_skill_use(
     builder.push(
         builder.field_value_range("log_skill_use"),
         DiagnosticSeverity::Warning,
-        "invalid_xprompt_frontmatter_log_skill_use",
-        "Xprompt log_skill_use must be true or false",
+        "invalid_macro_frontmatter_log_skill_use",
+        "Macro log_skill_use must be true or false",
     );
 }
 
@@ -1400,8 +1401,8 @@ fn validate_keywords(
         builder.push(
             builder.field_value_range("keywords"),
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_keywords",
-            "Xprompt keywords must be a sequence of non-empty scalars",
+            "invalid_macro_frontmatter_keywords",
+            "Macro keywords must be a sequence of non-empty scalars",
         );
         return;
     };
@@ -1419,8 +1420,8 @@ fn validate_keywords(
                 .copied()
                 .unwrap_or_else(|| builder.field_value_range("keywords")),
             DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_keywords",
-            "Xprompt keyword entries must be non-empty scalars",
+            "invalid_macro_frontmatter_keywords",
+            "Macro keyword entries must be non-empty scalars",
         );
     }
 }
@@ -2646,7 +2647,7 @@ mod tests {
                 "description",
                 "tags",
                 "input",
-                "xprompts",
+                "macros",
                 "skill",
                 "snippet"
             ]
@@ -2750,14 +2751,14 @@ mod tests {
             "---\ninput:\n  names:\n    type: agent\n    repeatable: true\n  mode: word\n---\n",
         );
         assert!(non_final.iter().any(|diagnostic| {
-            diagnostic.code == "non_final_xprompt_frontmatter_repeatable_input"
+            diagnostic.code == "non_final_macro_frontmatter_repeatable_input"
         }));
 
         let non_boolean = validate(
             "---\ninput:\n  names:\n    type: agent\n    repeatable: yes\n---\n",
         );
         assert!(non_boolean.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_repeatable"
+            diagnostic.code == "invalid_macro_frontmatter_input_repeatable"
         }));
     }
 
@@ -2779,7 +2780,7 @@ mod tests {
         let diagnostic = diagnostics
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             })
             .unwrap();
         assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
@@ -2795,7 +2796,7 @@ mod tests {
         let diagnostic = unknown
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             })
             .unwrap();
         assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
@@ -2808,7 +2809,7 @@ mod tests {
         let warning = deprecated
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "deprecated_xprompt_frontmatter_input_type"
+                diagnostic.code == "deprecated_macro_frontmatter_input_type"
             })
             .unwrap();
         assert_eq!(warning.severity, DiagnosticSeverity::Warning);
@@ -2836,7 +2837,7 @@ mod tests {
         let diagnostics =
             validate("---\ninput:\n  mode:\n    type: enum\n---\n");
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+            diagnostic.code == "invalid_macro_frontmatter_input_choices"
         }));
     }
 
@@ -2846,7 +2847,7 @@ mod tests {
             "---\ninput:\n  mode:\n    type: word\n    choices: [fast, slow]\n---\n",
         );
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+            diagnostic.code == "invalid_macro_frontmatter_input_choices"
         }));
     }
 
@@ -2856,7 +2857,7 @@ mod tests {
             "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, fast]\n---\n",
         );
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_choices"
+            diagnostic.code == "invalid_macro_frontmatter_input_choices"
         }));
     }
 
@@ -2871,7 +2872,7 @@ mod tests {
                 .iter()
                 .find(|diagnostic| {
                     diagnostic.code
-                        == "invalid_xprompt_frontmatter_input_choices"
+                        == "invalid_macro_frontmatter_input_choices"
                 })
                 .unwrap();
             assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
@@ -2896,7 +2897,7 @@ mod tests {
         let diagnostic = invalid
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_default"
+                diagnostic.code == "invalid_macro_frontmatter_input_default"
             })
             .unwrap();
         assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
@@ -2917,7 +2918,7 @@ mod tests {
             "---\ninput:\n  file:\n    type: path\n    default: \"src/my\\nfile.rs\"\n---\n",
         );
         assert!(multiline.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_default"
+            diagnostic.code == "invalid_macro_frontmatter_input_default"
                 && diagnostic.severity == DiagnosticSeverity::Error
         }));
     }
@@ -2929,7 +2930,7 @@ mod tests {
         assert!(!has_error(&diagnostics), "{diagnostics:?}");
         assert!(
             !diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "unknown_xprompt_frontmatter_field"
+                diagnostic.code == "unknown_macro_frontmatter_field"
             }),
             "{diagnostics:?}"
         );
@@ -2944,8 +2945,7 @@ mod tests {
             let diagnostics = validate(text);
             assert!(
                 diagnostics.iter().any(|diagnostic| {
-                    diagnostic.code
-                        == "invalid_xprompt_frontmatter_log_skill_use"
+                    diagnostic.code == "invalid_macro_frontmatter_log_skill_use"
                 }),
                 "{text:?} -> {diagnostics:?}"
             );
@@ -2987,7 +2987,7 @@ mod tests {
         )));
         let bad = validate_field("snippet", "bad-trigger!");
         assert!(bad.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_snippet_trigger"
+            diagnostic.code == "invalid_macro_frontmatter_snippet_trigger"
         }));
     }
 
@@ -2997,7 +2997,7 @@ mod tests {
         let diagnostics =
             validate_field("input", "service: wordd\nregion: word");
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+            diagnostic.code == "invalid_macro_frontmatter_input_type"
         }));
     }
 }
@@ -3018,7 +3018,7 @@ mod authored_inputs_tests {
             validate("---\nmacros:\n  _helper:\n    content: Hi\n---\nBody");
         assert!(
             diagnostics.iter().all(|diagnostic| diagnostic.code
-                != "unknown_xprompt_frontmatter_field"),
+                != "unknown_macro_frontmatter_field"),
             "{diagnostics:?}"
         );
         assert!(!has_error(&diagnostics), "{diagnostics:?}");
@@ -3027,8 +3027,8 @@ mod authored_inputs_tests {
     #[test]
     fn duplicate_local_sections_are_an_error_naming_macros() {
         for body in [
-            "xprompts:\n  a:\n    content: A\nmacros:\n  b:\n    content: B\n",
-            "xprompts:\nmacros:\n",
+            "macros:\n  a:\n    content: A\nmacros:\n  b:\n    content: B\n",
+            "macros:\nxprompts:\n", // legacy xprompt spelling
         ] {
             let diagnostics = validate(&format!("---\n{body}---\n"));
             let hit = diagnostics

@@ -39,11 +39,11 @@ use crate::wire::{
     MobileAgentTextLaunchRequestWire, MobileBeadListRequestWire,
     MobileBeadListResponseWire, MobileBeadShowRequestWire,
     MobileBeadShowResponseWire, MobileChangeSpecTagListRequestWire,
-    MobileChangeSpecTagListResponseWire, MobilePatchTagListRequestWire,
+    MobileChangeSpecTagListResponseWire, MobileMacroCatalogRequestWire,
+    MobileMacroCatalogResponseWire, MobilePatchTagListRequestWire,
     MobilePatchTagListResponseWire, MobileUpdateStartRequestWire,
     MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
-    MobileUpdateStatusResponseWire, MobileXpromptCatalogRequestWire,
-    MobileXpromptCatalogResponseWire, NotificationStateMutationResponseWire,
+    MobileUpdateStatusResponseWire, NotificationStateMutationResponseWire,
     PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
     PairStartResponseWire, PushSubscriptionDeleteResponseWire,
     PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
@@ -546,7 +546,7 @@ pub(crate) async fn list_patch_tags(
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct XpromptCatalogQuery {
+pub(crate) struct MacroCatalogQuery {
     #[serde(default)]
     project: Option<String>,
     #[serde(default)]
@@ -561,14 +561,14 @@ pub(crate) struct XpromptCatalogQuery {
     limit: Option<u32>,
 }
 
-pub(crate) async fn xprompt_catalog(
+pub(crate) async fn macro_catalog(
     State(state): State<GatewayState>,
     headers: HeaderMap,
-    Query(query): Query<XpromptCatalogQuery>,
-) -> Result<Json<MobileXpromptCatalogResponseWire>, ApiError> {
+    Query(query): Query<MacroCatalogQuery>,
+) -> Result<Json<MobileMacroCatalogResponseWire>, ApiError> {
     let device =
         authenticate(&state, &headers, "/api/v1/xprompts/catalog").await?;
-    let request = MobileXpromptCatalogRequestWire {
+    let request = MobileMacroCatalogRequestWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         project: query.project,
         source: query.source,
@@ -580,7 +580,7 @@ pub(crate) async fn xprompt_catalog(
     };
     state
         .helper_bridge
-        .xprompt_catalog(&request)
+        .macro_catalog(&request)
         .map(Json)
         .map_err(ApiError::from_host_bridge)
 }

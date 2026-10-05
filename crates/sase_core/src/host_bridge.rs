@@ -46,11 +46,11 @@ impl DynHelperHostBridge {
         self.0.list_patch_tags(request)
     }
 
-    pub fn xprompt_catalog(
+    pub fn macro_catalog(
         &self,
-        request: &MobileXpromptCatalogRequestWire,
-    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
-        self.0.xprompt_catalog(request)
+        request: &MobileMacroCatalogRequestWire,
+    ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
+        self.0.macro_catalog(request)
     }
 
     pub fn snippet_catalog(
@@ -137,10 +137,10 @@ pub trait HelperHostBridge: Send + Sync {
         .map(MobilePatchTagListResponseWire::from)
     }
 
-    fn xprompt_catalog(
+    fn macro_catalog(
         &self,
-        _request: &MobileXpromptCatalogRequestWire,
-    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
+        _request: &MobileMacroCatalogRequestWire,
+    ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
         Err(HostBridgeError::BridgeUnavailable(
             "helper_bridge".to_string(),
         ))
@@ -387,11 +387,11 @@ impl HelperHostBridge for CommandHelperHostBridge {
         self.invoke_mobile("changespec-tags", request)
     }
 
-    fn xprompt_catalog(
+    fn macro_catalog(
         &self,
-        request: &MobileXpromptCatalogRequestWire,
-    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
-        self.invoke_mobile("xprompt-catalog", request)
+        request: &MobileMacroCatalogRequestWire,
+    ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
+        self.invoke_mobile("macro-catalog", request)
     }
 
     fn snippet_catalog(
@@ -442,7 +442,7 @@ pub struct StaticHelperHostBridge {
     pub agent_catalog_response: AgentCatalogResponse,
     pub finalizer_catalog_response: FinalizerCatalogResponse,
     pub changespec_tags_response: MobileChangeSpecTagListResponseWire,
-    pub xprompt_catalog_response: MobileXpromptCatalogResponseWire,
+    pub macro_catalog_response: MobileMacroCatalogResponseWire,
     pub snippet_catalog_response: EditorSnippetCatalogResponseWire,
     pub vcs_repo_catalog_response: VcsRepoCatalogResponse,
     pub bead_list_response: MobileBeadListResponseWire,
@@ -473,11 +473,11 @@ impl HelperHostBridge for StaticHelperHostBridge {
         Ok(self.changespec_tags_response.clone())
     }
 
-    fn xprompt_catalog(
+    fn macro_catalog(
         &self,
-        _request: &MobileXpromptCatalogRequestWire,
-    ) -> Result<MobileXpromptCatalogResponseWire, HostBridgeError> {
-        Ok(self.xprompt_catalog_response.clone())
+        _request: &MobileMacroCatalogRequestWire,
+    ) -> Result<MobileMacroCatalogResponseWire, HostBridgeError> {
+        Ok(self.macro_catalog_response.clone())
     }
 
     fn snippet_catalog(
@@ -745,7 +745,7 @@ impl From<MobileChangeSpecTagEntryWire> for MobilePatchTagEntryWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogRequestWire {
+pub struct MobileMacroCatalogRequestWire {
     pub schema_version: u32,
     pub project: Option<String>,
     pub source: Option<String>,
@@ -757,20 +757,20 @@ pub struct MobileXpromptCatalogRequestWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogResponseWire {
+pub struct MobileMacroCatalogResponseWire {
     pub schema_version: u32,
     pub result: MobileHelperResultWire,
     pub context: MobileHelperProjectContextWire,
-    pub entries: Vec<MobileXpromptCatalogEntryWire>,
-    pub stats: MobileXpromptCatalogStatsWire,
-    pub catalog_attachment: Option<MobileXpromptCatalogAttachmentWire>,
+    pub entries: Vec<MobileMacroCatalogEntryWire>,
+    pub stats: MobileMacroCatalogStatsWire,
+    pub catalog_attachment: Option<MobileMacroCatalogAttachmentWire>,
 }
 
-pub type EditorXpromptCatalogRequestWire = MobileXpromptCatalogRequestWire;
-pub type EditorXpromptCatalogResponseWire = MobileXpromptCatalogResponseWire;
-pub type EditorXpromptCatalogEntryWire = MobileXpromptCatalogEntryWire;
-pub type EditorXpromptInputWire = MobileXpromptInputWire;
-pub type EditorXpromptCatalogStatsWire = MobileXpromptCatalogStatsWire;
+pub type EditorMacroCatalogRequestWire = MobileMacroCatalogRequestWire;
+pub type EditorMacroCatalogResponseWire = MobileMacroCatalogResponseWire;
+pub type EditorMacroCatalogEntryWire = MobileMacroCatalogEntryWire;
+pub type EditorXpromptInputWire = MobileMacroInputWire;
+pub type EditorMacroCatalogStatsWire = MobileMacroCatalogStatsWire;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditorSnippetCatalogRequestWire {
@@ -806,7 +806,7 @@ pub struct EditorSnippetCatalogStatsWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogEntryWire {
+pub struct MobileMacroCatalogEntryWire {
     pub name: String,
     pub display_label: String,
     pub insertion: Option<String>,
@@ -818,7 +818,7 @@ pub struct MobileXpromptCatalogEntryWire {
     pub tags: Vec<String>,
     pub input_signature: Option<String>,
     #[serde(default)]
-    pub inputs: Vec<MobileXpromptInputWire>,
+    pub inputs: Vec<MobileMacroInputWire>,
     pub is_skill: bool,
     /// Provider skill name for a skill source (`foo` for reference name
     /// `skill/foo`). Absent for everything that is not a skill; older payloads
@@ -850,7 +850,7 @@ pub struct MobileInputChoiceWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptInputWire {
+pub struct MobileMacroInputWire {
     pub name: String,
     #[serde(rename = "type")]
     pub r#type: String,
@@ -866,7 +866,7 @@ pub struct MobileXpromptInputWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogStatsWire {
+pub struct MobileMacroCatalogStatsWire {
     pub total_count: u64,
     pub project_count: u64,
     pub skill_count: u64,
@@ -878,7 +878,7 @@ pub struct MobileXpromptCatalogStatsWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MobileXpromptCatalogAttachmentWire {
+pub struct MobileMacroCatalogAttachmentWire {
     pub display_name: String,
     pub content_type: Option<String>,
     pub byte_size: Option<u64>,
@@ -1066,11 +1066,11 @@ mod tests {
                 tags: Vec::new(),
                 total_count: 0,
             },
-            xprompt_catalog_response: MobileXpromptCatalogResponseWire {
+            macro_catalog_response: MobileMacroCatalogResponseWire {
                 schema_version: 1,
                 result: helper_result(),
                 context: helper_context(),
-                entries: vec![MobileXpromptCatalogEntryWire {
+                entries: vec![MobileMacroCatalogEntryWire {
                     name: "bd/work_phase_bead".to_string(),
                     display_label: "Work phase bead".to_string(),
                     insertion: Some("#bd/work_phase_bead".to_string()),
@@ -1083,7 +1083,7 @@ mod tests {
                     project: None,
                     tags: vec!["beads".to_string()],
                     input_signature: Some("bead_id".to_string()),
-                    inputs: vec![MobileXpromptInputWire {
+                    inputs: vec![MobileMacroInputWire {
                         name: "bead_id".to_string(),
                         r#type: "word".to_string(),
                         description: None,
@@ -1105,7 +1105,7 @@ mod tests {
                     ),
                     definition_range: None,
                 }],
-                stats: MobileXpromptCatalogStatsWire {
+                stats: MobileMacroCatalogStatsWire {
                     total_count: 1,
                     project_count: 0,
                     skill_count: 0,
@@ -1201,7 +1201,7 @@ mod tests {
     fn static_helper_bridge_returns_structured_catalog_response() {
         let bridge = DynHelperHostBridge::new(Arc::new(static_bridge()));
         let response = bridge
-            .xprompt_catalog(&MobileXpromptCatalogRequestWire {
+            .macro_catalog(&MobileMacroCatalogRequestWire {
                 schema_version: 1,
                 project: Some("sase".to_string()),
                 source: None,
@@ -1577,7 +1577,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
     }
 
     #[test]
-    fn xprompt_catalog_entry_wire_accepts_old_and_new_definition_path_json() {
+    fn macro_catalog_entry_wire_accepts_old_and_new_definition_path_json() {
         let old_json = json!({
             "name": "review",
             "display_label": "review",
@@ -1600,7 +1600,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             "content_preview": null,
             "source_path_display": "sase/xprompts/review.md"
         });
-        let old_entry: MobileXpromptCatalogEntryWire =
+        let old_entry: MobileMacroCatalogEntryWire =
             serde_json::from_value(old_json).unwrap();
         assert_eq!(old_entry.definition_path, None);
         assert_eq!(old_entry.definition_range, None);
@@ -1635,7 +1635,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             })
         );
 
-        let new_entry: MobileXpromptCatalogEntryWire =
+        let new_entry: MobileMacroCatalogEntryWire =
             serde_json::from_value(json!({
                 "name": "review",
                 "display_label": "review",

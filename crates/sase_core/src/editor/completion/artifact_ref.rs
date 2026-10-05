@@ -92,7 +92,7 @@ fn artifact_ref_completion_context(
             byte_start: detected.candidate_span.0,
             byte_end: detected.candidate_span.1,
         }),
-        active_xprompt: None,
+        active_macro: None,
         active_input: None,
         directive_name: None,
         selected_values: Vec::new(),

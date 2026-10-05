@@ -230,8 +230,8 @@ fn macro_diagnostics(
                 out.push(EditorDiagnostic {
                     range,
                     severity: DiagnosticSeverity::Warning,
-                    code: "unknown_xprompt".to_string(),
-                    message: format!("Unknown xprompt `{name}`"),
+                    code: "unknown_macro".to_string(),
+                    message: format!("Unknown macro `{name}`"),
                 });
             }
             continue;
@@ -352,8 +352,8 @@ fn argument_diagnostics(
                 &mut out,
                 start,
                 end,
-                "malformed_xprompt_argument",
-                "Malformed xprompt argument form".to_string(),
+                "malformed_macro_argument",
+                "Malformed macro argument form".to_string(),
             );
             if entry.inputs.is_empty() || call.is_open {
                 continue;
@@ -419,9 +419,9 @@ pub(crate) fn validate_macro_call_args(
                     kind: MacroArgValidationKind::DuplicateKey,
                     arg_index: Some(arg_index),
                     span: name.span,
-                    code: "duplicate_xprompt_arg",
+                    code: "duplicate_macro_arg",
                     message: format!(
-                        "Duplicate xprompt argument `{}`",
+                        "Duplicate macro argument `{}`",
                         name.value
                     ),
                 });
@@ -434,9 +434,9 @@ pub(crate) fn validate_macro_call_args(
                     kind: MacroArgValidationKind::UnknownKey,
                     arg_index: Some(arg_index),
                     span: name.span,
-                    code: "unknown_xprompt_arg",
+                    code: "unknown_macro_arg",
                     message: format!(
-                        "Unknown argument `{}` for xprompt `{}`",
+                        "Unknown argument `{}` for macro `{}`",
                         name.value, entry.name
                     ),
                 });
@@ -476,7 +476,7 @@ pub(crate) fn validate_macro_call_args(
             span: call.name_span,
             code: "missing_required_arg",
             message: format!(
-                "Missing required argument `{}` for xprompt `{}`",
+                "Missing required argument `{}` for macro `{}`",
                 input.name, entry.name
             ),
         });
@@ -498,10 +498,10 @@ fn validate_type(
         kind: MacroArgValidationKind::TypeMismatch,
         arg_index: Some(arg_index),
         span: arg.value_span,
-        code: "invalid_xprompt_arg_type",
+        code: "invalid_macro_arg_type",
         message: enum_value_mismatch(input, &arg.value).unwrap_or_else(|| {
             format!(
-                "Argument `{}` for xprompt `{}` expects {}",
+                "Argument `{}` for macro `{}` expects {}",
                 input.name, entry.name, input.r#type
             )
         }),
@@ -581,11 +581,11 @@ fn local_macro_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
         return Vec::new();
     };
     // Discover helpers from both the canonical `macros:` section and the
-    // retired `xprompts:` spelling. The canonical entry wins on a name
+    // retired `macros:` spelling. The canonical entry wins on a name
     // conflict; a malformed canonical entry falls back to the retired one.
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
-    for key in ["macros", "xprompts"] {
+    for key in ["macros", "macros"] {
         let Some(section) =
             mapping_get(&frontmatter, key).and_then(Value::as_mapping)
         else {
@@ -631,7 +631,7 @@ fn local_macro_entry_from_config(
         display_label: name.to_string(),
         insertion,
         reference_prefix: "#".to_string(),
-        kind: Some("local_xprompt".to_string()),
+        kind: Some("local_macro".to_string()),
         source_bucket: "current_document".to_string(),
         project: None,
         tags: Vec::new(),
@@ -830,7 +830,7 @@ pub(crate) fn value_as_string(value: &Value) -> Option<String> {
 }
 
 /// Document-local macro names follow the ordinary reference grammar and may
-/// never claim the reserved xprompt-memory namespace.
+/// never claim the reserved macro-memory namespace.
 fn is_referenceable_macro_name(name: &str) -> bool {
     !is_reserved_memory_reference(name)
         && name.split('/').all(is_jinja_identifier)
@@ -1237,8 +1237,8 @@ mod tests {
     }
 
     #[test]
-    fn slash_skills_resolve_by_provider_name_not_xprompt_reference() {
-        // `/plan` is the installed skill; its xprompt reference is
+    fn slash_skills_resolve_by_provider_name_not_macro_reference() {
+        // `/plan` is the installed skill; its macro reference is
         // `#skill/plan`, and the namespaced form is not a slash skill.
         let known = DocumentSnapshot::new("/plan #skill/plan");
         assert_eq!(
@@ -1248,7 +1248,7 @@ mod tests {
             ),
             0
         );
-        // The xprompt namespace segment is not itself a slash skill.
+        // The macro namespace segment is not itself a slash skill.
         let namespaced = DocumentSnapshot::new("/skill");
         assert_eq!(
             diagnostic_count(
@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(
             diagnostic_count(
                 &analyze_document(&unnamespaced, &catalog()),
-                "unknown_xprompt"
+                "unknown_macro"
             ),
             1
         );
@@ -1272,7 +1272,7 @@ mod tests {
     fn reports_initial_diagnostics() {
         let doc = DocumentSnapshot::new("#missing #run /missing %wat");
         let diagnostics = analyze_document(&doc, &catalog());
-        assert!(diagnostics.iter().any(|d| d.code == "unknown_xprompt"));
+        assert!(diagnostics.iter().any(|d| d.code == "unknown_macro"));
         assert!(diagnostics
             .iter()
             .any(|d| d.code == "canonical_marker_mismatch"));
@@ -1387,25 +1387,25 @@ mod tests {
     }
 
     #[test]
-    fn reports_xprompt_argument_contract_diagnostics() {
+    fn reports_macro_argument_contract_diagnostics() {
         for (text, code) in [
             ("#typed", "missing_required_arg"),
             ("#typed(src/main.rs)", "missing_required_arg"),
             ("#typed(src/main.rs, 3, true, extra)", "too_many_args"),
             (
                 "#typed(path=src/main.rs, nope=1, count=3)",
-                "unknown_xprompt_arg",
+                "unknown_macro_arg",
             ),
-            ("#typed(path=a, path=b, count=3)", "duplicate_xprompt_arg"),
+            ("#typed(path=a, path=b, count=3)", "duplicate_macro_arg"),
             (
                 "#typed(path=\"bad\nvalue\", count=3)",
-                "invalid_xprompt_arg_type",
+                "invalid_macro_arg_type",
             ),
             (
                 "#typed(path=src/main.rs, count=nope)",
-                "invalid_xprompt_arg_type",
+                "invalid_macro_arg_type",
             ),
-            ("#typed:path(x)", "malformed_xprompt_argument"),
+            ("#typed:path(x)", "malformed_macro_argument"),
         ] {
             let doc = DocumentSnapshot::new(text);
             let diagnostics = analyze_document(&doc, &catalog());
@@ -1417,10 +1417,7 @@ mod tests {
 
         let diagnostics =
             diagnostics_for("#typed(src/main.rs, path=other, count=3)");
-        assert_eq!(
-            diagnostic_count(&diagnostics, "conflicting_xprompt_arg"),
-            0
-        );
+        assert_eq!(diagnostic_count(&diagnostics, "conflicting_macro_arg"), 0);
     }
 
     #[test]
@@ -1433,7 +1430,7 @@ mod tests {
         ] {
             let diagnostics = diagnostics_for(text);
             assert_eq!(
-                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                diagnostic_count(&diagnostics, "invalid_macro_arg_type"),
                 0,
                 "{text}: {diagnostics:?}"
             );
@@ -1446,7 +1443,7 @@ mod tests {
             let diagnostics = diagnostics_for(text);
             assert_eq!(diagnostic_count(&diagnostics, "too_many_args"), 0);
             assert_eq!(
-                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                diagnostic_count(&diagnostics, "invalid_macro_arg_type"),
                 0
             );
         }
@@ -1454,7 +1451,7 @@ mod tests {
         for text in ["#merge:planner,,coder", "#merge(planner,,coder)"] {
             let diagnostics = diagnostics_for(text);
             assert_eq!(
-                diagnostic_count(&diagnostics, "invalid_xprompt_arg_type"),
+                diagnostic_count(&diagnostics, "invalid_macro_arg_type"),
                 1,
                 "{diagnostics:?}"
             );
@@ -1469,7 +1466,7 @@ mod tests {
         let diagnostic = diagnostics
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             })
             .unwrap();
 
@@ -1485,7 +1482,7 @@ mod tests {
 
         assert!(
             !diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             }),
             "{diagnostics:?}"
         );
@@ -1499,7 +1496,7 @@ mod tests {
         let diagnostic = diagnostics
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             })
             .unwrap();
 
@@ -1514,7 +1511,7 @@ mod tests {
         let diagnostic = diagnostics
             .iter()
             .find(|diagnostic| {
-                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code == "invalid_macro_frontmatter_input_type"
             })
             .unwrap();
 
@@ -1525,12 +1522,12 @@ mod tests {
     fn reports_frontmatter_yaml_and_shape_diagnostics() {
         let diagnostics = diagnostics_for("---\ninput: [\n---\nBody");
         let yaml_diagnostic =
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_yaml");
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_yaml");
         assert_eq!(yaml_diagnostic.severity, DiagnosticSeverity::Error);
 
         let diagnostics = diagnostics_for("---\n[not, mapping]\n---\nBody");
         let shape_diagnostic =
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_shape");
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_shape");
         assert_eq!(shape_diagnostic.severity, DiagnosticSeverity::Error);
 
         let diagnostics = diagnostics_for("input:\n  name: wordd\nBody");
@@ -1547,54 +1544,50 @@ mod tests {
         let diagnostics =
             diagnostics_for("---\nname: bad-name\nowner: me\n---\nBody");
         assert_eq!(
-            diagnostic(&diagnostics, "unknown_xprompt_frontmatter_field")
+            diagnostic(&diagnostics, "unknown_macro_frontmatter_field")
                 .severity,
             DiagnosticSeverity::Information
         );
         assert_eq!(
-            diagnostic(
-                &diagnostics,
-                "unreferenceable_xprompt_frontmatter_name"
-            )
-            .severity,
+            diagnostic(&diagnostics, "unreferenceable_macro_frontmatter_name")
+                .severity,
             DiagnosticSeverity::Warning
         );
 
         let diagnostics = diagnostics_for("---\nname: []\n---\nBody");
         assert_eq!(
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_name")
-                .severity,
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_name").severity,
             DiagnosticSeverity::Error
         );
     }
 
     #[test]
-    fn accepts_frontmatter_local_xprompts() {
-        let text = "---\ndescription: Example\ninput:\n  topic: text\nxprompts:\n  _helper:\n    content: Helper {{ topic }}\n---\nBody";
+    fn accepts_frontmatter_local_macros() {
+        let text = "---\ndescription: Example\ninput:\n  topic: text\nmacros:\n  _helper:\n    content: Helper {{ topic }}\n---\nBody";
         let diagnostics = diagnostics_for(text);
 
         assert!(
             diagnostics.iter().all(|diagnostic| diagnostic.code
-                != "unknown_xprompt_frontmatter_field"),
+                != "unknown_macro_frontmatter_field"),
             "{diagnostics:?}"
         );
     }
 
     #[test]
-    fn accepts_current_document_local_xprompts_and_validates_args() {
-        let text = "---\nxprompts:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper(docs)\n#_missing\n";
+    fn accepts_current_document_local_macros_and_validates_args() {
+        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper(docs)\n#_missing\n";
         let diagnostics = diagnostics_for(text);
 
         assert!(
             diagnostics.iter().all(|diagnostic| {
-                diagnostic.code != "unknown_xprompt"
+                diagnostic.code != "unknown_macro"
                     || !diagnostic.message.contains("_helper")
             }),
             "{diagnostics:?}"
         );
         assert!(
             diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "unknown_xprompt"
+                diagnostic.code == "unknown_macro"
                     && diagnostic.message.contains("_missing")
             }),
             "{diagnostics:?}"
@@ -1606,7 +1599,7 @@ mod tests {
         );
 
         let diagnostics =
-            diagnostics_for("---\nxprompts:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper\n");
+            diagnostics_for("---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Helper {{ topic }}\n---\n#_helper\n");
         let diagnostic = diagnostic(&diagnostics, "missing_required_arg");
         assert!(diagnostic.message.contains("topic"));
         assert!(diagnostic.message.contains("_helper"));
@@ -1634,7 +1627,7 @@ mod tests {
 
         let text = "---\nmacros:\n  choose:\n    input:\n      edition:\n        type: enum\n        choices: [brief, full]\n    content: Choose an edition\n---\n#choose(edition=breif)";
         let diagnostics = diagnostics_for(text);
-        let mismatch = diagnostic(&diagnostics, "invalid_xprompt_arg_type");
+        let mismatch = diagnostic(&diagnostics, "invalid_macro_arg_type");
         assert_eq!(
             mismatch.message,
             "Argument `edition` expects one of brief | full, got `breif`; did you mean `brief`?"
@@ -1653,23 +1646,23 @@ mod tests {
         for (text, code) in [
             (
                 "---\ninput: nope\n---\nBody",
-                "invalid_xprompt_frontmatter_input_shape",
+                "invalid_macro_frontmatter_input_shape",
             ),
             (
                 "---\ninput:\n  - type: word\n---\nBody",
-                "invalid_xprompt_frontmatter_input_name",
+                "invalid_macro_frontmatter_input_name",
             ),
             (
                 "---\ninput:\n  - name: target\n  - name: target\n---\nBody",
-                "duplicate_xprompt_frontmatter_input",
+                "duplicate_macro_frontmatter_input",
             ),
             (
                 "---\ninput:\n  bad-name: word\n---\nBody",
-                "invalid_xprompt_frontmatter_input_identifier",
+                "invalid_macro_frontmatter_input_identifier",
             ),
             (
                 "---\ninput:\n  target:\n    type: word\n    extra: ignored\n---\nBody",
-                "unknown_xprompt_frontmatter_input_field",
+                "unknown_macro_frontmatter_input_field",
             ),
         ] {
             let diagnostics = diagnostics_for(text);
@@ -1688,7 +1681,7 @@ mod tests {
         assert_eq!(
             diagnostic_count(
                 &diagnostics,
-                "invalid_xprompt_frontmatter_input_default"
+                "invalid_macro_frontmatter_input_default"
             ),
             4,
             "{diagnostics:?}"
@@ -1702,9 +1695,9 @@ mod tests {
 
         assert!(
             diagnostics.iter().all(|diagnostic| {
-                diagnostic.code != "invalid_xprompt_frontmatter_input_type"
+                diagnostic.code != "invalid_macro_frontmatter_input_type"
                     && diagnostic.code
-                        != "invalid_xprompt_frontmatter_input_default"
+                        != "invalid_macro_frontmatter_input_default"
             }),
             "{diagnostics:?}"
         );
@@ -1721,9 +1714,9 @@ mod tests {
             let diagnostics = diagnostics_for(valid);
             assert!(
                 diagnostics.iter().all(|diagnostic| {
-                    diagnostic.code != "unknown_xprompt_frontmatter_input_field"
+                    diagnostic.code != "unknown_macro_frontmatter_input_field"
                         && diagnostic.code
-                            != "invalid_xprompt_frontmatter_input_description"
+                            != "invalid_macro_frontmatter_input_description"
                 }),
                 "{diagnostics:?}"
             );
@@ -1735,7 +1728,7 @@ mod tests {
         assert_eq!(
             diagnostic(
                 &diagnostics,
-                "invalid_xprompt_frontmatter_input_description"
+                "invalid_macro_frontmatter_input_description"
             )
             .severity,
             DiagnosticSeverity::Error
@@ -1751,18 +1744,17 @@ mod tests {
         assert_eq!(
             diagnostic(
                 &diagnostics,
-                "invalid_xprompt_frontmatter_snippet_trigger"
+                "invalid_macro_frontmatter_snippet_trigger"
             )
             .severity,
             DiagnosticSeverity::Error
         );
         assert_eq!(
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_tags")
-                .severity,
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_tags").severity,
             DiagnosticSeverity::Error
         );
         assert_eq!(
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_keywords")
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_keywords")
                 .severity,
             DiagnosticSeverity::Error
         );
@@ -1770,11 +1762,11 @@ mod tests {
             diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code
-                    != "missing_xprompt_memory_tag"),
+                    != "missing_macro_memory_tag"),
             "{diagnostics:?}"
         );
         assert_eq!(
-            diagnostic(&diagnostics, "missing_xprompt_skill_description")
+            diagnostic(&diagnostics, "missing_macro_skill_description")
                 .severity,
             DiagnosticSeverity::Warning
         );
@@ -1788,7 +1780,7 @@ mod tests {
             diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code
-                    != "missing_xprompt_memory_tag"),
+                    != "missing_macro_memory_tag"),
             "{diagnostics:?}"
         );
 
@@ -1801,7 +1793,7 @@ mod tests {
             diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code
-                    != "missing_xprompt_memory_tag"),
+                    != "missing_macro_memory_tag"),
             "{diagnostics:?}"
         );
 
@@ -1813,7 +1805,7 @@ mod tests {
             diagnostics
                 .iter()
                 .all(|diagnostic| diagnostic.code
-                    != "missing_xprompt_memory_tag"),
+                    != "missing_macro_memory_tag"),
             "{diagnostics:?}"
         );
 
@@ -1823,7 +1815,7 @@ mod tests {
         );
         let diagnostics = analyze_document(&invalid_doc, &catalog());
         assert_eq!(
-            diagnostic(&diagnostics, "invalid_xprompt_frontmatter_keywords")
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_keywords")
                 .severity,
             DiagnosticSeverity::Error
         );
@@ -1833,10 +1825,8 @@ mod tests {
     fn reports_flow_style_input_default_on_offending_scalar() {
         let text = "---\ninput: [{name: target, type: word, default: \"two words\"}]\n---\nBody";
         let diagnostics = diagnostics_for(text);
-        let diagnostic = diagnostic(
-            &diagnostics,
-            "invalid_xprompt_frontmatter_input_default",
-        );
+        let diagnostic =
+            diagnostic(&diagnostics, "invalid_macro_frontmatter_input_default");
 
         assert_eq!(diagnostic_text(text, diagnostic), "two words");
     }
@@ -1882,14 +1872,14 @@ mod tests {
 
         assert!(
             diagnostics.iter().all(|diagnostic| {
-                diagnostic.code != "unknown_xprompt"
+                diagnostic.code != "unknown_macro"
                     || !diagnostic.message.contains("_helper")
             }),
             "{diagnostics:?}"
         );
         assert!(
             diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "unknown_xprompt"
+                diagnostic.code == "unknown_macro"
                     && diagnostic.message.contains("_missing")
             }),
             "{diagnostics:?}"
@@ -1904,7 +1894,7 @@ mod tests {
 
     #[test]
     fn canonical_local_section_wins_on_helper_name_conflict() {
-        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Canonical {{ topic }}\nxprompts:\n  _helper:\n    content: Retired\n---\n#_helper\n";
+        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Canonical {{ topic }}\nmacros:\n  _helper:\n    content: Retired\n---\n#_helper\n";
         let diagnostics = diagnostics_for(text);
         // Canonical declares required `topic`, so the bare call is missing
         // an argument; the retired spelling would accept it.

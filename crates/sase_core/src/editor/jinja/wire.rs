@@ -16,8 +16,8 @@ pub const JINJA_CATALOG_WIRE_SCHEMA_VERSION: u32 = 1;
 pub enum JinjaScopeKind {
     /// A top-level agent prompt.
     Prompt,
-    /// An xprompt definition body.
-    Xprompt,
+    /// A macro definition body.
+    Macro,
 }
 
 /// Completion slot for the identifier token around the cursor.
@@ -76,10 +76,10 @@ pub enum JinjaAvailabilityRule {
     RunNeedsRepeat,
     /// A run variable defined only under `%wait`.
     RunNeedsWait,
-    /// Defined in `xprompt` scope only.
-    XpromptOnly,
-    /// Defined in `xprompt` scope with truthy frontmatter `skill`.
-    XpromptSkillOnly,
+    /// Defined in `macro` scope only.
+    MacroOnly,
+    /// Defined in `macro` scope with truthy frontmatter `skill`.
+    MacroSkillOnly,
 }
 
 /// Display tier of a catalog filter.
@@ -236,8 +236,8 @@ mod tests {
     #[test]
     fn enums_serialize_snake_case() {
         assert_eq!(
-            serde_json::to_string(&JinjaScopeKind::Xprompt).unwrap(),
-            "\"xprompt\""
+            serde_json::to_string(&JinjaScopeKind::Macro).unwrap(),
+            "\"macro\""
         );
         assert_eq!(
             serde_json::to_string(&JinjaCompletionSlotKind::None).unwrap(),

@@ -138,7 +138,7 @@ pub(super) fn select_pending_rows_for_query(
         "SELECT artifact_dir, projects_root, record_json, \
          agent_meta_sig, done_sig, running_sig, waiting_sig, \
          pending_question_sig, workflow_state_sig, plan_path_sig, \
-         prompt_steps_sig, xprompts_sig \
+         prompt_steps_sig, macros_sig \
          FROM agent_artifacts {}",
         query.where_sql
     );
@@ -246,7 +246,7 @@ pub(super) fn select_pending_rows_by_artifact_dirs(
             "SELECT artifact_dir, projects_root, record_json, \
              agent_meta_sig, done_sig, running_sig, waiting_sig, \
              pending_question_sig, workflow_state_sig, plan_path_sig, \
-             prompt_steps_sig, xprompts_sig \
+             prompt_steps_sig, macros_sig \
              FROM agent_artifacts WHERE artifact_dir IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -290,7 +290,7 @@ pub(super) fn pending_row_from_sql_with_artifact_dir(
         workflow_state: row.get(8).map_err(|e| e.to_string())?,
         plan_path: row.get(9).map_err(|e| e.to_string())?,
         prompt_steps: row.get(10).map_err(|e| e.to_string())?,
-        xprompts: row.get(11).map_err(|e| e.to_string())?,
+        macros: row.get(11).map_err(|e| e.to_string())?,
     };
     Ok(PendingRow {
         artifact_dir,
@@ -314,7 +314,7 @@ pub(super) fn pending_refresh_row_from_sql(
         workflow_state: row.get(7).map_err(|e| e.to_string())?,
         plan_path: row.get(8).map_err(|e| e.to_string())?,
         prompt_steps: row.get(9).map_err(|e| e.to_string())?,
-        xprompts: row.get(10).map_err(|e| e.to_string())?,
+        macros: row.get(10).map_err(|e| e.to_string())?,
     };
     Ok(PendingRefreshRow {
         artifact_dir,

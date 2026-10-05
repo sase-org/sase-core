@@ -1,0 +1,2218 @@
+use lsp_types::{
+    Command, CompletionItem, CompletionItemKind, CompletionItemLabelDetails,
+    CompletionItemTag, CompletionResponse, CompletionTextEdit, Documentation,
+    InsertTextFormat, MarkupContent, MarkupKind, NumberOrString, Position,
+    Range, TextEdit,
+};
+use sase_core::editor::jinja::{
+    JinjaAvailabilityState, JinjaCompletionItemKind, JinjaCompletionItemWire,
+    JinjaCompletionSource, JinjaCompletionWire,
+};
+use sase_core::project_tag::ProjectTagTargetWire;
+use sase_core::{
+    AtReferenceContextWire, AtReferenceGroup, AtReferenceMenuWire,
+    AtReferenceRowWire, AtReferenceStage, CompletionCandidate, CompletionList,
+    DiagnosticSeverity, EditorDiagnostic, EditorPosition, EditorRange,
+    EditorTextEdit, HoverPayload, ModelAliasShortcutContextWire,
+    ModelAliasShortcutEditWire, ModelShortcutContextWire,
+    ModelShortcutEditWire, ModelShortcutKind, VcsProjectEntry, VcsRepoEntry,
+};
+
+use crate::project_tags::{
+    entry_for_candidate, project_entry_documentation, tag_spelling,
+};
+
+pub fn to_editor_position(position: Position) -> EditorPosition {
+    EditorPosition {
+        line: position.line,
+        character: position.character,
+    }
+}
+
+pub fn to_lsp_range(range: EditorRange) -> Range {
+    Range {
+        start: to_lsp_position(range.start),
+        end: to_lsp_position(range.end),
+    }
+}
+
+pub fn completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .map(|candidate| completion_item(candidate, replacement_range))
+            .collect(),
+    )
+}
+
+/// Render the `@` reference menu as an *incomplete* list whose items all filter
+/// on the reference text the user actually typed.
+///
+/// The rows are ranked server-side by the shared fuzzy matcher, and a client
+/// that prefix-filters the inserted reference (`@research:202607/…`) against the
+/// typed query (`@research:site`) would throw every fuzzy row away. Setting
+/// `filterText` to the typed text keeps every row alive in prefix *and* fuzzy
+/// clients, and `isIncomplete` makes them re-request per keystroke instead of
+/// re-filtering (and re-sorting) a stale list, so `sortText` decides the order.
+pub fn at_reference_completion_response(
+    menu: AtReferenceMenuWire,
+    context: &AtReferenceContextWire,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    let filter_text = at_reference_filter_text(context);
+    let payload_kind = context.kind.as_deref();
+    let truncated_payloads = menu.truncated_payloads;
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: menu
+            .rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                at_reference_completion_item(
+                    row,
+                    payload_kind,
+                    &filter_text,
+                    replacement_range,
+                    index,
+                    truncated_payloads,
+                )
+            })
+            .collect(),
+    })
+}
+
+/// Reconstruct the reference text as typed, which is what clients filter on.
+fn at_reference_filter_text(context: &AtReferenceContextWire) -> String {
+    match (context.stage, context.kind.as_deref()) {
+        (AtReferenceStage::Payload, Some(kind)) => {
+            format!("@{kind}:{}", context.query)
+        }
+        _ => format!("@{}", context.query),
+    }
+}
+
+fn at_reference_completion_item(
+    row: AtReferenceRowWire,
+    payload_kind: Option<&str>,
+    filter_text: &str,
+    replacement_range: EditorRange,
+    index: usize,
+    truncated_payloads: usize,
+) -> CompletionItem {
+    let (group, kind, description) = match row.group {
+        AtReferenceGroup::Artifact => {
+            (0, CompletionItemKind::ENUM_MEMBER, "artifact kind")
+        }
+        AtReferenceGroup::File if row.is_dir => {
+            (1, CompletionItemKind::FOLDER, "directory")
+        }
+        AtReferenceGroup::File => (1, CompletionItemKind::FILE, "file"),
+        AtReferenceGroup::Payload => {
+            let kind = payload_kind.unwrap_or("file");
+            (0, payload_completion_item_kind(kind), kind)
+        }
+    };
+    // Providers that have no separate title echo the primary text back as one;
+    // repeating it beside the label and in the preview is pure noise.
+    let title = if row.title == row.label {
+        ""
+    } else {
+        row.title.as_str()
+    };
+    CompletionItem {
+        label: row.insertion.clone(),
+        label_details: Some(CompletionItemLabelDetails {
+            detail: (!title.is_empty()).then(|| format!(" · {title}")),
+            description: Some(description.to_string()),
+        }),
+        kind: Some(kind),
+        documentation: at_reference_documentation(
+            &row.label,
+            &row.label_match,
+            title,
+            &row.body,
+        ),
+        detail: at_reference_item_detail(row.detail, truncated_payloads),
+        filter_text: Some(filter_text.to_string()),
+        sort_text: Some(format!("{group}:{index:04}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: row.insertion,
+        })),
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+/// Payload kinds that resolve to an identifier (a SHA, a bead id, an agent
+/// name) rather than a filesystem path render with a reference icon; every
+/// other kind keeps the file icon it always had.
+fn payload_completion_item_kind(kind: &str) -> CompletionItemKind {
+    if matches!(kind, "commit" | "bead" | "agent") {
+        CompletionItemKind::REFERENCE
+    } else {
+        CompletionItemKind::FILE
+    }
+}
+
+fn at_reference_item_detail(
+    detail: String,
+    truncated_payloads: usize,
+) -> Option<String> {
+    if truncated_payloads == 0 {
+        return (!detail.is_empty()).then_some(detail);
+    }
+    let omitted = format!(
+        "at least {truncated_payloads} additional payload{} not shown",
+        if truncated_payloads == 1 { "" } else { "s" }
+    );
+    Some(if detail.is_empty() {
+        omitted
+    } else {
+        format!("{detail} · {omitted}")
+    })
+}
+
+/// Hover documentation shows at most this many lines of a payload row's body
+/// (a commit message, say) so a large one cannot flood the popup.
+const AT_REFERENCE_BODY_DOC_MAX_LINES: usize = 12;
+
+/// Show *why* a fuzzy row is in the list: the matched payload with its matched
+/// runs bolded, and the title underneath. Editors cannot highlight inside a
+/// completion label, so the preview window carries the match affordance the ACE
+/// prompt input paints inline.
+fn at_reference_documentation(
+    label: &str,
+    label_match: &[(u32, u32)],
+    title: &str,
+    body: &str,
+) -> Option<Documentation> {
+    if label.is_empty() {
+        return None;
+    }
+    let mut value = bold_match_runs(label, label_match);
+    if !title.is_empty() {
+        value.push('\n');
+        value.push('\n');
+        value.push_str(title);
+    }
+    if let Some(body) = truncated_body_block(body) {
+        value.push('\n');
+        value.push('\n');
+        value.push_str(&body);
+    }
+    Some(markdown_doc(value))
+}
+
+/// Render `body` as a fenced block, truncated to
+/// [`AT_REFERENCE_BODY_DOC_MAX_LINES`] lines. `None` when `body` is empty.
+fn truncated_body_block(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let mut lines = body.lines();
+    let kept = lines
+        .by_ref()
+        .take(AT_REFERENCE_BODY_DOC_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut block = String::from("```\n");
+    block.push_str(&kept);
+    if lines.next().is_some() {
+        block.push_str("\n…");
+    }
+    block.push_str("\n```");
+    Some(block)
+}
+
+/// Wrap each half-open char range of `runs` in `**`, leaving `text` otherwise
+/// verbatim. Runs are already ordered and non-overlapping.
+fn bold_match_runs(text: &str, runs: &[(u32, u32)]) -> String {
+    if runs.is_empty() {
+        return text.to_string();
+    }
+    let mut rendered = String::with_capacity(text.len() + runs.len() * 4);
+    let mut runs = runs.iter().peekable();
+    for (index, ch) in text.chars().enumerate() {
+        let index = index as u32;
+        if runs.peek().is_some_and(|(start, _)| *start == index) {
+            rendered.push_str("**");
+        }
+        rendered.push(ch);
+        if let Some((_, end)) = runs.peek().copied() {
+            if *end == index + 1 {
+                rendered.push_str("**");
+                runs.next();
+            }
+        }
+    }
+    rendered
+}
+
+/// Render `%model` rows with model/alias kinds and stable catalog ordering.
+pub fn model_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let kind = candidate.kind.clone();
+                let alias_kind = candidate.status.clone();
+                let is_alias = is_model_alias_kind(&kind);
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(if is_alias {
+                    CompletionItemKind::ENUM_MEMBER
+                } else {
+                    CompletionItemKind::VALUE
+                });
+                item.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(model_completion_kind_label(
+                        &kind,
+                        &alias_kind,
+                    )),
+                });
+                let group = model_completion_sort_group(&kind);
+                item.sort_text = Some(format!("{group}:{index:04}"));
+                item
+            })
+            .collect(),
+    )
+}
+
+fn is_model_alias_kind(kind: &str) -> bool {
+    matches!(kind, "implicit_alias" | "user_alias")
+}
+
+fn model_completion_kind_label(kind: &str, alias_kind: &str) -> String {
+    if kind == "provider" {
+        return "provider".to_string();
+    }
+    if !is_model_alias_kind(kind) {
+        return "model".to_string();
+    }
+    match alias_kind {
+        "default" => "default",
+        "role" => "role",
+        "provider_coder" => "coder",
+        "user" => "custom",
+        _ if kind == "user_alias" => "custom",
+        _ => "role",
+    }
+    .to_string()
+}
+
+fn model_completion_sort_group(kind: &str) -> u8 {
+    if is_model_alias_kind(kind) {
+        1
+    } else if kind == "provider" {
+        2
+    } else {
+        0
+    }
+}
+
+/// Render `=alias` shortcut rows as an *incomplete* list whose `filterText`
+/// is the equals prefix actually typed (`=` plus the detected context's
+/// `query`), and whose first row is preselected.
+///
+/// Each `(candidate, edit)` pair reuses [`model_completion_candidate`]'s
+/// label/detail/documentation/kind projection — the same one `%model:`
+/// completion uses — so the two surfaces never format a catalog row
+/// differently; only the `textEdit` (the shared Rust edit planner's
+/// [`ModelAliasShortcutEditWire::edit`]), the expansion shown in the label
+/// detail, `filterText`, and `sortText` are shortcut-specific. Mirrors
+/// [`at_reference_completion_response`]'s incomplete-list/filterText idiom:
+/// a client that prefix-filters the inserted `%m:@large` text against the
+/// typed `=la` would drop the row without `filterText`/`isIncomplete`
+/// telling it to re-request instead.
+///
+/// Callers pass an empty `candidates` list as-is (no matching alias, or no
+/// catalog) rather than falling back to unrelated completion; an empty
+/// shortcut response is still owned by this equals context.
+pub fn model_alias_shortcut_completion_response(
+    candidates: Vec<(CompletionCandidate, ModelAliasShortcutEditWire)>,
+    context: &ModelAliasShortcutContextWire,
+) -> CompletionResponse {
+    let filter_text = format!("={}", context.query);
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (candidate, edit))| {
+                model_alias_shortcut_completion_item(
+                    candidate,
+                    edit,
+                    &filter_text,
+                    index,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn model_alias_shortcut_completion_item(
+    mut candidate: CompletionCandidate,
+    edit: ModelAliasShortcutEditWire,
+    filter_text: &str,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let alias_kind = candidate.status.clone();
+    let expansion = edit.replacement.trim_end().to_string();
+    let range = edit.edit.range;
+    candidate.replacement = Some(edit.edit);
+    candidate.additional_edits = merge_coincident_edits(
+        &mut candidate.replacement,
+        edit.additional_edits,
+    );
+    // `candidate.replacement` is always `Some` here, so `completion_item`
+    // never falls back to this `replacement_range` argument.
+    let mut item = completion_item(candidate, range);
+    item.kind = Some(CompletionItemKind::ENUM_MEMBER);
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" → {expansion}")),
+        description: Some(model_completion_kind_label(&kind, &alias_kind)),
+    });
+    item.filter_text = Some(filter_text.to_string());
+    item.sort_text = Some(format!("{index:04}"));
+    item.preselect = (index == 0).then_some(true);
+    item
+}
+
+/// Render `==model` shortcut rows as an incomplete list owned by the detected
+/// double-marker context.
+pub fn model_shortcut_completion_response(
+    candidates: Vec<(CompletionCandidate, ModelShortcutEditWire)>,
+    context: &ModelShortcutContextWire,
+) -> CompletionResponse {
+    let filter_text = match context.kind {
+        ModelShortcutKind::Alias => format!("={}", context.query),
+        ModelShortcutKind::Model => format!("=={}", context.query),
+    };
+    CompletionResponse::List(lsp_types::CompletionList {
+        is_incomplete: true,
+        items: candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, (candidate, edit))| {
+                model_shortcut_completion_item(
+                    candidate,
+                    edit,
+                    &filter_text,
+                    index,
+                )
+            })
+            .collect(),
+    })
+}
+
+fn model_shortcut_completion_item(
+    mut candidate: CompletionCandidate,
+    edit: ModelShortcutEditWire,
+    filter_text: &str,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let alias_kind = candidate.status.clone();
+    let expansion = edit.replacement.trim_end().to_string();
+    let range = edit.edit.range;
+    if edit.kind == ModelShortcutKind::Model {
+        candidate.detail = Some(match candidate.detail.take() {
+            Some(detail) if !detail.is_empty() => {
+                format!("{expansion} · {detail}")
+            }
+            _ => expansion.clone(),
+        });
+        candidate.documentation = Some(match candidate.documentation.take() {
+            Some(documentation) if !documentation.is_empty() => {
+                format!("**Expansion:** `{expansion}`\n\n{documentation}")
+            }
+            _ => format!("**Expansion:** `{expansion}`"),
+        });
+    }
+    candidate.replacement = Some(edit.edit);
+    candidate.additional_edits = merge_coincident_edits(
+        &mut candidate.replacement,
+        edit.additional_edits,
+    );
+    let mut item = completion_item(candidate, range);
+    item.kind = Some(match edit.kind {
+        ModelShortcutKind::Alias => CompletionItemKind::ENUM_MEMBER,
+        ModelShortcutKind::Model => CompletionItemKind::VALUE,
+    });
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" → {expansion}")),
+        description: Some(model_completion_kind_label(&kind, &alias_kind)),
+    });
+    item.filter_text = Some(filter_text.to_string());
+    item.sort_text = Some(format!("{index:04}"));
+    item.preselect = (index == 0).then_some(true);
+    item
+}
+
+/// Render kind-aware wait/fork targets without losing the core candidate order.
+pub fn agent_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let kind = candidate.kind.clone();
+                let detail = candidate.detail.clone();
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(agent_completion_item_kind(&kind));
+                item.label_details = Some(CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(agent_completion_label(
+                        &kind,
+                        detail.as_deref(),
+                    )),
+                });
+                item.sort_text = Some(format!(
+                    "{}:{index:04}",
+                    agent_completion_sort_group(&kind)
+                ));
+                item
+            })
+            .collect(),
+    )
+}
+
+fn agent_completion_item_kind(kind: &str) -> CompletionItemKind {
+    match kind {
+        "keyword" => CompletionItemKind::KEYWORD,
+        "bead" => CompletionItemKind::REFERENCE,
+        "hood" => CompletionItemKind::FOLDER,
+        "tribe" => CompletionItemKind::ENUM_MEMBER,
+        "clan" => CompletionItemKind::MODULE,
+        "family" | "session" => CompletionItemKind::CLASS,
+        "proc" => CompletionItemKind::FUNCTION,
+        _ => CompletionItemKind::VALUE,
+    }
+}
+
+fn agent_completion_sort_group(kind: &str) -> u8 {
+    match kind {
+        "keyword" => 0,
+        "bead" => 0,
+        "hood" => 1,
+        "tribe" => 2,
+        "clan" => 3,
+        "family" | "session" => 4,
+        "proc" => 6,
+        _ => 5,
+    }
+}
+
+/// Render `%final` values with operation-aware kinds, labels, and docs.
+pub fn finalizer_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                finalizer_completion_item(candidate, replacement_range, index)
+            })
+            .collect(),
+    )
+}
+
+fn finalizer_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let kind = candidate.kind.clone();
+    let status = candidate.status.clone();
+    let detail = candidate.detail.clone();
+    let group = if kind == "finalizer_clear" { 1 } else { 0 };
+    let mut item = completion_item(candidate, replacement_range);
+    item.kind = Some(finalizer_completion_item_kind(&kind, &status));
+    item.label_details = Some(CompletionItemLabelDetails {
+        detail: Some(format!(" · {status}")),
+        description: Some(finalizer_label_description(
+            &kind,
+            detail.as_deref(),
+        )),
+    });
+    item.sort_text = Some(format!("{group}:{index:04}"));
+    item
+}
+
+fn finalizer_completion_item_kind(
+    kind: &str,
+    status: &str,
+) -> CompletionItemKind {
+    match kind {
+        "finalizer_clear" => CompletionItemKind::KEYWORD,
+        "finalizer_remove" => CompletionItemKind::OPERATOR,
+        _ if status == "required" => CompletionItemKind::ENUM_MEMBER,
+        _ => CompletionItemKind::VALUE,
+    }
+}
+
+fn finalizer_label_description(kind: &str, detail: Option<&str>) -> String {
+    let operation = match kind {
+        "finalizer_clear" => "clear",
+        "finalizer_remove" => "remove",
+        _ => {
+            return match detail.filter(|detail| !detail.is_empty()) {
+                Some(provider) => provider.to_string(),
+                None => "finalizer".to_string(),
+            }
+        }
+    };
+    match detail.filter(|detail| !detail.is_empty()) {
+        Some(provider) => format!("{operation} · {provider}"),
+        None => operation.to_string(),
+    }
+}
+
+fn agent_completion_label(kind: &str, detail: Option<&str>) -> String {
+    let normalized = match kind {
+        "keyword" | "bead" | "hood" | "tribe" | "clan" | "family"
+        | "session" | "proc" => kind,
+        "" => "value",
+        _ => "agent",
+    };
+    match detail.filter(|detail| !detail.is_empty()) {
+        Some(detail) if detail.starts_with(normalized) => detail.to_string(),
+        Some(detail) => format!("{normalized} · {detail}"),
+        None => normalized.to_string(),
+    }
+}
+
+/// Build variable-like placeholder completion items in document order.
+pub fn placeholder_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+    prefix: &str,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let mut item = completion_item(candidate, replacement_range);
+                item.kind = Some(CompletionItemKind::VARIABLE);
+                item.filter_text = Some(prefix.to_string());
+                item.sort_text = Some(format!("{index:04}"));
+                item
+            })
+            .collect(),
+    )
+}
+
+/// Render the Jinja engine's ranked candidates as rich LSP items.
+///
+/// The engine already owns ranking, filtering, and documentation text;
+/// this only maps its wire shape onto LSP kinds, label details, edits,
+/// and sort order. An empty item list still returns an array (never
+/// `None`) so Jinja owns the in-tag position.
+pub fn jinja_completion_response(
+    completion: JinjaCompletionWire,
+) -> CompletionResponse {
+    let replacement_range = completion.replacement_range;
+    CompletionResponse::Array(
+        completion
+            .items
+            .into_iter()
+            .map(|item| jinja_completion_item(item, replacement_range))
+            .collect(),
+    )
+}
+
+fn jinja_completion_item(
+    item: JinjaCompletionItemWire,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let kind = match item.kind {
+        JinjaCompletionItemKind::Variable => CompletionItemKind::VARIABLE,
+        JinjaCompletionItemKind::Member => CompletionItemKind::FIELD,
+        JinjaCompletionItemKind::Function
+        | JinjaCompletionItemKind::Filter
+        | JinjaCompletionItemKind::Test => CompletionItemKind::FUNCTION,
+        JinjaCompletionItemKind::Keyword => CompletionItemKind::KEYWORD,
+    };
+    let detail = item
+        .signature
+        .as_deref()
+        .or(item.type_label.as_deref())
+        .map(|type_label| format!(" {type_label}"));
+    let description = jinja_source_description(&item);
+    CompletionItem {
+        label: item.name.clone(),
+        kind: Some(kind),
+        label_details: Some(CompletionItemLabelDetails {
+            detail,
+            description: Some(description),
+        }),
+        detail: item.summary.clone(),
+        documentation: Some(markdown_doc(item.documentation.clone())),
+        filter_text: Some(item.name.clone()),
+        sort_text: Some(format!("{:04}", item.rank)),
+        preselect: Some(item.rank == 0).filter(|preselect| *preselect),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text: item.insertion.clone(),
+        })),
+        tags: item
+            .legacy_for
+            .as_deref()
+            .map(|_| vec![CompletionItemTag::DEPRECATED]),
+        ..Default::default()
+    }
+}
+
+fn jinja_source_description(item: &JinjaCompletionItemWire) -> String {
+    let base = match item.source {
+        JinjaCompletionSource::Input => {
+            if item.required {
+                "input · required".to_string()
+            } else {
+                "input".to_string()
+            }
+        }
+        JinjaCompletionSource::Local => "local".to_string(),
+        JinjaCompletionSource::Sase => "sase".to_string(),
+        JinjaCompletionSource::Positional => "arg".to_string(),
+        JinjaCompletionSource::Provider => "skill".to_string(),
+        JinjaCompletionSource::Jinja => "jinja".to_string(),
+    };
+    if item.availability.state == JinjaAvailabilityState::Conditional {
+        if let Some(hint) = item.availability.hint.as_deref() {
+            if hint.contains("%repeat") {
+                return format!("{base} · needs %repeat");
+            }
+            if hint.contains("%wait") {
+                return format!("{base} · needs %wait");
+            }
+        }
+        return format!("{base} · conditional");
+    }
+    if let Some(closes) = item.closes.as_deref() {
+        return format!("closes {closes}");
+    }
+    if item.legacy_for.is_some() {
+        return format!("{base} · legacy");
+    }
+    base
+}
+
+/// Build the completion response for the `+` (`vcs_project`) completion kind.
+///
+/// Project rows render as tags: the label and `filter_text` are the `+name`
+/// trigger spelling (so typing `+sa` keeps the `+sase` item), and the detail
+/// is `provider · #workflow:name`. The primary `text_edit` (the trigger
+/// removal, or the merged insertion when the trigger occupies the
+/// destination) and `additional_text_edits` (the target-position replacement
+/// or leading insertion plus same-segment target deletions) are carried over
+/// from the candidate's `replacement` / `additional_edits`, so PR rows keep
+/// their spelling while following the same placement. `sort_text` preserves
+/// catalog order.
+pub fn vcs_project_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+    entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                vcs_project_completion_item(
+                    candidate,
+                    replacement_range,
+                    entries,
+                    targets,
+                    index,
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn vcs_repo_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+    entries: &[VcsRepoEntry],
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .zip(entries.iter())
+            .enumerate()
+            .map(|(index, (candidate, entry))| {
+                vcs_repo_completion_item(
+                    candidate,
+                    entry,
+                    replacement_range,
+                    index,
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn vcs_ref_completion_response(
+    list: CompletionList,
+    replacement_range: EditorRange,
+) -> CompletionResponse {
+    CompletionResponse::Array(
+        list.candidates
+            .into_iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                vcs_ref_completion_item(candidate, replacement_range, index)
+            })
+            .collect(),
+    )
+}
+
+pub fn snippet_completion_item(
+    label: String,
+    new_text: String,
+    detail: Option<String>,
+    documentation: Option<String>,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    CompletionItem {
+        label,
+        label_details: Some(CompletionItemLabelDetails {
+            detail: Some(" snippet".to_string()),
+            description: None,
+        }),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail,
+        documentation: documentation.map(markdown_doc),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(replacement_range),
+            new_text,
+        })),
+        ..Default::default()
+    }
+}
+
+pub fn sase_snippet_completion_item(
+    label: String,
+    template: String,
+    detail: Option<String>,
+    documentation: Option<String>,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let retrigger_placeholder =
+        first_tabstop_is_immediately_inside_angles(&template);
+    let mut item = snippet_completion_item(
+        label,
+        sase_template_to_lsp_snippet(&template),
+        detail,
+        documentation,
+        replacement_range,
+    );
+    if retrigger_placeholder {
+        item.command = Some(Command::new(
+            "Trigger Suggest".to_string(),
+            "editor.action.triggerSuggest".to_string(),
+            None,
+        ));
+    }
+    item
+}
+
+fn first_tabstop_is_immediately_inside_angles(template: &str) -> bool {
+    let marker = ["$1", "$0"].into_iter().find_map(|needle| {
+        template.match_indices(needle).find_map(|(index, marker)| {
+            let end = index + marker.len();
+            let digit_continues = template
+                .get(end..)
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|ch| ch.is_ascii_digit());
+            (!digit_continues).then_some((index, end))
+        })
+    });
+    let Some((start, end)) = marker else {
+        return false;
+    };
+    template
+        .get(..start)
+        .is_some_and(|before| before.ends_with('<'))
+        && template
+            .get(end..)
+            .is_some_and(|after| after.starts_with('>'))
+}
+
+pub fn sase_template_to_lsp_snippet(template: &str) -> String {
+    let mut converted = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '$' if chars.peek().is_some_and(|next| next.is_ascii_digit()) => {
+                converted.push('$');
+                while let Some(next) = chars.peek().copied() {
+                    if !next.is_ascii_digit() {
+                        break;
+                    }
+                    converted.push(next);
+                    chars.next();
+                }
+            }
+            '$' => converted.push_str("\\$"),
+            '}' => converted.push_str("\\}"),
+            '\\' => converted.push_str("\\\\"),
+            _ => converted.push(ch),
+        }
+    }
+    converted
+}
+
+pub fn hover(payload: HoverPayload) -> lsp_types::Hover {
+    lsp_types::Hover {
+        contents: lsp_types::HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: payload.markdown,
+        }),
+        range: Some(to_lsp_range(payload.range)),
+    }
+}
+
+pub fn diagnostic(diagnostic: EditorDiagnostic) -> lsp_types::Diagnostic {
+    lsp_types::Diagnostic {
+        range: to_lsp_range(diagnostic.range),
+        severity: Some(to_lsp_diagnostic_severity(diagnostic.severity)),
+        code: Some(NumberOrString::String(diagnostic.code)),
+        source: Some("sase-macro".to_string()),
+        message: diagnostic.message,
+        ..Default::default()
+    }
+}
+
+fn completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+) -> CompletionItem {
+    let range = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.range)
+        .unwrap_or(replacement_range);
+    let new_text = candidate
+        .replacement
+        .map(|replacement| replacement.new_text)
+        .unwrap_or_else(|| candidate.insertion.clone());
+    CompletionItem {
+        label: candidate.display,
+        kind: Some(if candidate.kind == "artifact_payload" {
+            payload_completion_item_kind(&candidate.status)
+        } else if candidate.is_dir {
+            CompletionItemKind::FOLDER
+        } else {
+            CompletionItemKind::TEXT
+        }),
+        detail: candidate.detail,
+        documentation: candidate.documentation.map(markdown_doc),
+        filter_text: Some(candidate.name),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(range),
+            new_text,
+        })),
+        additional_text_edits: additional_text_edits(
+            candidate.additional_edits,
+        ),
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+/// Convert one `vcs_project` candidate, overriding the generic item's kind,
+/// label details, and `filter_text` so the `+name` trigger spelling drives
+/// client-side filtering.
+fn vcs_project_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+    entries: &[VcsProjectEntry],
+    targets: &[ProjectTagTargetWire],
+    index: usize,
+) -> CompletionItem {
+    let filter_text = format!("+{}", candidate.name);
+    let is_patch = is_patch_completion_kind(&candidate.kind);
+    let label_details = if is_patch {
+        Some(CompletionItemLabelDetails {
+            detail: (!candidate.project.is_empty())
+                .then(|| format!(" · {}", candidate.project)),
+            description: Some(if candidate.status.is_empty() {
+                "PR".to_string()
+            } else {
+                format!("PR · {}", candidate.status)
+            }),
+        })
+    } else {
+        Some(CompletionItemLabelDetails {
+            detail: None,
+            description: Some("project".to_string()),
+        })
+    };
+    let detail = Some(candidate.insertion.clone());
+    let kind = if is_patch {
+        CompletionItemKind::EVENT
+    } else {
+        CompletionItemKind::MODULE
+    };
+    let mut item = completion_item(candidate, replacement_range);
+    item.kind = Some(kind);
+    item.filter_text = Some(filter_text);
+    item.label_details = label_details;
+    item.detail = detail;
+    item.sort_text = Some(format!("{index:04}"));
+    if !is_patch {
+        if let Some((_, entry)) =
+            entry_for_candidate(&item.label, false, entries)
+        {
+            let tag = tag_spelling(entry);
+            item.label = tag.clone();
+            item.filter_text = Some(tag);
+            item.detail = Some(format!(
+                "{} · {}",
+                entry.provider_display, entry.display_tag
+            ));
+            let target = target_for_entry(entry, targets);
+            item.documentation =
+                Some(markdown_doc(project_entry_documentation(entry, target)));
+        }
+    }
+    item
+}
+
+/// The catalog target behind a completion entry, matched by directory key
+/// first, then by exact and casefolded name (mirroring `entry_for_target`
+/// in the other direction).
+fn target_for_entry<'a>(
+    entry: &VcsProjectEntry,
+    targets: &'a [ProjectTagTargetWire],
+) -> Option<&'a ProjectTagTargetWire> {
+    if !entry.key.is_empty() {
+        if let Some(target) =
+            targets.iter().find(|target| target.key == entry.key)
+        {
+            return Some(target);
+        }
+    }
+    if let Some(target) =
+        targets.iter().find(|target| target.name == entry.name)
+    {
+        return Some(target);
+    }
+    targets
+        .iter()
+        .find(|target| target.name.eq_ignore_ascii_case(&entry.name))
+}
+
+fn vcs_ref_completion_item(
+    candidate: CompletionCandidate,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let range = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.range)
+        .unwrap_or(replacement_range);
+    let new_text = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.new_text.clone())
+        .unwrap_or_else(|| candidate.insertion.clone());
+    let group = vcs_ref_sort_group(&candidate);
+    let is_namespace = candidate.kind == "namespace";
+    let label_details = vcs_ref_label_details(&candidate);
+    let item_kind = vcs_ref_item_kind(&candidate);
+    let filter_text = candidate.name.clone();
+    let sort_text =
+        format!("{group}:{}:{index:04}", candidate.name.to_lowercase());
+
+    CompletionItem {
+        label: candidate.display,
+        label_details: Some(label_details),
+        kind: Some(item_kind),
+        detail: candidate.detail.clone(),
+        documentation: candidate.documentation.map(markdown_doc),
+        filter_text: Some(filter_text),
+        sort_text: Some(sort_text),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(range),
+            new_text,
+        })),
+        additional_text_edits: additional_text_edits(
+            candidate.additional_edits,
+        ),
+        command: is_namespace.then(|| {
+            Command::new(
+                "Trigger Suggest".to_string(),
+                "editor.action.triggerSuggest".to_string(),
+                None,
+            )
+        }),
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+fn vcs_ref_item_kind(candidate: &CompletionCandidate) -> CompletionItemKind {
+    match candidate.kind.as_str() {
+        "patch" | "changespec" => CompletionItemKind::REFERENCE,
+        "namespace" => CompletionItemKind::FOLDER,
+        _ => CompletionItemKind::MODULE,
+    }
+}
+
+fn vcs_ref_sort_group(candidate: &CompletionCandidate) -> u8 {
+    match candidate.kind.as_str() {
+        "patch" | "changespec" => 1,
+        "namespace" => 2,
+        _ => 0,
+    }
+}
+
+fn vcs_ref_label_details(
+    candidate: &CompletionCandidate,
+) -> CompletionItemLabelDetails {
+    match candidate.kind.as_str() {
+        "patch" | "changespec" => CompletionItemLabelDetails {
+            detail: (!candidate.project.is_empty())
+                .then(|| format!(" · {}", candidate.project)),
+            description: Some(if candidate.status.is_empty() {
+                "PR".to_string()
+            } else {
+                format!("PR · {}", candidate.status)
+            }),
+        },
+        "namespace" => CompletionItemLabelDetails {
+            detail: None,
+            description: Some(if candidate.status.is_empty() {
+                "org".to_string()
+            } else {
+                candidate.status.clone()
+            }),
+        },
+        _ => CompletionItemLabelDetails {
+            detail: None,
+            description: Some("project".to_string()),
+        },
+    }
+}
+
+fn is_patch_completion_kind(kind: &str) -> bool {
+    matches!(kind, "patch" | "changespec")
+}
+
+fn vcs_repo_completion_item(
+    candidate: CompletionCandidate,
+    entry: &VcsRepoEntry,
+    replacement_range: EditorRange,
+    index: usize,
+) -> CompletionItem {
+    let badges = vcs_repo_badges(entry);
+    let range = candidate
+        .replacement
+        .as_ref()
+        .map(|replacement| replacement.range)
+        .unwrap_or(replacement_range);
+    let new_text = candidate
+        .replacement
+        .map(|replacement| replacement.new_text)
+        .unwrap_or_else(|| candidate.insertion.clone());
+
+    CompletionItem {
+        label: candidate.display,
+        label_details: Some(CompletionItemLabelDetails {
+            detail: Some(format!(" · {}", entry.r#ref)),
+            description: (!badges.is_empty()).then(|| badges.join(" ")),
+        }),
+        kind: Some(CompletionItemKind::MODULE),
+        detail: Some(vcs_repo_detail(entry, &badges)),
+        documentation: vcs_repo_documentation(entry, &badges),
+        filter_text: Some(entry.r#ref.clone()),
+        sort_text: Some(format!("{index:04}")),
+        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+            range: to_lsp_range(range),
+            new_text,
+        })),
+        additional_text_edits: None,
+        tags: None::<Vec<CompletionItemTag>>,
+        ..Default::default()
+    }
+}
+
+fn vcs_repo_detail(entry: &VcsRepoEntry, badges: &[String]) -> String {
+    if badges.is_empty() {
+        return entry.r#ref.clone();
+    }
+    format!("{} {}", entry.r#ref, badges.join(" "))
+}
+
+fn vcs_repo_documentation(
+    entry: &VcsRepoEntry,
+    badges: &[String],
+) -> Option<Documentation> {
+    let mut sections = Vec::new();
+    if !entry.description.is_empty() {
+        sections.push(entry.description.clone());
+    }
+    if !badges.is_empty() {
+        sections.push(badges.join(" "));
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(markdown_doc(sections.join("\n\n")))
+    }
+}
+
+fn vcs_repo_badges(entry: &VcsRepoEntry) -> Vec<String> {
+    let mut badges = Vec::new();
+    if entry.visibility == "private" {
+        badges.push("[private]".to_string());
+    }
+    if entry.is_fork {
+        badges.push("[fork]".to_string());
+    }
+    if entry.is_archived {
+        badges.push("[archived]".to_string());
+    }
+    badges
+}
+
+/// Fold shortcut `additional` edits against the primary edit.
+///
+/// The shared planner emits nonoverlapping ranges, so this is a defensive
+/// pass only: an additional edit coincident with the primary range is merged
+/// into the primary text (its text first — the multi-edit primary is a bare
+/// shortcut deletion) instead of producing an invalid overlapping
+/// `additionalTextEdits` entry.
+fn merge_coincident_edits(
+    primary: &mut Option<EditorTextEdit>,
+    additional: Vec<EditorTextEdit>,
+) -> Vec<EditorTextEdit> {
+    let Some(primary_edit) = primary.as_mut() else {
+        return additional;
+    };
+    let mut rest = Vec::with_capacity(additional.len());
+    for edit in additional {
+        if edit.range == primary_edit.range {
+            primary_edit.new_text =
+                format!("{}{}", edit.new_text, primary_edit.new_text);
+        } else {
+            rest.push(edit);
+        }
+    }
+    rest
+}
+
+/// Map the candidate's secondary edits (the prepend/replace-at-start tag edit)
+/// to LSP `additionalTextEdits`, returning `None` when there are none.
+fn additional_text_edits(edits: Vec<EditorTextEdit>) -> Option<Vec<TextEdit>> {
+    if edits.is_empty() {
+        return None;
+    }
+    Some(
+        edits
+            .into_iter()
+            .map(|edit| TextEdit {
+                range: to_lsp_range(edit.range),
+                new_text: edit.new_text,
+            })
+            .collect(),
+    )
+}
+
+pub fn apply_replacement(
+    list: CompletionList,
+    range: EditorRange,
+) -> CompletionList {
+    CompletionList {
+        candidates: list
+            .candidates
+            .into_iter()
+            .map(|mut candidate| {
+                if candidate.replacement.is_none() {
+                    candidate.replacement = Some(EditorTextEdit {
+                        range,
+                        new_text: candidate.insertion.clone(),
+                    });
+                }
+                candidate
+            })
+            .collect(),
+        shared_extension: list.shared_extension,
+    }
+}
+
+fn to_lsp_position(position: EditorPosition) -> Position {
+    Position {
+        line: position.line,
+        character: position.character,
+    }
+}
+
+fn to_lsp_diagnostic_severity(
+    severity: DiagnosticSeverity,
+) -> lsp_types::DiagnosticSeverity {
+    match severity {
+        DiagnosticSeverity::Error => lsp_types::DiagnosticSeverity::ERROR,
+        DiagnosticSeverity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+        DiagnosticSeverity::Information => {
+            lsp_types::DiagnosticSeverity::INFORMATION
+        }
+        DiagnosticSeverity::Hint => lsp_types::DiagnosticSeverity::HINT,
+    }
+}
+
+fn markdown_doc(value: String) -> Documentation {
+    Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_editor_range_to_lsp_range() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 1,
+                character: 2,
+            },
+            end: EditorPosition {
+                line: 1,
+                character: 5,
+            },
+        };
+
+        assert_eq!(to_lsp_range(range).start.character, 2);
+        assert_eq!(to_lsp_range(range).end.character, 5);
+    }
+
+    #[test]
+    fn completion_item_uses_replacement_text_edit() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 1,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 3,
+            },
+        };
+        let list = CompletionList {
+            candidates: vec![CompletionCandidate {
+                display: "#foo".to_string(),
+                insertion: "#foo".to_string(),
+                detail: None,
+                documentation: None,
+                is_dir: false,
+                name: "foo".to_string(),
+                replacement: Some(EditorTextEdit {
+                    range,
+                    new_text: "#foo".to_string(),
+                }),
+                additional_edits: Vec::new(),
+                kind: String::new(),
+                project: String::new(),
+                status: String::new(),
+            }],
+            shared_extension: String::new(),
+        };
+
+        let CompletionResponse::Array(items) = completion_response(list, range)
+        else {
+            panic!("expected array response");
+        };
+        assert!(items[0].text_edit.is_some());
+    }
+
+    fn editor_range(
+        start_line: u32,
+        start_char: u32,
+        end_line: u32,
+        end_char: u32,
+    ) -> EditorRange {
+        EditorRange {
+            start: EditorPosition {
+                line: start_line,
+                character: start_char,
+            },
+            end: EditorPosition {
+                line: end_line,
+                character: end_char,
+            },
+        }
+    }
+
+    fn shortcut_candidate(display: &str) -> CompletionCandidate {
+        CompletionCandidate {
+            display: display.to_string(),
+            insertion: display.to_string(),
+            detail: None,
+            documentation: None,
+            is_dir: false,
+            name: display.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: "user_alias".to_string(),
+            project: String::new(),
+            status: "user".to_string(),
+        }
+    }
+
+    /// Every LSP range in a shortcut item, primary first, as comparable
+    /// line/character tuples.
+    fn item_ranges(item: &CompletionItem) -> Vec<(u32, u32, u32, u32)> {
+        let mut ranges = Vec::new();
+        if let Some(CompletionTextEdit::Edit(primary)) = &item.text_edit {
+            ranges.push(lsp_range_tuple(&primary.range));
+        }
+        for extra in item.additional_text_edits.clone().unwrap_or_default() {
+            ranges.push(lsp_range_tuple(&extra.range));
+        }
+        ranges
+    }
+
+    fn lsp_range_tuple(range: &Range) -> (u32, u32, u32, u32) {
+        (
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+        )
+    }
+
+    #[test]
+    fn model_alias_shortcut_item_carries_multi_edits_as_additional() {
+        // `%model:old Use =la` accepting `@large`: the primary edit deletes
+        // the shortcut token while the destination replacement and the extra
+        // removal ride along as nonoverlapping `additionalTextEdits`.
+        let trigger = editor_range(0, 15, 0, 18);
+        let edit = ModelAliasShortcutEditWire {
+            schema_version: 1,
+            alias: "@large".to_string(),
+            replacement: "%m:@large ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: String::new(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 10,
+            },
+            additional_edits: vec![
+                EditorTextEdit {
+                    range: editor_range(0, 0, 0, 11),
+                    new_text: "%m:@large ".to_string(),
+                },
+                EditorTextEdit {
+                    range: editor_range(0, 24, 0, 33),
+                    new_text: String::new(),
+                },
+            ],
+        };
+        let context = ModelAliasShortcutContextWire {
+            schema_version: 1,
+            query: "la".to_string(),
+            token: "=la".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 18,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) =
+            model_alias_shortcut_completion_response(
+                vec![(shortcut_candidate("@large"), edit)],
+                &context,
+            )
+        else {
+            panic!("expected list response");
+        };
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.filter_text.as_deref(), Some("=la"));
+        assert_eq!(
+            item_ranges(item),
+            vec![(0, 15, 0, 18), (0, 0, 0, 11), (0, 24, 0, 33)]
+        );
+        let primary_new_text = match &item.text_edit {
+            Some(CompletionTextEdit::Edit(primary)) => primary.new_text.clone(),
+            _ => panic!("expected primary edit"),
+        };
+        assert_eq!(primary_new_text, String::new());
+        let extra_texts: Vec<&str> = item
+            .additional_text_edits
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|extra| extra.new_text.as_str())
+            .collect();
+        assert_eq!(extra_texts, vec!["%m:@large ", ""]);
+    }
+
+    #[test]
+    fn model_shortcut_item_carries_multi_edits_as_additional() {
+        // `Use ==op then %m:old` accepting `opus`: same split for the
+        // concrete-model kind, with model detail labels intact.
+        let trigger = editor_range(0, 15, 0, 19);
+        let edit = ModelShortcutEditWire {
+            schema_version: 1,
+            kind: ModelShortcutKind::Model,
+            value: "opus".to_string(),
+            replacement: "%m:opus ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: String::new(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 8,
+            },
+            additional_edits: vec![EditorTextEdit {
+                range: editor_range(0, 0, 0, 8),
+                new_text: "%m:opus ".to_string(),
+            }],
+        };
+        let context = ModelShortcutContextWire {
+            schema_version: 1,
+            kind: ModelShortcutKind::Model,
+            query: "op".to_string(),
+            token: "==op".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 19,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) = model_shortcut_completion_response(
+            vec![(shortcut_candidate("opus"), edit)],
+            &context,
+        ) else {
+            panic!("expected list response");
+        };
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.filter_text.as_deref(), Some("==op"));
+        assert_eq!(item_ranges(item), vec![(0, 15, 0, 19), (0, 0, 0, 8)]);
+        assert!(item.label_details.as_ref().is_some_and(
+            |label| label.detail == Some(" → %m:opus".to_string())
+        ));
+    }
+
+    #[test]
+    fn single_edit_shortcut_items_have_no_additional_edits() {
+        // Token-local expansion keeps the previous shape: one primary edit
+        // and no `additionalTextEdits` key.
+        let trigger = editor_range(0, 4, 0, 7);
+        let edit = ModelAliasShortcutEditWire {
+            schema_version: 1,
+            alias: "@large".to_string(),
+            replacement: "%m:@large ".to_string(),
+            edit: EditorTextEdit {
+                range: trigger,
+                new_text: "%m:@large ".to_string(),
+            },
+            caret: EditorPosition {
+                line: 0,
+                character: 14,
+            },
+            additional_edits: Vec::new(),
+        };
+        let context = ModelAliasShortcutContextWire {
+            schema_version: 1,
+            query: "la".to_string(),
+            token: "=la".to_string(),
+            caret: EditorPosition {
+                line: 0,
+                character: 7,
+            },
+            token_range: trigger,
+            replacement_range: trigger,
+        };
+        let CompletionResponse::List(list) =
+            model_alias_shortcut_completion_response(
+                vec![(shortcut_candidate("@large"), edit)],
+                &context,
+            )
+        else {
+            panic!("expected list response");
+        };
+        assert_eq!(item_ranges(&list.items[0]), vec![(0, 4, 0, 7)]);
+        assert_eq!(list.items[0].additional_text_edits, None);
+    }
+
+    #[test]
+    fn coincident_additional_edits_merge_into_primary() {
+        let mut primary = Some(EditorTextEdit {
+            range: editor_range(0, 4, 0, 7),
+            new_text: String::new(),
+        });
+        let rest = merge_coincident_edits(
+            &mut primary,
+            vec![
+                EditorTextEdit {
+                    range: editor_range(0, 4, 0, 7),
+                    new_text: "%m:@large ".to_string(),
+                },
+                EditorTextEdit {
+                    range: editor_range(1, 0, 1, 10),
+                    new_text: String::new(),
+                },
+            ],
+        );
+        assert_eq!(
+            primary.unwrap().new_text,
+            "%m:@large ".to_string(),
+            "coincident text folds into the primary"
+        );
+        assert_eq!(rest.len(), 1);
+    }
+
+    #[test]
+    fn model_completion_items_render_provider_label_and_trailing_sort_group() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 7,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 9,
+            },
+        };
+        let candidates = [
+            ("model", "", "opus"),
+            ("implicit_alias", "default", "@default"),
+            ("provider", "", "claude/"),
+        ]
+        .into_iter()
+        .map(|(kind, status, value)| CompletionCandidate {
+            display: value.to_string(),
+            insertion: value.to_string(),
+            detail: None,
+            documentation: None,
+            is_dir: kind == "provider",
+            name: value.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: status.to_string(),
+        })
+        .collect();
+
+        let CompletionResponse::Array(items) = model_completion_response(
+            CompletionList {
+                candidates,
+                shared_extension: String::new(),
+            },
+            range,
+        ) else {
+            panic!("expected array response");
+        };
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| {
+                    item.label_details
+                        .as_ref()
+                        .and_then(|details| details.description.as_deref())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>(),
+            vec!["model", "default", "provider"]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.sort_text.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["0:0000", "1:0001", "2:0002"]
+        );
+    }
+
+    #[test]
+    fn agent_completion_items_render_distinct_kinds_and_stable_sort_groups() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 2,
+            },
+        };
+        let candidates = [
+            ("keyword", "time=", "wait duration"),
+            ("hood", "sase-11l", "hood · 2 members"),
+            ("tribe", "@ops", "tribe · 2 agents"),
+            ("clan", "builders", "clan · 3 members"),
+            ("family", "review", "family · 2 members"),
+            ("agent", "worker", "RUNNING · sase"),
+            ("proc", "build-shell", "proc · PENDING"),
+        ]
+        .into_iter()
+        .map(|(kind, name, detail)| CompletionCandidate {
+            display: name.to_string(),
+            insertion: name.to_string(),
+            detail: Some(detail.to_string()),
+            documentation: None,
+            is_dir: false,
+            name: name.to_string(),
+            replacement: None,
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: String::new(),
+        })
+        .collect();
+        let CompletionResponse::Array(items) = agent_completion_response(
+            CompletionList {
+                candidates,
+                shared_extension: String::new(),
+            },
+            range,
+        ) else {
+            panic!("expected array response");
+        };
+
+        assert_eq!(
+            items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                Some(CompletionItemKind::KEYWORD),
+                Some(CompletionItemKind::FOLDER),
+                Some(CompletionItemKind::ENUM_MEMBER),
+                Some(CompletionItemKind::MODULE),
+                Some(CompletionItemKind::CLASS),
+                Some(CompletionItemKind::VALUE),
+                Some(CompletionItemKind::FUNCTION),
+            ]
+        );
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(items[1].sort_text.as_deref(), Some("1:0001"));
+        assert_eq!(items[5].sort_text.as_deref(), Some("5:0005"));
+        assert_eq!(items[6].sort_text.as_deref(), Some("6:0006"));
+        assert_eq!(
+            items[5]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("agent · RUNNING · sase")
+        );
+        assert_eq!(
+            items[6]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("proc · PENDING")
+        );
+    }
+
+    #[test]
+    fn at_reference_items_filter_on_the_typed_text_and_preview_the_match() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 13,
+            },
+        };
+        let context = AtReferenceContextWire {
+            stage: AtReferenceStage::Payload,
+            candidate_span: (0, 13),
+            replacement_span: (0, 13),
+            query_span: (9, 13),
+            query: "site".to_string(),
+            kind: Some("research".to_string()),
+            path_query: None,
+        };
+        let menu = AtReferenceMenuWire {
+            rows: vec![AtReferenceRowWire {
+                group: AtReferenceGroup::Payload,
+                label: "202607/sase_sites.md".to_string(),
+                title: "SASE Sites Hub".to_string(),
+                insertion: "@research:202607/sase_sites.md".to_string(),
+                is_dir: false,
+                detail: "research · 3d".to_string(),
+                builtin: false,
+                label_match: vec![(12, 16)],
+                title_match: vec![(5, 9)],
+                match_tier: 2,
+                body: String::new(),
+            }],
+            truncated_payloads: 3,
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        // `isIncomplete` keeps clients re-requesting per keystroke instead of
+        // re-filtering and re-sorting a stale, server-ranked list.
+        assert!(list.is_incomplete);
+        let item = &list.items[0];
+        assert_eq!(item.label, "@research:202607/sase_sites.md");
+        assert_eq!(item.filter_text.as_deref(), Some("@research:site"));
+        assert_eq!(item.sort_text.as_deref(), Some("0:0000"));
+        // A filesystem-backed kind keeps the file icon and takes its own name
+        // as the description, rather than the fixed word "file".
+        assert_eq!(item.kind, Some(CompletionItemKind::FILE));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("research")
+        );
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · SASE Sites Hub")
+        );
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("research · 3d · at least 3 additional payloads not shown")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.kind, MarkupKind::Markdown);
+        assert_eq!(
+            documentation.value,
+            "202607/sase_**site**s.md\n\nSASE Sites Hub"
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected a reference text edit");
+        };
+        assert_eq!(edit.new_text, "@research:202607/sase_sites.md");
+    }
+
+    fn commit_payload_row(body: &str) -> AtReferenceRowWire {
+        AtReferenceRowWire {
+            group: AtReferenceGroup::Payload,
+            label: "sase-core@5143cb981f0a".to_string(),
+            title: "fix(stats): expose occupancy".to_string(),
+            insertion: "@commit:sase-core@5143cb981f0a".to_string(),
+            is_dir: false,
+            detail: "sase-core · 2h".to_string(),
+            builtin: false,
+            label_match: vec![(5, 9)],
+            title_match: Vec::new(),
+            match_tier: 0,
+            body: body.to_string(),
+        }
+    }
+
+    fn commit_completion_context(query: &str) -> AtReferenceContextWire {
+        AtReferenceContextWire {
+            stage: AtReferenceStage::Payload,
+            candidate_span: (0, 8 + query.len()),
+            replacement_span: (0, 8 + query.len()),
+            query_span: (8, 8 + query.len()),
+            query: query.to_string(),
+            kind: Some("commit".to_string()),
+            path_query: None,
+        }
+    }
+
+    #[test]
+    fn commit_payload_rows_render_as_references_with_body_in_documentation() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row(
+                "Expose runner occupancy diagnostics for stats.",
+            )],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let item = &list.items[0];
+        // Commits resolve to a canonical SHA, not a filesystem path, so they
+        // render with a reference icon rather than a file icon.
+        assert_eq!(item.kind, Some(CompletionItemKind::REFERENCE));
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("commit")
+        );
+        assert_eq!(
+            item.label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · fix(stats): expose occupancy")
+        );
+        let Some(Documentation::MarkupContent(documentation)) =
+            item.documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(
+            documentation.value,
+            "sase-**core**@5143cb981f0a\n\nfix(stats): expose occupancy\n\n\
+             ```\nExpose runner occupancy diagnostics for stats.\n```"
+        );
+    }
+
+    #[test]
+    fn commit_documentation_omits_the_body_block_when_empty() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row("")],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let Some(Documentation::MarkupContent(documentation)) =
+            list.items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert!(!documentation.value.contains("```"));
+    }
+
+    #[test]
+    fn commit_documentation_truncates_a_long_body_to_a_bounded_line_count() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 12,
+            },
+        };
+        let context = commit_completion_context("core");
+        let long_body = (1..=50)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let menu = AtReferenceMenuWire {
+            rows: vec![commit_payload_row(&long_body)],
+            ..Default::default()
+        };
+
+        let response = at_reference_completion_response(menu, &context, range);
+        let CompletionResponse::List(list) = response else {
+            panic!("expected an incomplete list");
+        };
+        let Some(Documentation::MarkupContent(documentation)) =
+            list.items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert!(documentation.value.contains("line 1\n"));
+        assert!(!documentation.value.contains("line 50"));
+        assert!(documentation.value.contains('…'));
+        assert!(
+            documentation.value.lines().count() < long_body.lines().count()
+        );
+    }
+
+    #[test]
+    fn at_reference_kind_stage_items_filter_on_the_bare_typed_word() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 5,
+            },
+        };
+        let context = AtReferenceContextWire {
+            stage: AtReferenceStage::Kind,
+            candidate_span: (0, 5),
+            replacement_span: (0, 5),
+            query_span: (1, 5),
+            query: "rsch".to_string(),
+            kind: None,
+            path_query: None,
+        };
+        let menu = AtReferenceMenuWire {
+            rows: vec![AtReferenceRowWire {
+                group: AtReferenceGroup::Artifact,
+                label: "research".to_string(),
+                title: String::new(),
+                insertion: "@research:".to_string(),
+                is_dir: false,
+                detail: String::new(),
+                builtin: true,
+                label_match: vec![(0, 1), (2, 3), (4, 6)],
+                title_match: Vec::new(),
+                match_tier: 3,
+                body: String::new(),
+            }],
+            ..Default::default()
+        };
+
+        let items =
+            match at_reference_completion_response(menu, &context, range) {
+                CompletionResponse::List(list) => list.items,
+                CompletionResponse::Array(items) => items,
+            };
+        assert_eq!(items[0].filter_text.as_deref(), Some("@rsch"));
+        let Some(Documentation::MarkupContent(documentation)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(documentation.value, "**r**e**s**e**ar**ch");
+    }
+
+    #[test]
+    fn converts_sase_snippet_template_to_lsp_snippet_syntax() {
+        assert_eq!(
+            sase_template_to_lsp_snippet(r"cost $5 $1 \ path } $0"),
+            r"cost $5 $1 \\ path \} $0"
+        );
+        assert_eq!(sase_template_to_lsp_snippet("$foo"), r"\$foo");
+    }
+
+    #[test]
+    fn placeholder_tabstop_snippet_retriggers_completion() {
+        let range = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 3,
+            },
+        };
+        let item = sase_snippet_completion_item(
+            "cbi".to_string(),
+            "`<$1>`$0".to_string(),
+            None,
+            None,
+            range,
+        );
+        assert_eq!(
+            item.command
+                .as_ref()
+                .map(|command| command.command.as_str()),
+            Some("editor.action.triggerSuggest")
+        );
+
+        let ordinary = sase_snippet_completion_item(
+            "plain".to_string(),
+            "$1 body $0".to_string(),
+            None,
+            None,
+            range,
+        );
+        assert!(ordinary.command.is_none());
+    }
+
+    fn finalizer_candidate(
+        insertion: &str,
+        kind: &str,
+        status: &str,
+        detail: &str,
+        documentation: &str,
+        start: u32,
+        end: u32,
+    ) -> CompletionCandidate {
+        CompletionCandidate {
+            display: insertion.to_string(),
+            insertion: insertion.to_string(),
+            detail: Some(detail.to_string()).filter(|value| !value.is_empty()),
+            documentation: Some(documentation.to_string())
+                .filter(|value| !value.is_empty()),
+            is_dir: false,
+            name: insertion.to_string(),
+            replacement: Some(EditorTextEdit {
+                range: EditorRange {
+                    start: EditorPosition {
+                        line: 0,
+                        character: start,
+                    },
+                    end: EditorPosition {
+                        line: 0,
+                        character: end,
+                    },
+                },
+                new_text: insertion.to_string(),
+            }),
+            additional_edits: Vec::new(),
+            kind: kind.to_string(),
+            project: String::new(),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn finalizer_completion_emits_operation_aware_lsp_metadata() {
+        let fallback = EditorRange {
+            start: EditorPosition {
+                line: 0,
+                character: 0,
+            },
+            end: EditorPosition {
+                line: 0,
+                character: 10,
+            },
+        };
+        let list = CompletionList {
+            candidates: vec![
+                finalizer_candidate(
+                    "commit",
+                    "finalizer",
+                    "required",
+                    "builtin@commit",
+                    "Commit changes\n\nProvider: `builtin@commit`",
+                    7,
+                    7,
+                ),
+                finalizer_candidate(
+                    "!lint",
+                    "finalizer_remove",
+                    "default",
+                    "builtin@command",
+                    "Remove `lint` from the launch selection.",
+                    15,
+                    17,
+                ),
+                finalizer_candidate(
+                    "none",
+                    "finalizer_clear",
+                    "clear",
+                    "",
+                    "Clear the configured finalizer selection for this launch",
+                    7,
+                    7,
+                ),
+            ],
+            shared_extension: String::new(),
+        };
+        let CompletionResponse::Array(items) =
+            finalizer_completion_response(list, fallback)
+        else {
+            panic!("expected completion array");
+        };
+        assert_eq!(items[0].label, "commit");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:0000"));
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.detail.as_deref()),
+            Some(" · required")
+        );
+        assert_eq!(
+            items[0]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("builtin@commit")
+        );
+        let Some(Documentation::MarkupContent(doc)) =
+            items[0].documentation.as_ref()
+        else {
+            panic!("expected markdown documentation");
+        };
+        assert_eq!(doc.kind, MarkupKind::Markdown);
+        assert!(doc.value.contains("Provider: `builtin@commit`"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref()
+        else {
+            panic!("expected clause-local text edit");
+        };
+        assert_eq!(edit.range.start.character, 7);
+        assert_eq!(edit.new_text, "commit");
+
+        assert_eq!(items[1].label, "!lint");
+        assert_eq!(items[1].kind, Some(CompletionItemKind::OPERATOR));
+        assert_eq!(
+            items[1]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("remove · builtin@command")
+        );
+        let Some(CompletionTextEdit::Edit(remove_edit)) =
+            items[1].text_edit.as_ref()
+        else {
+            panic!("expected remove text edit");
+        };
+        assert_eq!(remove_edit.range.start.character, 15);
+        assert_eq!(remove_edit.range.end.character, 17);
+        assert_eq!(remove_edit.new_text, "!lint");
+
+        assert_eq!(items[2].kind, Some(CompletionItemKind::KEYWORD));
+        assert_eq!(items[2].sort_text.as_deref(), Some("1:0002"));
+        assert_eq!(
+            items[2]
+                .label_details
+                .as_ref()
+                .and_then(|details| details.description.as_deref()),
+            Some("clear")
+        );
+    }
+}

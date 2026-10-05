@@ -185,7 +185,7 @@ fn variables() -> Vec<JinjaCatalogVariableWire> {
              and so on up to the declared input count (at least \
              `{{ _1 }}`). Unavailable in `prompt` \
              scope.\n\nExample: `{{ _args }}`",
-            JinjaAvailabilityRule::XpromptOnly,
+            JinjaAvailabilityRule::MacroOnly,
         ),
         variable(
             "provider_name",
@@ -196,7 +196,7 @@ fn variables() -> Vec<JinjaCatalogVariableWire> {
              rendering a skill file. Only defined in `xprompt` scope \
              with truthy frontmatter `skill`.\n\nExample: \
              `{{ provider_name }}`",
-            JinjaAvailabilityRule::XpromptSkillOnly,
+            JinjaAvailabilityRule::MacroSkillOnly,
         ),
         variable(
             "provider_tool_name",
@@ -207,7 +207,7 @@ fn variables() -> Vec<JinjaCatalogVariableWire> {
              file (for example `\"Grok Build\"`). Only defined in \
              `xprompt` scope with truthy frontmatter \
              `skill`.\n\nExample: `{{ provider_tool_name }}`",
-            JinjaAvailabilityRule::XpromptSkillOnly,
+            JinjaAvailabilityRule::MacroSkillOnly,
         ),
         variable(
             "provider_native_ask_tool",
@@ -219,7 +219,7 @@ fn variables() -> Vec<JinjaCatalogVariableWire> {
              `xprompt` scope with truthy frontmatter \
              `skill`.\n\nExample: \
              `{{ provider_native_ask_tool }}`",
-            JinjaAvailabilityRule::XpromptSkillOnly,
+            JinjaAvailabilityRule::MacroSkillOnly,
         ),
         JinjaCatalogVariableWire {
             members: loop_members(),

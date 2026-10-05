@@ -303,7 +303,7 @@ pub(super) struct MarkerSignatures {
     pub(super) workflow_state: Option<String>,
     pub(super) plan_path: Option<String>,
     pub(super) prompt_steps: Option<String>,
-    pub(super) xprompts: Option<String>,
+    pub(super) macros: Option<String>,
 }
 
 impl MarkerSignatures {
@@ -320,7 +320,7 @@ impl MarkerSignatures {
             workflow_state: marker_signature(&dir.join("workflow_state.json")),
             plan_path: marker_signature(&dir.join("plan_path.json")),
             prompt_steps: None,
-            xprompts: durable_artifact_signature(&dir),
+            macros: durable_artifact_signature(&dir),
         };
 
         let mut step_sigs: Vec<String> = Vec::new();
@@ -350,7 +350,7 @@ impl MarkerSignatures {
 }
 
 /// Signature for the durable macro/raw-prompt selection stored in the
-/// preserved `xprompts_sig` column (no schema change).
+/// preserved `macros_sig` column (no schema change).
 ///
 /// Observes the new-first selected `macros.json` and `raw_prompt.md` files
 /// with their selected filenames as identity, so late canonical creation,

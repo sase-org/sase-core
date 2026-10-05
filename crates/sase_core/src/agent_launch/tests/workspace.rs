@@ -89,10 +89,7 @@ fn prepare_agent_launch_writes_prompt_and_shapes_process_data() {
     assert_eq!(prepared.env_delta["SASE_AGENT"], "1");
     assert_eq!(prepared.env_delta["SASE_REPEAT_NAME"], "task.1");
     assert_eq!(prepared.env_delta["GH_PRE_ALLOCATED"], "1");
-    assert_eq!(
-        prepared.env_delta["SASE_AGENT_LOCAL_XPROMPTS"],
-        "/tmp/xprompts.json"
-    );
+    assert!(!prepared.env_delta.contains_key("SASE_AGENT_LOCAL_XPROMPTS"));
     assert_eq!(
         prepared.env_delta["SASE_AGENT_LOCAL_MACROS"],
         "/tmp/xprompts.json"

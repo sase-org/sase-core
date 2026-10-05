@@ -60,7 +60,7 @@ async fn command_helper_bridge_changespec_tags_returns_command_output() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn command_helper_bridge_xprompt_catalog_returns_new_helper_fields() {
+async fn command_helper_bridge_macro_catalog_returns_new_helper_fields() {
     let tmp = tempfile::tempdir().unwrap();
     let state = state_for_command_helper_bridge(&tmp, "success");
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
@@ -92,7 +92,7 @@ async fn command_helper_bridge_xprompt_catalog_returns_new_helper_fields() {
     let bridge_request: Value = serde_json::from_str(
         &std::fs::read_to_string(
             tmp.path()
-                .join("mobile-helper-bridge-success.xprompt-catalog.json"),
+                .join("mobile-helper-bridge-success.macro-catalog.json"),
         )
         .unwrap(),
     )

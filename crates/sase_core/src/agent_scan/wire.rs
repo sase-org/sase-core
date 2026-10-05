@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 /// Schema version mirrored from
 /// `agent_scan_wire.py::AGENT_SCAN_WIRE_SCHEMA_VERSION`.
-pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 11;
+pub const AGENT_SCAN_WIRE_SCHEMA_VERSION: u32 = 12;
 
 /// Workflow directory categories the scanner walks.
 ///
@@ -1188,11 +1188,11 @@ pub struct PlanPathMarkerWire {
     pub plan_path: Option<String>,
 }
 
-/// Compact projection of one launch-boundary `xprompts.json` entry,
+/// Compact projection of one launch-boundary `macros.json` entry,
 /// deduplicated by name.
 ///
-/// The Rust type is macro-named; the serialized file and field keys stay on
-/// the legacy `xprompts` spelling (see `AgentArtifactRecordWire`).
+/// The Rust type is macro-named; stored `record_json` may still carry the
+/// legacy `used_xprompts` key (see `AgentArtifactRecordWire`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsedMacroWire {
     pub name: String,
@@ -1246,7 +1246,8 @@ pub struct AgentArtifactRecordWire {
     pub prompt_steps: Vec<PromptStepMarkerWire>,
     #[serde(default)]
     pub raw_prompt_snippet: Option<String>,
-    #[serde(default, rename = "used_xprompts", alias = "used_macros")]
+    #[serde(default, rename = "used_macros", alias = "used_xprompts")]
+    // legacy xprompt spelling
     pub used_macros: Vec<UsedMacroWire>,
     #[serde(default)]
     pub has_done_marker: bool,

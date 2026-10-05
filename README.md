@@ -13,7 +13,7 @@ the PyPI `sase-core-rs` extension: `pyproject.toml` pins a minor window and
 | `crates/sase_core`        | All domain logic, with no PyO3. Flat top-level modules, one per domain; `just modules` prints a one-line summary of each                          |
 | `crates/sase_core_py`     | The `sase_core_rs` extension (PyPI `sase-core-rs`). One binding domain per `src/<domain>/`, often named differently from the core module it binds |
 | `crates/sase_gateway`     | The mobile and fleet HTTP gateway plus the `sase_sudo_runner` and `sase_federation_worker` binaries. They ship inside the wheel                   |
-| `crates/sase_xprompt_lsp` | The `sase-xprompt-lsp` language server                                                                                                            |
+| `crates/sase_macro_lsp` | The `sase-macro-lsp` language server                                                                                                            |
 
 ## Development
 

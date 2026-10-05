@@ -14,9 +14,8 @@ use super::types::{
 };
 use super::*;
 use crate::{
-    EditorSnippetCatalogRequestWire, EditorXpromptCatalogRequestWire,
-    MemoryTierWire, MobileXpromptCatalogEntryWire,
-    MobileXpromptCatalogStatsWire,
+    EditorMacroCatalogRequestWire, EditorSnippetCatalogRequestWire,
+    MemoryTierWire, MobileMacroCatalogEntryWire, MobileMacroCatalogStatsWire,
 };
 
 mod authored_inputs;
@@ -28,8 +27,8 @@ mod projects;
 mod skill_definition;
 mod snippets;
 
-fn request() -> EditorXpromptCatalogRequestWire {
-    EditorXpromptCatalogRequestWire {
+fn request() -> EditorMacroCatalogRequestWire {
+    EditorMacroCatalogRequestWire {
         schema_version: 1,
         project: None,
         source: None,
@@ -40,7 +39,7 @@ fn request() -> EditorXpromptCatalogRequestWire {
         device_id: None,
     }
 }
-fn definition_line(entry: &MobileXpromptCatalogEntryWire) -> Option<u32> {
+fn definition_line(entry: &MobileMacroCatalogEntryWire) -> Option<u32> {
     entry.definition_range.map(|range| range.start.line)
 }
 fn write_memory_note(root: &Path, name: &str, contents: &str) {

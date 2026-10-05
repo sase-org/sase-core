@@ -1,6 +1,6 @@
 use crate::{
     content_layout::{skill_reference_name, split_skill_reference_name},
-    EditorXpromptCatalogRequestWire,
+    EditorMacroCatalogRequestWire,
 };
 
 use super::loader::CatalogLoader;
@@ -261,7 +261,7 @@ fn skill_definition_resolution(
 
 pub(super) fn filter_structured_sources(
     entries: Vec<StructuredSource>,
-    request: &EditorXpromptCatalogRequestWire,
+    request: &EditorMacroCatalogRequestWire,
     canonical_project: Option<&str>,
 ) -> Vec<StructuredSource> {
     let normalized_query =

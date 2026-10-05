@@ -1,7 +1,7 @@
 use crate::agent_scan::wire::{AgentArtifactRecordShapeWire, UsedMacroWire};
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 35;
+pub const AGENT_ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 36;
 
 /// Newest hidden terminal rows kept hot in the materialized SQLite view.
 ///
@@ -98,7 +98,8 @@ pub struct AgentAliasRunWire {
     pub workspace_num: Option<i64>,
     #[serde(default)]
     pub prompt_snippet: Option<String>,
-    #[serde(default, rename = "used_xprompts", alias = "used_macros")]
+    #[serde(default, rename = "used_macros", alias = "used_xprompts")]
+    // legacy xprompt spelling
     pub used_macros: Vec<UsedMacroWire>,
 }
 

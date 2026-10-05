@@ -168,7 +168,7 @@ pub fn plan_argument_list_continuation_edit(
 /// regions. Cached acceptance metadata only: no catalog, filesystem, or
 /// provider work on the typing path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XpromptCompletionSpacerWire {
+pub struct MacroCompletionSpacerWire {
     /// Exact insertion recorded at acceptance (for example `#optional`).
     pub reference_text: String,
     /// Document position of the first reference character at acceptance.
@@ -187,10 +187,10 @@ pub struct XpromptCompletionSpacerWire {
 /// and caret placement remain frontend concerns. This is a completion edit,
 /// not a parser change that permits whitespace between an invocation and its
 /// argument list.
-pub fn plan_xprompt_completion_spacer_to_parentheses_edit(
+pub fn plan_macro_completion_spacer_to_parentheses_edit(
     document: &DocumentSnapshot,
     position: EditorPosition,
-    record: &XpromptCompletionSpacerWire,
+    record: &MacroCompletionSpacerWire,
 ) -> Option<EditorTextEdit> {
     if !record.has_optional_inputs {
         return None;
@@ -694,8 +694,8 @@ mod tests {
         reference_byte: usize,
         spacer_byte: usize,
         has_optional_inputs: bool,
-    ) -> XpromptCompletionSpacerWire {
-        XpromptCompletionSpacerWire {
+    ) -> MacroCompletionSpacerWire {
+        MacroCompletionSpacerWire {
             reference_text: reference_text.to_string(),
             reference_start: document
                 .byte_offset_to_position(reference_byte)
@@ -726,7 +726,7 @@ mod tests {
             spacer_byte,
             has_optional_inputs,
         );
-        let edit = plan_xprompt_completion_spacer_to_parentheses_edit(
+        let edit = plan_macro_completion_spacer_to_parentheses_edit(
             &document, position, &record,
         )?;
         let start = document.position_to_byte_offset(edit.range.start)?;
@@ -843,7 +843,7 @@ mod tests {
             .expect("cursor");
         let record =
             spacer_record(&document, "#optional", reference, spacer, true);
-        let edit = plan_xprompt_completion_spacer_to_parentheses_edit(
+        let edit = plan_macro_completion_spacer_to_parentheses_edit(
             &document, cursor, &record,
         )
         .expect("planned edit");
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn spacer_rejects_invalid_utf16_positions() {
         let document = DocumentSnapshot::new("🙂 #optional ");
-        let record = XpromptCompletionSpacerWire {
+        let record = MacroCompletionSpacerWire {
             reference_text: "#optional".to_string(),
             reference_start: EditorPosition {
                 line: 0,
@@ -872,7 +872,7 @@ mod tests {
             has_optional_inputs: true,
         };
         assert_eq!(
-            plan_xprompt_completion_spacer_to_parentheses_edit(
+            plan_macro_completion_spacer_to_parentheses_edit(
                 &document,
                 EditorPosition {
                     line: 0,

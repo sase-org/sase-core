@@ -40,14 +40,14 @@ pub use sase_core::host_bridge::{
     MobileChangeSpecTagEntryWire, MobileChangeSpecTagListRequestWire,
     MobileChangeSpecTagListResponseWire, MobileHelperProjectContextWire,
     MobileHelperProjectScopeWire, MobileHelperResultWire,
-    MobileHelperSkippedWire, MobileHelperStatusWire, MobilePatchTagEntryWire,
+    MobileHelperSkippedWire, MobileHelperStatusWire,
+    MobileMacroCatalogAttachmentWire, MobileMacroCatalogEntryWire,
+    MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
+    MobileMacroCatalogStatsWire, MobileMacroInputWire, MobilePatchTagEntryWire,
     MobilePatchTagListRequestWire, MobilePatchTagListResponseWire,
     MobileUpdateJobStatusWire, MobileUpdateJobWire,
     MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
     MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
-    MobileXpromptCatalogAttachmentWire, MobileXpromptCatalogEntryWire,
-    MobileXpromptCatalogRequestWire, MobileXpromptCatalogResponseWire,
-    MobileXpromptCatalogStatsWire, MobileXpromptInputWire,
 };
 
 pub const GATEWAY_WIRE_SCHEMA_VERSION: u32 = 1;
@@ -1542,11 +1542,11 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(MobileXpromptCatalogResponseWire {
+            serde_json::to_value(MobileMacroCatalogResponseWire {
                 schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
                 result: result.clone(),
                 context: context.clone(),
-                entries: vec![MobileXpromptCatalogEntryWire {
+                entries: vec![MobileMacroCatalogEntryWire {
                     name: "gh".to_string(),
                     display_label: "GitHub workflow".to_string(),
                     insertion: Some("#!gh".to_string()),
@@ -1559,7 +1559,7 @@ mod tests {
                     project: Some("sase".to_string()),
                     tags: vec!["changespec".to_string()],
                     input_signature: Some("topic".to_string()),
-                    inputs: vec![MobileXpromptInputWire {
+                    inputs: vec![MobileMacroInputWire {
                         name: "topic".to_string(),
                         r#type: "word".to_string(),
                         description: Some("Workflow topic".to_string()),
@@ -1579,14 +1579,14 @@ mod tests {
                     definition_path: None,
                     definition_range: None,
                 }],
-                stats: MobileXpromptCatalogStatsWire {
+                stats: MobileMacroCatalogStatsWire {
                     total_count: 1,
                     project_count: 1,
                     skill_count: 0,
                     memory_count: 0,
                     pdf_requested: true,
                 },
-                catalog_attachment: Some(MobileXpromptCatalogAttachmentWire {
+                catalog_attachment: Some(MobileMacroCatalogAttachmentWire {
                     display_name: "xprompts.pdf".to_string(),
                     content_type: Some("application/pdf".to_string()),
                     byte_size: Some(1234),
@@ -1886,8 +1886,8 @@ mod tests {
     }
 
     #[test]
-    fn mobile_xprompt_catalog_entry_deserializes_legacy_shape() {
-        let entry: MobileXpromptCatalogEntryWire =
+    fn mobile_macro_catalog_entry_deserializes_legacy_shape() {
+        let entry: MobileMacroCatalogEntryWire =
             serde_json::from_value(json!({
                 "name": "gh",
                 "display_label": "GitHub workflow",
@@ -1906,6 +1906,6 @@ mod tests {
         assert_eq!(entry.insertion, None);
         assert_eq!(entry.reference_prefix, None);
         assert_eq!(entry.kind, None);
-        assert_eq!(entry.inputs, Vec::<MobileXpromptInputWire>::new());
+        assert_eq!(entry.inputs, Vec::<MobileMacroInputWire>::new());
     }
 }

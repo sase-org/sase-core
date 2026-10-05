@@ -75,7 +75,7 @@ struct MacroArgsCorpusFile {
 #[cfg(test)]
 pub(crate) fn macro_args_corpus() -> Vec<MacroArgsCorpusCase> {
     let file: MacroArgsCorpusFile = serde_json::from_str(include_str!(
-        "../tests/fixtures/xprompt_args_corpus.json"
+        "../tests/fixtures/macro_args_corpus.json"
     ))
     .expect("xprompt args corpus must parse");
     assert_eq!(file.schema_version, 1, "unexpected corpus schema_version");
