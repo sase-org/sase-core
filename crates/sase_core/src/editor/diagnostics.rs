@@ -8,6 +8,7 @@ use crate::macro_input_types::{
     validate_enum_choices_yaml, InputChoice, InputTypeRegistry,
     ResolvedInputType,
 };
+use crate::model_validity::{classify_model_value, ModelValiditySnapshot};
 use crate::{
     content_layout::is_reserved_memory_reference, fenced_block_ranges,
     inline_code_ranges, parse_artifact_ref, prompt_literal_zone_ranges,
@@ -33,9 +34,20 @@ use super::wire::{
 /// Externally visible code for an invalid closed-set argument value.
 pub(crate) const INVALID_MACRO_ARG_CHOICE: &str = "invalid_macro_arg_choice";
 
+/// Externally visible code for an invalid model argument value.
+pub(crate) const INVALID_MACRO_ARG_MODEL: &str = "invalid_macro_arg_model";
+
 pub fn analyze_document(
     document: &DocumentSnapshot,
     entries: &[MacroAssistEntry],
+) -> Vec<EditorDiagnostic> {
+    analyze_document_with_snapshot(document, entries, None)
+}
+
+pub fn analyze_document_with_snapshot(
+    document: &DocumentSnapshot,
+    entries: &[MacroAssistEntry],
+    snapshot: Option<&ModelValiditySnapshot>,
 ) -> Vec<EditorDiagnostic> {
     let local_entries = local_macro_entries(document);
     let combined_entries;
@@ -47,13 +59,60 @@ pub fn analyze_document(
     };
 
     let mut diagnostics = Vec::new();
-    diagnostics.extend(frontmatter::diagnostics(document));
+    diagnostics
+        .extend(frontmatter::diagnostics_with_snapshot(document, snapshot));
     diagnostics.extend(macro_diagnostics(document, entries));
     diagnostics.extend(slash_skill_diagnostics(document, entries));
     diagnostics.extend(directive_diagnostics(document));
     diagnostics.extend(alternation_diagnostics(document));
-    diagnostics.extend(argument_diagnostics(document, entries));
+    diagnostics.extend(argument_diagnostics_with_snapshot(
+        document, entries, snapshot,
+    ));
     diagnostics
+}
+
+pub fn argument_diagnostics(
+    document: &DocumentSnapshot,
+    entries: &[MacroAssistEntry],
+) -> Vec<EditorDiagnostic> {
+    argument_diagnostics_with_snapshot(document, entries, None)
+}
+
+pub fn argument_diagnostics_with_snapshot(
+    document: &DocumentSnapshot,
+    entries: &[MacroAssistEntry],
+    snapshot: Option<&ModelValiditySnapshot>,
+) -> Vec<EditorDiagnostic> {
+    let mut out = Vec::new();
+    for call in parse_macro_calls(document.text()) {
+        let Some(entry) = entries.iter().find(|entry| entry.name == call.name)
+        else {
+            continue;
+        };
+        if matches!(call.syntax, MacroArgSyntax::Malformed) {
+            let Some((start, end)) = call.malformed_span else {
+                continue;
+            };
+            push_diagnostic(
+                document,
+                &mut out,
+                start,
+                end,
+                "malformed_macro_argument",
+                "Malformed macro argument form".to_string(),
+            );
+            if entry.inputs.is_empty() || call.is_open {
+                continue;
+            }
+        }
+        if call.is_open || entry.inputs.is_empty() {
+            continue;
+        }
+        validate_call_args_with_snapshot(
+            document, entry, &call, &mut out, snapshot,
+        );
+    }
+    out
 }
 
 pub fn analyze_artifact_refs(
@@ -342,57 +401,35 @@ fn alternation_diagnostics(
     out
 }
 
-fn argument_diagnostics(
-    document: &DocumentSnapshot,
-    entries: &[MacroAssistEntry],
-) -> Vec<EditorDiagnostic> {
-    let mut out = Vec::new();
-    for call in parse_macro_calls(document.text()) {
-        let Some(entry) = entries.iter().find(|entry| entry.name == call.name)
-        else {
-            continue;
-        };
-        if matches!(call.syntax, MacroArgSyntax::Malformed) {
-            let Some((start, end)) = call.malformed_span else {
-                continue;
-            };
-            push_diagnostic(
-                document,
-                &mut out,
-                start,
-                end,
-                "malformed_macro_argument",
-                "Malformed macro argument form".to_string(),
-            );
-            if entry.inputs.is_empty() || call.is_open {
-                continue;
-            }
-        }
-        if call.is_open || entry.inputs.is_empty() {
-            continue;
-        }
-        validate_call_args(document, entry, &call, &mut out);
-    }
-    out
-}
-
-fn validate_call_args(
+fn validate_call_args_with_snapshot(
     document: &DocumentSnapshot,
     entry: &MacroAssistEntry,
     call: &super::macro_args::ParsedMacroCall,
     out: &mut Vec<EditorDiagnostic>,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
-    for validation in validate_macro_call_args(entry, call) {
-        let data = choice_suggestion_data(
-            document,
-            validation.span,
-            &validation.suggestion_values,
-        );
-        push_diagnostic_with_data(
+    for validation in
+        validate_macro_call_args_with_snapshot(entry, call, snapshot)
+    {
+        let data = if validation.code == INVALID_MACRO_ARG_MODEL {
+            model_suggestion_data(
+                document,
+                validation.span,
+                &validation.suggestion_values,
+            )
+        } else {
+            choice_suggestion_data(
+                document,
+                validation.span,
+                &validation.suggestion_values,
+            )
+        };
+        push_diagnostic_with_severity_and_data(
             document,
             out,
             validation.span.0,
             validation.span.1,
+            validation.severity,
             validation.code,
             validation.message,
             data,
@@ -417,6 +454,7 @@ pub(crate) struct MacroArgValidation {
     pub(crate) code: &'static str,
     pub(crate) message: String,
     pub(crate) suggestion_values: Vec<String>,
+    pub(crate) severity: DiagnosticSeverity,
 }
 
 fn arg_validation(
@@ -433,12 +471,21 @@ fn arg_validation(
         code,
         message,
         suggestion_values: Vec::new(),
+        severity: DiagnosticSeverity::Error,
     }
 }
 
 pub(crate) fn validate_macro_call_args(
     entry: &MacroAssistEntry,
     call: &super::macro_args::ParsedMacroCall,
+) -> Vec<MacroArgValidation> {
+    validate_macro_call_args_with_snapshot(entry, call, None)
+}
+
+pub(crate) fn validate_macro_call_args_with_snapshot(
+    entry: &MacroAssistEntry,
+    call: &super::macro_args::ParsedMacroCall,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) -> Vec<MacroArgValidation> {
     let mut out = Vec::new();
     let mut supplied_inputs = HashSet::new();
@@ -473,7 +520,9 @@ pub(crate) fn validate_macro_call_args(
                 continue;
             };
             supplied_inputs.insert(input.name.clone());
-            validate_type(entry, input, arg_index, arg, &mut out);
+            validate_type_with_snapshot(
+                entry, input, arg_index, arg, &mut out, snapshot,
+            );
         } else {
             let Some(input) = input_for_position(entry, positional_index)
             else {
@@ -491,7 +540,9 @@ pub(crate) fn validate_macro_call_args(
                 continue;
             };
             supplied_inputs.insert(input.name.clone());
-            validate_type(entry, input, arg_index, arg, &mut out);
+            validate_type_with_snapshot(
+                entry, input, arg_index, arg, &mut out, snapshot,
+            );
             positional_index += 1;
         }
     }
@@ -514,15 +565,45 @@ pub(crate) fn validate_macro_call_args(
     out
 }
 
-fn validate_type(
+fn is_model_hint(input: &MacroInputHint) -> bool {
+    input.value_role.as_deref() == Some("model")
+}
+
+fn validate_type_with_snapshot(
     entry: &MacroAssistEntry,
     input: &MacroInputHint,
     arg_index: usize,
     arg: &ParsedMacroArg,
     out: &mut Vec<MacroArgValidation>,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     if arg.value == "null" || macro_arg_value_unresolvable(&arg.value) {
         return;
+    }
+    if is_model_hint(input) {
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        let stripped = strip_arg_quotes(&arg.value);
+        if stripped.is_empty() {
+            return;
+        }
+        match classify_model_value(&input.name, stripped, snapshot) {
+            Ok(result) if result.ok => return,
+            Ok(result) => {
+                out.push(MacroArgValidation {
+                    kind: MacroArgValidationKind::TypeMismatch,
+                    arg_index: Some(arg_index),
+                    span: arg.value_span,
+                    code: INVALID_MACRO_ARG_MODEL,
+                    message: result.message,
+                    suggestion_values: result.suggestions,
+                    severity: DiagnosticSeverity::Warning,
+                });
+                return;
+            }
+            Err(_) => return,
+        }
     }
     if !input.choices.is_empty() {
         let resolved = resolved_hint(input);
@@ -540,6 +621,7 @@ fn validate_type(
                 code: INVALID_MACRO_ARG_CHOICE,
                 message,
                 suggestion_values,
+                severity: DiagnosticSeverity::Error,
             });
         }
         return;
@@ -998,15 +1080,76 @@ fn push_diagnostic_with_data(
     message: String,
     data: Option<EditorDiagnosticData>,
 ) {
+    push_diagnostic_with_severity_and_data(
+        document,
+        out,
+        start,
+        end,
+        DiagnosticSeverity::Error,
+        code,
+        message,
+        data,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_diagnostic_with_severity_and_data(
+    document: &DocumentSnapshot,
+    out: &mut Vec<EditorDiagnostic>,
+    start: usize,
+    end: usize,
+    severity: DiagnosticSeverity,
+    code: &str,
+    message: String,
+    data: Option<EditorDiagnosticData>,
+) {
     let Some(range) = document.byte_range_to_range(start, end) else {
         return;
     };
-    let mut diagnostic =
-        EditorDiagnostic::new(range, DiagnosticSeverity::Error, code, message);
+    let mut diagnostic = EditorDiagnostic::new(range, severity, code, message);
     if let Some(data) = data {
         diagnostic = diagnostic.with_data(data);
     }
     out.push(diagnostic);
+}
+
+fn strip_arg_quotes(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+        {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    trimmed
+}
+
+fn model_suggestion_data(
+    document: &DocumentSnapshot,
+    span: (usize, usize),
+    suggestion_values: &[String],
+) -> Option<EditorDiagnosticData> {
+    if suggestion_values.is_empty() {
+        return None;
+    }
+    let range = document.byte_range_to_range(span.0, span.1)?;
+    Some(EditorDiagnosticData {
+        suggestions: suggestion_values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| EditorDiagnosticSuggestion {
+                value: value.clone(),
+                title: format!("Replace with `{value}`"),
+                edit: EditorTextEdit {
+                    range,
+                    new_text: value.clone(),
+                },
+                preferred: index == 0,
+            })
+            .collect(),
+    })
 }
 
 fn macro_ref_re() -> &'static Regex {
@@ -1640,6 +1783,119 @@ mod tests {
         let diagnostics =
             diagnostics_for("#typed(src/main.rs, path=other, count=3)");
         assert_eq!(diagnostic_count(&diagnostics, "conflicting_macro_arg"), 0);
+    }
+
+    fn model_snapshot() -> ModelValiditySnapshot {
+        ModelValiditySnapshot {
+            schema_version: 1,
+            providers: ["claude", "codex", "fakey"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            models: [("opus", "claude"), ("fakey-large", "fakey")]
+                .into_iter()
+                .map(|(model, provider)| {
+                    (model.to_string(), provider.to_string())
+                })
+                .collect(),
+            aliases: vec!["large".to_string()],
+            effort_levels: [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
+    }
+
+    fn model_catalog() -> Vec<MacroAssistEntry> {
+        let mut hint = input("claude_model", "word", true, 0);
+        hint.named_type = Some("model".to_string());
+        hint.value_role = Some("model".to_string());
+        vec![MacroAssistEntry {
+            name: "launch".to_string(),
+            display_label: "launch".to_string(),
+            insertion: "#launch".to_string(),
+            reference_prefix: "#".to_string(),
+            kind: None,
+            source_bucket: "builtin".to_string(),
+            project: None,
+            tags: Vec::new(),
+            input_signature: None,
+            inputs: vec![hint],
+            content_preview: None,
+            description: None,
+            source_path_display: None,
+            definition_path: None,
+            definition_range: None,
+            is_skill: false,
+            skill_name: None,
+            memory_type: None,
+        }]
+    }
+
+    #[test]
+    fn invalid_model_argument_warns_with_preferred_replace_fix() {
+        let entries = model_catalog();
+        let snapshot = model_snapshot();
+        let text = "#launch(claude_model=opsu)";
+        let diagnostics = analyze_document_with_snapshot(
+            &DocumentSnapshot::new(text),
+            &entries,
+            Some(&snapshot),
+        );
+        let found = diagnostic(&diagnostics, "invalid_macro_arg_model");
+        assert_eq!(found.severity, DiagnosticSeverity::Warning);
+        assert!(
+            found.message.contains("expects a model"),
+            "unexpected message: {}",
+            found.message
+        );
+        let data = found.data.as_ref().expect("model fix data");
+        assert_eq!(data.suggestions.len(), 1);
+        assert_eq!(data.suggestions[0].title, "Replace with `opus`");
+        assert_eq!(data.suggestions[0].value, "opus");
+        assert!(data.suggestions[0].preferred);
+        assert_eq!(diagnostic_text(text, found), "opsu");
+
+        for accepted in [
+            "#launch(claude_model=claude/opus@xhigh)",
+            "#launch(claude_model=@large)",
+            "#launch(claude_model=fakey-large)",
+        ] {
+            let diagnostics = analyze_document_with_snapshot(
+                &DocumentSnapshot::new(accepted),
+                &entries,
+                Some(&snapshot),
+            );
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid_macro_arg_model"),
+                0,
+                "{accepted}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_argument_is_unchecked_without_routing_snapshot() {
+        let entries = model_catalog();
+        let text = "#launch(claude_model=opsu)";
+        let diagnostics = analyze_document_with_snapshot(
+            &DocumentSnapshot::new(text),
+            &entries,
+            None,
+        );
+        assert_eq!(
+            diagnostic_count(&diagnostics, "invalid_macro_arg_model"),
+            0,
+            "{diagnostics:?}"
+        );
+        let legacy = analyze_document(&DocumentSnapshot::new(text), &entries);
+        assert_eq!(
+            diagnostic_count(&legacy, "invalid_macro_arg_model"),
+            0,
+            "{legacy:?}"
+        );
     }
 
     #[test]

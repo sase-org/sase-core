@@ -2,6 +2,7 @@ use super::super::wire::{
     DirectiveKeywordSpec, DirectiveMetadata, DirectiveSuggestedValue,
     DirectiveSyntaxForm, DirectiveValueRole,
 };
+use crate::effort::EFFORT_LEVELS_WITH_DESCRIPTIONS;
 
 const AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
@@ -20,32 +21,32 @@ const AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
 
 const EFFORT_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
-        value: "none",
-        documentation: "No reasoning-effort override",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[0].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[0].1,
     },
     DirectiveSuggestedValue {
-        value: "minimal",
-        documentation: "Minimal reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[1].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[1].1,
     },
     DirectiveSuggestedValue {
-        value: "low",
-        documentation: "Low reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[2].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[2].1,
     },
     DirectiveSuggestedValue {
-        value: "medium",
-        documentation: "Medium reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[3].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[3].1,
     },
     DirectiveSuggestedValue {
-        value: "high",
-        documentation: "High reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[4].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[4].1,
     },
     DirectiveSuggestedValue {
-        value: "xhigh",
-        documentation: "Extra-high reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[5].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[5].1,
     },
     DirectiveSuggestedValue {
-        value: "max",
-        documentation: "Maximum reasoning effort",
+        value: EFFORT_LEVELS_WITH_DESCRIPTIONS[6].0,
+        documentation: EFFORT_LEVELS_WITH_DESCRIPTIONS[6].1,
     },
 ];
 

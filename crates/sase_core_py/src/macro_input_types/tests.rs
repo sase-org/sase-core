@@ -23,6 +23,7 @@ fn macro_input_type_bindings_are_registered() {
             "validate_enum_choices",
             "pyyaml_plain_scalar_is_non_string",
             "check_input_value",
+            "classify_model_value",
         ] {
             assert!(module.getattr(name).is_ok(), "{name} is registered");
         }
@@ -45,7 +46,7 @@ fn catalog_binding_round_trips_contract_rows() {
             names,
             [
                 "word", "line", "text", "path", "int", "float", "bool", "code",
-                "string", "enum", "agent",
+                "string", "enum", "agent", "effort", "model",
             ]
         );
         let string = value
@@ -141,6 +142,56 @@ fn validate_and_check_bindings_round_trip() {
             "Argument `edition` expects one of brief | full, got `breif`; \
              did you mean `brief`?"
         );
+    });
+}
+
+#[test]
+fn classify_binding_round_trips_accept_and_reject() {
+    use std::collections::BTreeMap;
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let snapshot = json!({
+            "schema_version": 1,
+            "providers": ["claude", "codex"],
+            "models": {"opus": "claude"},
+            "aliases": ["large"],
+            "effort_levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        });
+        let request = request_dict(
+            py,
+            &json!({"name": "m", "value": "claude/opus@xhigh", "snapshot": snapshot}),
+        );
+        let result = py_classify_model_value(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["ok"], json!(true));
+        assert_eq!(value["kind"], json!("provider_model"));
+
+        let request = request_dict(
+            py,
+            &json!({"name": "m", "value": "opsu", "snapshot": snapshot}),
+        );
+        let result = py_classify_model_value(py, &request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["ok"], json!(false));
+        assert!(value["message"].as_str().unwrap().contains("`opsu`"));
+
+        let bad_snapshot = {
+            let mut map = BTreeMap::new();
+            map.insert("bad".to_string(), json!(1));
+            map
+        };
+        let _ = bad_snapshot;
+        let request = request_dict(
+            py,
+            &json!({"name": "m", "value": "opus", "snapshot": {
+                "schema_version": 2,
+                "providers": [],
+                "models": {},
+                "aliases": [],
+                "effort_levels": [],
+            }}),
+        );
+        assert!(py_classify_model_value(py, &request).is_err());
     });
 }
 

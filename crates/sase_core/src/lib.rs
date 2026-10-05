@@ -92,6 +92,7 @@ pub mod memory_history;
 pub mod migration;
 pub mod model_completion;
 pub mod model_route;
+pub mod model_validity;
 pub mod note_attachment;
 pub mod notifications;
 pub mod parser;
@@ -749,8 +750,10 @@ pub use disk_pressure::{
 pub use editor::{
     analyze_artifact_refs as editor_analyze_artifact_refs,
     analyze_document as editor_analyze_document,
+    analyze_document_with_snapshot as editor_analyze_document_with_snapshot,
     apply_vcs_ref_selection as editor_apply_vcs_ref_selection,
     apply_vcs_repo_selection as editor_apply_vcs_repo_selection,
+    argument_diagnostics_with_snapshot as editor_argument_diagnostics_with_snapshot,
     assist_entries_from_catalog as editor_assist_entries_from_catalog,
     build_agent_completion_candidates as editor_build_agent_completion_candidates,
     build_artifact_ref_kind_completion_candidates as editor_build_artifact_ref_kind_completion_candidates,
@@ -808,6 +811,7 @@ pub use editor::{
     fuzzy_match as editor_fuzzy_match,
     hover_at_position as editor_hover_at_position,
     hover_at_position_with_flags as editor_hover_at_position_with_flags,
+    hover_at_position_with_snapshot as editor_hover_at_position_with_snapshot,
     is_path_like_token as editor_is_path_like_token,
     is_slash_skill_like_token as editor_is_slash_skill_like_token,
     is_snippet_trigger_token as editor_is_snippet_trigger_token,
@@ -863,9 +867,9 @@ pub use editor::{
     VCS_REPO_CATALOG_SCHEMA_VERSION,
 };
 pub use effort::{
-    is_valid_effort, resolve_effective_effort, split_model_effort,
-    EffectiveEffortResolutionWire, EffectiveEffortSource,
-    EFFORT_LEVELS_ORDERED,
+    effort_level_description, is_valid_effort, resolve_effective_effort,
+    split_model_effort, EffectiveEffortResolutionWire, EffectiveEffortSource,
+    EFFORT_LEVELS_ORDERED, EFFORT_LEVELS_WITH_DESCRIPTIONS,
 };
 pub use effort_override::{
     clear_effort_override, effort_override_state_path, get_effort_override,
@@ -1220,6 +1224,10 @@ pub use model_route::{
     size_model_route_from_name, EpicLandModelRouteWire, EpicLandModelSource,
     ModelRouteError, SizeModelRouteWire, PUBLIC_SIZE_ALIASES,
     PUBLIC_SIZE_ALIAS_NAMES,
+};
+pub use model_validity::{
+    classify_model_value, ClassifyModelValueRequestWire,
+    ClassifyModelValueResultWire, ModelValidityError, ModelValiditySnapshot,
 };
 pub use notifications::{
     append_notification, append_notification_counts,

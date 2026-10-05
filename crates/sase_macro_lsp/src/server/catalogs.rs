@@ -600,6 +600,40 @@ pub(super) fn load_model_catalog(
         .unwrap_or_default()
 }
 
+/// Load the model validity snapshot from the materialized JSON file's
+/// optional top-level `routing` object.
+///
+/// A missing, malformed, or unreadable routing block skips model
+/// diagnostics and the hover classification. It does not empty the
+/// completion list and it does not fail catalog load. A malformed block
+/// logs a warning.
+pub(super) fn load_model_routing(
+    path: Option<&Path>,
+) -> Option<sase_core::ModelValiditySnapshot> {
+    let path = path?;
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let routing = value.get("routing")?;
+    match serde_json::from_value::<sase_core::ModelValiditySnapshot>(
+        routing.clone(),
+    ) {
+        Ok(snapshot) => {
+            if snapshot.schema_version != 1 {
+                warn!(
+                    "unsupported model catalog routing schema_version {} at {path:?}",
+                    snapshot.schema_version
+                );
+                return None;
+            }
+            Some(snapshot)
+        }
+        Err(error) => {
+            warn!("malformed model catalog routing block at {path:?}: {error}");
+            None
+        }
+    }
+}
+
 /// Load the `%dispatch` machine completion catalog from materialized JSON.
 pub(super) fn load_machine_catalog(
     path: Option<&Path>,

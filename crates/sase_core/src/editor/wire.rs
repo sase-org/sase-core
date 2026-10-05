@@ -49,6 +49,7 @@ pub enum CompletionContextKind {
     MacroArgumentValue,
     MacroArgumentPath,
     MacroArgumentAgent,
+    MacroArgumentModel,
     MacroArgumentTypeHint,
     DirectiveName,
     DirectiveArgument,

@@ -45,7 +45,7 @@ fn catalog_contains_only_the_contract_rows() {
         names,
         [
             "word", "line", "text", "path", "int", "float", "bool", "code",
-            "string", "enum", "agent",
+            "string", "enum", "agent", "effort", "model",
         ]
     );
     let string = catalog.iter().find(|entry| entry.name == "string").unwrap();
@@ -60,6 +60,31 @@ fn catalog_contains_only_the_contract_rows() {
     assert_eq!(int.aliases, ["integer"]);
     let bool_entry = catalog.iter().find(|entry| entry.name == "bool").unwrap();
     assert_eq!(bool_entry.aliases, ["boolean"]);
+    let effort = catalog.iter().find(|entry| entry.name == "effort").unwrap();
+    assert_eq!(effort.kind, InputTypeKind::NamedEnum);
+    assert_eq!(effort.base, "enum");
+    assert_eq!(effort.value_role, None);
+    let effort_values: Vec<&str> = effort
+        .choices
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect();
+    assert_eq!(
+        effort_values,
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    for choice in &effort.choices {
+        assert!(choice.label.is_none());
+        assert!(choice
+            .description
+            .as_deref()
+            .is_some_and(|text| !text.is_empty()));
+    }
+    let model = catalog.iter().find(|entry| entry.name == "model").unwrap();
+    assert_eq!(model.kind, InputTypeKind::Domain);
+    assert_eq!(model.base, "word");
+    assert_eq!(model.value_role.as_deref(), Some("model"));
+    assert!(model.choices.is_empty());
 }
 
 #[test]

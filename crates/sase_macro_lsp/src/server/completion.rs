@@ -230,6 +230,14 @@ impl MacroLspServer {
                 editor_position,
             ));
         }
+        if context.kind == CompletionContextKind::MacroArgumentModel {
+            return Some(self.model_argument_completion(
+                &context,
+                &document,
+                editor_position,
+                &config,
+            ));
+        }
         if is_directive_argument_context(&context) {
             return Some(
                 self.directive_completion(&context, &config, &document)
@@ -522,6 +530,39 @@ impl MacroLspServer {
             &context.selected_values,
         );
         choice_completion_response(candidates, context.replacement_range, false)
+    }
+
+    pub(super) fn model_argument_completion(
+        &self,
+        context: &sase_core::CompletionContext,
+        document: &DocumentSnapshot,
+        position: EditorPosition,
+        config: &ServerConfig,
+    ) -> CompletionResponse {
+        let Some(start) =
+            document.position_to_byte_offset(context.replacement_range.start)
+        else {
+            return empty_completion_response();
+        };
+        let Some(end) =
+            document.position_to_byte_offset(context.replacement_range.end)
+        else {
+            return empty_completion_response();
+        };
+        let Some(cursor) = document.position_to_byte_offset(position) else {
+            return empty_completion_response();
+        };
+        let partial = document
+            .text()
+            .get(start..cursor.clamp(start, end))
+            .unwrap_or("")
+            .trim_start_matches(['"', '\'']);
+        let list =
+            model_completion_list(partial, config.model_catalog.as_deref());
+        crate::lsp_convert::model_completion_response(
+            list,
+            context.replacement_range,
+        )
     }
 
     pub(super) async fn agent_completion(
@@ -934,6 +975,9 @@ impl MacroLspServer {
                 empty_completion_list()
             }
             CompletionContextKind::MacroArgumentAgent => {
+                empty_completion_list()
+            }
+            CompletionContextKind::MacroArgumentModel => {
                 empty_completion_list()
             }
             CompletionContextKind::MacroArgumentTypeHint => {

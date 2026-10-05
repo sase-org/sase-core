@@ -1,5 +1,5 @@
 use super::catalogs::{
-    active_artifact_ref_context, active_glossary_project,
+    active_artifact_ref_context, active_glossary_project, load_model_routing,
     load_vcs_project_catalog,
 };
 use super::initialize::enabled_feature_flags;
@@ -48,7 +48,8 @@ impl MacroLspServer {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
         let document = DocumentSnapshot::new(text);
-        if let Some(hover) = editor_hover_at_position_with_flags(
+        let routing = load_model_routing(config.model_catalog.as_deref());
+        if let Some(hover) = sase_core::editor_hover_at_position_with_snapshot(
             &document,
             to_editor_position(position),
             entries.as_slice(),
@@ -56,6 +57,7 @@ impl MacroLspServer {
                 config.typed_launch_units,
                 config.queue_capacity_budget,
             ),
+            routing.as_ref(),
         ) {
             return Some(lsp_hover(hover));
         }
@@ -115,8 +117,12 @@ impl MacroLspServer {
     ) -> Vec<lsp_types::Diagnostic> {
         let config = self.current_config();
         let entries = self.entries_for_completion(&config).await;
-        let mut diagnostics =
-            editor_analyze_document(&document, entries.as_slice());
+        let routing = load_model_routing(config.model_catalog.as_deref());
+        let mut diagnostics = sase_core::editor_analyze_document_with_snapshot(
+            &document,
+            entries.as_slice(),
+            routing.as_ref(),
+        );
         diagnostics.extend(editor_typed_launch_directive_diagnostics(
             &document,
             config.typed_launch_units,

@@ -65,7 +65,8 @@ pub use completion::{
 };
 pub use definition::{definition_at_position, DefinitionTarget};
 pub use diagnostics::{
-    analyze_artifact_refs, analyze_document, queue_directive_diagnostics,
+    analyze_artifact_refs, analyze_document, analyze_document_with_snapshot,
+    argument_diagnostics_with_snapshot, queue_directive_diagnostics,
     typed_launch_directive_diagnostics,
 };
 pub use directive::{
@@ -95,7 +96,10 @@ pub use frontmatter::{
     FrontmatterInputTypeCompletion,
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
-pub use hover::{hover_at_position, hover_at_position_with_flags};
+pub use hover::{
+    hover_at_position, hover_at_position_with_flags,
+    hover_at_position_with_snapshot,
+};
 pub use macro_arg_choices::{
     macro_argument_choice_candidates, macro_input_type_label,
     quote_macro_arg_value, MacroChoiceCandidateWire,

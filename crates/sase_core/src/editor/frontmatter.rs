@@ -7,6 +7,7 @@ use crate::macro_input_types::{
     unquoted_plain_scalar_choice_error, validate_enum_choices_yaml,
     ChoiceIssueSeverity, InputChoice, InputTypeRegistry,
 };
+use crate::model_validity::ModelValiditySnapshot;
 
 use super::token::DocumentSnapshot;
 use super::wire::{
@@ -185,6 +186,13 @@ enum InputType {
 pub(super) fn diagnostics(
     document: &DocumentSnapshot,
 ) -> Vec<EditorDiagnostic> {
+    diagnostics_with_snapshot(document, None)
+}
+
+pub(super) fn diagnostics_with_snapshot(
+    document: &DocumentSnapshot,
+    snapshot: Option<&ModelValiditySnapshot>,
+) -> Vec<EditorDiagnostic> {
     let Some(frontmatter) = extract_frontmatter(document.text()) else {
         return Vec::new();
     };
@@ -207,7 +215,7 @@ pub(super) fn diagnostics(
         }
     };
 
-    validate_frontmatter_value(&mut builder, &value);
+    validate_frontmatter_value_with_snapshot(&mut builder, &value, snapshot);
     builder.finish()
 }
 
@@ -584,9 +592,10 @@ fn same_line_type_slot(
     Some((trimmed_start, trimmed_start + token_len))
 }
 
-fn validate_frontmatter_value(
+fn validate_frontmatter_value_with_snapshot(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     value: &Value,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     let Some(mapping) = value.as_mapping() else {
         builder.push(
@@ -601,7 +610,7 @@ fn validate_frontmatter_value(
     validate_top_level_fields(builder);
     validate_local_section_keys(builder, mapping);
     validate_name(builder, mapping);
-    validate_input(builder, mapping);
+    validate_input_with_snapshot(builder, mapping, snapshot);
     validate_tags(builder, mapping);
     validate_description(builder, mapping);
     validate_skill(builder, mapping);
@@ -700,18 +709,19 @@ fn validate_name(
     }
 }
 
-fn validate_input(
+fn validate_input_with_snapshot(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     mapping: &Mapping,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     let Some(input) = yaml_mapping_get(mapping, "input") else {
         return;
     };
     let input_range = builder.field_value_range("input");
     if let Some(inputs) = input.as_mapping() {
-        validate_shortform_inputs(builder, inputs);
+        validate_shortform_inputs_with_snapshot(builder, inputs, snapshot);
     } else if let Some(inputs) = input.as_sequence() {
-        validate_longform_inputs(builder, inputs);
+        validate_longform_inputs_with_snapshot(builder, inputs, snapshot);
     } else {
         builder.push(
             input_range,
@@ -722,9 +732,10 @@ fn validate_input(
     }
 }
 
-fn validate_shortform_inputs(
+fn validate_shortform_inputs_with_snapshot(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     inputs: &Mapping,
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     validate_shortform_duplicates(builder);
 
@@ -755,33 +766,39 @@ fn validate_shortform_inputs(
         };
         validate_input_name(builder, &name, name_range);
 
-        let (declared_type, type_known) = validate_shortform_input_type(
-            builder,
-            raw,
-            &name,
-            source.as_ref(),
-            item_range,
-        );
+        let (declared_type, type_known, named_type, catalog_choices) =
+            validate_shortform_input_type(
+                builder,
+                raw,
+                &name,
+                source.as_ref(),
+                item_range,
+            );
         let choices = validate_input_choices(
             builder,
             raw.as_mapping()
                 .and_then(|mapping| yaml_mapping_get(mapping, "choices")),
             declared_type,
             type_known,
+            named_type.as_deref(),
+            &catalog_choices,
             source.as_ref().and_then(|source| source.field("choices")),
             item_range,
         );
-        validate_input_default(
+        validate_input_default_with_snapshot(
             builder,
             raw.as_mapping()
                 .and_then(|mapping| yaml_mapping_get(mapping, "default")),
+            &name,
             declared_type,
             type_known,
+            named_type.as_deref(),
             &choices,
             source.as_ref().and_then(|source| {
                 source.default_value.as_ref().map(|default| default.range)
             }),
             item_range,
+            snapshot,
         );
         if let Some(mapping) = raw.as_mapping() {
             validate_input_description(
@@ -806,9 +823,10 @@ fn validate_shortform_inputs(
     }
 }
 
-fn validate_longform_inputs(
+fn validate_longform_inputs_with_snapshot(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     inputs: &[Value],
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     let mut seen_names = HashMap::<String, (usize, usize)>::new();
     for (idx, item) in inputs.iter().enumerate() {
@@ -874,26 +892,31 @@ fn validate_longform_inputs(
             .as_ref()
             .and_then(|source| source.field("type"))
             .cloned();
-        let (declared_type, type_known) = validate_longform_input_type(
-            builder,
-            mapping,
-            &input_name,
-            type_source.as_ref(),
-            item_range,
-        );
+        let (declared_type, type_known, named_type, catalog_choices) =
+            validate_longform_input_type(
+                builder,
+                mapping,
+                &input_name,
+                type_source.as_ref(),
+                item_range,
+            );
         let choices = validate_input_choices(
             builder,
             yaml_mapping_get(mapping, "choices"),
             declared_type,
             type_known,
+            named_type.as_deref(),
+            &catalog_choices,
             source.as_ref().and_then(|source| source.field("choices")),
             item_range,
         );
-        validate_input_default(
+        validate_input_default_with_snapshot(
             builder,
             yaml_mapping_get(mapping, "default"),
+            &input_name,
             declared_type,
             type_known,
+            named_type.as_deref(),
             &choices,
             source.as_ref().and_then(|source| {
                 source
@@ -902,6 +925,7 @@ fn validate_longform_inputs(
                     .map(|scalar| scalar.range)
             }),
             item_range,
+            snapshot,
         );
         validate_input_description(
             builder,
@@ -973,7 +997,7 @@ fn validate_shortform_input_type(
     input_name: &str,
     source: Option<&ShortInputSource>,
     fallback_range: (usize, usize),
-) -> (InputType, bool) {
+) -> (InputType, bool, Option<String>, Vec<InputChoice>) {
     let (type_value, range) = if let Some(mapping) = raw.as_mapping() {
         (
             yaml_mapping_get(mapping, "type"),
@@ -1004,7 +1028,7 @@ fn validate_longform_input_type(
     input_name: &str,
     source: Option<&KeyValueSource>,
     fallback_range: (usize, usize),
-) -> (InputType, bool) {
+) -> (InputType, bool, Option<String>, Vec<InputChoice>) {
     let range = source
         .and_then(|source| source.scalar.as_ref())
         .map(|scalar| scalar.range)
@@ -1025,9 +1049,9 @@ fn validate_explicit_input_type(
     input_name: &str,
     range: (usize, usize),
     missing_type: InputType,
-) -> (InputType, bool) {
+) -> (InputType, bool, Option<String>, Vec<InputChoice>) {
     let Some(value) = value else {
-        return (missing_type, true);
+        return (missing_type, true, None, Vec::new());
     };
     let Some(raw) = yaml_scalar_to_string(value) else {
         builder.push(
@@ -1036,7 +1060,7 @@ fn validate_explicit_input_type(
             "invalid_macro_frontmatter_input_type",
             "Macro input type must be a scalar",
         );
-        return (InputType::Line, false);
+        return (InputType::Line, false, None, Vec::new());
     };
     match resolve_input_type(input_name, &raw, &InputTypeRegistry::builtin()) {
         Ok(resolved) => {
@@ -1055,7 +1079,12 @@ fn validate_explicit_input_type(
                     data,
                 );
             }
-            (InputType::from_base(&resolved.base), true)
+            (
+                InputType::from_base(&resolved.base),
+                true,
+                resolved.named_type.clone(),
+                resolved.choices.clone(),
+            )
         }
         Err(error) => {
             let names = advertised_type_names();
@@ -1069,7 +1098,7 @@ fn validate_explicit_input_type(
                 error.message,
                 data,
             );
-            (InputType::Line, false)
+            (InputType::Line, false, None, Vec::new())
         }
     }
 }
@@ -1128,12 +1157,15 @@ fn quote_yaml_plain(raw: &str) -> String {
 /// `choices` is required and non-empty for `enum` and forbidden for every
 /// other type. Choice validation is delegated to the shared input-type
 /// catalog, and the returned values feed
-/// [`validate_input_default`]'s `enum` membership check.
+/// [`validate_input_default_with_snapshot`]'s `enum` membership check.
+#[allow(clippy::too_many_arguments)]
 fn validate_input_choices(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     choices: Option<&Value>,
     declared_type: InputType,
     type_known: bool,
+    named_type: Option<&str>,
+    catalog_choices: &[InputChoice],
     source: Option<&KeyValueSource>,
     fallback_range: (usize, usize),
 ) -> Vec<InputChoice> {
@@ -1145,6 +1177,28 @@ fn validate_input_choices(
         .map(|scalar| scalar.range)
         .or_else(|| source.map(|field| field.value_range))
         .unwrap_or(fallback_range);
+    if named_type.is_some_and(|name| name == "effort") {
+        if choices.is_some() {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_macro_frontmatter_input_choices",
+                "Macro input `effort` already defines its values; remove `choices`",
+            );
+        }
+        return catalog_choices.to_vec();
+    }
+    if named_type.is_some_and(|name| name == "model") {
+        if choices.is_some() {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_macro_frontmatter_input_choices",
+                "Macro input choices is only valid for type `enum`",
+            );
+        }
+        return Vec::new();
+    }
     if declared_type != InputType::Enum {
         if choices.is_some() {
             builder.push(
@@ -1234,14 +1288,18 @@ fn validate_input_choices(
     valid_choices
 }
 
-fn validate_input_default(
+#[allow(clippy::too_many_arguments)]
+fn validate_input_default_with_snapshot(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     default: Option<&Value>,
+    input_name: &str,
     declared_type: InputType,
     type_known: bool,
+    named_type: Option<&str>,
     choices: &[InputChoice],
     source_range: Option<(usize, usize)>,
     fallback_range: (usize, usize),
+    snapshot: Option<&ModelValiditySnapshot>,
 ) {
     if !type_known {
         return;
@@ -1253,6 +1311,94 @@ fn validate_input_default(
         return;
     }
     let range = source_range.unwrap_or(fallback_range);
+    if named_type.is_some_and(|name| name == "model") {
+        let Some(raw) = yaml_scalar_to_string(default) else {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_macro_frontmatter_input_default",
+                "Macro input default must be a scalar or null",
+            );
+            return;
+        };
+        if raw.is_empty() || raw.chars().any(char::is_whitespace) {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_macro_frontmatter_input_default",
+                format!(
+                    "Default value does not match input type `{}`",
+                    declared_type_name(declared_type)
+                ),
+            );
+            return;
+        }
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        match crate::model_validity::classify_model_value(
+            input_name, &raw, snapshot,
+        ) {
+            Ok(result) if result.ok => {}
+            Ok(result) => {
+                let mut data = None;
+                if !result.suggestions.is_empty() {
+                    let first = result.suggestions[0].clone();
+                    data = builder.replace_fix(
+                        range,
+                        format!("Replace with `{first}`"),
+                        first.clone(),
+                        true,
+                    );
+                    // Expand to all suggestions with first preferred.
+                    if let Some(mut full) = data {
+                        full.suggestions = result
+                            .suggestions
+                            .iter()
+                            .enumerate()
+                            .map(|(index, value)| {
+                                let start = builder.frontmatter_start + range.0;
+                                let end = builder.frontmatter_start + range.1;
+                                let editor_range = builder
+                                    .document
+                                    .byte_range_to_range(start, end)
+                                    .unwrap_or(crate::editor::wire::EditorRange {
+                                        start: crate::editor::wire::EditorPosition {
+                                            line: 0,
+                                            character: 0,
+                                        },
+                                        end: crate::editor::wire::EditorPosition {
+                                            line: 0,
+                                            character: 0,
+                                        },
+                                    });
+                                crate::editor::wire::EditorDiagnosticSuggestion {
+                                    value: value.clone(),
+                                    title: format!("Replace with `{value}`"),
+                                    edit:
+                                        crate::editor::wire::EditorTextEdit {
+                                            range: editor_range,
+                                            new_text: value.clone(),
+                                        },
+                                    preferred: index == 0,
+                                }
+                            })
+                            .collect();
+                        data = Some(full);
+                    }
+                }
+                builder.push_with_data(
+                    range,
+                    DiagnosticSeverity::Warning,
+                    "invalid_macro_frontmatter_input_default",
+                    result.message,
+                    data,
+                );
+            }
+            Err(_) => {}
+        }
+        return;
+    }
     if declared_type == InputType::Enum {
         if let Some(message) = source_range.and_then(|source_range| {
             unquoted_choice_error(&builder.index.text, source_range)
@@ -3259,6 +3405,84 @@ mod tests {
         assert_eq!(
             diagnostic.message,
             "default `turbo` is not one of fast | slow"
+        );
+    }
+
+    fn model_snapshot() -> ModelValiditySnapshot {
+        ModelValiditySnapshot {
+            schema_version: 1,
+            providers: ["claude", "codex", "fakey"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            models: [("opus", "claude"), ("fakey-large", "fakey")]
+                .into_iter()
+                .map(|(model, provider)| {
+                    (model.to_string(), provider.to_string())
+                })
+                .collect(),
+            aliases: vec!["large".to_string()],
+            effort_levels: [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
+    }
+
+    fn validate_with_snapshot(
+        text: &str,
+        snapshot: Option<&ModelValiditySnapshot>,
+    ) -> Vec<EditorDiagnostic> {
+        diagnostics_with_snapshot(&DocumentSnapshot::new(text), snapshot)
+    }
+
+    #[test]
+    fn model_default_warns_and_effort_default_errors() {
+        let snapshot = model_snapshot();
+        let bad_model = "---\ninput:\n  claude_model:\n    type: model\n    default: opsu\n---\n";
+        let diagnostics = validate_with_snapshot(bad_model, Some(&snapshot));
+        let found = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_macro_frontmatter_input_default"
+            })
+            .expect("model default warning");
+        assert_eq!(found.severity, DiagnosticSeverity::Warning);
+        assert!(
+            found.message.contains("expects a model"),
+            "unexpected message: {}",
+            found.message
+        );
+
+        let bad_effort = "---\ninput:\n  effort:\n    type: effort\n    default: turbo\n---\n";
+        let diagnostics = validate_with_snapshot(bad_effort, Some(&snapshot));
+        let found = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_macro_frontmatter_input_default"
+            })
+            .expect("effort default error");
+        assert_eq!(found.severity, DiagnosticSeverity::Error);
+
+        for default in ["claude/opus@xhigh", "@large", "fakey-large"] {
+            let text = format!(
+                "---\ninput:\n  claude_model:\n    type: model\n    default: {default}\n---\n"
+            );
+            let diagnostics = validate_with_snapshot(&text, Some(&snapshot));
+            assert!(
+                diagnostics.iter().all(|diagnostic| diagnostic.code
+                    != "invalid_macro_frontmatter_input_default"),
+                "{default}: {diagnostics:?}"
+            );
+        }
+
+        let skipped = validate_with_snapshot(bad_model, None);
+        assert!(
+            skipped.iter().all(|diagnostic| diagnostic.code
+                != "invalid_macro_frontmatter_input_default"),
+            "{skipped:?}"
         );
     }
 

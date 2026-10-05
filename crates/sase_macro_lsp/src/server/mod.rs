@@ -32,8 +32,7 @@ use sase_core::editor::{
 };
 use sase_core::project_tag::ProjectTagTargetWire;
 use sase_core::{
-    editor_analyze_artifact_refs, editor_analyze_document,
-    editor_build_agent_completion_candidates,
+    editor_analyze_artifact_refs, editor_build_agent_completion_candidates,
     editor_build_artifact_ref_payload_inventory,
     editor_build_at_reference_menu_with_options,
     editor_build_directive_clause_candidates,
@@ -53,8 +52,7 @@ use sase_core::{
     editor_directive_is_hidden_from_name_completion_with_flags,
     editor_extract_token_at_position,
     editor_filter_explicit_model_shortcut_entries,
-    editor_filter_model_alias_shortcut_entries,
-    editor_hover_at_position_with_flags, editor_model_shortcut_context,
+    editor_filter_model_alias_shortcut_entries, editor_model_shortcut_context,
     editor_model_shortcut_edit, editor_plan_argument_colon_to_parentheses_edit,
     editor_plan_argument_double_colon_to_parentheses_edit,
     editor_plan_model_alias_shortcut_edit,

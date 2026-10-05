@@ -609,6 +609,13 @@ fn completion_kind_for_input(input: &MacroInputHint) -> CompletionContextKind {
     if is_agent {
         return CompletionContextKind::MacroArgumentAgent;
     }
+    let is_model = input
+        .value_role
+        .as_deref()
+        .is_some_and(|role| role == "model");
+    if is_model {
+        return CompletionContextKind::MacroArgumentModel;
+    }
     if !input.choices.is_empty() || input.r#type == "bool" {
         return CompletionContextKind::MacroArgumentValue;
     }

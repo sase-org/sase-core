@@ -553,3 +553,64 @@ async fn model_at_suffix_still_completes_effort_vocabulary() {
     assert_eq!(edit.range.end, Position::new(0, 12));
     assert_eq!(edit.new_text, "xhigh");
 }
+
+#[tokio::test]
+async fn macro_argument_model_completion_matches_directive_list() {
+    use super::super::completion_items::model_completion_list;
+
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("model_catalog.json");
+    write_model_catalog(&catalog_path);
+    let mut hint = input_hint("claude_model", "word", true, 0);
+    hint.named_type = Some("model".to_string());
+    hint.value_role = Some("model".to_string());
+    let (service, _) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(bridge_with_catalog_entries(vec![catalog_entry(
+                "launch",
+                "#launch",
+                Some("(claude_model: model)".to_string()),
+                vec![hint],
+                None,
+            )])),
+        )
+    });
+    let server = service.inner();
+    {
+        let mut config = server.config.write().unwrap();
+        config.model_catalog = Some(catalog_path.clone());
+    }
+
+    let text = "#launch(claude_model=gp".to_string();
+    let response = server
+        .completion_for_text(text.clone(), Position::new(0, 23))
+        .await
+        .unwrap();
+    let CompletionResponse::Array(items) = response else {
+        panic!("expected completion array");
+    };
+
+    let expected = model_completion_list("gp", Some(&catalog_path));
+    assert!(!expected.candidates.is_empty());
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect::<Vec<_>>(),
+        expected
+            .candidates
+            .iter()
+            .map(|candidate| candidate.display.as_str())
+            .collect::<Vec<_>>(),
+    );
+    for (item, candidate) in items.iter().zip(expected.candidates.iter()) {
+        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit.as_ref()
+        else {
+            panic!("expected text edit");
+        };
+        assert_eq!(edit.new_text, candidate.insertion);
+        assert_eq!(edit.range.start, Position::new(0, 21));
+        assert_eq!(edit.range.end, Position::new(0, 23));
+    }
+}

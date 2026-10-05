@@ -12,6 +12,9 @@ use sase_core::macro_input_types::{
     resolve_input_type, validate_enum_choices, InputTypeRegistry,
     ResolvedInputType,
 };
+use sase_core::model_validity::{
+    classify_model_value, ClassifyModelValueRequestWire,
+};
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -107,6 +110,26 @@ fn py_check_input_value(
     }
 }
 
+#[pyfunction]
+#[pyo3(name = "classify_model_value")]
+fn py_classify_model_value(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: ClassifyModelValueRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid classify_model_value dict: {error}"
+            ))
+        })?;
+    match classify_model_value(&request.name, &request.value, &request.snapshot)
+    {
+        Ok(result) => serialize_to_py(py, &result),
+        Err(error) => Err(PyValueError::new_err(error.to_string())),
+    }
+}
+
 pub(crate) fn register_macro_input_types(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -115,6 +138,7 @@ pub(crate) fn register_macro_input_types(
     m.add_function(wrap_pyfunction!(py_validate_enum_choices, m)?)?;
     m.add_function(wrap_pyfunction!(py_pyyaml_plain_scalar_is_non_string, m)?)?;
     m.add_function(wrap_pyfunction!(py_check_input_value, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_model_value, m)?)?;
     Ok(())
 }
 

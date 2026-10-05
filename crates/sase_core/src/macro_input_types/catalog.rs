@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::InputChoice;
+use crate::effort::EFFORT_LEVELS_WITH_DESCRIPTIONS;
 
 /// Kind of a catalog entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +40,8 @@ pub struct CatalogEntry {
     pub advertised: bool,
 }
 
-/// Builtin catalog rows for this epic: scalars, `string`, `enum`, and `agent`.
+/// Builtin catalog rows for this epic: scalars, `string`, `enum`, `agent`,
+/// `effort`, and `model`.
 pub fn builtin_catalog() -> Vec<CatalogEntry> {
     vec![
         scalar("word", &[], "A single word with no whitespace."),
@@ -103,7 +105,51 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             deprecated_alias_of: None,
             advertised: true,
         },
+        CatalogEntry {
+            name: "effort".to_string(),
+            aliases: Vec::new(),
+            kind: InputTypeKind::NamedEnum,
+            base: "enum".to_string(),
+            value_role: None,
+            choices: effort_choices(),
+            description: "One of the seven `%effort` levels, matched exactly."
+                .to_string(),
+            rule: "One of the seven `%effort` levels, matched exactly."
+                .to_string(),
+            source: CatalogSource::Builtin,
+            deprecated_alias_of: None,
+            advertised: true,
+        },
+        CatalogEntry {
+            name: "model".to_string(),
+            aliases: Vec::new(),
+            kind: InputTypeKind::Domain,
+            base: "word".to_string(),
+            value_role: Some("model".to_string()),
+            choices: Vec::new(),
+            description: "A model token that `%model` would accept and that \
+                          routes to a provider without the silent \
+                          default-provider fallback."
+                .to_string(),
+            rule: "A model token that `%model` would accept and that routes \
+                   to a provider without the silent default-provider fallback."
+                .to_string(),
+            source: CatalogSource::Builtin,
+            deprecated_alias_of: None,
+            advertised: true,
+        },
     ]
+}
+
+fn effort_choices() -> Vec<InputChoice> {
+    EFFORT_LEVELS_WITH_DESCRIPTIONS
+        .iter()
+        .map(|(value, description)| InputChoice {
+            value: (*value).to_string(),
+            label: None,
+            description: Some((*description).to_string()),
+        })
+        .collect()
 }
 
 fn scalar(name: &str, aliases: &[&str], rule: &str) -> CatalogEntry {

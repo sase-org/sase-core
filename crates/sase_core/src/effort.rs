@@ -13,6 +13,27 @@
 pub const EFFORT_LEVELS_ORDERED: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// Canonical level plus description table. This is the single source for the
+/// `%effort` directive suggestions and the `effort` macro input-type catalog
+/// choices.
+pub const EFFORT_LEVELS_WITH_DESCRIPTIONS: &[(&str, &str)] = &[
+    ("none", "No reasoning-effort override"),
+    ("minimal", "Minimal reasoning effort"),
+    ("low", "Low reasoning effort"),
+    ("medium", "Medium reasoning effort"),
+    ("high", "High reasoning effort"),
+    ("xhigh", "Extra-high reasoning effort"),
+    ("max", "Maximum reasoning effort"),
+];
+
+/// Return the description for a canonical effort level, if known.
+pub fn effort_level_description(level: &str) -> Option<&'static str> {
+    EFFORT_LEVELS_WITH_DESCRIPTIONS
+        .iter()
+        .find(|(name, _)| *name == level)
+        .map(|(_, description)| *description)
+}
+
 /// Return true when `level` is a canonical reasoning-effort level.
 pub fn is_valid_effort(level: &str) -> bool {
     EFFORT_LEVELS_ORDERED.contains(&level)
