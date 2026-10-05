@@ -1,4 +1,5 @@
 use std::fs::{self};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -481,13 +482,20 @@ pub(crate) fn write_executable(path: &Path, contents: &str) {
 pub(crate) fn waiting_worker_script() -> &'static str {
     r#"#!/bin/sh
 set -eu
+# Portable tool paths: this stub can run with a cleared environment, so
+# resolve mv the same way the fake-sudo stub resolves cat/rm/rmdir.
+if [ -x /usr/bin/mv ]; then _MV=/usr/bin/mv; else _MV=/bin/mv; fi
+# Record argv to a private file first. The argument-parsing loop below
+# shifts "$@" and the record must stay complete, so frame it before
+# parsing and rename it into place only after it is finished.
+argv_tmp="$0.argv.tmp.$$"
 {
   printf 'BEGIN\n'
   for arg do
     printf '%s\n' "$arg"
   done
   printf 'END\n'
-} >> "$0.argv"
+} > "$argv_tmp"
 detach_dir=""
 started_path=""
 while [ "$#" -gt 0 ]; do
@@ -505,7 +513,13 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-printf '%s\n' "$$" > "$detach_dir/worker.pid"
+# Publish the PID atomically and before the argv record, so observing a
+# complete argv record also means cleanup identity is available. Both
+# renames stay in their destination directory, keeping them atomic.
+pid_tmp="$detach_dir/worker.pid.tmp.$$"
+printf '%s\n' "$$" > "$pid_tmp"
+"$_MV" "$pid_tmp" "$detach_dir/worker.pid"
+"$_MV" "$argv_tmp" "$0.argv"
 printf 'waiting\n' > "$detach_dir/worker.state"
 while [ ! -f "$started_path" ]; do
   sleep 0.05
@@ -527,9 +541,22 @@ pub(crate) fn argv_after_separator(call: &[String]) -> &[String] {
     &call[index + 1..]
 }
 
-pub(crate) fn recorded_argv(path: &Path) -> Vec<String> {
-    let content =
-        fs::read_to_string(path.with_extension("argv")).unwrap_or_default();
+/// Read a complete framed argv record published by
+/// [`waiting_worker_script`].
+///
+/// Returns `Ok(None)` when the record is absent, empty, or incomplete
+/// (no terminating `END` yet); only a `BEGIN`/`END` framed record
+/// yields `Ok(Some(_))`, so a partial vector is never mistaken for a
+/// successful observation. Real I/O failures other than "not found"
+/// surface as `Err`.
+pub(crate) fn recorded_argv(path: &Path) -> io::Result<Option<Vec<String>>> {
+    let content = match fs::read_to_string(path.with_extension("argv")) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
     let mut current = Vec::new();
     let mut in_call = false;
     for line in content.lines() {
@@ -538,12 +565,30 @@ pub(crate) fn recorded_argv(path: &Path) -> Vec<String> {
                 in_call = true;
                 current.clear();
             }
-            "END" if in_call => return current,
+            "END" if in_call => return Ok(Some(current)),
             _ if in_call => current.push(line.to_string()),
             _ => {}
         }
     }
-    current
+    Ok(None)
+}
+
+/// Wait up to `timeout` for [`recorded_argv`] to observe a complete
+/// record. Returns `Ok(None)` when the deadline expires while the
+/// record is still missing or incomplete, and propagates real I/O
+/// errors instead of disguising them as an empty observation.
+pub(crate) fn wait_for_complete_argv(
+    path: &Path,
+    timeout: Duration,
+) -> io::Result<Option<Vec<String>>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match recorded_argv(path)? {
+            Some(argv) => return Ok(Some(argv)),
+            None if Instant::now() >= deadline => return Ok(None),
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 pub(crate) fn python_hosted_prefix() -> Vec<String> {
@@ -555,7 +600,7 @@ pub(crate) fn python_hosted_prefix() -> Vec<String> {
 
 pub(crate) fn run_waiting_worker_exec(
     prefix: Vec<String>,
-) -> (Vec<String>, Result<(), SudoRunnerCliError>) {
+) -> (io::Result<Vec<String>>, Result<(), SudoRunnerCliError>) {
     let tmp = tempfile::tempdir().unwrap();
     let mut manifest = manifest();
     manifest.run_as = current_username();
@@ -582,17 +627,28 @@ pub(crate) fn run_waiting_worker_exec(
         &mut stdout,
         &mut stderr,
     );
-    let argv_path = worker_path.with_extension("argv");
     // The launcher stub records argv from a freshly spawned child; under
     // a parallel-test fork storm that child can wait seconds before its
     // first line runs (observed >1s on macOS), so the deadline keeps
-    // headroom far beyond the steady-state milliseconds. The loop still
-    // returns as soon as the file exists.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !argv_path.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let argv = recorded_argv(&worker_path);
+    // headroom far beyond the steady-state milliseconds. The wait still
+    // returns as soon as a complete BEGIN/END record is observable.
+    let argv =
+        match wait_for_complete_argv(&worker_path, Duration::from_secs(10)) {
+            Ok(Some(argv)) => Ok(argv),
+            Ok(None) => {
+                let observed =
+                    fs::read_to_string(worker_path.with_extension("argv"))
+                        .unwrap_or_default();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "timed out waiting for a complete worker argv record; \
+                     launch result: {result:?}; observed record: {observed:?}"
+                    ),
+                ))
+            }
+            Err(error) => Err(error),
+        };
     if let Ok(pid) = fs::read_to_string(tmp.path().join("worker.pid")) {
         if let Ok(pid) = pid.trim().parse::<u32>() {
             let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };

@@ -197,10 +197,13 @@ fn native_launcher_places_internal_modes_directly_after_executable() {
         ]
     );
 
-    let (worker_argv, result) = run_waiting_worker_exec(Vec::new());
+    let (argv_result, result) = run_waiting_worker_exec(Vec::new());
+    assert!(result.is_ok(), "waiting worker exec failed: {result:?}");
+    let worker_argv = argv_result
+        .expect("waiting worker did not publish a complete argv record");
     assert!(
         !worker_argv.is_empty(),
-        "worker did not record argv: {result:?}"
+        "worker published an empty argv record"
     );
     assert_eq!(
         worker_argv.first().map(String::as_str),
@@ -233,10 +236,14 @@ fn python_hosted_launcher_preserves_isolated_module_prefix() {
     expected.push(INTERNAL_ROOT_EXEC_FLAG.to_string());
     assert_eq!(&relaunch[..expected.len()], expected.as_slice());
 
-    let (worker_argv, result) = run_waiting_worker_exec(python_hosted_prefix());
+    let (argv_result, result) = run_waiting_worker_exec(python_hosted_prefix());
+    assert!(result.is_ok(), "waiting worker exec failed: {result:?}");
+    let worker_argv = argv_result
+        .expect("waiting worker did not publish a complete argv record");
     assert!(
         worker_argv.len() >= 4,
-        "worker did not record Python-hosted argv: {result:?}"
+        "worker published an incomplete Python-hosted argv record: \
+         {worker_argv:?}"
     );
     let mut expected_worker = python_hosted_prefix();
     expected_worker.push(INTERNAL_ROOT_WORKER_FLAG.to_string());
