@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.6](https://github.com/sase-org/sase-core/compare/v0.36.5...v0.36.6) - 2026-10-05
+
+### Added
+
+- *(macros)* add builtin model and effort types with one routing classifier
+- *(macros)* carry resolved choice metadata and shared candidates
+- *(macros)* flip emitted wires to macro spellings, rename LSP crate
+- add macro input-type catalog, resolver, and Python bindings
+- *(editor)* continue existing macro argument lists
+
+### Fixed
+
+- *(macros)* make sase-core green after the contract flip
+
 ## [0.36.5](https://github.com/sase-org/sase-core/compare/v0.36.4...v0.36.5) - 2026-10-04
 
 ### Added
