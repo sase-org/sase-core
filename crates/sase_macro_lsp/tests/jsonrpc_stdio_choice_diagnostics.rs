@@ -237,7 +237,7 @@ async fn stdio_jsonrpc_choice_diagnostic_quickfix_and_hover() {
     let diagnostics = read_diagnostics(&mut client_reader).await;
     let choice = diagnostics
         .iter()
-        .find(|diagnostic| diagnostic["code"] == "invalid_xprompt_arg_choice")
+        .find(|diagnostic| diagnostic["code"] == "invalid_macro_arg_choice")
         .expect("choice diagnostic");
     assert_eq!(choice["severity"], json!(1)); // Error
     assert_eq!(choice["data"]["suggestions"][0]["value"], json!("brief"));
@@ -296,9 +296,9 @@ async fn stdio_jsonrpc_choice_diagnostic_quickfix_and_hover() {
     .await;
     let cleaned = read_diagnostics(&mut client_reader).await;
     assert!(
-        cleaned.iter().all(
-            |diagnostic| diagnostic["code"] != "invalid_xprompt_arg_choice"
-        ),
+        cleaned
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "invalid_macro_arg_choice"),
         "{cleaned:?}"
     );
 

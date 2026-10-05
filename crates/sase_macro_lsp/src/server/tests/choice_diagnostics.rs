@@ -144,7 +144,7 @@ async fn published_choice_diagnostic_data_drives_preferred_quick_fix() {
             matches!(
                 diagnostic.code.as_ref(),
                 Some(lsp_types::NumberOrString::String(code))
-                    if code == "invalid_xprompt_arg_choice"
+                    if code == "invalid_macro_arg_choice"
             )
         })
         .expect("choice diagnostic");
@@ -191,7 +191,7 @@ async fn published_choice_diagnostic_data_drives_preferred_quick_fix() {
             !matches!(
                 diagnostic.code.as_ref(),
                 Some(lsp_types::NumberOrString::String(code))
-                    if code == "invalid_xprompt_arg_choice"
+                    if code == "invalid_macro_arg_choice"
             )
         }),
         "{cleaned:?}"

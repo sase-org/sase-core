@@ -31,8 +31,7 @@ use super::wire::{
 };
 
 /// Externally visible code for an invalid closed-set argument value.
-pub(crate) const INVALID_XPROMPT_ARG_CHOICE: &str =
-    "invalid_xprompt_arg_choice";
+pub(crate) const INVALID_MACRO_ARG_CHOICE: &str = "invalid_macro_arg_choice";
 
 pub fn analyze_document(
     document: &DocumentSnapshot,
@@ -538,7 +537,7 @@ fn validate_type(
                 kind: MacroArgValidationKind::TypeMismatch,
                 arg_index: Some(arg_index),
                 span: arg.value_span,
-                code: INVALID_XPROMPT_ARG_CHOICE,
+                code: INVALID_MACRO_ARG_CHOICE,
                 message,
                 suggestion_values,
             });
@@ -1848,7 +1847,7 @@ mod tests {
 
         let text = "---\nmacros:\n  choose:\n    input:\n      edition:\n        type: enum\n        choices: [brief, full]\n    content: Choose an edition\n---\n#choose(edition=breif)";
         let diagnostics = diagnostics_for(text);
-        let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
+        let mismatch = diagnostic(&diagnostics, INVALID_MACRO_ARG_CHOICE);
         assert_eq!(
             mismatch.message,
             "Argument `edition` expects one of brief | full, got `breif`; did you mean `brief`?"
@@ -1867,7 +1866,7 @@ mod tests {
             ["#choose(edition=breif)", "#choose(breif)", "#choose:breif"]
         {
             let diagnostics = diagnostics_for(text);
-            let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
+            let mismatch = diagnostic(&diagnostics, INVALID_MACRO_ARG_CHOICE);
             assert_eq!(diagnostic_text(text, mismatch), "breif");
             assert_eq!(
                 mismatch.data.as_ref().unwrap().suggestions[0].value,
@@ -1876,31 +1875,28 @@ mod tests {
         }
 
         let label = diagnostics_for("#choose(edition=Brief)");
-        let mismatch = diagnostic(&label, INVALID_XPROMPT_ARG_CHOICE);
+        let mismatch = diagnostic(&label, INVALID_MACRO_ARG_CHOICE);
         assert!(mismatch.message.contains("got `Brief`"));
 
         let valid = diagnostics_for("#choose(edition=brief)");
-        assert_eq!(diagnostic_count(&valid, INVALID_XPROMPT_ARG_CHOICE), 0);
+        assert_eq!(diagnostic_count(&valid, INVALID_MACRO_ARG_CHOICE), 0);
 
         let defaulted = diagnostics_for("#choose(edition=null)");
-        assert_eq!(diagnostic_count(&defaulted, INVALID_XPROMPT_ARG_CHOICE), 0);
+        assert_eq!(diagnostic_count(&defaulted, INVALID_MACRO_ARG_CHOICE), 0);
 
         let repeatable = diagnostics_for("#editions(brief, ful)");
-        assert_eq!(
-            diagnostic_count(&repeatable, INVALID_XPROMPT_ARG_CHOICE),
-            1
-        );
+        assert_eq!(diagnostic_count(&repeatable, INVALID_MACRO_ARG_CHOICE), 1);
         assert_eq!(
             diagnostic_text(
                 "#editions(brief, ful)",
-                diagnostic(&repeatable, INVALID_XPROMPT_ARG_CHOICE)
+                diagnostic(&repeatable, INVALID_MACRO_ARG_CHOICE)
             ),
             "ful"
         );
 
         let text = "😀#choose(edition=breif)";
         let diagnostics = diagnostics_for(text);
-        let mismatch = diagnostic(&diagnostics, INVALID_XPROMPT_ARG_CHOICE);
+        let mismatch = diagnostic(&diagnostics, INVALID_MACRO_ARG_CHOICE);
         assert_eq!(diagnostic_text(text, mismatch), "breif");
         assert_eq!(
             mismatch.range.start.character,

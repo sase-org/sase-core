@@ -83,6 +83,16 @@ pub fn quote_macro_arg_value(value: &str) -> String {
     out
 }
 
+/// One scored choice row while building candidates.
+#[derive(Debug, Clone)]
+struct ChoiceRow {
+    value: String,
+    label: Option<String>,
+    description: Option<String>,
+    index: usize,
+    is_default: bool,
+}
+
 /// Shared candidate builder.
 pub fn macro_argument_choice_candidates(
     hint: &MacroInputHint,
@@ -91,13 +101,18 @@ pub fn macro_argument_choice_candidates(
     selected: &[String],
 ) -> Vec<MacroChoiceCandidateWire> {
     // Build rows: (value,label,desc,index,is_default)
-    let mut rows: Vec<(String, Option<String>, Option<String>, usize, bool)> =
-        Vec::new();
+    let mut rows: Vec<ChoiceRow> = Vec::new();
     if hint.r#type == "bool" && hint.choices.is_empty() {
         let def = hint.default_display.as_deref().unwrap_or("");
         for (i, v) in ["true", "false"].iter().enumerate() {
             let is_def = !def.is_empty() && def.eq_ignore_ascii_case(v);
-            rows.push((v.to_string(), None, None, i, is_def));
+            rows.push(ChoiceRow {
+                value: v.to_string(),
+                label: None,
+                description: None,
+                index: i,
+                is_default: is_def,
+            });
         }
     } else {
         let def = hint.default_display.as_deref().unwrap_or("");
@@ -105,13 +120,13 @@ pub fn macro_argument_choice_candidates(
         for (i, c) in hint.choices.iter().enumerate() {
             // displayed default: default_display Some matches value? For bool synthetic above we did case-insensitive. For choices, exact match? Use exact.
             let is_def = !def.is_empty() && def == c.value;
-            rows.push((
-                c.value.clone(),
-                c.label.clone(),
-                c.description.clone(),
-                i,
-                is_def,
-            ));
+            rows.push(ChoiceRow {
+                value: c.value.clone(),
+                label: c.label.clone(),
+                description: c.description.clone(),
+                index: i,
+                is_default: is_def,
+            });
         }
     }
     if rows.is_empty() {
@@ -123,24 +138,18 @@ pub fn macro_argument_choice_candidates(
     let current_decoded = decode_arg_value(current_norm);
     let selected_set: std::collections::BTreeSet<String> =
         selected.iter().cloned().collect();
-    let mut filtered: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        usize,
-        bool,
-    )> = rows
+    let mut filtered: Vec<ChoiceRow> = rows
         .into_iter()
-        .filter(|(v, _, _, _, _)| {
+        .filter(|row| {
             if !hint.repeatable {
                 return true;
             }
-            if v == &current_decoded {
+            if row.value == current_decoded {
                 return true;
             }
             // Also if partial corresponds to selected? current_value is whole value, so above covers editing existing element.
             // Exclude if in selected.
-            !selected_set.contains(v)
+            !selected_set.contains(&row.value)
         })
         .collect();
     // Filtering by partial: empty => declared order. Otherwise prefix first, then fuzzy.
@@ -149,15 +158,12 @@ pub fn macro_argument_choice_candidates(
     } else {
         let lower = partial.to_lowercase();
         let mut prefix = Vec::new();
-        let mut fuzzy_scored: Vec<(
-            (u8, i32),
-            (String, Option<String>, Option<String>, usize, bool),
-        )> = Vec::new();
+        let mut fuzzy_scored: Vec<((u8, i32), ChoiceRow)> = Vec::new();
         for row in filtered.drain(..) {
-            let v_lower = row.0.to_lowercase();
+            let v_lower = row.value.to_lowercase();
             if v_lower.starts_with(&lower) {
                 prefix.push(row);
-            } else if let Some(m) = fuzzy_match(partial, &row.0) {
+            } else if let Some(m) = fuzzy_match(partial, &row.value) {
                 fuzzy_scored.push(((m.tier, m.score), row));
             }
         }
@@ -168,7 +174,7 @@ pub fn macro_argument_choice_candidates(
             a.0 .0
                 .cmp(&b.0 .0)
                 .then_with(|| b.0 .1.cmp(&a.0 .1))
-                .then_with(|| a.1 .3.cmp(&b.1 .3))
+                .then_with(|| a.1.index.cmp(&b.1.index))
         });
         // For more precise ordering matching shared fuzzy matcher, use compare_fuzzy when scores equal? Our tier/score already from fuzzy_match. Use declared-order ties as spec.
         filtered = prefix;
@@ -177,17 +183,25 @@ pub fn macro_argument_choice_candidates(
     }
     filtered
         .into_iter()
-        .map(|(value, label, description, index, is_default)| {
-            let insertion = quote_macro_arg_value(&value);
-            MacroChoiceCandidateWire {
-                value,
-                insertion,
-                label,
-                description,
-                index,
-                is_default,
-            }
-        })
+        .map(
+            |ChoiceRow {
+                 value,
+                 label,
+                 description,
+                 index,
+                 is_default,
+             }| {
+                let insertion = quote_macro_arg_value(&value);
+                MacroChoiceCandidateWire {
+                    value,
+                    insertion,
+                    label,
+                    description,
+                    index,
+                    is_default,
+                }
+            },
+        )
         .collect()
 }
 
@@ -370,10 +384,14 @@ mod tests {
                 .unwrap_or_else(|| {
                     panic!("{}: bad cursor {}", case.id, case.cursor_byte)
                 });
-            let ctx = classify_completion_context(&doc, pos, &[entry.clone()])
-                .unwrap_or_else(|| {
-                    panic!("{}: no context at {}", case.id, case.cursor_byte)
-                });
+            let ctx = classify_completion_context(
+                &doc,
+                pos,
+                std::slice::from_ref(&entry),
+            )
+            .unwrap_or_else(|| {
+                panic!("{}: no context at {}", case.id, case.cursor_byte)
+            });
             assert_eq!(
                 ctx.kind,
                 kind_from(&case.expected_kind),

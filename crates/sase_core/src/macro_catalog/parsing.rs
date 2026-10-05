@@ -569,7 +569,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
             .iter()
             .filter_map(|(name, raw)| {
                 let name = value_as_string(name)?;
-                let (
+                let ShortInputValue {
                     type_name,
                     description,
                     required,
@@ -578,7 +578,7 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     named_type,
                     value_role,
                     resolved_choices,
-                ) = parse_short_input_value(raw);
+                } = parse_short_input_value(raw);
                 let declared = short_input_choices(raw);
                 let choices = if declared.is_empty() {
                     resolved_choices
@@ -646,18 +646,18 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
     Vec::new()
 }
 
-fn parse_short_input_value(
-    value: &Value,
-) -> (
-    String,
-    Option<String>,
-    bool,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Vec<MobileInputChoiceWire>,
-) {
+struct ShortInputValue {
+    type_name: String,
+    description: Option<String>,
+    required: bool,
+    default_display: Option<String>,
+    default_snippet_value: Option<String>,
+    named_type: Option<String>,
+    value_role: Option<String>,
+    resolved_choices: Vec<MobileInputChoiceWire>,
+}
+
+fn parse_short_input_value(value: &Value) -> ShortInputValue {
     if let Some(mapping) = value.as_mapping() {
         let (type_name, named_type, value_role, resolved_choices) =
             mapping_get(mapping, "type")
@@ -669,31 +669,31 @@ fn parse_short_input_value(
         let default = mapping_get(mapping, "default");
         let description =
             mapping_get(mapping, "description").and_then(value_as_string);
-        (
+        ShortInputValue {
             type_name,
             description,
-            default.is_none(),
-            default.and_then(default_display),
-            default.map(snippet_default_value),
+            required: default.is_none(),
+            default_display: default.and_then(default_display),
+            default_snippet_value: default.map(snippet_default_value),
             named_type,
             value_role,
             resolved_choices,
-        )
+        }
     } else {
         let (type_name, named_type, value_role, resolved_choices) =
             resolve_rich(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
             );
-        (
+        ShortInputValue {
             type_name,
-            None,
-            true,
-            None,
-            None,
+            description: None,
+            required: true,
+            default_display: None,
+            default_snippet_value: None,
             named_type,
             value_role,
             resolved_choices,
-        )
+        }
     }
 }
 
