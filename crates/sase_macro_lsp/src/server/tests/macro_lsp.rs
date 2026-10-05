@@ -130,22 +130,31 @@ fn legacy_policy_defaults_true_and_parses_init_option() {
 }
 
 #[test]
-fn metadata_env_prefers_macro_prefix() {
+fn metadata_env_ignores_legacy_prefix() {
     let _serial = ENV_SERIAL.lock().unwrap();
-    // New-first precedence for the five metadata catalogs. Each pair is
-    // exercised with both spellings present so fallback alone is not enough.
+    // The LSP crate no longer reads `SASE_XPROMPT_*`; only the macro
+    // spelling is honored and the retired spelling is ignored.
     let pairs = [
         (
             "SASE_MACRO_VCS_PROJECT_CATALOG",
-            "SASE_MACRO_VCS_PROJECT_CATALOG",
+            "SASE_XPROMPT_VCS_PROJECT_CATALOG", // legacy xprompt spelling
         ),
-        ("SASE_MACRO_MODEL_CATALOG", "SASE_MACRO_MODEL_CATALOG"),
-        ("SASE_MACRO_MACHINE_CATALOG", "SASE_MACRO_MACHINE_CATALOG"),
+        (
+            "SASE_MACRO_MODEL_CATALOG",
+            "SASE_XPROMPT_MODEL_CATALOG", // legacy xprompt spelling
+        ),
+        (
+            "SASE_MACRO_MACHINE_CATALOG",
+            "SASE_XPROMPT_MACHINE_CATALOG", // legacy xprompt spelling
+        ),
         (
             "SASE_MACRO_ARTIFACT_REF_CATALOG",
-            "SASE_MACRO_ARTIFACT_REF_CATALOG",
+            "SASE_XPROMPT_ARTIFACT_REF_CATALOG", // legacy xprompt spelling
         ),
-        ("SASE_MACRO_GLOSSARY_CATALOG", "SASE_MACRO_GLOSSARY_CATALOG"),
+        (
+            "SASE_MACRO_GLOSSARY_CATALOG",
+            "SASE_XPROMPT_GLOSSARY_CATALOG", // legacy xprompt spelling
+        ),
     ];
     for (new_key, old_key) in pairs {
         let old_prev = std::env::var_os(old_key);
@@ -172,7 +181,7 @@ fn metadata_env_prefers_macro_prefix() {
             Some(std::path::PathBuf::from("/tmp/new-catalog.json")),
             "{new_key} should win"
         );
-        // Old-only fallback still works.
+        // The retired spelling alone is ignored.
         std::env::remove_var(new_key);
         let fallback = match new_key {
             "SASE_MACRO_VCS_PROJECT_CATALOG" => {
@@ -189,11 +198,7 @@ fn metadata_env_prefers_macro_prefix() {
             }
             _ => super::super::initialize::glossary_catalog_path(),
         };
-        assert_eq!(
-            fallback,
-            Some(std::path::PathBuf::from("/tmp/old-catalog.json")),
-            "{old_key} fallback"
-        );
+        assert_eq!(fallback, None, "{old_key} legacy spelling must be ignored");
         match old_prev {
             Some(v) => std::env::set_var(old_key, v),
             None => std::env::remove_var(old_key),

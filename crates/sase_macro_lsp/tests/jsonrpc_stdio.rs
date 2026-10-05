@@ -976,8 +976,15 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
     .await;
 
     let mut saw_frontmatter_diagnostic = false;
-    for _ in 0..4 {
-        let message = read_message(&mut client_reader).await;
+    let mut received: Vec<Value> = Vec::new();
+    for _ in 0..8 {
+        let message = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_message(&mut client_reader),
+        )
+        .await
+        .expect("timed out waiting for frontmatter publishDiagnostics");
+        received.push(message.clone());
         if message.get("method").and_then(Value::as_str)
             == Some("textDocument/publishDiagnostics")
         {
@@ -985,10 +992,10 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
                 .as_array()
                 .is_some_and(|diagnostics| {
                     let expected_codes = [
-                        "unknown_xprompt_frontmatter_field",
-                        "invalid_xprompt_frontmatter_input_type",
-                        "invalid_xprompt_frontmatter_snippet_trigger",
-                        "missing_xprompt_skill_description",
+                        "unknown_macro_frontmatter_field",
+                        "invalid_macro_frontmatter_input_type",
+                        "invalid_macro_frontmatter_snippet_trigger",
+                        "missing_macro_skill_description",
                     ];
                     expected_codes.iter().all(|code| {
                         diagnostics.iter().any(|diagnostic| {
@@ -999,7 +1006,7 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
                         diagnostic["source"] == "sase-macro"
                             && diagnostic["severity"] == 1
                             && diagnostic["code"]
-                                == "invalid_xprompt_frontmatter_input_type"
+                                == "invalid_macro_frontmatter_input_type"
                             && diagnostic["range"]["start"]["line"] == 3
                             && diagnostic["range"]["start"]["character"] == 10
                             && diagnostic["range"]["end"]["line"] == 3
@@ -1011,7 +1018,10 @@ async fn stdio_jsonrpc_frontmatter_diagnostics() {
             }
         }
     }
-    assert!(saw_frontmatter_diagnostic);
+    assert!(
+        saw_frontmatter_diagnostic,
+        "missing macro frontmatter diagnostics; last messages: {received:?}"
+    );
 
     write_message(
         &mut client_writer,

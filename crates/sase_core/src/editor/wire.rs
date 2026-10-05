@@ -1525,37 +1525,43 @@ mod tests {
     }
 
     #[test]
-    fn macro_argument_source_accepts_old_and_new_spellings() {
-        let old: MacroArgumentSource =
-            serde_json::from_value(serde_json::json!("xprompt")).unwrap();
+    fn macro_argument_source_pins_canonical_output() {
         let new: MacroArgumentSource =
             serde_json::from_value(serde_json::json!("macro")).unwrap();
-        assert_eq!(old, MacroArgumentSource::Macro);
         assert_eq!(new, MacroArgumentSource::Macro);
         assert_eq!(
             serde_json::to_value(new).unwrap(),
-            serde_json::json!("xprompt")
+            serde_json::json!("macro")
         );
+        // Legacy request variants are rejected by design.
+        assert!(serde_json::from_value::<MacroArgumentSource>(
+            serde_json::json!("xprompt") // legacy xprompt spelling
+        )
+        .is_err());
     }
 
     #[test]
-    fn completion_context_macro_variants_pin_legacy_output() {
+    fn completion_context_macro_variants_pin_canonical_output() {
         for (legacy, alias) in [
-            ("xprompt_argument_name", "macro_argument_name"),
-            ("xprompt_argument_value", "macro_argument_value"),
-            ("xprompt_argument_path", "macro_argument_path"),
-            ("xprompt_argument_agent", "macro_argument_agent"),
-            ("xprompt_argument_type_hint", "macro_argument_type_hint"),
+            ("xprompt_argument_name", "macro_argument_name"), // legacy xprompt spelling
+            ("xprompt_argument_value", "macro_argument_value"), // legacy xprompt spelling
+            ("xprompt_argument_path", "macro_argument_path"), // legacy xprompt spelling
+            ("xprompt_argument_agent", "macro_argument_agent"), // legacy xprompt spelling
+            ("xprompt_argument_type_hint", "macro_argument_type_hint"), // legacy xprompt spelling
         ] {
-            let from_old: CompletionContextKind =
-                serde_json::from_value(serde_json::json!(legacy)).unwrap();
             let from_new: CompletionContextKind =
                 serde_json::from_value(serde_json::json!(alias)).unwrap();
-            assert_eq!(from_old, from_new, "alias {alias} must parse");
             assert_eq!(
                 serde_json::to_value(&from_new).unwrap(),
-                serde_json::json!(legacy),
-                "alias {alias} must emit legacy {legacy}"
+                serde_json::json!(alias),
+                "alias {alias} must emit canonical {alias}"
+            );
+            assert!(
+                serde_json::from_value::<CompletionContextKind>(
+                    serde_json::json!(legacy)
+                )
+                .is_err(),
+                "legacy {legacy} must be rejected"
             );
         }
     }

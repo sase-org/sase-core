@@ -106,7 +106,7 @@ const TOP_LEVEL_FIELD_DOCS: &[(&str, &str)] = &[
         "Defines local macros available only within the current file. Reference them from the body with `#name`.",
     ),
     (
-        "macros",
+        "xprompts", // legacy xprompt spelling
         "Defines local macros available only within the current file. Reference them from the body with `#name`.",
     ),
 ];
@@ -3382,7 +3382,7 @@ mod authored_inputs_tests {
     #[test]
     fn duplicate_local_sections_are_an_error_naming_macros() {
         for body in [
-            "macros:\n  a:\n    content: A\nmacros:\n  b:\n    content: B\n",
+            "xprompts:\n  a:\n    content: A\nmacros:\n  b:\n    content: B\n", // legacy xprompt spelling
             "macros:\nxprompts:\n", // legacy xprompt spelling
         ] {
             let diagnostics = validate(&format!("---\n{body}---\n"));

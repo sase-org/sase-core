@@ -1,6 +1,8 @@
 use super::*;
 use std::env;
 
+static ENV_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn write_macro(dir: &Path, name: &str, body: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(name), body).unwrap();
@@ -98,6 +100,7 @@ fn explicit_package_macros_win_over_xprompts() {
 
 #[test]
 fn explicit_resources_beat_inferred_environment_paths() {
+    let _serial = ENV_SERIAL.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let explicit = temp.path().join("explicit_macros");
     let inferred = temp.path().join("inferred_macros");
@@ -121,6 +124,7 @@ fn explicit_resources_beat_inferred_environment_paths() {
 
 #[test]
 fn macro_env_precedence_is_new_first() {
+    let _serial = ENV_SERIAL.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let new_dir = temp.path().join("new_builtin");
     let old_dir = temp.path().join("old_builtin");

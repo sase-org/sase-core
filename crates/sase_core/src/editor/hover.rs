@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn builds_frontmatter_field_hover() {
         let doc = DocumentSnapshot::new(
-            "---\ndescription: Demo\nxprompts:\n  _helper:\n    content: Helper\n---\n#_helper\n",
+            "---\ndescription: Demo\nmacros:\n  _helper:\n    content: Helper\n---\n#_helper\n",
         );
         let hover = hover_at_position(
             &doc,
@@ -687,17 +687,14 @@ mod tests {
         )
         .unwrap();
 
-        let field_start = doc.text().find("xprompts").unwrap();
+        let field_start = doc.text().find("macros").unwrap();
         assert_eq!(
             hover.range,
-            doc.byte_range_to_range(
-                field_start,
-                field_start + "xprompts".len()
-            )
-            .unwrap()
+            doc.byte_range_to_range(field_start, field_start + "macros".len())
+                .unwrap()
         );
-        assert!(hover.markdown.contains("**xprompts**"));
-        assert!(hover.markdown.contains("local xprompts"));
+        assert!(hover.markdown.contains("**macros**"));
+        assert!(hover.markdown.contains("local macros"));
         assert!(hover.markdown.contains("current file"));
     }
 

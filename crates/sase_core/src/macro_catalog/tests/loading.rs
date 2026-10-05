@@ -4,7 +4,7 @@ use super::*;
 fn loads_markdown_and_workflow_with_canonical_insertions() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let xprompts = root.join("sase/xprompts");
+    let xprompts = root.join("sase/xprompts"); // legacy xprompt spelling
     let skills = root.join("sase/skills");
     fs::create_dir_all(&xprompts).unwrap();
     fs::create_dir_all(&skills).unwrap();
@@ -36,7 +36,7 @@ fn loads_markdown_and_workflow_with_canonical_insertions() {
     let swarm = by_name["skill/swarm"];
     assert_eq!(swarm.insertion.as_deref(), Some("#skill/swarm"));
     assert_eq!(swarm.reference_prefix.as_deref(), Some("#"));
-    assert_eq!(swarm.kind.as_deref(), Some("xprompt"));
+    assert_eq!(swarm.kind.as_deref(), Some("macro"));
     assert!(swarm.is_skill);
     assert_eq!(swarm.skill_name.as_deref(), Some("swarm"));
     assert_eq!(swarm.input_signature.as_deref(), Some("(target: word)"));

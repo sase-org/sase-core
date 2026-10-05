@@ -654,11 +654,13 @@ fn local_macro_entries(document: &DocumentSnapshot) -> Vec<MacroAssistEntry> {
         return Vec::new();
     };
     // Discover helpers from both the canonical `macros:` section and the
-    // retired `macros:` spelling. The canonical entry wins on a name
+    // retired `xprompts:` spelling. The canonical entry wins on a name
     // conflict; a malformed canonical entry falls back to the retired one.
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
-    for key in ["macros", "macros"] {
+    for key in ["macros", "xprompts"]
+    // legacy xprompt spelling
+    {
         let Some(section) =
             mapping_get(&frontmatter, key).and_then(Value::as_mapping)
         else {
@@ -2176,7 +2178,7 @@ mod tests {
 
     #[test]
     fn canonical_local_section_wins_on_helper_name_conflict() {
-        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Canonical {{ topic }}\nmacros:\n  _helper:\n    content: Retired\n---\n#_helper\n";
+        let text = "---\nmacros:\n  _helper:\n    input:\n      topic: word\n    content: Canonical {{ topic }}\nxprompts:\n  _helper:\n    content: Retired\n---\n#_helper\n"; // legacy xprompt spelling
         let diagnostics = diagnostics_for(text);
         // Canonical declares required `topic`, so the bare call is missing
         // an argument; the retired spelling would accept it.

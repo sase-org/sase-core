@@ -269,7 +269,7 @@ fn source_language_bindings_round_trip_wire_payloads() {
 }
 
 #[test]
-fn memory_xprompt_bindings_expose_the_shared_contract() {
+fn memory_macro_bindings_expose_the_shared_contract() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         assert_eq!(py_memory_reference_name("glossary"), "memory/glossary");
@@ -291,7 +291,7 @@ fn memory_xprompt_bindings_expose_the_shared_contract() {
             .bind(py),
         )
         .unwrap();
-        assert_eq!(layout["schema_version"], json!(5));
+        assert_eq!(layout["schema_version"], json!(6));
         assert_eq!(
             layout["memory_sources"][0]["paths"]["canonical"]["path"],
             json!("/repo/sase/memory")

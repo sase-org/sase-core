@@ -246,10 +246,10 @@ fn python_fixture_deserializes_into_rust_type() {
 }
 
 const PROC_SNAPSHOT_FIXTURE: &str = r#"{
-    "schema_version": 4,
+    "schema_version": 5,
     "procs": [
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "proc_id": "proc-one",
             "label": "Proc one",
             "kind": "detached",

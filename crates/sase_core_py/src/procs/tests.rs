@@ -103,7 +103,7 @@ fn proc_store_bindings_round_trip_python_dicts_and_legacy_aliases() {
         let reserve = json_value_to_py(
             py,
             &json!({
-                "schema_version": 4,
+                "schema_version": 5,
                 "proc_id": "proc-service",
                 "label": "Service proc",
                 "kind": "detached",
@@ -205,7 +205,7 @@ fn reserve_proc_uses_proc_name_spelling() {
     pyo3::prepare_freethreaded_python();
     fn reserve_payload(proc_id: &str, fingerprint: &str) -> serde_json::Value {
         json!({
-            "schema_version": 4,
+            "schema_version": 5,
             "proc_id": proc_id,
             "label": "Binding proc",
             "kind": "detached",

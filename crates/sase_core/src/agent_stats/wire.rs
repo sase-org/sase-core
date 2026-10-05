@@ -512,13 +512,13 @@ mod tests {
     }
 
     #[test]
-    fn older_run_stats_payload_without_xprompts_deserializes() {
+    fn older_run_stats_payload_without_macros_deserializes() {
         let mut payload =
             serde_json::to_value(AgentRunStatsResponseWire::default()).unwrap();
         let Value::Object(fields) = &mut payload else {
             panic!("run statistics response must serialize as an object");
         };
-        fields.remove("xprompts");
+        fields.remove("macros");
 
         let decoded: AgentRunStatsResponseWire =
             serde_json::from_value(payload).unwrap();
@@ -526,16 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn macro_request_keys_emit_legacy_xprompt_spellings() {
+    fn macro_request_keys_emit_macro_spellings() {
         let decoded: AgentRunStatsRequestWire = serde_json::from_value(
             serde_json::json!({"start_ts": 1, "end_ts": 2}),
         )
         .unwrap();
         let emitted = serde_json::to_value(&decoded).unwrap();
-        assert_eq!(emitted["xprompt_top_n"], serde_json::json!(40));
-        assert_eq!(emitted["xprompt_breakdown_top_n"], serde_json::json!(5));
-        assert!(emitted.get("macro_top_n").is_none());
-        assert!(emitted.get("macro_breakdown_top_n").is_none());
+        assert_eq!(emitted["macro_top_n"], serde_json::json!(40));
+        assert_eq!(emitted["macro_breakdown_top_n"], serde_json::json!(5));
+        assert_eq!(emitted["macro_focus"], serde_json::Value::Null);
+        assert!(emitted.get("xprompt_top_n").is_none()); // legacy xprompt spelling
+        assert!(emitted.get("xprompt_breakdown_top_n").is_none()); // legacy xprompt spelling
 
         let from_new: AgentRunStatsRequestWire =
             serde_json::from_value(serde_json::json!({
@@ -553,30 +554,23 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&from_new).unwrap())
                 .unwrap();
         assert_eq!(round_tripped, from_new);
-
-        let both = serde_json::json!({
-            "start_ts": 1,
-            "end_ts": 2,
-            "xprompt_top_n": 3,
-            "macro_top_n": 3,
-        });
-        assert!(
-            serde_json::from_value::<AgentRunStatsRequestWire>(both).is_err()
-        );
     }
 
     #[test]
-    fn macro_stats_response_emits_legacy_xprompt_keys() {
+    fn macro_stats_response_emits_macro_keys() {
         let decoded = AgentRunStatsResponseWire::default();
         let emitted = serde_json::to_value(&decoded).unwrap();
-        assert!(emitted.get("xprompts").is_some());
-        assert!(emitted.get("macros").is_none());
+        assert!(emitted.get("macros").is_some());
+        assert!(emitted.get("xprompts").is_none()); // legacy xprompt spelling
 
         let stats = AgentMacroStatsWire::default();
         let stats_value = serde_json::to_value(&stats).unwrap();
-        assert!(stats_value.get("runs_with_xprompts").is_some());
-        assert!(stats_value.get("runs_without_xprompts").is_some());
-        assert!(stats_value.get("distinct_xprompts").is_some());
+        assert!(stats_value.get("runs_with_macros").is_some());
+        assert!(stats_value.get("runs_without_macros").is_some());
+        assert!(stats_value.get("distinct_macros").is_some());
+        assert!(stats_value.get("runs_with_xprompts").is_none()); // legacy xprompt spelling
+        assert!(stats_value.get("runs_without_xprompts").is_none()); // legacy xprompt spelling
+        assert!(stats_value.get("distinct_xprompts").is_none()); // legacy xprompt spelling
         let back: AgentMacroStatsWire =
             serde_json::from_value(stats_value).unwrap();
         assert_eq!(back, stats);
@@ -597,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn older_run_stats_request_uses_xprompt_defaults() {
+    fn older_run_stats_request_uses_macro_defaults() {
         let decoded: AgentRunStatsRequestWire = serde_json::from_value(
             serde_json::json!({"start_ts": 1, "end_ts": 2}),
         )
@@ -623,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn older_xprompt_row_without_truncation_counts_defaults() {
+    fn older_macro_row_without_truncation_counts_defaults() {
         let mut payload =
             serde_json::to_value(AgentMacroStatsRowWire::default()).unwrap();
         let Value::Object(fields) = &mut payload else {

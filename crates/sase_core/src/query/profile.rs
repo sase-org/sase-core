@@ -934,7 +934,7 @@ mod tests {
         let profile = patch_query_profile();
         assert_eq!(
             profile.digest,
-            "a679434628641ed40ba1cc46be56255f63960edbd5249ca3acdc96b8b1012180"
+            "7ad4721d5155fad69189efcc5dd10802959c8ee3dd5e69319dd1ad46afa915ad"
         );
         let mut payload = match canonical_payload(
             &profile.pane_id,

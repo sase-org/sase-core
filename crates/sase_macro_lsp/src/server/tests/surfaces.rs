@@ -50,7 +50,7 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
 
     let frontmatter_hover = server
         .hover_for_text(
-            "---\nxprompts:\n  _helper:\n    content: Helper\n---\nBody\n"
+            "---\nmacros:\n  _helper:\n    content: Helper\n---\nBody\n"
                 .to_string(),
             Position {
                 line: 1,
@@ -75,11 +75,11 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
             },
             end: Position {
                 line: 1,
-                character: 8,
+                character: 6,
             },
         }
     );
-    assert!(frontmatter_markup.value.contains("local xprompts"));
+    assert!(frontmatter_markup.value.contains("local macros"));
     assert!(frontmatter_markup.value.contains("current file"));
 
     let diagnostics = server
@@ -87,7 +87,7 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
         .await;
     assert!(diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.message.contains("Unknown xprompt")));
+        .any(|diagnostic| diagnostic.message.contains("Unknown macro")));
     assert!(diagnostics
         .iter()
         .any(|diagnostic| diagnostic.message.contains("Unknown directive")));
@@ -111,7 +111,7 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
         !matches!(
             diagnostic.code.as_ref(),
             Some(lsp_types::NumberOrString::String(code))
-                if code == "invalid_xprompt_arg_type"
+                if code == "invalid_macro_arg_type"
         )
     }));
 
@@ -124,7 +124,7 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
             && matches!(
                 diagnostic.code.as_ref(),
                 Some(lsp_types::NumberOrString::String(code))
-                    if code == "invalid_xprompt_arg_type"
+                    if code == "invalid_macro_arg_type"
             )
     }));
 
@@ -249,7 +249,7 @@ async fn diagnostics_for_uri_text_honors_canonical_memory_file_uri() {
     assert!(
         !diagnostics_contain_code(
             &memory_diagnostics,
-            "missing_xprompt_memory_tag"
+            "missing_macro_memory_tag"
         ),
         "{memory_diagnostics:?}"
     );
@@ -259,7 +259,7 @@ async fn diagnostics_for_uri_text_honors_canonical_memory_file_uri() {
     assert!(
         !diagnostics_contain_code(
             &normal_diagnostics,
-            "missing_xprompt_memory_tag"
+            "missing_macro_memory_tag"
         ),
         "{normal_diagnostics:?}"
     );
@@ -288,7 +288,7 @@ async fn diagnostics_for_uri_text_accepts_markdown_local_xprompts() {
             !matches!(
                 diagnostic.code.as_ref(),
                 Some(lsp_types::NumberOrString::String(code))
-                    if code == "unknown_xprompt"
+                    if code == "unknown_macro"
             ) || !diagnostic.message.contains("_article_search_agent")
         }),
         "{diagnostics:?}"

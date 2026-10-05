@@ -2147,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_proc_field_accepts_both_spellings_and_emits_legacy() {
+    fn prompt_proc_field_accepts_both_spellings_and_emits_canonical() {
         let mut row = proc("named", "running", "2026-07-25T12:00:00Z");
         row.prompt_proc = Some(PromptProcMetaWire {
             logical_id: Some("unit-1".to_string()),
@@ -2155,26 +2155,26 @@ mod tests {
         });
         let emitted = serde_json::to_value(&row).unwrap();
         assert_eq!(
-            emitted["xprompt_proc"],
+            emitted["prompt_proc"],
             serde_json::json!({"logical_id": "unit-1"})
         );
-        assert!(emitted.get("prompt_proc").is_none());
+        assert!(emitted.get("xprompt_proc").is_none()); // legacy xprompt spelling
 
-        let from_old: ProcWire =
+        let from_new: ProcWire =
             serde_json::from_value(emitted.clone()).unwrap();
         let mut renamed = emitted.clone();
-        let meta = renamed.as_object_mut().unwrap().remove("xprompt_proc");
-        renamed
-            .as_object_mut()
-            .unwrap()
-            .insert("prompt_proc".to_string(), meta.unwrap());
-        let from_new: ProcWire = serde_json::from_value(renamed).unwrap();
+        let meta = renamed.as_object_mut().unwrap().remove("prompt_proc");
+        renamed.as_object_mut().unwrap().insert(
+            "xprompt_proc".to_string(), // legacy xprompt spelling
+            meta.unwrap(),
+        );
+        let from_old: ProcWire = serde_json::from_value(renamed).unwrap();
         assert_eq!(from_old, from_new);
         assert_eq!(from_new, row);
 
         let mut both = emitted.clone();
         both.as_object_mut().unwrap().insert(
-            "prompt_proc".to_string(),
+            "xprompt_proc".to_string(), // legacy xprompt spelling
             serde_json::json!({"logical_id": "unit-1"}),
         );
         assert!(serde_json::from_value::<ProcWire>(both).is_err());

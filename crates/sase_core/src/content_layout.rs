@@ -1584,7 +1584,7 @@ mod tests {
             Some("demo"),
         );
 
-        assert_eq!(layout.schema_version, 5);
+        assert_eq!(layout.schema_version, 6);
         assert_eq!(
             layout.project.as_ref().unwrap().refs.path,
             "/repo/sase/refs"
