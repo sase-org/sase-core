@@ -863,6 +863,10 @@ pub struct MobileMacroInputWire {
     pub repeatable: bool,
     #[serde(default)]
     pub choices: Vec<MobileInputChoiceWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1092,6 +1096,8 @@ mod tests {
                         position: 0,
                         repeatable: false,
                         choices: Vec::new(),
+                        named_type: None,
+                        value_role: None,
                     }],
                     is_skill: false,
                     skill_name: None,

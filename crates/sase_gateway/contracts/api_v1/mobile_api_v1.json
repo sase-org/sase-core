@@ -414,6 +414,68 @@
       "label": "string|null",
       "value": "string"
     },
+    "MobileMacroCatalogAttachmentWire": {
+      "byte_size": "u64|null",
+      "content_type": "string|null",
+      "display_name": "string",
+      "generated": "bool",
+      "path_display": "string|null"
+    },
+    "MobileMacroCatalogEntryWire": {
+      "content_preview": "string|null",
+      "description": "string|null",
+      "display_label": "string",
+      "input_signature": "string|null",
+      "inputs": "MobileMacroInputWire[]; default [] when absent",
+      "insertion": "string|null; fallback to #<name> when absent",
+      "is_skill": "bool",
+      "kind": "string|null",
+      "memory_type": "string|null; `core` or `reference` (legacy `short`/`long` still accepted) for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
+      "name": "string",
+      "project": "string|null",
+      "reference_prefix": "string|null",
+      "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
+      "source_bucket": "string",
+      "source_path_display": "string|null",
+      "tags": "string[]"
+    },
+    "MobileMacroCatalogRequestWire": {
+      "device_id": "string|null; host-injected before bridge dispatch",
+      "include_pdf": "bool",
+      "limit": "u32|null",
+      "project": "string|null",
+      "query": "string|null",
+      "schema_version": "u32",
+      "source": "string|null",
+      "tag": "string|null"
+    },
+    "MobileMacroCatalogResponseWire": {
+      "catalog_attachment": "MobileMacroCatalogAttachmentWire|null",
+      "context": "MobileHelperProjectContextWire",
+      "entries": "MobileMacroCatalogEntryWire[]",
+      "result": "MobileHelperResultWire",
+      "schema_version": "u32",
+      "stats": "MobileMacroCatalogStatsWire"
+    },
+    "MobileMacroCatalogStatsWire": {
+      "memory_count": "u64; default 0 when absent",
+      "pdf_requested": "bool",
+      "project_count": "u64",
+      "skill_count": "u64",
+      "total_count": "u64"
+    },
+    "MobileMacroInputWire": {
+      "choices": "MobileInputChoiceWire[]; default [] when absent",
+      "default_display": "string|null",
+      "description": "string|null; default null when absent",
+      "name": "string",
+      "named_type": "string|null; default null when absent",
+      "position": "u32",
+      "repeatable": "bool; default false when absent",
+      "required": "bool",
+      "type": "string",
+      "value_role": "string|null; default null when absent"
+    },
     "MobileNotificationCardWire": {
       "action_summary": "MobileActionSummaryWire|null",
       "actionable": "bool",
@@ -505,66 +567,6 @@
       "job": "MobileUpdateJobWire",
       "result": "MobileHelperResultWire",
       "schema_version": "u32"
-    },
-    "MobileXpromptCatalogAttachmentWire": {
-      "byte_size": "u64|null",
-      "content_type": "string|null",
-      "display_name": "string",
-      "generated": "bool",
-      "path_display": "string|null"
-    },
-    "MobileXpromptCatalogEntryWire": {
-      "content_preview": "string|null",
-      "description": "string|null",
-      "display_label": "string",
-      "input_signature": "string|null",
-      "inputs": "MobileXpromptInputWire[]; default [] when absent",
-      "insertion": "string|null; fallback to #<name> when absent",
-      "is_skill": "bool",
-      "kind": "string|null",
-      "memory_type": "string|null; `core` or `reference` (legacy `short`/`long` still accepted) for an xprompt memory referenced as `#memory/<stem>`, absent otherwise; a non-null value means `kind` is `memory`",
-      "name": "string",
-      "project": "string|null",
-      "reference_prefix": "string|null",
-      "skill_name": "string|null; provider skill name for `/<skill_name>`, absent for non-skills; `name` stays the `#skill/<skill_name>` reference",
-      "source_bucket": "string",
-      "source_path_display": "string|null",
-      "tags": "string[]"
-    },
-    "MobileXpromptCatalogRequestWire": {
-      "device_id": "string|null; host-injected before bridge dispatch",
-      "include_pdf": "bool",
-      "limit": "u32|null",
-      "project": "string|null",
-      "query": "string|null",
-      "schema_version": "u32",
-      "source": "string|null",
-      "tag": "string|null"
-    },
-    "MobileXpromptCatalogResponseWire": {
-      "catalog_attachment": "MobileXpromptCatalogAttachmentWire|null",
-      "context": "MobileHelperProjectContextWire",
-      "entries": "MobileXpromptCatalogEntryWire[]",
-      "result": "MobileHelperResultWire",
-      "schema_version": "u32",
-      "stats": "MobileXpromptCatalogStatsWire"
-    },
-    "MobileXpromptCatalogStatsWire": {
-      "memory_count": "u64; default 0 when absent",
-      "pdf_requested": "bool",
-      "project_count": "u64",
-      "skill_count": "u64",
-      "total_count": "u64"
-    },
-    "MobileXpromptInputWire": {
-      "choices": "MobileInputChoiceWire[]; default [] when absent",
-      "default_display": "string|null",
-      "description": "string|null; default null when absent",
-      "name": "string",
-      "position": "u32",
-      "repeatable": "bool; default false when absent",
-      "required": "bool",
-      "type": "string"
     },
     "NotificationStateMutationResponseWire": {
       "changed": "bool; false when the requested state was already set",
@@ -863,9 +865,20 @@
         "ApiErrorWire"
       ],
       "method": "GET",
+      "path": "/api/v1/macros/catalog",
+      "query": "MobileMacroCatalogRequestWire fields as URL query parameters",
+      "success": "MobileMacroCatalogResponseWire"
+    },
+    {
+      "auth": true,
+      "deprecated": true,
+      "errors": [
+        "ApiErrorWire"
+      ],
+      "method": "GET",
       "path": "/api/v1/xprompts/catalog",
-      "query": "MobileXpromptCatalogRequestWire fields as URL query parameters",
-      "success": "MobileXpromptCatalogResponseWire"
+      "query": "MobileMacroCatalogRequestWire fields as URL query parameters",
+      "success": "MobileMacroCatalogResponseWire"
     },
     {
       "auth": true,

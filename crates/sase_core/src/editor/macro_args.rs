@@ -454,7 +454,11 @@ pub(crate) fn top_level_commas_for_args(
     commas
 }
 
-fn find_top_level_equal(text: &str, start: usize, end: usize) -> Option<usize> {
+pub(crate) fn find_top_level_equal(
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
     let mut scan = ArgClauseScanner::default();
     let mut i = start;
     while i < end {

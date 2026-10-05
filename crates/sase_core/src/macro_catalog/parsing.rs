@@ -447,6 +447,8 @@ fn workflow_from_mapping(
                 is_step_input: true,
                 repeatable: false,
                 choices: Vec::new(),
+                named_type: None,
+                value_role: None,
             });
         }
     }
@@ -573,7 +575,16 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     required,
                     default_display,
                     default_snippet_value,
+                    named_type,
+                    value_role,
+                    resolved_choices,
                 ) = parse_short_input_value(raw);
+                let declared = short_input_choices(raw);
+                let choices = if declared.is_empty() {
+                    resolved_choices
+                } else {
+                    declared
+                };
                 Some(CatalogInput {
                     name,
                     type_name,
@@ -583,7 +594,9 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     default_snippet_value,
                     is_step_input: false,
                     repeatable: repeatable_input_value(raw),
-                    choices: short_input_choices(raw),
+                    choices,
+                    named_type,
+                    value_role,
                 })
             })
             .collect();
@@ -595,13 +608,23 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                 let mapping = item.as_mapping()?;
                 let name =
                     mapping_get(mapping, "name").and_then(value_as_string)?;
-                let type_name = mapping_get(mapping, "type")
-                    .and_then(value_as_string)
-                    .map(|raw| parse_input_type(&raw))
-                    .unwrap_or_else(|| "line".to_string());
+                let raw_type =
+                    mapping_get(mapping, "type").and_then(value_as_string);
+                let (type_name, named_type, value_role, resolved_choices) =
+                    raw_type.as_deref().map(resolve_rich).unwrap_or_else(
+                        || ("line".to_string(), None, None, Vec::new()),
+                    );
                 let default = mapping_get(mapping, "default");
                 let description = mapping_get(mapping, "description")
                     .and_then(value_as_string);
+                let declared = mapping_get(mapping, "choices")
+                    .map(parse_input_choices)
+                    .unwrap_or_default();
+                let choices = if declared.is_empty() {
+                    resolved_choices
+                } else {
+                    declared
+                };
                 Some(CatalogInput {
                     name,
                     type_name,
@@ -613,9 +636,9 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    choices: mapping_get(mapping, "choices")
-                        .map(parse_input_choices)
-                        .unwrap_or_default(),
+                    choices,
+                    named_type,
+                    value_role,
                 })
             })
             .collect();
@@ -625,12 +648,24 @@ fn parse_inputs(value: &Value) -> Vec<CatalogInput> {
 
 fn parse_short_input_value(
     value: &Value,
-) -> (String, Option<String>, bool, Option<String>, Option<String>) {
+) -> (
+    String,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<MobileInputChoiceWire>,
+) {
     if let Some(mapping) = value.as_mapping() {
-        let type_name = mapping_get(mapping, "type")
-            .and_then(value_as_string)
-            .map(|raw| parse_input_type(&raw))
-            .unwrap_or_else(|| "line".to_string());
+        let (type_name, named_type, value_role, resolved_choices) =
+            mapping_get(mapping, "type")
+                .and_then(value_as_string)
+                .map(|raw| resolve_rich(&raw))
+                .unwrap_or_else(|| {
+                    ("line".to_string(), None, None, Vec::new())
+                });
         let default = mapping_get(mapping, "default");
         let description =
             mapping_get(mapping, "description").and_then(value_as_string);
@@ -640,26 +675,55 @@ fn parse_short_input_value(
             default.is_none(),
             default.and_then(default_display),
             default.map(snippet_default_value),
+            named_type,
+            value_role,
+            resolved_choices,
         )
     } else {
-        (
-            parse_input_type(
+        let (type_name, named_type, value_role, resolved_choices) =
+            resolve_rich(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
-            ),
+            );
+        (
+            type_name,
             None,
             true,
             None,
             None,
+            named_type,
+            value_role,
+            resolved_choices,
         )
     }
 }
 
-fn parse_input_type(raw: &str) -> String {
-    resolve_input_type("input", raw, &InputTypeRegistry::builtin())
-        .map(|resolved| resolved.base)
+fn resolve_rich(
+    raw: &str,
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<MobileInputChoiceWire>,
+) {
+    match resolve_input_type("input", raw, &InputTypeRegistry::builtin()) {
+        Ok(resolved) => (
+            resolved.base,
+            resolved.named_type,
+            resolved.value_role,
+            resolved
+                .choices
+                .into_iter()
+                .map(|choice| MobileInputChoiceWire {
+                    value: choice.value,
+                    label: choice.label,
+                    description: choice.description,
+                })
+                .collect(),
+        ),
         // The editor catalog keeps unresolved inputs visible as `line`; the
         // macro's frontmatter still carries the resolver diagnostic.
-        .unwrap_or_else(|_| "line".to_string())
+        Err(_) => ("line".to_string(), None, None, Vec::new()),
+    }
 }
 
 fn repeatable_input_value(value: &Value) -> bool {

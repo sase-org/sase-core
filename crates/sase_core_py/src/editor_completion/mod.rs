@@ -2,7 +2,7 @@
 
 use crate::prelude::*;
 
-use sase_core::editor::wire::MacroAssistEntry;
+use sase_core::editor::wire::{MacroAssistEntry, MacroInputHint};
 use sase_core::editor::{
     extract_macro_argument_spans, extract_macro_argument_spans_with_catalog,
 };
@@ -1024,6 +1024,78 @@ fn py_jinja_catalog(py: Python<'_>) -> PyResult<PyObject> {
     json_value_to_py(py, &value)
 }
 
+#[derive(Debug, Deserialize)]
+struct MacroChoiceCandidatesRequestWire {
+    hint: MacroInputHint,
+    #[serde(default)]
+    partial: String,
+    #[serde(default, alias = "current_value")]
+    replacement: String,
+    #[serde(default)]
+    selected: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MacroInputTypeLabelRequestWire {
+    hint: MacroInputHint,
+}
+
+/// Shared choice candidates for macro enum/bool inputs.
+///
+/// Request dict: `{"hint": MacroInputHint, "partial": str, "replacement": str, "selected": [str]}`.
+/// `partial` is text before the cursor for filtering (empty keeps declared
+/// order with prefix-first then fuzzy ranking). `replacement` is the whole
+/// current value for repeatable active-element detection (decoded of quotes
+/// for comparison). `selected` holds already-chosen repeatable values and is
+/// honored only for repeatable inputs. Returns a list of
+/// `MacroChoiceCandidateWire` dicts with canonical `value`, quoted
+/// `insertion` (exact value, never label), `label`, `description`, declared
+/// `index`, and `is_default` marker (display metadata only).
+#[pyfunction]
+#[pyo3(name = "macro_argument_choice_candidates")]
+fn py_macro_argument_choice_candidates(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: MacroChoiceCandidatesRequestWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid macro_argument_choice_candidates dict: {error}"
+            ))
+        })?;
+    let candidates = sase_core::editor::macro_argument_choice_candidates(
+        &request.hint,
+        &request.partial,
+        &request.replacement,
+        &request.selected,
+    );
+    serialize_to_py(py, &candidates)
+}
+
+/// Canonical type label for a macro input hint.
+///
+/// Request dict: `{"hint": MacroInputHint}`. Returns the label string:
+/// canonical value union for up to four choices, otherwise
+/// `<named_type> (N)` or `enum (N)`; domains show named type, scalars show
+/// their keyword; synthetic bool suggestions keep the scalar `bool` label.
+#[pyfunction]
+#[pyo3(name = "macro_input_type_label")]
+fn py_macro_input_type_label(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: MacroInputTypeLabelRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+            PyValueError::new_err(format!(
+                "request is not a valid macro_input_type_label dict: {error}"
+            ))
+        })?;
+    let label = sase_core::editor::macro_input_type_label(&request.hint);
+    serialize_to_py(py, &label)
+}
+
 pub(crate) fn register_editor_completion(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -1087,6 +1159,8 @@ pub(crate) fn register_editor_completion(
     m.add_function(wrap_pyfunction!(py_jinja_completion, m)?)?;
     m.add_function(wrap_pyfunction!(py_jinja_scope_variables, m)?)?;
     m.add_function(wrap_pyfunction!(py_jinja_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(py_macro_argument_choice_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(py_macro_input_type_label, m)?)?;
     Ok(())
 }
 

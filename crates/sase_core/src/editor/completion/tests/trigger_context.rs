@@ -113,6 +113,8 @@ fn detects_narrow_argument_contexts() {
             position: 0,
             repeatable: false,
             choices: Vec::new(),
+            named_type: None,
+            value_role: None,
         }],
         content_preview: None,
         description: None,
@@ -140,6 +142,8 @@ fn repeatable_positionals_keep_the_tail_input_and_active_element_range() {
         position: 0,
         repeatable: true,
         choices: Vec::new(),
+        named_type: None,
+        value_role: None,
     }];
 
     for text in ["😀 #fork:planner,co", "😀 #fork(planner, co"] {
@@ -170,6 +174,8 @@ fn repeatable_agent_context_replaces_earlier_element_and_filters_selected() {
         position: 0,
         repeatable: true,
         choices: Vec::new(),
+        named_type: None,
+        value_role: None,
     }];
     let text = "😀 #fork(co, planner)";
     let doc = DocumentSnapshot::new(text);

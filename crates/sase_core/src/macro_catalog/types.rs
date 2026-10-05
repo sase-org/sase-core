@@ -186,6 +186,8 @@ pub(super) struct CatalogInput {
     pub(super) is_step_input: bool,
     pub(super) repeatable: bool,
     pub(super) choices: Vec<MobileInputChoiceWire>,
+    pub(super) named_type: Option<String>,
+    pub(super) value_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

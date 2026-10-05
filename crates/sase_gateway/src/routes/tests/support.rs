@@ -789,6 +789,8 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
                         position: 0,
                         repeatable: false,
                         choices: Vec::new(),
+                        named_type: None,
+                        value_role: None,
                     }],
                     is_skill: false,
                     skill_name: None,

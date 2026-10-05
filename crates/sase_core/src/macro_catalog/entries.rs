@@ -203,6 +203,8 @@ fn structured_inputs(inputs: &[CatalogInput]) -> Vec<MobileMacroInputWire> {
             position: position as u32,
             repeatable: input.repeatable,
             choices: input.choices.clone(),
+            named_type: input.named_type.clone(),
+            value_role: input.value_role.clone(),
         })
         .collect()
 }
@@ -214,7 +216,21 @@ fn format_inputs(inputs: &[CatalogInput]) -> Option<String> {
         .map(|input| {
             let optional = if input.required { "" } else { "?" };
             let repeatable = if input.repeatable { "…" } else { "" };
-            format!("{}{repeatable}{optional}: {}", input.name, input.type_name)
+            let hint = crate::editor::wire::MacroInputHint {
+                name: input.name.clone(),
+                r#type: input.type_name.clone(),
+                description: input.description.clone(),
+                required: input.required,
+                default_display: input.default_display.clone(),
+                position: 0,
+                repeatable: input.repeatable,
+                choices: input.choices.clone(),
+                named_type: input.named_type.clone(),
+                value_role: input.value_role.clone(),
+            };
+            let label =
+                crate::editor::macro_arg_choices::macro_input_type_label(&hint);
+            format!("{}{repeatable}{optional}: {}", input.name, label)
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {

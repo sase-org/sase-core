@@ -839,6 +839,8 @@ mod tests {
             position,
             repeatable,
             choices: Vec::new(),
+            named_type: None,
+            value_role: None,
         }
     }
 

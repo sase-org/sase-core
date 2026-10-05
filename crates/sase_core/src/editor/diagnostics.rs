@@ -655,8 +655,21 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
             .enumerate()
             .filter_map(|(position, (name, raw))| {
                 let name = value_as_string(name)?;
-                let (type_name, required, default_display, repeatable) =
-                    parse_short_input_hint(raw);
+                let (
+                    type_name,
+                    required,
+                    default_display,
+                    repeatable,
+                    named_type,
+                    value_role,
+                    resolved_choices,
+                ) = parse_short_input_hint(raw);
+                let declared = input_choices(raw);
+                let choices = if declared.is_empty() {
+                    resolved_choices
+                } else {
+                    declared
+                };
                 Some(MacroInputHint {
                     name,
                     r#type: type_name,
@@ -665,7 +678,9 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     default_display,
                     position: position as u32,
                     repeatable,
-                    choices: input_choices(raw),
+                    choices,
+                    named_type,
+                    value_role,
                 })
             })
             .collect();
@@ -678,11 +693,22 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                 let mapping = item.as_mapping()?;
                 let name =
                     mapping_get(mapping, "name").and_then(value_as_string)?;
-                let type_name = mapping_get(mapping, "type")
-                    .and_then(value_as_string)
-                    .map(|raw| parse_input_type_name(&raw))
-                    .unwrap_or_else(|| "line".to_string());
+                let (type_name, named_type, value_role, resolved_choices) =
+                    mapping_get(mapping, "type")
+                        .and_then(value_as_string)
+                        .map(|raw| resolve_local_rich(&raw))
+                        .unwrap_or_else(|| {
+                            ("line".to_string(), None, None, Vec::new())
+                        });
                 let default = mapping_get(mapping, "default");
+                let declared = mapping_get(mapping, "choices")
+                    .map(parse_local_input_choices)
+                    .unwrap_or_default();
+                let choices = if declared.is_empty() {
+                    resolved_choices
+                } else {
+                    declared
+                };
                 Some(MacroInputHint {
                     name,
                     r#type: type_name,
@@ -694,9 +720,9 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    choices: mapping_get(mapping, "choices")
-                        .map(parse_local_input_choices)
-                        .unwrap_or_default(),
+                    choices,
+                    named_type,
+                    value_role,
                 })
             })
             .collect();
@@ -706,12 +732,23 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
 
 fn parse_short_input_hint(
     value: &Value,
-) -> (String, bool, Option<String>, bool) {
+) -> (
+    String,
+    bool,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<String>,
+    Vec<MobileInputChoiceWire>,
+) {
     if let Some(mapping) = value.as_mapping() {
-        let type_name = mapping_get(mapping, "type")
-            .and_then(value_as_string)
-            .map(|raw| parse_input_type_name(&raw))
-            .unwrap_or_else(|| "line".to_string());
+        let (type_name, named_type, value_role, resolved_choices) =
+            mapping_get(mapping, "type")
+                .and_then(value_as_string)
+                .map(|raw| resolve_local_rich(&raw))
+                .unwrap_or_else(|| {
+                    ("line".to_string(), None, None, Vec::new())
+                });
         let default = mapping_get(mapping, "default");
         (
             type_name,
@@ -720,15 +757,23 @@ fn parse_short_input_hint(
             mapping_get(mapping, "repeatable")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            named_type,
+            value_role,
+            resolved_choices,
         )
     } else {
-        (
-            parse_input_type_name(
+        let (type_name, named_type, value_role, resolved_choices) =
+            resolve_local_rich(
                 &value_as_string(value).unwrap_or_else(|| "line".to_string()),
-            ),
+            );
+        (
+            type_name,
             true,
             None,
             false,
+            named_type,
+            value_role,
+            resolved_choices,
         )
     }
 }
@@ -763,10 +808,31 @@ fn parse_local_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
         .collect()
 }
 
-fn parse_input_type_name(raw: &str) -> String {
-    resolve_input_type("input", raw, &InputTypeRegistry::builtin())
-        .map(|resolved| resolved.base)
-        .unwrap_or_else(|_| "line".to_string())
+fn resolve_local_rich(
+    raw: &str,
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<MobileInputChoiceWire>,
+) {
+    match resolve_input_type("input", raw, &InputTypeRegistry::builtin()) {
+        Ok(resolved) => (
+            resolved.base,
+            resolved.named_type,
+            resolved.value_role,
+            resolved
+                .choices
+                .into_iter()
+                .map(|choice| MobileInputChoiceWire {
+                    value: choice.value,
+                    label: choice.label,
+                    description: choice.description,
+                })
+                .collect(),
+        ),
+        Err(_) => ("line".to_string(), None, None, Vec::new()),
+    }
 }
 
 pub(crate) fn default_display(value: &Value) -> Option<String> {
@@ -1069,6 +1135,8 @@ mod tests {
             position,
             repeatable: false,
             choices: Vec::new(),
+            named_type: None,
+            value_role: None,
         }
     }
 

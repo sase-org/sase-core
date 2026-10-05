@@ -49,6 +49,8 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
                     position: 0,
                     repeatable: false,
                     choices: Vec::new(),
+                    named_type: None,
+                    value_role: None,
                 },
                 MobileMacroInputWire {
                     name: "deep".to_string(),
@@ -59,6 +61,8 @@ pub(super) fn entries() -> Vec<MacroAssistEntry> {
                     position: 1,
                     repeatable: false,
                     choices: Vec::new(),
+                    named_type: None,
+                    value_role: None,
                 },
             ],
             is_skill: false,

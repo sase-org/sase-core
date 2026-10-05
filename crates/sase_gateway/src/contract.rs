@@ -652,7 +652,9 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "default_display": "string|null",
                 "position": "u32",
                 "repeatable": "bool; default false when absent",
-                "choices": "MobileInputChoiceWire[]; default [] when absent"
+                "choices": "MobileInputChoiceWire[]; default [] when absent",
+                "named_type": "string|null; default null when absent",
+                "value_role": "string|null; default null when absent"
             },
             "MobileInputChoiceWire": {
                 "value": "string",

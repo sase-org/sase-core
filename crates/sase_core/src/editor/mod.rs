@@ -13,7 +13,8 @@ mod frontmatter;
 pub mod fuzzy;
 pub mod hover;
 pub mod jinja;
-mod macro_args;
+pub mod macro_arg_choices;
+pub(crate) mod macro_args;
 pub mod model_alias_shortcut;
 pub mod placeholder;
 pub mod token;
@@ -93,6 +94,10 @@ pub use frontmatter::{
 };
 pub use fuzzy::{compare_fuzzy, fuzzy_match, FuzzyMatch};
 pub use hover::{hover_at_position, hover_at_position_with_flags};
+pub use macro_arg_choices::{
+    macro_argument_choice_candidates, macro_input_type_label,
+    quote_macro_arg_value, MacroChoiceCandidateWire,
+};
 pub(crate) use macro_args::{
     find_matching_bracket_for_args, parse_macro_reference_body,
 };
