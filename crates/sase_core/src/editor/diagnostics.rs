@@ -3,11 +3,16 @@ use serde_yaml::{Mapping, Value};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use crate::macro_input_types::{
+    check_input_value, resolve_input_type, validate_enum_choices_yaml,
+    InputChoice, InputTypeRegistry, ResolvedInputType,
+};
 use crate::{
     content_layout::is_reserved_memory_reference, fenced_block_ranges,
     inline_code_ranges, parse_artifact_ref, prompt_literal_zone_ranges,
     resolve_artifact_ref, scan_artifact_refs, scan_directive_owned_fences,
     typed_launch_units_flag_key, ArtifactRefContextWire, ArtifactRefKindWire,
+    MobileInputChoiceWire,
 };
 
 use super::alternation::{scan_alternations, AlternationFormWire};
@@ -494,10 +499,12 @@ fn validate_type(
         arg_index: Some(arg_index),
         span: arg.value_span,
         code: "invalid_xprompt_arg_type",
-        message: format!(
-            "Argument `{}` for xprompt `{}` expects {}",
-            input.name, entry.name, input.r#type
-        ),
+        message: enum_value_mismatch(input, &arg.value).unwrap_or_else(|| {
+            format!(
+                "Argument `{}` for xprompt `{}` expects {}",
+                input.name, entry.name, input.r#type
+            )
+        }),
     });
 }
 
@@ -509,7 +516,7 @@ fn value_matches_input_type(value: &str, input: &MacroInputHint) -> bool {
         "word" | "agent" => {
             !value.is_empty() && !value.chars().any(char::is_whitespace)
         }
-        "path" => !value.chars().any(char::is_whitespace),
+        "path" => !value.contains('\n') && !value.contains('\r'),
         "line" => !value.contains('\n'),
         "text" => true,
         "int" | "integer" => value.parse::<i64>().is_ok(),
@@ -518,8 +525,34 @@ fn value_matches_input_type(value: &str, input: &MacroInputHint) -> bool {
             value.to_ascii_lowercase().as_str(),
             "true" | "1" | "yes" | "on" | "false" | "0" | "no" | "off"
         ),
+        "enum" => {
+            input.choices.is_empty()
+                || input.choices.iter().any(|choice| choice.value == value)
+        }
         _ => true,
     }
+}
+
+fn enum_value_mismatch(input: &MacroInputHint, value: &str) -> Option<String> {
+    if input.r#type != "enum" {
+        return None;
+    }
+    let resolved = ResolvedInputType {
+        base: "enum".to_string(),
+        named_type: None,
+        value_role: None,
+        choices: input
+            .choices
+            .iter()
+            .map(|choice| InputChoice {
+                value: choice.value.clone(),
+                label: choice.label.clone(),
+                description: choice.description.clone(),
+            })
+            .collect(),
+        deprecated: false,
+    };
+    check_input_value(&resolved, &input.name, value).err()
 }
 
 pub(crate) fn macro_arg_value_unresolvable(value: &str) -> bool {
@@ -632,6 +665,7 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     default_display,
                     position: position as u32,
                     repeatable,
+                    choices: input_choices(raw),
                 })
             })
             .collect();
@@ -660,6 +694,9 @@ pub(crate) fn parse_local_inputs(value: &Value) -> Vec<MacroInputHint> {
                     repeatable: mapping_get(mapping, "repeatable")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    choices: mapping_get(mapping, "choices")
+                        .map(parse_local_input_choices)
+                        .unwrap_or_default(),
                 })
             })
             .collect();
@@ -703,20 +740,33 @@ fn input_description(value: &Value) -> Option<String> {
         .and_then(value_as_string)
 }
 
+fn input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
+    value
+        .as_mapping()
+        .and_then(|mapping| mapping_get(mapping, "choices"))
+        .map(parse_local_input_choices)
+        .unwrap_or_default()
+}
+
+fn parse_local_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
+    let Some(items) = value.as_sequence() else {
+        return Vec::new();
+    };
+    validate_enum_choices_yaml(items)
+        .choices
+        .into_iter()
+        .map(|choice| MobileInputChoiceWire {
+            value: choice.value,
+            label: choice.label,
+            description: choice.description,
+        })
+        .collect()
+}
+
 fn parse_input_type_name(raw: &str) -> String {
-    match raw.to_ascii_lowercase().as_str() {
-        "word" => "word",
-        "agent" => "agent",
-        "text" => "text",
-        "path" => "path",
-        "int" | "integer" => "int",
-        "bool" | "boolean" => "bool",
-        "float" => "float",
-        "enum" => "enum",
-        "code" => "code",
-        _ => "line",
-    }
-    .to_string()
+    resolve_input_type("input", raw, &InputTypeRegistry::builtin())
+        .map(|resolved| resolved.base)
+        .unwrap_or_else(|_| "line".to_string())
 }
 
 pub(crate) fn default_display(value: &Value) -> Option<String> {
@@ -1018,6 +1068,7 @@ mod tests {
             default_display: None,
             position,
             repeatable: false,
+            choices: Vec::new(),
         }
     }
 
@@ -1347,7 +1398,7 @@ mod tests {
             ),
             ("#typed(path=a, path=b, count=3)", "duplicate_xprompt_arg"),
             (
-                "#typed(path=\"bad value\", count=3)",
+                "#typed(path=\"bad\nvalue\", count=3)",
                 "invalid_xprompt_arg_type",
             ),
             (
@@ -1355,7 +1406,6 @@ mod tests {
                 "invalid_xprompt_arg_type",
             ),
             ("#typed:path(x)", "malformed_xprompt_argument"),
-            ("#typed:path+ ", "invalid_xprompt_arg_type"),
         ] {
             let doc = DocumentSnapshot::new(text);
             let diagnostics = analyze_document(&doc, &catalog());
@@ -1563,6 +1613,42 @@ mod tests {
     }
 
     #[test]
+    fn local_enum_choices_keep_descriptions_and_suggest_near_misses() {
+        let inputs: Value = serde_yaml::from_str(
+            "edition:\n  type: enum\n  choices:\n    - value: brief\n      label: Brief\n      description: Short edition\n    - value: full\n      description: Complete edition\n",
+        )
+        .unwrap();
+        let parsed = parse_local_inputs(&inputs);
+        assert_eq!(parsed[0].r#type, "enum");
+        assert_eq!(
+            parsed[0].choices[0].description.as_deref(),
+            Some("Short edition")
+        );
+
+        let unresolved: Value =
+            serde_yaml::from_str("mode:\n  type: enmu\n").unwrap();
+        assert_eq!(parse_local_inputs(&unresolved)[0].r#type, "line");
+        let deprecated: Value =
+            serde_yaml::from_str("mode:\n  type: string\n").unwrap();
+        assert_eq!(parse_local_inputs(&deprecated)[0].r#type, "line");
+
+        let text = "---\nmacros:\n  choose:\n    input:\n      edition:\n        type: enum\n        choices: [brief, full]\n    content: Choose an edition\n---\n#choose(edition=breif)";
+        let diagnostics = diagnostics_for(text);
+        let mismatch = diagnostic(&diagnostics, "invalid_xprompt_arg_type");
+        assert_eq!(
+            mismatch.message,
+            "Argument `edition` expects one of brief | full, got `breif`; did you mean `brief`?"
+        );
+    }
+
+    #[test]
+    fn path_values_allow_spaces_but_reject_line_breaks() {
+        let path = input("path", "path", true, 0);
+        assert!(value_matches_input_type("src/my file.rs", &path));
+        assert!(!value_matches_input_type("src/my\nfile.rs", &path));
+    }
+
+    #[test]
     fn reports_input_shape_name_duplicate_identifier_and_unknown_fields() {
         for (text, code) in [
             (
@@ -1759,6 +1845,7 @@ mod tests {
     fn accepts_valid_argument_forms_and_bool_spellings() {
         for text in [
             "#typed(path=src/main.rs, count=3, enabled=true)",
+            "#typed(path=\"src/my file.rs\", count=3)",
             "#typed(src/main.rs, 3, yes)",
             "#typed:src/main.rs,3,on",
             "#typed(path=null, count=null)",

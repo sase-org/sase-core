@@ -298,6 +298,7 @@ fn paren_arg_context(
             default_display: None,
             position: 0,
             repeatable: false,
+            choices: Vec::new(),
         };
         return Some(MacroArgCompletionTarget {
             kind: CompletionContextKind::MacroArgumentName,

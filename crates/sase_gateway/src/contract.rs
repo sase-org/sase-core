@@ -647,7 +647,8 @@ pub fn api_v1_contract_snapshot() -> Value {
             },
             "MobileInputChoiceWire": {
                 "value": "string",
-                "label": "string|null"
+                "label": "string|null",
+                "description": "string|null; default null when absent"
             },
             "MobileXpromptCatalogStatsWire": {
                 "total_count": "u64",

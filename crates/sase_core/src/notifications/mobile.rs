@@ -1670,10 +1670,12 @@ mod tests {
                     MobileInputChoiceWire {
                         value: "a".to_string(),
                         label: Some("Alpha".to_string()),
+                        description: None,
                     },
                     MobileInputChoiceWire {
                         value: "b".to_string(),
                         label: None,
+                        description: None,
                     },
                 ],
                 placeholder: None,

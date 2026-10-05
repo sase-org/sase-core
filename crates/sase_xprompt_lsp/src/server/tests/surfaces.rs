@@ -104,8 +104,19 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
             )
     }));
 
-    let invalid_type_diagnostics = server
+    let spaced_path_diagnostics = server
         .diagnostics_for_text("#foo(path=\"bad value\")".to_string())
+        .await;
+    assert!(spaced_path_diagnostics.iter().all(|diagnostic| {
+        !matches!(
+            diagnostic.code.as_ref(),
+            Some(lsp_types::NumberOrString::String(code))
+                if code == "invalid_xprompt_arg_type"
+        )
+    }));
+
+    let invalid_type_diagnostics = server
+        .diagnostics_for_text("#foo(path=\"bad\nvalue\")".to_string())
         .await;
     assert!(invalid_type_diagnostics.iter().any(|diagnostic| {
         diagnostic.source.as_deref() == Some("sase-xprompt")

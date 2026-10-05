@@ -49,6 +49,7 @@ pub fn assist_entries_from_catalog(
                         default_display: input.default_display.clone(),
                         position: input.position,
                         repeatable: input.repeatable,
+                        choices: input.choices.clone(),
                     })
                     .collect(),
                 content_preview: entry.content_preview.clone(),

@@ -36,6 +36,7 @@ fn gh_entry() -> MacroAssistEntry {
             default_display: None,
             position: 0,
             repeatable: false,
+            choices: Vec::new(),
         }],
         content_preview: None,
         description: None,

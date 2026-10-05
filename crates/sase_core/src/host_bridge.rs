@@ -845,6 +845,8 @@ pub struct MobileInputChoiceWire {
     pub value: String,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

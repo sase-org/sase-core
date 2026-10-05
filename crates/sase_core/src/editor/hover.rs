@@ -322,6 +322,7 @@ mod tests {
                 default_display: None,
                 position: 0,
                 repeatable: false,
+                choices: Vec::new(),
             }],
             content_preview: Some("Body preview".to_string()),
             description: Some("Review code".to_string()),

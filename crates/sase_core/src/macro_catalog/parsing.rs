@@ -6,6 +6,9 @@ use std::{
 
 use serde_yaml::Value;
 
+use crate::macro_input_types::{
+    resolve_input_type, validate_enum_choices_yaml, InputTypeRegistry,
+};
 use crate::{
     content_layout::{resolve_layout_candidates, CompatibleLayoutPathWire},
     list_project_records, DocumentSnapshot, EditorRange, MobileInputChoiceWire,
@@ -652,19 +655,11 @@ fn parse_short_input_value(
 }
 
 fn parse_input_type(raw: &str) -> String {
-    match raw.to_lowercase().as_str() {
-        "word" => "word",
-        "agent" => "agent",
-        "text" => "text",
-        "path" => "path",
-        "int" | "integer" => "int",
-        "bool" | "boolean" => "bool",
-        "float" => "float",
-        "enum" => "enum",
-        "code" => "code",
-        _ => "line",
-    }
-    .to_string()
+    resolve_input_type("input", raw, &InputTypeRegistry::builtin())
+        .map(|resolved| resolved.base)
+        // The editor catalog keeps unresolved inputs visible as `line`; the
+        // macro's frontmatter still carries the resolver diagnostic.
+        .unwrap_or_else(|_| "line".to_string())
 }
 
 fn repeatable_input_value(value: &Value) -> bool {
@@ -689,17 +684,13 @@ fn parse_input_choices(value: &Value) -> Vec<MobileInputChoiceWire> {
     let Some(items) = value.as_sequence() else {
         return Vec::new();
     };
-    items
-        .iter()
-        .filter_map(|item| {
-            if let Some(value) = value_as_string(item) {
-                return Some(MobileInputChoiceWire { value, label: None });
-            }
-            let mapping = item.as_mapping()?;
-            let value =
-                mapping_get(mapping, "value").and_then(value_as_string)?;
-            let label = mapping_get(mapping, "label").and_then(value_as_string);
-            Some(MobileInputChoiceWire { value, label })
+    validate_enum_choices_yaml(items)
+        .choices
+        .into_iter()
+        .map(|choice| MobileInputChoiceWire {
+            value: choice.value,
+            label: choice.label,
+            description: choice.description,
         })
         .collect()
 }
@@ -778,6 +769,8 @@ pub(super) fn value_as_string(value: &Value) -> Option<String> {
     if let Some(raw) = value.as_str() {
         Some(raw.to_string())
     } else if let Some(raw) = value.as_i64() {
+        Some(raw.to_string())
+    } else if let Some(raw) = value.as_f64() {
         Some(raw.to_string())
     } else {
         value.as_bool().map(|raw| raw.to_string())

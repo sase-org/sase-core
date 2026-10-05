@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::content_layout::MemoryTierWire;
+use crate::macro_input_types::{CatalogSource, InputTypeKind};
 use crate::project_tag::ProjectTagTargetWire;
+use crate::MobileInputChoiceWire;
 
 pub const EDITOR_WIRE_SCHEMA_VERSION: u32 = 3;
 
@@ -402,6 +404,8 @@ pub struct MacroInputHint {
     pub position: u32,
     #[serde(default)]
     pub repeatable: bool,
+    #[serde(default)]
+    pub choices: Vec<MobileInputChoiceWire>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1371,10 +1375,27 @@ pub struct FrontmatterInputType {
     pub aliases: Vec<String>,
     /// One-line human rule describing what values the type accepts.
     pub rule: String,
+    /// Catalog kind, added after the original schema wire.
+    #[serde(default = "default_frontmatter_input_type_kind")]
+    pub kind: InputTypeKind,
+    /// Human-readable description from the shared catalog.
+    #[serde(default)]
+    pub description: String,
+    /// Provenance from the shared catalog.
+    #[serde(default = "default_frontmatter_input_type_source")]
+    pub source: CatalogSource,
     /// When false the type is parsed and transported but not advertised in
     /// public completion, pickers, or helper catalogs.
     #[serde(default = "default_true")]
     pub advertised: bool,
+}
+
+fn default_frontmatter_input_type_kind() -> InputTypeKind {
+    InputTypeKind::Scalar
+}
+
+fn default_frontmatter_input_type_source() -> CatalogSource {
+    CatalogSource::Builtin
 }
 
 fn default_true() -> bool {

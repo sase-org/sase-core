@@ -44,6 +44,37 @@ fn projects_repeatable_agent_input_metadata() {
     assert_eq!(entry.inputs[0].r#type, "agent");
     assert!(entry.inputs[0].repeatable);
 }
+
+#[test]
+fn catalog_input_choices_keep_descriptions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let xprompts = root.join("sase/xprompts");
+    fs::create_dir_all(&xprompts).unwrap();
+    fs::write(
+        xprompts.join("edition.md"),
+        "---\ninput:\n  edition:\n    type: enum\n    choices:\n      - value: brief\n        label: Brief\n        description: Short edition\n---\nBody",
+    )
+    .unwrap();
+
+    let response = load_editor_macro_catalog(
+        &request(),
+        &MacroCatalogLoadOptions::new(Some(root.to_path_buf())),
+    )
+    .unwrap();
+    let entry = response
+        .entries
+        .iter()
+        .find(|entry| entry.name == "edition")
+        .unwrap();
+
+    assert_eq!(entry.inputs[0].choices[0].value, "brief");
+    assert_eq!(entry.inputs[0].choices[0].label.as_deref(), Some("Brief"));
+    assert_eq!(
+        entry.inputs[0].choices[0].description.as_deref(),
+        Some("Short edition")
+    );
+}
 #[test]
 fn filters_step_inputs_and_formats_defaults() {
     let temp = tempfile::tempdir().unwrap();

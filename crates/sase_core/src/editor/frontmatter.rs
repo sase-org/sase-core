@@ -1,14 +1,18 @@
 use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
 
+use crate::macro_input_types::{
+    builtin_catalog, check_closed_set_default,
+    pyyaml_plain_scalar_is_non_string, resolve_input_type,
+    unquoted_plain_scalar_choice_error, validate_enum_choices_yaml,
+    ChoiceIssueSeverity, InputChoice, InputTypeRegistry,
+};
+
 use super::token::DocumentSnapshot;
 use super::wire::{
     DiagnosticSeverity, EditorDiagnostic, EditorPosition, FrontmatterFieldKind,
     FrontmatterFieldSchema, FrontmatterInputType, HoverPayload,
 };
-
-const XPROMPT_INPUT_TYPE_EXPECTED: &str =
-    "word, line, text, path, agent, int/integer, bool/boolean, float, enum, code";
 
 /// Ordered panel field descriptors: `(name, kind, allowed_values, example)`.
 ///
@@ -255,22 +259,18 @@ pub fn field_schema() -> Vec<FrontmatterFieldSchema> {
         .collect()
 }
 
-/// The catalog of supported `input` types, with aliases and per-type guidance.
-///
-/// Powers the input collection modal's per-type rule text. The names and
-/// aliases mirror [`parse_input_type`]'s accepted spellings.
+/// A projection of the shared macro input-type catalog for frontmatter editors.
 pub fn input_type_schema() -> Vec<FrontmatterInputType> {
-    InputType::ALL
-        .iter()
-        .map(|input_type| FrontmatterInputType {
-            name: declared_type_name(*input_type).to_string(),
-            aliases: input_type
-                .aliases()
-                .iter()
-                .map(|alias| (*alias).to_string())
-                .collect(),
-            rule: input_type.rule().to_string(),
-            advertised: true,
+    builtin_catalog()
+        .into_iter()
+        .map(|entry| FrontmatterInputType {
+            name: entry.name,
+            aliases: entry.aliases,
+            rule: entry.rule,
+            kind: entry.kind,
+            description: entry.description,
+            source: entry.source,
+            advertised: entry.advertised,
         })
         .collect()
 }
@@ -588,6 +588,7 @@ fn validate_shortform_inputs(
         let (declared_type, type_known) = validate_shortform_input_type(
             builder,
             raw,
+            &name,
             source.as_ref(),
             item_range,
         );
@@ -696,6 +697,9 @@ fn validate_longform_inputs(
             ),
         }
 
+        let input_name = yaml_mapping_get(mapping, "name")
+            .and_then(yaml_scalar_to_string)
+            .unwrap_or_else(|| "input".to_string());
         let type_source = source
             .as_ref()
             .and_then(|source| source.field("type"))
@@ -703,6 +707,7 @@ fn validate_longform_inputs(
         let (declared_type, type_known) = validate_longform_input_type(
             builder,
             mapping,
+            &input_name,
             type_source.as_ref(),
             item_range,
         );
@@ -795,6 +800,7 @@ fn validate_input_name(
 fn validate_shortform_input_type(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     raw: &Value,
+    input_name: &str,
     source: Option<&ShortInputSource>,
     fallback_range: (usize, usize),
 ) -> (InputType, bool) {
@@ -816,6 +822,7 @@ fn validate_shortform_input_type(
     validate_explicit_input_type(
         builder,
         type_value,
+        input_name,
         range.unwrap_or(fallback_range),
         InputType::Line,
     )
@@ -824,6 +831,7 @@ fn validate_shortform_input_type(
 fn validate_longform_input_type(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     mapping: &Mapping,
+    input_name: &str,
     source: Option<&KeyValueSource>,
     fallback_range: (usize, usize),
 ) -> (InputType, bool) {
@@ -835,6 +843,7 @@ fn validate_longform_input_type(
     validate_explicit_input_type(
         builder,
         yaml_mapping_get(mapping, "type"),
+        input_name,
         range,
         InputType::Line,
     )
@@ -843,6 +852,7 @@ fn validate_longform_input_type(
 fn validate_explicit_input_type(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     value: Option<&Value>,
+    input_name: &str,
     range: (usize, usize),
     missing_type: InputType,
 ) -> (InputType, bool) {
@@ -854,31 +864,39 @@ fn validate_explicit_input_type(
             range,
             DiagnosticSeverity::Error,
             "invalid_xprompt_frontmatter_input_type",
-            format!(
-                "Invalid xprompt input type. Expected one of: {XPROMPT_INPUT_TYPE_EXPECTED}"
-            ),
+            "Xprompt input type must be a scalar",
         );
         return (InputType::Line, false);
     };
-    let Some(input_type) = parse_input_type(&raw) else {
-        builder.push(
-            range,
-            DiagnosticSeverity::Error,
-            "invalid_xprompt_frontmatter_input_type",
-            format!(
-                "Invalid xprompt input type `{raw}`. Expected one of: {XPROMPT_INPUT_TYPE_EXPECTED}"
-            ),
-        );
-        return (InputType::Line, false);
-    };
-    (input_type, true)
+    match resolve_input_type(input_name, &raw, &InputTypeRegistry::builtin()) {
+        Ok(resolved) => {
+            if resolved.deprecated {
+                builder.push(
+                    range,
+                    DiagnosticSeverity::Warning,
+                    "deprecated_xprompt_frontmatter_input_type",
+                    "Input type `string` is deprecated; use `line` instead",
+                );
+            }
+            (InputType::from_base(&resolved.base), true)
+        }
+        Err(error) => {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_type",
+                error.message,
+            );
+            (InputType::Line, false)
+        }
+    }
 }
 
-/// Validate a declared `input`'s `choices` and return the declared values.
+/// Validate a declared `input`'s `choices` and return valid catalog choices.
 ///
 /// `choices` is required and non-empty for `enum` and forbidden for every
-/// other type. Each item must be a scalar or a `{value, label}` mapping;
-/// declared values must be unique. The returned values feed
+/// other type. Choice validation is delegated to the shared input-type
+/// catalog, and the returned values feed
 /// [`validate_input_default`]'s `enum` membership check.
 fn validate_input_choices(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
@@ -887,7 +905,7 @@ fn validate_input_choices(
     type_known: bool,
     source: Option<&KeyValueSource>,
     fallback_range: (usize, usize),
-) -> Vec<String> {
+) -> Vec<InputChoice> {
     if !type_known {
         return Vec::new();
     }
@@ -919,35 +937,57 @@ fn validate_input_choices(
             return Vec::new();
         }
     };
-    let mut values = Vec::new();
+    let item_ranges = source
+        .map(|source| choice_item_ranges(builder, source))
+        .unwrap_or_default();
+    let mut valid_choices = Vec::new();
     let mut seen = HashSet::<String>::new();
-    for item in items {
-        let value = yaml_scalar_to_string(item).or_else(|| {
-            item.as_mapping()
-                .and_then(|mapping| yaml_mapping_get(mapping, "value"))
-                .and_then(yaml_scalar_to_string)
+    for (idx, item) in items.iter().enumerate() {
+        let source_item_range = item_ranges.get(idx).copied();
+        let item_range = source_item_range.unwrap_or(range);
+        let value_range = source_item_range.and_then(|item_range| {
+            choice_value_source_range(&builder.index.text, item_range)
         });
-        let Some(value) = value else {
+        if let Some(message) = value_range.and_then(|value_range| {
+            unquoted_choice_error(&builder.index.text, value_range)
+        }) {
             builder.push(
-                range,
+                value_range.unwrap_or(item_range),
                 DiagnosticSeverity::Error,
                 "invalid_xprompt_frontmatter_input_choices",
-                "Xprompt input choice must be a scalar or a `{value, label}` mapping",
-            );
-            continue;
-        };
-        if !seen.insert(value.clone()) {
-            builder.push(
-                range,
-                DiagnosticSeverity::Error,
-                "invalid_xprompt_frontmatter_input_choices",
-                format!("Duplicate xprompt input choice value `{value}`"),
+                message,
             );
             continue;
         }
-        values.push(value);
+
+        let validated = validate_enum_choices_yaml(std::slice::from_ref(item));
+        for issue in validated.issues {
+            let severity = match issue.severity {
+                ChoiceIssueSeverity::Error => DiagnosticSeverity::Error,
+                ChoiceIssueSeverity::Warning => DiagnosticSeverity::Warning,
+            };
+            builder.push(
+                value_range.unwrap_or(item_range),
+                severity,
+                "invalid_xprompt_frontmatter_input_choices",
+                issue.message,
+            );
+        }
+        let Some(choice) = validated.choices.into_iter().next() else {
+            continue;
+        };
+        if !seen.insert(choice.value.clone()) {
+            builder.push(
+                value_range.unwrap_or(item_range),
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_choices",
+                format!("choice `{}` is declared twice", choice.value),
+            );
+            continue;
+        }
+        valid_choices.push(choice);
     }
-    values
+    valid_choices
 }
 
 fn validate_input_default(
@@ -955,7 +995,7 @@ fn validate_input_default(
     default: Option<&Value>,
     declared_type: InputType,
     type_known: bool,
-    choices: &[String],
+    choices: &[InputChoice],
     source_range: Option<(usize, usize)>,
     fallback_range: (usize, usize),
 ) {
@@ -969,6 +1009,42 @@ fn validate_input_default(
         return;
     }
     let range = source_range.unwrap_or(fallback_range);
+    if declared_type == InputType::Enum {
+        if let Some(message) = source_range.and_then(|source_range| {
+            unquoted_choice_error(&builder.index.text, source_range)
+        }) {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_default",
+                message,
+            );
+            return;
+        }
+        let raw = yaml_scalar_to_string(default).unwrap_or_default();
+        if default.as_str().is_none() {
+            let message = check_closed_set_default(&raw, choices)
+                .unwrap_or_else(|| {
+                    format!("default `{raw}` must be a string choice")
+                });
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_default",
+                message,
+            );
+            return;
+        }
+        if let Some(message) = check_closed_set_default(&raw, choices) {
+            builder.push(
+                range,
+                DiagnosticSeverity::Error,
+                "invalid_xprompt_frontmatter_input_default",
+                message,
+            );
+        }
+        return;
+    }
     let Some(raw) = yaml_scalar_to_string(default) else {
         builder.push(
             range,
@@ -982,13 +1058,13 @@ fn validate_input_default(
         InputType::Word | InputType::Agent => {
             !raw.is_empty() && !raw.chars().any(char::is_whitespace)
         }
-        InputType::Path => !raw.chars().any(char::is_whitespace),
+        InputType::Path => !raw.contains('\n') && !raw.contains('\r'),
         InputType::Line => !raw.contains('\n'),
         InputType::Text => true,
         InputType::Int => raw.parse::<i64>().is_ok(),
         InputType::Float => raw.parse::<f64>().is_ok(),
         InputType::Bool => is_bool_spelling(&raw),
-        InputType::Enum => choices.iter().any(|choice| choice == &raw),
+        InputType::Enum => true,
         InputType::Code => true,
     };
     if !valid {
@@ -1809,6 +1885,116 @@ fn flow_or_sequence_item_ranges(
     flow_sequence_item_ranges(trimmed, base, 0)
 }
 
+fn choice_item_ranges(
+    builder: &FrontmatterDiagnosticBuilder<'_>,
+    source: &KeyValueSource,
+) -> Vec<(usize, usize)> {
+    if let Some(raw) = input_inline_value(&builder.index.text, source) {
+        let trimmed_offset = leading_whitespace_len(raw);
+        let trimmed = &raw[trimmed_offset..];
+        if trimmed.starts_with('[') {
+            return flow_sequence_item_ranges(
+                trimmed,
+                source.value_range.0 + trimmed_offset,
+                0,
+            );
+        }
+    }
+    block_choice_item_ranges(&builder.index.text, source.item_range)
+}
+
+fn block_choice_item_ranges(
+    text: &str,
+    source_range: (usize, usize),
+) -> Vec<(usize, usize)> {
+    let Some(block) = text.get(source_range.0..source_range.1) else {
+        return Vec::new();
+    };
+    let lines = frontmatter_lines(block);
+    let Some(sequence_indent) = lines.iter().find_map(|line| {
+        let indent = leading_whitespace_len(line.text);
+        sequence_item_content(&line.text[indent..]).map(|_| indent)
+    }) else {
+        return Vec::new();
+    };
+    let starts: Vec<(usize, usize)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            if leading_whitespace_len(line.text) != sequence_indent {
+                return None;
+            }
+            let (offset, _) =
+                sequence_item_content(&line.text[sequence_indent..])?;
+            Some((idx, line.start + sequence_indent + offset))
+        })
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (line_idx, content_offset))| {
+            let start = source_range.0 + content_offset;
+            let end = starts
+                .get(idx + 1)
+                .map(|(next_line_idx, _)| {
+                    source_range.0 + lines[*next_line_idx].start
+                })
+                .unwrap_or(source_range.1);
+            (start <= end && *line_idx < lines.len())
+                .then_some((start, end.max(start)))
+        })
+        .collect()
+}
+
+fn choice_value_source_range(
+    text: &str,
+    item_range: (usize, usize),
+) -> Option<(usize, usize)> {
+    let raw = text.get(item_range.0..item_range.1)?;
+    let trimmed_offset = leading_whitespace_len(raw);
+    let trimmed = &raw[trimmed_offset..];
+    let base = item_range.0 + trimmed_offset;
+    if trimmed.starts_with('{') {
+        return scan_flow_mapping_entries(trimmed, base, 0)
+            .into_iter()
+            .find(|field| field.key == "value")
+            .and_then(|field| field.scalar.map(|scalar| scalar.range));
+    }
+    for line in frontmatter_lines(raw) {
+        let indent = leading_whitespace_len(line.text);
+        let content = &line.text[indent..];
+        let Some(key) = yaml_line_key_colon_source(content) else {
+            continue;
+        };
+        if key.key != "value" {
+            continue;
+        }
+        let source_line = FrontmatterLine {
+            start: item_range.0 + line.start + indent,
+            text: content,
+        };
+        return line_value_source(&source_line, &key, item_range.1)
+            .scalar
+            .map(|scalar| scalar.range);
+    }
+    scalar_value_range(trimmed)
+        .map(|(start, end, _value)| (base + start, base + end))
+}
+
+fn unquoted_choice_error(
+    text: &str,
+    source_range: (usize, usize),
+) -> Option<String> {
+    let raw = text.get(source_range.0..source_range.1)?;
+    let previous = text[..source_range.0].chars().next_back();
+    if matches!(previous, Some('\'') | Some('"'))
+        || !pyyaml_plain_scalar_is_non_string(raw)
+    {
+        return None;
+    }
+    unquoted_plain_scalar_choice_error(raw)
+}
+
 fn block_sequence_item_ranges(
     text: &str,
     item_range: (usize, usize),
@@ -2360,65 +2546,19 @@ fn yaml_scalar_to_string(value: &Value) -> Option<String> {
 }
 
 impl InputType {
-    /// Every input type, in catalog order, for schema enumeration.
-    const ALL: [InputType; 10] = [
-        InputType::Word,
-        InputType::Agent,
-        InputType::Line,
-        InputType::Text,
-        InputType::Path,
-        InputType::Int,
-        InputType::Float,
-        InputType::Bool,
-        InputType::Enum,
-        InputType::Code,
-    ];
-
-    /// Accepted aliases for this type's canonical name (see
-    /// [`parse_input_type`]).
-    fn aliases(self) -> &'static [&'static str] {
-        match self {
-            InputType::Int => &["integer"],
-            InputType::Bool => &["boolean"],
-            _ => &[],
+    fn from_base(base: &str) -> Self {
+        match base {
+            "word" => InputType::Word,
+            "agent" => InputType::Agent,
+            "text" => InputType::Text,
+            "path" => InputType::Path,
+            "int" => InputType::Int,
+            "float" => InputType::Float,
+            "bool" => InputType::Bool,
+            "enum" => InputType::Enum,
+            "code" => InputType::Code,
+            _ => InputType::Line,
         }
-    }
-
-    /// One-line human rule describing the values this type accepts. Mirrors the
-    /// checks in [`validate_input_default`] so guidance and validation agree.
-    fn rule(self) -> &'static str {
-        match self {
-            InputType::Word => "A single word with no whitespace.",
-            InputType::Agent => "A non-empty agent name with no whitespace.",
-            InputType::Line => "A single line of text with no line breaks.",
-            InputType::Text => "Free-form text that may span multiple lines.",
-            InputType::Path => "A filesystem path with no whitespace.",
-            InputType::Int => "A whole number.",
-            InputType::Float => "A number, optionally with a decimal point.",
-            InputType::Bool => {
-                "A boolean: true or false (also yes/no, on/off, 1/0)."
-            }
-            InputType::Enum => "One of the values declared under `choices`.",
-            InputType::Code => {
-                "Structured source plus language, not a plain string convention."
-            }
-        }
-    }
-}
-
-fn parse_input_type(raw: &str) -> Option<InputType> {
-    match raw.to_ascii_lowercase().as_str() {
-        "word" => Some(InputType::Word),
-        "agent" => Some(InputType::Agent),
-        "line" => Some(InputType::Line),
-        "text" => Some(InputType::Text),
-        "path" => Some(InputType::Path),
-        "int" | "integer" => Some(InputType::Int),
-        "bool" | "boolean" => Some(InputType::Bool),
-        "float" => Some(InputType::Float),
-        "enum" => Some(InputType::Enum),
-        "code" => Some(InputType::Code),
-        _ => None,
     }
 }
 
@@ -2483,6 +2623,17 @@ mod tests {
             .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
     }
 
+    fn diagnostic_text(text: &str, diagnostic: &EditorDiagnostic) -> String {
+        let document = DocumentSnapshot::new(text);
+        let start = document
+            .position_to_byte_offset(diagnostic.range.start)
+            .unwrap();
+        let end = document
+            .position_to_byte_offset(diagnostic.range.end)
+            .unwrap();
+        text[start..end].to_string()
+    }
+
     #[test]
     fn field_schema_is_ordered_documented_and_parity_scoped() {
         let schema = field_schema();
@@ -2526,24 +2677,33 @@ mod tests {
     #[test]
     fn input_type_schema_matches_parser_spellings() {
         let schema = input_type_schema();
+        let catalog = builtin_catalog();
         let names: Vec<&str> =
             schema.iter().map(|input| input.name.as_str()).collect();
         assert_eq!(
             names,
-            [
-                "word", "agent", "line", "text", "path", "int", "float",
-                "bool", "enum", "code"
-            ]
+            catalog
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
         );
         for input in &schema {
             assert!(!input.rule.is_empty(), "{} has no rule", input.name);
-            assert!(input.advertised, "{} is hidden", input.name);
-            // Canonical name and every alias must parse back to a known type.
-            assert!(parse_input_type(&input.name).is_some());
+            assert!(!input.description.is_empty());
+            let entry = catalog
+                .iter()
+                .find(|entry| entry.name == input.name)
+                .unwrap();
+            assert_eq!(input.kind, entry.kind);
+            assert_eq!(input.source, entry.source);
+            assert_eq!(input.advertised, entry.advertised);
+            let registry = InputTypeRegistry::builtin();
+            assert!(
+                resolve_input_type(&input.name, &input.name, &registry).is_ok()
+            );
             for alias in &input.aliases {
                 assert!(
-                    parse_input_type(alias).is_some(),
-                    "alias {alias} does not parse"
+                    resolve_input_type(&input.name, alias, &registry).is_ok()
                 );
             }
         }
@@ -2552,6 +2712,31 @@ mod tests {
         let bool_type =
             schema.iter().find(|input| input.name == "bool").unwrap();
         assert_eq!(bool_type.aliases, vec!["boolean".to_string()]);
+        let string =
+            schema.iter().find(|input| input.name == "string").unwrap();
+        assert!(!string.advertised);
+        assert_eq!(
+            string.kind,
+            crate::macro_input_types::InputTypeKind::Scalar
+        );
+    }
+
+    #[test]
+    fn frontmatter_input_type_wire_defaults_new_catalog_fields() {
+        let input: FrontmatterInputType =
+            serde_json::from_value(serde_json::json!({
+                "name": "line",
+                "aliases": [],
+                "rule": "A single line.",
+            }))
+            .unwrap();
+        assert_eq!(input.kind, crate::macro_input_types::InputTypeKind::Scalar);
+        assert!(input.description.is_empty());
+        assert_eq!(
+            input.source,
+            crate::macro_input_types::CatalogSource::Builtin
+        );
+        assert!(input.advertised);
     }
 
     #[test]
@@ -2591,9 +2776,46 @@ mod tests {
     #[test]
     fn validate_flags_known_bad_input_type() {
         let diagnostics = validate("---\ninput:\n  service: wordd\n---\n");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "invalid_xprompt_frontmatter_input_type"
-        }));
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+            })
+            .unwrap();
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostic.message,
+            "input `service` has unknown type `wordd`; did you mean `word`?"
+        );
+    }
+
+    #[test]
+    fn unknown_type_suggests_enum_and_string_is_deprecated_warning() {
+        let unknown = validate("---\ninput:\n  mode:\n    type: enmu\n---\n");
+        let diagnostic = unknown
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_xprompt_frontmatter_input_type"
+            })
+            .unwrap();
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostic.message,
+            "input `mode` has unknown type `enmu`; did you mean `enum`?"
+        );
+
+        let deprecated = validate("---\ninput:\n  mode: string\n---\n");
+        let warning = deprecated
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "deprecated_xprompt_frontmatter_input_type"
+            })
+            .unwrap();
+        assert_eq!(warning.severity, DiagnosticSeverity::Warning);
+        assert_eq!(
+            warning.message,
+            "Input type `string` is deprecated; use `line` instead"
+        );
     }
 
     #[test]
@@ -2639,6 +2861,29 @@ mod tests {
     }
 
     #[test]
+    fn validate_quotes_yaml_typed_enum_choices_at_each_item() {
+        for text in [
+            "---\ninput:\n  mode:\n    type: enum\n    choices: [yes, no]\n---\n",
+            "---\ninput:\n  mode:\n    type: enum\n    choices:\n      - value: yes\n        description: Boolean-like token\n      - value: no\n---\n",
+        ] {
+            let diagnostics = validate(text);
+            let diagnostic = diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic.code
+                        == "invalid_xprompt_frontmatter_input_choices"
+                })
+                .unwrap();
+            assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+            assert_eq!(diagnostic_text(text, diagnostic), "yes");
+            assert_eq!(
+                diagnostic.message,
+                "choice `yes` must be quoted (\"yes\"): YAML reads it as a boolean"
+            );
+        }
+    }
+
+    #[test]
     fn validate_checks_enum_default_membership() {
         let valid = validate(
             "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, slow]\n    default: fast\n---\n",
@@ -2648,8 +2893,32 @@ mod tests {
         let invalid = validate(
             "---\ninput:\n  mode:\n    type: enum\n    choices: [fast, slow]\n    default: turbo\n---\n",
         );
-        assert!(invalid.iter().any(|diagnostic| {
+        let diagnostic = invalid
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == "invalid_xprompt_frontmatter_input_default"
+            })
+            .unwrap();
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostic.message,
+            "default `turbo` is not one of fast | slow"
+        );
+    }
+
+    #[test]
+    fn path_defaults_allow_spaces_and_reject_line_breaks() {
+        let spaced = validate(
+            "---\ninput:\n  file:\n    type: path\n    default: 'src/my file.rs'\n---\n",
+        );
+        assert!(!has_error(&spaced), "{spaced:?}");
+
+        let multiline = validate(
+            "---\ninput:\n  file:\n    type: path\n    default: \"src/my\\nfile.rs\"\n---\n",
+        );
+        assert!(multiline.iter().any(|diagnostic| {
             diagnostic.code == "invalid_xprompt_frontmatter_input_default"
+                && diagnostic.severity == DiagnosticSeverity::Error
         }));
     }
 

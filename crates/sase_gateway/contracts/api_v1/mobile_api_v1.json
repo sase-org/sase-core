@@ -410,6 +410,7 @@
       "target": "string|null"
     },
     "MobileInputChoiceWire": {
+      "description": "string|null; default null when absent",
       "label": "string|null",
       "value": "string"
     },

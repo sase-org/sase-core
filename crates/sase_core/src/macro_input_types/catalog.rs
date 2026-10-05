@@ -45,7 +45,11 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
         scalar("word", &[], "A single word with no whitespace."),
         scalar("line", &[], "A single line of text with no line breaks."),
         scalar("text", &[], "Free-form text that may span multiple lines."),
-        scalar("path", &[], "A filesystem path with no whitespace."),
+        scalar(
+            "path",
+            &[],
+            "A single-line filesystem path; spaces are allowed.",
+        ),
         scalar("int", &["integer"], "A whole number."),
         scalar("float", &[], "A number, optionally with a decimal point."),
         scalar(
