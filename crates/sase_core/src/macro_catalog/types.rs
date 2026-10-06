@@ -11,8 +11,6 @@ use crate::{content_layout::MemoryTierWire, MobileInputChoiceWire};
 pub(super) const MAX_CONTENT_PREVIEW_CHARS: usize = 500;
 pub(super) const SCHEMA_VERSION: u32 = 1;
 pub const MACRO_SKILL_DEFINITION_WIRE_SCHEMA_VERSION: u64 = 1;
-pub(super) const SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV: &str =
-    "SASE_XPROMPT_PLUGIN_DIRS_JSON";
 pub(super) const SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON_ENV: &str =
     "SASE_XPROMPT_PLUGIN_CONFIG_PATHS_JSON";
 pub(super) const SASE_SKILL_PLUGIN_DIRS_JSON_ENV: &str =
@@ -61,13 +59,10 @@ fn default_accept_legacy_xprompt_names() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroCatalogLoadOptions {
     pub root_dir: Option<PathBuf>,
-    pub package_xprompts_dir: Option<PathBuf>,
     pub package_macros_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
-    pub default_xprompts_dir: Option<PathBuf>,
     pub default_macros_dir: Option<PathBuf>,
     pub default_config_path: Option<PathBuf>,
-    pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
     pub plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
@@ -78,13 +73,10 @@ pub struct MacroCatalogLoadOptions {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MacroCatalogResourcePaths {
-    pub package_xprompts_dir: Option<PathBuf>,
     pub package_macros_dir: Option<PathBuf>,
     pub package_skills_dir: Option<PathBuf>,
-    pub default_xprompts_dir: Option<PathBuf>,
     pub default_macros_dir: Option<PathBuf>,
     pub default_config_path: Option<PathBuf>,
-    pub plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
     pub plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub plugin_config_paths: BTreeMap<String, PathBuf>,
@@ -100,13 +92,10 @@ impl MacroCatalogLoadOptions {
     pub fn new(root_dir: Option<PathBuf>) -> Self {
         Self {
             root_dir,
-            package_xprompts_dir: None,
             package_macros_dir: None,
             package_skills_dir: None,
-            default_xprompts_dir: None,
             default_macros_dir: None,
             default_config_path: None,
-            plugin_xprompt_dirs: BTreeMap::new(),
             plugin_macro_dirs: BTreeMap::new(),
             plugin_skill_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
@@ -119,13 +108,10 @@ impl MacroCatalogLoadOptions {
         mut self,
         resource_paths: MacroCatalogResourcePaths,
     ) -> Self {
-        self.package_xprompts_dir = resource_paths.package_xprompts_dir;
         self.package_macros_dir = resource_paths.package_macros_dir;
         self.package_skills_dir = resource_paths.package_skills_dir;
-        self.default_xprompts_dir = resource_paths.default_xprompts_dir;
         self.default_macros_dir = resource_paths.default_macros_dir;
         self.default_config_path = resource_paths.default_config_path;
-        self.plugin_xprompt_dirs = resource_paths.plugin_xprompt_dirs;
         self.plugin_macro_dirs = resource_paths.plugin_macro_dirs;
         self.plugin_skill_dirs = resource_paths.plugin_skill_dirs;
         self.plugin_config_paths = resource_paths.plugin_config_paths;

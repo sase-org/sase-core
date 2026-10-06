@@ -137,17 +137,6 @@ impl CatalogLoader {
         &self,
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
-        // Retired first, canonical last so canonical wins. Retired plugin
-        // metadata is skipped when the legacy policy is false.
-        if self.accepts_legacy() {
-            for (module, dir) in &self.plugin_xprompt_dirs {
-                result.extend(self.load_plugin_macros_from_dir(
-                    module,
-                    dir,
-                    "the plugin's skills/ resource directory",
-                )?);
-            }
-        }
         for (module, dir) in &self.plugin_macro_dirs {
             result.extend(self.load_plugin_macros_from_dir(
                 module,
@@ -276,12 +265,6 @@ impl CatalogLoader {
         &self,
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut result = BTreeMap::new();
-        if self.accepts_legacy() {
-            for (module, dir) in &self.plugin_xprompt_dirs {
-                result
-                    .extend(self.load_plugin_workflows_from_dir(module, dir)?);
-            }
-        }
         for (module, dir) in &self.plugin_macro_dirs {
             result.extend(self.load_plugin_workflows_from_dir(module, dir)?);
         }
@@ -730,8 +713,6 @@ impl CatalogLoader {
     ) -> Option<PathBuf> {
         if let Some(rest) = source.strip_prefix("plugin:") {
             let (module, filename) = rest.split_once('/')?;
-            // Probe the canonical macro directory before the retired
-            // xprompt directory so new-first selection resolves.
             let canonical = self
                 .plugin_macro_dirs
                 .get(module)
@@ -739,19 +720,11 @@ impl CatalogLoader {
             if canonical.as_ref().is_some_and(|path| path.is_file()) {
                 return canonical;
             }
-            let xprompt = self
-                .plugin_xprompt_dirs
-                .get(module)
-                .map(|dir| dir.join(filename));
-            if xprompt.as_ref().is_some_and(|path| path.is_file()) {
-                return xprompt;
-            }
             return self
                 .plugin_skill_dirs
                 .get(module)
                 .map(|dir| dir.join(filename))
-                .or(canonical)
-                .or(xprompt);
+                .or(canonical);
         }
         if let Some(module) = source.strip_prefix("plugin_config:") {
             return self.plugin_config_paths.get(module).cloned();
@@ -808,9 +781,9 @@ impl CatalogLoader {
 
     fn package_dirs(&self) -> Vec<PathBuf> {
         [
-            self.package_xprompts_dir.clone(),
+            self.package_macros_dir.clone(),
             self.package_skills_dir.clone(),
-            self.default_xprompts_dir.clone(),
+            self.default_macros_dir.clone(),
         ]
         .into_iter()
         .flatten()

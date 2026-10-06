@@ -111,7 +111,7 @@ pub fn load_editor_snippet_catalog(
                 trigger,
                 template,
                 source: "user_config".to_string(),
-                xprompt_name: None,
+                macro_name: None,
                 description: None,
                 source_path_display: Some("ace.snippets".to_string()),
             },
@@ -339,8 +339,8 @@ fn snippet_entry_from_macro(
     Some(EditorSnippetEntryWire {
         trigger,
         template,
-        source: "xprompt".to_string(),
-        xprompt_name: Some(xprompt.name.clone()),
+        source: "macro".to_string(),
+        macro_name: Some(xprompt.name.clone()),
         description: xprompt.description.clone(),
         source_path_display: xprompt.source_path.clone(),
     })

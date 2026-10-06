@@ -1271,7 +1271,7 @@ mod tests {
                 display_label: name.to_string(),
                 insertion: Some(format!("#{name}")),
                 reference_prefix: Some("#".to_string()),
-                kind: Some("xprompt".to_string()),
+                kind: Some("macro".to_string()),
                 description: None,
                 source_bucket: "plugin".to_string(),
                 project: None,

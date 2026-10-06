@@ -567,7 +567,7 @@ pub(crate) async fn macro_catalog(
     Query(query): Query<MacroCatalogQuery>,
 ) -> Result<Json<MobileMacroCatalogResponseWire>, ApiError> {
     let device =
-        authenticate(&state, &headers, "/api/v1/xprompts/catalog").await?;
+        authenticate(&state, &headers, "/api/v1/macros/catalog").await?;
     let request = MobileMacroCatalogRequestWire {
         schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
         project: query.project,

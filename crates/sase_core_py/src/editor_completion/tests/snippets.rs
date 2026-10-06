@@ -1429,16 +1429,14 @@ fn apply_snippet_session_event_binding_rejects_malformed_input() {
 }
 
 #[test]
-fn catalog_options_accept_macro_aliases_with_duplicate_rejection() {
+fn catalog_options_accept_only_macro_keys() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let temp = tempfile::tempdir().unwrap();
         let macros_dir = temp.path().join("macros");
-        let xprompts_dir = temp.path().join("xprompts");
         std::fs::create_dir_all(&macros_dir).unwrap();
-        std::fs::create_dir_all(&xprompts_dir).unwrap();
 
-        // New keys are accepted.
+        // Macro keys are accepted.
         let options = PyDict::new_bound(py);
         options
             .set_item(
@@ -1450,45 +1448,23 @@ fn catalog_options_accept_macro_aliases_with_duplicate_rejection() {
         assert_eq!(parsed.package_macros_dir, Some(macros_dir.clone()));
         assert!(parsed.accept_legacy_xprompt_names);
 
-        // Old keys still work.
-        let options = PyDict::new_bound(py);
-        options
-            .set_item(
-                "package_xprompts_dir",
-                xprompts_dir.to_string_lossy().to_string(),
-            )
-            .unwrap();
-        let parsed = macro_catalog_options_from_py(Some(&options)).unwrap();
-        assert_eq!(parsed.package_xprompts_dir, Some(xprompts_dir.clone()));
-
-        // Both spellings together are an error, even for empty maps.
+        // Retired xprompt keys are rejected. // legacy xprompt spelling
         let options = PyDict::new_bound(py);
         options.set_item("package_xprompts_dir", "a").unwrap();
-        options.set_item("package_macros_dir", "b").unwrap();
         assert!(macro_catalog_options_from_py(Some(&options)).is_err());
 
         let options = PyDict::new_bound(py);
         options.set_item("default_xprompts_dir", "a").unwrap();
-        options.set_item("default_macros_dir", "b").unwrap();
         assert!(macro_catalog_options_from_py(Some(&options)).is_err());
 
-        let empty_old = PyDict::new_bound(py);
-        empty_old
+        let retired = PyDict::new_bound(py);
+        retired
             .set_item(
                 "plugin_xprompt_dirs",
                 json_value_to_py(py, &json!({})).unwrap(),
             )
             .unwrap();
-        // An empty old map alone is fine.
-        assert!(macro_catalog_options_from_py(Some(&empty_old)).is_ok());
-        empty_old
-            .set_item(
-                "plugin_macro_dirs",
-                json_value_to_py(py, &json!({})).unwrap(),
-            )
-            .unwrap();
-        // Both present, even empty, is a duplicate.
-        assert!(macro_catalog_options_from_py(Some(&empty_old)).is_err());
+        assert!(macro_catalog_options_from_py(Some(&retired)).is_err());
 
         // Policy defaults true and is settable.
         assert!(

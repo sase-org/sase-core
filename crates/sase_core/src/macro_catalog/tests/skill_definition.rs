@@ -76,7 +76,7 @@ fn catalog_payloads_without_memory_fields_still_deserialize() {
     // Helper payloads written before xprompt memories existed omit the
     // additive fields entirely.
     let entry: MobileMacroCatalogEntryWire = serde_json::from_str(
-            r##"{"name":"foo","display_label":"foo","insertion":"#foo","reference_prefix":"#","kind":"xprompt","description":null,"source_bucket":"config","project":null,"tags":[],"input_signature":null,"is_skill":false,"content_preview":null,"source_path_display":null}"##,
+            r##"{"name":"foo","display_label":"foo","insertion":"#foo","reference_prefix":"#","kind":"macro","description":null,"source_bucket":"config","project":null,"tags":[],"input_signature":null,"is_skill":false,"content_preview":null,"source_path_display":null}"##,
         )
         .unwrap();
     assert_eq!(entry.memory_type, None);
@@ -99,10 +99,7 @@ fn pseudo_sources_do_not_get_definition_paths() {
     let loader = CatalogLoader {
         root_dir: Some(temp.path().to_path_buf()),
         home_dir: Some(temp.path().join("home")),
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::new(),
         canonical_project_refs: BTreeMap::new(),

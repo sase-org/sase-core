@@ -98,7 +98,7 @@ fn rejects_misplaced_skill_definitions_in_both_directions() {
 fn packaged_skill_frame_template_is_not_a_skill_source() {
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
-    let package_skills = package.join("xprompts/skills");
+    let package_skills = package.join("macros/skills");
     fs::create_dir_all(&package_skills).unwrap();
     fs::write(
         package_skills.join("sase_plan.md"),
@@ -130,7 +130,7 @@ fn packaged_skill_frame_template_is_not_a_skill_source() {
 fn packaged_skills_load_from_nested_xprompts_skills_only() {
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
-    let nested = package.join("xprompts/skills");
+    let nested = package.join("macros/skills");
     let legacy = package.join("skills");
     fs::create_dir_all(&nested).unwrap();
     fs::create_dir_all(&legacy).unwrap();
@@ -146,7 +146,9 @@ fn packaged_skills_load_from_nested_xprompts_skills_only() {
     .unwrap();
 
     let loader = CatalogLoader {
-        package_skills_dir: Some(package.join("xprompts/skills")),
+        package_skills_dir: Some(package.join("macros/skills")),
+        package_macros_dir: Some(package.join("macros")),
+        default_macros_dir: Some(package.join("default_macros")),
         ..CatalogLoader::default()
     };
     let xprompts = loader.load_all_macros(None).unwrap();
@@ -202,17 +204,17 @@ fn parity_fixture_covers_supported_catalog_sources() {
     fs::create_dir_all(root.join("sase/xprompts")).unwrap();
     fs::create_dir_all(root.join("sase/skills")).unwrap();
     fs::create_dir_all(home.join("sase/xprompts/app")).unwrap();
-    fs::create_dir_all(package.join("xprompts")).unwrap();
-    fs::create_dir_all(package.join("xprompts/skills")).unwrap();
-    fs::create_dir_all(package.join("default_xprompts")).unwrap();
+    fs::create_dir_all(package.join("macros")).unwrap();
+    fs::create_dir_all(package.join("macros/skills")).unwrap();
+    fs::create_dir_all(package.join("default_macros")).unwrap();
 
     fs::write(
-        package.join("xprompts/builtin.md"),
+        package.join("macros/builtin.md"),
         "---\ntags: [mentor]\n---\nBuilt in",
     )
     .unwrap();
     fs::write(
-        package.join("xprompts/skills/sase_plan.md"),
+        package.join("macros/skills/sase_plan.md"),
         "---\nskill: true\n---\nPlan skill",
     )
     .unwrap();
@@ -222,7 +224,7 @@ fn parity_fixture_covers_supported_catalog_sources() {
     )
     .unwrap();
     fs::write(
-        package.join("default_xprompts/defaulted.md"),
+        package.join("default_macros/defaulted.md"),
         "---\ndescription: Default prompt\n---\nDefault body",
     )
     .unwrap();
@@ -251,11 +253,10 @@ fn parity_fixture_covers_supported_catalog_sources() {
     let loader = CatalogLoader {
         root_dir: Some(root.clone()),
         home_dir: Some(home.clone()),
-        package_xprompts_dir: Some(package.join("xprompts")),
-        package_skills_dir: Some(package.join("xprompts/skills")),
-        default_xprompts_dir: Some(package.join("default_xprompts")),
+        package_skills_dir: Some(package.join("macros/skills")),
+        package_macros_dir: Some(package.join("macros")),
+        default_macros_dir: Some(package.join("default_macros")),
         default_config_path: Some(package.join("default_config.yml")),
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::from([("app".to_string(), root.clone())]),
         canonical_project_refs: BTreeMap::from([(
@@ -318,7 +319,7 @@ fn parity_fixture_covers_supported_catalog_sources() {
         wire_by_name["builtin"].definition_path.as_deref(),
         Some(
             package
-                .join("xprompts/builtin.md")
+                .join("macros/builtin.md")
                 .canonicalize()
                 .unwrap()
                 .to_str()
@@ -337,7 +338,7 @@ fn parity_fixture_covers_supported_catalog_sources() {
         wire_by_name["skill/sase_plan"].definition_path.as_deref(),
         Some(
             package
-                .join("xprompts/skills/sase_plan.md")
+                .join("macros/skills/sase_plan.md")
                 .canonicalize()
                 .unwrap()
                 .to_str()
@@ -348,7 +349,7 @@ fn parity_fixture_covers_supported_catalog_sources() {
         wire_by_name["defaulted"].definition_path.as_deref(),
         Some(
             package
-                .join("default_xprompts/defaulted.md")
+                .join("default_macros/defaulted.md")
                 .canonicalize()
                 .unwrap()
                 .to_str()
@@ -392,12 +393,12 @@ fn loads_plugin_file_and_config_catalog_sources() {
     let root = temp.path().join("workspace");
     let home = temp.path().join("home");
     let package = temp.path().join("package");
-    let plugin_prompts = temp.path().join("plugin").join("xprompts");
+    let plugin_prompts = temp.path().join("plugin").join("macros");
     let plugin_config = temp.path().join("plugin_config");
     fs::create_dir_all(root.join("sase")).unwrap();
     fs::create_dir_all(home.join(".config/sase")).unwrap();
-    fs::create_dir_all(package.join("xprompts")).unwrap();
-    fs::create_dir_all(package.join("default_xprompts")).unwrap();
+    fs::create_dir_all(package.join("macros")).unwrap();
+    fs::create_dir_all(package.join("default_macros")).unwrap();
     fs::create_dir_all(&plugin_prompts).unwrap();
     fs::create_dir_all(&plugin_config).unwrap();
 
@@ -426,10 +427,10 @@ fn loads_plugin_file_and_config_catalog_sources() {
     let loader = CatalogLoader {
         root_dir: Some(root.clone()),
         home_dir: Some(home),
-        package_xprompts_dir: Some(package.join("xprompts")),
-        default_xprompts_dir: Some(package.join("default_xprompts")),
+        package_macros_dir: Some(package.join("macros")),
+        default_macros_dir: Some(package.join("default_macros")),
         default_config_path: Some(package.join("default_config.yml")),
-        plugin_xprompt_dirs: BTreeMap::from([(
+        plugin_macro_dirs: BTreeMap::from([(
             "fake_plugin.prompts".to_string(),
             plugin_prompts.clone(),
         )]),
@@ -525,10 +526,7 @@ fn config_workflows_are_ignored_but_file_backed_project_workflows_load() {
     let loader = CatalogLoader {
         root_dir: Some(root.clone()),
         home_dir: Some(home),
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::from([(
             "app".to_string(),

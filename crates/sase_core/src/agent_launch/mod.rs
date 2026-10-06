@@ -58,10 +58,10 @@ pub use proc_runtime::{
     prepare_proc_script, proc_script_argv, resolve_proc_execution_cwd,
     sanitized_proc_env, validate_proc_workspace_intent,
     validate_standalone_named_proc_name, ProcDispatchPreparedWire,
-    ProcDispatchRequestWire, PROC_DISPATCH_WIRE_SCHEMA_VERSION,
-    PROC_PHASE_ACQUIRING_WORKSPACE, PROC_PHASE_CHECKING,
-    PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING, PROC_PHASE_SETTLING,
-    PROC_PHASE_WAITING, PROMPT_PROC_ORIGIN, XPROMPT_PROC_ORIGIN,
+    ProcDispatchRequestWire, LEGACY_XPROMPT_PROC_ORIGIN,
+    PROC_DISPATCH_WIRE_SCHEMA_VERSION, PROC_PHASE_ACQUIRING_WORKSPACE,
+    PROC_PHASE_CHECKING, PROC_PHASE_PREPARING_SCRIPT, PROC_PHASE_RUNNING,
+    PROC_PHASE_SETTLING, PROC_PHASE_WAITING, PROMPT_PROC_ORIGIN,
 };
 pub use typed_units::{
     plan_typed_launch_units, plan_typed_launch_units_with_flags,

@@ -793,7 +793,7 @@ pub struct EditorSnippetEntryWire {
     pub template: String,
     pub source: String,
     #[serde(default)]
-    pub xprompt_name: Option<String>,
+    pub macro_name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -1104,10 +1104,10 @@ mod tests {
                     memory_type: None,
                     content_preview: Some("Complete the bead".to_string()),
                     source_path_display: Some(
-                        "xprompts/bd/work_phase_bead.md".to_string(),
+                        "macros/bd/work_phase_bead.md".to_string(),
                     ),
                     definition_path: Some(
-                        "/tmp/sase/xprompts/bd/work_phase_bead.md".to_string(),
+                        "/tmp/sase/macros/bd/work_phase_bead.md".to_string(),
                     ),
                     definition_range: None,
                 }],
@@ -1128,7 +1128,7 @@ mod tests {
                     trigger: "fix".to_string(),
                     template: "Fix $1$0".to_string(),
                     source: "user_config".to_string(),
-                    xprompt_name: None,
+                    macro_name: None,
                     description: Some("Fix snippet".to_string()),
                     source_path_display: Some("ace.snippets".to_string()),
                 }],
@@ -1257,8 +1257,8 @@ mod tests {
                     }],
                     "is_skill": false,
                     "content_preview": "Complete the bead",
-                    "source_path_display": "xprompts/bd/work_phase_bead.md",
-                    "definition_path": "/tmp/sase/xprompts/bd/work_phase_bead.md"
+                    "source_path_display": "macros/bd/work_phase_bead.md",
+                    "definition_path": "/tmp/sase/macros/bd/work_phase_bead.md"
                 }],
                 "stats": {
                     "total_count": 1,
@@ -1301,7 +1301,7 @@ mod tests {
                     "trigger": "fix",
                     "template": "Fix $1$0",
                     "source": "user_config",
-                    "xprompt_name": null,
+                    "macro_name": null,
                     "description": "Fix snippet",
                     "source_path_display": "ace.snippets"
                 }],
@@ -1421,14 +1421,14 @@ mod tests {
                 "entries": [{
                     "trigger": "ship",
                     "template": "Ship $1$0",
-                    "source": "xprompt"
+                    "source": "macro"
                 }],
                 "stats": {"total_count": 1}
             }))
             .unwrap();
 
         assert_eq!(response.entries[0].trigger, "ship");
-        assert_eq!(response.entries[0].xprompt_name, None);
+        assert_eq!(response.entries[0].macro_name, None);
         assert_eq!(
             serde_json::to_value(&response).unwrap(),
             json!({
@@ -1447,8 +1447,8 @@ mod tests {
                 "entries": [{
                     "trigger": "ship",
                     "template": "Ship $1$0",
-                    "source": "xprompt",
-                    "xprompt_name": null,
+                    "source": "macro",
+                    "macro_name": null,
                     "description": null,
                     "source_path_display": null
                 }],
@@ -1484,7 +1484,7 @@ if [ "$1" != "editor" ] || [ "$2" != "helper-bridge" ] || [ "$3" != "snippet-cat
   exit 7
 fi
 cat >/dev/null
-printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"trigger":"fix","template":"Fix $1$0","source":"user_config","xprompt_name":null,"description":null,"source_path_display":"ace.snippets"}],"stats":{"total_count":1}}'
+printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"trigger":"fix","template":"Fix $1$0","source":"user_config","macro_name":null,"description":null,"source_path_display":"ace.snippets"}],"stats":{"total_count":1}}'
 "#,
         )
         .unwrap();
@@ -1589,7 +1589,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             "display_label": "review",
             "insertion": "#review",
             "reference_prefix": "#",
-            "kind": "xprompt",
+            "kind": "macro",
             "description": null,
             "source_bucket": "project",
             "project": null,
@@ -1604,7 +1604,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             }],
             "is_skill": false,
             "content_preview": null,
-            "source_path_display": "sase/xprompts/review.md"
+            "source_path_display": "sase/macros/review.md"
         });
         let old_entry: MobileMacroCatalogEntryWire =
             serde_json::from_value(old_json).unwrap();
@@ -1619,7 +1619,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
                 "display_label": "review",
                 "insertion": "#review",
                 "reference_prefix": "#",
-                "kind": "xprompt",
+                "kind": "macro",
                 "description": null,
                 "source_bucket": "project",
                 "project": null,
@@ -1637,7 +1637,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
                 }],
                 "is_skill": false,
                 "content_preview": null,
-                "source_path_display": "sase/xprompts/review.md"
+                "source_path_display": "sase/macros/review.md"
             })
         );
 
@@ -1647,7 +1647,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
                 "display_label": "review",
                 "insertion": "#review",
                 "reference_prefix": "#",
-                "kind": "xprompt",
+                "kind": "macro",
                 "description": null,
                 "source_bucket": "project",
                 "project": null,
@@ -1656,8 +1656,8 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
                 "inputs": [],
                 "is_skill": false,
                 "content_preview": null,
-                "source_path_display": "sase/xprompts/review.md",
-                "definition_path": "/workspace/sase/xprompts/review.md",
+                "source_path_display": "sase/macros/review.md",
+                "definition_path": "/workspace/sase/macros/review.md",
                 "definition_range": {
                     "start": {"line": 8, "character": 2},
                     "end": {"line": 8, "character": 8}
@@ -1666,7 +1666,7 @@ printf '%s\n' '{"schema_version":1,"status":"ok","message":"","entries":[{"value
             .unwrap();
         assert_eq!(
             new_entry.definition_path.as_deref(),
-            Some("/workspace/sase/xprompts/review.md")
+            Some("/workspace/sase/macros/review.md")
         );
         assert_eq!(
             new_entry.definition_range.map(|range| range.start.line),

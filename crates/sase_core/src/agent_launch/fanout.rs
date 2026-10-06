@@ -4,10 +4,9 @@ use super::conditional::filter_conditional_launch_segments;
 use super::directive_scan::{
     alt_directive_starts, alt_inner_ranges, directive_occurrences,
     find_matching_delimiter, launch_literal_zone_ranges, leading_blank_line_re,
-    parse_directive_args_with_names, position_in_ranges,
+    macro_occurrences, parse_directive_args_with_names, position_in_ranges,
     split_named_directive_arg, strip_disabled_region_markers,
-    unquote_directive_arg_value, xprompt_occurrences, DirectiveArg,
-    DirectiveOccurrence,
+    unquote_directive_arg_value, DirectiveArg, DirectiveOccurrence,
 };
 use super::plan_resolution::strip_prompt_regions;
 use super::wires::{
@@ -1061,7 +1060,7 @@ fn has_wait_directive(prompt: &str) -> bool {
         return true;
     }
     prompt.contains("#t")
-        && xprompt_occurrences(prompt).iter().any(|reference| {
+        && macro_occurrences(prompt).iter().any(|reference| {
             reference.name == "t"
                 && reference.has_time_argument
                 && !position_in_ranges(reference.start, &ignored_ranges)

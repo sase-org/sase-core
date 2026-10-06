@@ -721,7 +721,7 @@ fn scan_explicit_macro_skill_refs(
             continue;
         }
         let token_start = start + 1;
-        let end = scan_xprompt_reference_end(text, token_start);
+        let end = scan_macro_reference_end(text, token_start);
         if end <= token_start || overlaps(start, end, occupied) {
             continue;
         }
@@ -742,7 +742,7 @@ fn scan_explicit_macro_skill_refs(
     links
 }
 
-fn scan_xprompt_reference_end(text: &str, start: usize) -> usize {
+fn scan_macro_reference_end(text: &str, start: usize) -> usize {
     let mut end = start;
     for (offset, character) in text[start..].char_indices() {
         if !(character.is_ascii_alphanumeric()
@@ -758,7 +758,7 @@ fn scan_xprompt_reference_end(text: &str, start: usize) -> usize {
 fn canonical_macro_skill_ref_from_document_text(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let token = trimmed.strip_prefix('#')?;
-    let end = scan_xprompt_reference_end(token, 0);
+    let end = scan_macro_reference_end(token, 0);
     if end == 0 {
         return None;
     }

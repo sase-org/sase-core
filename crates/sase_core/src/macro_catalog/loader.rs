@@ -51,13 +51,10 @@ fn plugin_input_type_files_from_env(
 pub(super) struct CatalogLoader {
     pub(super) root_dir: Option<PathBuf>,
     pub(super) home_dir: Option<PathBuf>,
-    pub(super) package_xprompts_dir: Option<PathBuf>,
     pub(super) package_macros_dir: Option<PathBuf>,
     pub(super) package_skills_dir: Option<PathBuf>,
-    pub(super) default_xprompts_dir: Option<PathBuf>,
     pub(super) default_macros_dir: Option<PathBuf>,
     pub(super) default_config_path: Option<PathBuf>,
-    pub(super) plugin_xprompt_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_config_paths: BTreeMap<String, PathBuf>,
@@ -80,13 +77,10 @@ impl Default for CatalogLoader {
         Self {
             root_dir: None,
             home_dir: None,
-            package_xprompts_dir: None,
             package_macros_dir: None,
             package_skills_dir: None,
-            default_xprompts_dir: None,
             default_macros_dir: None,
             default_config_path: None,
-            plugin_xprompt_dirs: BTreeMap::new(),
             plugin_macro_dirs: BTreeMap::new(),
             plugin_skill_dirs: BTreeMap::new(),
             plugin_config_paths: BTreeMap::new(),
@@ -116,58 +110,25 @@ impl CatalogLoader {
         let root_dir = options.root_dir.clone();
         let home_dir = env::var_os("HOME").map(PathBuf::from);
         // Explicit resource options retain precedence over inferred
-        // environment/package paths.
-        let xprompt_package_root =
-            env::var_os("SASE_XPROMPT_PACKAGE_DIR").map(PathBuf::from);
-        let macro_package_root = env::var_os(SASE_MACRO_PACKAGE_DIR_ENV)
-            .map(PathBuf::from)
-            .or_else(|| xprompt_package_root.clone());
-        let package_xprompts_dir = options
-            .package_xprompts_dir
-            .clone()
-            .or_else(|| env_path("SASE_XPROMPT_BUILTIN_DIR"))
-            .or_else(|| {
-                xprompt_package_root
-                    // legacy xprompt spelling (retired `xprompts` dir)
-                    .as_ref()
-                    .map(|root| root.join("xprompts"))
-            });
+        // environment/package paths. Only macro keys are accepted; retired
+        // xprompt option spellings were removed in the key-flip.
+        let macro_package_root =
+            env::var_os(SASE_MACRO_PACKAGE_DIR_ENV).map(PathBuf::from);
         let package_macros_dir = options
             .package_macros_dir
             .clone()
             .or_else(|| env_path(SASE_MACRO_BUILTIN_DIR_ENV))
             .or_else(|| {
                 macro_package_root.as_ref().map(|root| root.join("macros"))
-            })
-            .or_else(|| {
-                xprompt_package_root
-                    .as_ref()
-                    .map(|root| root.join("macros"))
             });
         let package_skills_dir = options
             .package_skills_dir
             .clone()
             .or_else(|| env_path("SASE_SKILL_BUILTIN_DIR"))
             .or_else(|| {
-                xprompt_package_root.as_ref().map(|root| {
-                    // legacy xprompt spelling (retired `xprompts/skills`)
-                    root.join("xprompts").join(SKILL_DIRECTORY_SEGMENT)
-                })
-            })
-            .or_else(|| {
                 macro_package_root.as_ref().map(|root| {
                     root.join("macros").join(SKILL_DIRECTORY_SEGMENT)
                 })
-            });
-        let default_xprompts_dir = options
-            .default_xprompts_dir
-            .clone()
-            .or_else(|| env_path("SASE_XPROMPT_DEFAULT_DIR"))
-            .or_else(|| {
-                xprompt_package_root
-                    .as_ref()
-                    // legacy xprompt spelling (retired `default_xprompts`)
-                    .map(|root| root.join("default_xprompts"))
             });
         let default_macros_dir = options
             .default_macros_dir
@@ -175,11 +136,6 @@ impl CatalogLoader {
             .or_else(|| env_path(SASE_MACRO_DEFAULT_DIR_ENV))
             .or_else(|| {
                 macro_package_root
-                    .as_ref()
-                    .map(|root| root.join("default_macros"))
-            })
-            .or_else(|| {
-                xprompt_package_root
                     .as_ref()
                     .map(|root| root.join("default_macros"))
             });
@@ -191,20 +147,10 @@ impl CatalogLoader {
                 macro_package_root
                     .as_ref()
                     .map(|root| root.join("default_config.yml"))
-            })
-            .or_else(|| {
-                xprompt_package_root
-                    .as_ref()
-                    .map(|root| root.join("default_config.yml"))
             });
-        // Explicit plugin maps win over transport variables. Macro and
-        // retired families stay separate so both load with macro winning;
-        // each family resolves its own transport variable.
-        let plugin_xprompt_dirs = if options.plugin_xprompt_dirs.is_empty() {
-            plugin_path_map_from_env(SASE_XPROMPT_PLUGIN_DIRS_JSON_ENV)
-        } else {
-            options.plugin_xprompt_dirs.clone()
-        };
+        // Explicit plugin maps win over transport variables. Only the macro
+        // transport variable is read; retired xprompt plugin dirs load only
+        // through the legacy macro_sources list when the policy allows.
         let plugin_macro_dirs = if options.plugin_macro_dirs.is_empty() {
             plugin_path_map_from_env(SASE_MACRO_PLUGIN_DIRS_JSON_ENV)
         } else {
@@ -229,13 +175,10 @@ impl CatalogLoader {
         Self {
             root_dir,
             home_dir,
-            package_xprompts_dir,
             package_macros_dir,
             package_skills_dir,
-            default_xprompts_dir,
             default_macros_dir,
             default_config_path,
-            plugin_xprompt_dirs,
             plugin_macro_dirs,
             plugin_skill_dirs,
             plugin_config_paths,
@@ -463,16 +406,6 @@ impl CatalogLoader {
         project: Option<&str>,
     ) -> Result<BTreeMap<String, CatalogMacro>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
-        // Retired first, canonical last so canonical wins on conflict.
-        // Explicit retired options are skipped when the policy is false.
-        if self.retired_allowed() {
-            if let Some(dir) = &self.package_xprompts_dir {
-                all.extend(self.load_macros_from_dir(dir, None, false)?);
-            }
-            if let Some(dir) = &self.default_xprompts_dir {
-                all.extend(self.load_macros_from_dir(dir, None, false)?);
-            }
-        }
         if let Some(dir) = &self.package_macros_dir {
             all.extend(self.load_macros_from_dir(dir, None, false)?);
         }
@@ -540,11 +473,6 @@ impl CatalogLoader {
         project: Option<&str>,
     ) -> Result<BTreeMap<String, CatalogWorkflow>, MacroCatalogLoadError> {
         let mut all = BTreeMap::new();
-        if self.retired_allowed() {
-            if let Some(dir) = &self.package_xprompts_dir {
-                all.extend(self.load_workflows_from_dir(dir, None, false)?);
-            }
-        }
         if let Some(dir) = &self.package_macros_dir {
             all.extend(self.load_workflows_from_dir(dir, None, false)?);
         }

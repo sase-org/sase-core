@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 6;
+pub const CONTENT_LAYOUT_SCHEMA_VERSION: u32 = 7;
 
 /// Directory name holding canonical xprompt-backed skill sources.
 ///
@@ -89,7 +89,6 @@ pub struct ProjectContentLayoutWire {
     pub root: String,
     pub namespace_root: LayoutPathWire,
     pub config: CompatibleLayoutPathWire,
-    pub xprompts: CompatibleLayoutPathWire,
     pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
@@ -103,7 +102,6 @@ pub struct ProjectContentLayoutWire {
 pub struct HomeContentLayoutWire {
     pub root: String,
     pub namespace_root: LayoutPathWire,
-    pub xprompts: CompatibleLayoutPathWire,
     pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
@@ -118,7 +116,6 @@ pub struct HomeContentLayoutWire {
 pub struct ChezmoiContentLayoutWire {
     pub source_root: String,
     pub namespace_root: LayoutPathWire,
-    pub xprompts: CompatibleLayoutPathWire,
     pub macros: CompatibleLayoutPathWire,
     pub skills: LayoutPathWire,
     pub refs: LayoutPathWire,
@@ -531,12 +528,6 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
         LayoutTrackingWire::SourceControlled,
         LayoutCollisionPolicyWire::Error,
     );
-    let xprompts = compatible_path(
-        namespace_root.join("xprompts"),
-        [root.join(".xprompts"), root.join("xprompts")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::FirstWins,
-    );
     // Canonical macro writer with retired xprompt directories as legacy
     // candidates. // legacy xprompt spelling (retired `.xprompts`/`xprompts`)
     let macros = compatible_path(
@@ -555,7 +546,6 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
             LayoutTrackingWire::SourceControlled,
         ),
         config,
-        xprompts,
         macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
@@ -576,12 +566,6 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
 
 fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
     let namespace_root = root.join("sase");
-    let xprompts = compatible_path(
-        namespace_root.join("xprompts"),
-        [root.join(".xprompts"), root.join("xprompts")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::FirstWins,
-    );
     // Canonical macro writer with retired xprompt directories as legacy
     // candidates. // legacy xprompt spelling (retired `.xprompts`/`xprompts`)
     let macros = compatible_path(
@@ -598,7 +582,6 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
             LayoutPathRoleWire::Canonical,
             LayoutTrackingWire::SourceControlled,
         ),
-        xprompts,
         macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
@@ -624,12 +607,6 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
 
 fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
     let namespace_root = root.join("sase");
-    let xprompts = compatible_path(
-        namespace_root.join("xprompts"),
-        [root.join("dot_xprompts"), root.join("xprompts")],
-        LayoutTrackingWire::SourceControlled,
-        LayoutCollisionPolicyWire::FirstWins,
-    );
     // Canonical chezmoi macro path with its dot_macros counterpart and the
     // retired dot_xprompts candidate.
     // legacy xprompt spelling (retired `dot_xprompts`/`xprompts`)
@@ -652,7 +629,6 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
             LayoutPathRoleWire::Canonical,
             LayoutTrackingWire::SourceControlled,
         ),
-        xprompts,
         macros,
         skills: skills_layout_path(&namespace_root),
         refs: refs_layout_path(&namespace_root),
@@ -669,187 +645,6 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
         ),
         agent_documents: agent_document_paths(root),
     }
-}
-
-#[allow(dead_code)]
-fn xprompt_sources(
-    project_root: Option<&Path>,
-    home_root: &Path,
-    project_name: Option<&str>,
-) -> Vec<MacroSourceWire> {
-    let mut sources = Vec::new();
-    if let Some(root) = project_root {
-        push_directory_source(
-            &mut sources,
-            "project_canonical",
-            "project",
-            LayoutPathRoleWire::Canonical,
-            root.join("sase").join("xprompts"),
-            true,
-            true,
-        );
-        push_directory_source(
-            &mut sources,
-            "project_legacy_hidden",
-            "project",
-            LayoutPathRoleWire::Legacy,
-            root.join(".xprompts"),
-            true,
-            false,
-        );
-        push_directory_source(
-            &mut sources,
-            "project_legacy_visible",
-            "project",
-            LayoutPathRoleWire::Legacy,
-            root.join("xprompts"),
-            true,
-            false,
-        );
-    }
-
-    push_directory_source(
-        &mut sources,
-        "home_canonical",
-        "home",
-        LayoutPathRoleWire::Canonical,
-        home_root.join("sase").join("xprompts"),
-        false,
-        true,
-    );
-    push_directory_source(
-        &mut sources,
-        "home_legacy_hidden",
-        "home",
-        LayoutPathRoleWire::Legacy,
-        home_root.join(".xprompts"),
-        false,
-        false,
-    );
-    push_directory_source(
-        &mut sources,
-        "home_legacy_visible",
-        "home",
-        LayoutPathRoleWire::Legacy,
-        home_root.join("xprompts"),
-        false,
-        false,
-    );
-
-    if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
-        push_directory_source(
-            &mut sources,
-            "home_project_canonical",
-            "home_project",
-            LayoutPathRoleWire::Canonical,
-            home_root.join("sase").join("xprompts").join(project_name),
-            true,
-            true,
-        );
-        push_directory_source(
-            &mut sources,
-            "home_project_legacy_config",
-            "home_project",
-            LayoutPathRoleWire::Legacy,
-            home_root
-                .join(".config")
-                .join("sase")
-                .join("xprompts")
-                .join(project_name),
-            true,
-            false,
-        );
-    }
-
-    if let Some(root) = project_root {
-        push_config_source(
-            &mut sources,
-            "project_config_canonical",
-            "project_config",
-            LayoutPathRoleWire::Canonical,
-            root.join("sase").join("sase.yml"),
-            Some("project_config"),
-            Some(LayoutCollisionPolicyWire::Error),
-            true,
-        );
-        push_config_source(
-            &mut sources,
-            "project_config_legacy",
-            "project_config",
-            LayoutPathRoleWire::Legacy,
-            root.join("sase.yml"),
-            Some("project_config"),
-            Some(LayoutCollisionPolicyWire::Error),
-            false,
-        );
-    }
-
-    push_config_source(
-        &mut sources,
-        "user_config_overlays",
-        "user_config",
-        LayoutPathRoleWire::Unchanged,
-        home_root.join(".config").join("sase").join("sase_*.yml"),
-        None,
-        None,
-        true,
-    );
-    if let Some(source) = sources.last_mut() {
-        source.ordering = Some("reverse_lexical_first_wins".to_string());
-    }
-    push_config_source(
-        &mut sources,
-        "user_config",
-        "user_config",
-        LayoutPathRoleWire::Unchanged,
-        home_root.join(".config").join("sase").join("sase.yml"),
-        None,
-        None,
-        true,
-    );
-    push_symbolic_source(
-        &mut sources,
-        "plugin_config",
-        "plugin",
-        "entrypoint:sase_config/default_config.yml",
-        vec!["config"],
-    );
-    push_symbolic_source(
-        &mut sources,
-        "package_default_config",
-        "package",
-        "package:default_config.yml",
-        vec!["config"],
-    );
-    push_symbolic_source(
-        &mut sources,
-        "plugin_resources",
-        "plugin",
-        "entrypoint:sase_xprompts/xprompts",
-        vec!["md", "yml", "yaml"],
-    );
-    push_symbolic_source(
-        &mut sources,
-        "package_defaults",
-        "package",
-        "package:default_xprompts",
-        vec!["md"],
-    );
-    push_symbolic_source(
-        &mut sources,
-        "package_internal",
-        "package",
-        "package:xprompts",
-        vec!["md", "yml", "yaml"],
-    );
-    if let Some(source) = sources.last_mut() {
-        source.steps_path = Some("package:xprompts/steps".to_string());
-    }
-
-    for (priority, source) in sources.iter_mut().enumerate() {
-        source.priority = (priority + 1) as u32;
-    }
-    sources
 }
 
 /// Canonical macro source list, new-first.
@@ -898,14 +693,13 @@ fn macro_sources(
         );
     }
 
-    // Retired family: same scope order as the legacy list so an old-only
-    // installation keeps its precedence. Old `sase/xprompts` canonicals are
-    // retired here (Legacy role) while staying Canonical in `xprompt_sources`.
+    // Retired family: same scope order so an old-only installation keeps its
+    // precedence. Old `sase/xprompts` paths are retired here (Legacy role).
     // legacy xprompt spelling
     if let Some(root) = project_root {
         push_directory_source(
             &mut sources,
-            "project_xprompt_canonical",
+            "project_xprompt_legacy",
             "project",
             LayoutPathRoleWire::Legacy,
             root.join("sase").join("xprompts"),
@@ -933,7 +727,7 @@ fn macro_sources(
     }
     push_directory_source(
         &mut sources,
-        "home_xprompt_canonical",
+        "home_xprompt_legacy",
         "home",
         LayoutPathRoleWire::Legacy,
         home_root.join("sase").join("xprompts"),
@@ -961,7 +755,7 @@ fn macro_sources(
     if let Some(project_name) = project_name.filter(|name| !name.is_empty()) {
         push_directory_source(
             &mut sources,
-            "home_project_xprompt_canonical",
+            "home_project_xprompt_legacy",
             "home_project",
             LayoutPathRoleWire::Legacy,
             home_root.join("sase").join("xprompts").join(project_name),
@@ -1392,7 +1186,7 @@ mod tests {
             LayoutCollisionPolicyWire::Error
         );
         assert_eq!(
-            project.xprompts.read_policy,
+            project.macros.read_policy,
             LayoutCollisionPolicyWire::FirstWins
         );
         assert_eq!(project.repos.tracking, LayoutTrackingWire::RuntimeOnly);
@@ -1405,8 +1199,8 @@ mod tests {
             "/home/alice/.config/sase/sase.yml"
         );
         assert_eq!(
-            layout.chezmoi.unwrap().xprompts.canonical.path,
-            "/dotfiles/home/sase/xprompts"
+            layout.chezmoi.unwrap().macros.canonical.path,
+            "/dotfiles/home/sase/macros"
         );
     }
 
@@ -1429,7 +1223,7 @@ mod tests {
         assert!(ids.contains(&"package_macro_defaults"));
         assert!(ids.contains(&"package_macro_internal"));
         // Retired xprompt spellings stay readable. // legacy xprompt spelling
-        assert!(ids.contains(&"project_xprompt_canonical"));
+        assert!(ids.contains(&"project_xprompt_legacy"));
         assert!(ids.contains(&"plugin_resources"));
         assert_eq!(
             layout.macro_sources.last().unwrap().steps_path.as_deref(),
@@ -1438,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn collision_policy_is_exclusive_for_config_and_first_wins_for_xprompts() {
+    fn collision_policy_is_exclusive_for_config_and_first_wins_for_macros() {
         let exclusive = resolve_layout_candidates(
             LayoutCollisionPolicyWire::Error,
             &[true, true],
@@ -1584,7 +1378,7 @@ mod tests {
             Some("demo"),
         );
 
-        assert_eq!(layout.schema_version, 6);
+        assert_eq!(layout.schema_version, 7);
         assert_eq!(
             layout.project.as_ref().unwrap().refs.path,
             "/repo/sase/refs"
@@ -1833,8 +1627,8 @@ mod tests {
         );
         let project = layout.project.unwrap();
         // Old layouts keep their previous values.
-        assert_eq!(project.xprompts.canonical.path, "/repo/sase/xprompts");
-        assert_eq!(project.xprompts.legacy[0].path, "/repo/.xprompts");
+        assert_eq!(project.macros.canonical.path, "/repo/sase/macros");
+        assert_eq!(project.macros.legacy[0].path, "/repo/.xprompts");
         // Canonical macro writers resolve to `sase/macros`.
         assert_eq!(project.macros.canonical.path, "/repo/sase/macros");
         assert_eq!(project.macros.write_path, "/repo/sase/macros");
@@ -1882,13 +1676,13 @@ mod tests {
                 "project_macros_canonical",
                 "home_macros_canonical",
                 "home_project_macros_canonical",
-                "project_xprompt_canonical",
+                "project_xprompt_legacy",
                 "project_legacy_hidden",
                 "project_legacy_visible",
-                "home_xprompt_canonical",
+                "home_xprompt_legacy",
                 "home_legacy_hidden",
                 "home_legacy_visible",
-                "home_project_xprompt_canonical",
+                "home_project_xprompt_legacy",
                 "home_project_legacy_config",
                 "project_config_canonical",
                 "project_config_legacy",

@@ -116,7 +116,7 @@ fn builds_snippet_completions_by_case_insensitive_prefix() {
         None,
         &[
             snippet_entry("Foo", "body $1$0", "ace.snippets"),
-            snippet_entry("bar", "bar", "xprompt"),
+            snippet_entry("bar", "bar", "macro"),
         ],
     );
 
@@ -134,7 +134,7 @@ fn snippet_entry(
         trigger: trigger.to_string(),
         template: template.to_string(),
         source: source.to_string(),
-        xprompt_name: None,
+        macro_name: None,
         description: None,
         source_path_display: None,
     }

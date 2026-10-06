@@ -26,7 +26,7 @@ pub(crate) struct DirectiveOccurrence {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct XPromptOccurrence {
+pub(crate) struct MacroOccurrence {
     pub(crate) name: String,
     pub(crate) start: usize,
     pub(crate) end: usize,
@@ -131,8 +131,8 @@ pub(crate) fn directive_occurrences(
     Ok(out)
 }
 
-pub(crate) fn xprompt_occurrences(prompt: &str) -> Vec<XPromptOccurrence> {
-    xprompt_reference_re()
+pub(crate) fn macro_occurrences(prompt: &str) -> Vec<MacroOccurrence> {
+    macro_reference_re()
         .captures_iter(prompt)
         .filter_map(|captures| {
             let marker = captures.get(2)?;
@@ -151,7 +151,7 @@ pub(crate) fn xprompt_occurrences(prompt: &str) -> Vec<XPromptOccurrence> {
                     end = paren_end + 1;
                 }
             }
-            Some(XPromptOccurrence {
+            Some(MacroOccurrence {
                 name,
                 start: marker.start(),
                 end,
@@ -194,7 +194,7 @@ pub(crate) fn launch_inline_literal_ranges(
             .map(|directive| (directive.start, directive.end)),
     );
     masks.extend(
-        xprompt_occurrences(prompt)
+        macro_occurrences(prompt)
             .into_iter()
             .map(|reference| (reference.start, reference.end)),
     );
@@ -604,7 +604,7 @@ fn directive_re() -> &'static Regex {
     })
 }
 
-fn xprompt_reference_re() -> &'static Regex {
+fn macro_reference_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(

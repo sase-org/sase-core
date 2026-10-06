@@ -32,10 +32,7 @@ fn canonical_project_sources_win_with_legacy_read_compatibility() {
     let loader = CatalogLoader {
         root_dir: Some(root.clone()),
         home_dir: None,
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::from([("app".to_string(), root.clone())]),
         canonical_project_refs: BTreeMap::from([(
@@ -90,10 +87,7 @@ fn project_config_collision_reports_split_state() {
     let loader = CatalogLoader {
         root_dir: Some(root),
         home_dir: None,
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::new(),
         canonical_project_refs: BTreeMap::new(),
@@ -128,10 +122,7 @@ fn computes_known_project_local_config_definition_range() {
     let loader = CatalogLoader {
         root_dir: None,
         home_dir: None,
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: BTreeMap::from([(
             "app".to_string(),
@@ -278,10 +269,7 @@ fn project_catalog_uses_canonical_namespace_and_filter_refs() {
     let loader = CatalogLoader {
         root_dir: Some(workspace.clone()),
         home_dir: Some(home),
-        package_xprompts_dir: None,
-        default_xprompts_dir: None,
         default_config_path: None,
-        plugin_xprompt_dirs: BTreeMap::new(),
         plugin_config_paths: BTreeMap::new(),
         known_workspaces: known.workspaces,
         canonical_project_refs: known.canonical_refs,

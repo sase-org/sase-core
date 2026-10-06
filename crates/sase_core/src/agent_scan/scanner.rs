@@ -48,10 +48,10 @@ use crate::queue_directive::{
 
 const USED_MACROS_FILE: &str = "macros.json";
 // legacy xprompt spelling
-const USED_XPROMPTS_FILE: &str = "xprompts.json";
+const LEGACY_USED_XPROMPTS_FILE: &str = "xprompts.json";
 const RAW_PROMPT_MACROS_FILE: &str = "raw_prompt.md";
 // legacy xprompt spelling
-const RAW_PROMPT_FILE: &str = "raw_xprompt.md";
+const LEGACY_RAW_XPROMPT_FILE: &str = "raw_xprompt.md";
 const MAX_OUTPUT_VARIABLE_DEPTH: usize = 8;
 const MAX_OUTPUT_VARIABLE_NODES: usize = 1_024;
 const MAX_OUTPUT_VARIABLE_ENCODED_BYTES: usize = 65_536;
@@ -82,7 +82,7 @@ pub(crate) fn select_used_macros_path(artifact_dir: &Path) -> PathBuf {
     select_canonical_or_legacy(
         artifact_dir,
         USED_MACROS_FILE,
-        USED_XPROMPTS_FILE,
+        LEGACY_USED_XPROMPTS_FILE,
     )
 }
 
@@ -92,7 +92,7 @@ pub(crate) fn select_raw_prompt_path(artifact_dir: &Path) -> PathBuf {
     select_canonical_or_legacy(
         artifact_dir,
         RAW_PROMPT_MACROS_FILE,
-        RAW_PROMPT_FILE,
+        LEGACY_RAW_XPROMPT_FILE,
     )
 }
 

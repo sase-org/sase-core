@@ -44,7 +44,7 @@ fn loads_native_snippet_catalog_with_user_overrides() {
     assert!(response.stats.total_count >= 2);
     assert_eq!(by_trigger["review"].source, "user_config");
     assert_eq!(by_trigger["review"].template, "User review $0");
-    assert_eq!(by_trigger["Review"].source, "xprompt");
+    assert_eq!(by_trigger["Review"].source, "macro");
     assert_eq!(by_trigger["Review"].template, "Authored capital review$0");
     assert_eq!(
         by_trigger["Review"].description.as_deref(),
@@ -90,15 +90,15 @@ fn converts_native_xprompt_snippet_templates() {
         by_trigger["fixit"].template,
         "fix $1 in parser. Then $2 or done.$0"
     );
-    assert_eq!(by_trigger["fixit"].xprompt_name.as_deref(), Some("fix"));
+    assert_eq!(by_trigger["fixit"].macro_name.as_deref(), Some("fix"));
     assert_eq!(
         by_trigger["Fixit"].template,
         "Fix $1 in parser. Then $2 or done.$0"
     );
     assert_eq!(by_trigger["Fixit"].source, by_trigger["fixit"].source);
     assert_eq!(
-        by_trigger["Fixit"].xprompt_name,
-        by_trigger["fixit"].xprompt_name
+        by_trigger["Fixit"].macro_name,
+        by_trigger["fixit"].macro_name
     );
     assert_eq!(
         by_trigger["Fixit"].description,

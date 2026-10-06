@@ -136,23 +136,18 @@ fn default_py_accept_legacy() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PyMacroCatalogOptions {
     #[serde(default)]
     root_dir: Option<PathBuf>,
-    #[serde(default)]
-    package_xprompts_dir: Option<PathBuf>,
     #[serde(default)]
     package_macros_dir: Option<PathBuf>,
     #[serde(default)]
     package_skills_dir: Option<PathBuf>,
     #[serde(default)]
-    default_xprompts_dir: Option<PathBuf>,
-    #[serde(default)]
     default_macros_dir: Option<PathBuf>,
     #[serde(default)]
     default_config_path: Option<PathBuf>,
-    #[serde(default)]
-    plugin_xprompt_dirs: Option<BTreeMap<String, PathBuf>>,
     #[serde(default)]
     plugin_macro_dirs: Option<BTreeMap<String, PathBuf>>,
     #[serde(default)]
@@ -167,13 +162,10 @@ impl Default for PyMacroCatalogOptions {
     fn default() -> Self {
         Self {
             root_dir: None,
-            package_xprompts_dir: None,
             package_macros_dir: None,
             package_skills_dir: None,
-            default_xprompts_dir: None,
             default_macros_dir: None,
             default_config_path: None,
-            plugin_xprompt_dirs: None,
             plugin_macro_dirs: None,
             plugin_skill_dirs: None,
             plugin_config_paths: None,
@@ -191,37 +183,16 @@ fn macro_catalog_options_from_py(
         )
         .map_err(|error| {
             PyValueError::new_err(format!(
-                "xprompt catalog options are invalid: {error}"
+                "macro catalog options are invalid: {error}"
             ))
         })?,
         None => PyMacroCatalogOptions::default(),
     };
-    if raw.package_xprompts_dir.is_some() && raw.package_macros_dir.is_some() {
-        return Err(PyValueError::new_err(
-            "xprompt catalog options are invalid: supply only one of \
-             `package_xprompts_dir` or `package_macros_dir`",
-        ));
-    }
-    if raw.default_xprompts_dir.is_some() && raw.default_macros_dir.is_some() {
-        return Err(PyValueError::new_err(
-            "xprompt catalog options are invalid: supply only one of \
-             `default_xprompts_dir` or `default_macros_dir`",
-        ));
-    }
-    if raw.plugin_xprompt_dirs.is_some() && raw.plugin_macro_dirs.is_some() {
-        return Err(PyValueError::new_err(
-            "xprompt catalog options are invalid: supply only one of \
-             `plugin_xprompt_dirs` or `plugin_macro_dirs`",
-        ));
-    }
     let resource_paths = MacroCatalogResourcePaths {
-        package_xprompts_dir: raw.package_xprompts_dir,
         package_macros_dir: raw.package_macros_dir,
         package_skills_dir: raw.package_skills_dir,
-        default_xprompts_dir: raw.default_xprompts_dir,
         default_macros_dir: raw.default_macros_dir,
         default_config_path: raw.default_config_path,
-        plugin_xprompt_dirs: raw.plugin_xprompt_dirs.unwrap_or_default(),
         plugin_macro_dirs: raw.plugin_macro_dirs.unwrap_or_default(),
         plugin_skill_dirs: raw.plugin_skill_dirs.unwrap_or_default(),
         plugin_config_paths: raw.plugin_config_paths.unwrap_or_default(),

@@ -82,14 +82,11 @@ fn canonical_only_and_old_only_installations_both_load() {
 fn explicit_package_macros_win_over_xprompts() {
     let temp = tempfile::tempdir().unwrap();
     let macros_dir = temp.path().join("pkg_macros");
-    let xprompts_dir = temp.path().join("pkg_xprompts");
     write_macro(&macros_dir, "plug.md", "Canonical body");
-    write_macro(&xprompts_dir, "plug.md", "Retired body");
 
     let options = MacroCatalogLoadOptions::new(None).with_resource_paths(
         MacroCatalogResourcePaths {
             package_macros_dir: Some(macros_dir),
-            package_xprompts_dir: Some(xprompts_dir),
             ..MacroCatalogResourcePaths::default()
         },
     );
@@ -238,21 +235,12 @@ fn policy_false_skips_retired_but_keeps_skills_memory_and_config() {
 #[test]
 fn policy_false_skips_explicit_retired_and_plugin_retired() {
     let temp = tempfile::tempdir().unwrap();
-    let retired = temp.path().join("retired");
     let canonical = temp.path().join("canonical");
-    write_macro(&retired, "old.md", "Retired body");
     write_macro(&canonical, "new.md", "Canonical body");
-    let plugin_old = temp.path().join("plugin_old");
-    write_macro(&plugin_old, "pold.md", "Plugin retired");
 
     let options = MacroCatalogLoadOptions::new(None)
         .with_resource_paths(MacroCatalogResourcePaths {
-            package_xprompts_dir: Some(retired),
             package_macros_dir: Some(canonical),
-            plugin_xprompt_dirs: std::collections::BTreeMap::from([(
-                "demo".to_string(),
-                plugin_old,
-            )]),
             ..MacroCatalogResourcePaths::default()
         })
         .with_legacy_policy(false);
@@ -263,9 +251,7 @@ fn policy_false_skips_explicit_retired_and_plugin_retired() {
     let mut loader = CatalogLoader::new(&options);
     loader.home_dir = Some(home);
     let all = loader.load_all_macros(None).unwrap();
-    assert!(!all.contains_key("old"));
     assert!(all.contains_key("new"));
-    assert!(!all.contains_key("pold"));
 }
 
 #[test]
