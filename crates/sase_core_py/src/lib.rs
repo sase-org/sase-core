@@ -40,6 +40,7 @@ mod editor_content;
 mod fleet;
 mod fleet_attention;
 mod goals;
+mod instruction_manifest;
 mod json_bridge;
 mod macro_input_types;
 mod memory_history;
@@ -102,5 +103,6 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     continuation::register_continuation(m)?;
     telemetry::register_telemetry(m)?;
     prompt_prediction::register_prompt_prediction(m)?;
+    instruction_manifest::register_instruction_manifest(m)?;
     Ok(())
 }
