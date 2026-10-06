@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod cli;
 pub mod config;
 pub mod events;
+pub mod fingerprint;
 pub mod history;
 pub mod jsonl;
 pub mod mutation;
@@ -37,6 +38,11 @@ pub use events::{
     BeadIdRelocationKindWire, BeadIdRelocationWire,
     BeadIssueUpdateEventFieldsWire, BeadSnoozeWakeCauseWire,
     BEAD_EVENT_SCHEMA_VERSION,
+};
+pub use fingerprint::{
+    bead_store_fingerprint, BeadStoreFingerprintWire,
+    BEAD_STORE_FINGERPRINT_LAYOUT_EVENTS, BEAD_STORE_FINGERPRINT_LAYOUT_LEGACY,
+    BEAD_STORE_FINGERPRINT_WIRE_SCHEMA_VERSION,
 };
 pub use history::{
     bead_history, bead_lost_notes, BeadHistoryChangeWire, BeadHistoryEntryWire,
