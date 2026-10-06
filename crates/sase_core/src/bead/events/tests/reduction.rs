@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 
 use crate::bead::wire::{
-    notes_text, parse_legacy_note_blob, BeadResolutionWire, IssueWire,
+    notes_text, parse_legacy_note_blob, BeadResolutionWire, IssueTypeWire,
+    IssueWire,
 };
 
 use super::super::import::PendingEvent;
@@ -399,4 +400,78 @@ fn reduction_collapse_does_not_disturb_unrelated_issues() {
     let ids: Vec<&str> =
         reduced.iter().map(|issue| issue.id.as_str()).collect();
     assert_eq!(ids, vec!["sase-1", "sase-3"]);
+}
+
+fn task_issue() -> IssueWire {
+    let mut issue = issue_with_refs(Vec::new());
+    issue.issue_type = IssueTypeWire::Task;
+    issue.tier = None;
+    issue
+}
+
+fn ready_update(
+    event_id: &str,
+    timestamp: &str,
+    ready: bool,
+) -> BeadEventRecordWire {
+    BeadEventRecordWire {
+        schema_version: BEAD_EVENT_SCHEMA_VERSION,
+        event_id: event_id.to_string(),
+        timestamp: timestamp.to_string(),
+        actor: "owner@example.com".to_string(),
+        operation: BeadEventOperationWire::IssueUpdated,
+        issue_id: "sase-1".to_string(),
+        payload: BeadEventPayloadWire::IssueUpdated {
+            fields: BeadIssueUpdateEventFieldsWire {
+                is_ready_to_work: Some(ready),
+                ..Default::default()
+            },
+        },
+    }
+}
+
+#[test]
+fn reduction_accepts_invalid_intermediate_state_repaired_by_later_event() {
+    // Parse-once validates each issue once in the post-pass instead of after
+    // every applied event, so an intermediate state that later events repair
+    // no longer fails the replay. Marking a task ready is invalid, but the
+    // second update repairs it before the final state is checked.
+    let mut stream = created_stream(&task_issue());
+    stream
+        .events
+        .push(ready_update("sase-1:2", "2026-01-02T00:00:00Z", true));
+    stream
+        .events
+        .push(ready_update("sase-1:3", "2026-01-03T00:00:00Z", false));
+
+    let streams = std::slice::from_ref(&stream);
+    for reduced in [
+        reduce_event_streams(streams).unwrap(),
+        reduce_parsed_event_streams(streams).unwrap(),
+    ] {
+        assert_eq!(reduced.len(), 1);
+        assert!(!reduced[0].is_ready_to_work);
+    }
+}
+
+#[test]
+fn reduction_still_rejects_invalid_final_state_with_validation_error() {
+    let mut stream = created_stream(&task_issue());
+    stream
+        .events
+        .push(ready_update("sase-1:2", "2026-01-02T00:00:00Z", true));
+
+    let streams = std::slice::from_ref(&stream);
+    for result in [
+        reduce_event_streams(streams),
+        reduce_parsed_event_streams(streams),
+    ] {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, "validation");
+        assert!(
+            error.message.contains("is_ready_to_work"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
 }

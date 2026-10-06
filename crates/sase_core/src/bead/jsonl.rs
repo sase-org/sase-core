@@ -147,8 +147,12 @@ pub struct RemovedFlagStreamPruneOutcomeWire {
 /// retired flag issue type, then rewrite `events/manifest.json`.
 ///
 /// `sase bead rm` leaves a tombstoned stream on disk. After the flag issue
-/// type is deleted from the wire, those files cannot be deserialized, so this
-/// must run before any typed parse of the store.
+/// type is deleted from the wire, those files cannot be deserialized.
+///
+/// This mutates the store, so it never runs on the read path: it runs under
+/// the mutation lock (`MutableStore::load`) and through the
+/// `bead_prune_removed_flag_event_streams` binding. Readers skip
+/// removed-flag tombstones in memory instead.
 pub fn prune_removed_flag_event_streams(
     beads_dir: &Path,
 ) -> Result<RemovedFlagStreamPruneOutcomeWire, BeadError> {
@@ -389,10 +393,16 @@ pub fn repair_event_store_manifest(
     })
 }
 
+/// Load the manifest and every event stream without touching the store.
+///
+/// The read path never deletes files or rewrites the manifest. Streams that
+/// fail the typed parse are classified: removed-flag tombstones are skipped
+/// in memory (the physical prune runs under the mutation lock), live-flag
+/// streams stay an error, and anything else surfaces the parse error.
+/// The streams directory is listed exactly once per read.
 pub fn read_event_store(
     beads_dir: &Path,
 ) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
-    prune_removed_flag_event_streams(beads_dir)?;
     let manifest_path = event_manifest_path(beads_dir);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
         BeadError::io(format!(
@@ -404,12 +414,13 @@ pub fn read_event_store(
         serde_json::from_str(&manifest_text)?;
     manifest.validate()?;
 
-    let streams = read_event_streams_without_manifest(beads_dir)?;
-    if manifest.stream_count != streams.len() {
+    let (streams, skipped_removed_flag) =
+        read_event_stream_files(&event_streams_dir(beads_dir), true)?;
+    if manifest.stream_count != streams.len() + skipped_removed_flag {
         return Err(BeadError::validation(format!(
             "bead event manifest stream_count mismatch: {} != {}",
             manifest.stream_count,
-            streams.len()
+            streams.len() + skipped_removed_flag
         )));
     }
     Ok((manifest, streams))
@@ -418,22 +429,61 @@ pub fn read_event_store(
 fn read_event_streams_without_manifest(
     beads_dir: &Path,
 ) -> Result<Vec<BeadEventStreamWire>, BeadError> {
-    let stream_paths = list_event_stream_paths(&event_streams_dir(beads_dir))?;
+    // Manifest repair stays strict: an unparsable stream fails the repair
+    // instead of being silently skipped.
+    let (streams, _) =
+        read_event_stream_files(&event_streams_dir(beads_dir), false)?;
+    Ok(streams)
+}
 
+/// Read every stream file under `streams_dir`, which is listed once.
+///
+/// Returns the parsed streams (sorted by stream id) plus the number of
+/// removed-flag tombstones skipped in memory. With `skip_removed_flag`
+/// false, any stream that fails the typed parse is an error.
+fn read_event_stream_files(
+    streams_dir: &Path,
+    skip_removed_flag: bool,
+) -> Result<(Vec<BeadEventStreamWire>, usize), BeadError> {
+    let stream_paths = list_event_stream_paths(streams_dir)?;
+
+    let mut streams = Vec::with_capacity(stream_paths.len());
     let mut stream_ids = BTreeSet::new();
-    stream_paths
-        .into_iter()
-        .map(|path| {
-            let stream = read_event_stream_file(&path)?;
-            if !stream_ids.insert(stream.stream_id.clone()) {
-                return Err(BeadError::validation(format!(
-                    "duplicate bead event stream: {}",
-                    stream.stream_id
-                )));
+    let mut skipped_removed_flag = 0usize;
+    for path in &stream_paths {
+        match read_event_stream_file(path) {
+            Ok(stream) => {
+                if !stream_ids.insert(stream.stream_id.clone()) {
+                    return Err(BeadError::validation(format!(
+                        "duplicate bead event stream: {}",
+                        stream.stream_id
+                    )));
+                }
+                streams.push(stream);
             }
-            Ok(stream)
-        })
-        .collect()
+            Err(error) => {
+                if !skip_removed_flag {
+                    return Err(error);
+                }
+                match classify_flag_stream(path)? {
+                    FlagStreamKind::RemovedFlag => {
+                        skipped_removed_flag += 1;
+                    }
+                    FlagStreamKind::LiveFlag => {
+                        let stream_id = path
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default();
+                        return Err(BeadError::validation(format!(
+                            "bead event store still has live flag issue-type streams: {stream_id}; migrate or remove them before loading"
+                        )));
+                    }
+                    FlagStreamKind::Other => return Err(error),
+                }
+            }
+        }
+    }
+    Ok((streams, skipped_removed_flag))
 }
 
 pub fn write_event_store(
@@ -591,16 +641,29 @@ fn read_event_stream_file(
             path.display()
         ))
     })?;
+    // Events are already validated once by `parse_event_stream_bytes`; only
+    // the filename-derived header needs checking here.
     let events = parse_event_stream_bytes(path, &contents)?;
     let stream = BeadEventStreamWire {
         stream_id: stream_id.clone(),
         root_issue_id: stream_id,
         events,
     };
-    stream.validate()?;
+    if stream.stream_id.is_empty() || stream.root_issue_id.is_empty() {
+        return Err(BeadError::validation(format!(
+            "invalid bead event stream filename: {}",
+            path.display()
+        )));
+    }
     Ok(stream)
 }
 
+/// Parse one stream file, validating each event exactly once.
+///
+/// This is the single event-validation point on the read path: callers must
+/// not re-validate events parsed here. Streams from any other source (for
+/// example Python-supplied streams through `bead_reduce_event_streams`) are
+/// validated by `validated_event_streams` instead.
 fn parse_event_stream_bytes(
     path: &Path,
     contents: &[u8],
@@ -644,6 +707,14 @@ fn parse_event_stream_bytes(
                 ))
             },
         )?;
+        event.validate().map_err(|error| {
+            BeadError::validation(format!(
+                "invalid bead event stream {} line {}: {}",
+                path.display(),
+                index + 1,
+                error.message
+            ))
+        })?;
         events.push(event);
     }
     Ok(events)
@@ -826,6 +897,67 @@ mod tests {
         assert_eq!(streams[0].stream_id, "sase-plan");
     }
 
+    fn write_tombstoned_flag_stream(
+        streams_dir: &Path,
+        manifest_count: usize,
+    ) -> PathBuf {
+        let flag_path = streams_dir.join("sase-nw.jsonl");
+        let tombstone = concat!(
+            r#"{"schema_version":1,"event_id":"sase-nw:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-nw","payload":{"kind":"issue_created","issue":{"id":"sase-nw","title":"Old flag","status":"open","issue_type":"flag","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}}}"#,
+            "\n",
+            r#"{"schema_version":1,"event_id":"sase-nw:2","timestamp":"2026-01-02T00:00:00Z","actor":"test","operation":"issue_removed","issue_id":"sase-nw","payload":{"kind":"issue_removed","cascade_removed_issue_ids":[]}}"#,
+            "\n",
+        );
+        fs::write(&flag_path, tombstone).unwrap();
+        let beads_dir = streams_dir.parent().unwrap().parent().unwrap();
+        let manifest_path = event_manifest_path(beads_dir);
+        let mut manifest: BeadEventStoreManifestWire =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap())
+                .unwrap();
+        manifest.stream_count = manifest_count;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        flag_path
+    }
+
+    fn snapshot_store_files(beads_dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut snapshot = Vec::new();
+        let manifest_path = event_manifest_path(beads_dir);
+        snapshot
+            .push((manifest_path.clone(), fs::read(&manifest_path).unwrap()));
+        for path in
+            list_event_stream_paths(&event_streams_dir(beads_dir)).unwrap()
+        {
+            snapshot.push((path.clone(), fs::read(&path).unwrap()));
+        }
+        snapshot
+    }
+
+    #[test]
+    fn read_skips_removed_flag_stream_without_touching_the_store() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let streams_dir = event_streams_dir(beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+        write_event_store(beads_dir, &[event_stream("sase-plan", "Plan")])
+            .unwrap();
+        let flag_path = write_tombstoned_flag_stream(&streams_dir, 2);
+        let before = snapshot_store_files(beads_dir);
+
+        let (loaded_manifest, streams) = read_event_store(beads_dir).unwrap();
+        assert_eq!(loaded_manifest.stream_count, 2);
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].stream_id, "sase-plan");
+
+        // The tombstone is skipped in memory only: the file and the
+        // manifest are byte-identical after a pure read.
+        assert!(flag_path.exists());
+        assert_eq!(snapshot_store_files(beads_dir), before);
+    }
+
     #[test]
     fn prune_rejects_live_flag_streams() {
         let temp = tempdir().unwrap();
@@ -842,6 +974,38 @@ mod tests {
         .unwrap();
 
         let error = prune_removed_flag_event_streams(beads_dir).unwrap_err();
+        assert!(error.message.contains("sase-nw"));
+        assert!(error.message.contains("live flag"));
+    }
+
+    #[test]
+    fn read_rejects_live_flag_stream_with_todays_message() {
+        let temp = tempdir().unwrap();
+        let beads_dir = temp.path();
+        let streams_dir = event_streams_dir(beads_dir);
+        fs::create_dir_all(&streams_dir).unwrap();
+        write_event_store(beads_dir, &[event_stream("sase-plan", "Plan")])
+            .unwrap();
+        fs::write(
+            streams_dir.join("sase-nw.jsonl"),
+            concat!(
+                r#"{"schema_version":1,"event_id":"sase-nw:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-nw","payload":{"kind":"issue_created","issue":{"id":"sase-nw","title":"Live flag","status":"open","issue_type":"flag","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let manifest_path = event_manifest_path(beads_dir);
+        let mut manifest: BeadEventStoreManifestWire =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap())
+                .unwrap();
+        manifest.stream_count = 2;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = read_event_store(beads_dir).unwrap_err();
         assert!(error.message.contains("sase-nw"));
         assert!(error.message.contains("live flag"));
     }

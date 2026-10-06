@@ -26,8 +26,9 @@ pub use reduction::reduce_event_streams;
 pub(super) use reduction::{
     apply_event, archive_close_metadata, artifact_link_row_from_provenance,
     clear_snooze_record, compare_issues_canonically,
-    reduce_event_streams_with_link_provenance, task_plus_one_reopen_decision,
-    validated_event_streams, ActiveLinkProvenance, StoredLinkIdentity,
+    reduce_parsed_event_streams,
+    reduce_parsed_event_streams_with_link_provenance,
+    task_plus_one_reopen_decision, ActiveLinkProvenance, StoredLinkIdentity,
     TaskPlusOneReopenDecision,
 };
 pub use wire::{

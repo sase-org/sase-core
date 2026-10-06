@@ -9,7 +9,7 @@ use crate::bead::config::BeadConfigWire;
 use crate::bead::events::clear_snooze_record;
 use crate::bead::events::import_issues_to_event_streams;
 use crate::bead::events::mint_bead_event_id;
-use crate::bead::events::reduce_event_streams;
+use crate::bead::events::reduce_parsed_event_streams;
 use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
 use crate::bead::events::BeadEventRecordWire;
@@ -17,6 +17,7 @@ use crate::bead::events::BeadEventStreamWire;
 use crate::bead::events::BEAD_EVENT_SCHEMA_VERSION;
 use crate::bead::jsonl::event_store_present;
 use crate::bead::jsonl::import_issues_from_jsonl;
+use crate::bead::jsonl::prune_removed_flag_event_streams;
 use crate::bead::jsonl::read_event_store;
 use crate::bead::jsonl::write_event_store_changed;
 use crate::bead::jsonl::write_issues_jsonl;
@@ -282,8 +283,11 @@ impl MutableStore {
         let fallback = default_config("beads", "");
         let config = load_config(beads_dir, fallback)?;
         let (issues, streams) = if event_store_present(beads_dir) {
+            // The physical removed-flag prune runs here, under the mutation
+            // lock, now that the read path only skips tombstones in memory.
+            prune_removed_flag_event_streams(beads_dir)?;
             let (_manifest, streams) = read_event_store(beads_dir)?;
-            let issues = reduce_event_streams(&streams)?;
+            let issues = reduce_parsed_event_streams(&streams)?;
             (
                 issues,
                 tracked_streams::TrackedEventStreams::loaded(streams),
@@ -298,7 +302,9 @@ impl MutableStore {
                 tracked_streams::TrackedEventStreams::imported(streams),
             )
         };
-        validate_unique_external_refs(&issues)?;
+        // Uniqueness is already checked once per load: by
+        // `reduce_parsed_event_streams` on the event-store branch and by
+        // `import_issues_from_jsonl` on the legacy branch.
         Ok(Self {
             beads_dir: beads_dir.to_path_buf(),
             config,

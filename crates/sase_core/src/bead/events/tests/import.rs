@@ -211,7 +211,7 @@ fn link_added_provenance_tracks_rewrite_removal_and_readd() {
     streams[0].events.push(added);
 
     let (issues, provenance) =
-        reduce_event_streams_with_link_provenance(&streams).unwrap();
+        reduce_parsed_event_streams_with_link_provenance(&streams).unwrap();
     assert_eq!(issues[0].links.len(), 1);
     assert_eq!(provenance.len(), 1);
     let row = provenance.values().next().unwrap();
@@ -231,7 +231,7 @@ fn link_added_provenance_tracks_rewrite_removal_and_readd() {
     streams[0].events.push(rewrite);
 
     let (_issues, provenance) =
-        reduce_event_streams_with_link_provenance(&streams).unwrap();
+        reduce_parsed_event_streams_with_link_provenance(&streams).unwrap();
     assert_eq!(provenance.len(), 1);
     let row = provenance.values().next().unwrap();
     assert_eq!(row.actor, "bob");
@@ -246,7 +246,7 @@ fn link_added_provenance_tracks_rewrite_removal_and_readd() {
         "",
     ));
     let (_issues, provenance) =
-        reduce_event_streams_with_link_provenance(&streams).unwrap();
+        reduce_parsed_event_streams_with_link_provenance(&streams).unwrap();
     assert!(provenance.is_empty());
 
     let mut readd = link_event(
@@ -260,7 +260,7 @@ fn link_added_provenance_tracks_rewrite_removal_and_readd() {
     readd.actor = "carol".to_string();
     streams[0].events.push(readd);
     let (_issues, provenance) =
-        reduce_event_streams_with_link_provenance(&streams).unwrap();
+        reduce_parsed_event_streams_with_link_provenance(&streams).unwrap();
     let row = provenance.values().next().unwrap();
     assert_eq!(row.actor, "carol");
     assert_eq!(row.timestamp, "2026-01-04T00:00:00Z");
@@ -303,7 +303,7 @@ fn inbound_link_provenance_projects_bead_as_target() {
     streams[0].events.push(inbound);
 
     let (issues, provenance) =
-        reduce_event_streams_with_link_provenance(&streams).unwrap();
+        reduce_parsed_event_streams_with_link_provenance(&streams).unwrap();
     assert_eq!(issues[0].links.len(), 1);
     assert_eq!(issues[0].links[0].direction, BeadLinkDirectionWire::In);
     assert_eq!(issues[0].links[0].target_ref, "plan:202608/a.md");

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::events::{
-    apply_event, merge_stream_events, validated_event_streams,
-    BeadEventOperationWire, BeadEventStreamWire,
+    apply_event, merge_stream_events, BeadEventOperationWire,
+    BeadEventStreamWire,
 };
 use super::jsonl::read_event_store;
 use super::wire::{notes_text, parse_legacy_note_blob, BeadError, IssueWire};
@@ -72,12 +72,12 @@ fn history_from_streams(
     streams: &[BeadEventStreamWire],
     issue_id: &str,
 ) -> Result<BeadHistoryWire, BeadError> {
-    let streams = validated_event_streams(streams)?;
+    // Streams arrive parse-validated and sorted from `read_event_store`.
     let mut issues = BTreeMap::new();
     let mut entries = Vec::new();
     let mut found = false;
 
-    for event in merge_stream_events(&streams) {
+    for event in merge_stream_events(streams) {
         let is_target = event.issue_id == issue_id;
         let before = is_target.then(|| issues.get(issue_id).cloned()).flatten();
         apply_event(&mut issues, event)?;
@@ -116,12 +116,12 @@ fn lost_notes_from_streams(
     streams: &[BeadEventStreamWire],
     issue_id: Option<&str>,
 ) -> Result<Vec<BeadLostNotesWire>, BeadError> {
-    let streams = validated_event_streams(streams)?;
+    // Streams arrive parse-validated and sorted from `read_event_store`.
     let mut issues = BTreeMap::new();
     let mut revisions: BTreeMap<String, Vec<BeadLostNoteRevisionWire>> =
         BTreeMap::new();
 
-    for event in merge_stream_events(&streams) {
+    for event in merge_stream_events(streams) {
         let before_notes = issues
             .get(&event.issue_id)
             .map(|issue: &IssueWire| notes_text(&issue.notes));

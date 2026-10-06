@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::events::{
-    merge_stream_events, reduce_event_streams, validated_event_streams,
-    BeadEventPayloadWire,
+    merge_stream_events, reduce_parsed_event_streams, BeadEventPayloadWire,
 };
 use super::jsonl::read_event_store;
 use super::read::{read_store_issues, resolve_issue_id_in_issues};
@@ -107,7 +106,7 @@ pub fn bead_attachment_references(
 ) -> Result<Vec<BeadAttachmentReferenceWire>, BeadError> {
     use crate::note_attachment::AttachmentVisibilityWire;
     let (_manifest, streams) = read_event_store(beads_dir)?;
-    let streams = validated_event_streams(&streams)?;
+    // Streams arrive parse-validated and sorted from `read_event_store`.
     type Key = (String, String, String, String);
     type Meta = (AttachmentVisibilityWire, BeadAttachmentSourceWire);
     let mut seen: BTreeMap<Key, Meta> = BTreeMap::new();
@@ -188,7 +187,7 @@ pub fn bead_attachment_references(
         }
     }
     let mut current: BTreeMap<Key, Meta> = BTreeMap::new();
-    for issue in reduce_event_streams(&streams)? {
+    for issue in reduce_parsed_event_streams(&streams)? {
         for note in &issue.notes {
             for attachment in &note.attachments {
                 current.insert(

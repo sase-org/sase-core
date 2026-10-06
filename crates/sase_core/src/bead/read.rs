@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::events::{
     apply_event, artifact_link_row_from_provenance, merge_stream_events,
-    reduce_event_streams, reduce_event_streams_with_link_provenance,
-    validated_event_streams, ActiveLinkProvenance, BeadEventOperationWire,
-    BeadEventStreamWire, StoredLinkIdentity,
+    reduce_parsed_event_streams,
+    reduce_parsed_event_streams_with_link_provenance, ActiveLinkProvenance,
+    BeadEventOperationWire, BeadEventStreamWire, StoredLinkIdentity,
 };
 use super::jsonl::{
     event_manifest_path, event_store_present, event_streams_dir,
@@ -82,7 +82,7 @@ pub fn read_event_store_issues(
     beads_dir: &Path,
 ) -> Result<Vec<IssueWire>, BeadError> {
     let (_manifest, streams) = read_event_store(beads_dir)?;
-    reduce_event_streams(&streams)
+    reduce_parsed_event_streams(&streams)
 }
 
 pub fn read_legacy_jsonl_issues(
@@ -123,9 +123,9 @@ pub fn show_issue_detail_with_options(
     if event_store_present(beads_dir) {
         let (_manifest, streams) = read_event_store(beads_dir)?;
         let (issues, provenance) = if include_links {
-            reduce_event_streams_with_link_provenance(&streams)?
+            reduce_parsed_event_streams_with_link_provenance(&streams)?
         } else {
-            (reduce_event_streams(&streams)?, BTreeMap::new())
+            (reduce_parsed_event_streams(&streams)?, BTreeMap::new())
         };
         return finish_issue_detail(
             &issues,
@@ -297,7 +297,7 @@ fn doctor_report_impl(
     let (issues, streams) = if event_store_is_present {
         match read_event_store(beads_dir) {
             Ok((_manifest, streams)) => {
-                (reduce_event_streams(&streams)?, Some(streams))
+                (reduce_parsed_event_streams(&streams)?, Some(streams))
             }
             Err(err) => {
                 messages.push(format!(
@@ -411,7 +411,7 @@ fn empty_doctor_report(messages: Vec<String>) -> BeadDoctorReportWire {
 fn redundant_close_census(
     streams: &[BeadEventStreamWire],
 ) -> Result<(usize, usize, usize), BeadError> {
-    let streams = validated_event_streams(streams)?;
+    // Streams arrive parse-validated and sorted from `read_event_store`.
     let mut issues = BTreeMap::new();
     let mut issue_ids = BTreeSet::new();
     let mut event_count = 0;
@@ -419,7 +419,7 @@ fn redundant_close_census(
     let now: DateTime<Utc> = SystemTime::now().into();
     let cutoff = now - Duration::days(REDUNDANT_CLOSE_RECENT_WINDOW_DAYS);
 
-    for event in merge_stream_events(&streams) {
+    for event in merge_stream_events(streams) {
         if event.operation == BeadEventOperationWire::IssueClosed
             && issues
                 .get(&event.issue_id)

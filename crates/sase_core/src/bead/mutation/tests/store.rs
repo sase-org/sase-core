@@ -420,3 +420,43 @@ fn link_projection_batch_takes_one_load_and_save_cycle() {
     assert_eq!(store_io_stats::loads(), 32);
     assert_eq!(store_io_stats::saves(), 32);
 }
+
+#[test]
+fn locked_load_prunes_removed_flag_tombstone_skipped_by_reads() {
+    let (_temp, beads_dir, ids) = multi_stream_store();
+    // A removed retired-flag bead leaves a tombstoned stream the typed
+    // parse rejects. Pure readers skip it in memory; the next load under
+    // the mutation lock prunes it physically.
+    let flag_path = event_streams_dir(&beads_dir).join("sase-nw.jsonl");
+    fs::write(
+        &flag_path,
+        concat!(
+            r#"{"schema_version":1,"event_id":"sase-nw:1","timestamp":"2026-01-01T00:00:00Z","actor":"test","operation":"issue_created","issue_id":"sase-nw","payload":{"kind":"issue_created","issue":{"id":"sase-nw","title":"Old flag","status":"open","issue_type":"flag","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","flag":{"key":"demo_key","remove_by_date":"2026-12-01","remove_by_release":"0.19.0"}}}}"#,
+            "\n",
+            r#"{"schema_version":1,"event_id":"sase-nw:2","timestamp":"2026-01-02T00:00:00Z","actor":"test","operation":"issue_removed","issue_id":"sase-nw","payload":{"kind":"issue_removed","cascade_removed_issue_ids":[]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let manifest_path = beads_dir.join("events/manifest.json");
+    let mut manifest: crate::bead::events::BeadEventStoreManifestWire =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap())
+            .unwrap();
+    manifest.stream_count += 1;
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let read_issues =
+        crate::bead::read::read_event_store_issues(&beads_dir).unwrap();
+    assert_eq!(read_issues.len(), ids.len());
+    assert!(flag_path.exists());
+
+    let store = MutableStore::load(&beads_dir).unwrap();
+    assert_eq!(store.issues.len(), ids.len());
+    assert!(!flag_path.exists());
+    let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
+    assert_eq!(streams.len(), ids.len());
+}
