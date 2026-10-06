@@ -348,7 +348,11 @@ fn write_manifest(dir: &std::path::Path, name: &str, text: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn record(distribution: &str, module: &str, path: &str) -> PluginInputTypeFileRecord {
+fn record(
+    distribution: &str,
+    module: &str,
+    path: &str,
+) -> PluginInputTypeFileRecord {
     PluginInputTypeFileRecord {
         distribution: distribution.to_string(),
         module: module.to_string(),
@@ -371,9 +375,11 @@ fn plugin_loader_accepts_valid_sibling_and_skips_bad_type() {
         "input_types.yml",
         "schema_version: 1\ntypes:\n  audio_edition:\n    description: Narration length.\n    choices:\n      - { value: brief, description: About 4 minutes }\n      - { value: full, label: Full edition, description: About 16 minutes }\n  bad_type:\n    description: Bad.\n    choices: [\"in progress\", \"null\", \"prod\", \"prod\"]\n",
     );
-    let (registry, diagnostics) = load_plugin_input_type_registry(&[
-        record("sase-research-artifacts", "plugin_module", &manifest),
-    ]);
+    let (registry, diagnostics) = load_plugin_input_type_registry(&[record(
+        "sase-research-artifacts",
+        "plugin_module",
+        &manifest,
+    )]);
     assert!(registry.has_plugin("sase-research-artifacts"));
     let resolved = resolve_input_type(
         "edition",

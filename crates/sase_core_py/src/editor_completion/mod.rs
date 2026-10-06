@@ -593,10 +593,9 @@ fn py_frontmatter_input_type_schema(
     registry: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     let registry = input_type_registry_from_py(registry)?;
-    let schema =
-        sase_core::editor::frontmatter_input_type_schema_with_registry(
-            &registry,
-        );
+    let schema = sase_core::editor::frontmatter_input_type_schema_with_registry(
+        &registry,
+    );
     let value = serde_json::to_value(&schema).map_err(|e| {
         PyValueError::new_err(format!("internal serialize error: {e}"))
     })?;

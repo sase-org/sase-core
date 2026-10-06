@@ -312,9 +312,8 @@ pub(super) fn current_plugin_registry(
     if raw.trim().is_empty() {
         return sase_core::macro_input_types::InputTypeRegistry::builtin();
     }
-    let files: Vec<
-        sase_core::macro_input_types::PluginInputTypeFileRecord,
-    > = serde_json::from_str(&raw).unwrap_or_default();
+    let files: Vec<sase_core::macro_input_types::PluginInputTypeFileRecord> =
+        serde_json::from_str(&raw).unwrap_or_default();
     let (registry, _diagnostics) =
         sase_core::macro_input_types::load_plugin_input_type_registry(&files);
     registry

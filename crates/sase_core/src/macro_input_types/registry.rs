@@ -7,7 +7,9 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::catalog::{builtin_catalog, CatalogEntry, CatalogSource, InputTypeKind};
+use super::catalog::{
+    builtin_catalog, CatalogEntry, CatalogSource, InputTypeKind,
+};
 use super::choices::ChoiceIssueSeverity;
 use super::{
     pyyaml_plain_scalar_is_non_string, unquoted_plain_scalar_choice_error,
@@ -231,9 +233,7 @@ pub fn load_plugin_input_type_registry_with_known(
                     path: record.path.clone(),
                     type_id: None,
                     line: None,
-                    message: format!(
-                        "failed to read input_types.yml: {error}"
-                    ),
+                    message: format!("failed to read input_types.yml: {error}"),
                 });
                 continue;
             }
@@ -248,7 +248,10 @@ pub fn load_plugin_input_type_registry_with_known(
         );
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    (InputTypeRegistry::with_plugin_entries(entries, known), diagnostics)
+    (
+        InputTypeRegistry::with_plugin_entries(entries, known),
+        diagnostics,
+    )
 }
 
 fn canonicalize_record_path(path: &str) -> String {
@@ -443,14 +446,14 @@ fn load_one_type(
             )));
         }
     }
-    let description_value =
-        mapping.iter().find(|(key, _)| yaml_key_text(key) == "description").map(
-            |(_, value)| value,
-        );
-    let choices_value =
-        mapping.iter().find(|(key, _)| yaml_key_text(key) == "choices").map(
-            |(_, value)| value,
-        );
+    let description_value = mapping
+        .iter()
+        .find(|(key, _)| yaml_key_text(key) == "description")
+        .map(|(_, value)| value);
+    let choices_value = mapping
+        .iter()
+        .find(|(key, _)| yaml_key_text(key) == "choices")
+        .map(|(_, value)| value);
     let Some(description_value) = description_value else {
         issues.push(error(format!(
             "input type `{id}` is missing required key `description`"
@@ -522,10 +525,7 @@ fn load_one_type(
             let quoted_message =
                 unquoted_plain_scalar_choice_error(&choice.value)
                     .unwrap_or_else(|| {
-                        format!(
-                            "choice `{}` must be quoted",
-                            choice.value
-                        )
+                        format!("choice `{}` must be quoted", choice.value)
                     });
             issues.push(PluginRegistryDiagnostic {
                 severity: ChoiceIssueSeverity::Error,

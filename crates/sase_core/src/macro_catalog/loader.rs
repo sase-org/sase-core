@@ -25,16 +25,11 @@ fn load_input_type_registry(
     // Deduplicate by (distribution, path, module) for determinism; the
     // loader itself dedupes same-file aliases.
     files.sort_by(|a, b| {
-        (
-            a.distribution.as_str(),
-            a.path.as_str(),
-            a.module.as_str(),
-        )
-            .cmp(&(
-                b.distribution.as_str(),
-                b.path.as_str(),
-                b.module.as_str(),
-            ))
+        (a.distribution.as_str(), a.path.as_str(), a.module.as_str()).cmp(&(
+            b.distribution.as_str(),
+            b.path.as_str(),
+            b.module.as_str(),
+        ))
     });
     files.dedup();
     let (registry, _diagnostics) =
@@ -66,8 +61,7 @@ pub(super) struct CatalogLoader {
     pub(super) plugin_macro_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_skill_dirs: BTreeMap<String, PathBuf>,
     pub(super) plugin_config_paths: BTreeMap<String, PathBuf>,
-    pub(super) input_type_registry:
-        crate::macro_input_types::InputTypeRegistry,
+    pub(super) input_type_registry: crate::macro_input_types::InputTypeRegistry,
     pub(super) accept_legacy_xprompt_names: bool,
     pub(super) known_workspaces: BTreeMap<String, PathBuf>,
     pub(super) canonical_project_refs: BTreeMap<String, String>,

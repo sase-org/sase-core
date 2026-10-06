@@ -69,8 +69,7 @@ fn py_macro_input_type_catalog(
         Some(request) => {
             let value = py_to_json_value(request.as_any())?;
             // Accept either `{registry: {...}}` or a bare registry snapshot.
-            match serde_json::from_value::<CatalogRequestWire>(value.clone())
-            {
+            match serde_json::from_value::<CatalogRequestWire>(value.clone()) {
                 Ok(wire) if wire.registry.is_some() => wire.registry,
                 _ => serde_json::from_value::<InputTypeRegistry>(value).ok(),
             }
@@ -95,11 +94,10 @@ fn py_load_macro_input_type_registry(
                 "request is not a valid load_macro_input_type_registry dict: {error}"
             ))
         })?;
-    let (registry, diagnostics) =
-        load_plugin_input_type_registry_with_known(
-            &request.files,
-            &request.known_distributions,
-        );
+    let (registry, diagnostics) = load_plugin_input_type_registry_with_known(
+        &request.files,
+        &request.known_distributions,
+    );
     let response = serde_json::json!({
         "registry": registry,
         "diagnostics": diagnostics,
@@ -198,10 +196,7 @@ pub(crate) fn register_macro_input_types(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_macro_input_type_catalog, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        py_load_macro_input_type_registry,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(py_load_macro_input_type_registry, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_input_type, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_enum_choices, m)?)?;
     m.add_function(wrap_pyfunction!(py_pyyaml_plain_scalar_is_non_string, m)?)?;

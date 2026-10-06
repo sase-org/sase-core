@@ -386,7 +386,10 @@ pub fn validate_with_registry(
     registry: &InputTypeRegistry,
 ) -> Vec<EditorDiagnostic> {
     if extract_frontmatter(text).is_some() {
-        return diagnostics_with_registry(&DocumentSnapshot::new(text), registry);
+        return diagnostics_with_registry(
+            &DocumentSnapshot::new(text),
+            registry,
+        );
     }
     let body = strip_delimiter_lines(text);
     diagnostics_with_registry(
@@ -1151,7 +1154,8 @@ fn validate_explicit_input_type(
             )
         }
         Err(error) => {
-            let names = advertised_type_names_with_registry(&builder.registry.clone());
+            let names =
+                advertised_type_names_with_registry(&builder.registry.clone());
             let suggestions =
                 suggest_closest(&raw, names.iter().map(String::as_str));
             let data = type_change_fixes(builder, range, &suggestions);
