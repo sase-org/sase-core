@@ -1,4 +1,4 @@
-//! Completion-owned xprompt spacer acceptance for the language server.
+//! Completion-owned macro spacer acceptance for the language server.
 //!
 //! The widget tracks completion-owned trailing spaces locally; the language
 //! server must do the same through standard LSP messages only (completion
@@ -13,7 +13,7 @@ use lsp_types::{
 };
 use sase_core::{
     editor_map_normalized_range_to_actual,
-    editor_normalize_xprompt_spacer_transition,
+    editor_normalize_macro_spacer_transition,
     editor_plan_macro_completion_spacer_to_parentheses_edit, DocumentSnapshot,
     EditorPosition, EditorRange, MacroCompletionSpacerWire,
 };
@@ -181,7 +181,7 @@ pub(super) fn transition_spacer_byte(
 }
 
 impl MacroLspServer {
-    /// Attach acceptance commands to eligible xprompt snippet items.
+    /// Attach acceptance commands to eligible macro snippet items.
     ///
     /// Eligible items insert a trailing spacer for optional-only entries
     /// (`#optional `). Zero-input and non-spacer items never receive a
@@ -201,7 +201,7 @@ impl MacroLspServer {
         if items.is_empty() {
             return;
         }
-        // Only xprompt snippet completions with a trailing spacer are
+        // Only macro snippet completions with a trailing spacer are
         // eligible. Other surfaces (argument names, paths, agents) pass
         // through untouched.
         let mut eligible_indices = Vec::new();
@@ -272,7 +272,7 @@ impl MacroLspServer {
                 continue;
             };
             items[index].command = Some(Command {
-                title: "Accept xprompt completion".to_string(),
+                title: "Accept macro completion".to_string(),
                 command: ACCEPT_COMMAND.to_string(),
                 arguments: Some(vec![value]),
             });
@@ -322,7 +322,7 @@ impl MacroLspServer {
         if actual_byte <= spacer_byte {
             return None;
         }
-        let normalized_text = editor_normalize_xprompt_spacer_transition(
+        let normalized_text = editor_normalize_macro_spacer_transition(
             &document.text,
             spacer_byte,
         )?;

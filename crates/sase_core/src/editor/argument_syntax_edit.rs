@@ -160,7 +160,7 @@ pub fn plan_argument_list_continuation_edit(
     })
 }
 
-/// Accepted completion spacer record for consuming an xprompt space before `(`.
+/// Accepted completion spacer record for consuming a macro space before `(`.
 ///
 /// Frontends establish acceptance (manual completion, soft completion, or
 /// selector insertion); core validates the exact reference, single ASCII
@@ -179,7 +179,7 @@ pub struct MacroCompletionSpacerWire {
     pub has_optional_inputs: bool,
 }
 
-/// Plan deleting a completion-owned xprompt space before a just-typed `(`.
+/// Plan deleting a completion-owned macro space before a just-typed `(`.
 ///
 /// The caller supplies the pre-insertion document (still containing the owned
 /// space), the caret position immediately after that space, and the typed
@@ -248,7 +248,7 @@ pub fn plan_macro_completion_spacer_to_parentheses_edit(
 /// Returns the normalized document text with exactly that byte removed, or
 /// `None` when the byte is not a single ASCII space or not on a char
 /// boundary.
-pub fn normalize_xprompt_spacer_transition(
+pub fn normalize_macro_spacer_transition(
     text: &str,
     spacer_byte: usize,
 ) -> Option<String> {
@@ -385,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_xprompt_reference_forms_without_catalog_io() {
+    fn converts_macro_reference_forms_without_catalog_io() {
         for source in [
             "#foo:<cursor>",
             "#!foo:<cursor>",
@@ -888,7 +888,7 @@ mod tests {
     fn spacer_normalization_maps_ranges_back() {
         let actual = "#optional (suffix)";
         let spacer = actual.find(' ').expect("spacer");
-        let normalized = normalize_xprompt_spacer_transition(actual, spacer)
+        let normalized = normalize_macro_spacer_transition(actual, spacer)
             .expect("normalized");
         assert_eq!(normalized, "#optional(suffix)");
         let actual_doc = DocumentSnapshot::new(actual);
@@ -916,6 +916,6 @@ mod tests {
             map_normalized_byte_offset_to_actual(spacer - 1, spacer),
             spacer - 1
         );
-        assert_eq!(normalize_xprompt_spacer_transition(actual, 0), None);
+        assert_eq!(normalize_macro_spacer_transition(actual, 0), None);
     }
 }

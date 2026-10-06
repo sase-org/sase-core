@@ -10,10 +10,11 @@ use sase_core::{
     MobileHelperStatusWire, MobileMacroCatalogEntryWire,
     MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
     MobileMacroCatalogStatsWire, MobileMacroInputWire,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 use sase_macro_lsp::MacroLspServer;
 use serde_json::{json, Value};
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{duplex, AsyncWriteExt};
 use tower_lsp_server::UriExt;
 use tower_lsp_server::{LspService, Server};
 
@@ -184,7 +185,7 @@ impl HelperHostBridge for FixtureBridge {
         _request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         Ok(EditorSnippetCatalogResponseWire {
-            schema_version: 1,
+            schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
             result: MobileHelperResultWire {
                 status: MobileHelperStatusWire::Success,
                 message: None,
@@ -200,7 +201,7 @@ impl HelperHostBridge for FixtureBridge {
                 trigger: "foo".to_string(),
                 template: "body $1$0".to_string(),
                 source: "ace.snippets".to_string(),
-                xprompt_name: None,
+                macro_name: None,
                 description: Some("Foo snippet".to_string()),
                 source_path_display: Some("ace.snippets".to_string()),
             }],
@@ -1753,25 +1754,94 @@ async fn write_message(writer: &mut tokio::io::DuplexStream, value: Value) {
     writer.write_all(body.as_bytes()).await.unwrap();
 }
 
+const READ_MESSAGE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 async fn read_message(reader: &mut tokio::io::DuplexStream) -> Value {
+    read_message_timeout(reader, READ_MESSAGE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("stdio read_message failed after 10s: {error}");
+        })
+}
+
+async fn read_message_timeout(
+    reader: &mut tokio::io::DuplexStream,
+    timeout: std::time::Duration,
+) -> Result<Value, String> {
+    use tokio::io::AsyncReadExt;
+
     let mut header = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        reader.read_exact(&mut byte).await.unwrap();
-        header.push(byte[0]);
-        if header.ends_with(b"\r\n\r\n") {
-            break;
+    let received: Vec<Value> = Vec::new();
+    let header_result = tokio::time::timeout(timeout, async {
+        loop {
+            let mut byte = [0u8; 1];
+            reader.read_exact(&mut byte).await.map_err(|error| {
+                format!(
+                    "header read failed after {} header bytes: {error}",
+                    header.len()
+                )
+            })?;
+            header.push(byte[0]);
+            if header.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            if header.len() > 8192 {
+                return Err(format!(
+                    "header exceeded 8KiB without terminator; partial={:?}",
+                    String::from_utf8_lossy(&header)
+                ));
+            }
         }
+        Ok::<_, String>(())
+    })
+    .await;
+    match header_result {
+        Err(_) => {
+            return Err(format!(
+                "timed out waiting for header after {} bytes; partial header={:?}; received {} messages",
+                header.len(),
+                String::from_utf8_lossy(&header),
+                received.len()
+            ));
+        }
+        Ok(Err(error)) => return Err(error),
+        Ok(Ok(())) => {}
     }
-    let header = String::from_utf8(header).unwrap();
-    let length = header
+    let header_text = String::from_utf8(header.clone()).map_err(|error| {
+        format!("header is not UTF-8 after {} bytes: {error}", header.len())
+    })?;
+    let length: usize = header_text
         .lines()
         .find_map(|line| line.strip_prefix("Content-Length: "))
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap();
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).await.unwrap();
-    serde_json::from_slice(&body).unwrap()
+        .ok_or_else(|| {
+            format!("missing Content-Length in header={header_text:?}")
+        })?;
+    if length > 8 * 1024 * 1024 {
+        return Err(format!("refusing Content-Length {length} over 8MiB"));
+    }
+    let mut body = vec![0u8; length];
+    let body_result =
+        tokio::time::timeout(timeout, reader.read_exact(&mut body)).await;
+    match body_result {
+        Err(_) => {
+            return Err(format!(
+                "timed out waiting for {length}-byte body after header={header_text:?}"
+            ));
+        }
+        Ok(Err(error)) => {
+            return Err(format!(
+                "body read failed for {length}-byte body after header={header_text:?}: {error}"
+            ));
+        }
+        Ok(Ok(_)) => {}
+    }
+    serde_json::from_slice(&body).map_err(|error| {
+        format!(
+            "invalid JSON body of {length} bytes after header={header_text:?}: {error}"
+        )
+    })
 }
 
 async fn read_response_result(
@@ -1827,4 +1897,35 @@ fn assert_no_semantic_token_overlaps(tokens: &[(u32, u32, u32, u32, u32)]) {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn read_message_round_trips_normal_jsonrpc_payload() {
+    use tokio::io::duplex;
+    let (mut writer, mut reader) = duplex(8192);
+    let expected = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {"ok": true},
+    });
+    write_message(&mut writer, expected.clone()).await;
+    let actual =
+        read_message_timeout(&mut reader, std::time::Duration::from_secs(10))
+            .await
+            .expect("normal payload must decode");
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn read_message_times_out_on_stalled_input() {
+    use tokio::io::duplex;
+    let (_writer, mut reader) = duplex(8192);
+    let error =
+        read_message_timeout(&mut reader, std::time::Duration::from_secs(10))
+            .await
+            .expect_err("stalled input must fail instead of hanging");
+    assert!(
+        error.contains("timed out"),
+        "stalled error must name the timeout: {error}"
+    );
 }

@@ -109,6 +109,12 @@ fn py_validate_snippet_trigger(
 }
 
 #[pyfunction]
+#[pyo3(name = "editor_snippet_catalog_wire_schema_version")]
+fn py_editor_snippet_catalog_wire_schema_version() -> u32 {
+    sase_core::EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION
+}
+
+#[pyfunction]
 #[pyo3(name = "load_editor_snippet_catalog")]
 #[pyo3(signature = (project = None, root_dir = None, accept_legacy_xprompt_names = true))]
 fn py_load_editor_snippet_catalog(
@@ -118,7 +124,7 @@ fn py_load_editor_snippet_catalog(
     accept_legacy_xprompt_names: bool,
 ) -> PyResult<PyObject> {
     let request = EditorSnippetCatalogRequestWire {
-        schema_version: 1,
+        schema_version: sase_core::EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
         project,
     };
     let options = MacroCatalogLoadOptions::new(root_dir.map(PathBuf::from))
@@ -1128,6 +1134,10 @@ pub(crate) fn register_editor_completion(
     m.add_function(wrap_pyfunction!(py_compose_snippet_catalog, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_snippet_trigger, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_editor_snippet_catalog, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_editor_snippet_catalog_wire_schema_version,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_resolve_macro_skill_definition, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_macro_skill_definition_wire_schema_version,

@@ -1,5 +1,5 @@
 //! Trigger and context detection: the `classify_*` dispatcher plus the
-//! xprompt-argument trigger analysis and skeleton helpers behind it.
+//! macro-argument trigger analysis and skeleton helpers behind it.
 
 use super::artifact_ref::detect_artifact_ref_context_at_position;
 use super::vcs_candidates::{
@@ -93,7 +93,7 @@ pub fn classify_completion_context_with_artifacts_and_workflows(
         return Some(context);
     }
     if let Some(context) =
-        detect_xprompt_arg_completion_at_position(document, position, entries)
+        detect_macro_arg_completion_at_position(document, position, entries)
     {
         return Some(context);
     }
@@ -161,7 +161,7 @@ pub fn named_args_skeleton(entry: &MacroAssistEntry) -> String {
 pub fn colon_args_skeleton(entry: &MacroAssistEntry) -> String {
     format!("{}:$0", entry.insertion)
 }
-fn detect_xprompt_arg_completion_at_position(
+fn detect_macro_arg_completion_at_position(
     document: &DocumentSnapshot,
     position: EditorPosition,
     entries: &[MacroAssistEntry],

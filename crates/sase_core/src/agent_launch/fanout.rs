@@ -897,7 +897,7 @@ fn push_collapsed_empty_alt_run(
 /// A leading `%name`/`%(` marker gains one space when the character before
 /// the alternation site is not a directive left boundary, and a trailing
 /// `%name` token gains one space when the character after the site
-/// continues a word. `#xprompt` references and `+tag`s substitute verbatim.
+/// continues a word. `#macro` references and `+tag`s substitute verbatim.
 fn spaced_branch_value(
     prompt: &str,
     directive: &AlternativeDirective,

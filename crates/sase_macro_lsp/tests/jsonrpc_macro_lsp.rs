@@ -8,6 +8,7 @@ use sase_core::{
     MobileHelperStatusWire, MobileMacroCatalogEntryWire,
     MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
     MobileMacroCatalogStatsWire, MobileMacroInputWire,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 use sase_macro_lsp::MacroLspServer;
 use serde_json::{json, Value};
@@ -82,7 +83,7 @@ impl HelperHostBridge for FixtureBridge {
         _request: &EditorSnippetCatalogRequestWire,
     ) -> Result<EditorSnippetCatalogResponseWire, HostBridgeError> {
         Ok(EditorSnippetCatalogResponseWire {
-            schema_version: 1,
+            schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
             result: MobileHelperResultWire {
                 status: MobileHelperStatusWire::Success,
                 message: None,
@@ -98,7 +99,7 @@ impl HelperHostBridge for FixtureBridge {
                 trigger: "demo".to_string(),
                 template: "body $1$0".to_string(),
                 source: "ace.snippets".to_string(),
-                xprompt_name: None,
+                macro_name: None,
                 description: None,
                 source_path_display: Some("ace.snippets".to_string()),
             }],

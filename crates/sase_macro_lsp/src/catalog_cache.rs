@@ -17,6 +17,7 @@ use sase_core::{
     EditorSnippetCatalogRequestWire, EditorSnippetEntryWire,
     FinalizerCatalogRequest, FinalizerCatalogResponse, HelperHostBridge,
     HostBridgeError, VcsRepoCatalogRequest, VcsRepoCatalogResponse,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
     FINALIZER_CATALOG_SCHEMA_VERSION,
 };
 use tokio::time;
@@ -684,7 +685,7 @@ impl CatalogCache {
         accept_legacy: bool,
     ) -> Result<Arc<Vec<EditorSnippetEntryWire>>, CatalogFailure> {
         let request = EditorSnippetCatalogRequestWire {
-            schema_version: 1,
+            schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
             project,
         };
         // Same policy rule as catalogs: under false, never merge unverified
@@ -1299,7 +1300,7 @@ mod tests {
 
     fn snippet_response(trigger: &str) -> EditorSnippetCatalogResponseWire {
         EditorSnippetCatalogResponseWire {
-            schema_version: 1,
+            schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
             result: MobileHelperResultWire {
                 status: MobileHelperStatusWire::Success,
                 message: None,
@@ -1315,7 +1316,7 @@ mod tests {
                 trigger: trigger.to_string(),
                 template: format!("{trigger} $1$0"),
                 source: "user_config".to_string(),
-                xprompt_name: None,
+                macro_name: None,
                 description: None,
                 source_path_display: Some("ace.snippets".to_string()),
             }],
@@ -1597,7 +1598,7 @@ mod tests {
             .unwrap();
         assert_eq!(capitalized.template, "Fix $1.$0");
         assert_eq!(capitalized.source, lower.source);
-        assert_eq!(capitalized.xprompt_name, lower.xprompt_name);
+        assert_eq!(capitalized.macro_name, lower.macro_name);
         assert_eq!(capitalized.description, lower.description);
         assert_eq!(capitalized.source_path_display, lower.source_path_display);
     }

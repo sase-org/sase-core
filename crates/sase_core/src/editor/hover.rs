@@ -113,7 +113,7 @@ pub fn hover_at_position_with_snapshot(
         let entry = entries.iter().find(|entry| entry.name == name)?;
         return Some(HoverPayload {
             range: token.range,
-            markdown: xprompt_markdown(entry),
+            markdown: macro_markdown(entry),
         });
     }
     if let Some(name) = slash_skill_reference_name(&token.text) {
@@ -122,13 +122,13 @@ pub fn hover_at_position_with_snapshot(
         })?;
         return Some(HoverPayload {
             range: token.range,
-            markdown: xprompt_markdown(entry),
+            markdown: macro_markdown(entry),
         });
     }
     None
 }
 
-fn xprompt_markdown(entry: &MacroAssistEntry) -> String {
+fn macro_markdown(entry: &MacroAssistEntry) -> String {
     let mut lines = vec![format!("**{}**", entry.insertion)];
     let mut meta = Vec::new();
     if let Some(kind) = &entry.kind {
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn hovers_an_xprompt_memory_with_its_kind_and_tier() {
+    fn hovers_a_macro_memory_with_its_kind_and_tier() {
         let entries = vec![MacroAssistEntry {
             name: "memory/glossary".to_string(),
             display_label: "memory/glossary".to_string(),
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_xprompt_and_argument_hover() {
+    fn builds_macro_and_argument_hover() {
         let entries = vec![MacroAssistEntry {
             name: "review".to_string(),
             display_label: "review".to_string(),
@@ -498,8 +498,8 @@ mod tests {
             }],
             content_preview: Some("Body preview".to_string()),
             description: Some("Review code".to_string()),
-            source_path_display: Some("sase/xprompts/review.md".to_string()),
-            definition_path: Some("/tmp/sase/xprompts/review.md".to_string()),
+            source_path_display: Some("sase/macros/review.md".to_string()),
+            definition_path: Some("/tmp/sase/macros/review.md".to_string()),
             definition_range: None,
             is_skill: false,
             skill_name: None,
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn frontmatter_hover_ignores_body_and_non_field_positions() {
         let doc = DocumentSnapshot::new(
-            "---\nxprompts:\n  _helper:\n    content: Helper\n---\nBody xprompts\n",
+            "---\nmacros:\n  _helper:\n    content: Helper\n---\nBody macros\n",
         );
 
         assert!(hover_at_position(
@@ -896,7 +896,7 @@ mod tests {
         )
         .is_none());
         assert!(hover_at_position(
-            &DocumentSnapshot::new("xprompts:\nBody\n"),
+            &DocumentSnapshot::new("macros:\nBody\n"),
             EditorPosition {
                 line: 0,
                 character: 2,

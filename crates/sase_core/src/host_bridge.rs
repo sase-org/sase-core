@@ -1,7 +1,7 @@
 //! Shared host helper bridge plumbing for non-Python frontends.
 //!
 //! The command-backed bridge performs blocking subprocess I/O. Async callers,
-//! including the xprompt LSP, should run calls on a blocking worker and apply
+//! including the macro LSP, should run calls on a blocking worker and apply
 //! their own timeout policy around that task.
 
 use std::{
@@ -769,8 +769,12 @@ pub struct MobileMacroCatalogResponseWire {
 pub type EditorMacroCatalogRequestWire = MobileMacroCatalogRequestWire;
 pub type EditorMacroCatalogResponseWire = MobileMacroCatalogResponseWire;
 pub type EditorMacroCatalogEntryWire = MobileMacroCatalogEntryWire;
-pub type EditorXpromptInputWire = MobileMacroInputWire;
 pub type EditorMacroCatalogStatsWire = MobileMacroCatalogStatsWire;
+
+/// Owning schema for the editor snippet-catalog wire. Bumped to 2 when
+/// `EditorSnippetEntryWire.xprompt_name` became `macro_name` with kind
+/// `macro`; unrelated mobile/fleet families stay on their own versions.
+pub const EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditorSnippetCatalogRequestWire {
@@ -825,10 +829,10 @@ pub struct MobileMacroCatalogEntryWire {
     /// that predate the split simply omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
-    /// Tier of the SASE memory note behind an xprompt memory (`core` or
+    /// Tier of the SASE memory note behind a macro memory (`core` or
     /// `reference`; legacy `short`/`long` payloads still accepted), absent for
     /// every other entry. A non-null value is the authoritative marker that
-    /// `kind` is `memory`; older payloads that predate xprompt memories simply
+    /// `kind` is `memory`; older payloads that predate macro memories simply
     /// omit the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_type: Option<MemoryTierWire>,
@@ -874,8 +878,8 @@ pub struct MobileMacroCatalogStatsWire {
     pub total_count: u64,
     pub project_count: u64,
     pub skill_count: u64,
-    /// How many entries are xprompt memories. Additive: payloads written
-    /// before xprompt memories existed deserialize as zero.
+    /// How many entries are macro memories. Additive: payloads written
+    /// before macro memories existed deserialize as zero.
     #[serde(default)]
     pub memory_count: u64,
     pub pdf_requested: bool,
@@ -1121,7 +1125,7 @@ mod tests {
                 catalog_attachment: None,
             },
             snippet_catalog_response: EditorSnippetCatalogResponseWire {
-                schema_version: 1,
+                schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 result: helper_result(),
                 context: helper_context(),
                 entries: vec![EditorSnippetEntryWire {
@@ -1277,7 +1281,7 @@ mod tests {
         let bridge = DynHelperHostBridge::new(Arc::new(static_bridge()));
         let response = bridge
             .snippet_catalog(&EditorSnippetCatalogRequestWire {
-                schema_version: 1,
+                schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 project: Some("sase".to_string()),
             })
             .unwrap();
@@ -1285,7 +1289,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({
-                "schema_version": 1,
+                "schema_version": EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 "result": {
                     "status": "success",
                     "message": null,
@@ -1406,7 +1410,7 @@ mod tests {
     fn snippet_catalog_wire_accepts_minimal_entry_json() {
         let response: EditorSnippetCatalogResponseWire =
             serde_json::from_value(json!({
-                "schema_version": 1,
+                "schema_version": EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 "result": {
                     "status": "success",
                     "message": "loaded 1 snippet(s)",
@@ -1430,9 +1434,21 @@ mod tests {
         assert_eq!(response.entries[0].trigger, "ship");
         assert_eq!(response.entries[0].macro_name, None);
         assert_eq!(
-            serde_json::to_value(&response).unwrap(),
+            response.schema_version,
+            EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION
+        );
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(
+            value
+                .get("entries")
+                .and_then(|entries| entries.get(0))
+                .is_some_and(|entry| entry.get("xprompt_name").is_none()),
+            "retired output key must be absent: {value}"
+        );
+        assert_eq!(
+            value,
             json!({
-                "schema_version": 1,
+                "schema_version": EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 "result": {
                     "status": "success",
                     "message": "loaded 1 snippet(s)",
@@ -1484,7 +1500,7 @@ if [ "$1" != "editor" ] || [ "$2" != "helper-bridge" ] || [ "$3" != "snippet-cat
   exit 7
 fi
 cat >/dev/null
-printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"trigger":"fix","template":"Fix $1$0","source":"user_config","macro_name":null,"description":null,"source_path_display":"ace.snippets"}],"stats":{"total_count":1}}'
+printf '%s\n' '{"schema_version":2,"result":{"status":"success","message":null,"warnings":[],"skipped":[],"partial_failure_count":null},"context":{"project":"sase","scope":"explicit"},"entries":[{"trigger":"fix","template":"Fix $1$0","source":"user_config","macro_name":null,"description":null,"source_path_display":"ace.snippets"}],"stats":{"total_count":1}}'
 "#,
         )
         .unwrap();
@@ -1492,7 +1508,7 @@ printf '%s\n' '{"schema_version":1,"result":{"status":"success","message":null,"
         let bridge = CommandHelperHostBridge::new(sh_bridge_command(&script));
         let response = bridge
             .snippet_catalog(&EditorSnippetCatalogRequestWire {
-                schema_version: 1,
+                schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
                 project: Some("sase".to_string()),
             })
             .unwrap();

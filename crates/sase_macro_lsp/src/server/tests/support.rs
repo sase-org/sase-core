@@ -14,6 +14,7 @@ use sase_core::{
     MobileHelperStatusWire, MobileMacroCatalogEntryWire,
     MobileMacroCatalogRequestWire, MobileMacroCatalogResponseWire,
     MobileMacroCatalogStatsWire, MobileMacroInputWire, StaticHelperHostBridge,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 
 use super::super::*;
@@ -160,7 +161,7 @@ pub(super) fn bridge_with_catalog_and_snippets(
             catalog_attachment: None,
         },
         snippet_catalog_response: EditorSnippetCatalogResponseWire {
-            schema_version: 1,
+            schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
             result: MobileHelperResultWire {
                 status: MobileHelperStatusWire::Success,
                 message: None,
@@ -301,7 +302,7 @@ pub(super) fn snippet_entry(
         trigger: trigger.to_string(),
         template: template.to_string(),
         source: source.to_string(),
-        xprompt_name: None,
+        macro_name: None,
         description: Some(format!("{trigger} snippet")),
         source_path_display: Some("ace.snippets".to_string()),
     }

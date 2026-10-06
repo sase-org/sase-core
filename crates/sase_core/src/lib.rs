@@ -821,7 +821,7 @@ pub use editor::{
     model_shortcut_context as editor_model_shortcut_context,
     model_shortcut_edit as editor_model_shortcut_edit,
     named_args_skeleton as editor_named_args_skeleton,
-    normalize_xprompt_spacer_transition as editor_normalize_xprompt_spacer_transition,
+    normalize_macro_spacer_transition as editor_normalize_macro_spacer_transition,
     placeholder_input_names as editor_placeholder_input_names,
     plan_argument_colon_to_parentheses_edit as editor_plan_argument_colon_to_parentheses_edit,
     plan_argument_double_colon_to_parentheses_edit as editor_plan_argument_double_colon_to_parentheses_edit,
@@ -1125,9 +1125,8 @@ pub use host_bridge::{
     EditorMacroCatalogEntryWire, EditorMacroCatalogRequestWire,
     EditorMacroCatalogResponseWire, EditorMacroCatalogStatsWire,
     EditorSnippetCatalogRequestWire, EditorSnippetCatalogResponseWire,
-    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire,
-    EditorXpromptInputWire, HelperHostBridge, HostBridgeError,
-    MobileBeadDetailWire, MobileBeadListRequestWire,
+    EditorSnippetCatalogStatsWire, EditorSnippetEntryWire, HelperHostBridge,
+    HostBridgeError, MobileBeadDetailWire, MobileBeadListRequestWire,
     MobileBeadListResponseWire, MobileBeadShowRequestWire,
     MobileBeadShowResponseWire, MobileBeadSummaryWire,
     MobileChangeSpecTagEntryWire, MobileChangeSpecTagListRequestWire,
@@ -1142,6 +1141,7 @@ pub use host_bridge::{
     MobileUpdateStartRequestWire, MobileUpdateStartResponseWire,
     MobileUpdateStatusRequestWire, MobileUpdateStatusResponseWire,
     StaticHelperHostBridge, UnavailableHelperHostBridge,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 pub use host_liveness::{
     command_looks_like_agent, match_home_marker, match_project_claims,

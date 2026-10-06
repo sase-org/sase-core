@@ -66,7 +66,7 @@ pub(super) struct CatalogLoader {
     /// the catalog can name the offending source and its migration
     /// destination instead of silently losing it.
     pub(super) skill_issues: RefCell<Vec<SkillPlacementIssueWire>>,
-    /// Definitions dropped by the xprompt-memory rules: a reserved `memory/`
+    /// Definitions dropped by the macro-memory rules: a reserved `memory/`
     /// reference claimed by an ordinary definition, an unreachable note stem,
     /// or a file in a memory root that is not a valid memory note.
     pub(super) memory_issues: RefCell<Vec<MemoryMacroIssueWire>>,
@@ -253,27 +253,27 @@ impl CatalogLoader {
             }
         }
 
-        for (name, xprompt) in self.load_all_macros(effective_project)? {
+        for (name, macro_entry) in self.load_all_macros(effective_project)? {
             if workflow_names.contains(&name) {
                 continue;
             }
-            let source = xprompt.source_path.clone().unwrap_or_default();
+            let source = macro_entry.source_path.clone().unwrap_or_default();
             if !seen.insert((source, name.clone())) {
                 continue;
             }
             let (bucket, source_project) =
-                self.classify_source(xprompt.source_path.as_deref(), None);
-            let workflow = macro_to_workflow(&xprompt);
+                self.classify_source(macro_entry.source_path.as_deref(), None);
+            let workflow = macro_to_workflow(&macro_entry);
             sources.push(StructuredSource {
                 name,
                 workflow,
                 bucket,
                 project: source_project,
-                description: xprompt.description,
-                is_skill: xprompt.is_skill,
-                skill_name: xprompt.skill_name,
-                memory_type: xprompt.memory_type,
-                content: xprompt.content,
+                description: macro_entry.description,
+                is_skill: macro_entry.is_skill,
+                skill_name: macro_entry.skill_name,
+                memory_type: macro_entry.memory_type,
+                content: macro_entry.content,
                 definition_section: DefinitionSection::Macros,
             });
         }
@@ -292,22 +292,23 @@ impl CatalogLoader {
             project_macros.extend(
                 self.load_project_file_macros(project_name, workspace)?,
             );
-            for (name, xprompt) in project_macros {
-                let source = xprompt.source_path.clone().unwrap_or_default();
+            for (name, macro_entry) in project_macros {
+                let source =
+                    macro_entry.source_path.clone().unwrap_or_default();
                 if !seen.insert((source, name.clone())) {
                     continue;
                 }
-                let workflow = macro_to_workflow(&xprompt);
+                let workflow = macro_to_workflow(&macro_entry);
                 sources.push(StructuredSource {
                     name,
                     workflow,
                     bucket: "project".to_string(),
                     project: Some(project_name.clone()),
-                    description: xprompt.description,
-                    is_skill: xprompt.is_skill,
-                    skill_name: xprompt.skill_name,
-                    memory_type: xprompt.memory_type,
-                    content: xprompt.content,
+                    description: macro_entry.description,
+                    is_skill: macro_entry.is_skill,
+                    skill_name: macro_entry.skill_name,
+                    memory_type: macro_entry.memory_type,
+                    content: macro_entry.content,
                     definition_section: DefinitionSection::Macros,
                 });
             }
@@ -343,26 +344,26 @@ impl CatalogLoader {
             );
         }
 
-        self.load_all_macros(None).map(|xprompts| {
-            xprompts
+        self.load_all_macros(None).map(|macros| {
+            macros
                 .into_iter()
-                .filter_map(|(name, xprompt)| {
-                    xprompt.is_skill.then(|| {
+                .filter_map(|(name, macro_entry)| {
+                    macro_entry.is_skill.then(|| {
                         let (bucket, project) = self.classify_source(
-                            xprompt.source_path.as_deref(),
+                            macro_entry.source_path.as_deref(),
                             None,
                         );
-                        let workflow = macro_to_workflow(&xprompt);
+                        let workflow = macro_to_workflow(&macro_entry);
                         StructuredSource {
                             name,
                             workflow,
                             bucket,
                             project,
-                            description: xprompt.description,
-                            is_skill: xprompt.is_skill,
-                            skill_name: xprompt.skill_name,
-                            memory_type: xprompt.memory_type,
-                            content: xprompt.content,
+                            description: macro_entry.description,
+                            is_skill: macro_entry.is_skill,
+                            skill_name: macro_entry.skill_name,
+                            memory_type: macro_entry.memory_type,
+                            content: macro_entry.content,
                             definition_section: DefinitionSection::Macros,
                         }
                     })
@@ -430,7 +431,7 @@ impl CatalogLoader {
         }
 
         // Skills live in their own `skill/` reference namespace, so they can
-        // never shadow (or be shadowed by) an ordinary xprompt of the same
+        // never shadow (or be shadowed by) an ordinary macro of the same
         // bare name. Lowest priority first, so the canonical directory
         // sources win. Skills and memory placement is preserved independent
         // of the legacy policy.
@@ -458,8 +459,8 @@ impl CatalogLoader {
             )?);
         }
 
-        // Xprompt memories own the reserved `memory/` namespace, so they never
-        // collide with an ordinary xprompt or a skill. Home first, so the
+        // Macro memories own the reserved `memory/` namespace, so they never
+        // collide with an ordinary macro or a skill. Home first, so the
         // selected project's note shadows a same-stem home note.
         for source in self.memory_sources(project).into_iter().rev() {
             all.extend(self.load_memory_notes(&source)?);
@@ -563,7 +564,7 @@ impl CatalogLoader {
             .collect()
     }
 
-    /// Ordered xprompt-memory sources for the selected project and home.
+    /// Ordered macro-memory sources for the selected project and home.
     ///
     /// The project scope follows the selection rather than the reference name:
     /// an explicitly requested registered project contributes its own
@@ -586,11 +587,11 @@ impl CatalogLoader {
             .collect()
     }
 
-    /// Load one scope's flat memory notes as no-argument xprompt memories.
+    /// Load one scope's flat memory notes as no-argument macro memories.
     ///
     /// Split canonical/legacy memory state stays an error, `README.md` and
     /// nested assets are not catalog entries, and a file that is not a valid
-    /// memory note becomes a diagnostic instead of an ordinary xprompt.
+    /// memory note becomes a diagnostic instead of an ordinary macro.
     fn load_memory_notes(
         &self,
         source: &MemorySourceWire,
@@ -653,7 +654,7 @@ impl CatalogLoader {
 
     /// Canonical skill directory for the scope owning `dir`, used as the
     /// migration destination when a skill declaration turns up in an ordinary
-    /// xprompt directory.
+    /// macro directory.
     pub(super) fn skill_destination_for_macro_dir(
         &self,
         dir: &Path,

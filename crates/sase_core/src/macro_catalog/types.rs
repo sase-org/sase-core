@@ -36,9 +36,9 @@ pub(super) const SKILL_FRAME_TEMPLATE_FILENAME: &str =
 
 #[derive(Debug, Error)]
 pub enum MacroCatalogLoadError {
-    #[error("failed to read xprompt catalog: {0}")]
+    #[error("failed to read macro catalog: {0}")]
     Read(String),
-    #[error("xprompt catalog layout collision: {0}")]
+    #[error("macro catalog layout collision: {0}")]
     LayoutCollision(String),
     #[error(
         "duplicate macro definition keys `xprompts` and `macros` in {0}; keep only `macros`"
@@ -221,7 +221,7 @@ pub(super) struct CatalogMacro {
     pub(super) is_skill: bool,
     pub(super) skill_name: Option<String>,
     /// Tier of the SASE memory note this entry was loaded from. A non-null
-    /// value is the authoritative marker that the entry is an xprompt memory.
+    /// value is the authoritative marker that the entry is a macro memory.
     pub(super) memory_type: Option<MemoryTierWire>,
     pub(super) snippet: Option<CatalogSnippet>,
 }

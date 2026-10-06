@@ -232,7 +232,7 @@ impl LanguageServer for MacroLspServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        info!("sase xprompt LSP initialized");
+        info!("sase macro LSP initialized");
         self.refresh_catalog_explicit().await;
     }
 

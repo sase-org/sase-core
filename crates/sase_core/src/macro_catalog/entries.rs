@@ -12,7 +12,7 @@ use crate::{
     MobileHelperProjectContextWire, MobileHelperProjectScopeWire,
     MobileHelperResultWire, MobileHelperSkippedWire, MobileHelperStatusWire,
     MobileMacroCatalogEntryWire, MobileMacroCatalogStatsWire,
-    MobileMacroInputWire,
+    MobileMacroInputWire, EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 
 use super::definition::filter_structured_sources;
@@ -47,7 +47,7 @@ pub fn load_editor_macro_catalog(
         schema_version: SCHEMA_VERSION,
         result: MobileHelperResultWire {
             status: MobileHelperStatusWire::Success,
-            message: Some(format!("loaded {} xprompt(s)", wire_entries.len())),
+            message: Some(format!("loaded {} macro(s)", wire_entries.len())),
             warnings: loader.placement_warnings(),
             skipped: Vec::<MobileHelperSkippedWire>::new(),
             partial_failure_count: None,
@@ -91,9 +91,10 @@ pub fn load_editor_snippet_catalog(
     let mut entries_by_trigger =
         BTreeMap::<String, EditorSnippetEntryWire>::new();
 
-    for xprompt in loader.load_all_macros(request.project.as_deref())?.values()
+    for macro_entry in
+        loader.load_all_macros(request.project.as_deref())?.values()
     {
-        let Some(entry) = snippet_entry_from_macro(xprompt) else {
+        let Some(entry) = snippet_entry_from_macro(macro_entry) else {
             continue;
         };
         entries_by_trigger
@@ -138,7 +139,7 @@ pub fn load_editor_snippet_catalog(
 
     let entries = entries_by_trigger.into_values().collect::<Vec<_>>();
     Ok(EditorSnippetCatalogResponseWire {
-        schema_version: SCHEMA_VERSION,
+        schema_version: EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
         result: MobileHelperResultWire {
             status: MobileHelperStatusWire::Success,
             message: Some(format!("loaded {} snippet(s)", entries.len())),

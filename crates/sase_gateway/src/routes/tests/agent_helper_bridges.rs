@@ -80,7 +80,7 @@ async fn command_helper_bridge_macro_catalog_returns_new_helper_fields() {
     assert_eq!(value["entries"][0]["name"], "bd/work_phase_bead");
     assert_eq!(value["entries"][0]["insertion"], "#bd/work_phase_bead");
     assert_eq!(value["entries"][0]["reference_prefix"], "#");
-    assert_eq!(value["entries"][0]["kind"], "xprompt");
+    assert_eq!(value["entries"][0]["kind"], "macro");
     assert_eq!(value["entries"][0]["inputs"][0]["name"], "bead_id");
     assert_eq!(value["entries"][0]["inputs"][0]["type"], "word");
     assert_eq!(value["entries"][0]["inputs"][0]["required"], true);

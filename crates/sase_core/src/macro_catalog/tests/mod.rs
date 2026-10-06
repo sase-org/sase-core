@@ -16,6 +16,7 @@ use super::*;
 use crate::{
     EditorMacroCatalogRequestWire, EditorSnippetCatalogRequestWire,
     MemoryTierWire, MobileMacroCatalogEntryWire, MobileMacroCatalogStatsWire,
+    EDITOR_SNIPPET_CATALOG_WIRE_SCHEMA_VERSION,
 };
 
 mod authored_inputs;

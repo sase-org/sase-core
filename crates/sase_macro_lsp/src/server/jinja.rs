@@ -6,7 +6,7 @@ use sase_core::editor::jinja::JinjaScopeKind;
 ///
 /// - `gitcommit` language → `None` (no Jinja completion).
 /// - `sase` / `sase_prompt` language ids → `Prompt`.
-/// - xprompt-directory paths and memory notes → `Xprompt`.
+/// - macro-directory paths and memory notes → `Macro`.
 /// - prompt temp files and all other eligible markdown → `Prompt`.
 pub fn jinja_scope_for_document(
     source_path: Option<&Path>,
@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_notes_use_xprompt_scope() {
+    fn memory_notes_use_macro_scope() {
         assert_eq!(
             jinja_scope_for_document(
                 Some(path("/repo/sase/memory/note.md").as_path()),

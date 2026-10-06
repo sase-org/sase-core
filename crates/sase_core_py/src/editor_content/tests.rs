@@ -291,7 +291,7 @@ fn memory_macro_bindings_expose_the_shared_contract() {
             .bind(py),
         )
         .unwrap();
-        assert_eq!(layout["schema_version"], json!(6));
+        assert_eq!(layout["schema_version"], json!(7));
         assert_eq!(
             layout["memory_sources"][0]["paths"]["canonical"]["path"],
             json!("/repo/sase/memory")
