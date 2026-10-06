@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0](https://github.com/sase-org/sase-core/compare/v0.36.6...v0.37.0) - 2026-10-06
+
+### Added
+
+- *(macros)* [**breaking**] emit canonical macro wires and snippet catalog schema 2
+- *(macros)* flip remaining xprompt wire keys to macro spellings
+- *(core)* load plugin input_type registries with resolution, catalog, and LSP wiring
+
+### Fixed
+
+- *(ci)* format plugin input type registry changes
+
 ## [0.36.6](https://github.com/sase-org/sase-core/compare/v0.36.5...v0.36.6) - 2026-10-05
 
 ### Added
