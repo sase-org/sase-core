@@ -5,6 +5,7 @@ mod delegation_remove;
 mod dependencies;
 mod links;
 mod notes_update;
+mod read_model_mutations;
 mod snooze_plus_one;
 mod store;
 mod support;

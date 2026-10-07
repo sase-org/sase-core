@@ -662,6 +662,42 @@ pub fn ensure_cache_ready_at(
     }
 }
 
+/// Ensure the cache is fresh for the mutation path.
+///
+/// Mutations run under the `beads.db` flock and must never trust the 60 s
+/// token-only fast path: an out-of-band change inside the window would
+/// otherwise be invisible. This forces the full signature sweep every
+/// time, then shares the same tail-or-rebuild refresh the read path uses,
+/// establishing the consistent baseline (version, generation, token,
+/// signatures, config, frontier) the write-through commits against.
+pub fn ensure_cache_ready_for_mutation(
+    beads_dir: &Path,
+) -> Result<Option<PathBuf>, BeadError> {
+    let Some(cache_path) = read_model_cache_path_for_store(beads_dir) else {
+        return Ok(None);
+    };
+    ensure_cache_ready_for_mutation_at(beads_dir, &cache_path)
+        .map(|ready| ready.then_some(cache_path))
+}
+
+/// Ensure the cache at an explicit path is fresh for mutations (tests).
+///
+/// The explicit path skips git-dir discovery; the forced-sweep rule is
+/// otherwise identical to [`ensure_cache_ready_for_mutation`].
+pub fn ensure_cache_ready_for_mutation_at(
+    beads_dir: &Path,
+    cache_path: &Path,
+) -> Result<bool, BeadError> {
+    if !event_store_present(beads_dir) {
+        return Ok(false);
+    }
+    match ensure_fresh_forced(beads_dir, cache_path) {
+        Ok(ready) => Ok(ready),
+        Err(Fault::Cache) => Ok(false),
+        Err(Fault::Store(error)) => Err(error),
+    }
+}
+
 /// Freshness decision without a snapshot load.
 ///
 /// Mirrors [`rebuild`]'s decision tree — token-only fast path, sweep probe,
@@ -715,6 +751,65 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
             drop(connection);
             // The refresh loads one snapshot through the tail-or-rebuild
             // path; the indexed query after it serves warm.
+            match rebuild_catch_store_errors(beads_dir, cache_path, false) {
+                Ok(Some(_)) => Ok(true),
+                Ok(None) => Err(Fault::Cache),
+                Err(error) => Err(Fault::Store(error)),
+            }
+        }
+        Probe::Unusable(_) => {
+            drop(connection);
+            drop_cache_file(cache_path);
+            ensure_schema(cache_path)?;
+            connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+            rebuild_cold_discard(beads_dir, cache_path, connection)
+        }
+    }
+}
+
+/// Forced-sweep freshness without a snapshot load.
+///
+/// Same as [`ensure_fresh`] minus the token-only fast path: every call
+/// runs the full signature sweep, so a mutation inside the flock always
+/// observes out-of-band changes even within the 60 s window.
+fn ensure_fresh_forced(
+    beads_dir: &Path,
+    cache_path: &Path,
+) -> Result<bool, Fault> {
+    if ensure_schema(cache_path).is_err() {
+        return Err(Fault::Cache);
+    }
+    let mut connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    if version_mismatch_reason(&meta).is_some() {
+        drop(connection);
+        drop_cache_file(cache_path);
+        ensure_schema(cache_path)?;
+        connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+        return rebuild_cold_discard(beads_dir, cache_path, connection);
+    }
+    backfill_meta_keys(&connection)?;
+    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    let token = freshness_token(beads_dir).map_err(|_| Fault::Cache)?;
+    let now = now_ns();
+    let sweep = match sweep_store_signatures(beads_dir) {
+        Ok(sweep) => sweep,
+        Err(_) => {
+            drop(connection);
+            drop_cache_file(cache_path);
+            ensure_schema(cache_path)?;
+            connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+            return rebuild_cold_discard(beads_dir, cache_path, connection);
+        }
+    };
+    match probe_with(&connection, &meta, &token, &sweep) {
+        Probe::Fresh => {
+            update_token_and_sweep(&connection, &token, now)?;
+            note_serve_outcome(&connection);
+            Ok(true)
+        }
+        Probe::Stale => {
+            drop(connection);
             match rebuild_catch_store_errors(beads_dir, cache_path, false) {
                 Ok(Some(_)) => Ok(true),
                 Ok(None) => Err(Fault::Cache),

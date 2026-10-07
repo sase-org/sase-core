@@ -576,7 +576,7 @@ pub fn write_event_store(
     beads_dir: &Path,
     streams: &[BeadEventStreamWire],
 ) -> Result<(), BeadError> {
-    write_event_store_inner(beads_dir, streams, None)
+    write_event_store_inner(beads_dir, streams, None, None)
 }
 
 pub fn write_event_store_changed(
@@ -584,13 +584,35 @@ pub fn write_event_store_changed(
     streams: &[BeadEventStreamWire],
     changed_stream_ids: &BTreeSet<String>,
 ) -> Result<(), BeadError> {
-    write_event_store_inner(beads_dir, streams, Some(changed_stream_ids))
+    write_event_store_inner(beads_dir, streams, Some(changed_stream_ids), None)
+}
+
+/// Write lazily loaded streams while keeping the manifest exact.
+///
+/// `streams` holds only the selected (dirty plus lazily loaded) streams;
+/// `total_stream_count` is the physical stream count of the whole store, so
+/// the manifest keeps the correct full count instead of the lazy slice
+/// length. Only selected streams are validated; untouched streams were
+/// validated when admitted and must not be read merely to prove it.
+pub fn write_event_store_changed_with_total(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+    changed_stream_ids: &BTreeSet<String>,
+    total_stream_count: usize,
+) -> Result<(), BeadError> {
+    write_event_store_inner(
+        beads_dir,
+        streams,
+        Some(changed_stream_ids),
+        Some(total_stream_count),
+    )
 }
 
 fn write_event_store_inner(
     beads_dir: &Path,
     streams: &[BeadEventStreamWire],
     changed_stream_ids: Option<&BTreeSet<String>>,
+    total_stream_count: Option<usize>,
 ) -> Result<(), BeadError> {
     let events_dir = beads_dir.join("events");
     let streams_dir = event_streams_dir(beads_dir);
@@ -599,6 +621,9 @@ fn write_event_store_inner(
         streams.iter().collect();
     sorted_streams.sort_by(|a, b| a.stream_id.cmp(&b.stream_id));
     for stream in &sorted_streams {
+        if !selected_for_write(stream, changed_stream_ids) {
+            continue;
+        }
         stream.validate()?;
     }
 
@@ -616,7 +641,10 @@ fn write_event_store_inner(
         }
     }
 
-    let manifest = BeadEventStoreManifestWire::from_streams(streams);
+    let mut manifest = BeadEventStoreManifestWire::from_streams(streams);
+    if let Some(total) = total_stream_count {
+        manifest.stream_count = total;
+    }
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     write_file_atomic_if_changed(
         &events_dir.join("manifest.json"),

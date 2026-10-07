@@ -25,10 +25,11 @@ pub use queries::{
 };
 pub use store::{
     cached_store_snapshot, cached_store_snapshot_at, ensure_cache_ready,
-    ensure_cache_ready_at, read_model_status, read_model_status_at,
-    read_model_verify_cache, read_model_verify_cache_at, rebuild_read_model_at,
-    BeadReadModelStatusWire, BeadReadModelVerifyWire, CachedStoreSnapshot,
-    BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
+    ensure_cache_ready_at, ensure_cache_ready_for_mutation,
+    ensure_cache_ready_for_mutation_at, read_model_status,
+    read_model_status_at, read_model_verify_cache, read_model_verify_cache_at,
+    rebuild_read_model_at, BeadReadModelStatusWire, BeadReadModelVerifyWire,
+    CachedStoreSnapshot, BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
     BEAD_READ_MODEL_VERIFY_WIRE_SCHEMA_VERSION, READ_MODEL_REDUCER_VERSION,
     READ_MODEL_SCHEMA_VERSION,
 };

@@ -290,6 +290,11 @@ impl MutableStore {
             prune_removed_flag_event_streams(beads_dir)?;
             let (_manifest, streams) = read_event_store(beads_dir)?;
             let issues = reduce_parsed_event_streams(&streams)?;
+            #[cfg(test)]
+            store_io_stats::record_full_replay(
+                streams.len() as u64,
+                issues.len() as u64,
+            );
             (
                 issues,
                 tracked_streams::TrackedEventStreams::loaded(streams),
@@ -326,6 +331,8 @@ impl MutableStore {
         for issue in &self.issues {
             issue.validate()?;
         }
+        #[cfg(test)]
+        store_io_stats::record_validation_runs(self.issues.len() as u64);
         validate_unique_external_refs(&self.issues)?;
         // Presence is checked before the event write below so legacy stores
         // without `events/` keep today's full behavior (their first save
@@ -786,12 +793,20 @@ pub(crate) mod store_io_stats {
         static LOADS: Cell<u64> = const { Cell::new(0) };
         static SAVES: Cell<u64> = const { Cell::new(0) };
         static READS: Cell<u64> = const { Cell::new(0) };
+        static FULL_REPLAYS: Cell<u64> = const { Cell::new(0) };
+        static HYDRATED_ROWS: Cell<u64> = const { Cell::new(0) };
+        static STREAM_READS: Cell<u64> = const { Cell::new(0) };
+        static VALIDATION_RUNS: Cell<u64> = const { Cell::new(0) };
     }
 
     pub fn reset() {
         LOADS.with(|cell| cell.set(0));
         SAVES.with(|cell| cell.set(0));
         READS.with(|cell| cell.set(0));
+        FULL_REPLAYS.with(|cell| cell.set(0));
+        HYDRATED_ROWS.with(|cell| cell.set(0));
+        STREAM_READS.with(|cell| cell.set(0));
+        VALIDATION_RUNS.with(|cell| cell.set(0));
     }
 
     pub fn loads() -> u64 {
@@ -806,6 +821,26 @@ pub(crate) mod store_io_stats {
         READS.with(Cell::get)
     }
 
+    /// Full-store replay loads (the `MutableStore::load` replay path).
+    pub fn full_replays() -> u64 {
+        FULL_REPLAYS.with(Cell::get)
+    }
+
+    /// Issue rows hydrated by replay loads.
+    pub fn hydrated_rows() -> u64 {
+        HYDRATED_ROWS.with(Cell::get)
+    }
+
+    /// Physical event-stream files read on the mutation load path.
+    pub fn stream_reads() -> u64 {
+        STREAM_READS.with(Cell::get)
+    }
+
+    /// Per-issue validation runs on the mutation save path.
+    pub fn validation_runs() -> u64 {
+        VALIDATION_RUNS.with(Cell::get)
+    }
+
     pub fn record_read() {
         READS.with(|cell| cell.set(cell.get().saturating_add(1)));
     }
@@ -816,5 +851,21 @@ pub(crate) mod store_io_stats {
 
     pub fn record_save() {
         SAVES.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
+
+    pub fn record_full_replay(stream_count: u64, row_count: u64) {
+        FULL_REPLAYS.with(|cell| cell.set(cell.get().saturating_add(1)));
+        STREAM_READS.with(|cell| {
+            cell.set(cell.get().saturating_add(stream_count));
+        });
+        HYDRATED_ROWS.with(|cell| {
+            cell.set(cell.get().saturating_add(row_count));
+        });
+    }
+
+    pub fn record_validation_runs(count: u64) {
+        VALIDATION_RUNS.with(|cell| {
+            cell.set(cell.get().saturating_add(count));
+        });
     }
 }

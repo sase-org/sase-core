@@ -9,6 +9,11 @@ mod mutation_wire;
 mod notes_update;
 mod plus_one_snooze;
 mod store;
+// The indexed lookup layer for warm mutations. Its operation-port callers
+// land next (create/notes/close/claims/deps/links/snooze plus ready-marking),
+// so the module stays test-gated until the first production caller exists.
+#[cfg(test)]
+pub(crate) mod view;
 
 #[cfg(test)]
 mod tests;
