@@ -2,12 +2,13 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use std::collections::BTreeSet;
 
@@ -393,6 +394,57 @@ pub fn repair_event_store_manifest(
     })
 }
 
+/// File signature captured from the same open file whose bytes were parsed.
+///
+/// The read model persists these alongside the reduced rows so a signature
+/// and its content always describe one inode: a signature taken from a
+/// separate `stat` call could pair newer metadata with older bytes when a
+/// writer lands between the two calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::bead) struct StreamFileSignature {
+    /// File length in bytes, from the open handle.
+    pub size: u64,
+    /// Modification time as nanoseconds since the Unix epoch.
+    pub mtime_ns: i64,
+    /// Filesystem inode backing the open handle (0 where unavailable).
+    pub inode: u64,
+    /// Hex SHA-256 over the exact bytes that were parsed.
+    pub content_hash: String,
+}
+
+/// Loaded event store plus each stream's file signature.
+///
+/// The signatures come from the same open files whose bytes were reduced.
+pub(in crate::bead) type EventStoreWithSignatures = (
+    BeadEventStoreManifestWire,
+    Vec<BeadEventStreamWire>,
+    Vec<(String, StreamFileSignature)>,
+);
+
+/// Loaded streams plus the removed-flag skip count and file signatures.
+type EventStreamsWithSignatures = (
+    Vec<BeadEventStreamWire>,
+    usize,
+    Vec<(String, StreamFileSignature)>,
+);
+
+/// Inode of `metadata`, or 0 on platforms without a stable file index.
+pub(in crate::bead) fn file_inode(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::ino(metadata)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::MetadataExt::file_index(metadata)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
 /// Load the manifest and every event stream without touching the store.
 ///
 /// The read path never deletes files or rewrites the manifest. Streams that
@@ -403,6 +455,21 @@ pub fn repair_event_store_manifest(
 pub fn read_event_store(
     beads_dir: &Path,
 ) -> Result<(BeadEventStoreManifestWire, Vec<BeadEventStreamWire>), BeadError> {
+    let (manifest, streams, _signatures) =
+        read_event_store_with_stream_signatures(beads_dir)?;
+    Ok((manifest, streams))
+}
+
+/// Load the manifest and every event stream plus each stream's signature.
+///
+/// This is the single implementation behind [`read_event_store`]: the
+/// signatures come from the same open files whose bytes were reduced, so
+/// the read model can persist them without a second stat pass. In-memory
+/// removed-flag skips carry no signature; the physical prune under the
+/// mutation lock is what removes them.
+pub(in crate::bead) fn read_event_store_with_stream_signatures(
+    beads_dir: &Path,
+) -> Result<EventStoreWithSignatures, BeadError> {
     let manifest_path = event_manifest_path(beads_dir);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
         BeadError::io(format!(
@@ -414,8 +481,11 @@ pub fn read_event_store(
         serde_json::from_str(&manifest_text)?;
     manifest.validate()?;
 
-    let (streams, skipped_removed_flag) =
-        read_event_stream_files(&event_streams_dir(beads_dir), true)?;
+    let (streams, skipped_removed_flag, signatures) =
+        read_event_stream_files_with_signatures(
+            &event_streams_dir(beads_dir),
+            true,
+        )?;
     if manifest.stream_count != streams.len() + skipped_removed_flag {
         return Err(BeadError::validation(format!(
             "bead event manifest stream_count mismatch: {} != {}",
@@ -423,7 +493,7 @@ pub fn read_event_store(
             streams.len() + skipped_removed_flag
         )));
     }
-    Ok((manifest, streams))
+    Ok((manifest, streams, signatures))
 }
 
 fn read_event_streams_without_manifest(
@@ -445,20 +515,34 @@ fn read_event_stream_files(
     streams_dir: &Path,
     skip_removed_flag: bool,
 ) -> Result<(Vec<BeadEventStreamWire>, usize), BeadError> {
+    let (streams, skipped_removed_flag, _signatures) =
+        read_event_stream_files_with_signatures(
+            streams_dir,
+            skip_removed_flag,
+        )?;
+    Ok((streams, skipped_removed_flag))
+}
+
+fn read_event_stream_files_with_signatures(
+    streams_dir: &Path,
+    skip_removed_flag: bool,
+) -> Result<EventStreamsWithSignatures, BeadError> {
     let stream_paths = list_event_stream_paths(streams_dir)?;
 
     let mut streams = Vec::with_capacity(stream_paths.len());
     let mut stream_ids = BTreeSet::new();
+    let mut signatures = Vec::with_capacity(stream_paths.len());
     let mut skipped_removed_flag = 0usize;
     for path in &stream_paths {
         match read_event_stream_file(path) {
-            Ok(stream) => {
+            Ok((stream, signature)) => {
                 if !stream_ids.insert(stream.stream_id.clone()) {
                     return Err(BeadError::validation(format!(
                         "duplicate bead event stream: {}",
                         stream.stream_id
                     )));
                 }
+                signatures.push((stream.stream_id.clone(), signature));
                 streams.push(stream);
             }
             Err(error) => {
@@ -483,7 +567,7 @@ fn read_event_stream_files(
             }
         }
     }
-    Ok((streams, skipped_removed_flag))
+    Ok((streams, skipped_removed_flag, signatures))
 }
 
 pub fn write_event_store(
@@ -624,7 +708,7 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
 
 fn read_event_stream_file(
     path: &Path,
-) -> Result<BeadEventStreamWire, BeadError> {
+) -> Result<(BeadEventStreamWire, StreamFileSignature), BeadError> {
     let stream_id = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -635,12 +719,33 @@ fn read_event_stream_file(
             ))
         })?
         .to_string();
-    let contents = fs::read(path).map_err(|err| {
+    // The signature comes from the same open file whose bytes are parsed,
+    // so the read model never pairs newer metadata with older content.
+    let mut file = fs::File::open(path).map_err(|err| {
         BeadError::io(format!(
             "failed to read bead event stream {}: {err}",
             path.display()
         ))
     })?;
+    let metadata = file.metadata().map_err(|err| {
+        BeadError::io(format!(
+            "failed to stat bead event stream {}: {err}",
+            path.display()
+        ))
+    })?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).map_err(|err| {
+        BeadError::io(format!(
+            "failed to read bead event stream {}: {err}",
+            path.display()
+        ))
+    })?;
+    let signature = StreamFileSignature {
+        size: metadata.len(),
+        mtime_ns: crate::fs_sig::mtime_ns(metadata.modified().ok()),
+        inode: file_inode(&metadata),
+        content_hash: hex_signature(&contents),
+    };
     // Events are already validated once by `parse_event_stream_bytes`; only
     // the filename-derived header needs checking here.
     let events = parse_event_stream_bytes(path, &contents)?;
@@ -655,7 +760,14 @@ fn read_event_stream_file(
             path.display()
         )));
     }
-    Ok(stream)
+    Ok((stream, signature))
+}
+
+/// Hex SHA-256 over `bytes`.
+pub(in crate::bead) fn hex_signature(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 /// Parse one stream file, validating each event exactly once.

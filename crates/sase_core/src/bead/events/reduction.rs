@@ -33,6 +33,12 @@ use super::wire::{
 /// exactly once on this path. Callers holding streams from the typed parse
 /// path (`read_event_store`) use [`reduce_parsed_event_streams`] instead to
 /// skip that second validation.
+///
+/// Reducer versioning: the read model persists rows reduced here and keys
+/// them by `READ_MODEL_REDUCER_VERSION` (`bead::read_model`). Every change
+/// to merge, apply, or post-pass semantics in this file or `merge.rs` must
+/// bump that constant so old caches drop and rebuild instead of serving
+/// rows reduced under different semantics.
 pub fn reduce_event_streams(
     streams: &[BeadEventStreamWire],
 ) -> Result<Vec<IssueWire>, BeadError> {
@@ -55,8 +61,11 @@ pub(in crate::bead) fn reduce_parsed_event_streams(
 
 /// Identity of one stored bead-owned link, keyed as the owning event stream
 /// recorded it (source issue, relation, canonical target).
+///
+/// Public for the read-model snapshot so cached detail views resolve the
+/// same neighborhood rows as a replay.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(in crate::bead) struct StoredLinkIdentity {
+pub struct StoredLinkIdentity {
     pub source_issue_id: String,
     pub relation: String,
     pub target_ref: String,
@@ -64,8 +73,10 @@ pub(in crate::bead) struct StoredLinkIdentity {
 }
 
 /// Winning `LinkAdded` provenance for one currently active stored link.
+///
+/// Public for the read-model snapshot alongside [`StoredLinkIdentity`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::bead) struct ActiveLinkProvenance {
+pub struct ActiveLinkProvenance {
     pub source_issue_id: String,
     pub target_ref: String,
     pub relation: String,

@@ -75,6 +75,15 @@ pub fn read_store_issues(
         )));
     }
     if event_store_present(beads_dir) {
+        // The read model is a transparent cache: a hit serves without
+        // replaying history, and any cache fault (or a store without a
+        // cache location) falls back to the replay below. A read never
+        // fails because of the cache.
+        if let Some(snapshot) =
+            super::read_model::cached_store_snapshot(beads_dir)?
+        {
+            return Ok(snapshot.issues);
+        }
         return read_event_store_issues(beads_dir);
     }
     read_legacy_jsonl_issues(beads_dir)
@@ -127,6 +136,25 @@ pub fn show_issue_detail_with_options(
         )));
     }
     if event_store_present(beads_dir) {
+        // Same transparent cache as `read_store_issues`: the detail
+        // graph is resolved from the cached snapshot when fresh, and
+        // any cache fault falls back to the replay below.
+        if let Some(snapshot) =
+            super::read_model::cached_store_snapshot(beads_dir)?
+        {
+            let empty = BTreeMap::new();
+            let provenance = if include_links {
+                &snapshot.provenance
+            } else {
+                &empty
+            };
+            return finish_issue_detail(
+                &snapshot.issues,
+                issue_id,
+                include_links,
+                Some(provenance),
+            );
+        }
         let (_manifest, streams) = read_event_store(beads_dir)?;
         let (issues, provenance) = if include_links {
             reduce_parsed_event_streams_with_link_provenance(&streams)?

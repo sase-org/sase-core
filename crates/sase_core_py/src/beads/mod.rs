@@ -15,9 +15,11 @@ use pyo3::wrap_pyfunction;
 
 mod board;
 mod fingerprint;
+mod read_model;
 
 use board::register_board;
 use fingerprint::register_fingerprint;
+use read_model::register_read_model;
 
 // --- Bead read bindings ---------------------------------------------------
 #[pyfunction]
@@ -1531,6 +1533,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_board(m)?;
     register_fingerprint(m)?;
     register_target_probe(m)?;
+    register_read_model(m)?;
     Ok(())
 }
 

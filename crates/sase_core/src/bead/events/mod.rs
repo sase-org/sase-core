@@ -17,11 +17,13 @@ mod tests;
 mod wire;
 
 pub use import::import_issues_to_event_streams;
+pub(super) use merge::{
+    event_operation_priority, merge_stream_events, mint_bead_event_id,
+};
 pub use merge::{
     merge_bead_event_streams, merge_bead_event_streams_with_relocation,
     BeadEventStreamMergeWire, BeadIdRelocationKindWire, BeadIdRelocationWire,
 };
-pub(super) use merge::{merge_stream_events, mint_bead_event_id};
 pub use reduction::reduce_event_streams;
 pub(super) use reduction::{
     apply_event, archive_close_metadata, artifact_link_row_from_provenance,

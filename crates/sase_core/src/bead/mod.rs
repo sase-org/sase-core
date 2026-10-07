@@ -14,6 +14,7 @@ pub mod history;
 pub mod jsonl;
 pub mod mutation;
 pub mod read;
+pub mod read_model;
 pub mod routing;
 pub mod schema;
 pub mod search;
@@ -83,6 +84,13 @@ pub use read::{
     show_issue_detail, show_issue_detail_with_options, stats,
     BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
     BEAD_READ_WIRE_SCHEMA_VERSION,
+};
+pub use read_model::{
+    cached_store_snapshot, read_model_cache_path_for_store, read_model_status,
+    read_model_verify_cache, BeadReadModelStatusWire, BeadReadModelVerifyWire,
+    CachedStoreSnapshot, BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
+    BEAD_READ_MODEL_VERIFY_WIRE_SCHEMA_VERSION, READ_MODEL_REDUCER_VERSION,
+    READ_MODEL_SCHEMA_VERSION, READ_MODEL_SWEEP_INTERVAL_SECS,
 };
 pub use routing::{
     route_bead_targets, BeadTargetRouteErrorWire, BeadTargetRouteWire,

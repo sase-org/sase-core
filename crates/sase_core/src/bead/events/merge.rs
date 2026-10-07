@@ -854,7 +854,13 @@ impl Ord for StreamHead<'_> {
     }
 }
 
-fn event_operation_priority(operation: BeadEventOperationWire) -> usize {
+/// Merge order rank of one operation inside `(timestamp, priority, event_id)`.
+///
+/// Shared with the read model so its persisted merge frontier uses exactly
+/// the same ordering the k-way merge sorts by.
+pub(in crate::bead) fn event_operation_priority(
+    operation: BeadEventOperationWire,
+) -> usize {
     match operation {
         BeadEventOperationWire::IssueCreated => 0,
         BeadEventOperationWire::DependencyAdded => 2,
