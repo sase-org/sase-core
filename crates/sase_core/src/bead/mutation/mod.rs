@@ -40,6 +40,8 @@ pub use notes_update::{
     update_issues,
 };
 pub use plus_one_snooze::{add_task_plus_one, cancel_task_snooze, snooze_task};
+#[cfg(test)]
+pub(crate) use store::store_io_stats;
 pub use store::{
     export_jsonl, mark_ready_to_work, sync_is_clean, unmark_ready_to_work,
 };

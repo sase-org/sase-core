@@ -60,17 +60,27 @@ pub fn update_issues(
     with_bead_mutation_lock(beads_dir, "update", || {
         let mut store = MutableStore::load(beads_dir)?;
 
+        // Resolve inside the locked load: the single store read is the
+        // authority for existence and ambiguity, so callers pass raw IDs.
+        // Dedupe after resolution so a shorthand alongside its resolved
+        // full form collapses to a single update.
         let mut seen = HashSet::new();
-        let targets: Vec<String> = issue_ids
-            .iter()
-            .filter(|issue_id| seen.insert((*issue_id).clone()))
-            .cloned()
-            .collect();
+        let mut targets: Vec<String> = Vec::new();
+        for issue_id in issue_ids {
+            let resolved = store.resolve_issue_id(issue_id)?;
+            if seen.insert(resolved.clone()) {
+                targets.push(resolved);
+            }
+        }
 
         let indexes = targets
             .iter()
             .map(|issue_id| store.issue_index(issue_id))
             .collect::<Result<Vec<_>, _>>()?;
+        let old_issues = indexes
+            .iter()
+            .map(|index| store.issues[*index].clone())
+            .collect::<Vec<_>>();
 
         if fields.status.as_deref() == Some("closed") {
             reject_unclosed_descendants_in_batch(&store.issues, &targets)?;
@@ -108,6 +118,7 @@ pub fn update_issues(
             let mut result = outcome("update", false, Vec::new());
             result.unchanged_ids = unchanged_ids;
             result.issues = resulting_issues;
+            result.old_issues = old_issues;
             return Ok(result);
         }
 
@@ -139,10 +150,12 @@ pub fn update_issues(
         let mut result = outcome("update", true, changed_ids);
         result.unchanged_ids = unchanged_ids;
         result.issues = resulting_issues;
+        result.old_issues = old_issues;
         result.reopened_ancestor_ids = reopened_ancestors
             .iter()
             .map(|ancestor| ancestor.id.clone())
             .collect();
+        result.reopened_ancestors = reopened_ancestors;
         Ok(result)
     })
 }
@@ -164,7 +177,8 @@ pub fn append_issue_note(
 
     with_bead_mutation_lock(beads_dir, "note", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         let now = now.unwrap_or_else(now_utc);
         let author = author
             .filter(|value| !value.trim().is_empty())
@@ -244,7 +258,8 @@ pub fn edit_issue_note(
 
     with_bead_mutation_lock(beads_dir, "note_edit", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         let now = now.unwrap_or_else(now_utc);
         let author = author
             .filter(|value| !value.trim().is_empty())
@@ -325,7 +340,8 @@ pub fn remove_issue_note(
 
     with_bead_mutation_lock(beads_dir, "note_remove", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         let now = now.unwrap_or_else(now_utc);
         let author = author
             .filter(|value| !value.trim().is_empty())

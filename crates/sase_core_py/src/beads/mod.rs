@@ -1,6 +1,9 @@
 //! Bead store bindings: reads, mutations, migrations, and wire converters.
 
+mod target_probe;
+
 use crate::prelude::*;
+use target_probe::register_target_probe;
 
 use crate::artifact_refs::artifact_ref_context_from_pydict;
 
@@ -1527,6 +1530,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
     register_board(m)?;
     register_fingerprint(m)?;
+    register_target_probe(m)?;
     Ok(())
 }
 

@@ -20,9 +20,11 @@ pub fn add_dependency(
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, "add_dependency", || {
         let mut store = MutableStore::load(beads_dir)?;
-        store.get_issue(depends_on_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let depends_on_id = store.resolve_issue_id(depends_on_id)?;
+        store.get_issue(&depends_on_id)?;
         let owner = store.config.owner.clone();
-        let index = store.issue_index(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         if store.issues[index]
             .dependencies
             .iter()
@@ -40,7 +42,7 @@ pub fn add_dependency(
         };
         store.issues[index].dependencies.push(dep.clone());
         store.append_issue_event(
-            issue_id,
+            &issue_id,
             BeadEventOperationWire::DependencyAdded,
             BeadEventPayloadWire::DependencyAdded {
                 dependency: dep.clone(),
@@ -50,7 +52,7 @@ pub fn add_dependency(
         )?;
         store.save()?;
 
-        let mut result = outcome("dep_add", true, vec![issue_id.to_string()]);
+        let mut result = outcome("dep_add", true, vec![issue_id.clone()]);
         result.dependency = Some(dep);
         Ok(result)
     })
@@ -69,13 +71,19 @@ pub fn remove_dependencies(
     }
     with_bead_mutation_lock(beads_dir, "remove_dependency", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        // Resolve inside the locked load: the single store read is the
+        // authority for existence and ambiguity, so callers pass raw IDs.
+        let issue_id = store.resolve_issue_id(issue_id)?;
         let mut seen = BTreeSet::new();
-        let requested: Vec<String> = depends_on_ids
-            .iter()
-            .filter(|depends_on_id| seen.insert((*depends_on_id).clone()))
-            .cloned()
-            .collect();
+        let mut requested: Vec<String> = Vec::new();
+        for depends_on_id in depends_on_ids {
+            let resolved = store.resolve_issue_id(depends_on_id)?;
+            if seen.insert(resolved.clone()) {
+                requested.push(resolved);
+            }
+        }
+        let issue_id = issue_id.as_str();
+        let index = store.issue_index(issue_id)?;
         let removed = requested
             .iter()
             .map(|depends_on_id| {
@@ -126,6 +134,8 @@ pub fn remove_dependencies(
         let mut result = outcome("dep_rm", true, issue_ids);
         result.issue = Some(updated_issue);
         result.dependencies = removed;
+        result.active_blocker_ids =
+            crate::bead::read::active_blocker_ids(&store.issues, issue_id);
         Ok(result)
     })
 }
@@ -144,7 +154,8 @@ pub fn add_bead_references(
     let references = normalize_references(references)?;
     with_bead_mutation_lock(beads_dir, "add_reference", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         let added = references
             .iter()
             .filter(|reference| !store.issues[index].refs.contains(*reference))
@@ -163,7 +174,7 @@ pub fn add_bead_references(
         let actor = store.config.owner.clone();
         for reference in &added {
             store.append_issue_event(
-                issue_id,
+                &issue_id,
                 BeadEventOperationWire::ReferenceAdded,
                 BeadEventPayloadWire::ReferenceAdded {
                     reference: reference.clone(),
@@ -195,7 +206,8 @@ pub fn remove_bead_references(
     let references = normalize_references(references)?;
     with_bead_mutation_lock(beads_dir, "remove_reference", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
         let removed = references
             .iter()
             .filter(|reference| store.issues[index].refs.contains(*reference))
@@ -217,7 +229,7 @@ pub fn remove_bead_references(
         let actor = store.config.owner.clone();
         for reference in &removed {
             store.append_issue_event(
-                issue_id,
+                &issue_id,
                 BeadEventOperationWire::ReferenceRemoved,
                 BeadEventPayloadWire::ReferenceRemoved {
                     reference: reference.clone(),

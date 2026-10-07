@@ -1,6 +1,5 @@
 //! Mutating bead command handlers: open, update, close, dep, ref, rm.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -12,7 +11,7 @@ use super::super::mutation::{
     BeadUpdateFieldsWire,
 };
 use super::super::read::read_store_issues;
-use super::super::wire::{BeadError, IssueTypeWire, IssueWire, StatusWire};
+use super::super::wire::{BeadError, IssueTypeWire, StatusWire};
 use super::dispatch::{
     defer, error, mutation_summary, success, success_with_mutation,
     BeadCliMutationSummaryWire, BeadCliOutcomeWire,
@@ -22,7 +21,7 @@ use super::parsing::{close_note_author, parse_close_args, parse_update_args};
 use super::presentation::status_value;
 use super::resolution::{
     find_issue, issue_ids_resolution_outcome, issue_resolution_outcome,
-    resolve_cli_issue_id, resolve_cli_issue_ids,
+    resolve_cli_issue_id,
 };
 
 pub(super) fn handle_open(
@@ -32,13 +31,10 @@ pub(super) fn handle_open(
     if args.len() != 1 {
         return Ok(defer());
     }
-    let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    let issue_id = match resolve_cli_issue_id(&issues, &args[0]) {
-        Ok(issue_id) => issue_id,
-        Err(err) => return Ok(issue_resolution_outcome(&args[0], err)),
-    };
-    let old = find_issue(&issues, &issue_id).cloned();
-    match open_issue(write_beads_dir, &issue_id, None) {
+    // The raw ID goes straight into the mutation: resolution and the
+    // pre-mutation snapshot happen inside its single locked load, so this
+    // command performs no store read of its own.
+    match open_issue(write_beads_dir, &args[0], None) {
         Ok(outcome) => {
             let issue = outcome.issue.as_ref().expect("open outcome has issue");
             let mut stdout =
@@ -53,11 +49,11 @@ pub(super) fn handle_open(
             }
             Ok(success_with_mutation(
                 stdout,
-                mutation_summary("open", &outcome, old.as_ref()),
+                mutation_summary("open", &outcome, outcome.old_issues.first()),
             ))
         }
-        Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: issue not found: {}\n", args[0])))
+        Err(err) if err.kind == "not_found" || err.kind == "ambiguous" => {
+            Ok(issue_resolution_outcome(&args[0], err))
         }
         Err(err) => Err(err),
     }
@@ -80,17 +76,10 @@ pub(super) fn handle_update(
         return Ok(error("No fields to update.\n".to_string()));
     }
 
-    let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    let issue_ids = match raw_ids
-        .iter()
-        .map(|issue_id| resolve_cli_issue_id(&issues, issue_id))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(ids) => ids,
-        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-    };
-
-    match update_issues(write_beads_dir, &issue_ids, fields) {
+    // Raw IDs go straight into the mutation: resolution and the
+    // pre-mutation snapshot happen inside its single locked load, so this
+    // command performs no store read of its own.
+    match update_issues(write_beads_dir, &raw_ids, fields) {
         Ok(outcome) => {
             let changed: std::collections::HashSet<&str> =
                 outcome.issue_ids.iter().map(String::as_str).collect();
@@ -112,21 +101,19 @@ pub(super) fn handle_update(
                     .expect("writing to String cannot fail");
                 }
             }
-            for ancestor_id in &outcome.reopened_ancestor_ids {
-                if let Some(ancestor) = find_issue(&issues, ancestor_id) {
-                    writeln!(
-                        stdout,
-                        "○ Reopened ancestor: {} — {}",
-                        ancestor.id, ancestor.title
-                    )
-                    .expect("writing to String cannot fail");
-                }
+            for ancestor in &outcome.reopened_ancestors {
+                writeln!(
+                    stdout,
+                    "○ Reopened ancestor: {} — {}",
+                    ancestor.id, ancestor.title
+                )
+                .expect("writing to String cannot fail");
             }
             let status_transitions = outcome
                 .issues
                 .iter()
                 .filter_map(|issue| {
-                    let old = find_issue(&issues, &issue.id)?;
+                    let old = find_issue(&outcome.old_issues, &issue.id)?;
                     (old.status != issue.status).then(|| {
                         BeadCliStatusTransitionWire {
                             from_status: status_value(&old.status).to_string(),
@@ -145,8 +132,8 @@ pub(super) fn handle_update(
                 },
             ))
         }
-        Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: {}\n", err.message)))
+        Err(err) if err.kind == "not_found" || err.kind == "ambiguous" => {
+            Ok(issue_ids_resolution_outcome(err))
         }
         Err(err) => Err(err),
     }
@@ -163,15 +150,9 @@ pub(super) fn handle_close(
     if ids.is_empty() {
         return Ok(defer());
     }
-    let old_issues = read_store_issues(write_beads_dir).unwrap_or_default();
-    let ids = match ids
-        .iter()
-        .map(|issue_id| resolve_cli_issue_id(&old_issues, issue_id))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(ids) => ids,
-        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-    };
+    // Raw IDs go straight into the mutation: resolution and the
+    // pre-mutation snapshot happen inside its single locked load, so this
+    // command performs no store read of its own.
     // The close actor is always resolved, with or without `--note`: it
     // stamps the note author and every `issue_closed` event in the batch.
     let close_actor = close_note_author();
@@ -197,12 +178,13 @@ pub(super) fn handle_close(
                 BeadCliMutationSummaryWire {
                     operation: "close".to_string(),
                     changed: outcome.changed,
-                    issue_ids: ids,
+                    issue_ids: outcome.requested_issue_ids.clone(),
                     status_transitions: outcome
                         .issues
                         .iter()
                         .filter_map(|issue| {
-                            let old = find_issue(&old_issues, &issue.id)?;
+                            let old =
+                                find_issue(&outcome.old_issues, &issue.id)?;
                             (old.status != StatusWire::Closed).then(|| {
                                 BeadCliStatusTransitionWire {
                                     from_status: status_value(&old.status)
@@ -215,8 +197,8 @@ pub(super) fn handle_close(
                 },
             ))
         }
-        Err(err) if err.kind == "not_found" => {
-            Ok(error(format!("Error: '{}'\n", err.message)))
+        Err(err) if err.kind == "not_found" || err.kind == "ambiguous" => {
+            Ok(issue_ids_resolution_outcome(err))
         }
         Err(err) => Err(err),
     }
@@ -231,15 +213,21 @@ pub(super) fn handle_dep(
     }
     match args.first().map(String::as_str) {
         Some("add") if args.len() == 3 => {
-            let issue_ids =
-                match resolve_cli_issue_ids(write_beads_dir, &args[1..]) {
-                    Ok(issue_ids) => issue_ids,
-                    Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-                };
-            let issue_id = &issue_ids[0];
-            let depends_on_id = &issue_ids[1];
+            // Raw IDs go straight into the mutation: resolution happens
+            // inside its single locked load, so this command performs no
+            // store read of its own.
             let outcome =
-                add_dependency(write_beads_dir, issue_id, depends_on_id, None)?;
+                match add_dependency(write_beads_dir, &args[1], &args[2], None)
+                {
+                    Ok(outcome) => outcome,
+                    Err(err)
+                        if err.kind == "not_found"
+                            || err.kind == "ambiguous" =>
+                    {
+                        return Ok(issue_ids_resolution_outcome(err));
+                    }
+                    Err(err) => return Err(err),
+                };
             let dep = outcome
                 .dependency
                 .as_ref()
@@ -252,24 +240,38 @@ pub(super) fn handle_dep(
                 BeadCliMutationSummaryWire {
                     operation: "dep_add".to_string(),
                     changed: outcome.changed,
-                    issue_ids: vec![issue_id.clone(), depends_on_id.clone()],
+                    issue_ids: vec![
+                        dep.issue_id.clone(),
+                        dep.depends_on_id.clone(),
+                    ],
                     status_transitions: Vec::new(),
                 },
             ))
         }
         Some("rm") if args.len() >= 3 => {
-            let issue_ids =
-                match resolve_cli_issue_ids(write_beads_dir, &args[1..]) {
-                    Ok(issue_ids) => issue_ids,
-                    Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-                };
-            let issue_id = &issue_ids[0];
-            let outcome = remove_dependencies(
+            // Raw IDs go straight into the mutation: resolution happens
+            // inside its single locked load, and the outcome carries the
+            // post-mutation source plus its active blockers, so this
+            // command performs no store read of its own.
+            let outcome = match remove_dependencies(
                 write_beads_dir,
-                issue_id,
-                &issue_ids[1..],
+                &args[1],
+                &args[2..],
                 None,
-            )?;
+            ) {
+                Ok(outcome) => outcome,
+                Err(err)
+                    if err.kind == "not_found" || err.kind == "ambiguous" =>
+                {
+                    return Ok(issue_ids_resolution_outcome(err));
+                }
+                Err(err) => return Err(err),
+            };
+            let issue_id = outcome
+                .issue
+                .as_ref()
+                .map(|issue| issue.id.clone())
+                .unwrap_or_else(|| args[1].clone());
             let mut stdout = String::new();
             for dependency in &outcome.dependencies {
                 writeln!(
@@ -279,17 +281,12 @@ pub(super) fn handle_dep(
                 )
                 .expect("writing to String cannot fail");
             }
-            let issues = read_store_issues(write_beads_dir)?;
-            let active_blockers =
-                active_blocker_ids(&issues, issue_id.as_str());
-            let source_is_ready = issues
-                .iter()
-                .find(|issue| issue.id == *issue_id)
-                .is_some_and(|issue| {
-                    issue.status == StatusWire::Ready
-                        && issue.issue_type == IssueTypeWire::Task
-                        && active_blockers.is_empty()
-                });
+            let active_blockers = outcome.active_blocker_ids.clone();
+            let source_is_ready = outcome.issue.as_ref().is_some_and(|issue| {
+                issue.status == StatusWire::Ready
+                    && issue.issue_type == IssueTypeWire::Task
+                    && active_blockers.is_empty()
+            });
             if source_is_ready {
                 writeln!(
                     stdout,
@@ -336,20 +333,21 @@ pub(super) fn handle_ref(
     };
     match action {
         "add" if action_args.len() >= 2 => {
-            let issue_id = match resolve_cli_issue_ids(
-                write_beads_dir,
-                &[action_args[0].clone()],
-            ) {
-                Ok(mut issue_ids) => issue_ids.remove(0),
-                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-            };
+            // The raw ID goes straight into the mutation: resolution
+            // happens inside its single locked load, so this command
+            // performs no store read of its own.
             match add_bead_references(
                 write_beads_dir,
-                &issue_id,
+                &action_args[0],
                 &action_args[1..],
                 None,
             ) {
                 Ok(outcome) => {
+                    let issue_id = outcome
+                        .issue_ids
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| action_args[0].clone());
                     let mut stdout = String::new();
                     for reference in &outcome.references {
                         writeln!(
@@ -366,37 +364,38 @@ pub(super) fn handle_ref(
                         BeadCliMutationSummaryWire {
                             operation: "ref_add".to_string(),
                             changed: outcome.changed,
-                            issue_ids: vec![issue_id.clone()],
+                            issue_ids: vec![issue_id],
                             status_transitions: Vec::new(),
                         },
                     ))
                 }
                 Err(err)
-                    if matches!(
-                        err.kind.as_str(),
-                        "not_found" | "validation"
-                    ) =>
+                    if err.kind == "not_found" || err.kind == "ambiguous" =>
                 {
+                    Ok(issue_ids_resolution_outcome(err))
+                }
+                Err(err) if err.kind == "validation" => {
                     Ok(error(format!("Error: {}\n", err.message)))
                 }
                 Err(err) => Err(err),
             }
         }
         "rm" if action_args.len() >= 2 => {
-            let issue_id = match resolve_cli_issue_ids(
-                write_beads_dir,
-                &[action_args[0].clone()],
-            ) {
-                Ok(mut issue_ids) => issue_ids.remove(0),
-                Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-            };
+            // The raw ID goes straight into the mutation: resolution
+            // happens inside its single locked load, so this command
+            // performs no store read of its own.
             match remove_bead_references(
                 write_beads_dir,
-                &issue_id,
+                &action_args[0],
                 &action_args[1..],
                 None,
             ) {
                 Ok(outcome) => {
+                    let issue_id = outcome
+                        .issue_ids
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| action_args[0].clone());
                     let mut stdout = String::new();
                     for reference in &outcome.references {
                         writeln!(
@@ -413,17 +412,17 @@ pub(super) fn handle_ref(
                         BeadCliMutationSummaryWire {
                             operation: "ref_rm".to_string(),
                             changed: outcome.changed,
-                            issue_ids: vec![issue_id.clone()],
+                            issue_ids: vec![issue_id],
                             status_transitions: Vec::new(),
                         },
                     ))
                 }
                 Err(err)
-                    if matches!(
-                        err.kind.as_str(),
-                        "not_found" | "validation"
-                    ) =>
+                    if err.kind == "not_found" || err.kind == "ambiguous" =>
                 {
+                    Ok(issue_ids_resolution_outcome(err))
+                }
+                Err(err) if err.kind == "validation" => {
                     Ok(error(format!("Error: {}\n", err.message)))
                 }
                 Err(err) => Err(err),
@@ -516,37 +515,6 @@ pub(super) fn handle_ref_list(
     Ok(success(stdout))
 }
 
-pub(super) fn active_blocker_ids(
-    issues: &[IssueWire],
-    issue_id: &str,
-) -> Vec<String> {
-    let status_by_id: BTreeMap<&str, &StatusWire> = issues
-        .iter()
-        .map(|issue| (issue.id.as_str(), &issue.status))
-        .collect();
-    issues
-        .iter()
-        .find(|issue| issue.id == issue_id)
-        .into_iter()
-        .flat_map(|issue| &issue.dependencies)
-        .filter(|dependency| {
-            status_by_id
-                .get(dependency.depends_on_id.as_str())
-                .is_some_and(|status| {
-                    matches!(
-                        status,
-                        StatusWire::Open
-                            | StatusWire::Claimed
-                            | StatusWire::Ready
-                            | StatusWire::Snoozed
-                            | StatusWire::InProgress
-                    )
-                })
-        })
-        .map(|dependency| dependency.depends_on_id.clone())
-        .collect()
-}
-
 pub(super) fn handle_rm(
     args: &[String],
     write_beads_dir: &Path,
@@ -554,11 +522,9 @@ pub(super) fn handle_rm(
     if args.is_empty() {
         return Ok(defer());
     }
-    let issue_ids = match resolve_cli_issue_ids(write_beads_dir, args) {
-        Ok(issue_ids) => issue_ids,
-        Err(err) => return Ok(issue_ids_resolution_outcome(err)),
-    };
-    match remove_issues(write_beads_dir, &issue_ids) {
+    // Raw IDs go straight into the mutation: resolution happens inside its
+    // single locked load, so this command performs no store read of its own.
+    match remove_issues(write_beads_dir, args) {
         Ok(outcome) => {
             let mut stdout = String::new();
             for issue in &outcome.issues {
@@ -570,17 +536,13 @@ pub(super) fn handle_rm(
                 BeadCliMutationSummaryWire {
                     operation: "rm".to_string(),
                     changed: outcome.changed,
-                    issue_ids,
+                    issue_ids: outcome.requested_issue_ids.clone(),
                     status_transitions: Vec::new(),
                 },
             ))
         }
-        Err(err) if err.kind == "not_found" => {
-            let issue_id = err
-                .message
-                .strip_prefix("Issue not found: ")
-                .unwrap_or(&err.message);
-            Ok(error(format!("Error: issue not found: {issue_id}\n")))
+        Err(err) if err.kind == "not_found" || err.kind == "ambiguous" => {
+            Ok(issue_ids_resolution_outcome(err))
         }
         Err(err) => Err(err),
     }

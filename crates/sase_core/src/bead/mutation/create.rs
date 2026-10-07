@@ -64,6 +64,14 @@ pub fn create_issue(
         normalize_creation_reason(request.creation_reason.as_deref())?;
     with_bead_mutation_lock(beads_dir, "create", || {
         let mut store = MutableStore::load(beads_dir)?;
+        // Resolve inside the locked load: the single store read is the
+        // authority for existence and ambiguity, so callers pass raw IDs.
+        // This is also the existence check for the parent: a missing
+        // parent fails here exactly as the old caller-side pre-resolve did.
+        let mut request = request;
+        if let Some(parent_id) = request.parent_id.as_deref() {
+            request.parent_id = Some(store.resolve_issue_id(parent_id)?);
+        }
         let tier = default_create_tier(&request);
         let references = normalize_references(&request.refs)?;
         let now = request.now.unwrap_or_else(now_utc);

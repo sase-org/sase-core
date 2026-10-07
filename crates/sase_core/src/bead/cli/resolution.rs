@@ -2,9 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::super::read::{
-    read_store_issues, resolve_issue_id_in_issues, resolve_issue_ids,
-};
+use super::super::read::{read_store_issues, resolve_issue_id_in_issues};
 use super::super::wire::{BeadError, IssueWire};
 use super::dispatch::{error, BeadCliOutcomeWire};
 
@@ -27,20 +25,6 @@ pub(super) fn resolve_cli_issue_id(
     issue_id: &str,
 ) -> Result<String, BeadError> {
     resolve_issue_id_in_issues(issues, issue_id)
-}
-
-pub(super) fn resolve_cli_parent_id(
-    issues: &[IssueWire],
-    issue_id: &str,
-) -> Result<String, BeadError> {
-    resolve_issue_id_in_issues(issues, issue_id)
-}
-
-pub(super) fn resolve_cli_issue_ids(
-    beads_dir: &Path,
-    issue_ids: &[String],
-) -> Result<Vec<String>, BeadError> {
-    resolve_issue_ids(beads_dir, issue_ids)
 }
 
 pub(super) fn issue_resolution_outcome(

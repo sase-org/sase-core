@@ -188,7 +188,15 @@ pub struct BeadMutationOutcomeWire {
     #[serde(default)]
     pub rollback_preclaims: Vec<BeadPreclaimRollbackWire>,
     #[serde(default)]
+    pub requested_issue_ids: Vec<String>,
+    #[serde(default)]
     pub reopened_ancestor_ids: Vec<String>,
+    #[serde(default)]
+    pub reopened_ancestors: Vec<IssueWire>,
+    #[serde(default)]
+    pub old_issues: Vec<IssueWire>,
+    #[serde(default)]
+    pub active_blocker_ids: Vec<String>,
     #[serde(default)]
     pub unchanged_ids: Vec<String>,
     #[serde(default)]

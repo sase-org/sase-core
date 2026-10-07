@@ -7,14 +7,13 @@ use std::path::{Path, PathBuf};
 use crate::plan::canonicalize_plan_reference;
 
 use super::super::mutation::{create_issue, BeadCreateRequestWire};
-use super::super::read::read_store_issues;
 use super::super::wire::{BeadError, BeadTierWire, IssueTypeWire};
 use super::dispatch::{
     defer, error, mutation_summary, success_with_mutation, BeadCliOutcomeWire,
 };
 use super::parsing::parse_tier;
 use super::presentation::issue_type_value;
-use super::resolution::{parent_resolution_outcome, resolve_cli_parent_id};
+use super::resolution::parent_resolution_outcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CreateArgs {
@@ -39,7 +38,7 @@ pub(super) fn handle_create(
     cwd: &Path,
     _relativize_design_paths: bool,
 ) -> Result<BeadCliOutcomeWire, BeadError> {
-    let mut parsed = match parse_create_args(args) {
+    let parsed = match parse_create_args(args) {
         Ok(Some(parsed)) => parsed,
         Ok(None) => return Ok(defer()),
         Err(message) => return Ok(error(format!("Error: {message}\n"))),
@@ -65,13 +64,11 @@ pub(super) fn handle_create(
             "Error: --tier can only be set on plan beads\n".to_string(),
         ));
     }
-    if let Some(parent_id) = parsed.parent_id.as_deref() {
-        let issues = read_store_issues(write_beads_dir).unwrap_or_default();
-        parsed.parent_id = match resolve_cli_parent_id(&issues, parent_id) {
-            Ok(parent_id) => Some(parent_id),
-            Err(err) => return Ok(parent_resolution_outcome(parent_id, err)),
-        };
-    }
+    // A raw parent ID goes straight into the mutation: resolution happens
+    // inside its single locked load, so this command performs no store read
+    // of its own. `create_issue` reports a missing parent as not_found,
+    // mapped below to the same outcome as the old caller-side pre-resolve.
+    let raw_parent_id = parsed.parent_id.clone();
 
     let design = match parsed.plan_path.as_deref() {
         Some(plan_path) => {
@@ -115,6 +112,20 @@ pub(super) fn handle_create(
             ))
         }
         Err(err) if err.kind == "validation" || err.kind == "not_found" => {
+            // A parent miss surfaces as the resolve error for the raw
+            // parent ID; anything else keeps the historical verbatim form.
+            if err.kind == "not_found" {
+                if let Some(raw_parent_id) = raw_parent_id.as_deref() {
+                    if err.message
+                        == format!("Issue not found: {raw_parent_id}")
+                    {
+                        return Ok(parent_resolution_outcome(
+                            raw_parent_id,
+                            err,
+                        ));
+                    }
+                }
+            }
             Ok(error(format!("Error: {}\n", err.message)))
         }
         Err(err) => Err(err),

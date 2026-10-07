@@ -66,6 +66,8 @@ pub struct BeadIssueDetailWire {
 pub fn read_store_issues(
     beads_dir: &Path,
 ) -> Result<Vec<IssueWire>, BeadError> {
+    #[cfg(test)]
+    crate::bead::mutation::store_io_stats::record_read();
     if !beads_dir.is_dir() {
         return Err(BeadError::io(format!(
             "No beads directory found at {}",
@@ -95,7 +97,11 @@ pub fn show_issue(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<IssueWire, BeadError> {
-    show_issue_in_issues(read_store_issues(beads_dir)?, issue_id)
+    // Resolve inside the single read so callers pass raw IDs: one replay
+    // covers both resolution and the point lookup.
+    let issues = read_store_issues(beads_dir)?;
+    let issue_id = resolve_issue_id_in_issues(&issues, issue_id)?;
+    show_issue_in_issues(issues, &issue_id)
 }
 
 pub fn show_issue_detail(
@@ -153,6 +159,38 @@ pub fn resolve_issue_ids(
     issue_ids
         .iter()
         .map(|issue_id| resolve_issue_id_in_issues(&issues, issue_id))
+        .collect()
+}
+
+/// IDs of the dependencies of *issue_id* whose targets are still active.
+///
+/// Shared by the `dep rm` CLI rendering and the mutation outcome that feeds
+/// it, so the post-mutation readiness line never needs its own store read.
+pub fn active_blocker_ids(issues: &[IssueWire], issue_id: &str) -> Vec<String> {
+    let status_by_id: BTreeMap<&str, &StatusWire> = issues
+        .iter()
+        .map(|issue| (issue.id.as_str(), &issue.status))
+        .collect();
+    issues
+        .iter()
+        .find(|issue| issue.id == issue_id)
+        .into_iter()
+        .flat_map(|issue| &issue.dependencies)
+        .filter(|dependency| {
+            status_by_id
+                .get(dependency.depends_on_id.as_str())
+                .is_some_and(|status| {
+                    matches!(
+                        status,
+                        StatusWire::Open
+                            | StatusWire::Claimed
+                            | StatusWire::Ready
+                            | StatusWire::Snoozed
+                            | StatusWire::InProgress
+                    )
+                })
+        })
+        .map(|dependency| dependency.depends_on_id.clone())
         .collect()
 }
 

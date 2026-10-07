@@ -21,6 +21,7 @@ use crate::bead::jsonl::prune_removed_flag_event_streams;
 use crate::bead::jsonl::read_event_store;
 use crate::bead::jsonl::write_event_store_changed;
 use crate::bead::jsonl::write_issues_jsonl;
+use crate::bead::read::resolve_issue_id_in_issues;
 use crate::bead::wire::validate_model_value;
 use crate::bead::wire::validate_unique_external_refs;
 use crate::bead::wire::BeadError;
@@ -127,7 +128,8 @@ pub(crate) fn set_ready_to_work(
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, "set_ready_to_work", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(epic_id)?;
+        let epic_id = store.resolve_issue_id(epic_id)?;
+        let index = store.issue_index(&epic_id)?;
         if store.issues[index].issue_type != IssueTypeWire::Plan {
             return Err(BeadError {
                 kind: "not_a_plan".to_string(),
@@ -158,7 +160,7 @@ pub(crate) fn set_ready_to_work(
         store.issues[index].updated_at = now.unwrap_or_else(now_utc);
         let issue = store.issues[index].clone();
         store.append_issue_event(
-            epic_id,
+            &epic_id,
             if ready {
                 BeadEventOperationWire::ReadyMarked
             } else {
@@ -346,6 +348,20 @@ impl MutableStore {
             .iter()
             .position(|issue| issue.id == issue_id)
             .ok_or_else(|| not_found(issue_id))
+    }
+
+    /// Resolve a raw CLI-provided bead ID against the loaded store.
+    ///
+    /// Shorthand resolves to its full canonical ID exactly as the read path
+    /// does; full IDs pass through untouched. Call this at the top of every
+    /// mutation entry point that accepts caller-supplied IDs so the locked
+    /// load is the single store read: callers must not pre-resolve (and
+    /// pre-read) before calling in.
+    pub(crate) fn resolve_issue_id(
+        &self,
+        issue_id: &str,
+    ) -> Result<String, BeadError> {
+        resolve_issue_id_in_issues(&self.issues, issue_id)
     }
 
     pub(crate) fn get_issue(
@@ -741,7 +757,11 @@ pub(crate) fn outcome(
         references: Vec::new(),
         next_counter: None,
         rollback_preclaims: Vec::new(),
+        requested_issue_ids: Vec::new(),
         reopened_ancestor_ids: Vec::new(),
+        reopened_ancestors: Vec::new(),
+        old_issues: Vec::new(),
+        active_blocker_ids: Vec::new(),
         unchanged_ids: Vec::new(),
         reopen_withheld: false,
         reopen_withheld_closed_at: None,
@@ -755,11 +775,13 @@ pub(crate) mod store_io_stats {
     thread_local! {
         static LOADS: Cell<u64> = const { Cell::new(0) };
         static SAVES: Cell<u64> = const { Cell::new(0) };
+        static READS: Cell<u64> = const { Cell::new(0) };
     }
 
     pub fn reset() {
         LOADS.with(|cell| cell.set(0));
         SAVES.with(|cell| cell.set(0));
+        READS.with(|cell| cell.set(0));
     }
 
     pub fn loads() -> u64 {
@@ -768,6 +790,14 @@ pub(crate) mod store_io_stats {
 
     pub fn saves() -> u64 {
         SAVES.with(Cell::get)
+    }
+
+    pub fn reads() -> u64 {
+        READS.with(Cell::get)
+    }
+
+    pub fn record_read() {
+        READS.with(|cell| cell.set(cell.get().saturating_add(1)));
     }
 
     pub fn record_load() {

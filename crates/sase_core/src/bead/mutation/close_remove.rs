@@ -26,7 +26,9 @@ pub fn open_issue(
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, "open", || {
         let mut store = MutableStore::load(beads_dir)?;
-        let index = store.issue_index(issue_id)?;
+        let issue_id = store.resolve_issue_id(issue_id)?;
+        let index = store.issue_index(&issue_id)?;
+        let old_issue = store.issues[index].clone();
         let was_closed = store.issues[index].status == StatusWire::Closed;
         let now = now.unwrap_or_else(now_utc);
         store.issues[index].status = StatusWire::Open;
@@ -41,14 +43,14 @@ pub fn open_issue(
         let issue = store.issues[index].clone();
         issue.validate()?;
         store.append_issue_event(
-            issue_id,
+            &issue_id,
             BeadEventOperationWire::IssueOpened,
             BeadEventPayloadWire::IssueOpened,
             &now,
             &issue.created_by,
         )?;
         let reopened_ancestors = if was_closed {
-            reopen_closed_ancestors(&mut store, issue_id, &now)?
+            reopen_closed_ancestors(&mut store, &issue_id, &now)?
         } else {
             Vec::new()
         };
@@ -56,6 +58,7 @@ pub fn open_issue(
 
         let mut result = outcome("open", true, vec![issue.id.clone()]);
         result.issue = Some(issue);
+        result.old_issues = vec![old_issue];
         result.reopened_ancestor_ids = reopened_ancestors
             .iter()
             .map(|ancestor| ancestor.id.clone())
@@ -107,6 +110,13 @@ pub fn close_issues_with_note(
 
     with_bead_mutation_lock(beads_dir, "close", || {
         let mut store = MutableStore::load(beads_dir)?;
+        // Resolve inside the locked load: the single store read is the
+        // authority for existence and ambiguity, so callers pass raw IDs.
+        let resolved_ids: Vec<String> = issue_ids
+            .iter()
+            .map(|issue_id| store.resolve_issue_id(issue_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let issue_ids = &resolved_ids;
         let now = now.unwrap_or_else(now_utc);
         // The acting closer: trimmed non-blank value, else the store owner.
         // It is the note author and the envelope actor plus `closed_by` on
@@ -270,11 +280,15 @@ pub fn close_issues_with_note(
             }
         }
         let mut result = outcome("close", changed, affected_ids);
+        // Request order with duplicates, exactly as the old caller-side
+        // pre-resolve produced it for the mutation summary.
+        result.requested_issue_ids = resolved_ids.clone();
         if !changed {
             result.message =
                 "all requested issues were already closed".to_string();
         }
         result.issues = batch.returned;
+        result.old_issues = batch.old_issues;
         result.closed_ids = closed_ids;
         result.already_closed_ids = already_closed_ids;
         result.noted_ids = noted_ids;
@@ -329,6 +343,9 @@ struct CloseBatch {
     closed_ids: Vec<String>,
     event_closed: Vec<CloseEvent>,
     returned: Vec<IssueWire>,
+    /// Pre-mutation states parallel to [`CloseBatch::returned`], so callers
+    /// can render status transitions without their own pre-read.
+    old_issues: Vec<IssueWire>,
 }
 
 struct CloseEvent {
@@ -345,11 +362,14 @@ fn close_one_and_delegated_parent(
     forced_descendant_ids: Vec<String>,
     batch: &mut CloseBatch,
 ) -> Result<bool, BeadError> {
+    let old_issue = store.get_issue(issue_id)?.clone();
     let Some(issue) =
         store.close_one(issue_id, closed_at, reason, resolution)?
     else {
+        batch.old_issues.push(old_issue);
         return Ok(false);
     };
+    batch.old_issues.push(old_issue);
     batch.closed_ids.push(issue.id.clone());
     batch.event_closed.push(CloseEvent {
         issue: issue.clone(),
@@ -386,6 +406,11 @@ fn close_one_and_delegated_parent(
         return Ok(true);
     }
 
+    let old_parent = store
+        .issues
+        .iter()
+        .find(|candidate| candidate.id == parent_id)
+        .cloned();
     let parent = store
         .close_one(
             parent_id,
@@ -394,6 +419,9 @@ fn close_one_and_delegated_parent(
             BeadResolutionWire::Done,
         )?
         .expect("non-closed delegated parent phase closes");
+    if let Some(old_parent) = old_parent {
+        batch.old_issues.push(old_parent);
+    }
     batch.closed_ids.push(parent.id.clone());
     batch.event_closed.push(CloseEvent {
         issue: parent.clone(),
@@ -526,14 +554,21 @@ pub fn remove_issues(
 
     with_bead_mutation_lock(beads_dir, "remove", || {
         let mut store = MutableStore::load(beads_dir)?;
+        // Resolve inside the locked load: the single store read is the
+        // authority for existence and ambiguity, so callers pass raw IDs.
+        let resolved_ids: Vec<String> = issue_ids
+            .iter()
+            .map(|issue_id| store.resolve_issue_id(issue_id))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut requested = Vec::new();
         let mut requested_ids = BTreeSet::new();
-        for issue_id in issue_ids {
+        for issue_id in &resolved_ids {
             let issue = store.get_issue(issue_id)?.clone();
             if requested_ids.insert(issue.id.clone()) {
                 requested.push(issue);
             }
         }
+        let requested_issue_ids = resolved_ids.clone();
 
         let mut removed = Vec::new();
         let mut removed_ids = BTreeSet::new();
@@ -588,6 +623,7 @@ pub fn remove_issues(
             true,
             removed.iter().map(|issue| issue.id.clone()).collect(),
         );
+        result.requested_issue_ids = requested_issue_ids;
         result.issues = removed;
         Ok(result)
     })

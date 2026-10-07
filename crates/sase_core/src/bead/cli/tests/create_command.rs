@@ -4,6 +4,7 @@
 use super::super::create_command::{design_plan_roots, design_storage_root};
 use super::super::*;
 use super::support::*;
+use crate::bead::mutation::store_io_stats;
 use crate::bead::read::read_store_issues;
 use crate::bead::wire::{BeadTierWire, StatusWire};
 use serde_json::Value;
@@ -122,6 +123,50 @@ fn create_and_remove_are_handled_with_mutation_summaries() {
     assert_eq!(removed.exit_code, 0);
     assert_eq!(removed.mutation_summary.unwrap().operation, "rm");
     assert!(read_store_issues(&store.beads_dir).unwrap().is_empty());
+}
+
+/// A `create --type phase(<parent>)` resolves a shorthand parent inside
+/// the mutation's single locked load: one load, one save, no pre-read.
+#[test]
+fn create_resolves_shorthand_parent_inside_the_locked_load() {
+    let store = seed_issues(vec![plan_issue(
+        "beads-1",
+        "Epic",
+        "",
+        StatusWire::Open,
+        "2026-01-01T00:00:00Z",
+    )]);
+    store_io_stats::reset();
+    let created = execute_search(
+        &store.beads_dir,
+        &["create", "--title", "Kid", "--type", "phase(1)"],
+    );
+    assert_eq!(created.exit_code, 0, "{}", created.stderr);
+    assert!(created.stdout.starts_with("Created phase: beads-1.1 — Kid"));
+    assert_eq!(store_io_stats::loads(), 1);
+    assert_eq!(store_io_stats::reads(), 0);
+    assert_eq!(store_io_stats::saves(), 1);
+}
+
+/// A missing parent reports the same text as the old caller-side
+/// pre-resolve, still with no read outside the locked load.
+#[test]
+fn create_missing_parent_has_no_pre_read() {
+    let store = seed_issues(vec![plan_issue(
+        "beads-1",
+        "Epic",
+        "",
+        StatusWire::Open,
+        "2026-01-01T00:00:00Z",
+    )]);
+    store_io_stats::reset();
+    let outcome = execute_search(
+        &store.beads_dir,
+        &["create", "--title", "Kid", "--type", "phase(missing)"],
+    );
+    assert_eq!(outcome.exit_code, 1);
+    assert_eq!(outcome.stderr, "Error: parent bead not found: missing\n");
+    assert_eq!(store_io_stats::reads(), 0);
 }
 
 #[test]
