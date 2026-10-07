@@ -58,6 +58,7 @@ mod query;
 mod sudo;
 mod telemetry;
 mod vcs;
+mod wait_epic_follow;
 
 #[cfg(test)]
 mod test_support;
@@ -95,6 +96,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     agent_launch::register_agent_launch(m)?;
     provider_policy::register_provider_policy(m)?;
     axe::register_axe(m)?;
+    wait_epic_follow::register_wait_epic_follow(m)?;
     agent_holds::register_agent_holds(m)?;
     goals::register_goals(m)?;
     fleet::register_fleet(m)?;

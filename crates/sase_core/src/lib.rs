@@ -139,6 +139,7 @@ pub mod telemetry;
 pub mod text_tail;
 pub mod tool_run;
 pub mod vcs_log;
+pub mod wait_epic_follow;
 pub mod wire;
 pub mod workspace_lease;
 
