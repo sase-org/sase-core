@@ -70,7 +70,12 @@ pub fn create_issue(
         // parent fails here exactly as the old caller-side pre-resolve did.
         let mut request = request;
         if let Some(parent_id) = request.parent_id.as_deref() {
-            request.parent_id = Some(store.resolve_issue_id(parent_id)?);
+            let resolved = store.resolve_issue_id(parent_id)?;
+            // Full IDs pass resolution through untouched, so verify the
+            // parent exists in this same locked load: a missing parent
+            // must fail exactly as the old caller-side pre-read did.
+            store.issue_index(&resolved)?;
+            request.parent_id = Some(resolved);
         }
         let tier = default_create_tier(&request);
         let references = normalize_references(&request.refs)?;

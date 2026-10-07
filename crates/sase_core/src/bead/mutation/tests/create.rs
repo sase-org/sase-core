@@ -164,19 +164,31 @@ fn create_resolves_creator_from_phase_parent_then_store_owner() {
     .issue
     .unwrap();
     assert_eq!(child_plan.created_by, "owner@example.com");
-    let missing_parent = create_issue(
+    // A missing parent is refused outright (see
+    // create_with_missing_parent_fails_without_writing): tolerating it
+    // here would mint an orphaned phase, which the bead CLI golden
+    // contract forbids.
+}
+
+#[test]
+fn create_with_missing_parent_fails_without_writing() {
+    let temp = tempdir().unwrap();
+    init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+
+    let error = create_issue(
         &beads_dir,
         BeadCreateRequestWire {
-            title: "Missing-parent phase".to_string(),
+            title: "Orphan phase".to_string(),
             issue_type: IssueTypeWire::Phase,
-            parent_id: Some("sase-missing".to_string()),
+            parent_id: Some("sase-999".to_string()),
             ..Default::default()
         },
     )
-    .unwrap()
-    .issue
-    .unwrap();
-    assert_eq!(missing_parent.created_by, "owner@example.com");
+    .unwrap_err();
+
+    assert_eq!(error.kind, "not_found");
+    assert!(error.message.contains("sase-999"), "unexpected: {error:?}");
 }
 
 #[test]

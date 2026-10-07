@@ -396,6 +396,64 @@ fn update_issues_applies_same_fields_to_every_target_in_one_pass() {
 }
 
 #[test]
+fn update_issues_reports_request_order_resolution_with_duplicates() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    save_config(&beads_dir, &default_config("sase", "")).unwrap();
+    fs::write(
+        beads_dir.join("issues.jsonl"),
+        [
+            issue(
+                "sase-1",
+                "First",
+                "task",
+                None,
+                "open",
+                "2026-01-01T00:00:00Z",
+            ),
+            issue(
+                "sase-2",
+                "Second",
+                "task",
+                None,
+                "open",
+                "2026-01-01T00:01:00Z",
+            ),
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
+    let outcome = update_issues(
+        &beads_dir,
+        &["sase-2".to_string(), "1".to_string(), "sase-1".to_string()],
+        BeadUpdateFieldsWire {
+            status: Some("in_progress".to_string()),
+            now: Some("2026-01-02T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert!(outcome.changed);
+    // Request order with duplicates, so callers can map results back
+    // onto raw inputs without a second read.
+    assert_eq!(
+        outcome.requested_issue_ids,
+        vec![
+            "sase-2".to_string(),
+            "sase-1".to_string(),
+            "sase-1".to_string(),
+        ]
+    );
+    // The shorthand alongside its resolved full form collapses to one
+    // update each.
+    assert_eq!(outcome.issues.len(), 2);
+}
+
+#[test]
 fn update_issues_mixed_batch_reports_changed_and_unchanged() {
     let temp = tempdir().unwrap();
     let beads_dir = temp.path().join("sdd/beads");

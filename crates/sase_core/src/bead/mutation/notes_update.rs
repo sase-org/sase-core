@@ -63,11 +63,16 @@ pub fn update_issues(
         // Resolve inside the locked load: the single store read is the
         // authority for existence and ambiguity, so callers pass raw IDs.
         // Dedupe after resolution so a shorthand alongside its resolved
-        // full form collapses to a single update.
+        // full form collapses to a single update. The request-order
+        // resolution (with duplicates) rides along so callers can map
+        // results back onto their inputs without a second read.
         let mut seen = HashSet::new();
         let mut targets: Vec<String> = Vec::new();
+        let mut requested_ids: Vec<String> =
+            Vec::with_capacity(issue_ids.len());
         for issue_id in issue_ids {
             let resolved = store.resolve_issue_id(issue_id)?;
+            requested_ids.push(resolved.clone());
             if seen.insert(resolved.clone()) {
                 targets.push(resolved);
             }
@@ -116,6 +121,7 @@ pub fn update_issues(
 
         if planned.is_empty() {
             let mut result = outcome("update", false, Vec::new());
+            result.requested_issue_ids = requested_ids;
             result.unchanged_ids = unchanged_ids;
             result.issues = resulting_issues;
             result.old_issues = old_issues;
@@ -148,6 +154,7 @@ pub fn update_issues(
         store.save()?;
 
         let mut result = outcome("update", true, changed_ids);
+        result.requested_issue_ids = requested_ids;
         result.unchanged_ids = unchanged_ids;
         result.issues = resulting_issues;
         result.old_issues = old_issues;
