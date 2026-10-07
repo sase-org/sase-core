@@ -513,6 +513,31 @@ fn agent_meta_finalizer_status_field_order_matches_python_wire() {
 }
 
 #[test]
+fn agent_meta_created_epics_field_order_matches_python_wire() {
+    // `created_epics` trails `finalizer_status` so existing scan payloads
+    // keep their key order, and it is omitted (not `[]`) when empty so
+    // they stay byte-stable.
+    let absent = serde_json::to_string(&AgentMetaWire::default()).unwrap();
+    assert!(!absent.contains("created_epics"));
+    let present: AgentMetaWire = serde_json::from_str(
+        r#"{"proc_id":"p1","created_epics":[{"bead_id":"sase-7k","via":"host_launch"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(present.created_epics.len(), 1);
+    assert_eq!(present.created_epics[0].bead_id, "sase-7k");
+    assert_eq!(present.created_epics[0].via.as_deref(), Some("host_launch"));
+    let encoded = serde_json::to_string(&present).unwrap();
+    let proc_id = encoded.find("\"proc_id\"").unwrap();
+    let status = encoded.find("\"created_epics\"").unwrap();
+    assert!(proc_id < status);
+    assert!(encoded.ends_with(
+        "\"created_epics\":[{\"bead_id\":\"sase-7k\",\"project\":null,\"plan_ref\":null,\"created_at\":null,\"via\":\"host_launch\"}]}"
+    ));
+    let legacy: AgentMetaWire = serde_json::from_str("{}").unwrap();
+    assert!(legacy.created_epics.is_empty());
+}
+
+#[test]
 fn agent_meta_parent_epic_plan_reference_round_trips() {
     let meta: AgentMetaWire = serde_json::from_str(
         r#"{"sdd_plan_path":"plans/authored.md","epic_plan_ref":"plans/parent.md"}"#,

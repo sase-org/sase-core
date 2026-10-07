@@ -31,12 +31,12 @@ use super::wire::{
     AgentArtifactRecordWire, AgentArtifactScanOptionsWire,
     AgentArtifactScanStatsWire, AgentArtifactScanWire, AgentMetaWire,
     AgentSessionTurnGateWire, AgentSessionTurnMonitorWire,
-    AgentSessionTurnWire, DoneMarkerWire, FinalizerStatusInstanceWire,
-    FinalizerStatusRunnerWire, FinalizerStatusSummaryWire,
-    ImportedSourceOwnerWire, OutputVariableValue, PendingQuestionMarkerWire,
-    PlanPathMarkerWire, PromptStepMarkerWire, RunningMarkerWire, UsedMacroWire,
-    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
-    AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    AgentSessionTurnWire, CreatedEpicWire, DoneMarkerWire,
+    FinalizerStatusInstanceWire, FinalizerStatusRunnerWire,
+    FinalizerStatusSummaryWire, ImportedSourceOwnerWire, OutputVariableValue,
+    PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
+    RunningMarkerWire, UsedMacroWire, WaitingMarkerWire, WorkflowStateWire,
+    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -1282,6 +1282,60 @@ fn finalizer_status_from_value(
     })
 }
 
+/// Coerce an optional `created_epics` string: trimmed, with empty and
+/// non-string values dropped.
+fn coerce_created_epic_str(value: Option<&Value>) -> Option<String> {
+    coerce_str(value)
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+}
+
+/// Coerce one `created_epics` entry. Entries without a (non-empty)
+/// string `bead_id` are dropped; unknown keys are ignored.
+fn created_epic_from_value(value: &Value) -> Option<CreatedEpicWire> {
+    let obj = value.as_object()?;
+    let bead_id = coerce_created_epic_str(obj.get("bead_id"))?;
+    Some(CreatedEpicWire {
+        bead_id,
+        project: coerce_created_epic_str(obj.get("project")),
+        plan_ref: coerce_created_epic_str(obj.get("plan_ref")),
+        created_at: coerce_created_epic_str(obj.get("created_at")),
+        via: coerce_created_epic_str(obj.get("via")),
+    })
+}
+
+/// Maximum `created_epics` entries kept on the scan wire.
+const CREATED_EPICS_MAX_ENTRIES: usize = 64;
+
+/// Coerce the `created_epics` record leniently. A non-array value gives an
+/// empty list; a malformed entry never fails the whole meta. Bare string
+/// items degrade to entries with default fields, mirroring the Python
+/// converter.
+fn coerce_created_epics(value: Option<&Value>) -> Vec<CreatedEpicWire> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(raw) => {
+                    let bead_id = raw.trim().to_string();
+                    if bead_id.is_empty() {
+                        None
+                    } else {
+                        Some(CreatedEpicWire {
+                            bead_id,
+                            ..Default::default()
+                        })
+                    }
+                }
+                Value::Object(_) => created_epic_from_value(item),
+                _ => None,
+            })
+            .take(CREATED_EPICS_MAX_ENTRIES)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Read and validate the stored `%tab` placement for one meta object.
 ///
 /// The raw value is canonicalized (trimmed, lowercased) through
@@ -1457,6 +1511,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         finalizer_status: finalizer_status_from_value(
             data.get("finalizer_status"),
         ),
+        created_epics: coerce_created_epics(data.get("created_epics")),
     }
 }
 
@@ -2998,6 +3053,53 @@ mod tests {
         data.insert("name".to_string(), json!("probe"));
         data.insert("finalizer_status".to_string(), value);
         agent_meta_from_object(&data)
+    }
+
+    fn meta_with_created_epics(value: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("created_epics".to_string(), value);
+        agent_meta_from_object(&data)
+    }
+
+    #[test]
+    fn scanner_coerces_created_epics_tolerantly() {
+        // A valid record survives with every field intact.
+        let valid = meta_with_created_epics(json!([{
+            "bead_id": "sase-7k",
+            "project": "demo",
+            "plan_ref": "202610/epic.md",
+            "created_at": "2026-10-06T00:00:00+00:00",
+            "via": "host_launch",
+            "future_field": true,
+        }]));
+        assert_eq!(valid.created_epics.len(), 1);
+        let entry = &valid.created_epics[0];
+        assert_eq!(entry.bead_id, "sase-7k");
+        assert_eq!(entry.project.as_deref(), Some("demo"));
+        assert_eq!(entry.plan_ref.as_deref(), Some("202610/epic.md"));
+        assert_eq!(entry.via.as_deref(), Some("host_launch"));
+
+        // Malformed entries are dropped while the rest of the meta parses.
+        let malformed = meta_with_created_epics(json!([
+            {"project": "demo"},
+            {"bead_id": 42},
+            {"bead_id": ""},
+            {"bead_id": "  "},
+            42,
+            " sase-7m ",
+            {"bead_id": " sase-7n ", "via": 7},
+        ]));
+        assert_eq!(malformed.name.as_deref(), Some("probe"));
+        assert_eq!(malformed.created_epics.len(), 2);
+        assert_eq!(malformed.created_epics[0].bead_id, "sase-7m");
+        assert_eq!(malformed.created_epics[1].bead_id, "sase-7n");
+        assert_eq!(malformed.created_epics[1].via, None);
+
+        // A non-array value gives an empty list.
+        for value in [json!("sase-7k"), json!(42), json!(null), json!({})] {
+            assert!(meta_with_created_epics(value).created_epics.is_empty());
+        }
     }
 
     #[test]

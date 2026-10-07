@@ -725,6 +725,31 @@ pub struct AgentMetaWire {
     /// absent so existing scan payloads stay byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalizer_status: Option<FinalizerStatusSummaryWire>,
+    /// Authoritative epics this run launched, from
+    /// `agent_meta.json["created_epics"]` (`%wait for_epic` record phase).
+    /// Additive serde-default and omitted when empty, so existing scan
+    /// payloads stay byte-stable and no wire schema bump is needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_epics: Vec<CreatedEpicWire>,
+}
+
+/// One entry of `agent_meta.json`'s `created_epics` record.
+///
+/// Authoritative run → epic entry written by `sase bead work` when it
+/// materializes an epic-tier plan bead on the run's behalf. `via` is
+/// `host_launch` or `agent_command`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreatedEpicWire {
+    #[serde(default)]
+    pub bead_id: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub plan_ref: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 /// Runner that executed the finalizer phase (plan §3.3 C5).
@@ -1849,5 +1874,32 @@ mod tests {
         assert_eq!(encoded["finalizer_status"]["phase"], "executing");
         let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
         assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn agent_meta_wire_round_trips_created_epics() {
+        let meta = AgentMetaWire {
+            created_epics: vec![CreatedEpicWire {
+                bead_id: "sase-7k".to_string(),
+                project: Some("demo".to_string()),
+                plan_ref: Some("202610/epic.md".to_string()),
+                created_at: Some("2026-10-06T00:00:00+00:00".to_string()),
+                via: Some("host_launch".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(encoded["created_epics"][0]["bead_id"], "sase-7k");
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn agent_meta_wire_defaults_created_epics_empty() {
+        let old_record = serde_json::json!({"name": "planner"});
+        let decoded: AgentMetaWire =
+            serde_json::from_value(old_record).unwrap();
+        assert!(decoded.created_epics.is_empty());
     }
 }
