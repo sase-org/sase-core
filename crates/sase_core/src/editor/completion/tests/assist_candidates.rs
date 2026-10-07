@@ -237,8 +237,17 @@ fn wait_candidates_merge_keywords_and_exclude_selected_values() {
             .map(|candidate| candidate.insertion.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit=", "@ops",
-            "builders", "review", "worker"
+            "agent=",
+            "bead=",
+            "for_epic=",
+            "hood=",
+            "proc=",
+            "time=",
+            "unit=",
+            "@ops",
+            "builders",
+            "review",
+            "worker"
         ]
     );
 
@@ -252,7 +261,14 @@ fn wait_candidates_merge_keywords_and_exclude_selected_values() {
             .map(|candidate| candidate.insertion.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "agent=", "bead=", "for_epic=", "hood=", "proc=", "unit=", "@ops", "review",
+            "agent=",
+            "bead=",
+            "for_epic=",
+            "hood=",
+            "proc=",
+            "unit=",
+            "@ops",
+            "review",
             "worker"
         ]
     );

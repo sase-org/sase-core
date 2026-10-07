@@ -40,7 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::artifact_link::{ArtifactLinkOriginWire, BeadLinkDirectionWire};
 use crate::bead::events::{
     event_operation_priority, reduce_parsed_event_streams_with_link_provenance,
-    ActiveLinkProvenance, BeadEventStreamWire, StoredLinkIdentity,
+    ActiveLinkProvenance, BeadEventStoreManifestWire, BeadEventStreamWire,
+    StoredLinkIdentity,
 };
 use crate::bead::jsonl::{
     event_store_present, read_event_store_with_stream_signatures,
@@ -48,7 +49,7 @@ use crate::bead::jsonl::{
 };
 use crate::bead::read_model::freshness::{
     freshness_token, now_ns, sweep_store_signatures, FileSignature,
-    READ_MODEL_SWEEP_INTERVAL_SECS,
+    StoreSignatures, READ_MODEL_SWEEP_INTERVAL_SECS,
 };
 use crate::bead::read_model::location::read_model_cache_path_for_store;
 use crate::bead::wire::{BeadError, IssueWire};
@@ -69,12 +70,15 @@ pub const READ_MODEL_REDUCER_VERSION: u32 = 1;
 const VERIFY_DIFF_ID_LIMIT: usize = 50;
 
 /// Bounded wait for a read-only cache open before replaying instead.
-const SERVE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+pub(super) const SERVE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 /// Bounded wait for a rebuild transaction before replaying instead.
-const REBUILD_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const REBUILD_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Wire schema version for [`BeadReadModelStatusWire`].
-pub const BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 adds the serve/tail/rebuild outcome counters and the last
+/// refresh description (`read-model-tail` telemetry).
+pub const BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION: u32 = 2;
 /// Wire schema version for [`BeadReadModelVerifyWire`].
 pub const BEAD_READ_MODEL_VERIFY_WIRE_SCHEMA_VERSION: u32 = 1;
 
@@ -104,6 +108,16 @@ pub struct BeadReadModelStatusWire {
     pub reducer_version: u32,
     /// `sase_core` crate version that wrote the cache.
     pub crate_version: String,
+    /// Cache-hit serves since the cache file was created.
+    pub serve_count: u64,
+    /// Incremental tail commits since the cache file was created.
+    pub tail_count: u64,
+    /// Full-rebuild commits since the cache file was created.
+    pub rebuild_count: u64,
+    /// How the cache content last changed: `""`, `"tail"`, or `"rebuild"`.
+    pub last_refresh: String,
+    /// Why the last refresh ran: tail stats or the rebuild reason.
+    pub last_refresh_reason: String,
 }
 
 /// Cache-vs-replay comparison for `sase bead doctor --verify-cache`.
@@ -169,19 +183,10 @@ pub fn cached_store_snapshot_at(
 pub fn read_model_status(beads_dir: &Path) -> BeadReadModelStatusWire {
     match read_model_cache_path_for_store(beads_dir) {
         Some(cache_path) => read_model_status_at(beads_dir, &cache_path),
-        None => BeadReadModelStatusWire {
-            schema_version: BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
-            location: None,
-            fresh: false,
-            reason: "no git dir: plain replay serves the read".to_string(),
-            generation: 0,
-            size_bytes: 0,
-            last_sweep_age_secs: None,
-            streams: 0,
-            issues: 0,
-            reducer_version: READ_MODEL_REDUCER_VERSION,
-            crate_version: crate_version(),
-        },
+        None => empty_status(
+            None,
+            "no git dir: plain replay serves the read".to_string(),
+        ),
     }
 }
 
@@ -191,19 +196,10 @@ pub fn read_model_status_at(
     cache_path: &Path,
 ) -> BeadReadModelStatusWire {
     let location = Some(cache_path.display().to_string());
-    let mut status = BeadReadModelStatusWire {
-        schema_version: BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
+    let mut status = empty_status(
         location,
-        fresh: false,
-        reason: "cache file missing: the next read rebuilds".to_string(),
-        generation: 0,
-        size_bytes: 0,
-        last_sweep_age_secs: None,
-        streams: 0,
-        issues: 0,
-        reducer_version: READ_MODEL_REDUCER_VERSION,
-        crate_version: crate_version(),
-    };
+        "cache file missing: the next read rebuilds".to_string(),
+    );
     if !event_store_present(beads_dir) {
         status.reason =
             "legacy store: plain replay serves the read".to_string();
@@ -232,6 +228,11 @@ pub fn read_model_status_at(
         return status;
     }
     status.generation = meta.generation;
+    status.serve_count = meta.outcome_serve;
+    status.tail_count = meta.outcome_tail;
+    status.rebuild_count = meta.outcome_rebuild;
+    status.last_refresh = meta.last_refresh.clone();
+    status.last_refresh_reason = meta.last_refresh_reason.clone();
     status.last_sweep_age_secs = Some(
         now_ns()
             .saturating_sub(meta.last_sweep_ns)
@@ -402,6 +403,31 @@ fn crate_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// A never-fresh status report: no cache to describe.
+fn empty_status(
+    location: Option<String>,
+    reason: String,
+) -> BeadReadModelStatusWire {
+    BeadReadModelStatusWire {
+        schema_version: BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
+        location,
+        fresh: false,
+        reason,
+        generation: 0,
+        size_bytes: 0,
+        last_sweep_age_secs: None,
+        streams: 0,
+        issues: 0,
+        reducer_version: READ_MODEL_REDUCER_VERSION,
+        crate_version: crate_version(),
+        serve_count: 0,
+        tail_count: 0,
+        rebuild_count: 0,
+        last_refresh: String::new(),
+        last_refresh_reason: String::new(),
+    }
+}
+
 /// Serve or rebuild, letting cache faults fall back to replay but store
 /// errors fail. `force` skips the freshness checks and always replays.
 fn rebuild_catch_store_errors(
@@ -425,12 +451,12 @@ fn rebuild_catch_store_errors(
 /// routine fallbacks (missing file, busy cache, version drift) need no
 /// message, while surprising faults surface through the status and
 /// verify wires, which own their own reason strings.
-enum Fault {
+pub(super) enum Fault {
     Cache,
     Store(BeadError),
 }
 
-enum ServeOutcome {
+pub(super) enum ServeOutcome {
     Hit(CachedStoreSnapshot),
     Unusable,
 }
@@ -441,7 +467,9 @@ enum ServeOutcome {
 /// lost generation race means the winner committed fresh rows). A
 /// version mismatch drops to `Unusable`; unreadable rows drop the file
 /// and report the fault.
-fn open_and_serve(cache_path: &Path) -> Result<ServeOutcome, String> {
+pub(super) fn open_and_serve(
+    cache_path: &Path,
+) -> Result<ServeOutcome, String> {
     let connection = open_read_only(cache_path, SERVE_BUSY_TIMEOUT)?;
     let meta = read_meta(&connection)?;
     if version_mismatch_reason(&meta).is_some() {
@@ -461,7 +489,7 @@ fn open_and_serve(cache_path: &Path) -> Result<ServeOutcome, String> {
 enum Probe {
     /// Stored rows describe the current store.
     Fresh,
-    /// The store moved on; a rebuild is due.
+    /// The store moved on; a refresh (tail or rebuild) is due.
     Stale,
     /// The file is missing, unreadable, or version-mismatched.
     Unusable(String),
@@ -480,27 +508,38 @@ fn probe_cache(connection: &Connection, beads_dir: &Path) -> Probe {
         Ok(token) => token,
         Err(_) => return Probe::Unusable("token unreadable".to_string()),
     };
-    if token != meta.token {
+    let sweep = match sweep_store_signatures(beads_dir) {
+        Ok(sweep) => sweep,
+        Err(_) => return Probe::Unusable("sweep unreadable".to_string()),
+    };
+    probe_with(connection, &meta, &token, &sweep)
+}
+
+/// Probe freshness against already-computed inputs.
+///
+/// `rebuild` sweeps once and shares the result with the tail refresh, so
+/// the change path pays one directory listing instead of two.
+fn probe_with(
+    connection: &Connection,
+    meta: &CacheMeta,
+    token: &str,
+    sweep: &StoreSignatures,
+) -> Probe {
+    if *token != meta.token {
         return Probe::Stale;
     }
-    match sweep_store_signatures(beads_dir) {
-        Ok(current) => {
-            if current.manifest.is_none() {
-                return Probe::Stale;
-            }
-            if meta.streams_known
-                && load_stream_signatures(connection) == current.streams
-            {
-                Probe::Fresh
-            } else {
-                Probe::Stale
-            }
-        }
-        Err(_) => Probe::Unusable("sweep unreadable".to_string()),
+    if sweep.manifest.is_none() {
+        return Probe::Stale;
+    }
+    if meta.streams_known && load_stream_signatures(connection) == sweep.streams
+    {
+        Probe::Fresh
+    } else {
+        Probe::Stale
     }
 }
 
-/// Full freshness decision followed by serve or rebuild.
+/// Full freshness decision followed by serve, tail apply, or rebuild.
 fn rebuild(
     beads_dir: &Path,
     cache_path: &Path,
@@ -515,6 +554,7 @@ fn rebuild(
         ensure_schema(cache_path)?;
         connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     }
+    backfill_meta_keys(&connection)?;
     if !force {
         // Token-only fast path: a matching token with a recent sweep
         // serves without touching per-stream metadata.
@@ -525,42 +565,128 @@ fn rebuild(
             && now.saturating_sub(meta.last_sweep_ns)
                 < READ_MODEL_SWEEP_INTERVAL_SECS as i64 * 1_000_000_000
         {
-            return load_snapshot(&connection).map_err(|_| {
-                drop(connection);
-                drop_cache_file(cache_path);
-                Fault::Cache
-            });
-        }
-        match probe_cache(&connection, beads_dir) {
-            Probe::Fresh => {
-                update_token_and_sweep(&connection, &token, now)?;
-                return load_snapshot(&connection).map_err(|_| {
+            let snapshot = match load_snapshot(&connection) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
                     drop(connection);
                     drop_cache_file(cache_path);
-                    Fault::Cache
-                });
+                    return Err(Fault::Cache);
+                }
+            };
+            note_serve_outcome(&connection);
+            return Ok(snapshot);
+        }
+        let sweep = match sweep_store_signatures(beads_dir) {
+            Ok(sweep) => sweep,
+            Err(_) => {
+                drop(connection);
+                drop_cache_file(cache_path);
+                ensure_schema(cache_path)?;
+                connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+                return rebuild_cold(beads_dir, cache_path, connection);
             }
-            Probe::Stale => {}
+        };
+        match probe_with(&connection, &meta, &token, &sweep) {
+            Probe::Fresh => {
+                update_token_and_sweep(&connection, &token, now)?;
+                let snapshot = match load_snapshot(&connection) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => {
+                        drop(connection);
+                        drop_cache_file(cache_path);
+                        return Err(Fault::Cache);
+                    }
+                };
+                note_serve_outcome(&connection);
+                return Ok(snapshot);
+            }
+            Probe::Stale => {
+                return refresh_changed_store(
+                    beads_dir, cache_path, connection, &meta, &token, &sweep,
+                );
+            }
             Probe::Unusable(_) => {
                 drop(connection);
                 drop_cache_file(cache_path);
                 ensure_schema(cache_path)?;
                 connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+                return rebuild_cold(beads_dir, cache_path, connection);
             }
         }
     }
+    rebuild_cold(beads_dir, cache_path, connection)
+}
+
+/// Re-read the freshness inputs on the connection the caller already holds
+/// and rebuild with the explicit-rebuild telemetry reason.
+fn rebuild_cold(
+    beads_dir: &Path,
+    cache_path: &Path,
+    connection: Connection,
+) -> Result<CachedStoreSnapshot, Fault> {
     let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
     let token = freshness_token(beads_dir).map_err(|_| Fault::Cache)?;
     drop(connection);
-    rebuild_from_replay(beads_dir, cache_path, &token, meta.generation)
+    rebuild_from_replay(
+        beads_dir,
+        cache_path,
+        &token,
+        meta.generation,
+        "explicit rebuild",
+    )
+}
+
+/// Serve-or-refresh decision for a store whose sweep differs from the
+/// cache: try the incremental tail first, and rebuild only when a tail
+/// precondition fails. The fallback reason becomes the rebuild's
+/// telemetry so doctor shows why the tail path was refused.
+fn refresh_changed_store(
+    beads_dir: &Path,
+    cache_path: &Path,
+    connection: Connection,
+    meta: &CacheMeta,
+    token: &str,
+    sweep: &StoreSignatures,
+) -> Result<CachedStoreSnapshot, Fault> {
+    match super::tail::try_tail_apply(
+        beads_dir,
+        cache_path,
+        &connection,
+        meta,
+        token,
+        sweep,
+    ) {
+        Ok(super::tail::TailDecision::Served(snapshot)) => {
+            note_serve_outcome(&connection);
+            Ok(snapshot)
+        }
+        Ok(super::tail::TailDecision::Tailed(snapshot)) => Ok(snapshot),
+        Ok(super::tail::TailDecision::Fallback(reason)) => {
+            let start_generation = meta.generation;
+            let token = token.to_string();
+            drop(connection);
+            rebuild_from_replay(
+                beads_dir,
+                cache_path,
+                &token,
+                start_generation,
+                &format!("tail fallback: {reason}"),
+            )
+        }
+        Err(fault) => Err(fault),
+    }
 }
 
 /// Rebuild from a forced full replay and commit under generation CAS.
+///
+/// `reason` records why the replay ran (cold start, explicit rebuild, or
+/// the tail precondition that failed) in the outcome telemetry.
 fn rebuild_from_replay(
     beads_dir: &Path,
     cache_path: &Path,
     token: &str,
     start_generation: u64,
+    reason: &str,
 ) -> Result<CachedStoreSnapshot, Fault> {
     let (streams, signatures) =
         match read_event_store_with_stream_signatures(beads_dir) {
@@ -576,6 +702,10 @@ fn rebuild_from_replay(
     let signature_map: BTreeMap<String, StreamFileSignature> =
         signatures.into_iter().collect();
     let frontier = merge_frontier(&streams);
+    let fingerprint = match fingerprint_manifest_config(beads_dir) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => return Err(Fault::Store(error)),
+    };
     let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
@@ -587,7 +717,10 @@ fn rebuild_from_replay(
         token,
         &frontier,
         start_generation,
-    );
+    )
+    .and_then(|()| record_manifest_config_in_txn(&connection, &fingerprint))
+    .and_then(|()| bump_outcome_in_txn(&connection, "outcome_rebuild"))
+    .and_then(|()| record_refresh_in_txn(&connection, "rebuild", reason));
     match outcome {
         Ok(()) => {
             connection
@@ -633,17 +766,38 @@ fn rebuild_from_replay(
     Ok(snapshot)
 }
 
-struct CacheMeta {
-    token: String,
-    last_sweep_ns: i64,
-    generation: u64,
-    schema_version: u32,
-    reducer_version: u32,
-    crate_version: String,
-    streams_known: bool,
+pub(super) struct CacheMeta {
+    pub(super) token: String,
+    pub(super) last_sweep_ns: i64,
+    pub(super) generation: u64,
+    pub(super) schema_version: u32,
+    pub(super) reducer_version: u32,
+    pub(super) crate_version: String,
+    pub(super) streams_known: bool,
+    /// Largest merge key across the reduced events, as `merge_frontier`
+    /// formats it. The tail refresh resumes after this point.
+    pub(super) frontier: String,
+    /// Manifest fields the tail gate compares: only a stream-count change
+    /// from pure stream additions keeps the incremental path open.
+    pub(super) manifest_schema_version: u32,
+    pub(super) manifest_stream_count: usize,
+    /// Canonical form of the parsed `config.json` the cache was built
+    /// from. Comparing parsed structs (rather than raw bytes) keeps the
+    /// tail open across default-materializing rewrites while still
+    /// catching real config edits.
+    pub(super) config_canonical: String,
+    /// Serve / tail / rebuild outcome counters (`read-model-tail`
+    /// telemetry, surfaced in the doctor cache status).
+    pub(super) outcome_serve: u64,
+    pub(super) outcome_tail: u64,
+    pub(super) outcome_rebuild: u64,
+    /// How the cached content last changed: `""`, `"tail"`, or `"rebuild"`.
+    pub(super) last_refresh: String,
+    /// Tail stats or the rebuild reason for the last refresh.
+    pub(super) last_refresh_reason: String,
 }
 
-fn read_meta(connection: &Connection) -> Result<CacheMeta, String> {
+pub(super) fn read_meta(connection: &Connection) -> Result<CacheMeta, String> {
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut statement = connection
         .prepare("SELECT key, value FROM meta")
@@ -677,7 +831,39 @@ fn read_meta(connection: &Connection) -> Result<CacheMeta, String> {
             .unwrap_or(0),
         crate_version: values.get("crate_version").cloned().unwrap_or_default(),
         streams_known: values.contains_key("streams_known"),
+        frontier: values.get("frontier").cloned().unwrap_or_default(),
+        manifest_schema_version: values
+            .get("manifest_schema_version")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        manifest_stream_count: values
+            .get("manifest_stream_count")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        config_canonical: values
+            .get("config_canonical")
+            .cloned()
+            .unwrap_or_default(),
+        outcome_serve: meta_counter(&values, "outcome_serve"),
+        outcome_tail: meta_counter(&values, "outcome_tail"),
+        outcome_rebuild: meta_counter(&values, "outcome_rebuild"),
+        last_refresh: values.get("last_refresh").cloned().unwrap_or_default(),
+        last_refresh_reason: values
+            .get("last_refresh_reason")
+            .cloned()
+            .unwrap_or_default(),
     })
+}
+
+/// Parse one outcome counter from the meta map, defaulting to zero.
+///
+/// Caches written before `read-model-tail` have no counter keys; they
+/// backfill through [`backfill_meta_keys`] instead of dropping.
+fn meta_counter(values: &BTreeMap<String, String>, key: &str) -> u64 {
+    values
+        .get(key)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Reason the cached rows must be dropped, or `None` when versions match.
@@ -704,7 +890,54 @@ fn version_mismatch_reason(meta: &CacheMeta) -> Option<String> {
     None
 }
 
-fn update_token_and_sweep(
+/// Count one cache-hit serve in the outcome telemetry.
+///
+/// Best-effort and non-blocking: the counter update runs with a zero
+/// wait, so a serve never stalls behind a concurrent rebuild's write
+/// transaction. A lost bump only undercounts telemetry, never content.
+pub(super) fn note_serve_outcome(connection: &Connection) {
+    let _ = connection.busy_timeout(Duration::ZERO);
+    let _ = connection.execute(
+        "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'outcome_serve'",
+        [],
+    );
+    let _ = connection.busy_timeout(REBUILD_BUSY_TIMEOUT);
+}
+
+/// Bump one outcome counter inside the caller's open write transaction.
+pub(super) fn bump_outcome_in_txn(
+    connection: &Connection,
+    key: &str,
+) -> Result<(), WriteFault> {
+    connection
+        .execute(
+            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = ?1",
+            rusqlite::params![key],
+        )
+        .map_err(|_| WriteFault::Other)?;
+    Ok(())
+}
+
+/// Record how the cached content last changed inside the open txn.
+pub(super) fn record_refresh_in_txn(
+    connection: &Connection,
+    refresh: &str,
+    reason: &str,
+) -> Result<(), WriteFault> {
+    for (key, value) in
+        [("last_refresh", refresh), ("last_refresh_reason", reason)]
+    {
+        connection
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )
+            .map_err(|_| WriteFault::Other)?;
+    }
+    Ok(())
+}
+
+pub(super) fn update_token_and_sweep(
     connection: &Connection,
     token: &str,
     now_ns: i64,
@@ -722,11 +955,151 @@ fn update_token_and_sweep(
 }
 
 /// Why a snapshot write failed: a lost generation race versus a fault.
-enum WriteFault {
+pub(super) enum WriteFault {
     /// Another rebuild committed first; serve what it wrote.
     CasLost,
     /// Any other write fault; the file is dropped and reads replay.
     Other,
+}
+
+/// Manifest content plus parsed config the tail gate compares.
+///
+/// Both come from the live files at commit time, so a later change to
+/// either is visible to the next freshness decision.
+pub(super) struct ManifestConfigFingerprint {
+    pub(super) manifest_schema_version: u32,
+    pub(super) manifest_stream_count: usize,
+    pub(super) config_canonical: String,
+}
+
+/// Read the manifest and canonicalize `config.json` for the cache
+/// fingerprints.
+///
+/// The config compares as a parsed struct, so a rewrite that only
+/// materializes defaults compares equal while a real edit does not. The
+/// `next_counter` allocation cursor is normalized away: minting new ids
+/// bumps it on every creation, and reduction never reads it, so a
+/// counter-only change keeps the tail open. An unparseable config
+/// fingerprints as its raw hash, which still changes on any edit; a
+/// missing `config.json` canonicalizes as empty on both sides so absence
+/// compares equal to absence.
+pub(super) fn fingerprint_manifest_config(
+    beads_dir: &Path,
+) -> Result<ManifestConfigFingerprint, BeadError> {
+    use crate::bead::config::load_config_from_str;
+    use crate::bead::jsonl::event_manifest_path;
+    let manifest_path = event_manifest_path(beads_dir);
+    let manifest_text =
+        fs::read_to_string(&manifest_path).map_err(|error| {
+            BeadError::io(format!(
+                "failed to read bead events manifest {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    let manifest: BeadEventStoreManifestWire =
+        serde_json::from_str(&manifest_text).map_err(BeadError::from)?;
+    let config_path = beads_dir.join("config.json");
+    let config_text = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            String::new()
+        }
+        Err(error) => {
+            return Err(BeadError::io(format!(
+                "failed to read bead store config {}: {error}",
+                config_path.display()
+            )));
+        }
+    };
+    let config_canonical = match load_config_from_str(&config_text) {
+        Ok(config) => serde_json::to_string(&normalize_config(&config))
+            .map_err(BeadError::from)?,
+        Err(_) => {
+            format!(
+                "unparseable:{}",
+                crate::bead::jsonl::hex_signature(config_text.as_bytes())
+            )
+        }
+    };
+    Ok(ManifestConfigFingerprint {
+        manifest_schema_version: manifest.schema_version,
+        manifest_stream_count: manifest.stream_count,
+        config_canonical,
+    })
+}
+
+/// Normalize a parsed config for fingerprinting: the `next_counter`
+/// allocation cursor moves on every creation and reduction never reads
+/// it, so it compares as zero on both sides.
+fn normalize_config(
+    config: &crate::bead::config::BeadConfigWire,
+) -> serde_json::Value {
+    let mut value =
+        serde_json::to_value(config).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("next_counter".to_string(), serde_json::Value::from(0));
+    }
+    value
+}
+
+/// Persist one manifest/config fingerprint inside the open write txn.
+pub(super) fn record_manifest_config_in_txn(
+    connection: &Connection,
+    fingerprint: &ManifestConfigFingerprint,
+) -> Result<(), WriteFault> {
+    for (key, value) in [
+        (
+            "manifest_schema_version",
+            fingerprint.manifest_schema_version.to_string(),
+        ),
+        (
+            "manifest_stream_count",
+            fingerprint.manifest_stream_count.to_string(),
+        ),
+        ("config_canonical", fingerprint.config_canonical.clone()),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )
+            .map_err(|_| WriteFault::Other)?;
+    }
+    Ok(())
+}
+
+/// Insert link-provenance rows inside the caller's open write txn.
+///
+/// Callers clear the rows they replace first: full rewrites delete the
+/// whole table, tail commits delete only the touched sources and the
+/// removed issues' target refs, then re-insert those sources from the
+/// resumed map.
+pub(super) fn insert_link_provenance(
+    connection: &Connection,
+    provenance: &BTreeMap<StoredLinkIdentity, ActiveLinkProvenance>,
+) -> Result<(), WriteFault> {
+    let mut link_stmt = connection
+        .prepare(
+            "INSERT INTO link_provenance (target_ref, source_issue_id, relation, description, origin, direction, uses, actor, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        )
+        .map_err(|_| WriteFault::Other)?;
+    // The map key duplicates the row fields and stays in memory only.
+    for provenance in provenance.values() {
+        link_stmt
+            .execute(rusqlite::params![
+                provenance.target_ref,
+                provenance.source_issue_id,
+                provenance.relation,
+                provenance.description,
+                wire_string(&provenance.origin),
+                wire_string(&provenance.direction),
+                provenance.uses as i64,
+                provenance.actor,
+                provenance.timestamp,
+            ])
+            .map_err(|_| WriteFault::Other)?;
+    }
+    Ok(())
 }
 
 /// Persist one snapshot plus signatures and frontier in the open txn.
@@ -814,28 +1187,7 @@ fn write_snapshot_in_txn(
     drop(issue_stmt);
     drop(edge_stmt);
     drop(suffix_stmt);
-    let mut link_stmt = connection
-        .prepare(
-            "INSERT INTO link_provenance (target_ref, source_issue_id, relation, description, origin, direction, uses, actor, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .map_err(|_| WriteFault::Other)?;
-    // The map key duplicates the row fields and stays in memory only.
-    for provenance in snapshot.provenance.values() {
-        link_stmt
-            .execute(rusqlite::params![
-                provenance.target_ref,
-                provenance.source_issue_id,
-                provenance.relation,
-                provenance.description,
-                wire_string(&provenance.origin),
-                wire_string(&provenance.direction),
-                provenance.uses as i64,
-                provenance.actor,
-                provenance.timestamp,
-            ])
-            .map_err(|_| WriteFault::Other)?;
-    }
-    drop(link_stmt);
+    insert_link_provenance(connection, &snapshot.provenance)?;
     let mut stream_stmt = connection
         .prepare(
             "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -887,7 +1239,7 @@ fn write_snapshot_in_txn(
 }
 
 /// Load the snapshot in replay order.
-fn load_snapshot(
+pub(super) fn load_snapshot(
     connection: &Connection,
 ) -> Result<CachedStoreSnapshot, String> {
     let mut statement = connection
@@ -967,6 +1319,60 @@ fn load_snapshot(
     Ok(CachedStoreSnapshot { issues, provenance })
 }
 
+/// Stored per-stream signatures with the content hashes the tail gate
+/// verifies append prefixes against.
+pub(super) struct StoredStreamSig {
+    pub(super) size: u64,
+    pub(super) mtime_ns: i64,
+    pub(super) inode: u64,
+    pub(super) byte_len: u64,
+    pub(super) content_hash: String,
+}
+
+/// Load every stored stream signature, including content hashes.
+pub(super) fn load_stored_stream_sigs(
+    connection: &Connection,
+) -> BTreeMap<String, StoredStreamSig> {
+    let mut signatures = BTreeMap::new();
+    let mut statement = match connection.prepare(
+        "SELECT stream_id, size, mtime_ns, inode, byte_len, content_hash FROM streams ORDER BY stream_id",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return signatures,
+    };
+    let rows = match statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return signatures,
+    };
+    for row in rows {
+        let Ok((stream_id, size, mtime_ns, inode, byte_len, content_hash)) =
+            row
+        else {
+            continue;
+        };
+        signatures.insert(
+            stream_id,
+            StoredStreamSig {
+                size: u64::try_from(size).unwrap_or(0),
+                mtime_ns,
+                inode: u64::try_from(inode).unwrap_or(0),
+                byte_len: u64::try_from(byte_len).unwrap_or(0),
+                content_hash,
+            },
+        );
+    }
+    signatures
+}
+
 fn load_stream_signatures(
     connection: &Connection,
 ) -> Vec<(String, FileSignature)> {
@@ -1009,7 +1415,7 @@ fn load_stream_signatures(
 /// Uses exactly the `(timestamp, operation priority, event_id)` ordering
 /// the k-way merge sorts by, so `read-model-tail` can prove every appended
 /// event sorts after it.
-fn merge_frontier(streams: &[BeadEventStreamWire]) -> String {
+pub(super) fn merge_frontier(streams: &[BeadEventStreamWire]) -> String {
     let mut frontier: Option<(String, usize, String)> = None;
     for stream in streams {
         for event in &stream.events {
@@ -1024,19 +1430,49 @@ fn merge_frontier(streams: &[BeadEventStreamWire]) -> String {
         }
     }
     match frontier {
-        Some((timestamp, priority, event_id)) => serde_json::json!({
-            "timestamp": timestamp,
-            "priority": priority,
-            "event_id": event_id,
-        })
-        .to_string(),
-        None => serde_json::json!({
-            "timestamp": "",
-            "priority": 0,
-            "event_id": "",
-        })
-        .to_string(),
+        Some((timestamp, priority, event_id)) => {
+            format_frontier(&timestamp, priority, &event_id)
+        }
+        None => format_frontier("", 0, ""),
     }
+}
+
+/// Format one merge-frontier key exactly as [`merge_frontier`] does, so
+/// tail commits advance the stored frontier in the same encoding.
+pub(super) fn format_frontier(
+    timestamp: &str,
+    priority: usize,
+    event_id: &str,
+) -> String {
+    serde_json::json!({
+        "timestamp": timestamp,
+        "priority": priority,
+        "event_id": event_id,
+    })
+    .to_string()
+}
+
+/// Parse one merge-frontier key back into its ordering tuple.
+pub(super) fn parse_frontier(frontier: &str) -> (String, usize, String) {
+    let value: serde_json::Value =
+        serde_json::from_str(frontier).unwrap_or(serde_json::Value::Null);
+    (
+        value
+            .get("timestamp")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        value
+            .get("priority")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0),
+        value
+            .get("event_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 /// Root of an issue's lineage: the stream that canonically holds it.
@@ -1045,7 +1481,10 @@ fn merge_frontier(streams: &[BeadEventStreamWire]) -> String {
 /// parent plan's stream, so walking the parent chain to the top derives
 /// the stream without parsing events. Cycles fall back to the issue
 /// itself.
-fn lineage_root(id: &str, parent_of: &BTreeMap<&str, &str>) -> String {
+pub(super) fn lineage_root(
+    id: &str,
+    parent_of: &BTreeMap<&str, &str>,
+) -> String {
     let mut root = id;
     let mut seen = BTreeSet::from([id]);
     while let Some(parent) = parent_of.get(root) {
@@ -1058,11 +1497,11 @@ fn lineage_root(id: &str, parent_of: &BTreeMap<&str, &str>) -> String {
 }
 
 /// Shorthand suffix exactly as `resolve_issue_id_in_issues` matches it.
-fn id_suffix(id: &str) -> &str {
+pub(super) fn id_suffix(id: &str) -> &str {
     id.rsplit_once('-').map(|(_, suffix)| suffix).unwrap_or(id)
 }
 
-fn wire_string(value: &impl Serialize) -> String {
+pub(super) fn wire_string(value: &impl Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -1205,15 +1644,7 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
             ",
         )
         .map_err(|_| Fault::Cache)?;
-    for (key, value) in [
-        ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
-        ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
-        ("crate_version", crate_version()),
-        ("token", String::new()),
-        ("last_sweep_ns", "0".to_string()),
-        ("frontier", String::new()),
-        ("generation", "0".to_string()),
-    ] {
+    for (key, value) in tail_meta_defaults() {
         connection
             .execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
@@ -1224,7 +1655,49 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
     Ok(())
 }
 
-fn open_read_only(
+/// Default values for every meta key, including the `read-model-tail`
+/// manifest/config fingerprints and outcome telemetry.
+///
+/// Shared by fresh-file creation and [`backfill_meta_keys`] so caches
+/// written before `read-model-tail` gain the new keys without a drop and
+/// rebuild.
+fn tail_meta_defaults() -> [(&'static str, String); 15] {
+    [
+        ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
+        ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
+        ("crate_version", crate_version()),
+        ("token", String::new()),
+        ("last_sweep_ns", "0".to_string()),
+        ("frontier", String::new()),
+        ("generation", "0".to_string()),
+        ("manifest_schema_version", "0".to_string()),
+        ("manifest_stream_count", "0".to_string()),
+        ("config_canonical", String::new()),
+        ("outcome_serve", "0".to_string()),
+        ("outcome_tail", "0".to_string()),
+        ("outcome_rebuild", "0".to_string()),
+        ("last_refresh", String::new()),
+        ("last_refresh_reason", String::new()),
+    ]
+}
+
+/// Heal pre-tail caches: insert any missing meta key without touching the
+/// rows, counters, or generation. Runs on every read before the freshness
+/// decision, so a cache written by `read-model-store` gains tail support
+/// on its next read instead of rebuilding.
+pub(super) fn backfill_meta_keys(connection: &Connection) -> Result<(), Fault> {
+    for (key, value) in tail_meta_defaults() {
+        connection
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+                rusqlite::params![key, value],
+            )
+            .map_err(|_| Fault::Cache)?;
+    }
+    Ok(())
+}
+
+pub(super) fn open_read_only(
     cache_path: &Path,
     busy_timeout: Duration,
 ) -> Result<Connection, String> {
@@ -1239,7 +1712,7 @@ fn open_read_only(
     Ok(connection)
 }
 
-fn open_read_write(
+pub(super) fn open_read_write(
     cache_path: &Path,
     busy_timeout: Duration,
 ) -> Result<Connection, Fault> {
@@ -1279,7 +1752,7 @@ fn cache_file_size(cache_path: &Path) -> u64 {
 }
 
 /// Delete the cache file and its WAL companions: derived data only.
-fn drop_cache_file(cache_path: &Path) {
+pub(super) fn drop_cache_file(cache_path: &Path) {
     for companion in [
         cache_path.to_path_buf(),
         cache_path.with_extension("sqlite-wal"),

@@ -112,7 +112,7 @@ mod read_model_tests {
             {
                 assert!(module.getattr(name).is_ok(), "{name}");
             }
-            assert_eq!(py_bead_read_model_status_wire_schema_version(), 1);
+            assert_eq!(py_bead_read_model_status_wire_schema_version(), 2);
             assert_eq!(py_bead_read_model_verify_wire_schema_version(), 1);
 
             let temp = tempdir().unwrap();

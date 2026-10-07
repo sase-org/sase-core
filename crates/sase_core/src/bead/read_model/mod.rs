@@ -2,13 +2,14 @@
 //!
 //! The cache lives under the clone's git dir (see `location`), serves
 //! unchanged-store reads without replaying history (see `freshness` for
-//! the O(1) token protocol), and rebuilds from a full replay whenever
-//! anything differs (see `store`). `read-model-tail` adds incremental
-//! apply on top of the signatures and frontier persisted here.
+//! the O(1) token protocol), applies appended events incrementally after
+//! the merge frontier (see `tail`), and rebuilds from a full replay
+//! whenever a tail precondition fails (see `store`).
 
 mod freshness;
 mod location;
 mod store;
+mod tail;
 #[cfg(test)]
 mod tests;
 

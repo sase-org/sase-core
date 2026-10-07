@@ -135,14 +135,21 @@ fn reduce_event_streams_inner(
         }
     }
 
-    let mut reduced: Vec<IssueWire> = issues.into_values().collect();
+    let reduced: Vec<IssueWire> = issues.into_values().collect();
+    Ok((post_pass(reduced)?, provenance))
+}
+
+/// Canonical ordering plus once-each validation, external-ref collapse, and
+/// uniqueness: the reduction post-pass shared by full replays and tail
+/// resumes so the two can never drift apart.
+fn post_pass(mut reduced: Vec<IssueWire>) -> Result<Vec<IssueWire>, BeadError> {
     reduced.sort_by(compare_issues_canonically);
     for issue in &reduced {
         issue.validate()?;
     }
     let reduced = collapse_duplicate_external_refs(reduced);
     validate_unique_external_refs(&reduced)?;
-    Ok((reduced, provenance))
+    Ok(reduced)
 }
 
 fn apply_link_provenance(

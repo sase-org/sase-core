@@ -775,8 +775,10 @@ pub(in crate::bead) fn hex_signature(bytes: &[u8]) -> String {
 /// This is the single event-validation point on the read path: callers must
 /// not re-validate events parsed here. Streams from any other source (for
 /// example Python-supplied streams through `bead_reduce_event_streams`) are
-/// validated by `validated_event_streams` instead.
-fn parse_event_stream_bytes(
+/// validated by `validated_event_streams` instead. The read model's tail
+/// refresh parses appended bytes here too, so tail events are validated
+/// exactly once as well.
+pub(in crate::bead) fn parse_event_stream_bytes(
     path: &Path,
     contents: &[u8],
 ) -> Result<Vec<BeadEventRecordWire>, BeadError> {

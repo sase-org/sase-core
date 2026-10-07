@@ -471,7 +471,7 @@ pub(super) fn link_error(
     BeadError::validation(error.to_string())
 }
 
-pub(super) fn canonical_bead_source_ref(issue_id: &str) -> String {
+pub(in crate::bead) fn canonical_bead_source_ref(issue_id: &str) -> String {
     format!("bead:{issue_id}")
 }
 

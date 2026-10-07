@@ -376,7 +376,9 @@ fn directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
     out
 }
 
-fn wait_directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
+fn wait_directive_diagnostics(
+    document: &DocumentSnapshot,
+) -> Vec<EditorDiagnostic> {
     use std::collections::HashMap;
 
     let text = document.text();
@@ -437,9 +439,7 @@ fn wait_directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnost
             }
         }
         let mut cursor = name_end;
-        while cursor < bytes.len()
-            && (bytes[cursor] as char).is_whitespace()
-        {
+        while cursor < bytes.len() && (bytes[cursor] as char).is_whitespace() {
             cursor += 1;
         }
         if cursor < bytes.len() && bytes[cursor] == b'(' {
@@ -539,7 +539,9 @@ fn wait_directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnost
             } else {
                 while end < bytes.len() {
                     let next = bytes[end] as char;
-                    if next.is_whitespace() || matches!(next, '(' | '[' | '{' | '"' | '\'' | '`') {
+                    if next.is_whitespace()
+                        || matches!(next, '(' | '[' | '{' | '"' | '\'' | '`')
+                    {
                         break;
                     }
                     // Colon args end at whitespace; commas separate targets.
@@ -548,8 +550,20 @@ fn wait_directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnost
                     if !(next.is_ascii_alphanumeric()
                         || matches!(
                             next,
-                            '#' | '/' | '.' | ',' | '(' | ')' | '@' | '=' | '-'
-                                | '_' | '!' | '{' | '}' | ':')
+                            '#' | '/'
+                                | '.'
+                                | ','
+                                | '('
+                                | ')'
+                                | '@'
+                                | '='
+                                | '-'
+                                | '_'
+                                | '!'
+                                | '{'
+                                | '}'
+                                | ':'
+                        )
                         || next == '@')
                     {
                         break;

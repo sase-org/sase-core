@@ -1133,7 +1133,8 @@ fn parse_wait_directive(
                     }
                     let mut conflict: Option<bool> = None;
                     for existing in raw_waits.iter() {
-                        if let RawWaitTargetKind::Agent(name) = &existing.target {
+                        if let RawWaitTargetKind::Agent(name) = &existing.target
+                        {
                             if name == target {
                                 if let Some(previous) = existing.for_epic {
                                     if conflict.is_none() {

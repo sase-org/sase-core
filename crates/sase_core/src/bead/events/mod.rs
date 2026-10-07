@@ -33,6 +33,7 @@ pub(super) use reduction::{
     task_plus_one_reopen_decision, ActiveLinkProvenance, StoredLinkIdentity,
     TaskPlusOneReopenDecision,
 };
+pub(super) use wire::canonical_bead_source_ref;
 pub use wire::{
     BeadEventOperationWire, BeadEventPayloadWire, BeadEventRecordWire,
     BeadEventStoreManifestWire, BeadEventStreamWire,
