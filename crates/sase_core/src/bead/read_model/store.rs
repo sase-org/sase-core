@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -57,7 +57,11 @@ use crate::bead::wire::{BeadError, IssueWire};
 /// Schema version of the read-model SQLite file.
 ///
 /// Any schema change means drop and rebuild: old files are never migrated.
-pub const READ_MODEL_SCHEMA_VERSION: u32 = 1;
+///
+/// Version 2 adds the `task_type`, `plus_one`, and `is_flag` issue columns
+/// behind the `read-model-queries` indexed list filters and index
+/// aggregates.
+pub const READ_MODEL_SCHEMA_VERSION: u32 = 2;
 
 /// Reducer version the cached rows were reduced with.
 ///
@@ -617,6 +621,139 @@ fn rebuild(
     rebuild_cold(beads_dir, cache_path, connection)
 }
 
+/// Ensure the cache describes the live store without loading any rows.
+///
+/// Returns the cache path when the next query may serve from it and `None`
+/// whenever the caller should replay instead: no git dir (plain replay
+/// serves the read), a legacy store, or any cache fault. Genuine store
+/// errors surface as `Err`, exactly as the replay the caller falls back to
+/// would fail with them.
+///
+/// Fresh stores return without deserializing a single row: the token-only
+/// and sweep-confirmed paths record their serve telemetry and leave the
+/// rows on disk for the caller's indexed query. A store the sweep finds
+/// changed refreshes through the same tail-or-rebuild path `rebuild` uses
+/// (paying one full snapshot load), so the indexed query after it is warm.
+pub fn ensure_cache_ready(
+    beads_dir: &Path,
+) -> Result<Option<PathBuf>, BeadError> {
+    let Some(cache_path) = read_model_cache_path_for_store(beads_dir) else {
+        return Ok(None);
+    };
+    ensure_cache_ready_at(beads_dir, &cache_path)
+        .map(|ready| ready.then_some(cache_path))
+}
+
+/// Ensure the cache at an explicit path is fresh (tests and queries).
+///
+/// The explicit path skips git-dir discovery; freshness and refresh rules
+/// are otherwise identical to [`ensure_cache_ready`].
+pub fn ensure_cache_ready_at(
+    beads_dir: &Path,
+    cache_path: &Path,
+) -> Result<bool, BeadError> {
+    if !event_store_present(beads_dir) {
+        return Ok(false);
+    }
+    match ensure_fresh(beads_dir, cache_path) {
+        Ok(ready) => Ok(ready),
+        Err(Fault::Cache) => Ok(false),
+        Err(Fault::Store(error)) => Err(error),
+    }
+}
+
+/// Freshness decision without a snapshot load.
+///
+/// Mirrors [`rebuild`]'s decision tree — token-only fast path, sweep probe,
+/// tail-or-rebuild refresh, version-mismatch drop — but the fresh paths
+/// return without touching the `issues` table, so warm indexed queries
+/// never pay the full-snapshot deserialize. The stale path delegates to
+/// the existing refresh (which loads once) and reports warm afterwards.
+fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
+    if ensure_schema(cache_path).is_err() {
+        return Err(Fault::Cache);
+    }
+    let mut connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    if version_mismatch_reason(&meta).is_some() {
+        drop(connection);
+        drop_cache_file(cache_path);
+        ensure_schema(cache_path)?;
+        connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+        return rebuild_cold_discard(beads_dir, cache_path, connection);
+    }
+    backfill_meta_keys(&connection)?;
+    // Token-only fast path: a matching token with a recent sweep serves
+    // without touching per-stream metadata, exactly as in `rebuild`.
+    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    let token = freshness_token(beads_dir).map_err(|_| Fault::Cache)?;
+    let now = now_ns();
+    if token == meta.token
+        && now.saturating_sub(meta.last_sweep_ns)
+            < READ_MODEL_SWEEP_INTERVAL_SECS as i64 * 1_000_000_000
+    {
+        note_serve_outcome(&connection);
+        return Ok(true);
+    }
+    let sweep = match sweep_store_signatures(beads_dir) {
+        Ok(sweep) => sweep,
+        Err(_) => {
+            drop(connection);
+            drop_cache_file(cache_path);
+            ensure_schema(cache_path)?;
+            connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+            return rebuild_cold_discard(beads_dir, cache_path, connection);
+        }
+    };
+    match probe_with(&connection, &meta, &token, &sweep) {
+        Probe::Fresh => {
+            update_token_and_sweep(&connection, &token, now)?;
+            note_serve_outcome(&connection);
+            Ok(true)
+        }
+        Probe::Stale => {
+            drop(connection);
+            // The refresh loads one snapshot through the tail-or-rebuild
+            // path; the indexed query after it serves warm.
+            match rebuild_catch_store_errors(beads_dir, cache_path, false) {
+                Ok(Some(_)) => Ok(true),
+                Ok(None) => Err(Fault::Cache),
+                Err(error) => Err(Fault::Store(error)),
+            }
+        }
+        Probe::Unusable(_) => {
+            drop(connection);
+            drop_cache_file(cache_path);
+            ensure_schema(cache_path)?;
+            connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+            rebuild_cold_discard(beads_dir, cache_path, connection)
+        }
+    }
+}
+
+/// Cold rebuild that discards the snapshot instead of returning it.
+///
+/// The rows are committed exactly as [`rebuild_from_replay`] writes them;
+/// only the in-memory copy the snapshot path returns is dropped, since an
+/// indexed query loads just the rows it needs afterwards.
+fn rebuild_cold_discard(
+    beads_dir: &Path,
+    cache_path: &Path,
+    connection: Connection,
+) -> Result<bool, Fault> {
+    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    let token = freshness_token(beads_dir).map_err(|_| Fault::Cache)?;
+    drop(connection);
+    rebuild_from_replay(
+        beads_dir,
+        cache_path,
+        &token,
+        meta.generation,
+        "explicit rebuild",
+    )
+    .map(|_| true)
+}
+
 /// Re-read the freshness inputs on the connection the caller already holds
 /// and rebuild with the explicit-rebuild telemetry reason.
 fn rebuild_cold(
@@ -1138,7 +1275,7 @@ fn write_snapshot_in_txn(
         .collect();
     let mut issue_stmt = connection
         .prepare(
-            "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref, task_type, plus_one, is_flag) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .map_err(|_| WriteFault::Other)?;
     let mut edge_stmt = connection
@@ -1164,6 +1301,9 @@ fn write_snapshot_in_txn(
                 lineage_root(&issue.id, &parent_of),
                 issue.created_at,
                 issue.external_ref,
+                issue.task_type.clone().unwrap_or_default(),
+                issue.plus_one_count() as i64,
+                i64::from(issue.is_flag_task()),
             ])
             .map_err(|_| WriteFault::Other)?;
         if let Some(parent) = issue.parent_id.as_deref() {
@@ -1608,7 +1748,10 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
                 parent TEXT NOT NULL DEFAULT '',
                 stream TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
-                external_ref TEXT NOT NULL DEFAULT ''
+                external_ref TEXT NOT NULL DEFAULT '',
+                task_type TEXT NOT NULL DEFAULT '',
+                plus_one INTEGER NOT NULL DEFAULT 0,
+                is_flag INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS issues_status ON issues(status);
             CREATE INDEX IF NOT EXISTS issues_type ON issues(issue_type);
@@ -1617,6 +1760,8 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
             CREATE INDEX IF NOT EXISTS issues_stream ON issues(stream);
             CREATE INDEX IF NOT EXISTS issues_created_at ON issues(created_at);
             CREATE INDEX IF NOT EXISTS issues_external_ref ON issues(external_ref);
+            CREATE INDEX IF NOT EXISTS issues_task_type ON issues(task_type);
+            CREATE INDEX IF NOT EXISTS issues_is_flag ON issues(is_flag);
             CREATE TABLE IF NOT EXISTS edges (
                 src TEXT NOT NULL,
                 dst TEXT NOT NULL,

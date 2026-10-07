@@ -45,6 +45,20 @@ pub fn search_issues(
     limit: Option<usize>,
     regex: bool,
 ) -> Result<Vec<BeadSearchMatchWire>, BeadError> {
+    // Indexed lane first: cached rows carry today's match semantics
+    // without replaying history. The replay below owns the fallback and
+    // the legacy layout.
+    if let Some(cached) = super::read_model::cached_search(
+        beads_dir,
+        query,
+        statuses,
+        issue_types,
+        tiers,
+        limit,
+        regex,
+    )? {
+        return cached;
+    }
     search_issues_in_issues(
         read_store_issues(beads_dir)?,
         query,
@@ -84,7 +98,14 @@ pub(crate) fn search_issues_in_issues_with_matcher(
     tiers: Option<&[String]>,
     limit: Option<usize>,
 ) -> Result<Vec<BeadSearchMatchWire>, BeadError> {
-    let filtered = list_issues_in_issues(issues, statuses, issue_types, tiers)?;
+    let filtered = list_issues_in_issues(
+        issues,
+        statuses,
+        issue_types,
+        tiers,
+        None,
+        None,
+    )?;
     let max = limit.unwrap_or(0);
     let mut matches = Vec::new();
     // `list_issues_in_issues` returns candidates sorted by `created_at`
@@ -178,7 +199,7 @@ impl SearchMatcher {
     }
 }
 
-fn matched_field_names(
+pub(crate) fn matched_field_names(
     issue: &IssueWire,
     matcher: &SearchMatcher,
 ) -> Vec<String> {

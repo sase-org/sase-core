@@ -83,12 +83,13 @@ pub use mutation::{
     BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use read::{
-    blocked_issues, doctor, doctor_report, doctor_report_with_contexts,
-    doctor_with_contexts, doctor_with_plan_roots, get_epic_children,
-    list_issues, read_event_store_issues, read_legacy_jsonl_issues,
-    read_store_issues, ready_issues, reference_diagnostics, resolve_issue_id,
-    resolve_issue_id_in_issues, resolve_issue_ids, show_issue,
-    show_issue_detail, show_issue_detail_with_options, stats,
+    blocked_issues, closed_ids, doctor, doctor_report,
+    doctor_report_with_contexts, doctor_with_contexts, doctor_with_plan_roots,
+    get_epic_children, list_issue_page, list_issues, read_event_store_issues,
+    read_legacy_jsonl_issues, read_store_issues, ready_issues,
+    reference_diagnostics, resolve_issue_id, resolve_issue_id_in_issues,
+    resolve_issue_ids, show_issue, show_issue_detail,
+    show_issue_detail_with_options, stats, statuses_for_ids,
     BeadDoctorReportWire, BeadIssueDetailWire, BeadProjectionDriftWire,
     BEAD_READ_WIRE_SCHEMA_VERSION,
 };

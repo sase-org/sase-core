@@ -16,23 +16,29 @@ use sase_core::bead::events::import_issues_to_event_streams;
 use sase_core::bead::jsonl::{parse_issues_jsonl, write_event_store};
 use sase_core::bead::{
     add_bead_link, add_dependency, add_task_plus_one, append_issue_note,
-    bead_store_fingerprint, blocked_issues, cancel_task_snooze, close_issues,
-    create_issue, edit_issue_note, list_issues, open_issue, read_model_status,
-    read_model_verify_cache, read_store_issues, ready_issues, remove_bead_link,
-    remove_dependencies, remove_issue, remove_issue_note, resolve_issue_id,
-    search_issues, show_issue_detail_with_options, snooze_task, stats,
+    bead_history, bead_store_fingerprint, blocked_issues, board_snapshot,
+    cancel_task_snooze, close_issues, create_issue, edit_issue_note,
+    get_epic_children, list_issue_page, list_issues, open_issue,
+    read_model_status, read_model_verify_cache, read_store_issues,
+    ready_issues, remove_bead_link, remove_dependencies, remove_issue,
+    remove_issue_note, resolve_issue_id, search_issues, show_issue,
+    show_issue_detail_with_options, snooze_task, stats, statuses_for_ids,
     BeadCreateRequestWire, BeadUpdateFieldsWire, IssueTypeWire, PhaseSizeWire,
 };
 use sase_core::{ArtifactLinkOriginWire, BeadLinkDirectionWire};
 use tempfile::tempdir;
 
 const SEED_ISSUES_JSONL: &str = concat!(
-    "{\"id\":\"bench-1\",\"title\":\"Epic one\",\"status\":\"open\",\"issue_type\":\"plan\",\"created_at\":\"2026-01-01T00:00:00Z\"}\n",
+    "{\"id\":\"bench-1\",\"title\":\"Epic one\",\"status\":\"open\",\"issue_type\":\"plan\",\"tier\":\"epic\",\"created_at\":\"2026-01-01T00:00:00Z\"}\n",
     "{\"id\":\"bench-1.1\",\"title\":\"Phase one\",\"status\":\"open\",\"issue_type\":\"phase\",\"parent_id\":\"bench-1\",\"created_at\":\"2026-01-01T00:01:00Z\"}\n",
     "{\"id\":\"bench-1.2\",\"title\":\"Phase two\",\"status\":\"closed\",\"issue_type\":\"phase\",\"parent_id\":\"bench-1\",\"created_at\":\"2026-01-01T00:02:00Z\"}\n",
-    "{\"id\":\"bench-2\",\"title\":\"Ready task\",\"status\":\"ready\",\"issue_type\":\"task\",\"created_at\":\"2026-01-01T00:03:00Z\"}\n",
-    "{\"id\":\"bench-3\",\"title\":\"Blocked task\",\"status\":\"ready\",\"issue_type\":\"task\",\"created_at\":\"2026-01-01T00:04:00Z\",\"dependencies\":[{\"issue_id\":\"bench-3\",\"depends_on_id\":\"bench-2\",\"created_at\":\"2026-01-01T00:04:00Z\",\"created_by\":\"\"}]}\n",
+    "{\"id\":\"bench-2\",\"title\":\"Ready task\",\"status\":\"ready\",\"issue_type\":\"task\",\"task_type\":\"feature\",\"created_at\":\"2026-01-01T00:03:00Z\"}\n",
+    "{\"id\":\"bench-3\",\"title\":\"Blocked task\",\"status\":\"ready\",\"issue_type\":\"task\",\"task_type\":\"bug\",\"created_at\":\"2026-01-01T00:04:00Z\",\"dependencies\":[{\"issue_id\":\"bench-3\",\"depends_on_id\":\"bench-2\",\"created_at\":\"2026-01-01T00:04:00Z\",\"created_by\":\"\"}]}\n",
     "{\"id\":\"bench-4\",\"title\":\"External\",\"status\":\"open\",\"issue_type\":\"task\",\"created_at\":\"2026-01-01T00:05:00Z\",\"external_ref\":\"ext-1\"}\n",
+    "{\"id\":\"bench-a1\",\"title\":\"Suffix task\",\"status\":\"open\",\"issue_type\":\"task\",\"task_type\":\"feature\",\"created_at\":\"2026-01-01T00:06:00Z\"}\n",
+    "{\"id\":\"zz-a1\",\"title\":\"Suffix collision\",\"status\":\"open\",\"issue_type\":\"task\",\"created_at\":\"2026-01-01T00:07:00Z\"}\n",
+    "{\"id\":\"bench-5\",\"title\":\"Flag task\",\"status\":\"open\",\"issue_type\":\"task\",\"task_type\":\"flag\",\"task_type_fields\":{\"remove_by_date\":\"2020-01-01\",\"remove_by_release\":\"0.0.0\"},\"created_at\":\"2026-01-01T00:08:00Z\"}\n",
+    "{\"id\":\"bench-6\",\"title\":\"Closed task\",\"status\":\"closed\",\"issue_type\":\"task\",\"created_at\":\"2026-01-01T00:09:00Z\"}\n",
 );
 
 /// A cache-mode store (with `.git`) plus its replay-mode copy.
@@ -51,7 +57,7 @@ fn seed_stores() -> ParityStores {
     fs::create_dir_all(&cache_dir).unwrap();
     fs::write(cache_dir.join("config.json"), "{}\n").unwrap();
     let outcome = parse_issues_jsonl(SEED_ISSUES_JSONL);
-    assert_eq!(outcome.loaded_rows, 6);
+    assert_eq!(outcome.loaded_rows, 10);
     let streams = import_issues_to_event_streams(&outcome.issues).unwrap();
     write_event_store(&cache_dir, &streams).unwrap();
     // One link so provenance neighborhoods are non-empty in both modes.
@@ -65,6 +71,32 @@ fn seed_stores() -> ParityStores {
         BeadLinkDirectionWire::Out,
         1,
         Some("2026-01-01T00:06:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+    // One bead-target link so the provenance touch rule resolves a
+    // shorthand neighbor in both modes.
+    add_bead_link(
+        &cache_dir,
+        "bench-4",
+        "bead:bench-2",
+        "related",
+        "parity bead link",
+        ArtifactLinkOriginWire::Manual,
+        BeadLinkDirectionWire::Out,
+        1,
+        Some("2026-01-01T00:06:30Z".to_string()),
+        None,
+    )
+    .unwrap();
+    add_task_plus_one(
+        &cache_dir,
+        "bench-2",
+        "parity-seed",
+        "parity evidence",
+        &[],
+        Some("2026-01-01T00:06:45Z".to_string()),
+        None,
         None,
     )
     .unwrap();
@@ -145,7 +177,27 @@ fn assert_parity(stores: &ParityStores) {
             resolve_issue_id(&stores.cache_dir, id).unwrap(),
             resolve_issue_id(&stores.replay_dir, id).unwrap(),
         );
+        assert_eq!(
+            serde_json::to_value(show_issue(&stores.cache_dir, id).unwrap())
+                .unwrap(),
+            serde_json::to_value(show_issue(&stores.replay_dir, id).unwrap())
+                .unwrap(),
+            "point lookup of {id} differs"
+        );
+        assert_history_parity(stores, id);
     }
+    // Resolution answers, not just successes: unique suffixes, ambiguous
+    // suffixes (`a1` names two beads), unknown shorthands, and full IDs.
+    for probe in ["2", "a1", "zzz", "bench-1.1", "bench-9", ""] {
+        assert_eq!(
+            resolve_issue_id(&stores.cache_dir, probe)
+                .map_err(|error| (error.kind, error.message)),
+            resolve_issue_id(&stores.replay_dir, probe)
+                .map_err(|error| (error.kind, error.message)),
+            "resolve of {probe:?} differs"
+        );
+    }
+    assert_history_parity(stores, "zzz");
     assert_eq!(
         serde_json::to_value(
             list_issues(&stores.cache_dir, None, None, None).unwrap()
@@ -156,6 +208,7 @@ fn assert_parity(stores: &ParityStores) {
         )
         .unwrap(),
     );
+    assert_list_page_parity(stores);
     assert_eq!(
         serde_json::to_value(ready_issues(&stores.cache_dir).unwrap()).unwrap(),
         serde_json::to_value(ready_issues(&stores.replay_dir).unwrap())
@@ -171,6 +224,45 @@ fn assert_parity(stores: &ParityStores) {
         stats(&stores.cache_dir).unwrap(),
         stats(&stores.replay_dir).unwrap(),
     );
+    assert_eq!(
+        sase_core::bead::closed_ids(&stores.cache_dir).unwrap(),
+        sase_core::bead::closed_ids(&stores.replay_dir).unwrap(),
+        "closed IDs differ"
+    );
+    // Multi-get: exact IDs, a unique suffix, an ambiguous suffix, and
+    // unknown IDs are omitted in both modes, never errors.
+    for probes in [
+        vec!["bench-2", "2", "a1", "zzz", "bench-1.1", "bench-9"],
+        vec!["bench-5", "5", "a1"],
+        Vec::<&str>::new(),
+    ] {
+        let wanted: Vec<String> =
+            probes.iter().map(|probe| probe.to_string()).collect();
+        assert_eq!(
+            statuses_for_ids(&stores.cache_dir, &wanted).unwrap(),
+            statuses_for_ids(&stores.replay_dir, &wanted).unwrap(),
+            "statuses for {probes:?} differ"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(board_snapshot(&stores.cache_dir).unwrap())
+            .unwrap(),
+        serde_json::to_value(board_snapshot(&stores.replay_dir).unwrap())
+            .unwrap(),
+    );
+    for epic in ["bench-1", "bench-2", "zzz"] {
+        assert_eq!(
+            serde_json::to_value(
+                get_epic_children(&stores.cache_dir, epic).unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(
+                get_epic_children(&stores.replay_dir, epic).unwrap()
+            )
+            .unwrap(),
+            "children of {epic} differ"
+        );
+    }
     for query in ["Epic", "task", "bench-1"] {
         assert_eq!(
             serde_json::to_value(
@@ -202,6 +294,166 @@ fn assert_parity(stores: &ParityStores) {
             "search for {query} differs",
         );
     }
+    // Filtered search parity, including a regex lane.
+    assert_eq!(
+        serde_json::to_value(
+            search_issues(
+                &stores.cache_dir,
+                "task",
+                Some(&["open".to_string()]),
+                Some(&["task".to_string()]),
+                None,
+                Some(2),
+                false,
+            )
+            .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(
+            search_issues(
+                &stores.replay_dir,
+                "task",
+                Some(&["open".to_string()]),
+                Some(&["task".to_string()]),
+                None,
+                Some(2),
+                false,
+            )
+            .unwrap()
+        )
+        .unwrap(),
+        "filtered search differs",
+    );
+    assert_eq!(
+        serde_json::to_value(
+            search_issues(
+                &stores.cache_dir,
+                "bench-[0-9]",
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(
+            search_issues(
+                &stores.replay_dir,
+                "bench-[0-9]",
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .unwrap()
+        )
+        .unwrap(),
+        "regex search differs",
+    );
+}
+
+/// Filtered list parity with pre-limit totals: every filter combination
+/// must agree between the indexed lane and the replay lane, including
+/// empty task-type filters (which match nothing) and invalid filters
+/// (which fail identically).
+/// One filtered-list case: status, type, tier, and task-type filters
+/// plus an optional newest-N limit.
+type ListPageCase = (
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    Option<usize>,
+);
+
+fn assert_list_page_parity(stores: &ParityStores) {
+    let open = Some(vec!["open".to_string()]);
+    let closed = Some(vec!["closed".to_string()]);
+    let ready = Some(vec!["ready".to_string()]);
+    let task = Some(vec!["task".to_string()]);
+    let plan = Some(vec!["plan".to_string()]);
+    let epic_tier = Some(vec!["epic".to_string()]);
+    let feature = Some(vec!["feature".to_string()]);
+    let empty_task = Some(vec!["".to_string()]);
+    let cases: Vec<ListPageCase> = vec![
+        (None, None, None, None, None),
+        (open.clone(), None, None, None, None),
+        (closed.clone(), None, None, None, None),
+        (closed.clone(), None, None, None, Some(1)),
+        (closed.clone(), None, None, None, Some(20)),
+        (None, task.clone(), None, None, None),
+        (None, task.clone(), None, feature.clone(), None),
+        (None, task.clone(), None, feature.clone(), Some(1)),
+        (None, None, None, empty_task.clone(), None),
+        (None, plan.clone(), epic_tier.clone(), None, None),
+        (ready.clone(), task.clone(), None, None, Some(0)),
+        (open.clone(), task.clone(), None, feature.clone(), Some(2)),
+    ];
+    for (statuses, issue_types, tiers, task_types, limit) in &cases {
+        let cached = list_issue_page(
+            &stores.cache_dir,
+            statuses.as_deref(),
+            issue_types.as_deref(),
+            tiers.as_deref(),
+            task_types.as_deref(),
+            *limit,
+        )
+        .map(|(total, issues)| (total, serde_json::to_value(&issues).unwrap()))
+        .map_err(|error| (error.kind, error.message));
+        let replayed = list_issue_page(
+            &stores.replay_dir,
+            statuses.as_deref(),
+            issue_types.as_deref(),
+            tiers.as_deref(),
+            task_types.as_deref(),
+            *limit,
+        )
+        .map(|(total, issues)| (total, serde_json::to_value(&issues).unwrap()))
+        .map_err(|error| (error.kind, error.message));
+        assert_eq!(
+            cached, replayed,
+            "list page {statuses:?} {issue_types:?} {tiers:?} {task_types:?} {limit:?} differs"
+        );
+    }
+    // Invalid filters fail identically on both lanes.
+    let bogus = Some(vec!["bogus".to_string()]);
+    assert_eq!(
+        list_issue_page(
+            &stores.cache_dir,
+            bogus.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| (error.kind, error.message)),
+        list_issue_page(
+            &stores.replay_dir,
+            bogus.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .map_err(|error| (error.kind, error.message)),
+    );
+}
+
+/// History parity between the lineage lane (cache mode) and the full
+/// replay (replay mode), comparing successes and error text alike.
+fn assert_history_parity(stores: &ParityStores, issue_id: &str) {
+    assert_eq!(
+        bead_history(&stores.cache_dir, issue_id)
+            .map(|history| serde_json::to_value(&history).unwrap())
+            .map_err(|error| (error.kind, error.message)),
+        bead_history(&stores.replay_dir, issue_id)
+            .map(|history| serde_json::to_value(&history).unwrap())
+            .map_err(|error| (error.kind, error.message)),
+        "history of {issue_id} differs"
+    );
 }
 
 #[test]
@@ -209,12 +461,12 @@ fn cache_matches_replay_on_seeded_store() {
     let stores = seed_stores();
     // Warm the cache, then compare.
     let cached = read_store_issues(&stores.cache_dir).unwrap();
-    assert_eq!(cached.len(), 6);
+    assert_eq!(cached.len(), 10);
     assert_parity(&stores);
 
     let status = read_model_status(&stores.cache_dir);
     assert!(status.fresh, "{}", status.reason);
-    assert_eq!(status.issues, 6);
+    assert_eq!(status.issues, 10);
     let verify = read_model_verify_cache(&stores.cache_dir);
     assert!(verify.compared, "{}", verify.reason);
     assert!(verify.matched, "{}", verify.reason);
@@ -303,6 +555,9 @@ fn cache_matches_replay_after_mutation_sequence() {
                 );
             }
             2 => {
+                // Stamp creations like every other step: wall-clock
+                // creations sort after later past-stamp mutations, which
+                // trips the dependency target-exists check on replay.
                 let _ = create_issue(
                     &stores.cache_dir,
                     BeadCreateRequestWire {
@@ -310,6 +565,7 @@ fn cache_matches_replay_after_mutation_sequence() {
                         issue_type: IssueTypeWire::Task,
                         size: Some(PhaseSizeWire::Small),
                         task_type: Some("feature".to_string()),
+                        now: Some(stamp.clone()),
                         ..Default::default()
                     },
                 );
@@ -784,6 +1040,60 @@ fn bench_corpus_read_model_timings() {
         tail_status.generation,
         tail_status.last_refresh,
         tail_status.last_refresh_reason,
+    );
+    // Indexed queries (`read-model-queries` acceptance): a warm point
+    // read, `ready`, the unfiltered list, and the default closed listing
+    // (newest 20) must all stay flat while history grows.
+    let point_id = cold[cold.len() / 2].id.clone();
+    let mut point_ms = vec![];
+    for _ in 0..5 {
+        let start = Instant::now();
+        let shown = show_issue(&store, &point_id).unwrap();
+        point_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(shown.id, point_id);
+    }
+    let mut ready_ms = vec![];
+    let mut ready_len = 0;
+    for _ in 0..5 {
+        let start = Instant::now();
+        let ready = ready_issues(&store).unwrap();
+        ready_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        ready_len = ready.len();
+    }
+    let mut list_ms = vec![];
+    let mut list_len = 0;
+    for _ in 0..5 {
+        let start = Instant::now();
+        let listed = list_issues(&store, None, None, None).unwrap();
+        list_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        list_len = listed.len();
+    }
+    let mut closed_ms = vec![];
+    let mut closed_total = 0;
+    for _ in 0..5 {
+        let start = Instant::now();
+        let (total, closed) = list_issue_page(
+            &store,
+            Some(&["closed".to_string()]),
+            None,
+            None,
+            None,
+            Some(20),
+        )
+        .unwrap();
+        closed_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        closed_total = total;
+        assert!(closed.len() <= 20);
+    }
+    for samples in [&mut point_ms, &mut ready_ms, &mut list_ms, &mut closed_ms]
+    {
+        samples.sort_by(|left, right| {
+            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    eprintln!(
+        "indexed timings: issues={} ready={} closed_total={} point_ms={point_ms:.1?} ready_ms={ready_ms:.1?} list_ms={list_ms:.1?} closed20_ms={closed_ms:.1?}",
+        list_len, ready_len, closed_total,
     );
     let verify = read_model_verify_cache(&store);
     assert!(verify.compared, "{}", verify.reason);

@@ -213,13 +213,15 @@ pub fn prune_removed_flag_event_streams(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlagStreamKind {
+pub(in crate::bead) enum FlagStreamKind {
     Other,
     LiveFlag,
     RemovedFlag,
 }
 
-fn classify_flag_stream(path: &Path) -> Result<FlagStreamKind, BeadError> {
+pub(in crate::bead) fn classify_flag_stream(
+    path: &Path,
+) -> Result<FlagStreamKind, BeadError> {
     let contents = fs::read_to_string(path).map_err(|err| {
         BeadError::io(format!(
             "failed to read bead event stream {}: {err}",
@@ -258,7 +260,7 @@ fn classify_flag_stream(path: &Path) -> Result<FlagStreamKind, BeadError> {
     })
 }
 
-fn list_event_stream_paths(
+pub(in crate::bead) fn list_event_stream_paths(
     streams_dir: &Path,
 ) -> Result<Vec<PathBuf>, BeadError> {
     let mut stream_paths = Vec::new();
@@ -706,7 +708,7 @@ fn issue_import_key(issue: &IssueWire) -> (u8, &str) {
     (kind_order, issue.id.as_str())
 }
 
-fn read_event_stream_file(
+pub(in crate::bead) fn read_event_stream_file(
     path: &Path,
 ) -> Result<(BeadEventStreamWire, StreamFileSignature), BeadError> {
     let stream_id = path

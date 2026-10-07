@@ -174,7 +174,10 @@ fn cache_path_lives_under_the_git_dir() {
 
 #[test]
 fn versions_are_current() {
-    assert_eq!(READ_MODEL_SCHEMA_VERSION, 1);
+    // Schema 2 adds the `task_type`, `plus_one`, and `is_flag` issue
+    // columns behind the `read-model-queries` indexed filters; the
+    // reducer semantics did not change.
+    assert_eq!(READ_MODEL_SCHEMA_VERSION, 2);
     assert_eq!(READ_MODEL_REDUCER_VERSION, 1);
 }
 

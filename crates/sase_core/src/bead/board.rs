@@ -42,6 +42,17 @@ pub struct BeadBoardSnapshotWire {
 pub fn board_snapshot(
     beads_dir: &Path,
 ) -> Result<BeadBoardSnapshotWire, BeadError> {
+    // Indexed lane first: the list plus ready/blocked IDs resolve from
+    // the same indexed lanes the separate queries use, so the board keeps
+    // matching them exactly without replaying history.
+    if let Some(cached) = super::read_model::cached_board(beads_dir)? {
+        return cached.map(|view| BeadBoardSnapshotWire {
+            schema_version: BEAD_BOARD_SNAPSHOT_WIRE_SCHEMA_VERSION,
+            issues: view.issues,
+            ready_ids: view.ready_ids,
+            blocked_ids: view.blocked_ids,
+        });
+    }
     board_snapshot_in_issues(read_store_issues(beads_dir)?)
 }
 
@@ -57,7 +68,7 @@ pub(crate) fn board_snapshot_in_issues(
         .into_iter()
         .map(|issue| issue.id)
         .collect();
-    let issues = list_issues_in_issues(issues, None, None, None)?;
+    let issues = list_issues_in_issues(issues, None, None, None, None, None)?;
     Ok(BeadBoardSnapshotWire {
         schema_version: BEAD_BOARD_SNAPSHOT_WIRE_SCHEMA_VERSION,
         issues,
@@ -141,7 +152,8 @@ mod tests {
         );
         assert_eq!(
             snapshot.issues,
-            list_issues_in_issues(issues.clone(), None, None, None).unwrap()
+            list_issues_in_issues(issues.clone(), None, None, None, None, None)
+                .unwrap()
         );
         assert_eq!(
             snapshot.ready_ids,

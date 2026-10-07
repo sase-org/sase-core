@@ -56,8 +56,58 @@ pub fn bead_history(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<BeadHistoryWire, BeadError> {
+    // Lineage lane first: the target lineage's stream files replay exactly
+    // like the full store when the closure proves complete, at a fraction
+    // of the parse cost. Anything unproven reads every stream instead.
+    if let Some(files) =
+        super::read_model::lineage_history_streams(beads_dir, issue_id)?
+    {
+        let streams = read_lineage_streams(&files)?;
+        return history_from_streams(&streams, issue_id);
+    }
     let (_manifest, streams) = read_event_store(beads_dir)?;
     history_from_streams(&streams, issue_id)
+}
+
+/// Parse one history lane's stream files with the full read's semantics:
+/// removed-flag tombstones skip in memory, live-flag streams stay an
+/// error, and anything else surfaces the parse error.
+fn read_lineage_streams(
+    files: &[std::path::PathBuf],
+) -> Result<Vec<BeadEventStreamWire>, BeadError> {
+    use super::jsonl::{
+        classify_flag_stream, read_event_stream_file, FlagStreamKind,
+    };
+    let mut streams = Vec::with_capacity(files.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for path in files {
+        match read_event_stream_file(path) {
+            Ok((stream, _signature)) => {
+                if !seen.insert(stream.stream_id.clone()) {
+                    return Err(BeadError::validation(format!(
+                        "duplicate bead event stream: {}",
+                        stream.stream_id
+                    )));
+                }
+                streams.push(stream);
+            }
+            Err(error) => match classify_flag_stream(path) {
+                Ok(FlagStreamKind::RemovedFlag) => {}
+                Ok(FlagStreamKind::LiveFlag) => {
+                    let stream_id = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    return Err(BeadError::validation(format!(
+                        "bead event store still has live flag issue-type streams: {stream_id}; migrate or remove them before loading"
+                    )));
+                }
+                Ok(FlagStreamKind::Other) | Err(_) => return Err(error),
+            },
+        }
+    }
+    streams.sort_by(|left, right| left.stream_id.cmp(&right.stream_id));
+    Ok(streams)
 }
 
 pub fn bead_lost_notes(
@@ -68,7 +118,7 @@ pub fn bead_lost_notes(
     lost_notes_from_streams(&streams, issue_id)
 }
 
-fn history_from_streams(
+pub(in crate::bead) fn history_from_streams(
     streams: &[BeadEventStreamWire],
     issue_id: &str,
 ) -> Result<BeadHistoryWire, BeadError> {

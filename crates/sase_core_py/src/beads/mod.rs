@@ -503,6 +503,74 @@ fn py_bead_stats<'py>(py: Python<'py>, beads_dir: &str) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
+#[pyo3(name = "bead_list_query")]
+#[pyo3(signature = (beads_dir, statuses=None, issue_types=None, tiers=None, task_types=None, limit=None))]
+#[allow(clippy::too_many_arguments)]
+fn py_bead_list_query<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    statuses: Option<Vec<String>>,
+    issue_types: Option<Vec<String>>,
+    tiers: Option<Vec<String>>,
+    task_types: Option<Vec<String>>,
+    limit: Option<usize>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    let outcome = py.allow_threads(|| {
+        sase_core::bead::list_issue_page(
+            &beads_dir,
+            statuses.as_deref(),
+            issue_types.as_deref(),
+            tiers.as_deref(),
+            task_types.as_deref(),
+            limit,
+        )
+    });
+    match outcome {
+        Ok((total, issues)) => {
+            let issues = serde_json::to_value(&issues).map_err(|e| {
+                PyValueError::new_err(format!("internal serialize error: {e}"))
+            })?;
+            let value = serde_json::json!({
+                "total": total,
+                "issues": issues,
+            });
+            json_value_to_py(py, &value)
+        }
+        Err(error) => Err(bead_error_to_pyerr(error)),
+    }
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_statuses_for_ids")]
+fn py_bead_statuses_for_ids<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+    issue_ids: Vec<String>,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| {
+            sase_core::bead::statuses_for_ids(&beads_dir, &issue_ids)
+        }),
+    )
+}
+
+#[pyfunction]
+#[pyo3(name = "bead_closed_ids")]
+fn py_bead_closed_ids<'py>(
+    py: Python<'py>,
+    beads_dir: &str,
+) -> PyResult<PyObject> {
+    let beads_dir = PathBuf::from(beads_dir);
+    bead_result_to_py(
+        py,
+        py.allow_threads(|| sase_core::bead::closed_ids(&beads_dir)),
+    )
+}
+
+#[pyfunction]
 #[pyo3(signature = (beads_dir, plan_roots=None, reference_context=None))]
 #[pyo3(name = "bead_doctor")]
 fn py_bead_doctor<'py>(
@@ -1486,6 +1554,9 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_touch_index_query, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_touch_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_list, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_list_query, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_statuses_for_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bead_closed_ids, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_ready, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_blocked, m)?)?;

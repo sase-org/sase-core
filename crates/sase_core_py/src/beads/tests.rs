@@ -858,6 +858,103 @@ fn bead_search_binding_accepts_regex_keyword() {
 }
 
 #[test]
+fn bead_list_query_statuses_and_closed_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (_temp, beads_dir) = temp_beads_dir();
+        let rows = [
+            json!({
+                "id": "beads-1",
+                "title": "Open plan",
+                "status": "open",
+                "issue_type": "plan",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }),
+            json!({
+                "id": "beads-2",
+                "title": "Bug task",
+                "status": "ready",
+                "issue_type": "task",
+                "task_type": "bug",
+                "created_at": "2026-01-01T00:01:00Z",
+                "updated_at": "2026-01-01T00:01:00Z"
+            }),
+            json!({
+                "id": "beads-3",
+                "title": "Closed task",
+                "status": "closed",
+                "issue_type": "task",
+                "created_at": "2026-01-01T00:02:00Z",
+                "updated_at": "2026-01-01T00:02:00Z"
+            }),
+        ];
+        fs::write(
+            beads_dir.join("issues.jsonl"),
+            rows.iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let dir = beads_dir.to_str().unwrap();
+
+        let page =
+            py_bead_list_query(py, dir, None, None, None, None, None).unwrap();
+        let page = py_to_json_value(page.bind(py)).unwrap();
+        assert_eq!(page["total"], json!(3));
+        assert_eq!(page["issues"].as_array().unwrap().len(), 3);
+
+        let page = py_bead_list_query(
+            py,
+            dir,
+            Some(vec!["closed".to_string()]),
+            None,
+            None,
+            None,
+            Some(5),
+        )
+        .unwrap();
+        let page = py_to_json_value(page.bind(py)).unwrap();
+        assert_eq!(page["total"], json!(1));
+        assert_eq!(page["issues"][0]["id"], json!("beads-3"));
+
+        let page = py_bead_list_query(
+            py,
+            dir,
+            None,
+            None,
+            None,
+            Some(vec!["bug".to_string()]),
+            None,
+        )
+        .unwrap();
+        let page = py_to_json_value(page.bind(py)).unwrap();
+        assert_eq!(page["total"], json!(1));
+        assert_eq!(page["issues"][0]["id"], json!("beads-2"));
+
+        let statuses = py_bead_statuses_for_ids(
+            py,
+            dir,
+            vec![
+                "beads-2".to_string(),
+                "2".to_string(),
+                "missing".to_string(),
+            ],
+        )
+        .unwrap();
+        let statuses = py_to_json_value(statuses.bind(py)).unwrap();
+        assert_eq!(statuses, json!({"beads-2": "ready", "2": "ready"}));
+
+        let closed = py_bead_closed_ids(py, dir).unwrap();
+        let closed = py_to_json_value(closed.bind(py)).unwrap();
+        assert_eq!(closed, json!(["beads-3"]));
+    });
+}
+
+#[test]
 fn bead_merge_event_streams_binding_preserves_replay_stable_union() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

@@ -106,6 +106,11 @@ pub fn show_issue(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<IssueWire, BeadError> {
+    // Indexed lane first: a point lookup without replaying history. The
+    // replay below owns the fallback and the legacy layout.
+    if let Some(cached) = super::read_model::cached_show(beads_dir, issue_id)? {
+        return cached;
+    }
     // Resolve inside the single read so callers pass raw IDs: one replay
     // covers both resolution and the point lookup.
     let issues = read_store_issues(beads_dir)?;
@@ -134,6 +139,14 @@ pub fn show_issue_detail_with_options(
             "No beads directory found at {}",
             beads_dir.display()
         )));
+    }
+    // Indexed lane first: the detail graph resolves from index lookups
+    // without replaying history. The replay below owns the fallback and
+    // the legacy layout.
+    if let Some(cached) =
+        super::read_model::cached_detail(beads_dir, issue_id, include_links)?
+    {
+        return cached;
     }
     if event_store_present(beads_dir) {
         // Same transparent cache as `read_store_issues`: the detail
@@ -176,6 +189,11 @@ pub fn resolve_issue_id(
     beads_dir: &Path,
     issue_id: &str,
 ) -> Result<String, BeadError> {
+    if let Some(cached) =
+        super::read_model::cached_resolve(beads_dir, issue_id)?
+    {
+        return cached;
+    }
     resolve_issue_id_in_issues(&read_store_issues(beads_dir)?, issue_id)
 }
 
@@ -183,11 +201,24 @@ pub fn resolve_issue_ids(
     beads_dir: &Path,
     issue_ids: &[String],
 ) -> Result<Vec<String>, BeadError> {
-    let issues = read_store_issues(beads_dir)?;
-    issue_ids
-        .iter()
-        .map(|issue_id| resolve_issue_id_in_issues(&issues, issue_id))
-        .collect()
+    // Resolve each ID through the suffix catalog when the cache serves;
+    // one failed lane falls back to the single replay for the whole batch.
+    let mut cached = Vec::with_capacity(issue_ids.len());
+    for issue_id in issue_ids {
+        match super::read_model::cached_resolve(beads_dir, issue_id)? {
+            Some(resolved) => cached.push(resolved?),
+            None => {
+                let issues = read_store_issues(beads_dir)?;
+                return issue_ids
+                    .iter()
+                    .map(|issue_id| {
+                        resolve_issue_id_in_issues(&issues, issue_id)
+                    })
+                    .collect();
+            }
+        }
+    }
+    Ok(cached)
 }
 
 /// IDs of the dependencies of *issue_id* whose targets are still active.
@@ -228,23 +259,114 @@ pub fn list_issues(
     issue_types: Option<&[String]>,
     tiers: Option<&[String]>,
 ) -> Result<Vec<IssueWire>, BeadError> {
+    if let Some(cached) = super::read_model::cached_list(
+        beads_dir,
+        statuses,
+        issue_types,
+        tiers,
+        None,
+        None,
+    )? {
+        return cached.map(|page| page.issues);
+    }
     list_issues_in_issues(
         read_store_issues(beads_dir)?,
         statuses,
         issue_types,
         tiers,
+        None,
+        None,
     )
 }
 
+/// Filtered list with a pre-limit match count, served from the indexes
+/// when the cache is fresh.
+///
+/// `limit` keeps the newest matches (mirroring the CLI's `issues[-limit:]`
+/// slice) and `total` counts every match before it, backing the CLI's
+/// `matched` summary count without loading the dropped rows.
+#[allow(clippy::too_many_arguments)]
+pub fn list_issue_page(
+    beads_dir: &Path,
+    statuses: Option<&[String]>,
+    issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
+    task_types: Option<&[String]>,
+    limit: Option<usize>,
+) -> Result<(usize, Vec<IssueWire>), BeadError> {
+    if let Some(cached) = super::read_model::cached_list(
+        beads_dir,
+        statuses,
+        issue_types,
+        tiers,
+        task_types,
+        limit,
+    )? {
+        return cached.map(|page| (page.total, page.issues));
+    }
+    // One replay serves both the pre-limit count and the sliced rows.
+    let issues = read_store_issues(beads_dir)?;
+    let total = list_issues_in_issues_total(
+        &issues,
+        statuses,
+        issue_types,
+        tiers,
+        task_types,
+    )?;
+    let issues = list_issues_in_issues(
+        issues,
+        statuses,
+        issue_types,
+        tiers,
+        task_types,
+        limit,
+    )?;
+    Ok((total, issues))
+}
+
+/// Pre-limit match count over one replayed issue list.
+fn list_issues_in_issues_total(
+    issues: &[IssueWire],
+    statuses: Option<&[String]>,
+    issue_types: Option<&[String]>,
+    tiers: Option<&[String]>,
+    task_types: Option<&[String]>,
+) -> Result<usize, BeadError> {
+    let statuses = parse_statuses(statuses)?;
+    let issue_types = parse_issue_types(issue_types)?;
+    let tiers = parse_tiers(tiers)?;
+    Ok(issues
+        .iter()
+        .filter(|issue| {
+            list_issue_matches(
+                issue,
+                &statuses,
+                &issue_types,
+                &tiers,
+                task_types,
+            )
+        })
+        .count())
+}
+
 pub fn ready_issues(beads_dir: &Path) -> Result<Vec<IssueWire>, BeadError> {
+    if let Some(cached) = super::read_model::cached_ready(beads_dir)? {
+        return cached;
+    }
     ready_issues_in_issues(read_store_issues(beads_dir)?)
 }
 
 pub fn blocked_issues(beads_dir: &Path) -> Result<Vec<IssueWire>, BeadError> {
+    if let Some(cached) = super::read_model::cached_blocked(beads_dir)? {
+        return cached;
+    }
     blocked_issues_in_issues(read_store_issues(beads_dir)?)
 }
 
 pub fn stats(beads_dir: &Path) -> Result<BTreeMap<String, usize>, BeadError> {
+    if let Some(cached) = super::read_model::cached_stats(beads_dir)? {
+        return cached;
+    }
     Ok(stats_for_issues(&read_store_issues(beads_dir)?))
 }
 
@@ -252,7 +374,66 @@ pub fn get_epic_children(
     beads_dir: &Path,
     epic_id: &str,
 ) -> Result<Vec<IssueWire>, BeadError> {
+    if let Some(cached) =
+        super::read_model::cached_epic_children(beads_dir, epic_id)?
+    {
+        return cached;
+    }
     get_epic_children_in_issues(read_store_issues(beads_dir)?, epic_id)
+}
+
+/// Closed bead IDs in replay order, backing the wait-bead catalog's
+/// closed set without hydrating full rows.
+pub fn closed_ids(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
+    if let Some(cached) = super::read_model::cached_closed_ids(beads_dir)? {
+        return cached;
+    }
+    Ok(read_store_issues(beads_dir)?
+        .into_iter()
+        .filter(|issue| issue.status == StatusWire::Closed)
+        .map(|issue| issue.id)
+        .collect())
+}
+
+/// Requested IDs mapped to status wire strings, omitting unknown and
+/// ambiguous IDs.
+///
+/// Backs the multi-get behind `bead_statuses_for_project`: exact IDs match
+/// first, then unique suffixes, mirroring the Python matcher the indexed
+/// lane implements in SQL.
+pub fn statuses_for_ids(
+    beads_dir: &Path,
+    issue_ids: &[String],
+) -> Result<BTreeMap<String, String>, BeadError> {
+    if let Some(cached) =
+        super::read_model::cached_statuses_for_ids(beads_dir, issue_ids)?
+    {
+        return cached;
+    }
+    let issues = read_store_issues(beads_dir)?;
+    let mut statuses = BTreeMap::new();
+    for issue_id in issue_ids {
+        if let Some(issue) = issues.iter().find(|issue| issue.id == *issue_id) {
+            statuses.insert(
+                issue_id.clone(),
+                status_as_str(&issue.status).to_string(),
+            );
+            continue;
+        }
+        if issue_id.contains('-') {
+            continue;
+        }
+        let Ok(resolved) = resolve_issue_id_in_issues(&issues, issue_id) else {
+            continue;
+        };
+        if let Some(issue) = issues.iter().find(|issue| issue.id == resolved) {
+            statuses.insert(
+                issue_id.clone(),
+                status_as_str(&issue.status).to_string(),
+            );
+        }
+    }
+    Ok(statuses)
 }
 
 pub fn doctor(beads_dir: &Path) -> Result<Vec<String>, BeadError> {
@@ -945,7 +1126,7 @@ fn canonical_bead_ref(issue_id: &str) -> String {
     format!("bead:{issue_id}")
 }
 
-fn sort_artifact_link_rows(rows: &mut [ArtifactLinkRowWire]) {
+pub(crate) fn sort_artifact_link_rows(rows: &mut [ArtifactLinkRowWire]) {
     rows.sort_by(|left, right| {
         (
             left.source_ref.as_str(),
@@ -1031,31 +1212,75 @@ pub fn resolve_issue_id_in_issues(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn list_issues_in_issues(
     mut issues: Vec<IssueWire>,
     statuses: Option<&[String]>,
     issue_types: Option<&[String]>,
     tiers: Option<&[String]>,
+    task_types: Option<&[String]>,
+    limit: Option<usize>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     let statuses = parse_statuses(statuses)?;
     let issue_types = parse_issue_types(issue_types)?;
     let tiers = parse_tiers(tiers)?;
     issues.retain(|issue| {
-        statuses
-            .as_ref()
-            .is_none_or(|values| values.contains(&issue.status))
-            && issue_types
-                .as_ref()
-                .is_none_or(|values| values.contains(&issue.issue_type))
-            && tiers.as_ref().is_none_or(|values| {
-                issue
-                    .tier
-                    .as_ref()
-                    .is_some_and(|tier| values.contains(tier))
-            })
+        list_issue_matches(issue, &statuses, &issue_types, &tiers, task_types)
     });
     sort_by_created_at(&mut issues);
+    // A zero limit slices nothing, mirroring the CLI's `if limit:` guard.
+    if let Some(limit) = limit.filter(|limit| *limit > 0) {
+        let start = issues.len().saturating_sub(limit);
+        issues.drain(..start);
+    }
     Ok(issues)
+}
+
+fn list_issue_matches(
+    issue: &IssueWire,
+    statuses: &Option<Vec<StatusWire>>,
+    issue_types: &Option<Vec<IssueTypeWire>>,
+    tiers: &Option<Vec<BeadTierWire>>,
+    task_types: Option<&[String]>,
+) -> bool {
+    statuses
+        .as_ref()
+        .is_none_or(|values| values.contains(&issue.status))
+        && issue_types
+            .as_ref()
+            .is_none_or(|values| values.contains(&issue.issue_type))
+        && tiers.as_ref().is_none_or(|values| {
+            issue
+                .tier
+                .as_ref()
+                .is_some_and(|tier| values.contains(tier))
+        })
+        && task_type_matches(issue.task_type.as_deref(), task_types)
+}
+
+/// Mirror Python's `issue_matches_task_types`: no filter for `None` or an
+/// empty wanted list, otherwise the stored slug (untyped beads count as
+/// `untyped`) must fold-equal a non-empty wanted entry.
+pub(crate) fn task_type_matches(
+    task_type: Option<&str>,
+    task_types: Option<&[String]>,
+) -> bool {
+    let Some(wanted) = task_types else {
+        return true;
+    };
+    if wanted.is_empty() {
+        return true;
+    }
+    let stored = task_type.unwrap_or("");
+    let current = if stored.is_empty() {
+        "untyped".to_string()
+    } else {
+        stored.to_lowercase()
+    };
+    wanted
+        .iter()
+        .filter(|item| !item.is_empty())
+        .any(|item| current == item.to_lowercase())
 }
 
 pub(crate) fn ready_issues_in_issues(
@@ -1149,7 +1374,7 @@ fn current_date() -> NaiveDate {
     now.date_naive()
 }
 
-fn parse_statuses(
+pub(crate) fn parse_statuses(
     statuses: Option<&[String]>,
 ) -> Result<Option<Vec<StatusWire>>, BeadError> {
     statuses
@@ -1157,7 +1382,7 @@ fn parse_statuses(
         .transpose()
 }
 
-fn parse_issue_types(
+pub(crate) fn parse_issue_types(
     issue_types: Option<&[String]>,
 ) -> Result<Option<Vec<IssueTypeWire>>, BeadError> {
     issue_types
@@ -1192,7 +1417,7 @@ fn parse_issue_type(value: &str) -> Result<IssueTypeWire, BeadError> {
     }
 }
 
-fn parse_tiers(
+pub(crate) fn parse_tiers(
     tiers: Option<&[String]>,
 ) -> Result<Option<Vec<BeadTierWire>>, BeadError> {
     tiers
@@ -1388,6 +1613,8 @@ mod tests {
         let claimed = list_issues_in_issues(
             issues.clone(),
             Some(&["claimed".to_string()]),
+            None,
+            None,
             None,
             None,
         )

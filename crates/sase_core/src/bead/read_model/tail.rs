@@ -1184,7 +1184,7 @@ fn write_tail_rows(
     }
     let mut issue_stmt = connection
         .prepare(
-            "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET position = excluded.position, row = excluded.row, status = excluded.status, issue_type = excluded.issue_type, tier = excluded.tier, parent = excluded.parent, stream = excluded.stream, created_at = excluded.created_at, external_ref = excluded.external_ref WHERE issues.row != excluded.row OR issues.position != excluded.position OR issues.status != excluded.status OR issues.issue_type != excluded.issue_type OR issues.tier != excluded.tier OR issues.parent != excluded.parent OR issues.stream != excluded.stream OR issues.created_at != excluded.created_at OR issues.external_ref != excluded.external_ref",
+            "INSERT INTO issues (id, position, row, status, issue_type, tier, parent, stream, created_at, external_ref, task_type, plus_one, is_flag) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) ON CONFLICT(id) DO UPDATE SET position = excluded.position, row = excluded.row, status = excluded.status, issue_type = excluded.issue_type, tier = excluded.tier, parent = excluded.parent, stream = excluded.stream, created_at = excluded.created_at, external_ref = excluded.external_ref, task_type = excluded.task_type, plus_one = excluded.plus_one, is_flag = excluded.is_flag WHERE issues.row != excluded.row OR issues.position != excluded.position OR issues.status != excluded.status OR issues.issue_type != excluded.issue_type OR issues.tier != excluded.tier OR issues.parent != excluded.parent OR issues.stream != excluded.stream OR issues.created_at != excluded.created_at OR issues.external_ref != excluded.external_ref OR issues.task_type != excluded.task_type OR issues.plus_one != excluded.plus_one OR issues.is_flag != excluded.is_flag",
         )
         .map_err(|_| WriteFault::Other)?;
     for (id, row, issue) in &resumed.upserts {
@@ -1201,6 +1201,9 @@ fn write_tail_rows(
                 lineage_root(id.as_str(), parent_of),
                 issue.created_at,
                 issue.external_ref,
+                issue.task_type.clone().unwrap_or_default(),
+                issue.plus_one_count() as i64,
+                i64::from(issue.is_flag_task()),
             ])
             .map_err(|_| WriteFault::Other)?;
     }
