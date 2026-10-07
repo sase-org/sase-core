@@ -64,6 +64,7 @@ pub fn analyze_document_with_snapshot(
     diagnostics.extend(macro_diagnostics(document, entries));
     diagnostics.extend(slash_skill_diagnostics(document, entries));
     diagnostics.extend(directive_diagnostics(document));
+    diagnostics.extend(wait_directive_diagnostics(document));
     diagnostics.extend(alternation_diagnostics(document));
     diagnostics.extend(argument_diagnostics_with_snapshot(
         document, entries, snapshot,
@@ -373,6 +374,391 @@ fn directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
         }
     }
     out
+}
+
+fn wait_directive_diagnostics(document: &DocumentSnapshot) -> Vec<EditorDiagnostic> {
+    use std::collections::HashMap;
+
+    let text = document.text();
+    let literal_ranges: Vec<(usize, usize)> = {
+        let mut ranges = fenced_block_ranges(text);
+        ranges.extend(inline_code_ranges(text, &ranges));
+        ranges.extend(prompt_literal_zone_ranges(text));
+        ranges
+    };
+    let intersects_literal = |start: usize, end: usize| -> bool {
+        literal_ranges
+            .iter()
+            .any(|literal| start < literal.1 && literal.0 < end)
+    };
+
+    let mut out = Vec::new();
+    let mut explicit: HashMap<String, bool> = HashMap::new();
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let remaining = &text[index..];
+        let percent = match remaining.find('%') {
+            Some(offset) => index + offset,
+            None => break,
+        };
+        if intersects_literal(percent, percent + 1) {
+            index = percent + 1;
+            continue;
+        }
+        let after = &text[percent + 1..];
+        let (raw_name, name_end) = if after.starts_with("wait") {
+            ("wait", percent + 1 + 4)
+        } else if after.starts_with("w")
+            && after[1..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_')
+        {
+            ("w", percent + 1 + 1)
+        } else {
+            index = percent + 1;
+            continue;
+        };
+        let canonical = canonical_directive_name(raw_name);
+        if canonical != Some("wait") {
+            index = name_end;
+            continue;
+        }
+        // Require a directive boundary like the Python parser: start,
+        // whitespace, or one of ([{"' before `%`.
+        if percent > 0 {
+            let prev = bytes[percent - 1] as char;
+            if !(prev.is_whitespace()
+                || matches!(prev, '(' | '[' | '{' | '"' | '\''))
+            {
+                index = name_end;
+                continue;
+            }
+        }
+        let mut cursor = name_end;
+        while cursor < bytes.len()
+            && (bytes[cursor] as char).is_whitespace()
+        {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'(' {
+            let Some(paren_end) = find_matching_paren(text, cursor) else {
+                index = cursor + 1;
+                continue;
+            };
+            if intersects_literal(percent, paren_end + 1) {
+                index = paren_end + 1;
+                continue;
+            }
+            let inner = &text[cursor + 1..paren_end];
+            let (targets, raw_for_epic, has_for_epic) =
+                parse_wait_paren_args(inner);
+            if !has_for_epic {
+                for target in &targets {
+                    if target.is_empty() {
+                        continue;
+                    }
+                }
+                // Track nothing for conflict when no explicit value.
+                index = paren_end + 1;
+                continue;
+            }
+            if targets.is_empty() {
+                push_diagnostic(
+                    document,
+                    &mut out,
+                    percent,
+                    paren_end + 1,
+                    "wait-for-epic-without-agent",
+                    "%wait(for_epic=...) needs an agent target in the same %wait, e.g. %wait(planner, for_epic=false). bead=, hood=, proc=, unit=, and time= waits never launch epics.".to_string(),
+                );
+                index = paren_end + 1;
+                continue;
+            }
+            let raw_text = raw_for_epic.unwrap_or_default();
+            let lowered = raw_text.trim().to_ascii_lowercase();
+            if lowered != "true" && lowered != "false" {
+                push_diagnostic(
+                    document,
+                    &mut out,
+                    percent,
+                    paren_end + 1,
+                    "wait-for-epic-invalid-value",
+                    format!(
+                        "Invalid %wait for_epic= value '{raw_text}': use true or false."
+                    ),
+                );
+                index = paren_end + 1;
+                continue;
+            }
+            let value = lowered == "true";
+            for target in &targets {
+                if target.ends_with("--plan") && value {
+                    push_diagnostic(
+                        document,
+                        &mut out,
+                        percent,
+                        paren_end + 1,
+                        "wait-for-epic-plan-row",
+                        format!(
+                            "%wait target '{target}' cannot use for_epic=true: --plan rows release when the plan is submitted. Use %wait:planner to wait through approval and into its epic."
+                        ),
+                    );
+                }
+                if let Some(previous) = explicit.get(target) {
+                    if *previous != value {
+                        push_diagnostic(
+                            document,
+                            &mut out,
+                            percent,
+                            paren_end + 1,
+                            "wait-for-epic-conflict",
+                            format!(
+                                "Conflicting for_epic= values for %wait target '{target}'."
+                            ),
+                        );
+                    }
+                } else {
+                    explicit.insert(target.clone(), value);
+                }
+            }
+            index = paren_end + 1;
+            continue;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b':' {
+            // Colon form never takes keywords, so it always gets the default.
+            // Skip its targets for explicit tracking (no for_epic possible).
+            let mut end = cursor + 1;
+            if end < bytes.len() && bytes[end] == b'`' {
+                if let Some(close) = text[end + 1..].find('`') {
+                    end = end + 1 + close + 1;
+                } else {
+                    end = bytes.len();
+                }
+            } else {
+                while end < bytes.len() {
+                    let next = bytes[end] as char;
+                    if next.is_whitespace() || matches!(next, '(' | '[' | '{' | '"' | '\'' | '`') {
+                        break;
+                    }
+                    // Colon args end at whitespace; commas separate targets.
+                    // Stop at characters that cannot appear in a colon arg
+                    // (matching the Python colon-arg character class loosely).
+                    if !(next.is_ascii_alphanumeric()
+                        || matches!(
+                            next,
+                            '#' | '/' | '.' | ',' | '(' | ')' | '@' | '=' | '-'
+                                | '_' | '!' | '{' | '}' | ':')
+                        || next == '@')
+                    {
+                        break;
+                    }
+                    end += next.len_utf8();
+                    if next.is_whitespace() {
+                        break;
+                    }
+                }
+            }
+            index = end;
+            continue;
+        }
+        // Bare `%wait` / `%w` gets the default; no explicit tracking.
+        index = name_end;
+    }
+    out
+}
+
+fn find_matching_paren(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_single {
+            if byte == b'\'' {
+                in_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_double {
+            if byte == b'"' {
+                in_double = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_backtick {
+            if byte == b'`' {
+                in_backtick = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'`' => in_backtick = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_wait_paren_args(inner: &str) -> (Vec<String>, Option<String>, bool) {
+    let mut targets: Vec<String> = Vec::new();
+    let mut raw_for_epic: Option<String> = None;
+    let mut has_for_epic = false;
+    for part in split_wait_args(inner) {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = split_wait_key_value(trimmed) {
+            let key_trimmed = key.trim();
+            if key_trimmed == "agent" {
+                let unquoted = unquote_wait_value(value.trim());
+                if !unquoted.is_empty() {
+                    targets.push(unquoted);
+                }
+            } else if key_trimmed == "for_epic" {
+                has_for_epic = true;
+                raw_for_epic = Some(unquote_wait_value(value.trim()));
+            } else {
+                // bead=, hood=, proc=, unit=, time= are not agent targets.
+            }
+        } else {
+            targets.push(unquote_wait_value(trimmed));
+        }
+    }
+    (targets, raw_for_epic, has_for_epic)
+}
+
+fn split_wait_args(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut depth = 0usize;
+    for ch in inner.chars() {
+        if in_single {
+            current.push(ch);
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            current.push(ch);
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_backtick {
+            current.push(ch);
+            if ch == '`' {
+                in_backtick = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                current.push(ch);
+            }
+            '"' => {
+                in_double = true;
+                current.push(ch);
+            }
+            '`' => {
+                in_backtick = true;
+                current.push(ch);
+            }
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+fn split_wait_key_value(part: &str) -> Option<(String, String)> {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    for (idx, ch) in part.char_indices() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_backtick {
+            if ch == '`' {
+                in_backtick = false;
+            }
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '`' => in_backtick = true,
+            '=' => {
+                let key = part[..idx].trim().to_string();
+                let value = part[idx + 1..].trim().to_string();
+                return Some((key, value));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn unquote_wait_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        if (bytes[0] == b'"' && bytes[trimmed.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[trimmed.len() - 1] == b'\'')
+            || (bytes[0] == b'`' && bytes[trimmed.len() - 1] == b'`')
+        {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// One error per unclosed alternation opener outside literal zones,

@@ -281,6 +281,18 @@ const BOOL_TRUE_FALSE: &[DirectiveSuggestedValue] = &[
     },
 ];
 
+const FOR_EPIC_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
+    DirectiveSuggestedValue {
+        value: "true",
+        documentation: "Also wait for any epic these agents launch",
+    },
+    DirectiveSuggestedValue {
+        value: "false",
+        documentation:
+            "Release when these agents finish, even if they launched an epic (default)",
+    },
+];
+
 const DURATION_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "20m",
@@ -562,6 +574,14 @@ const WAIT_KEYWORDS: &[DirectiveKeywordSpec] = &[
         suggested_values: &[],
     },
     DirectiveKeywordSpec {
+        name: "for_epic",
+        description: "Also wait for any epic these agents launch",
+        value_role: DirectiveValueRole::Bool,
+        repeatable: false,
+        conflicts_with: &[],
+        suggested_values: FOR_EPIC_SUGGESTIONS,
+    },
+    DirectiveKeywordSpec {
         name: "hood",
         description: "Wait for current members of this agent hood",
         value_role: DirectiveValueRole::Hood,
@@ -680,7 +700,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         name: "wait",
         alias: Some("w"),
         description: "Wait for another agent/workflow and/or a time floor",
-        argument_hint: ":agent or (agent, bead=, hood=, time=)",
+        argument_hint: ":agent or (agent, bead=, hood=, time=, for_epic=)",
         takes_argument: true,
         allows_multiple: true,
         syntax_forms: COLON_PAREN_BARE,

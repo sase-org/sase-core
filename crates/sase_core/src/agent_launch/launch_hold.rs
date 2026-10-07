@@ -112,6 +112,7 @@ mod tests {
             logical_id: "unit-1".to_string(),
             source_order: 1,
             waits: Vec::new(),
+            wait_for_epics_of: Vec::new(),
             condition: None,
             payload: LaunchUnitPayloadWire::Agent(agent),
         }
@@ -122,6 +123,7 @@ mod tests {
             logical_id: "proc-1".to_string(),
             source_order: 1,
             waits: Vec::new(),
+            wait_for_epics_of: Vec::new(),
             condition: None,
             payload: LaunchUnitPayloadWire::Proc(proc_unit),
         }

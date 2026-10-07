@@ -1512,6 +1512,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
             data.get("finalizer_status"),
         ),
         created_epics: coerce_created_epics(data.get("created_epics")),
+        wait_for_epics_of: coerce_str_list(data.get("wait_for_epics_of")),
     }
 }
 
@@ -1819,6 +1820,7 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         wait_runners_explicit: false,
         slot_requested_at: coerce_str(data.get("slot_requested_at")),
         eligible_since: coerce_str(data.get("eligible_since")),
+        wait_for_epics_of: coerce_str_list(data.get("wait_for_epics_of")),
     }
 }
 

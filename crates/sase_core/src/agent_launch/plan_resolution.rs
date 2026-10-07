@@ -51,7 +51,9 @@ pub(crate) fn resolve_typed_waits(
     for index in 0..raw_units.len() {
         let logical_id = raw_units[index].unit.logical_id.clone();
         let mut waits = Vec::new();
+        let mut armed: Vec<String> = Vec::new();
         for wait in raw_units[index].raw_waits.clone() {
+            let for_epic = wait.for_epic;
             match wait.target {
                 RawWaitTargetKind::Previous => {
                     if index == 0 {
@@ -89,6 +91,12 @@ pub(crate) fn resolve_typed_waits(
                     }
                 }
                 RawWaitTargetKind::Agent(target) => {
+                    if for_epic == Some(true)
+                        && !target.ends_with("--plan")
+                        && !armed.contains(&target)
+                    {
+                        armed.push(target.clone());
+                    }
                     if let Some(unit) = agent_names.get(&target) {
                         waits.push(WaitTargetWire::Logical {
                             logical_id: unit.clone(),
@@ -122,6 +130,7 @@ pub(crate) fn resolve_typed_waits(
             }
         }
         raw_units[index].unit.waits = waits;
+        raw_units[index].unit.wait_for_epics_of = armed;
     }
 }
 

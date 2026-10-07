@@ -1003,6 +1003,7 @@ raise SystemExit(1)
             logical_id: "unit-1".to_string(),
             source_order: 0,
             waits: Vec::new(),
+            wait_for_epics_of: Vec::new(),
             condition: Some(LaunchConditionWire {
                 code: bash_code("exit 0\n"),
                 cwd: None,

@@ -340,7 +340,7 @@ async fn wait_completion_uses_kind_aware_agent_catalog() {
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "agent=", "bead=", "hood=", "proc=", "time=", "unit=", "@ops",
+            "agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit=", "@ops",
             "builders", "review"
         ]
     );
@@ -674,7 +674,7 @@ async fn wait_keywords_survive_helper_failure_and_mixed_version_payloads() {
             .iter()
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["agent=", "bead=", "hood=", "proc=", "time=", "unit="]
+        vec!["agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit="]
     );
 
     let mut mixed = bridge_with_catalog_entries(Vec::new());
@@ -864,7 +864,7 @@ async fn queue_completion_avoids_agent_targets() {
     );
     assert_eq!(
         labels_at(server, "%wait(").await,
-        vec!["agent=", "bead=", "hood=", "proc=", "time=", "unit=", "planner"]
+        vec!["agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit=", "planner"]
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(labels_at(server, "%q(")

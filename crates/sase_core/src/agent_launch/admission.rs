@@ -631,6 +631,7 @@ mod tests {
             logical_id: logical_id.to_string(),
             source_order,
             waits: Vec::new(),
+            wait_for_epics_of: Vec::new(),
             condition: None,
             payload: LaunchUnitPayloadWire::Agent(AgentUnitWire {
                 prompt: "Do work".to_string(),
@@ -647,6 +648,7 @@ mod tests {
             logical_id: logical_id.to_string(),
             source_order,
             waits: Vec::new(),
+            wait_for_epics_of: Vec::new(),
             condition: None,
             payload: LaunchUnitPayloadWire::Proc(ProcUnitWire {
                 code: CodeValueWire {

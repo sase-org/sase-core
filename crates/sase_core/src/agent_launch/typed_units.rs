@@ -122,6 +122,7 @@ pub(crate) struct RawWaitTarget {
     pub(crate) target: RawWaitTargetKind,
     pub(crate) source: Option<String>,
     pub(crate) source_span: Option<[usize; 2]>,
+    pub(crate) for_epic: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,6 +720,7 @@ fn classify_typed_launch_unit(
             waits: Vec::new(),
             condition,
             payload,
+            wait_for_epics_of: Vec::new(),
         },
         raw_waits,
     }
@@ -1062,18 +1064,142 @@ fn parse_wait_directive(
             target: RawWaitTargetKind::Previous,
             source,
             source_span: Some(span),
+            for_epic: None,
         });
         return;
+    }
+    // Per-occurrence `for_epic=` applies to every agent target in its own
+    // `%wait(...)`. Collect agent targets first so validation mirrors the
+    // Python launcher with identical messages.
+    let mut occurrence_agents: Vec<String> = Vec::new();
+    let mut raw_for_epic: Option<String> = None;
+    let mut has_for_epic = false;
+    for arg in &args {
+        let (name, value_raw) = split_named_directive_arg(arg);
+        match name.as_deref() {
+            Some("agent") => {
+                let value = unquote_directive_arg_value(value_raw.trim());
+                if !value.is_empty() {
+                    occurrence_agents.push(value);
+                }
+            }
+            Some("for_epic") => {
+                has_for_epic = true;
+                raw_for_epic =
+                    Some(unquote_directive_arg_value(value_raw.trim()));
+            }
+            None => {
+                let value = unquote_directive_arg_value(value_raw.trim());
+                if !value.is_empty() {
+                    occurrence_agents.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut explicit_value: Option<bool> = None;
+    if has_for_epic {
+        if occurrence_agents.is_empty() {
+            diagnostics.push(typed_unit_diagnostic(
+                "wait-for-epic-without-agent",
+                "%wait(for_epic=...) needs an agent target in the same %wait, e.g. %wait(planner, for_epic=false). bead=, hood=, proc=, unit=, and time= waits never launch epics.",
+                logical_id,
+                Some(span),
+            ));
+        } else {
+            let raw_text = raw_for_epic.clone().unwrap_or_default();
+            let lowered = raw_text.trim().to_ascii_lowercase();
+            if lowered != "true" && lowered != "false" {
+                diagnostics.push(typed_unit_diagnostic(
+                    "wait-for-epic-invalid-value",
+                    &format!(
+                        "Invalid %wait for_epic= value '{raw_text}': use true or false."
+                    ),
+                    logical_id,
+                    Some(span),
+                ));
+            } else {
+                let value = lowered == "true";
+                for target in &occurrence_agents {
+                    if target.ends_with("--plan") && value {
+                        diagnostics.push(typed_unit_diagnostic(
+                            "wait-for-epic-plan-row",
+                            &format!(
+                                "%wait target '{target}' cannot use for_epic=true: --plan rows release when the plan is submitted. Use %wait:planner to wait through approval and into its epic."
+                            ),
+                            logical_id,
+                            Some(span),
+                        ));
+                    }
+                    let mut conflict: Option<bool> = None;
+                    for existing in raw_waits.iter() {
+                        if let RawWaitTargetKind::Agent(name) = &existing.target {
+                            if name == target {
+                                if let Some(previous) = existing.for_epic {
+                                    if conflict.is_none() {
+                                        conflict = Some(previous);
+                                    }
+                                    if previous != value {
+                                        diagnostics.push(typed_unit_diagnostic(
+                                            "wait-for-epic-conflict",
+                                            &format!(
+                                                "Conflicting for_epic= values for %wait target '{target}'."
+                                            ),
+                                            logical_id,
+                                            Some(span),
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = conflict;
+                }
+                explicit_value = Some(value);
+            }
+        }
     }
     for arg in args {
         let (name, value_raw) = split_named_directive_arg(&arg);
         let value = unquote_directive_arg_value(value_raw.trim());
         match name.as_deref() {
-            Some("unit") => raw_waits.push(raw_wait("unit", value, span, source.clone())),
-            Some("agent") => raw_waits.push(raw_wait("agent", value, span, source.clone())),
-            Some("proc") => raw_waits.push(raw_wait("proc", value, span, source.clone())),
-            Some("bead") => raw_waits.push(raw_wait("bead", value, span, source.clone())),
-            Some("time") => raw_waits.push(raw_wait("time", value, span, source.clone())),
+            Some("unit") => raw_waits.push(raw_wait(
+                "unit",
+                value,
+                span,
+                source.clone(),
+                None,
+            )),
+            Some("agent") => raw_waits.push(raw_wait(
+                "agent",
+                value,
+                span,
+                source.clone(),
+                explicit_value,
+            )),
+            Some("proc") => raw_waits.push(raw_wait(
+                "proc",
+                value,
+                span,
+                source.clone(),
+                None,
+            )),
+            Some("bead") => raw_waits.push(raw_wait(
+                "bead",
+                value,
+                span,
+                source.clone(),
+                None,
+            )),
+            Some("time") => raw_waits.push(raw_wait(
+                "time",
+                value,
+                span,
+                source.clone(),
+                None,
+            )),
+            Some("for_epic") => {}
             Some("runners") => diagnostics.push(typed_unit_diagnostic(
                 "wait-queue-runners-moved",
                 "%wait(runners=...) has moved to %queue. Use %queue(capacity=N) or %q:N, and keep dependencies on %wait.",
@@ -1113,7 +1239,7 @@ fn parse_wait_directive(
             Some(key) => diagnostics.push(typed_unit_diagnostic(
                 "unknown-wait-target",
                 &format!(
-                    "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, or time=. Queue controls belong on %queue."
+                    "Unsupported keyword on %wait: {key}=. Use unit=, agent=, proc=, bead=, hood=, time=, or for_epic=. Queue controls belong on %queue."
                 ),
                 logical_id,
                 Some(span),
@@ -1122,6 +1248,7 @@ fn parse_wait_directive(
                 target: RawWaitTargetKind::Agent(value),
                 source: source.clone(),
                 source_span: Some(span),
+                for_epic: explicit_value,
             }),
         }
     }
@@ -1132,6 +1259,7 @@ fn raw_wait(
     value: String,
     span: [usize; 2],
     source: Option<String>,
+    for_epic: Option<bool>,
 ) -> RawWaitTarget {
     let target = match kind {
         "unit" => RawWaitTargetKind::Unit(value),
@@ -1145,5 +1273,6 @@ fn raw_wait(
         target,
         source,
         source_span: Some(span),
+        for_epic,
     }
 }

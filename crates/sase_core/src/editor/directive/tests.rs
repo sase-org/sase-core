@@ -790,7 +790,7 @@ fn wait_argument_candidates_use_runtime_keywords() {
         candidates.iter().map(|c| c.insertion.as_str()).collect();
     assert_eq!(
         values,
-        ["agent=", "bead=", "hood=", "proc=", "time=", "unit="]
+        ["agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit="]
     );
     assert!(directive_argument_candidates("time").candidates.is_empty());
 }
@@ -1167,7 +1167,7 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
     assert_eq!(
         at_end("%wait("),
         [
-            "agent=", "bead=", "hood=", "proc=", "time=", "unit=", "builders",
+            "agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit=", "builders",
             "planner"
         ]
     );
@@ -1213,7 +1213,7 @@ fn clause_candidates_cover_roles_conflicts_and_self_references() {
     assert_eq!(
         queue_insertions("%wait("),
         [
-            "agent=", "bead=", "hood=", "proc=", "time=", "unit=", "builders",
+            "agent=", "bead=", "for_epic=", "hood=", "proc=", "time=", "unit=", "builders",
             "planner"
         ]
     );

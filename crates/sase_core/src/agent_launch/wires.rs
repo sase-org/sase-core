@@ -225,6 +225,10 @@ pub struct LaunchUnitWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<LaunchConditionWire>,
     pub payload: LaunchUnitPayloadWire,
+    /// Effective positive `%wait(for_epic=)` armed targets. Additive
+    /// serde-default and omitted when empty so typed plans stay stable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_for_epics_of: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -731,6 +731,11 @@ pub struct AgentMetaWire {
     /// payloads stay byte-stable and no wire schema bump is needed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_epics: Vec<CreatedEpicWire>,
+    /// Effective positive `%wait(for_epic=)` armed targets (`contract` phase).
+    /// Additive serde-default and omitted when empty, so existing scan
+    /// payloads stay byte-stable and no wire schema bump is needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_for_epics_of: Vec<String>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.
@@ -1040,6 +1045,11 @@ pub struct WaitingMarkerWire {
     pub slot_requested_at: Option<String>,
     #[serde(default)]
     pub eligible_since: Option<String>,
+    /// Effective positive `%wait(for_epic=)` armed targets (`contract` phase).
+    /// Additive serde-default and omitted when empty, so existing scan
+    /// payloads stay byte-stable and no wire schema bump is needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_for_epics_of: Vec<String>,
 }
 
 impl WaitingMarkerWire {
