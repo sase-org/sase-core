@@ -147,12 +147,12 @@ pub fn builtin_artifact_relations() -> Vec<ArtifactRelationWire> {
             "produced",
             true,
             "projection",
-            "The stitch is the source; the agent that produced it is the target.",
+            "The stitch or bead is the source; the agent that produced it is the target.",
             "stitch:sase@0123456789abcdef0123456789abcdef01234567 produced-by \
              agent:sase-tj.land",
             "agent:sase-tj.land produced-by \
              stitch:sase@0123456789abcdef0123456789abcdef01234567",
-            &["stitch"],
+            &["stitch", "bead"],
             &["agent"],
         ),
         ArtifactRelationWire::builtin(
@@ -365,6 +365,16 @@ mod tests {
             relation_label_from_perspective("launched", false).unwrap(),
             "launched-by"
         );
+    }
+
+    #[test]
+    fn produced_by_covers_stitch_and_bead_sources() {
+        let produced_by = lookup_artifact_relation("produced-by").unwrap();
+        assert!(produced_by.directed);
+        assert_eq!(produced_by.inverse, "produced");
+        assert_eq!(produced_by.written_by, "projection");
+        assert_eq!(produced_by.recommended_source_kinds, ["stitch", "bead"]);
+        assert_eq!(produced_by.recommended_target_kinds, ["agent"]);
     }
 
     #[test]
