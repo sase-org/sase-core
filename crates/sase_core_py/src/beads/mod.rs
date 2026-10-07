@@ -10,8 +10,10 @@ use crate::json_bridge::{
 
 use pyo3::wrap_pyfunction;
 
+mod board;
 mod fingerprint;
 
+use board::register_board;
 use fingerprint::register_fingerprint;
 
 // --- Bead read bindings ---------------------------------------------------
@@ -1523,6 +1525,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
+    register_board(m)?;
     register_fingerprint(m)?;
     Ok(())
 }

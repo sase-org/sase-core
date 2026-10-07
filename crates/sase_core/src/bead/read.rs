@@ -990,7 +990,7 @@ pub(crate) fn list_issues_in_issues(
     Ok(issues)
 }
 
-fn ready_issues_in_issues(
+pub(crate) fn ready_issues_in_issues(
     mut issues: Vec<IssueWire>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     sort_by_created_at(&mut issues);
@@ -1008,7 +1008,7 @@ fn ready_issues_in_issues(
         .collect())
 }
 
-fn blocked_issues_in_issues(
+pub(crate) fn blocked_issues_in_issues(
     mut issues: Vec<IssueWire>,
 ) -> Result<Vec<IssueWire>, BeadError> {
     sort_by_created_at(&mut issues);

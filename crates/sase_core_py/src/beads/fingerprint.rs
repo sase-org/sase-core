@@ -59,10 +59,7 @@ mod fingerprint_tests {
             let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
             sase_core_rs(py, &module).unwrap();
             assert!(module.getattr("bead_store_fingerprint").is_ok());
-            assert_eq!(
-                py_bead_store_fingerprint_wire_schema_version(),
-                1
-            );
+            assert_eq!(py_bead_store_fingerprint_wire_schema_version(), 1);
 
             let temp = tempdir().unwrap();
             let beads_dir = temp.path().join("beads");

@@ -5,6 +5,7 @@
 //! mutation engines on top of these wire records.
 
 pub mod attachments;
+pub mod board;
 pub mod cli;
 pub mod config;
 pub mod events;
@@ -22,6 +23,10 @@ pub mod work;
 
 pub use crate::artifact_link::BeadLinkWire;
 pub use attachments::{bead_attachment_references, bead_attachment_roster};
+pub use board::{
+    board_snapshot, BeadBoardSnapshotWire,
+    BEAD_BOARD_SNAPSHOT_WIRE_SCHEMA_VERSION,
+};
 pub use cli::{
     execute_bead_cli, BeadCliMutationSummaryWire, BeadCliOutcomeWire,
     BeadCliStatusTransitionWire,

@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::jsonl::{event_manifest_path, event_store_present, event_streams_dir};
+use super::jsonl::{
+    event_manifest_path, event_store_present, event_streams_dir,
+};
 use super::wire::BeadError;
 use crate::fs_sig::mtime_ns;
 
@@ -108,10 +110,8 @@ pub fn bead_store_fingerprint(
             stream_count += 1;
         }
     } else {
-        entries.push((
-            "issues.jsonl".to_string(),
-            beads_dir.join("issues.jsonl"),
-        ));
+        entries
+            .push(("issues.jsonl".to_string(), beads_dir.join("issues.jsonl")));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -123,14 +123,7 @@ pub fn bead_store_fingerprint(
                 if !metadata.is_file() {
                     // A directory where a file belongs is a shape change:
                     // hash it as absent so the token moves.
-                    hash_entry(
-                        &mut hasher,
-                        relative,
-                        false,
-                        0,
-                        0,
-                        0,
-                    );
+                    hash_entry(&mut hasher, relative, false, 0, 0, 0);
                     continue;
                 }
                 files += 1;
