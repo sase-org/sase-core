@@ -17,11 +17,13 @@ mod artifact_refs;
 mod board;
 mod fingerprint;
 mod read_model;
+mod seal_watch;
 
 use artifact_refs::register_artifact_refs;
 use board::register_board;
 use fingerprint::register_fingerprint;
 use read_model::register_read_model;
+use seal_watch::register_seal_watch;
 
 // --- Bead read bindings ---------------------------------------------------
 #[pyfunction]
@@ -1537,6 +1539,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_fingerprint(m)?;
     register_target_probe(m)?;
     register_read_model(m)?;
+    register_seal_watch(m)?;
     Ok(())
 }
 

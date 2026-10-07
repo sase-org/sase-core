@@ -13,7 +13,7 @@ mod tail;
 #[cfg(test)]
 mod tests;
 
-pub use freshness::READ_MODEL_SWEEP_INTERVAL_SECS;
+pub use freshness::{sweep_store_signatures, READ_MODEL_SWEEP_INTERVAL_SECS};
 pub use location::read_model_cache_path_for_store;
 pub use store::{
     cached_store_snapshot, cached_store_snapshot_at, read_model_status,

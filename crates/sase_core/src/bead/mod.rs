@@ -18,6 +18,7 @@ pub mod read;
 pub mod read_model;
 pub mod routing;
 pub mod schema;
+pub mod seal_watch;
 pub mod search;
 pub mod target_probe;
 pub mod touch_index;
@@ -120,6 +121,12 @@ pub use schema::{
     resolution_migration_sql, size_check_relax_migration_sql,
     size_migration_sql, snoozed_status_migration_sql, task_ready_migration_sql,
     task_type_migration_sql, BEAD_SQLITE_SCHEMA,
+};
+pub use seal_watch::{
+    bead_seal_watch_triggers, classify_seal_watch_triggers,
+    BeadSealWatchTriggerWire, BeadSealWatchWire,
+    BEAD_SEAL_WATCH_WIRE_SCHEMA_VERSION, SEAL_WATCH_HOT_STREAM_FILES_WARN,
+    SEAL_WATCH_SWEEP_MS_WARN, SEAL_WATCH_TREE_BYTES_WARN,
 };
 pub use search::{search_issues, BEAD_SEARCH_FIELD_NAMES};
 pub use target_probe::{
