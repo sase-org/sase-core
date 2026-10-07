@@ -35,8 +35,9 @@ use super::wire::{
     FinalizerStatusInstanceWire, FinalizerStatusRunnerWire,
     FinalizerStatusSummaryWire, ImportedSourceOwnerWire, OutputVariableValue,
     PendingQuestionMarkerWire, PlanPathMarkerWire, PromptStepMarkerWire,
-    RunningMarkerWire, UsedMacroWire, WaitingMarkerWire, WorkflowStateWire,
-    WorkflowStepStateWire, AGENT_SCAN_WIRE_SCHEMA_VERSION,
+    RunningMarkerWire, UsedMacroWire, WaitEpicFollowEntryWire,
+    WaitingMarkerWire, WorkflowStateWire, WorkflowStepStateWire,
+    AGENT_SCAN_WIRE_SCHEMA_VERSION,
 };
 use crate::project_spec::{
     list_project_records, preferred_project_spec_path,
@@ -1336,6 +1337,61 @@ fn coerce_created_epics(value: Option<&Value>) -> Vec<CreatedEpicWire> {
     }
 }
 
+/// Coerce one `wait_epic_follows` entry. Entries without a target or
+/// without a persisted stage state (`launching` / `following` / `blocked`)
+/// are dropped; unknown keys are ignored.
+fn wait_epic_follow_entry_from_value(
+    value: &Value,
+) -> Option<WaitEpicFollowEntryWire> {
+    let obj = value.as_object()?;
+    let target = coerce_str(obj.get("target"))
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())?;
+    let state = coerce_str(obj.get("state"))
+        .map(|raw| raw.trim().to_lowercase())
+        .filter(|normalized| {
+            matches!(normalized.as_str(), "launching" | "following" | "blocked")
+        })?;
+    let optional_str = |key: &str| {
+        coerce_str(obj.get(key))
+            .map(|raw| raw.trim().to_string())
+            .filter(|trimmed| !trimmed.is_empty())
+    };
+    Some(WaitEpicFollowEntryWire {
+        target,
+        state,
+        epic_ids: coerce_str_list(obj.get("epic_ids")),
+        added_bead_ids: coerce_str_list(obj.get("added_bead_ids")),
+        members: coerce_str_list(obj.get("members")),
+        since: coerce_float(obj.get("since")).unwrap_or_default(),
+        reason: optional_str("reason"),
+        detail: optional_str("detail"),
+        resume_command: optional_str("resume_command"),
+        skipped_epic_ids: coerce_str_list(obj.get("skipped_epic_ids")),
+    })
+}
+
+/// Maximum `wait_epic_follows` entries kept on the scan wire.
+const WAIT_EPIC_FOLLOWS_MAX_ENTRIES: usize = 64;
+
+/// Coerce the `wait_epic_follows` record leniently. A non-array value gives
+/// an empty list; a malformed entry never fails the whole scan.
+fn coerce_wait_epic_follows(
+    value: Option<&Value>,
+) -> Vec<WaitEpicFollowEntryWire> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::Object(_) => wait_epic_follow_entry_from_value(item),
+                _ => None,
+            })
+            .take(WAIT_EPIC_FOLLOWS_MAX_ENTRIES)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Read and validate the stored `%tab` placement for one meta object.
 ///
 /// The raw value is canonicalized (trimmed, lowercased) through
@@ -1513,6 +1569,9 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         ),
         created_epics: coerce_created_epics(data.get("created_epics")),
         wait_for_epics_of: coerce_str_list(data.get("wait_for_epics_of")),
+        wait_epic_follows: coerce_wait_epic_follows(
+            data.get("wait_epic_follows"),
+        ),
     }
 }
 
@@ -1821,6 +1880,9 @@ fn waiting_marker_from_object(data: &Map<String, Value>) -> WaitingMarkerWire {
         slot_requested_at: coerce_str(data.get("slot_requested_at")),
         eligible_since: coerce_str(data.get("eligible_since")),
         wait_for_epics_of: coerce_str_list(data.get("wait_for_epics_of")),
+        wait_epic_follows: coerce_wait_epic_follows(
+            data.get("wait_epic_follows"),
+        ),
     }
 }
 
@@ -3064,6 +3126,13 @@ mod tests {
         agent_meta_from_object(&data)
     }
 
+    fn meta_with_wait_epic_follows(value: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("wait_epic_follows".to_string(), value);
+        agent_meta_from_object(&data)
+    }
+
     #[test]
     fn scanner_coerces_created_epics_tolerantly() {
         // A valid record survives with every field intact.
@@ -3101,6 +3170,52 @@ mod tests {
         // A non-array value gives an empty list.
         for value in [json!("sase-7k"), json!(42), json!(null), json!({})] {
             assert!(meta_with_created_epics(value).created_epics.is_empty());
+        }
+    }
+
+    #[test]
+    fn scanner_coerces_wait_epic_follows_tolerantly() {
+        // A valid stage entry survives with every field intact.
+        let valid = meta_with_wait_epic_follows(json!([{
+            "target": "planner",
+            "state": "following",
+            "epic_ids": ["sase-7k"],
+            "added_bead_ids": ["sase-7k"],
+            "members": ["planner"],
+            "since": 1_800_000_000.0,
+            "reason": null,
+            "detail": "recorded",
+            "resume_command": null,
+            "skipped_epic_ids": [],
+            "future_field": true,
+        }]));
+        assert_eq!(valid.wait_epic_follows.len(), 1);
+        let entry = &valid.wait_epic_follows[0];
+        assert_eq!(entry.target, "planner");
+        assert_eq!(entry.state, "following");
+        assert_eq!(entry.epic_ids, vec!["sase-7k".to_string()]);
+        assert_eq!(entry.detail.as_deref(), Some("recorded"));
+
+        // Malformed entries are dropped while the rest of the meta parses.
+        let malformed = meta_with_wait_epic_follows(json!([
+            {"state": "following"},
+            {"target": "planner"},
+            {"target": "planner", "state": "agent"},
+            {"target": "planner", "state": "none"},
+            42,
+            {"target": " planner ", "state": " BLOCKED ", "reason": 7},
+        ]));
+        assert_eq!(malformed.name.as_deref(), Some("probe"));
+        assert_eq!(malformed.wait_epic_follows.len(), 1);
+        assert_eq!(malformed.wait_epic_follows[0].target, "planner");
+        assert_eq!(malformed.wait_epic_follows[0].state, "blocked");
+        assert_eq!(malformed.wait_epic_follows[0].reason, None);
+
+        // A non-array value gives an empty list.
+        for value in [json!("planner"), json!(42), json!(null), json!({})] {
+            assert!(meta_with_wait_epic_follows(value)
+                .wait_epic_follows
+                .is_empty());
         }
     }
 

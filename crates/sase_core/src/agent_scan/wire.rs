@@ -736,6 +736,11 @@ pub struct AgentMetaWire {
     /// payloads stay byte-stable and no wire schema bump is needed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for_epics_of: Vec<String>,
+    /// Persisted epic-follow stages (`release` phase). Additive
+    /// serde-default and omitted when empty, so existing scan payloads
+    /// stay byte-stable and no wire schema bump is needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_epic_follows: Vec<WaitEpicFollowEntryWire>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.
@@ -755,6 +760,36 @@ pub struct CreatedEpicWire {
     pub created_at: Option<String>,
     #[serde(default)]
     pub via: Option<String>,
+}
+
+/// One persisted `wait_epic_follows` stage entry.
+///
+/// Written by the epic-follow release phase when an armed
+/// `%wait(for_epic=)` target reaches `launching`, `following`, or
+/// `blocked`. `added_bead_ids` holds only the epic ids this promotion
+/// appended to `wait_for_beads` for that target.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WaitEpicFollowEntryWire {
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub epic_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_bead_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub since: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_epic_ids: Vec<String>,
 }
 
 /// Runner that executed the finalizer phase (plan §3.3 C5).
@@ -1050,6 +1085,11 @@ pub struct WaitingMarkerWire {
     /// payloads stay byte-stable and no wire schema bump is needed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_for_epics_of: Vec<String>,
+    /// Persisted epic-follow stages (`release` phase). Trailing for the
+    /// same key-order stability; additive serde-default and omitted when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wait_epic_follows: Vec<WaitEpicFollowEntryWire>,
 }
 
 impl WaitingMarkerWire {

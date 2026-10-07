@@ -279,11 +279,15 @@ fn reduce_target(
         .filter(|member| member.launch_reserved)
         .collect();
 
+    // A dismissed member is deleted: no epic will ever be recorded for
+    // it, so it must not hold the target in the launch-settle window. Only
+    // live members keep a fresh launch in `launching`.
     let launching = reserved.iter().any(|member| {
-        member.launch_in_flight
-            || member
-                .launch_reserved_age_seconds
-                .is_some_and(|age| age < input.launch_settle_seconds)
+        !member.member_dismissed
+            && (member.launch_in_flight
+                || member
+                    .launch_reserved_age_seconds
+                    .is_some_and(|age| age < input.launch_settle_seconds))
     });
     if launching {
         let state = "launching".to_string();
@@ -667,6 +671,43 @@ mod tests {
             decisions[0].resume_command.as_deref(),
             Some("sase bead work plan.md")
         );
+    }
+
+    #[test]
+    fn dismissed_member_with_fresh_launch_still_blocks() {
+        let mut solo = member("planner");
+        solo.launch_reserved = true;
+        solo.launch_argv_present = true;
+        solo.launch_reserved_age_seconds = Some(5.0);
+        solo.launch_in_flight = true;
+        solo.member_dismissed = true;
+        solo.resume_command = Some("sase bead work plan.md".to_string());
+        let decisions = wait_epic_follow_reduce(&input(vec![target(
+            "planner",
+            true,
+            vec![solo],
+        )]));
+        assert_eq!(decisions[0].state, "blocked");
+        assert_eq!(
+            decisions[0].reason.as_deref(),
+            Some("target_dismissed_during_launch")
+        );
+    }
+
+    #[test]
+    fn live_sibling_launch_keeps_dismissed_target_launching() {
+        let mut dismissed = member("planner");
+        dismissed.launch_reserved = true;
+        dismissed.member_dismissed = true;
+        let mut live = member("planner");
+        live.launch_reserved = true;
+        live.launch_in_flight = true;
+        let decisions = wait_epic_follow_reduce(&input(vec![target(
+            "planner",
+            true,
+            vec![dismissed, live],
+        )]));
+        assert_eq!(decisions[0].state, "launching");
     }
 
     #[test]
