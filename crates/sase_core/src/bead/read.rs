@@ -353,7 +353,9 @@ fn doctor_report_impl(
             messages.push("WARNING: bead event streams missing".to_string());
         }
     }
-    if !legacy_path.exists() {
+    // The projection is an on-demand export for event stores, so its absence
+    // is only a warning for legacy stores that still read it.
+    if !legacy_path.exists() && !event_store_is_present {
         messages.push("WARNING: issues.jsonl missing".to_string());
     }
     if !beads_dir.join("beads.db").exists() {

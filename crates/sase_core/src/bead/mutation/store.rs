@@ -327,13 +327,23 @@ impl MutableStore {
             issue.validate()?;
         }
         validate_unique_external_refs(&self.issues)?;
+        // Presence is checked before the event write below so legacy stores
+        // without `events/` keep today's full behavior (their first save
+        // also materializes the event store). Event stores never rewrite
+        // the `issues.jsonl` compatibility projection on the per-mutation
+        // path; `export_jsonl` regenerates it on demand instead.
+        let event_store = event_store_present(&self.beads_dir);
         write_event_store_changed(
             &self.beads_dir,
             self.streams.all(),
             self.streams.changed(),
         )?;
         save_config(&self.beads_dir, &self.config)?;
-        self.save_issues()
+        if event_store {
+            Ok(())
+        } else {
+            self.save_issues()
+        }
     }
 
     pub(crate) fn save_issues(&self) -> Result<(), BeadError> {

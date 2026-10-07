@@ -49,8 +49,9 @@ fn snooze_task_records_wake_conditions_and_replays_from_events() {
         );
 
     assert_eq!(reduces_to_store(&beads_dir), vec![issue.clone()]);
-    // The generated projection carries the record too, so a reader that
-    // only has issues.jsonl still sees the wake conditions.
+    // The on-demand export carries the record too, so a reader that only
+    // has issues.jsonl still sees the wake conditions.
+    export_jsonl(&beads_dir).unwrap();
     let projected =
         import_issues_from_jsonl(&beads_dir.join("issues.jsonl")).unwrap();
     assert_eq!(projected.issues, vec![issue]);

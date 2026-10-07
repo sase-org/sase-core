@@ -20,6 +20,7 @@ use crate::artifact_link::BeadLinkDirectionWire;
 use crate::bead::config::default_config;
 use crate::bead::config::save_config;
 use crate::bead::events::reduce_event_streams;
+use crate::bead::jsonl::export_issues_to_jsonl;
 use crate::bead::jsonl::import_issues_from_jsonl;
 pub(super) fn note_text(issue: &IssueWire) -> String {
     notes_text(&issue.notes)
@@ -104,10 +105,17 @@ pub(super) fn reduces_to_store(beads_dir: &Path) -> Vec<IssueWire> {
 }
 
 pub(super) fn assert_reprojection_byte_stable(beads_dir: &Path, label: &str) {
-    let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+    // projection-off: mutations never rewrite `issues.jsonl`, so the
+    // on-demand export must reproduce the replayed state byte for byte,
+    // and re-exporting must be a fixed point.
     export_jsonl(beads_dir).unwrap();
-    let after = fs::read(beads_dir.join("issues.jsonl")).unwrap();
-    assert_eq!(before, after, "{label}");
+    let exported = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+    export_jsonl(beads_dir).unwrap();
+    let reread = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+    assert_eq!(exported, reread, "{label}");
+    let reduced = reduces_to_store(beads_dir);
+    let replayed = export_issues_to_jsonl(&reduced).unwrap();
+    assert_eq!(exported, replayed.as_bytes(), "{label}");
 }
 
 pub(super) fn external_ref_store() -> (tempfile::TempDir, PathBuf) {
@@ -319,12 +327,13 @@ pub(super) fn dependency_mutation_fixture(
     (temp, beads_dir, source.id, vec![first.id, second.id])
 }
 
-/// The issue the mutation wrote to `issues.jsonl`, and the same issue as
-/// the reducer projects it from the store's event streams.
+/// The issue as the on-demand `issues.jsonl` export projects it, and the
+/// same issue as the reducer projects it from the store's event streams.
 pub(super) fn projected_and_reduced(
     beads_dir: &Path,
     issue_id: &str,
 ) -> (IssueWire, IssueWire) {
+    export_jsonl(beads_dir).unwrap();
     let projected = import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
         .unwrap()
         .issues

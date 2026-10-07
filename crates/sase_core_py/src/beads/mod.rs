@@ -13,10 +13,12 @@ use crate::json_bridge::{
 
 use pyo3::wrap_pyfunction;
 
+mod artifact_refs;
 mod board;
 mod fingerprint;
 mod read_model;
 
+use artifact_refs::register_artifact_refs;
 use board::register_board;
 use fingerprint::register_fingerprint;
 use read_model::register_read_model;
@@ -1530,6 +1532,7 @@ pub(crate) fn register_beads(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_bead_cli_execute, m)?)?;
+    register_artifact_refs(m)?;
     register_board(m)?;
     register_fingerprint(m)?;
     register_target_probe(m)?;

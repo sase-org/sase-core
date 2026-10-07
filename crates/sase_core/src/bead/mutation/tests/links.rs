@@ -905,6 +905,7 @@ fn phase_size_round_trips_through_create_update_events_and_projection() {
     .unwrap();
     assert_eq!(updated.size, Some(PhaseSizeWire::Large));
 
+    export_jsonl(&beads_dir).unwrap();
     let jsonl = fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
     assert!(jsonl.contains(r#""size":"large""#));
     let (_manifest, streams) = read_event_store(&beads_dir).unwrap();
@@ -1048,6 +1049,7 @@ fn concurrent_update_and_claim_preserve_both_events_and_projection() {
     assert!(update_outcome.lock_wait_ms > 0);
     assert!(claim_outcome.lock_wait_ms > 0);
 
+    export_jsonl(&beads_dir).unwrap();
     let projected = import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
         .unwrap()
         .issues;
@@ -1150,6 +1152,7 @@ fn concurrent_launch_claims_preserve_sibling_events_and_projection() {
         })
         .collect();
     assert_eq!(claim_events.len(), 2);
+    export_jsonl(&beads_dir).unwrap();
     let projected = import_issues_from_jsonl(&beads_dir.join("issues.jsonl"))
         .unwrap()
         .issues;
@@ -1274,6 +1277,9 @@ fn projection_writers_are_byte_stable_for_the_same_store_state() {
     )
     .unwrap();
 
+    // projection-off: mutations leave `issues.jsonl` alone, so the export
+    // must reproduce the mutation-time projection byte for byte.
+    export_jsonl(&beads_dir).unwrap();
     let mutation_projection = fs::read(beads_dir.join("issues.jsonl")).unwrap();
     let manifest_before =
         fs::read(beads_dir.join("events/manifest.json")).unwrap();
@@ -1313,6 +1319,55 @@ fn projection_writers_are_byte_stable_for_the_same_store_state() {
         fs::read(beads_dir.join("issues.jsonl")).unwrap(),
         mutation_projection
     );
+}
+
+#[test]
+fn event_store_mutation_leaves_issues_jsonl_without_a_diff() {
+    // projection-off acceptance: once a store has an event store, a
+    // mutation appends events but never rewrites the compatibility
+    // projection. The on-demand export picks the mutation up instead.
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    save_config(&beads_dir, &default_config("sase", "owner@example.com"))
+        .unwrap();
+    fs::write(beads_dir.join("issues.jsonl"), "").unwrap();
+
+    let epic = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Exported epic".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    export_jsonl(&beads_dir).unwrap();
+    let before = fs::read(beads_dir.join("issues.jsonl")).unwrap();
+
+    update_issue(
+        &beads_dir,
+        &epic.id,
+        BeadUpdateFieldsWire {
+            title: Some("Renamed epic".to_string()),
+            now: Some("2026-01-01T00:01:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(beads_dir.join("issues.jsonl")).unwrap(),
+        before,
+        "mutation must not rewrite issues.jsonl"
+    );
+
+    export_jsonl(&beads_dir).unwrap();
+    let regenerated =
+        fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
+    assert!(regenerated.contains(r#""title":"Renamed epic""#));
 }
 
 #[test]

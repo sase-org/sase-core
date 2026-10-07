@@ -123,6 +123,7 @@ fn claim_for_agent_launch_claims_open_and_reassigns_in_progress_issue() {
     assert_eq!(reassigned.status, StatusWire::InProgress);
     assert_eq!(reassigned.assignee, "agent-2");
     assert_eq!(reassigned.updated_at, "2026-01-01T00:03:00Z");
+    export_jsonl(&beads_dir).unwrap();
     let projection =
         fs::read_to_string(beads_dir.join("issues.jsonl")).unwrap();
     assert!(projection.contains(r#""assignee":"agent-2""#));
