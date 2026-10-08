@@ -285,10 +285,10 @@ fn paren_arg_context(
     cursor: usize,
     suffix: &str,
 ) -> Option<MacroArgCompletionTarget> {
-    let prefix_body = suffix.strip_prefix('(')?;
-    if prefix_body.contains(')') {
-        return None;
-    }
+    suffix.strip_prefix('(')?;
+    // A quoted `)` is one value's text, not the end of the call. The
+    // `body_end` check below enforces a real close through the quote-aware
+    // paren matcher, so no raw scan is needed here.
     let body_start = base_end + 1;
     let cursor_in_body = cursor.checked_sub(body_start)?;
     // Unclosed lists match the argument parser: the body runs to EOF
