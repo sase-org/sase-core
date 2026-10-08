@@ -58,6 +58,18 @@ pub fn update_issues(
         ));
     }
     with_bead_mutation_lock(beads_dir, "update", || {
+        if let Some(cache_path) =
+            super::indexed::admit_indexed_mutation(beads_dir)
+        {
+            if let Some(outcome) = super::indexed::try_update_issues(
+                beads_dir,
+                &cache_path,
+                issue_ids,
+                fields.clone(),
+            )? {
+                return Ok(outcome);
+            }
+        }
         let mut store = MutableStore::load(beads_dir)?;
 
         // Resolve inside the locked load: the single store read is the
@@ -183,6 +195,21 @@ pub fn append_issue_note(
     }
 
     with_bead_mutation_lock(beads_dir, "note", || {
+        if let Some(cache_path) =
+            super::indexed::admit_indexed_mutation(beads_dir)
+        {
+            if let Some(outcome) = super::indexed::try_append_note(
+                beads_dir,
+                &cache_path,
+                issue_id,
+                entry,
+                author.clone(),
+                now.clone(),
+                attachments.clone(),
+            )? {
+                return Ok(outcome);
+            }
+        }
         let mut store = MutableStore::load(beads_dir)?;
         let issue_id = store.resolve_issue_id(issue_id)?;
         let index = store.issue_index(&issue_id)?;
@@ -396,7 +423,7 @@ fn remove_note_from_store(
     Ok(issue)
 }
 
-fn apply_update_fields(
+pub(crate) fn apply_update_fields(
     issue: &mut IssueWire,
     fields: BeadUpdateFieldsWire,
     timestamp: &str,
@@ -466,7 +493,7 @@ fn apply_update_fields(
     Ok(())
 }
 
-fn event_fields_from_update_fields(
+pub(crate) fn event_fields_from_update_fields(
     fields: &BeadUpdateFieldsWire,
 ) -> Result<BeadIssueUpdateEventFieldsWire, BeadError> {
     let status = fields.status.as_deref().map(parse_status).transpose()?;
@@ -505,7 +532,7 @@ fn event_fields_from_update_fields(
     Ok(event_fields)
 }
 
-fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
+pub(crate) fn parse_status(value: &str) -> Result<StatusWire, BeadError> {
     match value {
         "open" => Ok(StatusWire::Open),
         "claimed" => Ok(StatusWire::Claimed),

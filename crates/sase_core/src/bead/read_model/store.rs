@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -705,12 +706,68 @@ pub fn ensure_cache_ready_for_mutation_at(
 /// return without touching the `issues` table, so warm indexed queries
 /// never pay the full-snapshot deserialize. The stale path delegates to
 /// the existing refresh (which loads once) and reports warm afterwards.
+/// True when the cache file is provably not a SQLite database.
+///
+/// A foreign or truncated file at the cache path can never heal by
+/// retrying reads against it, so the freshness paths drop and rebuild it
+/// exactly like a version mismatch. A healthy database that merely failed
+/// a read (contention, torn view) keeps the fail-open path: only the
+/// missing SQLite header magic proves the file itself is the fault.
+fn cache_file_is_not_a_database(cache_path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(cache_path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    if file.read_exact(&mut header).is_err() {
+        return true;
+    }
+    header != *b"SQLite format 3\0"
+}
+
+/// Drop a provably non-database cache file and rebuild it cold.
+fn rebuild_not_a_database(
+    beads_dir: &Path,
+    cache_path: &Path,
+    connection: Connection,
+) -> Result<bool, Fault> {
+    drop(connection);
+    drop_cache_file(cache_path);
+    ensure_schema(cache_path)?;
+    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+    rebuild_cold_discard(beads_dir, cache_path, connection)
+}
+
+/// Open the cache for a freshness pass, healing a provably non-database
+/// file first.
+///
+/// The WAL pragma in `open_read_write` already fails on a foreign file,
+/// so the heal must happen at open time, not only at the meta read: such
+/// a file can never heal by retrying against it. Anything else keeps the
+/// fail-open path.
+fn open_or_heal_for_freshness(cache_path: &Path) -> Result<Connection, Fault> {
+    match open_read_write(cache_path, REBUILD_BUSY_TIMEOUT) {
+        Ok(connection) => Ok(connection),
+        Err(_) if cache_file_is_not_a_database(cache_path) => {
+            drop_cache_file(cache_path);
+            ensure_schema(cache_path)?;
+            open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)
+        }
+        Err(fault) => Err(fault),
+    }
+}
+
 fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
     if ensure_schema(cache_path).is_err() {
         return Err(Fault::Cache);
     }
-    let mut connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    let mut connection = open_or_heal_for_freshness(cache_path)?;
+    let meta = match read_meta(&connection) {
+        Ok(meta) => meta,
+        Err(_) if cache_file_is_not_a_database(cache_path) => {
+            return rebuild_not_a_database(beads_dir, cache_path, connection);
+        }
+        Err(_) => return Err(Fault::Cache),
+    };
     if version_mismatch_reason(&meta).is_some() {
         drop(connection);
         drop_cache_file(cache_path);
@@ -779,8 +836,14 @@ fn ensure_fresh_forced(
     if ensure_schema(cache_path).is_err() {
         return Err(Fault::Cache);
     }
-    let mut connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    let meta = read_meta(&connection).map_err(|_| Fault::Cache)?;
+    let mut connection = open_or_heal_for_freshness(cache_path)?;
+    let meta = match read_meta(&connection) {
+        Ok(meta) => meta,
+        Err(_) if cache_file_is_not_a_database(cache_path) => {
+            return rebuild_not_a_database(beads_dir, cache_path, connection);
+        }
+        Err(_) => return Err(Fault::Cache),
+    };
     if version_mismatch_reason(&meta).is_some() {
         drop(connection);
         drop_cache_file(cache_path);

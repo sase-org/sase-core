@@ -4,6 +4,7 @@ mod claims;
 mod close_remove;
 mod create;
 mod dependencies;
+pub(crate) mod indexed;
 mod links;
 mod mutation_wire;
 mod notes_update;

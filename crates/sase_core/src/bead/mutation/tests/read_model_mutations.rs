@@ -16,8 +16,9 @@ use crate::bead::mutation::store::store_io_stats;
 use crate::bead::mutation::store::MutableStore;
 use crate::bead::mutation::view::MutationView;
 use crate::bead::read_model::{
-    ensure_cache_ready_at, ensure_cache_ready_for_mutation_at,
-    read_model_cache_path_for_store, rebuild_read_model_at,
+    cached_detail, ensure_cache_ready_at, ensure_cache_ready_for_mutation_at,
+    read_model_cache_path_for_store, read_model_verify_cache_at,
+    rebuild_read_model_at,
 };
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::PhaseSizeWire;
@@ -318,6 +319,281 @@ fn mutation_sweep_establishes_fresh_baseline() {
         ensure_cache_ready_for_mutation_at(&beads_dir, &cache_path).unwrap()
     );
     assert!(ensure_cache_ready_at(&beads_dir, &cache_path).unwrap());
+}
+
+fn snapshot_event_bytes(beads_dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let streams_dir = beads_dir.join("events/streams");
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let listing = fs::read_dir(&streams_dir).unwrap();
+    for entry in listing {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().to_string();
+        entries.push((name, fs::read(entry.path()).unwrap()));
+    }
+    entries.sort();
+    entries.push((
+        "manifest.json".to_string(),
+        fs::read(beads_dir.join("events/manifest.json")).unwrap(),
+    ));
+    entries
+}
+
+fn seed_warm_git_store(
+    temp: &tempfile::TempDir,
+) -> (std::path::PathBuf, String, String) {
+    fs::create_dir_all(temp.path().join(".git")).unwrap();
+    init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let (_, task_id) = seed_two_issue_store(&beads_dir);
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+    assert!(
+        ensure_cache_ready_for_mutation_at(&beads_dir, &cache_path).unwrap()
+    );
+    (beads_dir, task_id, cache_path.to_string_lossy().to_string())
+}
+
+#[test]
+fn indexed_note_update_skips_full_replay() {
+    let temp = tempdir().unwrap();
+    let (beads_dir, task_id, _) = seed_warm_git_store(&temp);
+    store_io_stats::reset();
+    append_issue_note(
+        &beads_dir,
+        &task_id,
+        "indexed note",
+        Some("agent".to_string()),
+        Some("2026-01-01T00:02:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+    update_issue(
+        &beads_dir,
+        &task_id,
+        BeadUpdateFieldsWire {
+            title: Some("Indexed title".to_string()),
+            now: Some("2026-01-01T00:03:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(store_io_stats::loads(), 2);
+    assert_eq!(store_io_stats::full_replays(), 0);
+    assert!(
+        store_io_stats::hydrated_rows() <= 8,
+        "bounded affected-row hydration, got {}",
+        store_io_stats::hydrated_rows()
+    );
+    assert_eq!(store_io_stats::stream_reads(), 2);
+    assert_eq!(store_io_stats::validation_runs(), 2);
+
+    let detail = cached_detail(&beads_dir, &task_id, false)
+        .unwrap()
+        .expect("warm indexed read serves from cache")
+        .unwrap();
+    let detail_value = serde_json::to_value(&detail).unwrap();
+    assert!(
+        detail_value.to_string().contains("Indexed title")
+            && detail_value.to_string().contains("indexed note"),
+        "indexed read sees the write-through rows"
+    );
+
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+    let report = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(report.compared, "verify ran a forced replay");
+    assert!(
+        report.matched,
+        "indexed write-through matches replay: {}",
+        report.reason
+    );
+    assert!(report.differing_ids.is_empty());
+}
+
+#[test]
+fn indexed_mutations_match_replay_store() {
+    let git_temp = tempdir().unwrap();
+    let (git_beads, git_task, _) = seed_warm_git_store(&git_temp);
+    let plain_temp = tempdir().unwrap();
+    init_store(plain_temp.path(), "beads", "sase", "owner@example.com")
+        .unwrap();
+    let plain_beads = plain_temp.path().join("beads");
+    let (_, plain_task) = seed_two_issue_store(&plain_beads);
+
+    for (beads_dir, task_id) in [
+        (&git_beads, git_task.as_str()),
+        (&plain_beads, plain_task.as_str()),
+    ] {
+        append_issue_note(
+            beads_dir,
+            task_id,
+            "parity note",
+            Some("agent".to_string()),
+            Some("2026-01-01T00:02:00Z".to_string()),
+            None,
+        )
+        .unwrap();
+        update_issue(
+            beads_dir,
+            task_id,
+            BeadUpdateFieldsWire {
+                title: Some("Parity title".to_string()),
+                now: Some("2026-01-01T00:03:00Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+
+    let git_issues = reduces_to_store(&git_beads);
+    let plain_issues = reduces_to_store(&plain_beads);
+    assert_eq!(
+        serde_json::to_value(&git_issues).unwrap(),
+        serde_json::to_value(&plain_issues).unwrap()
+    );
+    let renamed = git_issues
+        .iter()
+        .find(|issue| issue.id == git_task)
+        .unwrap();
+    assert_eq!(renamed.title, "Parity title");
+    assert!(note_text(renamed).contains("parity note"));
+}
+
+#[test]
+fn indexed_noop_update_writes_nothing() {
+    let temp = tempdir().unwrap();
+    let (beads_dir, task_id, _) = seed_warm_git_store(&temp);
+    let before = snapshot_event_bytes(&beads_dir);
+    let current = reduces_to_store(&beads_dir)
+        .into_iter()
+        .find(|issue| issue.id == task_id)
+        .unwrap();
+    let result = update_issue(
+        &beads_dir,
+        &task_id,
+        BeadUpdateFieldsWire {
+            title: Some(current.title.clone()),
+            now: Some("2026-01-01T00:04:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!result.changed);
+    assert_eq!(snapshot_event_bytes(&beads_dir), before);
+}
+
+#[test]
+fn indexed_note_on_closed_bead_matches_replay() {
+    let git_temp = tempdir().unwrap();
+    let (git_beads, git_task, _) = seed_warm_git_store(&git_temp);
+    let plain_temp = tempdir().unwrap();
+    init_store(plain_temp.path(), "beads", "sase", "owner@example.com")
+        .unwrap();
+    let plain_beads = plain_temp.path().join("beads");
+    let (_, plain_task) = seed_two_issue_store(&plain_beads);
+
+    for (beads_dir, task_id) in [
+        (&git_beads, git_task.as_str()),
+        (&plain_beads, plain_task.as_str()),
+    ] {
+        close_issues(
+            beads_dir,
+            std::slice::from_ref(&task_id.to_string()),
+            Some("done".to_string()),
+            Some(crate::bead::wire::BeadResolutionWire::Done),
+            false,
+            Some("2026-01-01T00:02:00Z".to_string()),
+        )
+        .unwrap();
+        append_issue_note(
+            beads_dir,
+            task_id,
+            "note after close",
+            Some("agent".to_string()),
+            Some("2026-01-01T00:03:00Z".to_string()),
+            None,
+        )
+        .unwrap();
+    }
+
+    let git_issues = reduces_to_store(&git_beads);
+    let plain_issues = reduces_to_store(&plain_beads);
+    assert_eq!(
+        serde_json::to_value(&git_issues).unwrap(),
+        serde_json::to_value(&plain_issues).unwrap()
+    );
+    let cache_path = read_model_cache_path_for_store(&git_beads).unwrap();
+    let report = read_model_verify_cache_at(&git_beads, &cache_path);
+    assert!(
+        report.matched,
+        "write to closed bead verifies: {}",
+        report.reason
+    );
+}
+
+#[test]
+fn indexed_mutation_falls_back_when_cache_is_corrupt() {
+    let temp = tempdir().unwrap();
+    let (beads_dir, task_id, cache_path) = seed_warm_git_store(&temp);
+    fs::write(&cache_path, b"not a sqlite file").unwrap();
+    append_issue_note(
+        &beads_dir,
+        &task_id,
+        "fallback note",
+        Some("agent".to_string()),
+        Some("2026-01-01T00:02:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+    let issues = reduces_to_store(&beads_dir);
+    let noted = issues.iter().find(|issue| issue.id == task_id).unwrap();
+    assert!(note_text(noted).contains("fallback note"));
+
+    let cache = std::path::PathBuf::from(&cache_path);
+    assert!(ensure_cache_ready_at(&beads_dir, &cache).unwrap());
+    let report = read_model_verify_cache_at(&beads_dir, &cache);
+    assert!(
+        report.matched,
+        "next read repairs exactly: {}",
+        report.reason
+    );
+}
+
+#[test]
+fn indexed_rejection_matches_replay_bytes() {
+    let git_temp = tempdir().unwrap();
+    let (git_beads, git_task, _) = seed_warm_git_store(&git_temp);
+    let plain_temp = tempdir().unwrap();
+    init_store(plain_temp.path(), "beads", "sase", "owner@example.com")
+        .unwrap();
+    let plain_beads = plain_temp.path().join("beads");
+    let (_, plain_task) = seed_two_issue_store(&plain_beads);
+
+    let git_before = reduces_to_store(&git_beads);
+    let git_rejected = update_issue(
+        &git_beads,
+        &git_task,
+        BeadUpdateFieldsWire {
+            status: Some("not-a-status".to_string()),
+            now: Some("2026-01-01T00:04:00Z".to_string()),
+            ..Default::default()
+        },
+    );
+    let plain_rejected = update_issue(
+        &plain_beads,
+        &plain_task,
+        BeadUpdateFieldsWire {
+            status: Some("not-a-status".to_string()),
+            now: Some("2026-01-01T00:04:00Z".to_string()),
+            ..Default::default()
+        },
+    );
+    let git_error = git_rejected.unwrap_err();
+    let plain_error = plain_rejected.unwrap_err();
+    assert_eq!(git_error.kind, plain_error.kind);
+    assert_eq!(git_error.message, plain_error.message);
+    assert_eq!(
+        serde_json::to_value(reduces_to_store(&git_beads)).unwrap(),
+        serde_json::to_value(&git_before).unwrap()
+    );
 }
 
 #[test]

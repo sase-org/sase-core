@@ -868,4 +868,18 @@ pub(crate) mod store_io_stats {
             cell.set(cell.get().saturating_add(count));
         });
     }
+
+    /// Issue rows hydrated by indexed (affected-row) mutation loads.
+    pub fn record_hydrated_rows(count: u64) {
+        HYDRATED_ROWS.with(|cell| {
+            cell.set(cell.get().saturating_add(count));
+        });
+    }
+
+    /// Physical event-stream files read by indexed mutation loads.
+    pub fn record_stream_reads(count: u64) {
+        STREAM_READS.with(|cell| {
+            cell.set(cell.get().saturating_add(count));
+        });
+    }
 }
