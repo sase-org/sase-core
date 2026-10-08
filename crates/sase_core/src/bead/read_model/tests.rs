@@ -175,9 +175,10 @@ fn cache_path_lives_under_the_git_dir() {
 #[test]
 fn versions_are_current() {
     // Schema 2 adds the `task_type`, `plus_one`, and `is_flag` issue
-    // columns behind the `read-model-queries` indexed filters; the
-    // reducer semantics did not change.
-    assert_eq!(READ_MODEL_SCHEMA_VERSION, 2);
+    // columns behind the `read-model-queries` indexed filters; schema 3
+    // adds disposable `alloc_top`/`alloc_child` allocation metadata for
+    // index-only ID minting. The reducer semantics did not change.
+    assert_eq!(READ_MODEL_SCHEMA_VERSION, 3);
     assert_eq!(READ_MODEL_REDUCER_VERSION, 1);
 }
 

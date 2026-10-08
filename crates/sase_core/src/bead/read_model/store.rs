@@ -62,7 +62,10 @@ use crate::bead::wire::{BeadError, IssueWire};
 /// Version 2 adds the `task_type`, `plus_one`, and `is_flag` issue columns
 /// behind the `read-model-queries` indexed list filters and index
 /// aggregates.
-pub const READ_MODEL_SCHEMA_VERSION: u32 = 2;
+///
+/// Version 3 adds disposable `alloc_top`/`alloc_child` allocation metadata
+/// for index-only ID minting (`read-model-mutations`); older caches rebuild.
+pub const READ_MODEL_SCHEMA_VERSION: u32 = 3;
 
 /// Reducer version the cached rows were reduced with.
 ///
@@ -1065,6 +1068,7 @@ pub(super) struct CacheMeta {
     pub(super) token: String,
     pub(super) last_sweep_ns: i64,
     pub(super) generation: u64,
+    pub(super) content_generation: u64,
     pub(super) schema_version: u32,
     pub(super) reducer_version: u32,
     pub(super) crate_version: String,
@@ -1114,6 +1118,10 @@ pub(super) fn read_meta(connection: &Connection) -> Result<CacheMeta, String> {
             .unwrap_or(0),
         generation: values
             .get("generation")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        content_generation: values
+            .get("content_generation")
             .and_then(|value| value.parse().ok())
             .unwrap_or(0),
         schema_version: values
@@ -1421,6 +1429,15 @@ fn write_snapshot_in_txn(
             .execute(&format!("DELETE FROM {table}"), [])
             .map_err(|_| WriteFault::Other)?;
     }
+    super::alloc::ensure_alloc_schema(connection)
+        .map_err(|_| WriteFault::Other)?;
+    let alloc_ids: Vec<&str> = snapshot
+        .issues
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect();
+    super::alloc::rebuild_allocation(connection, alloc_ids)
+        .map_err(|_| WriteFault::Other)?;
     let parent_of: BTreeMap<&str, &str> = snapshot
         .issues
         .iter()
@@ -1533,6 +1550,12 @@ fn write_snapshot_in_txn(
     if changed != 1 {
         return Err(WriteFault::CasLost);
     }
+    connection
+        .execute(
+            "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'content_generation'",
+            [],
+        )
+        .map_err(|_| WriteFault::Other)?;
     Ok(())
 }
 
@@ -1944,6 +1967,14 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
                 issue_id TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS suffix_catalog_suffix ON suffix_catalog(suffix);
+            CREATE TABLE IF NOT EXISTS alloc_top (
+                prefix TEXT PRIMARY KEY,
+                max_counter INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alloc_child (
+                parent_id TEXT PRIMARY KEY,
+                max_suffix INTEGER NOT NULL
+            );
             ",
         )
         .map_err(|_| Fault::Cache)?;
@@ -1964,7 +1995,7 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
 /// Shared by fresh-file creation and [`backfill_meta_keys`] so caches
 /// written before `read-model-tail` gain the new keys without a drop and
 /// rebuild.
-fn tail_meta_defaults() -> [(&'static str, String); 15] {
+fn tail_meta_defaults() -> [(&'static str, String); 16] {
     [
         ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
         ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
@@ -1973,6 +2004,7 @@ fn tail_meta_defaults() -> [(&'static str, String); 15] {
         ("last_sweep_ns", "0".to_string()),
         ("frontier", String::new()),
         ("generation", "0".to_string()),
+        ("content_generation", "0".to_string()),
         ("manifest_schema_version", "0".to_string()),
         ("manifest_stream_count", "0".to_string()),
         ("config_canonical", String::new()),

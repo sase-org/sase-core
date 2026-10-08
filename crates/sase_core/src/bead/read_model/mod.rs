@@ -6,6 +6,7 @@
 //! the merge frontier (see `tail`), and rebuilds from a full replay
 //! whenever a tail precondition fails (see `store`).
 
+pub(crate) mod alloc;
 mod freshness;
 mod location;
 pub mod queries;

@@ -50,6 +50,7 @@ use crate::bead::read_model::freshness::{
 };
 use crate::bead::wire::{BeadError, IssueWire};
 
+use super::alloc;
 use super::store::{
     bump_outcome_in_txn, drop_cache_file, fingerprint_manifest_config,
     format_frontier, id_suffix, lineage_root, load_snapshot,
@@ -720,8 +721,8 @@ fn commit_sweep_refresh(
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(|_| Fault::Cache)?;
-    let outcome =
-        write_refreshed_streams(connection, &refreshed).and_then(|()| {
+    let outcome = write_refreshed_streams(connection, &refreshed, tail_sigs)
+        .and_then(|()| {
             update_token_and_sweep(connection, token, now)
                 .map_err(|_| WriteFault::Other)
         });
@@ -993,6 +994,7 @@ fn commit_tail(
         stats.events, stats.streams
     );
     let start_generation = meta.generation;
+    let start_content = meta.content_generation;
     let now = now_ns();
     let refreshed = refreshed_streams(stored, tail_sigs, sweep);
     connection
@@ -1005,7 +1007,7 @@ fn commit_tail(
         &removed_bead_refs,
         merged,
     )
-    .and_then(|()| write_refreshed_streams(connection, &refreshed))
+    .and_then(|()| write_refreshed_streams(connection, &refreshed, tail_sigs))
     .and_then(|()| {
         update_token_and_sweep(connection, token, now)
             .map_err(|_| WriteFault::Other)
@@ -1015,17 +1017,28 @@ fn commit_tail(
         record_manifest_config_in_txn(connection, fingerprint)?;
         bump_outcome_in_txn(connection, "outcome_tail")?;
         record_refresh_in_txn(connection, "tail", &reason)?;
-        // Generation compare-and-verify last: a tail commit carries the
-        // content forward without opening a new generation, but a lost
-        // race still rolls back and serves the winner instead of pairing
-        // mixed generations.
-        let current = connection
+        // Generation compare-and-verify plus content-generation CAS last:
+        // generation alone cannot distinguish two successive tail
+        // publications, so a content generation advances on every tail
+        // commit. A lost race rolls back and serves the winner instead of
+        // pairing newer signatures with older rows.
+        let generation_held = connection
             .execute(
                 "UPDATE meta SET value = value WHERE key = 'generation' AND value = ?1",
                 rusqlite::params![start_generation.to_string()],
             )
             .map_err(|_| WriteFault::Other)?;
-        if current != 1 {
+        if generation_held != 1 {
+            return Err(WriteFault::CasLost);
+        }
+        let new_content = start_content.saturating_add(1).to_string();
+        let content_held = connection
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'content_generation' AND value = ?2",
+                rusqlite::params![new_content, start_content.to_string()],
+            )
+            .map_err(|_| WriteFault::Other)?;
+        if content_held != 1 {
             return Err(WriteFault::CasLost);
         }
         Ok(())
@@ -1115,22 +1128,32 @@ fn refreshed_streams(
     refreshed
 }
 
-/// Replace the streams table with the refreshed signatures.
+/// Upsert only changed stream-signature records.
+///
+/// The tail never removes or renames streams (those fall back to a full
+/// rebuild), so only streams in `tail_sigs` — changed appends plus new
+/// streams — need writes. Unchanged stream membership is proven by the
+/// preserved rows, not by rewriting them. Uses `INSERT ... ON CONFLICT
+/// DO UPDATE` with a change guard so untouched rows are not rewritten.
 fn write_refreshed_streams(
     connection: &Connection,
     refreshed: &BTreeMap<String, (u64, i64, u64, u64, String)>,
+    tail_sigs: &BTreeMap<String, NewStreamSig>,
 ) -> Result<(), WriteFault> {
-    connection
-        .execute("DELETE FROM streams", [])
-        .map_err(|_| WriteFault::Other)?;
+    if tail_sigs.is_empty() {
+        return Ok(());
+    }
     let mut stream_stmt = connection
         .prepare(
-            "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(stream_id) DO UPDATE SET size = excluded.size, mtime_ns = excluded.mtime_ns, inode = excluded.inode, byte_len = excluded.byte_len, content_hash = excluded.content_hash WHERE streams.size != excluded.size OR streams.mtime_ns != excluded.mtime_ns OR streams.inode != excluded.inode OR streams.byte_len != excluded.byte_len OR streams.content_hash != excluded.content_hash",
         )
         .map_err(|_| WriteFault::Other)?;
-    for (stream_id, (size, mtime_ns, inode, byte_len, content_hash)) in
-        refreshed
-    {
+    for stream_id in tail_sigs.keys() {
+        let Some((size, mtime_ns, inode, byte_len, content_hash)) =
+            refreshed.get(stream_id)
+        else {
+            continue;
+        };
         stream_stmt
             .execute(rusqlite::params![
                 stream_id,
@@ -1264,6 +1287,12 @@ fn write_tail_rows(
                     .map_err(|_| WriteFault::Other)?;
             }
         }
+    }
+    for (id, _, _) in &resumed.upserts {
+        alloc::note_upsert(connection, id).map_err(|_| WriteFault::Other)?;
+    }
+    for id in &resumed.deletes {
+        alloc::note_delete(connection, id).map_err(|_| WriteFault::Other)?;
     }
     apply_provenance_txn(connection, merged)?;
     // Provenance rows naming removed issues as targets go after the

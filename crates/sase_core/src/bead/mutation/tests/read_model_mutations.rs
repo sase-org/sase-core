@@ -619,3 +619,69 @@ fn validation_rejection_leaves_canonical_bytes_unchanged() {
         serde_json::to_value(&after).unwrap()
     );
 }
+
+#[test]
+fn cached_create_matches_replay_without_full_scan() {
+    let git_temp = tempdir().unwrap();
+    fs::create_dir_all(git_temp.path().join(".git")).unwrap();
+    init_store(git_temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = git_temp.path().join("beads");
+    let (epic_id, _) = seed_two_issue_store(&beads_dir);
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    assert!(ensure_cache_ready_at(&beads_dir, &cache_path).unwrap());
+
+    store_io_stats::reset();
+    let created = create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Cached child".to_string(),
+            issue_type: IssueTypeWire::Phase,
+            parent_id: Some(epic_id.clone()),
+            now: Some("2026-01-01T00:05:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    assert!(created.id.starts_with(&format!("{epic_id}.")));
+    assert_eq!(store_io_stats::full_replays(), 0);
+    assert!(store_io_stats::hydrated_rows() <= 5);
+    assert!(store_io_stats::stream_reads() <= 2);
+
+    let replay_issues = reduces_to_store(&beads_dir);
+    assert!(replay_issues.iter().any(|issue| issue.id == created.id));
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.matched);
+}
+
+#[test]
+fn allocation_metadata_matches_oracle_with_overlay() {
+    let git_temp = tempdir().unwrap();
+    fs::create_dir_all(git_temp.path().join(".git")).unwrap();
+    init_store(git_temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = git_temp.path().join("beads");
+    let (epic_id, _) = seed_two_issue_store(&beads_dir);
+    let cache_path = read_model_cache_path_for_store(&beads_dir).unwrap();
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+
+    let replay_issues = reduces_to_store(&beads_dir);
+    let view = MutationView::load(&beads_dir, &replay_issues).unwrap();
+    assert!(view.is_cached());
+    let replay_next = {
+        let mut max: u64 = 0;
+        for issue in &replay_issues {
+            if let Some(suffix) = issue.id.strip_prefix(&format!("{epic_id}."))
+            {
+                if !suffix.contains('.') {
+                    if let Ok(counter) = suffix.parse::<u64>() {
+                        max = max.max(counter);
+                    }
+                }
+            }
+        }
+        format!("{epic_id}.{}", max + 1)
+    };
+    assert_eq!(view.next_child_id(&epic_id).unwrap(), replay_next);
+}

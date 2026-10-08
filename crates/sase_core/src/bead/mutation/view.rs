@@ -17,6 +17,7 @@
 //! mutation algorithms: callers branch on the backing only for row
 //! retrieval, never for operation semantics.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -25,29 +26,57 @@ use rusqlite::{Connection, OpenFlags};
 use crate::artifact_link::BeadLinkDirectionWire;
 use crate::bead::events::{BeadEventOperationWire, BeadEventPayloadWire};
 use crate::bead::jsonl::{event_streams_dir, read_event_stream_file};
+use crate::bead::read_model::alloc;
 use crate::bead::read_model::{
     ensure_cache_ready_for_mutation_at, read_model_cache_path_for_store,
 };
 use crate::bead::wire::{BeadError, IssueWire};
 
 /// How rows are retrieved: indexed cache rows or a replay slice.
+#[allow(dead_code)]
 pub(crate) enum MutationViewBacking {
-    Cached { cache_path: PathBuf },
+    Cached {
+        cache_path: PathBuf,
+        witness: CacheWitness,
+    },
     Replay,
+}
+
+/// Baseline witness held while retrieving rows inside the flock.
+///
+/// Captured at admission after the mandatory full freshness sweep: the
+/// SQLite generation, merge frontier, and cache token that the later
+/// durable append validates against. A lost race rolls back instead of
+/// pairing newer signatures with older rows.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CacheWitness {
+    pub(crate) generation: String,
+    pub(crate) frontier: String,
+    pub(crate) token: String,
 }
 
 /// One lookup view for a single locked mutation.
 ///
 /// `replay_issues` backs resolution when the cache is unusable; the
 /// cached path never hydrates it. The overlay maps an ID to
-/// `Some(changed/created row)` or `None` (pending removal).
+/// `Some(changed/created row)` or `None` (pending removal). Hydrated
+/// cached rows are memoized so a batch reads each affected row once and
+/// always sees its staged final state through the overlay.
+///
+/// The lookup surface (children/descendants/ancestors/reverse-dependents,
+/// stream routing, receipt checks) is consumed incrementally as operation
+/// ports land; until the full mutation surface is ported, not every
+/// method has a production caller yet.
+#[allow(dead_code)]
 pub(crate) struct MutationView<'a> {
     beads_dir: PathBuf,
     backing: MutationViewBacking,
     replay_issues: Option<&'a [IssueWire]>,
     overlay: BTreeMap<String, Option<IssueWire>>,
+    memoized: RefCell<BTreeMap<String, IssueWire>>,
 }
 
+#[allow(dead_code)]
 impl<'a> MutationView<'a> {
     /// Open the warmest usable view inside the mutation flock.
     ///
@@ -60,27 +89,69 @@ impl<'a> MutationView<'a> {
         beads_dir: &Path,
         replay_issues: &'a [IssueWire],
     ) -> Result<Self, BeadError> {
-        let cache_path = read_model_cache_path_for_store(beads_dir);
-        if let Some(cache_path) = cache_path {
-            match ensure_cache_ready_for_mutation_at(beads_dir, &cache_path) {
-                Ok(true) => {
-                    return Ok(Self {
-                        beads_dir: beads_dir.to_path_buf(),
-                        backing: MutationViewBacking::Cached { cache_path },
-                        replay_issues: None,
-                        overlay: BTreeMap::new(),
-                    });
-                }
-                Ok(false) => {}
-                Err(error) => return Err(error),
-            }
+        if let Some(view) = Self::load_cached(beads_dir)? {
+            return Ok(view);
         }
-        Ok(Self {
+        Ok(Self::with_replay(beads_dir, replay_issues))
+    }
+
+    /// Admit the cached path without loading any replay.
+    ///
+    /// Runs inside the unchanged `beads.db` flock after the mandatory
+    /// full freshness sweep. Returns `Ok(None)` when the caller must load
+    /// the replay backing instead (no cache location, legacy store,
+    /// unusable cache). Never replays just to supply an otherwise unused
+    /// constructor argument: the full replay backing is instantiated only
+    /// on this `None` or when a proven repair path requires it.
+    pub(crate) fn load_cached(
+        beads_dir: &Path,
+    ) -> Result<Option<Self>, BeadError> {
+        let Some(cache_path) = read_model_cache_path_for_store(beads_dir)
+        else {
+            return Ok(None);
+        };
+        match ensure_cache_ready_for_mutation_at(beads_dir, &cache_path) {
+            Ok(true) => {
+                #[cfg(test)]
+                crate::bead::mutation::store::store_io_stats::record_load();
+                let witness =
+                    read_cache_witness(&cache_path).unwrap_or_default();
+                Ok(Some(Self {
+                    beads_dir: beads_dir.to_path_buf(),
+                    backing: MutationViewBacking::Cached {
+                        cache_path,
+                        witness,
+                    },
+                    replay_issues: None,
+                    overlay: BTreeMap::new(),
+                    memoized: RefCell::new(BTreeMap::new()),
+                }))
+            }
+            Ok(false) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Replay backing for uncached stores and proven repair paths.
+    pub(crate) fn with_replay(
+        beads_dir: &Path,
+        replay_issues: &'a [IssueWire],
+    ) -> Self {
+        Self {
             beads_dir: beads_dir.to_path_buf(),
             backing: MutationViewBacking::Replay,
             replay_issues: Some(replay_issues),
             overlay: BTreeMap::new(),
-        })
+            memoized: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Baseline witness for pre-write validation, if cached.
+    pub(crate) fn witness(&self) -> Option<&CacheWitness> {
+        match &self.backing {
+            MutationViewBacking::Cached { witness, .. } => Some(witness),
+            MutationViewBacking::Replay => None,
+        }
     }
 
     /// True when indexed rows serve this mutation (no full replay).
@@ -90,17 +161,21 @@ impl<'a> MutationView<'a> {
 
     /// Record a changed or created row in the overlay.
     pub(crate) fn stage_issue(&mut self, issue: IssueWire) {
+        self.memoized
+            .borrow_mut()
+            .insert(issue.id.clone(), issue.clone());
         self.overlay.insert(issue.id.clone(), Some(issue));
     }
 
     /// Record a pending removal tombstone in the overlay.
     pub(crate) fn stage_removal(&mut self, issue_id: &str) {
+        self.memoized.borrow_mut().remove(issue_id);
         self.overlay.insert(issue_id.to_string(), None);
     }
 
     fn open_cached(&self) -> Result<Connection, BeadError> {
         match &self.backing {
-            MutationViewBacking::Cached { cache_path } => {
+            MutationViewBacking::Cached { cache_path, .. } => {
                 Connection::open_with_flags(
                     cache_path,
                     OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -188,12 +263,20 @@ impl<'a> MutationView<'a> {
     }
 
     /// Load one row by exact ID, overlay-aware.
+    ///
+    /// Overlay entries win so a batch reads its staged final state.
+    /// Memoized rows avoid re-hydrating the same affected row twice.
+    /// SQLite and row-decode faults stay `io` errors and are never
+    /// collapsed into semantic `not_found`.
     pub(crate) fn get(&self, issue_id: &str) -> Result<IssueWire, BeadError> {
         if let Some(entry) = self.overlay.get(issue_id) {
             return entry.clone().ok_or_else(|| BeadError {
                 kind: "not_found".to_string(),
                 message: format!("Issue not found: {issue_id}"),
             });
+        }
+        if let Some(cached) = self.memoized.borrow().get(issue_id) {
+            return Ok(cached.clone());
         }
         match &self.backing {
             MutationViewBacking::Cached { .. } => {
@@ -212,11 +295,20 @@ impl<'a> MutationView<'a> {
                         let text: String = row.get(0).map_err(|error| {
                             BeadError::io(error.to_string())
                         })?;
-                        serde_json::from_str(&text).map_err(|error| {
-                            BeadError::io(format!(
-                                "cached issue row is not valid: {error}"
-                            ))
-                        })
+                        let issue: IssueWire = serde_json::from_str(&text)
+                            .map_err(|error| {
+                                BeadError::io(format!(
+                                    "cached issue row is not valid: {error}"
+                                ))
+                            })?;
+                        #[cfg(test)]
+                        crate::bead::mutation::store::store_io_stats::record_hydrated_rows(
+                            1,
+                        );
+                        self.memoized
+                            .borrow_mut()
+                            .insert(issue_id.to_string(), issue.clone());
+                        Ok(issue)
                     }
                     None => Err(BeadError {
                         kind: "not_found".to_string(),
@@ -515,116 +607,214 @@ impl<'a> MutationView<'a> {
     }
 
     /// Next top-level counter for `prefix`, honoring the config counter,
-    /// removed IDs, and the overlay — without hydrating every row.
+    /// removed IDs, and the overlay — from disposable allocation metadata.
+    ///
+    /// Matches `store.rs::next_top_level_counter` exactly: the maximum of
+    /// `config.next_counter` and the next valid base36 top-level ID for
+    /// that prefix. Malformed IDs, nested IDs (containing `.`), multiple
+    /// prefixes, and empty stores contribute nothing. Staged creates raise
+    /// the maximum; removing the maximum recomputes from surviving rows
+    /// with a prefix-scoped query so a freed counter is reused exactly as
+    /// the replay oracle would.
     pub(crate) fn next_top_level_counter(
         &self,
         issue_prefix: &str,
         config_counter: u64,
     ) -> Result<u64, BeadError> {
-        let expected = format!("{issue_prefix}-");
-        let mut max_seen: u64 = 0;
-        let mut ids: Vec<String> = Vec::new();
         match &self.backing {
             MutationViewBacking::Cached { .. } => {
                 let connection = self.open_cached()?;
-                let mut statement = connection
-                    .prepare("SELECT id FROM issues")
-                    .map_err(|error| BeadError::io(error.to_string()))?;
-                let mapped = statement
-                    .query_map([], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
-                for row in mapped {
-                    ids.push(
-                        row.map_err(|error| BeadError::io(error.to_string()))?,
-                    );
+                let mut stored =
+                    alloc::stored_top_max(&connection, issue_prefix)?
+                        .unwrap_or(0);
+                let mut overlay_max: u64 = 0;
+                let mut removes_max = false;
+                for (id, entry) in &self.overlay {
+                    if entry.is_some() {
+                        if let Some((prefix, counter)) =
+                            alloc::top_prefix_and_counter(id)
+                        {
+                            if prefix == issue_prefix {
+                                overlay_max = overlay_max.max(counter);
+                            }
+                        }
+                    } else if let Some((prefix, counter)) =
+                        alloc::top_prefix_and_counter(id)
+                    {
+                        if prefix == issue_prefix && counter == stored {
+                            removes_max = true;
+                        }
+                    }
                 }
+                if removes_max {
+                    stored =
+                        self.recompute_top_max(&connection, issue_prefix)?;
+                }
+                let max_seen = stored.max(overlay_max);
+                Ok(config_counter.max(max_seen.saturating_add(1)))
             }
             MutationViewBacking::Replay => {
-                ids.extend(
-                    self.replay_issues
-                        .unwrap_or(&[])
-                        .iter()
-                        .map(|issue| issue.id.clone()),
-                );
+                let mut max_seen: u64 = 0;
+                let mut ids: Vec<String> = self
+                    .replay_issues
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|issue| issue.id.clone())
+                    .collect();
+                for (id, entry) in &self.overlay {
+                    if entry.is_some() {
+                        ids.push(id.clone());
+                    } else {
+                        ids.retain(|candidate| candidate != id);
+                    }
+                }
+                let expected = format!("{issue_prefix}-");
+                for id in ids {
+                    let Some(suffix) = id.strip_prefix(&expected) else {
+                        continue;
+                    };
+                    if suffix.contains('.') {
+                        continue;
+                    }
+                    if let Ok(counter) = u64::from_str_radix(suffix, 36) {
+                        max_seen = max_seen.max(counter);
+                    }
+                }
+                Ok(config_counter.max(max_seen.saturating_add(1)))
             }
         }
-        for (id, entry) in &self.overlay {
-            if entry.is_some() {
-                ids.push(id.clone());
-            } else {
-                ids.retain(|candidate| candidate != id);
-            }
-        }
-        for id in ids {
-            let Some(suffix) = id.strip_prefix(&expected) else {
+    }
+
+    fn recompute_top_max(
+        &self,
+        connection: &Connection,
+        issue_prefix: &str,
+    ) -> Result<u64, BeadError> {
+        let like = format!("{issue_prefix}-%");
+        let mut stmt = connection
+            .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let mapped = stmt
+            .query_map([like], |row| row.get::<_, String>(0))
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let mut max_seen: u64 = 0;
+        for row in mapped {
+            let id: String =
+                row.map_err(|error| BeadError::io(error.to_string()))?;
+            if self.overlay.get(&id).is_some_and(|entry| entry.is_none()) {
                 continue;
-            };
-            if suffix.contains('.') {
-                continue;
             }
-            if let Ok(counter) = u64::from_str_radix(suffix, 36) {
-                max_seen = max_seen.max(counter);
+            if let Some((prefix, counter)) = alloc::top_prefix_and_counter(&id)
+            {
+                if prefix == issue_prefix {
+                    max_seen = max_seen.max(counter);
+                }
             }
         }
-        Ok(config_counter.max(max_seen.saturating_add(1)))
+        Ok(max_seen)
     }
 
     /// Next direct child ID under `parent_id`, overlay-consistent.
+    ///
+    /// Matches `store.rs::next_child_id` exactly: IDs with the textual
+    /// `<parent>.` prefix and a direct decimal suffix, regardless of a
+    /// row's `parent_id` field. The prototype's `WHERE parent = ?1` is
+    /// therefore insufficient for mismatched parent fields. Staged
+    /// creates/removes and removal of the maximum suffix behave exactly
+    /// as the replay oracle: a freed maximum is reused.
     pub(crate) fn next_child_id(
         &self,
         parent_id: &str,
     ) -> Result<String, BeadError> {
-        let prefix = format!("{parent_id}.");
-        let mut local_max: u64 = 0;
-        let mut ids: Vec<String> = Vec::new();
         match &self.backing {
             MutationViewBacking::Cached { .. } => {
                 let connection = self.open_cached()?;
-                let mut statement = connection
-                    .prepare("SELECT id FROM issues WHERE parent = ?1")
-                    .map_err(|error| BeadError::io(error.to_string()))?;
-                let mapped = statement
-                    .query_map([parent_id], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
-                for row in mapped {
-                    ids.push(
-                        row.map_err(|error| BeadError::io(error.to_string()))?,
-                    );
+                let mut stored =
+                    alloc::stored_child_max(&connection, parent_id)?
+                        .unwrap_or(0);
+                let mut overlay_max: u64 = 0;
+                let mut removes_max = false;
+                for (id, entry) in &self.overlay {
+                    if entry.is_some() {
+                        if let Some((parent, counter)) =
+                            alloc::child_parent_and_suffix(id)
+                        {
+                            if parent == parent_id {
+                                overlay_max = overlay_max.max(counter);
+                            }
+                        }
+                    } else if let Some((parent, counter)) =
+                        alloc::child_parent_and_suffix(id)
+                    {
+                        if parent == parent_id && counter == stored {
+                            removes_max = true;
+                        }
+                    }
                 }
+                if removes_max {
+                    stored =
+                        self.recompute_child_max(&connection, parent_id)?;
+                }
+                let local_max = stored.max(overlay_max);
+                Ok(format!("{parent_id}.{}", local_max + 1))
             }
             MutationViewBacking::Replay => {
-                ids.extend(
-                    self.replay_issues
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter(|issue| {
-                            issue.parent_id.as_deref() == Some(parent_id)
-                        })
-                        .map(|issue| issue.id.clone()),
-                );
+                let prefix = format!("{parent_id}.");
+                let mut local_max: u64 = 0;
+                let mut ids: Vec<String> = Vec::new();
+                for issue in self.replay_issues.unwrap_or(&[]) {
+                    ids.push(issue.id.clone());
+                }
+                for (id, entry) in &self.overlay {
+                    if entry.is_some() {
+                        ids.push(id.clone());
+                    } else {
+                        ids.retain(|candidate| candidate != id);
+                    }
+                }
+                for id in ids {
+                    let Some(suffix) = id.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    if suffix.contains('.') {
+                        continue;
+                    }
+                    if let Ok(counter) = suffix.parse::<u64>() {
+                        local_max = local_max.max(counter);
+                    }
+                }
+                Ok(format!("{parent_id}.{}", local_max + 1))
             }
         }
-        for (id, entry) in &self.overlay {
-            if entry.as_ref().is_some_and(|issue| {
-                issue.parent_id.as_deref() == Some(parent_id)
-            }) {
-                ids.push(id.clone());
-            } else {
-                ids.retain(|candidate| candidate != id);
-            }
-        }
-        for id in ids {
-            let Some(suffix) = id.strip_prefix(&prefix) else {
+    }
+
+    fn recompute_child_max(
+        &self,
+        connection: &Connection,
+        parent_id: &str,
+    ) -> Result<u64, BeadError> {
+        let like = format!("{parent_id}.%");
+        let mut stmt = connection
+            .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let mapped = stmt
+            .query_map([like], |row| row.get::<_, String>(0))
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let mut local_max: u64 = 0;
+        for row in mapped {
+            let id: String =
+                row.map_err(|error| BeadError::io(error.to_string()))?;
+            if self.overlay.get(&id).is_some_and(|entry| entry.is_none()) {
                 continue;
-            };
-            if suffix.contains('.') {
-                continue;
             }
-            if let Ok(counter) = suffix.parse::<u64>() {
-                local_max = local_max.max(counter);
+            if let Some((parent, counter)) = alloc::child_parent_and_suffix(&id)
+            {
+                if parent == parent_id {
+                    local_max = local_max.max(counter);
+                }
             }
         }
-        Ok(format!("{parent_id}.{}", local_max + 1))
+        Ok(local_max)
     }
 
     /// Physical event-stream owner, preserving the `stream_id_for_issue`
@@ -673,6 +863,8 @@ impl<'a> MutationView<'a> {
             return Ok(false);
         }
         let (stream, _signature) = read_event_stream_file(&path)?;
+        #[cfg(test)]
+        crate::bead::mutation::store::store_io_stats::record_stream_reads(1);
         Ok(stream.events.iter().any(|event| match &event.payload {
             BeadEventPayloadWire::LinkAdded {
                 operation_id: Some(existing),
@@ -705,4 +897,46 @@ impl<'a> MutationView<'a> {
             _ => false,
         }))
     }
+}
+
+/// Read the baseline witness for a freshly admitted cache.
+///
+/// Best-effort: any fault yields the default witness and the later
+/// pre-write validation treats it as stale (repair path) rather than
+/// failing the mutation. Never turns a cache fault into a semantic
+/// error here; admission already proved freshness.
+fn read_cache_witness(cache_path: &Path) -> Result<CacheWitness, BeadError> {
+    let connection = Connection::open_with_flags(
+        cache_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| BeadError::io(error.to_string()))?;
+    let mut generation = String::new();
+    let mut frontier = String::new();
+    let mut token = String::new();
+    for (key, slot) in [
+        ("generation", &mut generation),
+        ("frontier", &mut frontier),
+        ("token", &mut token),
+    ] {
+        let mut stmt = connection
+            .prepare("SELECT value FROM meta WHERE key = ?1")
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        let mut rows = stmt
+            .query([key])
+            .map_err(|error| BeadError::io(error.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|error| BeadError::io(error.to_string()))?
+        {
+            *slot = row
+                .get::<_, String>(0)
+                .map_err(|error| BeadError::io(error.to_string()))?;
+        }
+    }
+    Ok(CacheWitness {
+        generation,
+        frontier,
+        token,
+    })
 }
