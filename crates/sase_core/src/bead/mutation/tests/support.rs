@@ -22,6 +22,10 @@ use crate::bead::config::save_config;
 use crate::bead::events::reduce_event_streams;
 use crate::bead::jsonl::export_issues_to_jsonl;
 use crate::bead::jsonl::import_issues_from_jsonl;
+use crate::bead::mutation::store::store_io_stats;
+use crate::bead::read_model::ensure_cache_ready_at;
+use crate::bead::read_model::read_model_cache_path_for_store;
+use crate::bead::read_model::read_model_verify_cache_at;
 pub(super) fn note_text(issue: &IssueWire) -> String {
     notes_text(&issue.notes)
 }
@@ -616,4 +620,76 @@ pub(super) fn batch_remove_fixture() -> (tempfile::TempDir, PathBuf) {
     )
     .unwrap();
     (temp, beads_dir)
+}
+
+/// Which backing a dual-mode test store uses.
+///
+/// `Cached` creates the `.git` dir that gives the store a read-model cache
+/// path, so mutations run the cached path with its replay fallback.
+/// `Replay` leaves the store without a git dir, so every mutation and read
+/// replays the event streams. Tests branch on this enum through the helpers
+/// below instead of `macro_rules!`, which the workspace forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoreMode {
+    Cached,
+    Replay,
+}
+
+/// One store for a dual-mode run: `Cached` is git-backed (the read model is
+/// used), `Replay` is plain (full replay). Both seed through `init_store`
+/// with the same prefix and owner, so identical scenarios mint identical
+/// IDs on both backings.
+pub(super) fn mode_store(mode: StoreMode) -> (tempfile::TempDir, PathBuf) {
+    let temp = tempdir().unwrap();
+    if mode == StoreMode::Cached {
+        fs::create_dir_all(temp.path().join(".git")).unwrap();
+    }
+    init_store(temp.path(), "beads", "sase", "owner@example.com").unwrap();
+    let beads_dir = temp.path().join("beads");
+    (temp, beads_dir)
+}
+
+/// Assert the store's read model equals a full replay.
+///
+/// Replay-fallback families (everything not yet ported to the cached path)
+/// leave the cache stale behind their event append; the next read tails or
+/// rebuilds, so ensure freshness through the normal read path first and
+/// then compare against the forced replay. On a replay store there is no
+/// cache to compare, so this is a no-op there.
+pub(super) fn assert_cache_equals_replay(beads_dir: &Path, label: &str) {
+    let Some(cache_path) = read_model_cache_path_for_store(beads_dir) else {
+        return;
+    };
+    assert!(
+        ensure_cache_ready_at(beads_dir, &cache_path).unwrap(),
+        "{label}: cached read repairs after mutation"
+    );
+    let report = read_model_verify_cache_at(beads_dir, &cache_path);
+    assert!(report.compared, "{label}: {}", report.reason);
+    assert!(
+        report.matched,
+        "{label}: differing {:?}: {}",
+        report.differing_ids, report.reason
+    );
+}
+
+/// Assert the store actually has a read-model cache path (the cached half
+/// of a dual-mode run), so a zero-replay assertion cannot pass vacuously on
+/// a replay store.
+pub(super) fn assert_cached_path_used(beads_dir: &Path, label: &str) {
+    assert!(
+        read_model_cache_path_for_store(beads_dir).is_some(),
+        "{label}: expected a git-backed cached store"
+    );
+}
+
+/// Assert no full-store replay ran since the last `store_io_stats::reset`.
+/// Only the already-cached create/note/update paths may assert this;
+/// replay-fallback families still replay by design until ported.
+pub(super) fn assert_no_full_replay(label: &str) {
+    assert_eq!(
+        store_io_stats::full_replays(),
+        0,
+        "{label}: cached path must not replay"
+    );
 }

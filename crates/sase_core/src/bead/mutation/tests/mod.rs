@@ -3,6 +3,7 @@ mod close;
 mod create;
 mod delegation_remove;
 mod dependencies;
+mod dual_mode;
 mod links;
 mod notes_update;
 mod publish_direct;
