@@ -284,12 +284,12 @@ const BOOL_TRUE_FALSE: &[DirectiveSuggestedValue] = &[
 const FOR_EPIC_SUGGESTIONS: &[DirectiveSuggestedValue] = &[
     DirectiveSuggestedValue {
         value: "true",
-        documentation: "Also wait for any epic these agents launch",
+        documentation: "Also wait for any epic these agents launch (default)",
     },
     DirectiveSuggestedValue {
         value: "false",
         documentation:
-            "Release when these agents finish, even if they launched an epic (default)",
+            "Release when these agents finish, even if they launched an epic",
     },
 ];
 

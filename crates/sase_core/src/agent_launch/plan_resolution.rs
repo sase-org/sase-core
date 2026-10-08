@@ -91,7 +91,7 @@ pub(crate) fn resolve_typed_waits(
                     }
                 }
                 RawWaitTargetKind::Agent(target) => {
-                    if for_epic == Some(true)
+                    if for_epic != Some(false)
                         && !target.ends_with("--plan")
                         && !armed.contains(&target)
                     {
