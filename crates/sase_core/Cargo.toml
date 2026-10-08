@@ -18,6 +18,8 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 aho-corasick = { version = "1" }
+unicode-normalization = { workspace = true }
+unicode-casefold = { workspace = true }
 chrono = { workspace = true }
 fs2 = { workspace = true }
 rand = { workspace = true }

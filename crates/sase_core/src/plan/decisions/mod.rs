@@ -2,12 +2,13 @@
 //!
 //! This module owns the additive validated-plan wire records plus the
 //! frontmatter and body validation behind them. Frozen definitions, the
-//! digest, and strict resolution live in `resolver`; quote matching, the
-//! Decision Sheet, and the implementer block arrive in later phases and
-//! build on these records.
+//! digest, and strict resolution live in `resolver`; human quote
+//! matching lives in `quote`. The Decision Sheet and the implementer
+//! block arrive in later phases and build on these records.
 
 pub mod callout;
 pub mod grammar;
+pub mod quote;
 pub mod resolver;
 pub mod wire;
 
@@ -20,6 +21,10 @@ pub use callout::{
 pub use grammar::{
     validate_decision_body, validate_decision_frontmatter, DecisionBodyInfo,
     DecisionBodyOutcome, DecisionFrontmatterOutcome,
+};
+pub use quote::{
+    plan_decision_quote_match, PlanDecisionQuoteClosestWire,
+    PlanDecisionQuoteMatchWire, PlanDecisionQuoteTextWire, QUOTE_MIN_WORDS,
 };
 pub use resolver::{
     plan_decisions_digest, plan_decisions_payload, plan_decisions_resolve,

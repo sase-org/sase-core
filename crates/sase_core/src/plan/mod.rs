@@ -27,12 +27,14 @@ pub use artifact_link::{
     PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
 };
 pub use decisions::{
-    plan_decisions_digest, plan_decisions_payload, plan_decisions_resolve,
-    PlanDecisionCalloutWire, PlanDecisionChoiceWire,
+    plan_decision_quote_match, plan_decisions_digest, plan_decisions_payload,
+    plan_decisions_resolve, PlanDecisionCalloutWire, PlanDecisionChoiceWire,
     PlanDecisionDefinitionWire, PlanDecisionHostFactWire,
     PlanDecisionMemoryRecordWire, PlanDecisionMemoryWire,
-    PlanDecisionResolveErrorWire, PlanDecisionResolveRowWire,
-    PlanDecisionResolveWire, PlanDecisionWire, DECISION_PROVENANCES,
+    PlanDecisionQuoteClosestWire, PlanDecisionQuoteMatchWire,
+    PlanDecisionQuoteTextWire, PlanDecisionResolveErrorWire,
+    PlanDecisionResolveRowWire, PlanDecisionResolveWire, PlanDecisionWire,
+    DECISION_PROVENANCES, QUOTE_MIN_WORDS,
 };
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use refs::{
