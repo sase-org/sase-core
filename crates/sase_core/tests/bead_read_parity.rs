@@ -483,7 +483,7 @@ fn event_store_supports_read_queries_without_legacy_projection() {
         ids(bead_get_epic_children(&beads_dir, "beads-1").unwrap()),
         vec!["beads-1.1"]
     );
-    assert!(bead_doctor(&beads_dir)
+    assert!(!bead_doctor(&beads_dir)
         .unwrap()
         .contains(&"WARNING: issues.jsonl missing".to_string()));
 }
