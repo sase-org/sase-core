@@ -530,7 +530,8 @@ pub(crate) fn sorted_children<'a>(
         .iter()
         .filter(|issue| issue.parent_id.as_deref() == Some(parent_id))
         .collect();
-    children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    children
+        .sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     children
 }
 

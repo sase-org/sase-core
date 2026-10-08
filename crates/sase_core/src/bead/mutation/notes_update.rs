@@ -2,21 +2,30 @@ use super::close_remove::reject_unclosed_descendants_in_batch;
 use super::close_remove::reopen_closed_ancestors;
 use super::mutation_wire::BeadMutationOutcomeWire;
 use super::mutation_wire::BeadUpdateFieldsWire;
+use super::shared::commit_staged_write;
+use super::shared::load_mutation_stream;
+use super::shared::mint_stream_event;
 use super::store::normalize_model;
 use super::store::now_utc;
 use super::store::outcome;
 use super::store::with_bead_mutation_lock;
 use super::store::MutableStore;
+use super::view::MutationView;
+use crate::bead::config::default_config;
+use crate::bead::config::load_config;
 use crate::bead::events::archive_close_metadata;
 use crate::bead::events::clear_snooze_record;
 use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
+use crate::bead::events::BeadEventStreamWire;
 use crate::bead::events::BeadIssueUpdateEventFieldsWire;
 use crate::bead::wire::validate_unique_external_refs;
 use crate::bead::wire::BeadError;
 use crate::bead::wire::BeadReopenCauseWire;
 use crate::bead::wire::IssueWire;
 use crate::bead::wire::StatusWire;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -58,15 +67,10 @@ pub fn update_issues(
         ));
     }
     with_bead_mutation_lock(beads_dir, "update", || {
-        if let Some(cache_path) =
-            super::indexed::admit_indexed_mutation(beads_dir)
-        {
-            if let Some(outcome) = super::indexed::try_update_issues(
-                beads_dir,
-                &cache_path,
-                issue_ids,
-                fields.clone(),
-            )? {
+        if let Some(view) = MutationView::load_cached(beads_dir)? {
+            if let Some(outcome) =
+                try_cached_update(beads_dir, view, issue_ids, fields.clone())?
+            {
                 return Ok(outcome);
             }
         }
@@ -195,12 +199,10 @@ pub fn append_issue_note(
     }
 
     with_bead_mutation_lock(beads_dir, "note", || {
-        if let Some(cache_path) =
-            super::indexed::admit_indexed_mutation(beads_dir)
-        {
-            if let Some(outcome) = super::indexed::try_append_note(
+        if let Some(view) = MutationView::load_cached(beads_dir)? {
+            if let Some(outcome) = try_cached_append(
                 beads_dir,
-                &cache_path,
+                view,
                 issue_id,
                 entry,
                 author.clone(),
@@ -291,6 +293,20 @@ pub fn edit_issue_note(
     }
 
     with_bead_mutation_lock(beads_dir, "note_edit", || {
+        if let Some(view) = MutationView::load_cached(beads_dir)? {
+            if let Some(outcome) = try_cached_edit(
+                beads_dir,
+                view,
+                issue_id,
+                note_id,
+                text,
+                author.clone(),
+                now.clone(),
+                attachments.clone(),
+            )? {
+                return Ok(outcome);
+            }
+        }
         let mut store = MutableStore::load(beads_dir)?;
         let issue_id = store.resolve_issue_id(issue_id)?;
         let index = store.issue_index(&issue_id)?;
@@ -373,6 +389,18 @@ pub fn remove_issue_note(
     }
 
     with_bead_mutation_lock(beads_dir, "note_remove", || {
+        if let Some(view) = MutationView::load_cached(beads_dir)? {
+            if let Some(outcome) = try_cached_remove(
+                beads_dir,
+                view,
+                issue_id,
+                note_id,
+                author.clone(),
+                now.clone(),
+            )? {
+                return Ok(outcome);
+            }
+        }
         let mut store = MutableStore::load(beads_dir)?;
         let issue_id = store.resolve_issue_id(issue_id)?;
         let index = store.issue_index(&issue_id)?;
@@ -421,6 +449,527 @@ fn remove_note_from_store(
     let issue = store.issues[issue_index].clone();
     issue.validate()?;
     Ok(issue)
+}
+
+/// Cached `update_issues` over the mutation view: affected rows plus
+/// affected streams only, with no external-ref or reopen fallback.
+///
+/// Returns `Ok(None)` when the replay path must run instead (a missing
+/// physical stream file or manifest, so replay owns the corruption and
+/// legacy behavior). Store and decode faults stay errors and never become
+/// not-found; only pre-append cache faults fall back.
+fn try_cached_update(
+    beads_dir: &Path,
+    mut view: MutationView<'_>,
+    issue_ids: &[String],
+    fields: BeadUpdateFieldsWire,
+) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
+    let mut seen = HashSet::new();
+    let mut targets: Vec<String> = Vec::new();
+    let mut requested_ids: Vec<String> = Vec::with_capacity(issue_ids.len());
+    for issue_id in issue_ids {
+        let resolved = view.resolve(issue_id)?;
+        requested_ids.push(resolved.clone());
+        if seen.insert(resolved.clone()) {
+            targets.push(resolved);
+        }
+    }
+    let mut currents = Vec::with_capacity(targets.len());
+    for target in &targets {
+        currents.push(view.get(target)?);
+    }
+    let old_issues = currents.clone();
+
+    if fields.status.as_deref() == Some("closed") {
+        reject_unclosed_via_view(&view, &currents, &targets)?;
+    }
+
+    let event_fields = event_fields_from_update_fields(&fields)?;
+    let now = fields.now.clone().unwrap_or_else(now_utc);
+
+    let mut planned: Vec<(IssueWire, bool)> = Vec::new();
+    let mut unchanged_ids = Vec::new();
+    let mut resulting_issues = Vec::with_capacity(targets.len());
+    for (target_id, current) in targets.iter().zip(currents.iter()) {
+        let was_closed = current.status == StatusWire::Closed;
+        let mut issue = current.clone();
+        apply_update_fields(&mut issue, fields.clone(), &now)?;
+        if issue == *current {
+            unchanged_ids.push(target_id.clone());
+            resulting_issues.push(current.clone());
+            continue;
+        }
+        issue.updated_at = now.clone();
+        issue.validate()?;
+        resulting_issues.push(issue.clone());
+        planned.push((issue, was_closed));
+    }
+
+    if planned.is_empty() {
+        let mut result = outcome("update", false, Vec::new());
+        result.requested_issue_ids = requested_ids;
+        result.unchanged_ids = unchanged_ids;
+        result.issues = resulting_issues;
+        result.old_issues = old_issues;
+        return Ok(Some(result));
+    }
+
+    // External-ref uniqueness against the final overlay, including batch
+    // exchanges: check before staging so a staged self cannot hide another
+    // owner. A ref whose backing owner is itself vacating in this batch is
+    // allowed; any other occupied ref conflicts, exactly as the replay
+    // oracle's `validate_unique_external_refs` does.
+    {
+        let mut new_ref_owner: BTreeMap<String, &str> = BTreeMap::new();
+        for (issue, _) in &planned {
+            let external_ref = issue.external_ref.trim().to_string();
+            if external_ref.is_empty() {
+                continue;
+            }
+            if let Some(first) =
+                new_ref_owner.insert(external_ref.clone(), issue.id.as_str())
+            {
+                return Err(BeadError::conflict(format!(
+                    "external_ref {external_ref} already belongs to {first}; cannot also assign it to {}",
+                    issue.id
+                )));
+            }
+        }
+        // Map every target's old ref for the vacate check below.
+        let mut old_refs: BTreeMap<String, String> = BTreeMap::new();
+        for (target_id, current) in targets.iter().zip(currents.iter()) {
+            old_refs.insert(
+                target_id.clone(),
+                current.external_ref.trim().to_string(),
+            );
+        }
+        for (issue, _) in &planned {
+            let external_ref = issue.external_ref.trim().to_string();
+            if external_ref.is_empty() {
+                continue;
+            }
+            let old = old_refs.get(&issue.id).cloned().unwrap_or_default();
+            if external_ref == old {
+                continue;
+            }
+            if let Some(owner) = view.external_ref_owner(&external_ref)? {
+                if owner.id == issue.id {
+                    continue;
+                }
+                let vacating = planned.iter().any(|(other, _)| {
+                    other.id == owner.id
+                        && other.external_ref.trim() != external_ref
+                });
+                if !vacating {
+                    return Err(BeadError::conflict(format!(
+                        "external_ref {external_ref} already belongs to {}; cannot also assign it to {}",
+                        owner.id, issue.id
+                    )));
+                }
+            }
+        }
+    }
+    for (issue, _) in &planned {
+        view.stage_issue(issue.clone());
+    }
+
+    let fallback = default_config("beads", "");
+    let config = load_config(beads_dir, fallback)?;
+    let mut streams: Vec<BeadEventStreamWire> = Vec::new();
+    let mut base_lens: Vec<usize> = Vec::new();
+    let mut stream_index: BTreeMap<String, usize> = BTreeMap::new();
+    let mut changed_ids = Vec::with_capacity(planned.len());
+    let mut reopened_ancestors: Vec<IssueWire> = Vec::new();
+
+    for (issue, was_closed) in &planned {
+        let stream_id = view.stream_id_for_issue(&issue.id)?;
+        let index = match stream_index.get(&stream_id) {
+            Some(index) => *index,
+            None => {
+                let Some(loaded) = load_mutation_stream(beads_dir, &stream_id)?
+                else {
+                    return Ok(None);
+                };
+                base_lens.push(loaded.events.len());
+                streams.push(loaded);
+                let index = streams.len() - 1;
+                stream_index.insert(stream_id.clone(), index);
+                index
+            }
+        };
+        mint_stream_event(
+            &mut streams[index],
+            BeadEventOperationWire::IssueUpdated,
+            BeadEventPayloadWire::IssueUpdated {
+                fields: event_fields.clone(),
+            },
+            &issue.updated_at,
+            &issue.created_by,
+            &issue.id,
+        )?;
+        changed_ids.push(issue.id.clone());
+        if *was_closed && issue.status != StatusWire::Closed {
+            let newly = reopen_ancestors_via_view(
+                &mut view,
+                &issue.id,
+                &issue.updated_at,
+            )?;
+            for ancestor in newly {
+                let stream_id = view.stream_id_for_issue(&ancestor.id)?;
+                let index = match stream_index.get(&stream_id) {
+                    Some(index) => *index,
+                    None => {
+                        let Some(loaded) =
+                            load_mutation_stream(beads_dir, &stream_id)?
+                        else {
+                            return Ok(None);
+                        };
+                        base_lens.push(loaded.events.len());
+                        streams.push(loaded);
+                        let index = streams.len() - 1;
+                        stream_index.insert(stream_id.clone(), index);
+                        index
+                    }
+                };
+                mint_stream_event(
+                    &mut streams[index],
+                    BeadEventOperationWire::IssueOpened,
+                    BeadEventPayloadWire::IssueOpened,
+                    &ancestor.updated_at,
+                    &ancestor.created_by,
+                    &ancestor.id,
+                )?;
+                reopened_ancestors.push(ancestor);
+            }
+        }
+    }
+
+    let mut expected: Vec<(String, IssueWire)> = planned
+        .iter()
+        .map(|(issue, _)| (issue.id.clone(), issue.clone()))
+        .collect();
+    for ancestor in &reopened_ancestors {
+        expected.push((ancestor.id.clone(), ancestor.clone()));
+    }
+    let cache_path_buf =
+        crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
+    let committed = commit_staged_write(
+        beads_dir,
+        cache_path_buf.as_deref(),
+        view.witness(),
+        &config,
+        &streams,
+        &base_lens,
+        &expected,
+    )?;
+    let Some(corrected) = committed else {
+        return Ok(None);
+    };
+    let mut corrected_by_id: BTreeMap<String, IssueWire> = corrected
+        .into_iter()
+        .map(|issue| (issue.id.clone(), issue))
+        .collect();
+    for issue in resulting_issues.iter_mut() {
+        if let Some(truth) = corrected_by_id.remove(&issue.id) {
+            *issue = truth;
+        }
+    }
+    let mut reopened_out = Vec::with_capacity(reopened_ancestors.len());
+    for ancestor in reopened_ancestors {
+        reopened_out
+            .push(corrected_by_id.remove(&ancestor.id).unwrap_or(ancestor));
+    }
+
+    let mut result = outcome("update", true, changed_ids);
+    result.requested_issue_ids = requested_ids;
+    result.unchanged_ids = unchanged_ids;
+    result.issues = resulting_issues;
+    result.old_issues = old_issues;
+    result.reopened_ancestor_ids =
+        reopened_out.iter().map(|issue| issue.id.clone()).collect();
+    result.reopened_ancestors = reopened_out;
+    Ok(Some(result))
+}
+
+/// Descendant guard through the view instead of an all-issue scan.
+///
+/// Loads only the affected subtrees, then reuses the shared batch guard
+/// so the error kind and text match the replay path exactly.
+fn reject_unclosed_via_view(
+    view: &MutationView<'_>,
+    currents: &[IssueWire],
+    targets: &[String],
+) -> Result<(), BeadError> {
+    let mut check_by_id: BTreeMap<String, IssueWire> = currents
+        .iter()
+        .map(|issue| (issue.id.clone(), issue.clone()))
+        .collect();
+    for target in targets {
+        for descendant in view.descendants(target)? {
+            check_by_id
+                .entry(descendant.id.clone())
+                .or_insert(descendant);
+        }
+    }
+    let check_set: Vec<IssueWire> = check_by_id.into_values().collect();
+    reject_unclosed_descendants_in_batch(&check_set, targets)
+}
+
+/// Reopen closed ancestors through the view, staging each reopen.
+///
+/// Mirrors `close_remove::reopen_closed_ancestors` exactly: walks the
+/// ancestor chain via the view (which sees already-staged reopens),
+/// flips closed ancestors to open with archived close metadata, stages
+/// them, and returns them in chain order. Callers mint one `IssueOpened`
+/// event per returned ancestor in its own stream.
+fn reopen_ancestors_via_view(
+    view: &mut MutationView<'_>,
+    issue_id: &str,
+    opened_at: &str,
+) -> Result<Vec<IssueWire>, BeadError> {
+    let mut reopened = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut next = view.get(issue_id)?.parent_id.clone();
+    while let Some(parent_id) = next {
+        if !seen.insert(parent_id.clone()) {
+            break;
+        }
+        let Ok(parent) = view.get(&parent_id) else {
+            break;
+        };
+        next = parent.parent_id.clone();
+        if parent.status != StatusWire::Closed {
+            continue;
+        }
+        let mut ancestor = parent.clone();
+        ancestor.status = StatusWire::Open;
+        archive_close_metadata(
+            &mut ancestor,
+            opened_at,
+            BeadReopenCauseWire::Open,
+            None,
+        );
+        clear_snooze_record(&mut ancestor);
+        ancestor.updated_at = opened_at.to_string();
+        ancestor.validate()?;
+        view.stage_issue(ancestor.clone());
+        reopened.push(ancestor);
+    }
+    Ok(reopened)
+}
+
+/// Cached `append_issue_note` over the view: one row plus one stream.
+fn try_cached_append(
+    beads_dir: &Path,
+    mut view: MutationView<'_>,
+    issue_id: &str,
+    entry: &str,
+    author: Option<String>,
+    now: Option<String>,
+    attachments: Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
+) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
+    let resolved = view.resolve(issue_id)?;
+    let mut issue = view.get(&resolved)?;
+    let fallback = default_config("beads", "");
+    let config = load_config(beads_dir, fallback)?;
+    let now = now.unwrap_or_else(now_utc);
+    let author = author
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.owner.clone());
+
+    let stream_id = view.stream_id_for_issue(&issue.id)?;
+    let Some(mut stream) = load_mutation_stream(beads_dir, &stream_id)? else {
+        return Ok(None);
+    };
+    let base_len = stream.events.len();
+    let event_id = mint_stream_event(
+        &mut stream,
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: entry.to_string(),
+            attachments: attachments.clone().unwrap_or_default(),
+        },
+        &now,
+        &author,
+        &issue.id,
+    )?;
+    if let Some(note) = crate::bead::wire::BeadNoteWire::from_event(
+        &event_id,
+        &now,
+        &author,
+        entry,
+        attachments.clone().unwrap_or_default(),
+    ) {
+        issue.notes.push(note);
+    }
+    issue.updated_at = now.clone();
+    issue.validate()?;
+    view.stage_issue(issue.clone());
+
+    let expected = vec![(issue.id.clone(), issue.clone())];
+    let cache_path_buf =
+        crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
+    let committed = commit_staged_write(
+        beads_dir,
+        cache_path_buf.as_deref(),
+        view.witness(),
+        &config,
+        std::slice::from_ref(&stream),
+        std::slice::from_ref(&base_len),
+        &expected,
+    )?;
+    let Some(mut rows) = committed else {
+        return Ok(None);
+    };
+    let issue = rows.pop().expect("one note row");
+    let mut result = outcome("note", true, vec![issue.id.clone()]);
+    result.issue = Some(issue);
+    Ok(Some(result))
+}
+
+/// Cached `edit_issue_note` over the view: one row plus one stream.
+///
+/// `attachments` replaces the manifest when `Some` (including `Some([])`)
+/// and keeps it when `None`, exactly as the replay path does. An unknown
+/// note ID fails without writing, byte-identical to replay.
+#[allow(clippy::too_many_arguments)]
+fn try_cached_edit(
+    beads_dir: &Path,
+    mut view: MutationView<'_>,
+    issue_id: &str,
+    note_id: &str,
+    text: &str,
+    author: Option<String>,
+    now: Option<String>,
+    attachments: Option<Vec<crate::note_attachment::BeadNoteAttachmentWire>>,
+) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
+    let resolved = view.resolve(issue_id)?;
+    let mut issue = view.get(&resolved)?;
+    if !issue.notes.iter().any(|note| note.id == note_id) {
+        return Err(note_not_found(note_id));
+    }
+    let fallback = default_config("beads", "");
+    let config = load_config(beads_dir, fallback)?;
+    let now = now.unwrap_or_else(now_utc);
+    let author = author
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.owner.clone());
+
+    let stream_id = view.stream_id_for_issue(&issue.id)?;
+    let Some(mut stream) = load_mutation_stream(beads_dir, &stream_id)? else {
+        return Ok(None);
+    };
+    let base_len = stream.events.len();
+    mint_stream_event(
+        &mut stream,
+        BeadEventOperationWire::NoteEdited,
+        BeadEventPayloadWire::NoteEdited {
+            note_id: note_id.to_string(),
+            text: text.to_string(),
+            attachments: attachments.clone(),
+        },
+        &now,
+        &author,
+        &issue.id,
+    )?;
+    let note = issue
+        .notes
+        .iter_mut()
+        .find(|note| note.id == note_id)
+        .ok_or_else(|| note_not_found(note_id))?;
+    note.text = text.to_string();
+    if let Some(manifest) = attachments {
+        note.attachments = manifest;
+    }
+    note.edited_at = Some(now.clone());
+    note.edited_by = Some(author.clone());
+    issue.updated_at = now.clone();
+    issue.validate()?;
+    view.stage_issue(issue.clone());
+
+    let expected = vec![(issue.id.clone(), issue.clone())];
+    let cache_path_buf =
+        crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
+    let committed = commit_staged_write(
+        beads_dir,
+        cache_path_buf.as_deref(),
+        view.witness(),
+        &config,
+        std::slice::from_ref(&stream),
+        std::slice::from_ref(&base_len),
+        &expected,
+    )?;
+    let Some(mut rows) = committed else {
+        return Ok(None);
+    };
+    let issue = rows.pop().expect("one edited row");
+    let mut result = outcome("note_edit", true, vec![issue.id.clone()]);
+    result.issue = Some(issue);
+    Ok(Some(result))
+}
+
+/// Cached `remove_issue_note` over the view: one row plus one stream.
+///
+/// An unknown note ID fails without writing, byte-identical to replay.
+fn try_cached_remove(
+    beads_dir: &Path,
+    mut view: MutationView<'_>,
+    issue_id: &str,
+    note_id: &str,
+    author: Option<String>,
+    now: Option<String>,
+) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
+    let resolved = view.resolve(issue_id)?;
+    let mut issue = view.get(&resolved)?;
+    if !issue.notes.iter().any(|note| note.id == note_id) {
+        return Err(note_not_found(note_id));
+    }
+    let fallback = default_config("beads", "");
+    let config = load_config(beads_dir, fallback)?;
+    let now = now.unwrap_or_else(now_utc);
+    let author = author
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| config.owner.clone());
+
+    let stream_id = view.stream_id_for_issue(&issue.id)?;
+    let Some(mut stream) = load_mutation_stream(beads_dir, &stream_id)? else {
+        return Ok(None);
+    };
+    let base_len = stream.events.len();
+    mint_stream_event(
+        &mut stream,
+        BeadEventOperationWire::NoteRemoved,
+        BeadEventPayloadWire::NoteRemoved {
+            note_id: note_id.to_string(),
+        },
+        &now,
+        &author,
+        &issue.id,
+    )?;
+    issue.notes.retain(|note| note.id != note_id);
+    issue.updated_at = now.clone();
+    issue.validate()?;
+    view.stage_issue(issue.clone());
+
+    let expected = vec![(issue.id.clone(), issue.clone())];
+    let cache_path_buf =
+        crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
+    let committed = commit_staged_write(
+        beads_dir,
+        cache_path_buf.as_deref(),
+        view.witness(),
+        &config,
+        std::slice::from_ref(&stream),
+        std::slice::from_ref(&base_len),
+        &expected,
+    )?;
+    let Some(mut rows) = committed else {
+        return Ok(None);
+    };
+    let issue = rows.pop().expect("one removed row");
+    let mut result = outcome("note_remove", true, vec![issue.id.clone()]);
+    result.issue = Some(issue);
+    Ok(Some(result))
 }
 
 pub(crate) fn apply_update_fields(

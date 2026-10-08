@@ -147,6 +147,16 @@ impl<'a> MutationView<'a> {
         matches!(self.backing, MutationViewBacking::Cached { .. })
     }
 
+    /// Cache path for the staged commit, when cached.
+    pub(crate) fn cache_path(&self) -> Option<&Path> {
+        match &self.backing {
+            MutationViewBacking::Cached { cache_path, .. } => {
+                Some(cache_path.as_path())
+            }
+            MutationViewBacking::Replay => None,
+        }
+    }
+
     /// Record a changed or created row in the overlay.
     pub(crate) fn stage_issue(&mut self, issue: IssueWire) {
         self.memoized
@@ -335,6 +345,7 @@ impl<'a> MutationView<'a> {
                 let mapped = statement
                     .query_map([parent_id], |row| row.get::<_, String>(0))
                     .map_err(|error| BeadError::io(error.to_string()))?;
+                let mut hydrated: u64 = 0;
                 for row in mapped {
                     let text: String =
                         row.map_err(|error| BeadError::io(error.to_string()))?;
@@ -344,8 +355,13 @@ impl<'a> MutationView<'a> {
                                 "cached issue row is not valid: {error}"
                             ))
                         })?;
+                    hydrated = hydrated.saturating_add(1);
                     rows.insert(issue.id.clone(), issue);
                 }
+                #[cfg(test)]
+                crate::bead::mutation::store::store_io_stats::record_hydrated_rows(
+                    hydrated,
+                );
             }
             MutationViewBacking::Replay => {
                 for issue in self.replay_issues.unwrap_or(&[]) {
@@ -559,9 +575,11 @@ impl<'a> MutationView<'a> {
                 let mapped = statement
                     .query_map([normalized_ref], |row| row.get::<_, String>(0))
                     .map_err(|error| BeadError::io(error.to_string()))?;
+                let mut hydrated: u64 = 0;
                 for row in mapped {
                     let text: String =
                         row.map_err(|error| BeadError::io(error.to_string()))?;
+                    hydrated = hydrated.saturating_add(1);
                     candidate =
                         Some(serde_json::from_str(&text).map_err(|error| {
                             BeadError::io(format!(
@@ -569,6 +587,10 @@ impl<'a> MutationView<'a> {
                             ))
                         })?);
                 }
+                #[cfg(test)]
+                crate::bead::mutation::store::store_io_stats::record_hydrated_rows(
+                    hydrated,
+                );
             }
             MutationViewBacking::Replay => {
                 candidate = self
@@ -678,12 +700,13 @@ impl<'a> MutationView<'a> {
         connection: &Connection,
         issue_prefix: &str,
     ) -> Result<u64, BeadError> {
-        let like = format!("{issue_prefix}-%");
+        let lower = format!("{issue_prefix}-");
+        let upper = format!("{issue_prefix}.");
         let mut stmt = connection
-            .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+            .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
             .map_err(|error| BeadError::io(error.to_string()))?;
         let mapped = stmt
-            .query_map([like], |row| row.get::<_, String>(0))
+            .query_map([lower, upper], |row| row.get::<_, String>(0))
             .map_err(|error| BeadError::io(error.to_string()))?;
         let mut max_seen: u64 = 0;
         for row in mapped {
@@ -781,12 +804,13 @@ impl<'a> MutationView<'a> {
         connection: &Connection,
         parent_id: &str,
     ) -> Result<u64, BeadError> {
-        let like = format!("{parent_id}.%");
+        let lower = format!("{parent_id}.");
+        let upper = format!("{parent_id}/");
         let mut stmt = connection
-            .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+            .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
             .map_err(|error| BeadError::io(error.to_string()))?;
         let mapped = stmt
-            .query_map([like], |row| row.get::<_, String>(0))
+            .query_map([lower, upper], |row| row.get::<_, String>(0))
             .map_err(|error| BeadError::io(error.to_string()))?;
         let mut local_max: u64 = 0;
         for row in mapped {
@@ -937,7 +961,9 @@ fn read_cache_witness(cache_path: &Path) -> Result<CacheWitness, BeadError> {
 ///
 /// Best-effort like [`MutationView::load_cached`]: any fault yields an
 /// all-zero witness, and the later CAS treats it as stale (skip and
-/// repair) rather than failing the mutation.
+/// repair) rather than failing the mutation. Used by tests only; the
+/// warm paths read the witness from their admitted view.
+#[allow(dead_code)]
 pub(crate) fn read_admission_witness(cache_path: &Path) -> CacheWitness {
     read_cache_witness(cache_path).unwrap_or_default()
 }

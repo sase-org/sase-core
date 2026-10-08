@@ -4,11 +4,11 @@ mod claims;
 mod close_remove;
 mod create;
 mod dependencies;
-pub(crate) mod indexed;
 mod links;
 mod mutation_wire;
 mod notes_update;
 mod plus_one_snooze;
+pub(crate) mod shared;
 mod store;
 // Shared cached/replay lookup layer for warm mutations.
 pub(crate) mod publish;

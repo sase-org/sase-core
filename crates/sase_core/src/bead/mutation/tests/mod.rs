@@ -11,3 +11,4 @@ mod read_model_mutations;
 mod snooze_plus_one;
 mod store;
 mod support;
+mod view_core;

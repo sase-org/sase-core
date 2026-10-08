@@ -19,12 +19,10 @@ use crate::bead::wire::BeadError;
 /// Parse a top-level ID `"<prefix>-<suffix>"` with no `.` in the suffix.
 ///
 /// Returns `(prefix, base36 counter)` when the suffix decodes. Mirrors
-/// `store.rs::max_top_level_counter` exactly: the suffix must not contain
-/// `.`, and decoding is base36.
+/// `store.rs::max_top_level_counter` exactly: only the suffix must not
+/// contain `.` (a `.` elsewhere, e.g. in a dotted prefix, does not
+/// disqualify the ID), and decoding is base36.
 pub fn top_prefix_and_counter(issue_id: &str) -> Option<(String, u64)> {
-    if issue_id.contains('.') {
-        return None;
-    }
     let dash = issue_id.rfind('-')?;
     let prefix = &issue_id[..dash];
     let suffix = &issue_id[dash + 1..];
@@ -59,9 +57,10 @@ pub fn child_parent_and_suffix(issue_id: &str) -> Option<(String, u64)> {
 
 /// Compute per-prefix top-level maxima from an ID list.
 ///
-/// Only IDs without `.` whose suffix base36-decodes contribute, exactly as
-/// the replay oracle does. Malformed IDs, nested IDs (contain `.`), and
-/// multiple prefixes are handled by ignoring non-matching IDs.
+/// Only IDs whose suffix (after the final `-`) has no `.` and base36-decodes
+/// contribute, exactly as the replay oracle does. Malformed IDs, nested IDs
+/// (`.` in the suffix), and multiple prefixes are handled by ignoring
+/// non-matching IDs.
 pub fn top_maxima<I, S>(ids: I) -> BTreeMap<String, u64>
 where
     I: IntoIterator<Item = S>,
@@ -257,11 +256,12 @@ pub fn note_upsert(
 /// Record one removed ID, recomputing the affected maximum when needed.
 ///
 /// When the removed ID was the stored maximum for its prefix/parent,
-/// the new maximum is recomputed with a prefix-scoped `LIKE` query over
-/// surviving rows — never a full-store scan. Removing a non-maximum
-/// leaves the tables untouched, preserving the replay oracle's reuse
-/// behavior: the next allocation reuses a freed maximum suffix exactly
-/// as `store.rs::next_child_id` would.
+/// the new maximum is recomputed with a prefix-scoped index range scan
+/// over surviving rows — never a full-store scan and never `LIKE` (which
+/// cannot use the BINARY primary-key index and mis-handles `%`/`_`).
+/// Removing a non-maximum leaves the tables untouched, preserving the
+/// replay oracle's reuse behavior: the next allocation reuses a freed
+/// maximum suffix exactly as `store.rs::next_child_id` would.
 pub fn note_delete(
     connection: &rusqlite::Connection,
     issue_id: &str,
@@ -269,12 +269,13 @@ pub fn note_delete(
     if let Some((prefix, counter)) = top_prefix_and_counter(issue_id) {
         let current = stored_top_max(connection, &prefix)?.unwrap_or(0);
         if counter == current && counter > 0 {
-            let like = format!("{prefix}-%");
+            let lower = format!("{prefix}-");
+            let upper = format!("{prefix}.");
             let mut stmt = connection
-                .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+                .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
                 .map_err(|error| BeadError::io(error.to_string()))?;
             let mapped = stmt
-                .query_map([like], |row| row.get::<_, String>(0))
+                .query_map([lower, upper], |row| row.get::<_, String>(0))
                 .map_err(|error| BeadError::io(error.to_string()))?;
             let mut new_max: u64 = 0;
             for row in mapped {
@@ -308,12 +309,13 @@ pub fn note_delete(
     if let Some((parent, counter)) = child_parent_and_suffix(issue_id) {
         let current = stored_child_max(connection, &parent)?.unwrap_or(0);
         if counter == current && counter > 0 {
-            let like = format!("{parent}.%");
+            let lower = format!("{parent}.");
+            let upper = format!("{parent}/");
             let mut stmt = connection
-                .prepare("SELECT id FROM issues WHERE id LIKE ?1 ESCAPE '\\'")
+                .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
                 .map_err(|error| BeadError::io(error.to_string()))?;
             let mapped = stmt
-                .query_map([like], |row| row.get::<_, String>(0))
+                .query_map([lower, upper], |row| row.get::<_, String>(0))
                 .map_err(|error| BeadError::io(error.to_string()))?;
             let mut new_max: u64 = 0;
             for row in mapped {
