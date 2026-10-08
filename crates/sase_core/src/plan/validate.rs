@@ -14,6 +14,10 @@ use serde_yaml::{Mapping, Value as YamlValue};
 use crate::bead::validate_model_value;
 
 use super::artifact_link::sdd_plan_header_block_problem;
+use super::decisions::{
+    validate_decision_body, validate_decision_frontmatter,
+    PlanDecisionCalloutWire, PlanDecisionWire,
+};
 use super::read::split_frontmatter;
 use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 
@@ -21,12 +25,14 @@ use super::wire::{PlanError, PLAN_WIRE_SCHEMA_VERSION};
 /// repair the block from the diagnostic alone.
 const HEADER_BLOCK_REMEDY: &str = "SASE owns the plan header block: a link-shaped section (`PLAN`, `PROMPT`, `PARENT`, `BEAD`) must be a bolded key followed by exactly one Markdown link and nothing else, and a list-shaped section (`AGENTS`, `ARTIFACTS`, `COMMITS`) must be a bare bolded key whose entries are indented bullets. Delete the hand-authored text; SASE rewrites this block itself.";
 
-const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model"];
+const COMMON_FIELDS: &[&str] = &["tier", "title", "goal", "model", "decisions"];
 const TALE_FIELDS: &[&str] = &["size"];
 const TRANSIENT_FIELDS: &[&str] = &["links"];
 const SYSTEM_FIELDS: &[&str] = &[
     "create_time",
     "status",
+    "decided_by",
+    "decided_via",
     "prompt",
     "bead",
     "proposed_by",
@@ -77,6 +83,8 @@ pub enum PlanValidationMode {
     Authoring,
     /// Accept a missing legacy phase size as `small` with a warning.
     Launch,
+    /// As strict as Authoring, while also allowing system-written answers.
+    Archived,
 }
 
 impl PlanValidationMode {
@@ -84,8 +92,9 @@ impl PlanValidationMode {
         match value {
             "authoring" => Ok(Self::Authoring),
             "launch" => Ok(Self::Launch),
+            "archived" => Ok(Self::Archived),
             _ => Err(PlanError::validation(format!(
-                "unsupported plan validation mode `{value}`; expected `authoring` or `launch`"
+                "unsupported plan validation mode `{value}`; expected `authoring`, `launch`, or `archived`"
             ))),
         }
     }
@@ -124,6 +133,9 @@ pub struct PlanPhaseWire {
 }
 
 /// The normalized plan structure returned after successful validation.
+///
+/// The decision fields are additive: plans without decisions serialize
+/// exactly as before, so `PLAN_WIRE_SCHEMA_VERSION` stays 3.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedPlanWire {
     pub tier: String,
@@ -139,6 +151,14 @@ pub struct ValidatedPlanWire {
     pub bead: Option<String>,
     pub proposed_by: Option<String>,
     pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<PlanDecisionWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_callouts: Vec<PlanDecisionCalloutWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_via: Option<String>,
 }
 
 /// Complete validation result. Warnings do not make `ok` false.
@@ -221,6 +241,65 @@ pub fn plan_frontmatter_schema(
         },
         json!("codex/gpt-5.6-sol"),
     ));
+
+    fields.extend([
+        field_spec(
+            "decisions",
+            "optional ordered map of at most 5 decisions",
+            false,
+            "Reviewer decisions answered inside the plan review, in author order. An absent or empty map adds no plan fields.",
+            json!({"tui_note": {"ask": "Edit the TUI note?", "default": false, "memory": ["tui.md"], "requested": "please update the tui note"}}),
+        ),
+        field_spec(
+            "decisions.<id>.ask",
+            "required one-line question of at most 120 characters",
+            true,
+            "The question the reviewer answers. Phrase toggles so yes means do the work; a missing trailing `?` warns.",
+            json!("Edit the TUI note?"),
+        ),
+        field_spec(
+            "decisions.<id>.choices",
+            "optional map of 2-5 choice keys to consequence labels",
+            false,
+            "Presence selects the choice kind; absence selects a toggle. Keys match ^[a-z][a-z0-9_]*$ with at most 24 characters, labels are one-line consequences of at most 100 characters.",
+            json!({"mode": "Group by mode", "pane": "Group by pane"}),
+        ),
+        field_spec(
+            "decisions.<id>.default",
+            "required default value",
+            true,
+            "A YAML boolean for toggles (use `true`/`false`, never `yes`/`on` strings) or exactly one authored choice key for choices.",
+            json!(false),
+        ),
+        field_spec(
+            "decisions.<id>.why",
+            "optional one-line reason of at most 100 characters",
+            false,
+            "Why the default is recommended. Forbidden on memory decisions; the requested quote explains those.",
+            json!("Keeps the review to one keystroke"),
+        ),
+        field_spec(
+            "decisions.<id>.memory",
+            "optional non-empty list of memory read selectors",
+            false,
+            "Toggles only. Selectors look like `note.md`, `web`, or `web:keyword`, including nested note paths and keyword aliases; core checks syntax and the host resolves identities.",
+            json!(["tui.md"]),
+        ),
+        field_spec(
+            "decisions.<id>.requested",
+            "human quote for a memory decision defaulting to true",
+            false,
+            "Memory toggles only: one line of 3-300 characters quoting the human request. Required when the authored memory default is true.",
+            json!("please update the tui note"),
+        ),
+        field_spec(
+            "decisions.<id>.answer",
+            "system-written answer",
+            false,
+            "The accepted value, written by SASE when the plan is reviewed. Forbidden in Authoring mode; validated against the decision kind in Launch and Archived modes.",
+            json!(true),
+        ),
+    ]);
 
     if tier == PlanTier::Epic {
         fields.extend([
@@ -328,6 +407,20 @@ pub fn plan_frontmatter_schema(
             false,
             "Plan lifecycle status maintained by SASE.",
             json!("wip"),
+        ),
+        field_spec(
+            "decided_by",
+            "system-managed value",
+            false,
+            "Who accepted the decisions, written by SASE: `reviewer`, `auto`, or `agent`. Forbidden in Authoring mode.",
+            json!("reviewer"),
+        ),
+        field_spec(
+            "decided_via",
+            "system-managed value",
+            false,
+            "Surface that accepted the decisions, written by SASE: `tui`, `telegram`, `mobile`, or `cli`. Absent when `decided_by` is `auto`; forbidden in Authoring mode.",
+            json!("tui"),
         ),
         field_spec(
             "bead",
@@ -493,6 +586,37 @@ impl<'a> Validator<'a> {
             }
         };
 
+        let frontmatter =
+            validate_decision_frontmatter(mapping, &index, self.mode);
+        for diagnostic in frontmatter.diagnostics {
+            self.push_direct(
+                diagnostic.severity.as_str(),
+                diagnostic.code.as_str(),
+                diagnostic.field_path.as_str(),
+                diagnostic.message,
+                diagnostic.line,
+            );
+        }
+        // Body lines count from the original document (frontmatter
+        // included): the opening `---`, the frontmatter lines, and the
+        // closing `---` precede the first body line.
+        let body_base = yaml.lines().count() as u64 + 3;
+        let body_outcome = validate_decision_body(
+            &body,
+            body_base,
+            &frontmatter.infos,
+            &index,
+        );
+        for diagnostic in body_outcome.diagnostics {
+            self.push_direct(
+                diagnostic.severity.as_str(),
+                diagnostic.code.as_str(),
+                diagnostic.field_path.as_str(),
+                diagnostic.message,
+                diagnostic.line,
+            );
+        }
+
         let has_errors = self
             .diagnostics
             .iter()
@@ -510,6 +634,10 @@ impl<'a> Validator<'a> {
             bead,
             proposed_by,
             parent,
+            decisions: frontmatter.decisions,
+            decision_callouts: body_outcome.callouts,
+            decided_by: frontmatter.decided_by,
+            decided_via: frontmatter.decided_via,
         });
         self.finish(plan)
     }
@@ -661,7 +789,7 @@ impl<'a> Validator<'a> {
     ) -> Option<String> {
         let Some(value) = mapping_value(mapping, "size") else {
             let (severity, message) = match self.mode {
-                PlanValidationMode::Authoring => (
+                PlanValidationMode::Authoring | PlanValidationMode::Archived => (
                     "error",
                     "required tale field `size` is missing; expected `xsmall`, `small`, or `medium`",
                 ),
@@ -672,7 +800,8 @@ impl<'a> Validator<'a> {
             };
             self.push(severity, "tale-size-missing", "size", message, index);
             return match self.mode {
-                PlanValidationMode::Authoring => None,
+                PlanValidationMode::Authoring
+                | PlanValidationMode::Archived => None,
                 PlanValidationMode::Launch => Some("medium".to_string()),
             };
         };
@@ -868,7 +997,7 @@ impl<'a> Validator<'a> {
         let field_path = format!("phases[{phase_index}].size");
         let Some(value) = mapping_value(mapping, "size") else {
             let (severity, message) = match self.mode {
-                PlanValidationMode::Authoring => (
+                PlanValidationMode::Authoring | PlanValidationMode::Archived => (
                     "error",
                     "required phase field `size` is missing; expected `xsmall`, `small`, `medium`, `large`, or `xlarge`",
                 ),
@@ -885,7 +1014,8 @@ impl<'a> Validator<'a> {
                 index,
             );
             return match self.mode {
-                PlanValidationMode::Authoring => String::new(),
+                PlanValidationMode::Authoring
+                | PlanValidationMode::Archived => String::new(),
                 PlanValidationMode::Launch => "small".to_string(),
             };
         };
@@ -935,6 +1065,16 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
+            if key == "when" {
+                self.push(
+                    "error",
+                    "phase-when-reserved",
+                    &format!("phases[{phase_index}].when"),
+                    "phase field `when` is reserved and always invalid; remove it",
+                    index,
+                );
+                continue;
+            }
             if !PHASE_FIELDS.contains(&key) {
                 let path = format!("phases[{phase_index}].{key}");
                 self.push(
@@ -1300,8 +1440,11 @@ fn is_tale_size(value: &str) -> bool {
 
 /// Best-effort YAML source index. Exact source spans are not available from
 /// `serde_yaml::Value`, so this records key lines and falls back to the nearest
-/// containing phase or top-level field for flow-style YAML.
-struct SourceIndex {
+/// containing phase, decision, or top-level field for flow-style YAML.
+///
+/// Public so the sibling `decisions` module can resolve `decisions.<id>`
+/// paths to document lines; construction stays inside this module.
+pub struct SourceIndex {
     lines: BTreeMap<String, u64>,
 }
 
@@ -1310,6 +1453,8 @@ impl SourceIndex {
         let mut lines = BTreeMap::new();
         let mut in_phases = false;
         let mut phase_index = None;
+        let mut in_decisions = false;
+        let mut decisions_stack: Vec<(usize, String)> = Vec::new();
 
         for (yaml_line, raw_line) in yaml.lines().enumerate() {
             let file_line = yaml_line as u64 + 2;
@@ -1321,11 +1466,38 @@ impl SourceIndex {
             let indent = raw_line.len() - trimmed.len();
             if indent == 0 {
                 phase_index = None;
+                decisions_stack.clear();
                 if let Some(key) = yaml_key(trimmed) {
                     lines.entry(key.to_string()).or_insert(file_line);
                     in_phases = key == "phases";
+                    in_decisions = key == "decisions";
                 } else {
                     in_phases = false;
+                    in_decisions = false;
+                }
+                continue;
+            }
+            if in_decisions {
+                // Decision entries are map keys; list items (memory
+                // selectors) and flow lines fall back to the containing
+                // field through `line_for`.
+                let is_key_line = !trimmed.starts_with('-')
+                    && !trimmed.starts_with(['{', '[']);
+                if is_key_line {
+                    if let Some(key) = yaml_key(trimmed) {
+                        while decisions_stack
+                            .last()
+                            .is_some_and(|(level, _)| *level >= indent)
+                        {
+                            decisions_stack.pop();
+                        }
+                        let path = match decisions_stack.last() {
+                            None => format!("decisions.{key}"),
+                            Some((_, parent)) => format!("{parent}.{key}"),
+                        };
+                        lines.insert(path.clone(), file_line);
+                        decisions_stack.push((indent, path));
+                    }
                 }
                 continue;
             }
@@ -1348,7 +1520,7 @@ impl SourceIndex {
         Self { lines }
     }
 
-    fn line_for(&self, field_path: &str) -> Option<u64> {
+    pub(crate) fn line_for(&self, field_path: &str) -> Option<u64> {
         if field_path.is_empty() {
             return Some(1);
         }
@@ -1435,6 +1607,10 @@ mod tests {
                 bead: Some("sase-88.1".to_string()),
                 proposed_by: None,
                 parent: Some("sase/repos/plans/202607/parent.md".to_string(),),
+                decisions: Vec::new(),
+                decision_callouts: Vec::new(),
+                decided_by: None,
+                decided_via: None,
             })
         );
     }
@@ -1724,6 +1900,10 @@ mod tests {
                 bead: None,
                 proposed_by: None,
                 parent: None,
+                decisions: Vec::new(),
+                decision_callouts: Vec::new(),
+                decided_by: None,
+                decided_via: None,
             })
         );
     }
@@ -1999,9 +2179,19 @@ mod tests {
                 "goal",
                 "size",
                 "model",
+                "decisions",
+                "decisions.<id>.ask",
+                "decisions.<id>.choices",
+                "decisions.<id>.default",
+                "decisions.<id>.why",
+                "decisions.<id>.memory",
+                "decisions.<id>.requested",
+                "decisions.<id>.answer",
                 "links",
                 "create_time",
                 "status",
+                "decided_by",
+                "decided_via",
                 "bead",
                 "proposed_by",
                 "parent",
@@ -2018,6 +2208,14 @@ mod tests {
                 "title",
                 "goal",
                 "model",
+                "decisions",
+                "decisions.<id>.ask",
+                "decisions.<id>.choices",
+                "decisions.<id>.default",
+                "decisions.<id>.why",
+                "decisions.<id>.memory",
+                "decisions.<id>.requested",
+                "decisions.<id>.answer",
                 "phases",
                 "phases[].id",
                 "phases[].title",
@@ -2031,6 +2229,8 @@ mod tests {
                 "links",
                 "create_time",
                 "status",
+                "decided_by",
+                "decided_via",
                 "bead",
                 "proposed_by",
                 "parent",

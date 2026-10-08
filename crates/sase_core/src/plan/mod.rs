@@ -7,6 +7,7 @@
 //! engine built on top of it.
 
 pub mod artifact_link;
+pub mod decisions;
 pub mod read;
 pub mod refs;
 pub mod search;
@@ -24,6 +25,10 @@ pub use artifact_link::{
     SddPlanHeaderEntryWire, SddPlanHeaderSectionKindWire,
     SddPlanHeaderSectionWire, MAX_RENDERED_PLAN_HEADER_ENTRIES,
     PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
+};
+pub use decisions::{
+    PlanDecisionCalloutWire, PlanDecisionChoiceWire, PlanDecisionMemoryWire,
+    PlanDecisionWire,
 };
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use refs::{

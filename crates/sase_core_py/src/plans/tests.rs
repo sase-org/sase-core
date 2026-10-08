@@ -122,6 +122,72 @@ fn plan_validation_bindings_round_trip_json_shapes() {
         ));
         assert_eq!(legacy_value["plan"]["phases"][0]["size"], json!("small"));
 
+        // Decisions validate through the same binding in every mode, with
+        // additive wire fields and ordered schema rows.
+        let decided = "---\ntier: tale\ntitle: Decided tale\ngoal: Decisions round-trip\nsize: small\ndecided_by: reviewer\ndecided_via: tui\ndecisions:\n  tui_note:\n    ask: Edit the TUI note?\n    default: false\n    memory:\n      - tui.md\n    answer: false\n  grouping:\n    ask: How to group?\n    choices:\n      mode: Group by mode\n      pane: Group by pane\n    default: mode\n    answer: pane\n---\n# Plan\nShip tui_note and grouping.\n> [!decision] tui_note\n> Covers the note edits.\n> [!decision] grouping = pane\n";
+        let forbidden =
+            py_plan_validate(py, decided, "tale", "authoring").unwrap();
+        let forbidden_value = py_to_json_value(forbidden.bind(py)).unwrap();
+        assert_eq!(forbidden_value["ok"], json!(false));
+        assert!(forbidden_value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| {
+                diagnostic["code"] == json!("decision-answer-forbidden")
+            }));
+
+        let archived =
+            py_plan_validate(py, decided, "tale", "archived").unwrap();
+        let archived_value = py_to_json_value(archived.bind(py)).unwrap();
+        assert_eq!(archived_value["ok"], json!(true));
+        assert_eq!(archived_value["schema_version"], json!(3));
+        assert_eq!(
+            archived_value["plan"]["decisions"][0]["memory"]["selectors"],
+            json!(["tui.md"])
+        );
+        assert_eq!(
+            archived_value["plan"]["decisions"][1]["choices"][0]["key"],
+            json!("mode")
+        );
+        assert_eq!(
+            archived_value["plan"]["decisions"][1]["answer"],
+            json!("pane")
+        );
+        assert_eq!(
+            archived_value["plan"]["decision_callouts"][0]["branch"],
+            json!("yes")
+        );
+        assert_eq!(
+            archived_value["plan"]["decision_callouts"][1]["key"],
+            json!("pane")
+        );
+        assert_eq!(archived_value["plan"]["decided_by"], json!("reviewer"));
+        assert_eq!(archived_value["plan"]["decided_via"], json!("tui"));
+
+        // Plans without decisions serialize exactly as before.
+        assert!(tale_value["plan"].get("decisions").is_none());
+        assert!(tale_value["plan"].get("decision_callouts").is_none());
+        assert!(tale_value["plan"].get("decided_by").is_none());
+
+        for field_name in [
+            "decisions",
+            "decisions.<id>.ask",
+            "decisions.<id>.choices",
+            "decisions.<id>.default",
+            "decisions.<id>.why",
+            "decisions.<id>.memory",
+            "decisions.<id>.requested",
+            "decided_by",
+            "decided_via",
+        ] {
+            assert!(schema_value
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field["name"] == json!(field_name)));
+        }
+
         let error =
             py_plan_validate(py, content, "story", "authoring").unwrap_err();
         assert!(error.to_string().contains("unsupported plan tier"));
