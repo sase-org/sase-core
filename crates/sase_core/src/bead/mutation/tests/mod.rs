@@ -7,6 +7,7 @@ mod dependencies;
 mod dual_mode;
 mod lifecycle_warm;
 mod links;
+mod links_evidence;
 mod notes_update;
 mod publish_direct;
 mod read_model_mutations;
