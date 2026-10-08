@@ -609,9 +609,19 @@ fn rebuild(
                 return Ok(snapshot);
             }
             Probe::Stale => {
-                return refresh_changed_store(
-                    beads_dir, cache_path, connection, &meta, &token, &sweep,
-                );
+                return match refresh_changed_store(
+                    beads_dir,
+                    cache_path,
+                    connection,
+                    &meta,
+                    &token,
+                    &sweep,
+                    RefreshFinish::Snapshot,
+                ) {
+                    Ok(Some(snapshot)) => Ok(snapshot),
+                    Ok(None) => Err(Fault::Cache),
+                    Err(fault) => Err(fault),
+                };
             }
             Probe::Unusable(_) => {
                 drop(connection);
@@ -808,13 +818,20 @@ fn ensure_fresh(beads_dir: &Path, cache_path: &Path) -> Result<bool, Fault> {
             Ok(true)
         }
         Probe::Stale => {
-            drop(connection);
-            // The refresh loads one snapshot through the tail-or-rebuild
-            // path; the indexed query after it serves warm.
-            match rebuild_catch_store_errors(beads_dir, cache_path, false) {
-                Ok(Some(_)) => Ok(true),
-                Ok(None) => Err(Fault::Cache),
-                Err(error) => Err(Fault::Store(error)),
+            // The refresh runs the tail-or-rebuild path with the sweep
+            // just taken; the indexed query after it loads only the rows
+            // it needs, so no snapshot is deserialized here.
+            match refresh_changed_store(
+                beads_dir,
+                cache_path,
+                connection,
+                &meta,
+                &token,
+                &sweep,
+                RefreshFinish::Readiness,
+            ) {
+                Ok(_) => Ok(true),
+                Err(fault) => Err(fault),
             }
         }
         Probe::Unusable(_) => {
@@ -875,11 +892,21 @@ fn ensure_fresh_forced(
             Ok(true)
         }
         Probe::Stale => {
-            drop(connection);
-            match rebuild_catch_store_errors(beads_dir, cache_path, false) {
-                Ok(Some(_)) => Ok(true),
-                Ok(None) => Err(Fault::Cache),
-                Err(error) => Err(Fault::Store(error)),
+            // Forced refresh off the sweep just taken: admission inside
+            // the mutation flock always observes out-of-band changes,
+            // even within the 60 s token window, and pays no snapshot
+            // load for rows the mutation loads itself.
+            match refresh_changed_store(
+                beads_dir,
+                cache_path,
+                connection,
+                &meta,
+                &token,
+                &sweep,
+                RefreshFinish::Readiness,
+            ) {
+                Ok(_) => Ok(true),
+                Err(fault) => Err(fault),
             }
         }
         Probe::Unusable(_) => {
@@ -934,6 +961,16 @@ fn rebuild_cold(
     )
 }
 
+/// How a refresh finishes: with a full snapshot for serving reads,
+/// or with readiness only for admission and publication paths that load
+/// exactly the rows they need afterwards and must not pay a full-row
+/// deserialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefreshFinish {
+    Snapshot,
+    Readiness,
+}
+
 /// Serve-or-refresh decision for a store whose sweep differs from the
 /// cache: try the incremental tail first, and rebuild only when a tail
 /// precondition fails. The fallback reason becomes the rebuild's
@@ -945,7 +982,8 @@ fn refresh_changed_store(
     meta: &CacheMeta,
     token: &str,
     sweep: &StoreSignatures,
-) -> Result<CachedStoreSnapshot, Fault> {
+    finish: RefreshFinish,
+) -> Result<Option<CachedStoreSnapshot>, Fault> {
     match super::tail::try_tail_apply(
         beads_dir,
         cache_path,
@@ -953,6 +991,7 @@ fn refresh_changed_store(
         meta,
         token,
         sweep,
+        finish,
     ) {
         Ok(super::tail::TailDecision::Served(snapshot)) => {
             note_serve_outcome(&connection);
@@ -970,6 +1009,7 @@ fn refresh_changed_store(
                 start_generation,
                 &format!("tail fallback: {reason}"),
             )
+            .map(Some)
         }
         Err(fault) => Err(fault),
     }
@@ -979,7 +1019,7 @@ fn refresh_changed_store(
 ///
 /// `reason` records why the replay ran (cold start, explicit rebuild, or
 /// the tail precondition that failed) in the outcome telemetry.
-fn rebuild_from_replay(
+pub(super) fn rebuild_from_replay(
     beads_dir: &Path,
     cache_path: &Path,
     token: &str,
@@ -1269,7 +1309,7 @@ pub(super) enum WriteFault {
 ///
 /// Both come from the live files at commit time, so a later change to
 /// either is visible to the next freshness decision.
-pub(super) struct ManifestConfigFingerprint {
+pub(crate) struct ManifestConfigFingerprint {
     pub(super) manifest_schema_version: u32,
     pub(super) manifest_stream_count: usize,
     pub(super) config_canonical: String,
@@ -1286,7 +1326,7 @@ pub(super) struct ManifestConfigFingerprint {
 /// fingerprints as its raw hash, which still changes on any edit; a
 /// missing `config.json` canonicalizes as empty on both sides so absence
 /// compares equal to absence.
-pub(super) fn fingerprint_manifest_config(
+pub(crate) fn fingerprint_manifest_config(
     beads_dir: &Path,
 ) -> Result<ManifestConfigFingerprint, BeadError> {
     use crate::bead::config::load_config_from_str;
@@ -1563,6 +1603,8 @@ fn write_snapshot_in_txn(
 pub(super) fn load_snapshot(
     connection: &Connection,
 ) -> Result<CachedStoreSnapshot, String> {
+    #[cfg(test)]
+    crate::bead::mutation::store_io_stats::record_snapshot_load();
     let mut statement = connection
         .prepare("SELECT row FROM issues ORDER BY position")
         .map_err(|error| error.to_string())?;
@@ -2021,7 +2063,24 @@ fn tail_meta_defaults() -> [(&'static str, String); 16] {
 /// decision, so a cache written by `read-model-store` gains tail support
 /// on its next read instead of rebuilding.
 pub(super) fn backfill_meta_keys(connection: &Connection) -> Result<(), Fault> {
-    for (key, value) in tail_meta_defaults() {
+    let defaults = tail_meta_defaults();
+    let placeholders =
+        defaults.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+    for (key, _) in &defaults {
+        params.push(key);
+    }
+    let present: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM meta WHERE key IN ({placeholders})"),
+            params.as_slice(),
+            |row| row.get(0),
+        )
+        .map_err(|_| Fault::Cache)?;
+    if present as usize >= defaults.len() {
+        return Ok(());
+    }
+    for (key, value) in &defaults {
         connection
             .execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
@@ -2029,6 +2088,22 @@ pub(super) fn backfill_meta_keys(connection: &Connection) -> Result<(), Fault> {
             )
             .map_err(|_| Fault::Cache)?;
     }
+    Ok(())
+}
+
+/// Record the post-write freshness token without moving the sweep time.
+///
+/// Direct publication recomputes the token after its own append: the
+/// stored token must describe the published files so the next read
+/// serves token-only, while `last_sweep_ns` stays at the admission
+/// sweep so out-of-band writers stay bounded by the 60 s rule.
+pub(super) fn set_token_in_txn(
+    connection: &Connection,
+    token: &str,
+) -> Result<(), WriteFault> {
+    connection
+        .execute("UPDATE meta SET value = ?1 WHERE key = 'token'", [token])
+        .map_err(|_| WriteFault::Other)?;
     Ok(())
 }
 

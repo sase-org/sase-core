@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::events::{
     compare_issues_canonically, reduce_event_streams, BeadEventRecordWire,
@@ -576,7 +576,7 @@ pub fn write_event_store(
     beads_dir: &Path,
     streams: &[BeadEventStreamWire],
 ) -> Result<(), BeadError> {
-    write_event_store_inner(beads_dir, streams, None, None)
+    write_event_store_inner(beads_dir, streams, None, None).map(|_| ())
 }
 
 pub fn write_event_store_changed(
@@ -585,6 +585,7 @@ pub fn write_event_store_changed(
     changed_stream_ids: &BTreeSet<String>,
 ) -> Result<(), BeadError> {
     write_event_store_inner(beads_dir, streams, Some(changed_stream_ids), None)
+        .map(|_| ())
 }
 
 /// Write lazily loaded streams while keeping the manifest exact.
@@ -606,6 +607,45 @@ pub fn write_event_store_changed_with_total(
         Some(changed_stream_ids),
         Some(total_stream_count),
     )
+    .map(|_| ())
+}
+
+/// Writer-captured signature of one stream the mutation just wrote.
+///
+/// `size`, `mtime_ns`, and `inode` come from a handle opened on the
+/// final path after the atomic rename (the renamed file keeps the
+/// handle's inode), while `byte_len` and `content_hash` come from the
+/// exact bytes the writer stored. The next freshness sweep must
+/// therefore see these streams as unchanged, with no re-read and no
+/// re-hash on the publication path.
+pub(crate) struct StreamWriteSignature {
+    pub(in crate::bead) size: u64,
+    pub(in crate::bead) mtime_ns: i64,
+    pub(in crate::bead) inode: u64,
+    pub(in crate::bead) byte_len: u64,
+    pub(in crate::bead) content_hash: String,
+}
+
+/// Lazily-loaded write that also returns each written stream's
+/// writer-captured signature.
+///
+/// A sibling of [`write_event_store_changed_with_total`] that delegates
+/// to the same inner writer: validation, append-preserving writes, and
+/// manifest handling are identical. Streams the writer skips (an
+/// already-current file, or a stream with no new tail events) report no
+/// signature.
+pub(in crate::bead) fn write_event_store_changed_with_total_and_signatures(
+    beads_dir: &Path,
+    streams: &[BeadEventStreamWire],
+    changed_stream_ids: &BTreeSet<String>,
+    total_stream_count: usize,
+) -> Result<BTreeMap<String, StreamWriteSignature>, BeadError> {
+    write_event_store_inner(
+        beads_dir,
+        streams,
+        Some(changed_stream_ids),
+        Some(total_stream_count),
+    )
 }
 
 fn write_event_store_inner(
@@ -613,7 +653,7 @@ fn write_event_store_inner(
     streams: &[BeadEventStreamWire],
     changed_stream_ids: Option<&BTreeSet<String>>,
     total_stream_count: Option<usize>,
-) -> Result<(), BeadError> {
+) -> Result<BTreeMap<String, StreamWriteSignature>, BeadError> {
     let events_dir = beads_dir.join("events");
     let streams_dir = event_streams_dir(beads_dir);
 
@@ -629,15 +669,22 @@ fn write_event_store_inner(
 
     fs::create_dir_all(&streams_dir)?;
     let append_preserving = changed_stream_ids.is_some();
+    let mut signatures = BTreeMap::new();
     for stream in &sorted_streams {
         if !selected_for_write(stream, changed_stream_ids) {
             continue;
         }
         let path = streams_dir.join(format!("{}.jsonl", stream.stream_id));
-        if append_preserving {
-            write_stream_append_preserving(&path, stream)?;
+        let written = if append_preserving {
+            write_stream_append_preserving(&path, stream)?
         } else {
-            write_stream_fully(&path, stream)?;
+            Some(write_stream_fully(&path, stream)?)
+        };
+        if let Some(bytes) = written {
+            signatures.insert(
+                stream.stream_id.clone(),
+                capture_write_signature(&path, &bytes)?,
+            );
         }
     }
 
@@ -650,20 +697,52 @@ fn write_event_store_inner(
         &events_dir.join("manifest.json"),
         &manifest_json,
     )?;
-    Ok(())
+    Ok(signatures)
+}
+
+/// Capture a stream's signature from the bytes just written and a handle
+/// on the final path.
+///
+/// The content hash covers exactly the stored bytes, so the read model's
+/// append-prefix check accepts them; the stat triple comes from the
+/// renamed file itself, so the next sweep's stat comparison matches
+/// without re-reading the stream.
+fn capture_write_signature(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<StreamWriteSignature, BeadError> {
+    let file = fs::File::open(path).map_err(|error| {
+        BeadError::io(format!(
+            "failed to stat written bead event stream {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        BeadError::io(format!(
+            "failed to stat written bead event stream {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(StreamWriteSignature {
+        size: metadata.len(),
+        mtime_ns: crate::fs_sig::mtime_ns(metadata.modified().ok()),
+        inode: file_inode(&metadata),
+        byte_len: bytes.len() as u64,
+        content_hash: hex_signature(bytes),
+    })
 }
 
 fn write_stream_fully(
     path: &Path,
     stream: &BeadEventStreamWire,
-) -> Result<(), BeadError> {
+) -> Result<Vec<u8>, BeadError> {
     let mut output = String::new();
     for event in &stream.events {
         output.push_str(&serde_json::to_string(event)?);
         output.push('\n');
     }
     write_file_atomic_if_changed(path, output.as_bytes())?;
-    Ok(())
+    Ok(output.into_bytes())
 }
 
 /// Write a changed stream without reserializing its already-published
@@ -673,11 +752,11 @@ fn write_stream_fully(
 fn write_stream_append_preserving(
     path: &Path,
     stream: &BeadEventStreamWire,
-) -> Result<(), BeadError> {
+) -> Result<Option<Vec<u8>>, BeadError> {
     let existing_bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return write_stream_fully(path, stream);
+            return write_stream_fully(path, stream).map(Some);
         }
         Err(error) => return Err(error.into()),
     };
@@ -703,7 +782,7 @@ fn write_stream_append_preserving(
 
     let new_tail = &stream.events[existing_events.len()..];
     if new_tail.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut output = existing_bytes;
@@ -714,7 +793,8 @@ fn write_stream_append_preserving(
         output.extend_from_slice(serde_json::to_string(event)?.as_bytes());
         output.push(b'\n');
     }
-    write_file_atomic(path, &output)
+    write_file_atomic(path, &output)?;
+    Ok(Some(output))
 }
 
 fn selected_for_write(

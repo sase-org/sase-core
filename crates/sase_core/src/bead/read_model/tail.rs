@@ -57,15 +57,21 @@ use super::store::{
     load_stored_stream_sigs, open_and_serve, parse_frontier,
     record_manifest_config_in_txn, record_refresh_in_txn,
     update_token_and_sweep, wire_string, CacheMeta, CachedStoreSnapshot, Fault,
-    ManifestConfigFingerprint, ServeOutcome, StoredStreamSig, WriteFault,
+    ManifestConfigFingerprint, RefreshFinish, ServeOutcome, StoredStreamSig,
+    WriteFault,
 };
+#[cfg(test)]
+use crate::bead::mutation::store_io_stats;
 
 /// What a tail attempt decided: serve, apply, or rebuild with a reason.
 pub(super) enum TailDecision {
     /// Nothing appended (only stat noise): refresh the sweep and serve.
-    Served(CachedStoreSnapshot),
-    /// Tail events applied and committed.
-    Tailed(CachedStoreSnapshot),
+    /// The snapshot is present unless the caller asked for readiness
+    /// only, in which case no row is deserialized.
+    Served(Option<CachedStoreSnapshot>),
+    /// Tail events applied and committed. The snapshot is present unless
+    /// the caller asked for readiness only.
+    Tailed(Option<CachedStoreSnapshot>),
     /// A precondition failed: the caller rebuilds, recording the reason.
     Fallback(String),
 }
@@ -89,6 +95,7 @@ pub(super) fn try_tail_apply(
     meta: &CacheMeta,
     token: &str,
     sweep: &StoreSignatures,
+    finish: RefreshFinish,
 ) -> Result<TailDecision, Fault> {
     if !meta.streams_known {
         return Ok(TailDecision::Fallback(
@@ -250,6 +257,7 @@ pub(super) fn try_tail_apply(
     if tail_event_count == 0 {
         return commit_sweep_refresh(
             beads_dir, cache_path, connection, token, &stored, &tail_sigs,
+            finish,
         );
     }
     // Merge the tail in full stream order (empty placeholders keep the
@@ -359,22 +367,23 @@ pub(super) fn try_tail_apply(
         &new_frontier,
         &fingerprint,
         &stats,
+        finish,
     )
 }
 
 /// What one merged tail can observe: touched issues, removals, and
 /// dependency targets to preload.
-struct TailLoadPlan {
+pub(super) struct TailLoadPlan {
     /// Every event's issue, including removal targets.
-    touched_ids: BTreeSet<String>,
+    pub(super) touched_ids: BTreeSet<String>,
     /// Removed issues: event targets plus cascade sets.
-    removed_ids: BTreeSet<String>,
+    pub(super) removed_ids: BTreeSet<String>,
     /// Dependency targets the tail adds.
-    dep_targets: BTreeSet<String>,
+    pub(super) dep_targets: BTreeSet<String>,
     /// External refs the tail mentions (for the collapse overlay).
-    tail_refs: BTreeSet<String>,
+    pub(super) tail_refs: BTreeSet<String>,
     /// Issues the tail creates.
-    created_ids: BTreeSet<String>,
+    pub(super) created_ids: BTreeSet<String>,
 }
 
 impl TailLoadPlan {
@@ -382,7 +391,7 @@ impl TailLoadPlan {
     /// winners: creations, removals, or ref mentions. Otherwise the
     /// compact index, collapse overlay, and position renumbering are all
     /// provably no-ops and the resume stays on touched rows alone.
-    fn needs_index(&self) -> bool {
+    pub(super) fn needs_index(&self) -> bool {
         !self.created_ids.is_empty()
             || !self.removed_ids.is_empty()
             || !self.tail_refs.is_empty()
@@ -390,7 +399,7 @@ impl TailLoadPlan {
 }
 
 /// Scan one merged tail for everything the resume must preload.
-fn tail_load_plan(merged: &[&BeadEventRecordWire]) -> TailLoadPlan {
+pub(super) fn tail_load_plan(merged: &[&BeadEventRecordWire]) -> TailLoadPlan {
     let mut plan = TailLoadPlan {
         touched_ids: BTreeSet::new(),
         removed_ids: BTreeSet::new(),
@@ -434,20 +443,20 @@ fn tail_load_plan(merged: &[&BeadEventRecordWire]) -> TailLoadPlan {
 
 /// Compact issue index: identity plus collapse and lineage inputs, in
 /// stored position order. Small columns only, never fat issue rows.
-struct IssueIndex {
+pub(super) struct IssueIndex {
     /// `(id, external_ref, created_at)` in stored position order.
-    ordered: Vec<(String, String, String)>,
+    pub(super) ordered: Vec<(String, String, String)>,
     /// `id -> (external_ref, created_at)`.
-    by_id: BTreeMap<String, (String, String)>,
+    pub(super) by_id: BTreeMap<String, (String, String)>,
     /// `child id -> parent id`, for lineage roots.
-    parents: BTreeMap<String, String>,
+    pub(super) parents: BTreeMap<String, String>,
 }
 
 impl IssueIndex {
     /// Empty index for tails that provably need none: without
     /// creations, removals, or ref mentions the id set, collapse
     /// winners, and positions all stay exact.
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         IssueIndex {
             ordered: Vec::new(),
             by_id: BTreeMap::new(),
@@ -457,7 +466,9 @@ impl IssueIndex {
 }
 
 /// Load the compact issue index in stored position order.
-fn load_issue_index(connection: &Connection) -> Result<IssueIndex, String> {
+pub(super) fn load_issue_index(
+    connection: &Connection,
+) -> Result<IssueIndex, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, external_ref, created_at, parent FROM issues ORDER BY position",
@@ -493,7 +504,7 @@ fn load_issue_index(connection: &Connection) -> Result<IssueIndex, String> {
 }
 
 /// Load fat issue rows plus positions for exactly the given ids.
-fn load_rows(
+pub(super) fn load_rows(
     connection: &Connection,
     ids: &BTreeSet<&str>,
 ) -> Result<BTreeMap<String, (String, i64)>, String> {
@@ -529,7 +540,7 @@ fn load_rows(
 
 /// Issues whose dependency lists name a removed issue: the cascade
 /// prunes them, so their rows reload for the resume.
-fn query_dependents(
+pub(super) fn query_dependents(
     connection: &Connection,
     removed_ids: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
@@ -563,7 +574,7 @@ fn query_dependents(
 /// Manifest/config gate: only stream-count growth from pure additions
 /// keeps the tail open. Anything else (rewritten manifest, any config
 /// content change) rebuilds.
-fn gate_manifest_config(
+pub(super) fn gate_manifest_config(
     meta: &CacheMeta,
     fingerprint: &ManifestConfigFingerprint,
     new_stream_count: usize,
@@ -590,7 +601,9 @@ fn gate_manifest_config(
 }
 
 /// One event's merge key in the k-way merge ordering.
-fn tail_merge_key(event: &BeadEventRecordWire) -> (String, usize, String) {
+pub(super) fn tail_merge_key(
+    event: &BeadEventRecordWire,
+) -> (String, usize, String) {
     (
         event.timestamp.clone(),
         event_operation_priority(event.operation),
@@ -607,12 +620,12 @@ struct StreamRead {
 }
 
 /// Refreshed signature for a stream whose bytes were read.
-struct NewStreamSig {
-    size: u64,
-    mtime_ns: i64,
-    inode: u64,
-    byte_len: u64,
-    content_hash: String,
+pub(super) struct NewStreamSig {
+    pub(super) size: u64,
+    pub(super) mtime_ns: i64,
+    pub(super) inode: u64,
+    pub(super) byte_len: u64,
+    pub(super) content_hash: String,
 }
 
 /// Read one stream file, capturing the signature from the same open
@@ -672,6 +685,7 @@ fn commit_sweep_refresh(
     token: &str,
     stored: &BTreeMap<String, StoredStreamSig>,
     tail_sigs: &BTreeMap<String, NewStreamSig>,
+    finish: RefreshFinish,
 ) -> Result<TailDecision, Fault> {
     let now = now_ns();
     let mut refreshed: BTreeMap<String, (u64, i64, u64, u64, String)> =
@@ -743,28 +757,33 @@ fn commit_sweep_refresh(
         cache_path,
         &committed_sweep_sigs(&refreshed),
     )?;
-    let snapshot = load_snapshot(connection).map_err(|_| {
-        drop_cache_file(cache_path);
-        Fault::Cache
-    })?;
+    let snapshot = match finish {
+        RefreshFinish::Snapshot => {
+            Some(load_snapshot(connection).map_err(|_| {
+                drop_cache_file(cache_path);
+                Fault::Cache
+            })?)
+        }
+        RefreshFinish::Readiness => None,
+    };
     Ok(TailDecision::Served(snapshot))
 }
 
 /// What the partial resume decided: rows to write, rows to drop, and
 /// where every survivor sits.
-struct ResumedTail {
+pub(super) struct ResumedTail {
     /// Changed and added survivors: `(id, row, issue)` for upsert.
-    upserts: Vec<(String, String, IssueWire)>,
+    pub(super) upserts: Vec<(String, String, IssueWire)>,
     /// Removed issues plus collapse losers present in the DB.
-    deletes: Vec<String>,
+    pub(super) deletes: Vec<String>,
     /// Final positions for upserts and moved survivors.
-    positions: BTreeMap<String, i64>,
+    pub(super) positions: BTreeMap<String, i64>,
     /// Survivors whose position moved but whose row did not change.
-    moved: Vec<String>,
+    pub(super) moved: Vec<String>,
     /// Added survivors, for suffix inserts.
-    added: Vec<String>,
+    pub(super) added: Vec<String>,
     /// Sources whose edges are rewritten, plus removals.
-    edge_rescope: BTreeSet<String>,
+    pub(super) edge_rescope: BTreeSet<String>,
 }
 
 /// Resume the post-pass over the partial map plus the compact index.
@@ -776,7 +795,7 @@ struct ResumedTail {
 /// collapse winners are decided by `(created_at, id)` per ref, which the
 /// index carries, and a collapse that keeps one row per ref leaves refs
 /// unique by construction, exactly as the full post-pass does.
-fn resume_from_partial(
+pub(super) fn resume_from_partial(
     index: &IssueIndex,
     partial: &BTreeMap<String, IssueWire>,
     plan: &TailLoadPlan,
@@ -969,6 +988,7 @@ fn commit_tail(
     new_frontier: &str,
     fingerprint: &ManifestConfigFingerprint,
     stats: &TailStats,
+    finish: RefreshFinish,
 ) -> Result<TailDecision, Fault> {
     // Full parent map for lineage roots: upsert rows may descend from
     // untouched ancestors outside the partial map.
@@ -1052,7 +1072,9 @@ fn commit_tail(
         Err(WriteFault::CasLost) => {
             let _ = connection.execute_batch("ROLLBACK");
             return match open_and_serve(cache_path) {
-                Ok(ServeOutcome::Hit(fresh)) => Ok(TailDecision::Served(fresh)),
+                Ok(ServeOutcome::Hit(fresh)) => {
+                    Ok(TailDecision::Served(Some(fresh)))
+                }
                 _ => Err(Fault::Cache),
             };
         }
@@ -1067,10 +1089,15 @@ fn commit_tail(
         cache_path,
         &committed_sweep_sigs(&refreshed),
     )?;
-    let snapshot = load_snapshot(connection).map_err(|_| {
-        drop_cache_file(cache_path);
-        Fault::Cache
-    })?;
+    let snapshot = match finish {
+        RefreshFinish::Snapshot => {
+            Some(load_snapshot(connection).map_err(|_| {
+                drop_cache_file(cache_path);
+                Fault::Cache
+            })?)
+        }
+        RefreshFinish::Readiness => None,
+    };
     Ok(TailDecision::Tailed(snapshot))
 }
 
@@ -1135,7 +1162,7 @@ fn refreshed_streams(
 /// streams — need writes. Unchanged stream membership is proven by the
 /// preserved rows, not by rewriting them. Uses `INSERT ... ON CONFLICT
 /// DO UPDATE` with a change guard so untouched rows are not rewritten.
-fn write_refreshed_streams(
+pub(super) fn write_refreshed_streams(
     connection: &Connection,
     refreshed: &BTreeMap<String, (u64, i64, u64, u64, String)>,
     tail_sigs: &BTreeMap<String, NewStreamSig>,
@@ -1148,6 +1175,8 @@ fn write_refreshed_streams(
             "INSERT INTO streams (stream_id, size, mtime_ns, inode, byte_len, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(stream_id) DO UPDATE SET size = excluded.size, mtime_ns = excluded.mtime_ns, inode = excluded.inode, byte_len = excluded.byte_len, content_hash = excluded.content_hash WHERE streams.size != excluded.size OR streams.mtime_ns != excluded.mtime_ns OR streams.inode != excluded.inode OR streams.byte_len != excluded.byte_len OR streams.content_hash != excluded.content_hash",
         )
         .map_err(|_| WriteFault::Other)?;
+    #[cfg(test)]
+    let mut written = 0u64;
     for stream_id in tail_sigs.keys() {
         let Some((size, mtime_ns, inode, byte_len, content_hash)) =
             refreshed.get(stream_id)
@@ -1164,12 +1193,18 @@ fn write_refreshed_streams(
                 content_hash,
             ])
             .map_err(|_| WriteFault::Other)?;
+        #[cfg(test)]
+        {
+            written += 1;
+        }
     }
+    #[cfg(test)]
+    store_io_stats::record_sig_rows_written(written);
     Ok(())
 }
 
 /// Set one meta key inside the open write txn.
-fn meta_set(
+pub(super) fn meta_set(
     connection: &Connection,
     key: &str,
     value: &str,
@@ -1187,7 +1222,7 @@ fn meta_set(
 /// added issues, position fixes for moved survivors, deletes for
 /// removals and collapse losers, rescoped edges, SQL provenance
 /// transitions in event order, and suffix maintenance.
-fn write_tail_rows(
+pub(super) fn write_tail_rows(
     connection: &Connection,
     resumed: &ResumedTail,
     parent_of: &BTreeMap<&str, &str>,

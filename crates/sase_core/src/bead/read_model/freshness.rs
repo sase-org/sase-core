@@ -24,6 +24,8 @@ use std::time::SystemTime;
 use sha2::{Digest, Sha256};
 
 use crate::bead::jsonl::{event_manifest_path, event_streams_dir, file_inode};
+#[cfg(test)]
+use crate::bead::mutation::store_io_stats;
 use crate::bead::wire::BeadError;
 use crate::fs_sig::mtime_ns;
 
@@ -96,6 +98,8 @@ pub fn freshness_token(beads_dir: &Path) -> Result<String, BeadError> {
 pub fn sweep_store_signatures(
     beads_dir: &Path,
 ) -> Result<StoreSignatures, BeadError> {
+    #[cfg(test)]
+    store_io_stats::record_full_sweep();
     let streams_dir = event_streams_dir(beads_dir);
     let mut stream_names: Vec<String> = vec![];
     match fs::read_dir(&streams_dir) {

@@ -797,6 +797,10 @@ pub(crate) mod store_io_stats {
         static HYDRATED_ROWS: Cell<u64> = const { Cell::new(0) };
         static STREAM_READS: Cell<u64> = const { Cell::new(0) };
         static VALIDATION_RUNS: Cell<u64> = const { Cell::new(0) };
+        static FULL_SWEEPS: Cell<u64> = const { Cell::new(0) };
+        static SNAPSHOT_LOADS: Cell<u64> = const { Cell::new(0) };
+        static SIG_ROWS_WRITTEN: Cell<u64> = const { Cell::new(0) };
+        static PUBLISHED_ROWS: Cell<u64> = const { Cell::new(0) };
     }
 
     pub fn reset() {
@@ -807,6 +811,10 @@ pub(crate) mod store_io_stats {
         HYDRATED_ROWS.with(|cell| cell.set(0));
         STREAM_READS.with(|cell| cell.set(0));
         VALIDATION_RUNS.with(|cell| cell.set(0));
+        FULL_SWEEPS.with(|cell| cell.set(0));
+        SNAPSHOT_LOADS.with(|cell| cell.set(0));
+        SIG_ROWS_WRITTEN.with(|cell| cell.set(0));
+        PUBLISHED_ROWS.with(|cell| cell.set(0));
     }
 
     pub fn loads() -> u64 {
@@ -879,6 +887,47 @@ pub(crate) mod store_io_stats {
     /// Physical event-stream files read by indexed mutation loads.
     pub fn record_stream_reads(count: u64) {
         STREAM_READS.with(|cell| {
+            cell.set(cell.get().saturating_add(count));
+        });
+    }
+
+    /// Full per-stream stat sweeps run inside the read model.
+    pub fn full_sweeps() -> u64 {
+        FULL_SWEEPS.with(Cell::get)
+    }
+
+    /// Full-row snapshot deserializations inside the read model.
+    pub fn snapshot_loads() -> u64 {
+        SNAPSHOT_LOADS.with(Cell::get)
+    }
+
+    /// Stream-signature rows upserted by tail and publication commits.
+    pub fn sig_rows_written() -> u64 {
+        SIG_ROWS_WRITTEN.with(Cell::get)
+    }
+
+    /// Issue rows published direct (upserts plus deletes) without a
+    /// second sweep or snapshot load.
+    pub fn published_rows() -> u64 {
+        PUBLISHED_ROWS.with(Cell::get)
+    }
+
+    pub fn record_full_sweep() {
+        FULL_SWEEPS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
+
+    pub fn record_snapshot_load() {
+        SNAPSHOT_LOADS.with(|cell| cell.set(cell.get().saturating_add(1)));
+    }
+
+    pub fn record_sig_rows_written(count: u64) {
+        SIG_ROWS_WRITTEN.with(|cell| {
+            cell.set(cell.get().saturating_add(count));
+        });
+    }
+
+    pub fn record_published_rows(count: u64) {
+        PUBLISHED_ROWS.with(|cell| {
             cell.set(cell.get().saturating_add(count));
         });
     }

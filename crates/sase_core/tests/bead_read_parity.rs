@@ -483,7 +483,23 @@ fn event_store_supports_read_queries_without_legacy_projection() {
         ids(bead_get_epic_children(&beads_dir, "beads-1").unwrap()),
         vec!["beads-1.1"]
     );
+    // The projection is an on-demand export for event stores: its
+    // absence warns only for legacy stores that still read it.
     assert!(!bead_doctor(&beads_dir)
+        .unwrap()
+        .contains(&"WARNING: issues.jsonl missing".to_string()));
+}
+
+#[test]
+fn doctor_still_warns_when_a_legacy_store_lacks_issues_jsonl() {
+    let temp = tempdir().unwrap();
+    let beads_dir = temp.path().join("sdd/beads");
+    fs::create_dir_all(&beads_dir).unwrap();
+    fs::write(beads_dir.join("config.json"), "{}\n").unwrap();
+    fs::write(beads_dir.join("beads.db"), "").unwrap();
+    // No event store and no legacy projection: the warning still applies.
+
+    assert!(bead_doctor(&beads_dir)
         .unwrap()
         .contains(&"WARNING: issues.jsonl missing".to_string()));
 }

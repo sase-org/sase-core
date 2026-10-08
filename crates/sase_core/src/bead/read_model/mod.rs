@@ -9,6 +9,7 @@
 pub(crate) mod alloc;
 mod freshness;
 mod location;
+pub(crate) mod publish;
 pub mod queries;
 mod store;
 mod tail;
@@ -17,6 +18,9 @@ mod tests;
 
 pub use freshness::{sweep_store_signatures, READ_MODEL_SWEEP_INTERVAL_SECS};
 pub use location::read_model_cache_path_for_store;
+pub(crate) use publish::{
+    publish_mutation_write, AppendedStream, CacheWitness, PublishOutcome,
+};
 pub use queries::{
     cached_blocked, cached_blocked_ids, cached_board, cached_closed_ids,
     cached_detail, cached_epic_children, cached_list, cached_ready,
@@ -33,4 +37,7 @@ pub use store::{
     CachedStoreSnapshot, BEAD_READ_MODEL_STATUS_WIRE_SCHEMA_VERSION,
     BEAD_READ_MODEL_VERIFY_WIRE_SCHEMA_VERSION, READ_MODEL_REDUCER_VERSION,
     READ_MODEL_SCHEMA_VERSION,
+};
+pub(crate) use store::{
+    fingerprint_manifest_config, ManifestConfigFingerprint,
 };

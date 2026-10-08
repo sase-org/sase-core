@@ -34,6 +34,9 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 
+use super::publish::apply_corrections;
+use super::publish::publish_cached_write;
+use super::view::read_admission_witness;
 use crate::bead::config::default_config;
 use crate::bead::config::load_config;
 use crate::bead::config::save_config;
@@ -45,7 +48,7 @@ use crate::bead::events::BeadEventStreamWire;
 use crate::bead::events::BEAD_EVENT_SCHEMA_VERSION;
 use crate::bead::jsonl::event_streams_dir;
 use crate::bead::jsonl::read_event_stream_file;
-use crate::bead::jsonl::write_event_store_changed_with_total;
+use crate::bead::jsonl::write_event_store_changed_with_total_and_signatures;
 use crate::bead::mutation::close_remove::reject_unclosed_descendants_in_batch;
 use crate::bead::mutation::mutation_wire::BeadMutationOutcomeWire;
 use crate::bead::mutation::mutation_wire::BeadUpdateFieldsWire;
@@ -58,6 +61,7 @@ use crate::bead::mutation::store::outcome;
 use crate::bead::mutation::store::store_io_stats;
 use crate::bead::read_model::ensure_cache_ready_for_mutation_at;
 use crate::bead::read_model::read_model_cache_path_for_store;
+use crate::bead::read_model::AppendedStream;
 use crate::bead::wire::BeadError;
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::IssueWire;
@@ -290,76 +294,6 @@ impl LazyStream {
     }
 }
 
-/// Publish appended events through the snapshot-plus-tail refresh.
-///
-/// Row normalization, edge cleanup, suffixes, lineage, ordering, and link
-/// provenance keep their single definition in the tail reducer: the refresh
-/// recomputes the touched rows from the appended bytes instead of trusting
-/// the imperative overlay. A cache fault afterwards is fail-open (the events
-/// are durable and the next read tails, rebuilds, or replays).
-///
-/// When the cache claims to be fresh but a touched row differs from the
-/// overlay, the reducer truth wins: the stored row is returned as a
-/// correction so the outcome reflects durable state and no retry can
-/// duplicate the event. A mismatch always signals an overlay bug; the
-/// parity harness catches it, but production stays safe.
-fn publish_indexed_write(
-    beads_dir: &Path,
-    cache_path: &Path,
-    expected: &[(String, IssueWire)],
-) -> Result<Vec<(String, IssueWire)>, BeadError> {
-    let mut corrected = Vec::new();
-    let fresh = ensure_cache_ready_for_mutation_at(beads_dir, cache_path)
-        .map_err(|_| ())
-        .unwrap_or(false);
-    if !fresh || expected.is_empty() {
-        return Ok(corrected);
-    }
-    let connection = match open_indexed(cache_path) {
-        Ok(connection) => connection,
-        Err(_) => return Ok(corrected),
-    };
-    for (issue_id, overlay) in expected {
-        let Some(stored) = fetch_row_hydration_silent(&connection, issue_id)
-        else {
-            return Ok(Vec::new());
-        };
-        if serde_json::to_value(&stored).unwrap_or_default()
-            != serde_json::to_value(overlay).unwrap_or_default()
-        {
-            corrected.push((issue_id.clone(), stored));
-        }
-    }
-    Ok(corrected)
-}
-
-/// Apply reducer-truth corrections to outcome rows, keyed by issue ID.
-fn apply_corrections(
-    rows: &mut [IssueWire],
-    corrected: &[(String, IssueWire)],
-) {
-    for row in rows.iter_mut() {
-        if let Some((_, truth)) = corrected.iter().find(|(id, _)| id == &row.id)
-        {
-            *row = truth.clone();
-        }
-    }
-}
-
-/// Row fetch for the publish check that never perturbs `store_io_stats`.
-fn fetch_row_hydration_silent(
-    connection: &Connection,
-    issue_id: &str,
-) -> Option<IssueWire> {
-    let mut statement = connection
-        .prepare("SELECT row FROM issues WHERE id = ?1")
-        .ok()?;
-    let mut rows = statement.query([issue_id]).ok()?;
-    let row = rows.next().ok()??;
-    let text: String = row.get(0).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
 /// Indexed `append_issue_note`: one row, one stream, changed-only
 /// validation, then tail publication.
 ///
@@ -393,6 +327,8 @@ pub(crate) fn try_append_note(
     let Some(mut lazy) = load_lazy_stream(beads_dir, &stream_id) else {
         return Ok(None);
     };
+    let witness = read_admission_witness(cache_path);
+    let base_len = lazy.stream.events.len();
     let event_id = lazy.append_event(
         &stream_id,
         BeadEventOperationWire::NoteAppended,
@@ -426,7 +362,7 @@ pub(crate) fn try_append_note(
     store_io_stats::record_save();
     #[cfg(test)]
     store_io_stats::record_validation_runs(1);
-    write_event_store_changed_with_total(
+    let mut signatures = write_event_store_changed_with_total_and_signatures(
         beads_dir,
         std::slice::from_ref(&lazy.stream),
         &changed,
@@ -434,14 +370,30 @@ pub(crate) fn try_append_note(
     )?;
     save_config(beads_dir, &config)?;
     drop(connection);
-    let corrected = publish_indexed_write(
+    // A stream the writer skipped has no signature to publish against;
+    // the durable events stand and the next read tails them in.
+    let appended = signatures
+        .remove(&stream_id)
+        .map(|signature| {
+            vec![AppendedStream {
+                stream_id: stream_id.clone(),
+                events: lazy.stream.events[base_len..].to_vec(),
+                signature,
+            }]
+        })
+        .unwrap_or_default();
+    let expected = vec![(issue.id.clone(), issue.clone())];
+    let corrected = publish_cached_write(
         beads_dir,
         cache_path,
-        std::slice::from_ref(&(issue.id.clone(), issue.clone())),
-    )?;
+        (!appended.is_empty()).then_some(&witness),
+        &appended,
+        &expected,
+    )
+    .corrections();
     let mut returned = vec![issue.clone()];
     apply_corrections(&mut returned, &corrected);
-    let issue = returned.pop().expect("one note row");
+    issue = returned.pop().expect("one note row");
 
     let mut result = outcome("note", true, vec![issue.id.clone()]);
     result.issue = Some(issue);
@@ -470,6 +422,7 @@ pub(crate) fn try_update_issues(
         Ok(connection) => connection,
         Err(_) => return Ok(None),
     };
+    let witness = read_admission_witness(cache_path);
     let mut seen = HashSet::new();
     let mut targets: Vec<String> = Vec::new();
     let mut requested_ids: Vec<String> = Vec::with_capacity(issue_ids.len());
@@ -546,6 +499,7 @@ pub(crate) fn try_update_issues(
     let fallback = default_config("beads", "");
     let config = load_config(beads_dir, fallback)?;
     let mut streams: Vec<BeadEventStreamWire> = Vec::new();
+    let mut base_lens: Vec<usize> = Vec::new();
     let mut changed = BTreeSet::new();
     let mut changed_ids = Vec::with_capacity(planned.len());
     for issue in &planned {
@@ -561,6 +515,7 @@ pub(crate) fn try_update_issues(
                     drop(connection);
                     return Ok(None);
                 };
+                base_lens.push(lazy.stream.events.len());
                 streams.push(lazy.stream);
                 streams.len() - 1
             }
@@ -605,14 +560,38 @@ pub(crate) fn try_update_issues(
     store_io_stats::record_save();
     #[cfg(test)]
     store_io_stats::record_validation_runs(planned.len() as u64);
-    write_event_store_changed_with_total(beads_dir, &streams, &changed, total)?;
+    let mut signatures = write_event_store_changed_with_total_and_signatures(
+        beads_dir, &streams, &changed, total,
+    )?;
     save_config(beads_dir, &config)?;
     let expected: Vec<(String, IssueWire)> = planned
         .iter()
         .map(|issue| (issue.id.clone(), issue.clone()))
         .collect();
     drop(connection);
-    let corrected = publish_indexed_write(beads_dir, cache_path, &expected)?;
+    // Streams the writer skipped carry no signature; their durable
+    // events stand and the next read tails them in.
+    let appended: Vec<AppendedStream> = streams
+        .iter()
+        .zip(base_lens.iter())
+        .filter_map(|(stream, base_len)| {
+            signatures.remove(&stream.stream_id).map(|signature| {
+                AppendedStream {
+                    stream_id: stream.stream_id.clone(),
+                    events: stream.events[*base_len..].to_vec(),
+                    signature,
+                }
+            })
+        })
+        .collect();
+    let corrected = publish_cached_write(
+        beads_dir,
+        cache_path,
+        (!appended.is_empty()).then_some(&witness),
+        &appended,
+        &expected,
+    )
+    .corrections();
     apply_corrections(&mut resulting_issues, &corrected);
 
     let mut result = outcome("update", true, changed_ids);

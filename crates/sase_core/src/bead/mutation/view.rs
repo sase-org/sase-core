@@ -29,6 +29,7 @@ use crate::bead::jsonl::{event_streams_dir, read_event_stream_file};
 use crate::bead::read_model::alloc;
 use crate::bead::read_model::{
     ensure_cache_ready_for_mutation_at, read_model_cache_path_for_store,
+    CacheWitness,
 };
 use crate::bead::wire::{BeadError, IssueWire};
 
@@ -40,19 +41,6 @@ pub(crate) enum MutationViewBacking {
         witness: CacheWitness,
     },
     Replay,
-}
-
-/// Baseline witness held while retrieving rows inside the flock.
-///
-/// Captured at admission after the mandatory full freshness sweep: the
-/// SQLite generation, merge frontier, and cache token that the later
-/// durable append validates against. A lost race rolls back instead of
-/// pairing newer signatures with older rows.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CacheWitness {
-    pub(crate) generation: String,
-    pub(crate) frontier: String,
-    pub(crate) token: String,
 }
 
 /// One lookup view for a single locked mutation.
@@ -911,14 +899,9 @@ fn read_cache_witness(cache_path: &Path) -> Result<CacheWitness, BeadError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| BeadError::io(error.to_string()))?;
-    let mut generation = String::new();
-    let mut frontier = String::new();
-    let mut token = String::new();
-    for (key, slot) in [
-        ("generation", &mut generation),
-        ("frontier", &mut frontier),
-        ("token", &mut token),
-    ] {
+    let mut values: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for key in ["generation", "content_generation", "frontier", "token"] {
         let mut stmt = connection
             .prepare("SELECT value FROM meta WHERE key = ?1")
             .map_err(|error| BeadError::io(error.to_string()))?;
@@ -929,14 +912,32 @@ fn read_cache_witness(cache_path: &Path) -> Result<CacheWitness, BeadError> {
             .next()
             .map_err(|error| BeadError::io(error.to_string()))?
         {
-            *slot = row
-                .get::<_, String>(0)
-                .map_err(|error| BeadError::io(error.to_string()))?;
+            values.insert(
+                key.to_string(),
+                row.get::<_, String>(0)
+                    .map_err(|error| BeadError::io(error.to_string()))?,
+            );
         }
     }
+    let counter = |key: &str| {
+        values
+            .get(key)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    };
     Ok(CacheWitness {
-        generation,
-        frontier,
-        token,
+        generation: counter("generation"),
+        content_generation: counter("content_generation"),
+        frontier: values.get("frontier").cloned().unwrap_or_default(),
+        token: values.get("token").cloned().unwrap_or_default(),
     })
+}
+
+/// Read the admission witness for a cache path outside the view.
+///
+/// Best-effort like [`MutationView::load_cached`]: any fault yields an
+/// all-zero witness, and the later CAS treats it as stale (skip and
+/// repair) rather than failing the mutation.
+pub(crate) fn read_admission_witness(cache_path: &Path) -> CacheWitness {
+    read_cache_witness(cache_path).unwrap_or_default()
 }

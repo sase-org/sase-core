@@ -239,7 +239,8 @@ fn try_cached_create(
     use crate::bead::events::BEAD_EVENT_SCHEMA_VERSION;
     use crate::bead::jsonl::event_streams_dir;
     use crate::bead::jsonl::read_event_stream_file;
-    use crate::bead::jsonl::write_event_store_changed_with_total;
+    use crate::bead::jsonl::write_event_store_changed_with_total_and_signatures;
+    use crate::bead::read_model::AppendedStream;
 
     let mut request = request.clone();
     if let Some(parent_id) = request.parent_id.as_deref() {
@@ -356,6 +357,7 @@ fn try_cached_create(
     };
     #[cfg(test)]
     super::store::store_io_stats::record_stream_reads(1);
+    let base_len = stream.events.len();
 
     fn push_event(
         stream: &mut BeadEventStreamWire,
@@ -460,7 +462,7 @@ fn try_cached_create(
     super::store::store_io_stats::record_save();
     #[cfg(test)]
     super::store::store_io_stats::record_validation_runs(1);
-    write_event_store_changed_with_total(
+    let mut signatures = write_event_store_changed_with_total_and_signatures(
         beads_dir,
         std::slice::from_ref(&stream),
         &changed,
@@ -472,14 +474,29 @@ fn try_cached_create(
     let cache_path_opt =
         crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
     if let Some(cache_path) = cache_path_opt {
-        let baseline = view.witness().cloned();
+        // A stream the writer skipped has no signature to publish
+        // against; the durable events stand and the next read tails
+        // them in.
+        let appended = signatures
+            .remove(&stream_id)
+            .map(|signature| {
+                vec![AppendedStream {
+                    stream_id: stream_id.clone(),
+                    events: stream.events[base_len..].to_vec(),
+                    signature,
+                }]
+            })
+            .unwrap_or_default();
         let expected = vec![(issue.id.clone(), issue.clone())];
-        let corrected = super::publish::publish_indexed_write(
+        let witness = (!appended.is_empty()).then(|| view.witness()).flatten();
+        let corrected = super::publish::publish_cached_write(
             beads_dir,
             &cache_path,
-            baseline.as_ref(),
+            witness,
+            &appended,
             &expected,
-        )?;
+        )
+        .corrections();
         let mut returned = vec![issue.clone()];
         super::publish::apply_corrections(&mut returned, &corrected);
         issue = returned.pop().expect("one created row");
