@@ -1,5 +1,8 @@
-//! `plan_decisions_*` and `plan_decision_quote_match` bindings:
-//! frozen definitions, digest, resolution, and human quote matching.
+//! `plan_decisions_*`, `plan_decision_quote_match`, `plan_decision_sheet`,
+//! `plan_decision_summary`, and `plan_decisions_prompt_block` bindings:
+//! frozen definitions, digest, resolution, human quote matching, the
+//! Decision Sheet, the shared summary sentence, and the implementer
+//! block.
 
 use std::collections::BTreeMap;
 
@@ -9,11 +12,15 @@ use crate::prelude::*;
 use pyo3::wrap_pyfunction;
 use sase_core::plan::{
     plan_decision_quote_match as core_plan_decision_quote_match,
+    plan_decision_sheet as core_plan_decision_sheet,
+    plan_decision_summary as core_plan_decision_summary,
     plan_decisions_digest as core_plan_decisions_digest,
     plan_decisions_payload as core_plan_decisions_payload,
+    plan_decisions_prompt_block as core_plan_decisions_prompt_block,
     plan_decisions_resolve as core_plan_decisions_resolve,
     PlanDecisionDefinitionWire, PlanDecisionHostFactWire,
-    PlanDecisionQuoteTextWire, ValidatedPlanWire,
+    PlanDecisionInheritedWire, PlanDecisionQuoteTextWire,
+    PlanDecisionSheetWire, ValidatedPlanWire,
 };
 
 /// Freeze a validated plan's decisions into an ordered review vector.
@@ -136,12 +143,125 @@ fn quote_texts_from_py(
         .collect()
 }
 
-/// Register the decision resolution bindings on the extension module.
+/// Build the Decision Sheet from frozen definitions and an accepted
+/// answer vector.
+///
+/// `definitions` is the frozen review vector, `values` maps each id
+/// to its canonical value, and `review_revision` is the displayed
+/// revision the approval refers to.
+#[pyfunction]
+#[pyo3(name = "plan_decision_sheet")]
+fn py_plan_decision_sheet<'py>(
+    py: Python<'py>,
+    definitions: &Bound<'_, PyAny>,
+    values: &Bound<'_, PyAny>,
+    review_revision: u64,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(definitions)?;
+    let definitions: Vec<PlanDecisionDefinitionWire> =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "invalid decision definitions payload: {error}"
+            ))
+        })?;
+    let values = py_to_json_value(values)?;
+    plan_result_to_py(
+        py,
+        core_plan_decision_sheet(&definitions, &values, review_revision),
+    )
+}
+
+/// Render the one summary sentence every surface shares.
+///
+/// `verdict` is `coder + commit`, `coder`, `commit`, or `epic launch`;
+/// `form` is `short` or `full`. Unknown verdicts and forms fail as
+/// binding errors, never as interpolated text.
+#[pyfunction]
+#[pyo3(name = "plan_decision_summary")]
+fn py_plan_decision_summary<'py>(
+    py: Python<'py>,
+    sheet: &Bound<'_, PyAny>,
+    verdict: &str,
+    form: &str,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(sheet)?;
+    let sheet: PlanDecisionSheetWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "invalid decision sheet payload: {error}"
+            ))
+        })?;
+    plan_result_to_py(py, core_plan_decision_summary(&sheet, verdict, form))
+}
+
+/// Render the host-owned implementer block.
+///
+/// `decided_by` is `reviewer`, `auto`, or `agent`; `decided_via` is a
+/// review surface (`tui`, `telegram`, `mobile`, or `cli`), absent for
+/// auto. `audience` is `tale_coder`, `epic_phase`, or `epic_land`;
+/// `inherited` is an optional `{sheet, epic_title}` record carrying
+/// the epic's accepted authorization.
+#[pyfunction]
+#[pyo3(name = "plan_decisions_prompt_block")]
+fn py_plan_decisions_prompt_block<'py>(
+    py: Python<'py>,
+    sheet: &Bound<'_, PyAny>,
+    decided_by: &str,
+    decided_via: &Bound<'_, PyAny>,
+    audience: &str,
+    inherited: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(sheet)?;
+    let sheet: PlanDecisionSheetWire =
+        serde_json::from_value(value).map_err(|error| {
+            PyValueError::new_err(format!(
+                "invalid decision sheet payload: {error}"
+            ))
+        })?;
+    // `None` means no transport and no inherited grants; anything else
+    // must be a surface string and a `{sheet, epic_title}` record.
+    // Malformed entries fail as binding errors, never as panics.
+    let via: Option<String> = if decided_via.is_none() {
+        None
+    } else {
+        Some(decided_via.extract::<String>().map_err(|_| {
+            PyValueError::new_err(
+                "decided_via must be tui, telegram, mobile, cli, or None",
+            )
+        })?)
+    };
+    let inherited_wire: Option<PlanDecisionInheritedWire> =
+        if inherited.is_none() {
+            None
+        } else {
+            let inherited_value = py_to_json_value(inherited)?;
+            Some(serde_json::from_value(inherited_value).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "invalid inherited decisions payload: {error}"
+                ))
+            })?)
+        };
+    plan_result_to_py(
+        py,
+        core_plan_decisions_prompt_block(
+            &sheet,
+            decided_by,
+            via.as_deref(),
+            audience,
+            inherited_wire.as_ref(),
+        ),
+    )
+}
+
+/// Register the decision bindings on the extension module.
 pub(crate) fn register_decisions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_plan_decisions_payload, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_decisions_digest, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_decisions_resolve, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_decision_quote_match, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_decision_sheet, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_decision_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_decisions_prompt_block, m)?)?;
     Ok(())
 }
 
@@ -458,6 +578,65 @@ mod tests {
         });
     }
 
+    fn sheet(
+        py: Python<'_>,
+        definitions: &serde_json::Value,
+        values: &serde_json::Value,
+        review_revision: u64,
+    ) -> serde_json::Value {
+        let definitions = to_object(py, definitions);
+        let values = to_object(py, values);
+        let out = py_plan_decision_sheet(
+            py,
+            definitions.bind(py),
+            values.bind(py),
+            review_revision,
+        )
+        .unwrap();
+        from_object(py, &out)
+    }
+
+    fn summary(
+        py: Python<'_>,
+        sheet: &serde_json::Value,
+        verdict: &str,
+        form: &str,
+    ) -> String {
+        let sheet = to_object(py, sheet);
+        let out = py_plan_decision_summary(py, sheet.bind(py), verdict, form)
+            .unwrap();
+        from_object(py, &out).as_str().unwrap().to_string()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn block(
+        py: Python<'_>,
+        sheet: &serde_json::Value,
+        decided_by: &str,
+        decided_via: Option<&str>,
+        audience: &str,
+        inherited: Option<&serde_json::Value>,
+    ) -> String {
+        let sheet_arg = to_object(py, sheet);
+        let via_arg = match decided_via {
+            Some(via) => to_object(py, &json!(via)),
+            None => to_object(py, &serde_json::Value::Null),
+        };
+        let owned = inherited.map(|record| to_object(py, record));
+        let none_arg = to_object(py, &serde_json::Value::Null);
+        let inherited_arg = owned.as_ref().unwrap_or(&none_arg);
+        let out = py_plan_decisions_prompt_block(
+            py,
+            sheet_arg.bind(py),
+            decided_by,
+            via_arg.bind(py),
+            audience,
+            inherited_arg.bind(py),
+        )
+        .unwrap();
+        from_object(py, &out).as_str().unwrap().to_string()
+    }
+
     #[test]
     fn decision_bindings_reject_invalid_input_shapes() {
         pyo3::prepare_freethreaded_python();
@@ -482,6 +661,388 @@ mod tests {
                 "robot",
             )
             .expect_err("unknown caller must fail");
+        });
+    }
+
+    #[test]
+    fn sheet_summary_and_block_bindings_round_trip() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            assert!(module.getattr("plan_decision_sheet").is_ok());
+            assert!(module.getattr("plan_decision_summary").is_ok());
+            assert!(module.getattr("plan_decisions_prompt_block").is_ok());
+
+            let definitions = payload(py, &validated_value(), &facts_value());
+            let sheet = sheet(
+                py,
+                &definitions,
+                &json!({"grouping": "mode", "tui_note": true}),
+                4,
+            );
+            assert_eq!(sheet["count"], json!(2));
+            assert_eq!(sheet["memory_count"], json!(1));
+            assert_eq!(sheet["changed_count"], json!(1));
+            assert_eq!(sheet["review_revision"], json!(4));
+            assert_eq!(sheet["rows"][0]["default"], json!("pane"));
+            assert_eq!(sheet["rows"][0]["value"], json!("mode"));
+            assert_eq!(
+                sheet["rows"][1]["memory"]["provenance"],
+                json!("asked"),
+            );
+            assert_eq!(
+                sheet["rows"][1]["memory"]["quote"],
+                json!("and note the convention in the tui memory"),
+            );
+
+            assert_eq!(
+                summary(py, &sheet, "coder + commit", "full"),
+                "→ coder + commit · grouping=mode ● · 🧠 tui.md",
+            );
+            assert_eq!(summary(py, &sheet, "coder", "short"), "1 change · 🧠",);
+
+            let text =
+                block(py, &sheet, "reviewer", Some("tui"), "tale_coder", None);
+            assert!(text.starts_with(
+                "Reviewer decisions for this plan (final · reviewer \
+                 via ACE):",
+            ));
+            assert!(text.contains(
+                "- grouping = mode (planner default: pane). Implement \
+                 the \"grouping = mode\" branch;",
+            ));
+            assert!(text.contains(
+                "- tui_note = yes 🧠. Memory edits are authorized for \
+                 tui.md only.",
+            ));
+            assert!(
+                text.contains("Implement only the branches selected above.",)
+            );
+
+            // An explicit Python None carries no inherited grants.
+            let none = to_object(py, &serde_json::Value::Null);
+            let via = to_object(py, &json!("tui"));
+            let sheet_arg = to_object(py, &sheet);
+            let out = py_plan_decisions_prompt_block(
+                py,
+                sheet_arg.bind(py),
+                "reviewer",
+                via.bind(py),
+                "epic_phase",
+                none.bind(py),
+            )
+            .unwrap();
+            let explicit = from_object(py, &out);
+            assert!(explicit.as_str().unwrap().contains("reviewer via ACE"));
+        });
+    }
+
+    #[test]
+    fn sheet_bindings_reject_invalid_input_shapes() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let definitions = payload(py, &validated_value(), &facts_value());
+            let defs = to_object(py, &definitions);
+
+            // A vector missing an answer is a binding error, not a
+            // coerced display value.
+            let partial = to_object(py, &json!({"grouping": "mode"}));
+            py_plan_decision_sheet(py, defs.bind(py), partial.bind(py), 1)
+                .expect_err("missing answers must fail");
+
+            let sheet = sheet(
+                py,
+                &definitions,
+                &json!({"grouping": "pane", "tui_note": true}),
+                1,
+            );
+            let sheet_arg = to_object(py, &sheet);
+
+            // Unknown verdicts never interpolate into the sentence.
+            py_plan_decision_summary(py, sheet_arg.bind(py), "approve", "full")
+                .expect_err("unknown verdicts must fail");
+
+            // Unknown audiences and malformed inherited records fail.
+            let via = to_object(py, &json!("tui"));
+            let none = to_object(py, &serde_json::Value::Null);
+            py_plan_decisions_prompt_block(
+                py,
+                sheet_arg.bind(py),
+                "reviewer",
+                via.bind(py),
+                "tablet",
+                none.bind(py),
+            )
+            .expect_err("unknown audiences must fail");
+            let bad_via = to_object(py, &json!(7));
+            py_plan_decisions_prompt_block(
+                py,
+                sheet_arg.bind(py),
+                "reviewer",
+                bad_via.bind(py),
+                "tale_coder",
+                none.bind(py),
+            )
+            .expect_err("non-string transports must fail");
+            let bad_inherited = to_object(py, &json!({"epic_title": 7}));
+            py_plan_decisions_prompt_block(
+                py,
+                sheet_arg.bind(py),
+                "reviewer",
+                via.bind(py),
+                "tale_coder",
+                bad_inherited.bind(py),
+            )
+            .expect_err("malformed inherited records must fail");
+        });
+    }
+
+    /// Call a registered binding the way the host does: by name on
+    /// the initialized module, then read the JSON bridge result back.
+    fn call(
+        module: &Bound<'_, PyModule>,
+        name: &str,
+        args: Vec<PyObject>,
+    ) -> serde_json::Value {
+        let py = module.py();
+        let tuple = PyTuple::new_bound(py, args);
+        let out = module.getattr(name).unwrap().call1(tuple).unwrap();
+        py_to_json_value(&out).unwrap()
+    }
+
+    #[test]
+    fn seven_binding_decision_integration() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+            sase_core_rs(py, &module).unwrap();
+            for name in [
+                "plan_decisions_payload",
+                "plan_decisions_digest",
+                "plan_decisions_resolve",
+                "plan_decision_quote_match",
+                "plan_decision_sheet",
+                "plan_decision_summary",
+                "plan_decisions_prompt_block",
+            ] {
+                assert!(module.getattr(name).is_ok(), "{name} is registered",);
+            }
+
+            // A tale with a choice and a memory toggle flows through
+            // every binding: validate, freeze, digest, resolve, match
+            // the quote, sheet, both summaries, implementer block.
+            let tale = "---\ntier: tale\ntitle: Keymap help \
+                overlay\ngoal: Ship the overlay grouping rule\nsize: \
+                small\ndecisions:\n  grouping:\n    ask: How should the \
+                overlay group bindings?\n    choices:\n      pane: By \
+                pane, matching the footer hints\n      mode: By leader \
+                mode\n    default: pane\n    why: Keeps the review \
+                short\n  tui_note:\n    ask: Record the overlay \
+                conventions in the tui note?\n    default: true\n    \
+                memory:\n      - tui.md\n    requested: and note the \
+                convention in the tui memory\n---\n# Plan\nShip grouping \
+                and tui_note.\n> [!decision] grouping = mode\n> Group by \
+                mode.\n> [!decision] tui_note\n> Note the convention.\n";
+            let validated = call(
+                &module,
+                "plan_validate",
+                vec![
+                    to_object(py, &json!(tale)),
+                    to_object(py, &json!("tale")),
+                    to_object(py, &json!("authoring")),
+                ],
+            );
+            assert_eq!(validated["ok"], json!(true));
+            assert_eq!(
+                validated["plan"]["decisions"].as_array().unwrap().len(),
+                2
+            );
+
+            let facts = json!({
+                "tui_note": {
+                    "requested_verified": true,
+                    "provenance": "asked",
+                    "resolved": [
+                        {
+                            "selector": "tui.md",
+                            "kind": "note",
+                            "scope": "project",
+                            "path": "sase/memory/tui.md",
+                            "type": "reference",
+                            "exists": true
+                        }
+                    ]
+                }
+            });
+            let plan = to_object(py, &validated["plan"]);
+            let facts_arg = to_object(py, &facts);
+            let definitions =
+                call(&module, "plan_decisions_payload", vec![plan, facts_arg]);
+            assert_eq!(definitions.as_array().unwrap().len(), 2);
+
+            let digest_arg = to_object(py, &definitions);
+            let digest =
+                call(&module, "plan_decisions_digest", vec![digest_arg]);
+            assert_eq!(digest.as_str().unwrap().len(), 64);
+
+            let resolve_defs = to_object(py, &definitions);
+            let submitted =
+                to_object(py, &json!({"grouping": "MODE", "tui_note": true}));
+            let human = to_object(py, &json!("human"));
+            let resolved = call(
+                &module,
+                "plan_decisions_resolve",
+                vec![resolve_defs, submitted, human],
+            );
+            assert_eq!(
+                resolved["values"],
+                json!({"grouping": "mode", "tui_note": true}),
+            );
+            assert!(resolved["errors"].as_array().unwrap().is_empty());
+
+            let texts = to_object(
+                py,
+                &json!([
+                    {
+                        "source": "chat",
+                        "ref": "m1",
+                        "text": "Please review and note the convention \
+                         in the tui memory today."
+                    }
+                ]),
+            );
+            let quote = to_object(
+                py,
+                &json!("and note the convention in the tui memory"),
+            );
+            let matched =
+                call(&module, "plan_decision_quote_match", vec![quote, texts]);
+            assert_eq!(matched["verified"], json!(true));
+            assert_eq!(matched["matched_source"]["ref"], json!("m1"));
+
+            let sheet_defs = to_object(py, &definitions);
+            let values = to_object(py, &resolved["values"]);
+            let revision = to_object(py, &json!(4));
+            let sheet = call(
+                &module,
+                "plan_decision_sheet",
+                vec![sheet_defs, values, revision],
+            );
+            assert_eq!(sheet["count"], json!(2));
+            assert_eq!(sheet["changed_count"], json!(1));
+
+            let full_arg = to_object(py, &sheet);
+            let full_verdict = to_object(py, &json!("coder + commit"));
+            let full_form = to_object(py, &json!("full"));
+            let full = call(
+                &module,
+                "plan_decision_summary",
+                vec![full_arg, full_verdict, full_form],
+            );
+            assert_eq!(
+                full.as_str().unwrap(),
+                "→ coder + commit · grouping=mode ● · 🧠 tui.md",
+            );
+            let short_arg = to_object(py, &sheet);
+            let short_form = to_object(py, &json!("short"));
+            let short_verdict = to_object(py, &json!("coder + commit"));
+            let short = call(
+                &module,
+                "plan_decision_summary",
+                vec![short_arg, short_verdict, short_form],
+            );
+            assert_eq!(short.as_str().unwrap(), "1 change · 🧠");
+
+            let block_arg = to_object(py, &sheet);
+            let reviewer = to_object(py, &json!("reviewer"));
+            let via_tui = to_object(py, &json!("tui"));
+            let coder = to_object(py, &json!("tale_coder"));
+            let none = to_object(py, &serde_json::Value::Null);
+            let rendered = call(
+                &module,
+                "plan_decisions_prompt_block",
+                vec![block_arg, reviewer, via_tui, coder, none],
+            );
+            let rendered = rendered.as_str().unwrap();
+            assert!(rendered.contains("reviewer via ACE"));
+            assert!(rendered.contains("grouping = mode"));
+            assert!(rendered.contains("authorized for tui.md only"));
+
+            // An epic in Archived mode resolves under auto with no
+            // memory grants and an honest no-human header.
+            let epic = "---\ntier: epic\ntitle: Overlay \
+                epic\ngoal: Ship overlays\nparent_bead: \
+                sase-1hi\nbead: sase-1hi.9\nparent: \
+                sase/repos/plans/202610/parent.md\nphases:\n  - id: \
+                core\n    title: Core\n    depends_on: []\n    \
+                description: Core work section for the archived epic \
+                example.\n    size: small\ndecisions:\n  notify:\n    \
+                ask: Send a notification?\n    default: \
+                false\n---\n# Plan\nShip notify.\n";
+            let archived = call(
+                &module,
+                "plan_validate",
+                vec![
+                    to_object(py, &json!(epic)),
+                    to_object(py, &json!("epic")),
+                    to_object(py, &json!("archived")),
+                ],
+            );
+            assert_eq!(archived["ok"], json!(true));
+            let epic_plan = to_object(py, &archived["plan"]);
+            let empty_facts = to_object(py, &json!({}));
+            let epic_defs = call(
+                &module,
+                "plan_decisions_payload",
+                vec![epic_plan, empty_facts],
+            );
+            let empty_submitted = to_object(py, &json!({}));
+            let auto_defs = to_object(py, &epic_defs);
+            let auto_caller = to_object(py, &json!("auto"));
+            let auto_resolved = call(
+                &module,
+                "plan_decisions_resolve",
+                vec![auto_defs, empty_submitted, auto_caller],
+            );
+            assert_eq!(auto_resolved["values"], json!({"notify": false}));
+            let auto_values = to_object(py, &auto_resolved["values"]);
+            let auto_sheet_defs = to_object(py, &epic_defs);
+            let auto_revision = to_object(py, &json!(12));
+            let auto_sheet = call(
+                &module,
+                "plan_decision_sheet",
+                vec![auto_sheet_defs, auto_values, auto_revision],
+            );
+            assert_eq!(auto_sheet["memory_count"], json!(0));
+            let auto_short_arg = to_object(py, &auto_sheet);
+            let commit = to_object(py, &json!("commit"));
+            let short = to_object(py, &json!("short"));
+            let auto_short = call(
+                &module,
+                "plan_decision_summary",
+                vec![auto_short_arg, commit, short],
+            );
+            assert_eq!(auto_short.as_str().unwrap(), "defaults");
+            let auto_block_arg = to_object(py, &auto_sheet);
+            let auto_none = to_object(py, &serde_json::Value::Null);
+            let auto_by = to_object(py, &json!("auto"));
+            let auto_for = to_object(py, &json!("tale_coder"));
+            let auto_block = call(
+                &module,
+                "plan_decisions_prompt_block",
+                vec![
+                    auto_block_arg,
+                    auto_by,
+                    auto_none.clone_ref(py),
+                    auto_for,
+                    auto_none,
+                ],
+            );
+            // The same Null converts twice: no transport, no grants.
+            let auto_block = auto_block.as_str().unwrap();
+            assert!(auto_block.contains("no human reviewed this plan"));
+            assert!(!auto_block.contains("No other memory note"));
         });
     }
 }

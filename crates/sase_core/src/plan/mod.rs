@@ -27,14 +27,18 @@ pub use artifact_link::{
     PLAN_HEADER_BLOCK_WIRE_SCHEMA_VERSION,
 };
 pub use decisions::{
-    plan_decision_quote_match, plan_decisions_digest, plan_decisions_payload,
+    plan_decision_quote_match, plan_decision_sheet, plan_decision_summary,
+    plan_decisions_digest, plan_decisions_payload, plan_decisions_prompt_block,
     plan_decisions_resolve, PlanDecisionCalloutWire, PlanDecisionChoiceWire,
     PlanDecisionDefinitionWire, PlanDecisionHostFactWire,
-    PlanDecisionMemoryRecordWire, PlanDecisionMemoryWire,
-    PlanDecisionQuoteClosestWire, PlanDecisionQuoteMatchWire,
-    PlanDecisionQuoteTextWire, PlanDecisionResolveErrorWire,
-    PlanDecisionResolveRowWire, PlanDecisionResolveWire, PlanDecisionWire,
-    DECISION_PROVENANCES, QUOTE_MIN_WORDS,
+    PlanDecisionInheritedWire, PlanDecisionMemoryRecordWire,
+    PlanDecisionMemoryWire, PlanDecisionQuoteClosestWire,
+    PlanDecisionQuoteMatchWire, PlanDecisionQuoteTextWire,
+    PlanDecisionResolveErrorWire, PlanDecisionResolveRowWire,
+    PlanDecisionResolveWire, PlanDecisionSheetMemoryWire,
+    PlanDecisionSheetRowWire, PlanDecisionSheetWire, PlanDecisionWire,
+    DECISION_AUDIENCES, DECISION_PROVENANCES, DECISION_SUMMARY_FORMS,
+    DECISION_SURFACES, DECISION_VERDICTS, QUOTE_MIN_WORDS,
 };
 pub use read::{read_plans, PLAN_READ_WIRE_SCHEMA_VERSION};
 pub use refs::{
