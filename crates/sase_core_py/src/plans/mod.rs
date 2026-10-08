@@ -6,6 +6,10 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value};
 
 use pyo3::wrap_pyfunction;
 
+mod decisions;
+
+use decisions::register_decisions;
+
 /// Search and rank markdown plan artifacts under a repo `sdd/` tree and/or the
 /// machine-local archive.
 ///
@@ -316,6 +320,7 @@ fn plan_error_to_pyerr(err: PlanError) -> PyErr {
 }
 
 pub(crate) fn register_plans(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_decisions(m)?;
     m.add_function(wrap_pyfunction!(py_plan_search, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_validate, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_frontmatter_schema, m)?)?;

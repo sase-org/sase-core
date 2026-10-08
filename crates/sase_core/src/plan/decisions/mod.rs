@@ -1,12 +1,14 @@
 //! Plan Decision authoring grammar (Section 2 of `plan:202610/plan_decisions.md`).
 //!
 //! This module owns the additive validated-plan wire records plus the
-//! frontmatter and body validation behind them. Resolution, quote matching,
-//! the Decision Sheet, and the implementer block arrive in later phases and
+//! frontmatter and body validation behind them. Frozen definitions, the
+//! digest, and strict resolution live in `resolver`; quote matching, the
+//! Decision Sheet, and the implementer block arrive in later phases and
 //! build on these records.
 
 pub mod callout;
 pub mod grammar;
+pub mod resolver;
 pub mod wire;
 
 #[cfg(test)]
@@ -18,6 +20,12 @@ pub use callout::{
 pub use grammar::{
     validate_decision_body, validate_decision_frontmatter, DecisionBodyInfo,
     DecisionBodyOutcome, DecisionFrontmatterOutcome,
+};
+pub use resolver::{
+    plan_decisions_digest, plan_decisions_payload, plan_decisions_resolve,
+    PlanDecisionDefinitionWire, PlanDecisionHostFactWire,
+    PlanDecisionMemoryRecordWire, PlanDecisionResolveErrorWire,
+    PlanDecisionResolveRowWire, PlanDecisionResolveWire, DECISION_PROVENANCES,
 };
 pub use wire::{
     PlanDecisionCalloutWire, PlanDecisionChoiceWire, PlanDecisionMemoryWire,
