@@ -1,4 +1,5 @@
 mod claims;
+mod claims_deps;
 mod close;
 mod create;
 mod delegation_remove;
