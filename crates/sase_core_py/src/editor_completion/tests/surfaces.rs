@@ -687,7 +687,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
                 .iter()
                 .map(|keyword| keyword["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["agent", "bead", "hood", "proc", "time", "unit"]
+            ["agent", "bead", "for_epic", "hood", "proc", "time", "unit"]
         );
 
         let context =

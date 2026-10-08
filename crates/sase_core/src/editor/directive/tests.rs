@@ -101,7 +101,7 @@ fn contract_covers_the_audited_directive_matrix() {
             .iter()
             .map(|keyword| keyword.name.as_str())
             .collect::<Vec<_>>(),
-        ["agent", "bead", "hood", "proc", "time", "unit"]
+        ["agent", "bead", "for_epic", "hood", "proc", "time", "unit"]
     );
     assert!(wait
         .syntax_forms

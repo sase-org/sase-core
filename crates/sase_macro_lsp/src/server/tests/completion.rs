@@ -353,20 +353,20 @@ async fn wait_completion_uses_kind_aware_agent_catalog() {
         ]
     );
     assert_eq!(items[0].kind, Some(CompletionItemKind::KEYWORD));
-    assert_eq!(items[6].kind, Some(CompletionItemKind::ENUM_MEMBER));
-    assert_eq!(items[7].kind, Some(CompletionItemKind::MODULE));
-    assert_eq!(items[8].kind, Some(CompletionItemKind::CLASS));
-    assert_eq!(items[6].sort_text.as_deref(), Some("2:0006"));
+    assert_eq!(items[7].kind, Some(CompletionItemKind::ENUM_MEMBER));
+    assert_eq!(items[8].kind, Some(CompletionItemKind::MODULE));
+    assert_eq!(items[9].kind, Some(CompletionItemKind::CLASS));
+    assert_eq!(items[7].sort_text.as_deref(), Some("2:0007"));
     assert_eq!(
-        items[7]
+        items[8]
             .label_details
             .as_ref()
             .and_then(|details| details.description.as_deref()),
         Some("clan · 3 members")
     );
-    assert!(items[7].documentation.is_none());
+    assert!(items[8].documentation.is_none());
     let Some(Documentation::MarkupContent(review_doc)) =
-        items[8].documentation.as_ref()
+        items[9].documentation.as_ref()
     else {
         panic!("expected markdown documentation for review family entry");
     };
