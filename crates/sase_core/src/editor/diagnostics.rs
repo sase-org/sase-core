@@ -65,6 +65,7 @@ pub fn analyze_document_with_snapshot(
     diagnostics.extend(slash_skill_diagnostics(document, entries));
     diagnostics.extend(directive_diagnostics(document));
     diagnostics.extend(wait_directive_diagnostics(document));
+    diagnostics.extend(auto_directive_diagnostics(document));
     diagnostics.extend(alternation_diagnostics(document));
     diagnostics.extend(argument_diagnostics_with_snapshot(
         document, entries, snapshot,
@@ -579,6 +580,65 @@ fn wait_directive_diagnostics(
         }
         // Bare `%wait` / `%w` gets the default; no explicit tracking.
         index = name_end;
+    }
+    out
+}
+
+/// Error diagnostics for invalid `%auto`/`%a` spellings, using the same
+/// fail-closed classifier as the typed launch extractor.
+fn auto_directive_diagnostics(
+    document: &DocumentSnapshot,
+) -> Vec<EditorDiagnostic> {
+    use crate::agent_launch::{
+        classify_auto_directive, directive_occurrences, AutoDirectiveForm,
+        INVALID_AUTO_CODE,
+    };
+
+    let text = document.text();
+    let literal_ranges: Vec<(usize, usize)> = {
+        let mut ranges = fenced_block_ranges(text);
+        ranges.extend(inline_code_ranges(text, &ranges));
+        ranges.extend(prompt_literal_zone_ranges(text));
+        ranges
+    };
+    let intersects_literal = |start: usize, end: usize| -> bool {
+        literal_ranges
+            .iter()
+            .any(|literal| start < literal.1 && literal.0 < end)
+    };
+
+    let mut out = Vec::new();
+    for occurrence in directive_occurrences(text).unwrap_or_default() {
+        if occurrence.canonical_name != "auto" {
+            continue;
+        }
+        if intersects_literal(occurrence.start, occurrence.end) {
+            continue;
+        }
+        let form = if occurrence.has_paren_form {
+            AutoDirectiveForm::Paren
+        } else if occurrence.has_plus_suffix {
+            AutoDirectiveForm::Plus
+        } else if occurrence.is_bare {
+            AutoDirectiveForm::Bare
+        } else {
+            AutoDirectiveForm::Colon
+        };
+        let raw_value =
+            occurrence.args.first().map(String::as_str).unwrap_or("");
+        let spelling = &text[occurrence.start..occurrence.end];
+        if let Err(diagnostic) =
+            classify_auto_directive(form, raw_value, spelling)
+        {
+            push_diagnostic(
+                document,
+                &mut out,
+                occurrence.start,
+                occurrence.end,
+                INVALID_AUTO_CODE,
+                diagnostic.message,
+            );
+        }
     }
     out
 }
@@ -2108,6 +2168,42 @@ mod tests {
 
         let enabled_valid = typed_launch_directive_diagnostics(&valid, true);
         assert!(enabled_valid.is_empty(), "{enabled_valid:?}");
+    }
+
+    #[test]
+    fn invalid_auto_spellings_report_invalid_auto_errors() {
+        for text in [
+            "%auto(plan=ask)\nDo work",
+            "%a(epic=ask)\nDo work",
+            "%auto:foo\nDo work",
+            "%auto:x(plan=ask)\nDo work",
+            "%auto(\nDo work",
+        ] {
+            let diagnostics = diagnostics_for(text);
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid-auto"),
+                1,
+                "{text:?}: {diagnostics:?}"
+            );
+            let found = diagnostic(&diagnostics, "invalid-auto");
+            assert_eq!(found.severity, DiagnosticSeverity::Error);
+        }
+        for text in [
+            "%auto\nDo work",
+            "%a:tale\nDo work",
+            "%auto+\nDo work",
+            "%auto:epic\nDo work",
+            "%auto:manual\nDo work",
+            "%auto:off\nDo work",
+            "```\n%auto(plan=ask)\n```\nDo work",
+        ] {
+            let diagnostics = diagnostics_for(text);
+            assert_eq!(
+                diagnostic_count(&diagnostics, "invalid-auto"),
+                0,
+                "{text:?}: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]

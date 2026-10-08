@@ -71,6 +71,60 @@ fn hold_directive_bindings_collect_format_and_expand() {
 }
 
 #[test]
+fn auto_directive_bindings_classify_and_describe_vocabulary() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        crate::sase_core_rs(py, &module).unwrap();
+        assert!(
+            module.getattr("classify_auto_directive").is_ok(),
+            "missing classify_auto_directive"
+        );
+        assert!(
+            module.getattr("auto_directive_vocabulary").is_ok(),
+            "missing auto_directive_vocabulary"
+        );
+
+        let vocabulary = py_auto_directive_vocabulary(py).unwrap();
+        let vocabulary_value = py_to_json_value(vocabulary.bind(py)).unwrap();
+        assert_eq!(vocabulary_value["modes"], json!(["plan", "tale", "epic"]));
+        assert_eq!(vocabulary_value["manual_values"], json!(["manual", "off"]));
+        assert_eq!(vocabulary_value["diagnostic_code"], json!("invalid-auto"));
+
+        let classify = |form: &str, value: &str, spelling: &str| {
+            let request = json_value_to_py(
+                py,
+                &json!({
+                    "form": form,
+                    "value": value,
+                    "spelling": spelling,
+                }),
+            )
+            .unwrap();
+            py_classify_auto_directive(py, request.bind(py))
+                .map(|result| py_to_json_value(result.bind(py)).unwrap())
+        };
+        let bare = classify("bare", "", "%auto").unwrap();
+        assert_eq!(bare["enabled"], json!(true));
+        assert_eq!(bare["mode"], json!("plan"));
+        assert_eq!(bare["argument"], json!(null));
+        let tale = classify("colon", "tale", "%auto:tale").unwrap();
+        assert_eq!(tale["enabled"], json!(true));
+        assert_eq!(tale["mode"], json!("tale"));
+        assert_eq!(tale["argument"], json!("tale"));
+        let manual = classify("colon", "off", "%auto:off").unwrap();
+        assert_eq!(manual["enabled"], json!(false));
+        assert_eq!(manual["mode"], json!(null));
+        assert_eq!(manual["argument"], json!(null));
+
+        let err = classify("paren", "", "%auto(plan=ask)").unwrap_err();
+        assert!(err.to_string().contains("%auto(plan=ask)"));
+        let err = classify("colon", "foo", "%auto:foo").unwrap_err();
+        assert!(err.to_string().contains("%auto:foo"));
+    });
+}
+
+#[test]
 fn standalone_named_proc_validator_has_no_legacy_binding_name() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

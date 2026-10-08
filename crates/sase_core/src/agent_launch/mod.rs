@@ -1,6 +1,7 @@
 //! Wire records and deterministic helpers for agent launch.
 
 mod admission;
+mod auto_directive;
 mod condition;
 mod conditional;
 mod directive_scan;
@@ -27,6 +28,13 @@ pub use admission::{
     LaunchAdmissionUnitStateWire, LaunchAdmissionWaitFactWire,
     LaunchUnitPhaseWire, WaitedOutcomeWire,
     LAUNCH_ADMISSION_JOURNAL_SCHEMA_VERSION,
+};
+pub use auto_directive::{
+    auto_directive_vocabulary, classify_auto_directive,
+    classify_auto_directive_request, AutoDirectiveClassification,
+    AutoDirectiveClassificationWire, AutoDirectiveClassifyRequestWire,
+    AutoDirectiveDiagnostic, AutoDirectiveForm, AutoDirectiveVocabularyWire,
+    AUTO_APPROVAL_MODES, AUTO_MANUAL_VALUES, INVALID_AUTO_CODE,
 };
 pub use condition::{
     build_condition_context, classify_condition_status, condition_command_argv,

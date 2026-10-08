@@ -1,5 +1,6 @@
 //! Typed launch-unit classification: parse `%proc`, `%agent`, `%wait`,
 //! queue, and hold directives in a prompt into raw units and plan them.
+use super::auto_directive::{classify_auto_directive, AutoDirectiveForm};
 use super::directive_scan::{
     directive_occurrences, find_matching_paren,
     parse_directive_args_with_names, position_in_ranges,
@@ -185,6 +186,7 @@ fn classify_typed_launch_unit(
     let mut agent_hidden = false;
     let mut auto_enabled = false;
     let mut auto_mode: Option<String> = None;
+    let mut saw_auto_directive = false;
     let mut finalizers = Vec::new();
     let mut wait_queue = QueueFieldsWire::default();
     let mut queue_occurrences = Vec::new();
@@ -400,15 +402,42 @@ fn classify_typed_launch_unit(
             "auto" => {
                 regions_to_remove.push((directive.start, directive.end));
                 proc_forbidden_directives.push("%auto".to_string());
-                auto_enabled = true;
-                auto_mode = Some(
-                    directive
-                        .args
-                        .first()
-                        .filter(|arg| !arg.is_empty() && arg.as_str() != "true")
-                        .cloned()
-                        .unwrap_or_else(|| "plan".to_string()),
-                );
+                if saw_auto_directive {
+                    diagnostics.push(typed_unit_diagnostic(
+                        "duplicate-auto",
+                        "Only one %auto directive is allowed per launch unit.",
+                        &logical_id,
+                        Some(span),
+                    ));
+                    continue;
+                }
+                saw_auto_directive = true;
+                let form = if directive.has_paren_form {
+                    AutoDirectiveForm::Paren
+                } else if directive.has_plus_suffix {
+                    AutoDirectiveForm::Plus
+                } else if directive.is_bare {
+                    AutoDirectiveForm::Bare
+                } else {
+                    AutoDirectiveForm::Colon
+                };
+                let raw_value =
+                    directive.args.first().map(String::as_str).unwrap_or("");
+                let spelling = &prompt[directive.start..directive.end];
+                match classify_auto_directive(form, raw_value, spelling) {
+                    Ok(classified) => {
+                        auto_enabled = classified.enabled;
+                        auto_mode = classified.mode;
+                    }
+                    Err(diagnostic) => {
+                        diagnostics.push(typed_unit_diagnostic(
+                            diagnostic.code,
+                            &diagnostic.message,
+                            &logical_id,
+                            Some(span),
+                        ));
+                    }
+                }
             }
             "final" => {
                 regions_to_remove.push((directive.start, directive.end));

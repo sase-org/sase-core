@@ -27,8 +27,20 @@ fn effort_and_auto_directive_arguments_classify_with_candidates() {
         ("%e:xh", 5, "effort", "xh", EFFORT_LEVELS_ORDERED.to_vec()),
         ("%final:", 7, "final", "", vec!["none"]),
         ("%final:n", 8, "final", "n", vec!["none"]),
-        ("%auto:", 6, "auto", "", vec!["plan", "tale", "epic"]),
-        ("%auto:t", 7, "auto", "t", vec!["plan", "tale", "epic"]),
+        (
+            "%auto:",
+            6,
+            "auto",
+            "",
+            vec!["plan", "tale", "epic", "manual", "off"],
+        ),
+        (
+            "%auto:t",
+            7,
+            "auto",
+            "t",
+            vec!["plan", "tale", "epic", "manual", "off"],
+        ),
     ];
 
     for (text, col, directive_name, token, expected_values) in cases {

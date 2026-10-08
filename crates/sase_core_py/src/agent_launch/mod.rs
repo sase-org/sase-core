@@ -201,6 +201,46 @@ fn py_plan_typed_launch_units<'py>(
     json_value_to_py(py, &value)
 }
 
+/// Classify one `%auto`/`%a` spelling through the shared fail-closed
+/// grammar. The request carries `form` (bare, plus, colon, or paren),
+/// `value` (the colon value, `""` for bare, `"true"` for `+`), and
+/// `spelling` (the source text shown in rejection messages). Returns
+/// `enabled`, `mode`, and `argument` in launch-extractor field shape, or
+/// raises the exact launch error every surface shows.
+#[pyfunction]
+#[pyo3(name = "classify_auto_directive")]
+fn py_classify_auto_directive<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyAny>,
+) -> PyResult<PyObject> {
+    let request: AutoDirectiveClassifyRequestWire =
+        serde_json::from_value(py_to_json_value(request)?).map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid auto directive request: {err}"
+            ))
+        })?;
+    let classified = core_classify_auto_directive_request(&request)
+        .map_err(|diagnostic| PyValueError::new_err(diagnostic.message))?;
+    let value = serde_json::to_value(&classified).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
+/// Return the closed `%auto`/`%a` vocabulary: the colon modes that enable
+/// automatic approval, the values that disable it, and the stable
+/// diagnostic code every rejection carries.
+#[pyfunction]
+#[pyo3(name = "auto_directive_vocabulary")]
+fn py_auto_directive_vocabulary<'py>(py: Python<'py>) -> PyResult<PyObject> {
+    let vocabulary: AutoDirectiveVocabularyWire =
+        core_auto_directive_vocabulary();
+    let value = serde_json::to_value(&vocabulary).map_err(|e| {
+        PyValueError::new_err(format!("internal serialize error: {e}"))
+    })?;
+    json_value_to_py(py, &value)
+}
+
 #[pyfunction]
 #[pyo3(name = "launch_unit_hold_key")]
 pub(crate) fn py_launch_unit_hold_key(
@@ -1162,6 +1202,8 @@ pub(crate) fn register_agent_launch(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_bind_batch_predecessor_waits, m)?)?;
     m.add_function(wrap_pyfunction!(py_plan_typed_launch_units, m)?)?;
+    m.add_function(wrap_pyfunction!(py_classify_auto_directive, m)?)?;
+    m.add_function(wrap_pyfunction!(py_auto_directive_vocabulary, m)?)?;
     m.add_function(wrap_pyfunction!(py_launch_unit_hold_key, m)?)?;
     m.add_function(wrap_pyfunction!(py_launch_unit_hold_armer, m)?)?;
     m.add_function(wrap_pyfunction!(

@@ -1917,6 +1917,108 @@ async fn read_message_round_trips_normal_jsonrpc_payload() {
 }
 
 #[tokio::test]
+async fn stdio_jsonrpc_invalid_auto_spelling_publishes_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let definition_path = temp.path().join("foo.md");
+    fs::write(&definition_path, "foo").unwrap();
+
+    let (mut client_writer, server_stdin) = duplex(8192);
+    let (server_stdout, mut client_reader) = duplex(8192);
+    let (service, socket) = LspService::new(|client| {
+        MacroLspServer::with_bridge(
+            client,
+            Arc::new(FixtureBridge {
+                definition_path: definition_path.to_string_lossy().into_owned(),
+            }),
+        )
+    });
+    let server_task = tokio::spawn(async move {
+        Server::new(server_stdin, server_stdout, socket)
+            .serve(service)
+            .await;
+    });
+
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {}
+            }
+        }),
+    )
+    .await;
+    let initialize_response = read_message(&mut client_reader).await;
+    assert_eq!(
+        initialize_response.get("id").and_then(Value::as_i64),
+        Some(1)
+    );
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": "file:///tmp/sase_prompt_rpc.md",
+                    "languageId": "markdown",
+                    "version": 1,
+                    "text": "%auto(plan=ask)\nDo work"
+                }
+            }
+        }),
+    )
+    .await;
+
+    // NOTE: this didOpen must reuse the established
+    // file:///tmp/sase_prompt_rpc.md URI: the harness only publishes
+    // diagnostics for that path.
+    let mut saw_invalid_auto = false;
+    for _ in 0..8 {
+        let message = read_message(&mut client_reader).await;
+        if message.get("method").and_then(Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            saw_invalid_auto = message["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|diagnostics| {
+                    diagnostics.iter().any(|diagnostic| {
+                        diagnostic["source"] == "sase-macro"
+                            && diagnostic["severity"] == 1
+                            && diagnostic["code"] == "invalid-auto"
+                    })
+                });
+            if saw_invalid_auto {
+                break;
+            }
+        }
+    }
+    assert!(saw_invalid_auto);
+
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+    )
+    .await;
+    write_message(
+        &mut client_writer,
+        json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    )
+    .await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn read_message_times_out_on_stalled_input() {
     use tokio::io::duplex;
     let (_writer, mut reader) = duplex(8192);

@@ -1108,6 +1108,106 @@ fn typed_launch_rejects_invalid_tab_values() {
 }
 
 #[test]
+fn typed_launch_accepts_closed_auto_spellings() {
+    for (prompt, enabled, mode) in [
+        ("%auto\nDo work", true, Some("plan")),
+        ("%a\nDo work", true, Some("plan")),
+        ("%auto+\nDo work", true, Some("plan")),
+        ("%auto:true\nDo work", true, Some("plan")),
+        ("%auto:plan\nDo work", true, Some("plan")),
+        ("%auto:tale\nDo work", true, Some("tale")),
+        ("%auto:epic\nDo work", true, Some("epic")),
+        ("%a:tale\nDo work", true, Some("tale")),
+        ("%auto:manual\nDo work", false, None),
+        ("%auto:off\nDo work", false, None),
+    ] {
+        let plan = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap();
+        match &plan.units[0].payload {
+            LaunchUnitPayloadWire::Agent(agent) => {
+                assert_eq!(agent.auto_enabled, enabled, "{prompt:?}");
+                assert_eq!(agent.auto_mode.as_deref(), mode, "{prompt:?}");
+            }
+            other => panic!("expected agent payload, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn typed_launch_rejects_open_auto_spellings_with_invalid_auto() {
+    for prompt in [
+        "%auto(plan=ask)\nDo work",
+        "%a(epic=ask)\nDo work",
+        "%auto(plan, epic)\nDo work",
+        "%auto(sudo=approve)\nDo work",
+        "%auto()\nDo work",
+        "%auto(tale)\nDo work",
+        "%auto(\nDo work",
+        "%auto:foo\nDo work",
+        "%auto:first\nDo work",
+        "%auto:epic_plan\nDo work",
+        "%auto:offload\nDo work",
+        "%auto:`foo`\nDo work",
+        "%auto:x(plan=ask)\nDo work",
+    ] {
+        let err = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap_err();
+        match err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "invalid-auto"),
+                    "expected invalid-auto for {prompt:?}"
+                );
+            }
+            other => {
+                panic!("expected typed launch diagnostic, got {other:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_launch_rejects_duplicate_auto() {
+    for prompt in ["%auto\n%auto:tale\nDo work", "%auto\n%auto:off\nDo work"] {
+        let err = plan_typed_launch_units(prompt, Some("auto"), Some("sase"))
+            .unwrap_err();
+        match err {
+            AgentLaunchFanoutPlanError::TypedLaunchPlan { diagnostics } => {
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "duplicate-auto"),
+                    "expected duplicate-auto for {prompt:?}"
+                );
+            }
+            other => {
+                panic!("expected typed launch diagnostic, got {other:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_launch_manual_auto_renders_no_auto_token() {
+    let plan = plan_typed_launch_units(
+        "%auto:manual\nDo work",
+        Some("auto"),
+        Some("sase"),
+    )
+    .unwrap();
+    let LaunchUnitPayloadWire::Agent(agent) = &plan.units[0].payload else {
+        panic!("expected agent payload");
+    };
+    assert!(!agent.auto_enabled);
+    assert_eq!(agent.auto_mode, None);
+    assert_eq!(agent.prompt, "Do work");
+    let rebuilt = agent_unit_dispatch_prompt(agent);
+    assert!(!rebuilt.contains("%auto"), "{rebuilt}");
+}
+
+#[test]
 fn typed_launch_rejects_tab_on_proc_with_specific_code() {
     let err = plan_typed_launch_units(
         "%tab:blog\n%proc(\"just check\")",

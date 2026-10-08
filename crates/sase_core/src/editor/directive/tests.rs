@@ -615,18 +615,18 @@ fn auto_metadata_describes_gate_owned_resolution_and_offers_compatibility_sugges
     assert_eq!(auto.alias, Some("a"));
     assert!(auto.takes_argument);
     assert!(
-        auto.description.contains("gate kind"),
-        "auto description should assign validation to the gate kind: {}",
+        auto.description.contains("fails at launch"),
+        "auto description should state the closed vocabulary: {}",
         auto.description
     );
 
     // These insertions stay aligned with Python's
-    // AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS. They are suggestions, not a
-    // universal runtime allowlist.
+    // AUTO_COMPATIBILITY_ARGUMENT_SUGGESTIONS: the closed launch grammar,
+    // including the manual/off spellings that disable automatic approval.
     let candidates = directive_argument_candidates("auto").candidates;
     let values: Vec<&str> =
         candidates.iter().map(|c| c.insertion.as_str()).collect();
-    assert_eq!(values, ["plan", "tale", "epic"]);
+    assert_eq!(values, ["plan", "tale", "epic", "manual", "off"]);
 }
 
 #[test]
