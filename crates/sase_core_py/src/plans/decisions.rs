@@ -795,6 +795,18 @@ mod tests {
                 bad_inherited.bind(py),
             )
             .expect_err("malformed inherited records must fail");
+
+            // Unknown provenance and contradictory counts fail as ValueError.
+            let mut provenance_bad = sheet.clone();
+            provenance_bad["rows"][1]["memory"]["provenance"] = json!("typed");
+            let bad_arg = to_object(py, &provenance_bad);
+            py_plan_decision_summary(py, bad_arg.bind(py), "coder", "full")
+                .expect_err("unknown provenance must fail");
+            let mut count_bad = sheet.clone();
+            count_bad["count"] = json!(99);
+            let count_arg = to_object(py, &count_bad);
+            py_plan_decision_summary(py, count_arg.bind(py), "coder", "full")
+                .expect_err("contradictory counts must fail");
         });
     }
 

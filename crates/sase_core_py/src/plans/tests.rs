@@ -191,6 +191,27 @@ fn plan_validation_bindings_round_trip_json_shapes() {
         let error =
             py_plan_validate(py, content, "story", "authoring").unwrap_err();
         assert!(error.to_string().contains("unsupported plan tier"));
+
+        // Warning-only asks keep their wire through the Python module.
+        let warn_only = "---\ntier: tale\ntitle: T\ngoal: G\nsize: small\ndecisions:\n  grouping:\n    ask: How to group\n    choices:\n      pane: By pane\n      mode: By mode\n    default: pane\n---\n# Plan\nShip grouping.\n";
+        let warned =
+            py_plan_validate(py, warn_only, "tale", "authoring").unwrap();
+        let warned_value = py_to_json_value(warned.bind(py)).unwrap();
+        assert_eq!(warned_value["ok"], json!(true));
+        assert!(warned_value["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"]
+                == json!("decision-ask-not-question")));
+        assert_eq!(
+            warned_value["plan"]["decisions"][0]["id"],
+            json!("grouping")
+        );
+        assert_eq!(
+            warned_value["plan"]["decisions"][0]["choices"][1]["key"],
+            json!("mode")
+        );
     });
 }
 

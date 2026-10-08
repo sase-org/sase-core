@@ -240,9 +240,7 @@ pub fn plan_decision_summary(
              or full"
         )));
     }
-    for row in &sheet.rows {
-        check_sheet_row(row)?;
-    }
+    check_sheet(sheet)?;
     if form == "short" {
         return Ok(short_summary(sheet));
     }
@@ -338,18 +336,16 @@ pub fn plan_decisions_prompt_block(
              tale_coder, epic_phase, or epic_land"
         )));
     }
-    for row in &sheet.rows {
-        check_sheet_row(row)?;
-    }
+    check_sheet(sheet)?;
     if let Some(grants) = inherited {
+        // Titles stay safely quoted by `quoted()`, so newlines flatten
+        // rather than introducing extra instruction lines.
         if grants.epic_title.trim().is_empty() {
             return Err(PlanError::validation(
                 "inherited decisions need a non-empty epic title",
             ));
         }
-        for row in &grants.sheet.rows {
-            check_sheet_row(row)?;
-        }
+        check_sheet(&grants.sheet)?;
     }
 
     let mut lines = vec![block_header(decided_by, decided_via)];
@@ -418,7 +414,14 @@ fn block_row(
             "- {} = no. Do not edit {selectors}. Context: {ask}.",
             row.id,
         );
-        if decided_by == "auto" {
+        // Only an unrequested memory change left off without human review
+        // files skipped work. Verified requested (`asked`) or inherited rows
+        // left off, and every human-declined row, stay quiet.
+        let unrequested = matches!(
+            memory.provenance.as_str(),
+            "not_asked" | "quote_not_found"
+        );
+        if decided_by == "auto" && unrequested {
             if audience == "tale_coder" {
                 line.push_str(
                     " Record the skipped memory change with \
@@ -527,15 +530,147 @@ fn display_sheet_value(
     })
 }
 
+fn is_one_line(text: &str) -> bool {
+    !text.contains('\n') && !text.contains('\r')
+}
+
 fn check_sheet_row(row: &PlanDecisionSheetRowWire) -> Result<(), PlanError> {
+    if row.id.trim().is_empty() || !is_one_line(&row.id) {
+        return Err(PlanError::validation(format!(
+            "invalid decision id {:?}; ids must be non-empty one-line text",
+            row.id,
+        )));
+    }
+    if !matches!(row.kind.as_str(), "toggle" | "choice") {
+        return Err(PlanError::validation(format!(
+            "unknown decision kind {:?} for {:?}; expected toggle or choice",
+            row.kind, row.id,
+        )));
+    }
+    // Value shape also checks the kind and, for choices, key membership.
     display_sheet_value(row)?;
-    if let Some(memory) = row.memory.as_ref() {
-        if memory.provenance.trim().is_empty() {
+    // Default shape mirrors the value shape so contradictory wire state
+    // cannot render a review default no surface could have shown.
+    match row.kind.as_str() {
+        "toggle" => {
+            if row.default.as_bool().is_none() {
+                return Err(PlanError::validation(format!(
+                    "invalid sheet default for toggle {:?}; expected a JSON boolean, got {}",
+                    row.id, row.default,
+                )));
+            }
+        }
+        _ => match row.default.as_str() {
+            Some(default) => {
+                if !row.choices.iter().any(|choice| choice.key == default) {
+                    return Err(PlanError::validation(format!(
+                            "unknown sheet default {:?} for {:?}; expected one of {}",
+                            default,
+                            row.id,
+                            row.choices
+                                .iter()
+                                .map(|choice| choice.key.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )));
+                }
+            }
+            None => {
+                return Err(PlanError::validation(format!(
+                        "invalid sheet default for choice {:?}; expected one of its choice keys, got {}",
+                        row.id, row.default,
+                    )));
+            }
+        },
+    }
+    for choice in &row.choices {
+        if choice.key.trim().is_empty() || !is_one_line(&choice.key) {
             return Err(PlanError::validation(format!(
-                "missing provenance for memory decision \"{}\"",
+                "invalid choice key {:?} for {:?}; keys must be non-empty one-line text",
+                choice.key, row.id,
+            )));
+        }
+    }
+    if let Some(memory) = row.memory.as_ref() {
+        if row.kind != "toggle" {
+            return Err(PlanError::validation(format!(
+                "memory is allowed on toggles only; decision {:?} is {:?}",
+                row.id, row.kind,
+            )));
+        }
+        if row.value.as_bool().is_none() || row.default.as_bool().is_none() {
+            return Err(PlanError::validation(format!(
+                "invalid memory row {:?}; memory decisions must be boolean toggles",
                 row.id,
             )));
         }
+        if memory.selectors.is_empty() {
+            return Err(PlanError::validation(format!(
+                "missing memory selectors for decision {:?}",
+                row.id,
+            )));
+        }
+        for selector in &memory.selectors {
+            if selector.trim().is_empty() || !is_one_line(selector) {
+                return Err(PlanError::validation(format!(
+                    "invalid memory selector {:?} for {:?}; selectors must be non-empty one-line text",
+                    selector, row.id,
+                )));
+            }
+        }
+        match memory.provenance.as_str() {
+            "asked" | "not_asked" | "quote_not_found" | "inherited" => {}
+            other => {
+                return Err(PlanError::validation(format!(
+                    "unknown memory provenance {:?} for {:?}; expected asked, not_asked, quote_not_found, or inherited",
+                    other, row.id,
+                )));
+            }
+        }
+    }
+    let expected_changed = row.value != row.default;
+    if row.changed != expected_changed {
+        return Err(PlanError::validation(format!(
+            "contradictory changed flag for {:?}; value {} {} default {}",
+            row.id,
+            row.value,
+            if expected_changed {
+                "differs from"
+            } else {
+                "equals"
+            },
+            row.default,
+        )));
+    }
+    Ok(())
+}
+
+fn check_sheet(sheet: &PlanDecisionSheetWire) -> Result<(), PlanError> {
+    if sheet.count != sheet.rows.len() as u64 {
+        return Err(PlanError::validation(format!(
+            "contradictory sheet count {}; rows carry {} decisions",
+            sheet.count,
+            sheet.rows.len(),
+        )));
+    }
+    let memory_count =
+        sheet.rows.iter().filter(|row| row.memory.is_some()).count() as u64;
+    if sheet.memory_count != memory_count {
+        return Err(PlanError::validation(format!(
+            "contradictory sheet memory_count {}; rows carry {memory_count} memory decisions",
+            sheet.memory_count,
+        )));
+    }
+    let changed_count =
+        sheet.rows.iter().filter(|row| row.changed).count() as u64;
+    if sheet.changed_count != changed_count {
+        return Err(PlanError::validation(format!(
+            "contradictory sheet changed_count {}; rows carry {changed_count} changed decisions",
+            sheet.changed_count,
+        )));
+    }
+    for row in &sheet.rows {
+        check_sheet_row(row)?;
     }
     Ok(())
 }
@@ -1206,5 +1341,124 @@ mod tests {
             plan_decision_summary(&sheet, "coder", "full").unwrap(),
             "→ coder · 🧠 no memory edits",
         );
+    }
+
+    #[test]
+    fn sheet_rejects_unknown_provenance_kinds_and_shapes() {
+        // Unknown provenance fails on both summary and prompt paths.
+        let mut bad = sheet();
+        bad.rows[1].memory.as_mut().unwrap().provenance = "typed".to_string();
+        plan_decision_summary(&bad, "coder", "full")
+            .expect_err("unknown provenance must fail");
+        plan_decisions_prompt_block(
+            &bad,
+            "reviewer",
+            Some("tui"),
+            "tale_coder",
+            None,
+        )
+        .expect_err("unknown provenance must fail");
+        // Malformed inherited memory rows fail too.
+        let granted = sheet();
+        let mut inherited_bad = granted.clone();
+        inherited_bad.rows[1].memory.as_mut().unwrap().provenance =
+            "typed".to_string();
+        let empty = plan_decision_sheet(&[], &json!({}), 1).unwrap();
+        plan_decisions_prompt_block(
+            &empty,
+            "reviewer",
+            Some("tui"),
+            "epic_phase",
+            Some(&PlanDecisionInheritedWire {
+                sheet: inherited_bad,
+                epic_title: "Epic".to_string(),
+            }),
+        )
+        .expect_err("malformed inherited rows must fail");
+        // Invalid kinds fail.
+        let mut kind_bad = sheet();
+        kind_bad.rows[0].kind = "freetext".to_string();
+        plan_decision_summary(&kind_bad, "coder", "full")
+            .expect_err("unknown kinds must fail");
+        // Memory rows must be boolean toggles with selectors.
+        let mut toggle_bad = sheet();
+        toggle_bad.rows[1].value = json!("yes");
+        plan_decision_summary(&toggle_bad, "coder", "full")
+            .expect_err("toggle strings must fail");
+        let mut selector_bad = sheet();
+        selector_bad.rows[1]
+            .memory
+            .as_mut()
+            .unwrap()
+            .selectors
+            .clear();
+        plan_decision_summary(&selector_bad, "coder", "full")
+            .expect_err("empty selectors must fail");
+        let mut newline_bad = sheet();
+        newline_bad.rows[1].memory.as_mut().unwrap().selectors =
+            vec!["bad\nselector".to_string()];
+        plan_decision_summary(&newline_bad, "coder", "full")
+            .expect_err("multiline selectors must fail");
+        let mut id_bad = sheet();
+        id_bad.rows[0].id = "bad\nid".to_string();
+        plan_decision_summary(&id_bad, "coder", "full")
+            .expect_err("multiline ids must fail");
+        // Contradictory counts and changed flags fail instead of rendering.
+        let mut count_bad = sheet();
+        count_bad.count = 99;
+        plan_decision_summary(&count_bad, "coder", "full")
+            .expect_err("contradictory counts must fail");
+        let mut changed_bad = sheet();
+        changed_bad.rows[0].changed = !changed_bad.rows[0].changed;
+        plan_decision_summary(&changed_bad, "coder", "full")
+            .expect_err("contradictory changed flags must fail");
+    }
+
+    #[test]
+    fn auto_follow_ups_only_for_unrequested_memory_off() {
+        for (provenance, files_task) in [
+            ("not_asked", true),
+            ("quote_not_found", true),
+            ("asked", false),
+            ("inherited", false),
+        ] {
+            let mut memory = memory_definition();
+            memory.effective_default = json!(false);
+            memory.provenance = Some(provenance.to_string());
+            memory.requested_verified = provenance == "asked";
+            let sheet =
+                plan_decision_sheet(&[memory], &json!({"tui_note": false}), 5)
+                    .unwrap();
+            for audience in ["tale_coder", "epic_phase", "epic_land"] {
+                let block = plan_decisions_prompt_block(
+                    &sheet, "auto", None, audience, None,
+                )
+                .unwrap();
+                let has_task = block.contains("/sase_new_task")
+                    || block.contains("PROPOSED FOLLOW-UP:");
+                assert_eq!(
+                    has_task, files_task,
+                    "{provenance}/{audience}: {block}",
+                );
+                if files_task {
+                    if audience == "tale_coder" {
+                        assert!(block.contains("/sase_new_task"));
+                    } else {
+                        assert!(block.contains("PROPOSED FOLLOW-UP:"));
+                    }
+                }
+            }
+            // Human-declined rows never file, whatever the provenance.
+            let quiet = plan_decisions_prompt_block(
+                &sheet,
+                "reviewer",
+                Some("cli"),
+                "tale_coder",
+                None,
+            )
+            .unwrap();
+            assert!(!quiet.contains("/sase_new_task"));
+            assert!(!quiet.contains("PROPOSED FOLLOW-UP:"));
+        }
     }
 }

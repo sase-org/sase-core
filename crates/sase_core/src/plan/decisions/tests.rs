@@ -877,3 +877,202 @@ fn uncovered_memory_edits_warn_until_covered() {
         );
     }
 }
+
+#[test]
+fn warning_only_ask_preserves_full_decision_wire() {
+    use crate::plan::decisions::plan_decision_sheet;
+    use crate::plan::decisions::{
+        plan_decisions_digest, plan_decisions_payload,
+    };
+    use std::collections::BTreeMap;
+    // A valid ask lacking `?` warns but must keep the decision in author
+    // order with choices, memory, and answer shapes intact.
+    let decisions = "decisions:\n  grouping:\n    ask: How to group\n    choices:\n      pane: By pane\n      mode: By mode\n    default: pane\n    why: Keeps order\n  tui_note:\n    ask: Record the note\n    default: false\n    memory:\n      - tui.md\n";
+    for (content, tier) in [
+        (tale(decisions, &mentioned("grouping tui_note")), "tale"),
+        (epic(decisions, &mentioned("grouping tui_note")), "epic"),
+    ] {
+        for mode in ["authoring", "launch", "archived"] {
+            let result = plan_validate_with_mode(&content, tier, mode).unwrap();
+            assert!(result.ok, "{tier}/{mode}: {:?}", result.diagnostics);
+            assert!(codes(&result).contains(&"decision-ask-not-question"));
+            let plan = result.plan.unwrap();
+            assert_eq!(plan.decisions.len(), 2, "{tier}/{mode}");
+            assert_eq!(plan.decisions[0].id, "grouping");
+            assert_eq!(plan.decisions[0].choices.len(), 2);
+            assert_eq!(plan.decisions[1].id, "tui_note");
+            assert!(plan.decisions[1].memory.is_some());
+            // Payload, digest, and sheet run on the preserved wire.
+            let facts = BTreeMap::new();
+            let definitions = plan_decisions_payload(&plan, &facts).unwrap();
+            assert_eq!(definitions.len(), 2);
+            assert_eq!(definitions[0].id, "grouping");
+            let digest = plan_decisions_digest(&definitions).unwrap();
+            assert_eq!(digest.len(), 64);
+            let values =
+                serde_json::json!({"grouping": "pane", "tui_note": false});
+            let sheet = plan_decision_sheet(&definitions, &values, 1).unwrap();
+            assert_eq!(sheet.count, 2);
+            assert_eq!(sheet.rows[0].id, "grouping");
+        }
+    }
+    // An actual error still fails validation.
+    let bad = "decisions:\n  grouping:\n    ask: How?\n    choices:\n      pane: By pane\n      mode: By mode\n";
+    let result =
+        plan_validate(&tale(bad, &mentioned("grouping")), "tale").unwrap();
+    assert!(!result.ok);
+    assert!(codes(&result).contains(&"decision-default-missing"));
+    if let Some(plan) = result.plan {
+        assert!(plan.decisions.is_empty());
+    }
+}
+
+#[test]
+fn archived_completeness_triggers_on_any_stamp() {
+    let plain =
+        "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n";
+    let answered = "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n    answer: true\n";
+    // Absent decisions with a transport-only stamp fail.
+    for decisions in ["", "decisions: {}\n"] {
+        let content =
+            tale(&format!("decided_via: tui\n{decisions}"), "# Plan\n");
+        let result =
+            plan_validate_with_mode(&content, "tale", "archived").unwrap();
+        assert!(
+            codes(&result).contains(&"decision-answer-incomplete"),
+            "absent {decisions:?}: {:?}",
+            result.diagnostics
+        );
+        // Fully unstamped absent/empty stays valid.
+        let content = tale(decisions, "# Plan\n");
+        let result =
+            plan_validate_with_mode(&content, "tale", "archived").unwrap();
+        assert!(result.ok, "{decisions:?}: {:?}", result.diagnostics);
+    }
+    // Transport-only stamped decision fails without `decided_by`.
+    let content = tale(
+        &format!("decided_via: tui\n{answered}"),
+        &mentioned("tui_note"),
+    );
+    let result = plan_validate_with_mode(&content, "tale", "archived").unwrap();
+    assert!(codes(&result).contains(&"decision-answer-incomplete"));
+    // Partial vectors fail: one answered decision plus an unanswered one.
+    let partial = "decisions:\n  first:\n    ask: First?\n    default: false\n    answer: false\n  second:\n    ask: Second?\n    default: false\n";
+    let content = tale(
+        &format!("decided_by: reviewer\ndecided_via: tui\n{partial}"),
+        "# Plan\nShip first and second.\n",
+    );
+    let result = plan_validate_with_mode(&content, "tale", "archived").unwrap();
+    assert!(codes(&result).contains(&"decision-answer-incomplete"));
+    // Fully stamped and unstamped controls stay valid.
+    let content = tale(
+        &format!("decided_by: reviewer\ndecided_via: tui\n{answered}"),
+        &mentioned("tui_note"),
+    );
+    assert!(
+        plan_validate_with_mode(&content, "tale", "archived")
+            .unwrap()
+            .ok
+    );
+    let content = tale(plain, &mentioned("tui_note"));
+    assert!(
+        plan_validate_with_mode(&content, "tale", "archived")
+            .unwrap()
+            .ok
+    );
+    // Invalid provenance still reports its own code alongside completeness.
+    let content = tale(
+        &format!("decided_by: human\ndecided_via: tui\n{answered}"),
+        &mentioned("tui_note"),
+    );
+    let result = plan_validate_with_mode(&content, "tale", "archived").unwrap();
+    assert!(codes(&result).contains(&"decision-provenance-invalid"));
+    // Auto without transport stays the valid unattended stamp.
+    let content = tale(
+        &format!("decided_by: auto\n{answered}"),
+        &mentioned("tui_note"),
+    );
+    assert!(
+        plan_validate_with_mode(&content, "tale", "archived")
+            .unwrap()
+            .ok
+    );
+}
+
+#[test]
+fn unicode_body_checks_run_through_the_public_validator() {
+    let plain =
+        "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n";
+    // Ordinary Unicode prose with an edit verb warns through validation.
+    let result = plan_validate(
+        &tale(plain, "# Plan\nUpdate 🚀 sase/memory/tui.md.\n"),
+        "tale",
+    )
+    .unwrap();
+    assert!(codes(&result).contains(&"decision-memory-uncovered"));
+    // Read-only Unicode text and the `src/` exclusion stay quiet.
+    for body in [
+        "# Plan\nRead 📚 sase/memory/tui.md first.\n",
+        "# Plan\nAdd 🚀 src/sase/memory/tui.md.\n",
+    ] {
+        let result = plan_validate(&tale(plain, body), "tale").unwrap();
+        assert!(
+            !codes(&result).contains(&"decision-memory-uncovered"),
+            "{body:?}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn fenced_callout_boundary_does_not_absorb_later_quote() {
+    let decisions =
+        "decisions:\n  toggle:\n    ask: Do toggle?\n    default: false\n";
+    let body = "> [!decision] toggle before\n\n```\ncode\n```\n\n> after\n";
+    let result = plan_validate(&tale(decisions, body), "tale").unwrap();
+    let plan = result.plan.unwrap();
+    assert_eq!(plan.decision_callouts.len(), 1);
+    assert_eq!(
+        plan.decision_callouts[0].start_line,
+        plan.decision_callouts[0].end_line,
+        "fence boundary must end the callout: {:?}",
+        plan.decision_callouts[0]
+    );
+}
+
+#[test]
+fn archived_heuristic_regression_phrases_match_sources() {
+    // Compact phrases mirror Aug-Oct 2026 archive wording without copying
+    // reports. Sources: plan:202608/glossary_tier1_memory_note.md (create
+    // glossary note), plan:202608/sase_memory_bullet_order.md (add bullet
+    // note), plan:202609/queue_capacity_budget.md (update xprompts note),
+    // plan:202608/drop_plan_authoring_size_paragraph.md (delete scratch
+    // note). Read-only/disclaimer controls stay quiet.
+    let plain =
+        "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n";
+    for body in [
+        "# Plan\nCreate `sase/memory/glossary.md` with the text.\n",
+        "# Plan\nAdd `sase/memory/decisions/note.md`, titled 'Note'.\n",
+        "# Plan\nUpdate `sase/memory/xprompts.md` now.\n",
+        "# Plan\n9. **Delete** `sase/memory/scratch.md`.\n",
+        "# Plan\nRun `sase memory init`.\n",
+    ] {
+        let result = plan_validate(&tale(plain, body), "tale").unwrap();
+        assert!(
+            codes(&result).contains(&"decision-memory-uncovered"),
+            "{body:?}: {:?}",
+            result.diagnostics
+        );
+    }
+    for body in [
+        "# Plan\nRead `sase/memory/cli_rules.md` first.\n",
+        "# Plan\nDo not edit `sase/memory/tui.md`.\n",
+    ] {
+        let result = plan_validate(&tale(plain, body), "tale").unwrap();
+        assert!(
+            !codes(&result).contains(&"decision-memory-uncovered"),
+            "{body:?}: {:?}",
+            result.diagnostics
+        );
+    }
+}

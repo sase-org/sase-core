@@ -221,13 +221,17 @@ pub fn validate_decision_frontmatter(
         validate_system_stamps(mapping, index, mode, &mut diagnostics);
 
     let Some(value) = mapping_value(mapping, "decisions") else {
-        return DecisionFrontmatterOutcome {
+        let mut outcome = DecisionFrontmatterOutcome {
             decisions: Vec::new(),
             infos: Vec::new(),
             decided_by,
             decided_via,
             diagnostics,
         };
+        if mode == PlanValidationMode::Archived {
+            apply_archived_completeness(mapping, index, &mut outcome);
+        }
+        return outcome;
     };
     let Some(entries) = value.as_mapping() else {
         diagnostics.push(diagnostic(
@@ -240,13 +244,17 @@ pub fn validate_decision_frontmatter(
             ),
             index.line_for("decisions"),
         ));
-        return DecisionFrontmatterOutcome {
+        let mut outcome = DecisionFrontmatterOutcome {
             decisions: Vec::new(),
             infos: Vec::new(),
             decided_by,
             decided_via,
             diagnostics,
         };
+        if mode == PlanValidationMode::Archived {
+            apply_archived_completeness(mapping, index, &mut outcome);
+        }
+        return outcome;
     };
     if entries.len() > 5 {
         diagnostics.push(diagnostic(
@@ -258,13 +266,17 @@ pub fn validate_decision_frontmatter(
         ));
     }
     if entries.is_empty() {
-        return DecisionFrontmatterOutcome {
+        let mut outcome = DecisionFrontmatterOutcome {
             decisions: Vec::new(),
             infos: Vec::new(),
             decided_by,
             decided_via,
             diagnostics,
         };
+        if mode == PlanValidationMode::Archived {
+            apply_archived_completeness(mapping, index, &mut outcome);
+        }
+        return outcome;
     }
 
     let mut outcome = DecisionFrontmatterOutcome {
@@ -335,10 +347,19 @@ pub fn validate_decision_frontmatter(
             ));
             continue;
         };
-        let errors_before = outcome.diagnostics.len();
+        let errors_before = outcome
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "error")
+            .count();
         let parsed =
             validate_one_decision(&id, entry, index, mode, &mut outcome);
-        if outcome.diagnostics.len() == errors_before {
+        let errors_after = outcome
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == "error")
+            .count();
+        if errors_after == errors_before {
             outcome.decisions.push(parsed.wire);
         }
         outcome.infos.push(parsed.info);
@@ -825,8 +846,10 @@ fn valid_memory_selector(selector: &str) -> bool {
     true
 }
 
-/// In Archived mode a stamped plan needs `decided_by` and a valid answer on
-/// every decision together; an unstamped archived plan stays valid.
+/// In Archived mode a stamped plan needs a valid `decided_by` and a valid
+/// answer on every decision together; an unstamped archived plan stays
+/// valid. Any system stamp triggers completeness: `decided_by`,
+/// `decided_via` (including a transport-only archive), or an answer.
 fn apply_archived_completeness(
     mapping: &Mapping,
     index: &SourceIndex,
@@ -842,7 +865,15 @@ fn apply_archived_completeness(
             })
         })
         .unwrap_or(false);
-    if outcome.decided_by.is_none() && !any_answer {
+    let has_decided_by_raw =
+        mapping.contains_key(YamlValue::String("decided_by".to_string()));
+    let has_decided_via_raw =
+        mapping.contains_key(YamlValue::String("decided_via".to_string()));
+    if outcome.decided_by.is_none()
+        && !any_answer
+        && !has_decided_by_raw
+        && !has_decided_via_raw
+    {
         return;
     }
     if outcome.decided_by.is_none() {

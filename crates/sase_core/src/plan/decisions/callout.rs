@@ -29,20 +29,35 @@ pub struct MemoryEditSignal {
     pub note: Option<String>,
 }
 
+/// A fence marker: its delimiter character and opening run length. A
+/// shorter run cannot close a longer opening fence.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|char| *char == marker).count();
+    if len >= 3 {
+        Some((marker, len))
+    } else {
+        None
+    }
+}
+
 /// Body lines visible outside backtick and tilde fenced code, each with its
 /// body-relative line index.
 fn visible_lines(body: &str) -> Vec<(usize, &str)> {
     let mut visible = Vec::new();
-    let mut fence: Option<char> = None;
+    let mut fence: Option<(char, usize)> = None;
     for (index, line) in body.split('\n').enumerate() {
-        let trimmed = line.trim_start();
-        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
-        if is_fence {
-            let marker = trimmed.chars().next().unwrap_or('`');
-            if fence == Some(marker) {
-                fence = None;
-            } else if fence.is_none() {
-                fence = Some(marker);
+        if let Some((marker, len)) = fence_marker(line) {
+            if let Some((open_marker, open_len)) = fence {
+                if marker == open_marker && len >= open_len {
+                    fence = None;
+                }
+            } else {
+                fence = Some((marker, len));
             }
             continue;
         }
@@ -65,8 +80,30 @@ fn is_blockquote(line: &str) -> bool {
 pub fn parse_decision_callouts(body: &str, body_base: u64) -> Vec<RawCallout> {
     let mut callouts = Vec::new();
     let mut open: Option<RawCallout> = None;
-    for (index, line) in visible_lines(body) {
+    let mut fence: Option<(char, usize)> = None;
+    for (index, line) in body.split('\n').enumerate() {
         let document_line = body_base + index as u64;
+        if let Some((marker, len)) = fence_marker(line) {
+            // Any fence boundary ends the active callout even though the
+            // fence contents themselves are ignored.
+            if let Some(callout) = open.take() {
+                callouts.push(callout);
+            }
+            if let Some((open_marker, open_len)) = fence {
+                if marker == open_marker && len >= open_len {
+                    fence = None;
+                }
+            } else {
+                fence = Some((marker, len));
+            }
+            continue;
+        }
+        if fence.is_some() {
+            // Fenced code is ignored, but a fenced non-blockquote boundary
+            // already closed the callout above; an open span cannot absorb
+            // a later quote across the fence.
+            continue;
+        }
         if !is_blockquote(line) {
             if let Some(callout) = open.take() {
                 callouts.push(callout);
@@ -250,8 +287,10 @@ fn memory_note_on_line(line: &str) -> Option<(String, usize)> {
             let prev = bytes[relative - 1];
             !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'.'
         };
-        let src_prefixed =
-            relative >= 4 && &line[relative - 4..relative] == "src/";
+        // Byte comparison avoids splitting a UTF-8 character: `Update 🚀
+        // sase/memory/tui.md.` panicked at this slice before.
+        let src_prefixed = relative >= 4
+            && line.as_bytes()[relative - 4..relative] == *b"src/";
         if preceded_ok && !src_prefixed {
             let mut end = relative + PREFIX.len();
             while end < bytes.len() && is_path_char(bytes[end]) {
@@ -469,5 +508,58 @@ mod tests {
             uncovered_memory_edits("Do not touch `sase/memory/`.\n", 8),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn unicode_prose_does_not_panic_and_reports_edits() {
+        // Ordinary Unicode prose beside a memory path must warn, not panic.
+        let signals =
+            uncovered_memory_edits("Update 🚀 sase/memory/tui.md.\n", 8);
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].note.as_deref(), Some("tui.md"));
+        // Read-only Unicode text stays quiet.
+        assert_eq!(
+            uncovered_memory_edits("Read 📚 sase/memory/tui.md first.\n", 8),
+            Vec::new()
+        );
+        // The existing `src/` exclusion holds beside Unicode.
+        assert_eq!(
+            uncovered_memory_edits("Add 🚀 src/sase/memory/tui.md.\n", 8),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn fence_boundary_ends_callouts_with_delimiter_lengths() {
+        // Body base 8: header at 8, fence at 10, code, fence, quote at 13.
+        // The first callout must end at 8, not absorb the later quote.
+        let body = "> [!decision] toggle before\n\n```\ncode\n```\n\n> after\n";
+        let callouts = parse_decision_callouts(body, 8);
+        assert_eq!(callouts.len(), 1);
+        assert_eq!((callouts[0].start_line, callouts[0].end_line), (8, 8));
+        // Tilde delimiters behave the same.
+        let body = "> [!decision] toggle before\n\n~~~\ncode\n~~~\n\n> after\n";
+        let callouts = parse_decision_callouts(body, 8);
+        assert_eq!(callouts.len(), 1);
+        assert_eq!((callouts[0].start_line, callouts[0].end_line), (8, 8));
+        // A shorter run cannot close a longer opening fence.
+        let body =
+            "````\ncode\n```\nstill fenced\n````\n> [!decision] real_id\n";
+        let callouts = parse_decision_callouts(body, 8);
+        assert_eq!(callouts.len(), 1);
+        assert_eq!(callouts[0].id, "real_id");
+        // CRLF sources keep document lines.
+        let body = "> [!decision] toggle before\r\n\r\n```\r\ncode\r\n```\r\n\r\n> after\r\n";
+        let callouts = parse_decision_callouts(body, 8);
+        assert_eq!(callouts.len(), 1);
+        assert_eq!((callouts[0].start_line, callouts[0].end_line), (8, 8));
+        // Callouts before and after a fenced block stay separate.
+        let body = "> [!decision] first\n> tail\n```\ncode\n```\n> [!decision] second\n> tail\n";
+        let callouts = parse_decision_callouts(body, 8);
+        assert_eq!(callouts.len(), 2);
+        assert_eq!(callouts[0].id, "first");
+        assert_eq!(callouts[1].id, "second");
+        // Fenced markers never count as body references.
+        assert!(!whole_word_mentions_body("```\nfirst\n```\n", "first"));
     }
 }
