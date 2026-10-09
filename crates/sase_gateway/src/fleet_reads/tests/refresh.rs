@@ -467,3 +467,22 @@ async fn overlay_queries_once_per_snapshot_and_skips_under_contention() {
         == Some("delta-overlay")));
     assert_eq!(service.overlay_query_count_for_test(), 3);
 }
+
+#[tokio::test]
+async fn checkpoint_hook_runs_after_presentation_success_only() {
+    let (_temp, service) = seed_home();
+    service.summary().await.unwrap();
+    poll_until(|| service.checkpoint_hook_calls_for_test() == 1).await;
+    assert_eq!(service.checkpoint_hook_calls_for_test(), 1);
+
+    service.age_cache_for_test(FLEET_SNAPSHOT_STALE_SECONDS + 1.0);
+    fs::remove_file(service.index_path()).unwrap();
+    fs::create_dir_all(service.index_path()).unwrap();
+    let failed = service.summary().await.unwrap();
+    assert!(failed.freshness.partial);
+    assert_eq!(
+        service.checkpoint_hook_calls_for_test(),
+        1,
+        "a failed Presentation build must not run WAL housekeeping"
+    );
+}

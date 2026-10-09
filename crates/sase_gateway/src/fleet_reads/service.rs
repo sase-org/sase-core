@@ -1,6 +1,7 @@
 //! `FleetReadService`: snapshot-backed fleet read APIs with refresh
 //! coalescing and stale retention.
 
+use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
@@ -12,9 +13,11 @@ use std::{
 
 use sase_core::{
     agent_scan::{
+        checkpoint_agent_artifact_index_wal_if_oversized,
         AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
         AgentArtifactRecordShapeWire, AgentArtifactScanOptionsWire,
         AgentSessionDismissalLineageCandidateWire,
+        AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
     },
     fleet_catalog::select_fleet_presentation,
     fleet_contract::{
@@ -73,6 +76,18 @@ const SNAPSHOT_INDEX_PERMITS: usize = 2;
 /// it falls back to a timeout response instead of waiting forever on a
 /// wedged build.
 const FORCE_REFRESH_MAX_JOINS: u32 = 4;
+/// A build still in flight this long gets one `warn` event. It cannot be
+/// cancelled, so the log is the only signal for a wedged build.
+const LONG_RUNNING_BUILD_WARN_AFTER: Duration = Duration::from_secs(60);
+/// Tracing target for every fleet-refresh telemetry event.
+const FLEET_READS_TRACE_TARGET: &str = "sase_gateway::fleet_reads";
+
+fn scope_name(scope: SnapshotScope) -> &'static str {
+    match scope {
+        SnapshotScope::Presentation => "presentation",
+        SnapshotScope::History => "history",
+    }
+}
 
 #[derive(Clone)]
 pub struct FleetReadService {
@@ -103,6 +118,9 @@ struct RefreshOutcome {
 struct InFlightJoin {
     generation: u64,
     receiver: watch::Receiver<Option<RefreshOutcome>>,
+    /// Waiters that hit `refresh_timeout` while this build ran. Counted,
+    /// never logged per request; the finished-build event reports the total.
+    timed_out: Arc<AtomicU64>,
 }
 
 /// Per-scope refresh state behind a plain mutex. The mutex is never held
@@ -174,6 +192,10 @@ struct FleetReadServiceInner {
     owner_files: Arc<dyn OwnerFileObserver>,
     #[cfg(test)]
     overlay_queries: AtomicUsize,
+    /// Successful Presentation builds that ran the WAL checkpoint hook.
+    /// Proves housekeeping runs on success and never on failure.
+    #[cfg(test)]
+    checkpoint_hook_calls: AtomicUsize,
 }
 
 impl std::fmt::Debug for FleetReadService {
@@ -227,6 +249,8 @@ impl FleetReadService {
                 owner_files: Arc::new(HostOwnerFileObserver::default()),
                 #[cfg(test)]
                 overlay_queries: AtomicUsize::new(0),
+                #[cfg(test)]
+                checkpoint_hook_calls: AtomicUsize::new(0),
             }),
         }
     }
@@ -634,6 +658,12 @@ impl FleetReadService {
         self.inner.overlay_queries.load(Ordering::Relaxed)
     }
 
+    /// Successful Presentation builds that ran the WAL checkpoint hook.
+    #[cfg(test)]
+    pub fn checkpoint_hook_calls_for_test(&self) -> usize {
+        self.inner.checkpoint_hook_calls.load(Ordering::Relaxed)
+    }
+
     /// Hold every index permit for as long as the returned guards live, so
     /// tests can prove the overlay pass skips under contention.
     #[cfg(test)]
@@ -752,9 +782,9 @@ impl FleetReadService {
                 if let Some(in_flight) = state.in_flight.as_ref() {
                     RefreshDecision::Join {
                         receiver: in_flight.receiver.clone(),
-                        generation: in_flight.generation,
+                        timed_out: Arc::clone(&in_flight.timed_out),
                     }
-                } else if state.backoff_remaining().is_some() {
+                } else if let Some(remaining) = state.backoff_remaining() {
                     RefreshDecision::Backoff {
                         code: state
                             .last_error
@@ -766,6 +796,8 @@ impl FleetReadService {
                                 "snapshot_backoff".to_string(),
                             )
                         }),
+                        consecutive_failures: state.consecutive_failures,
+                        window_secs: remaining.as_secs(),
                     }
                 } else {
                     let (sender, receiver) =
@@ -796,9 +828,11 @@ impl FleetReadService {
                         liveness: Arc::clone(&self.inner.liveness),
                         owner_files: Arc::clone(&self.inner.owner_files),
                     };
+                    let timed_out = Arc::new(AtomicU64::new(0));
                     state.in_flight = Some(InFlightJoin {
                         generation,
                         receiver: receiver.clone(),
+                        timed_out: Arc::clone(&timed_out),
                     });
                     RefreshDecision::Start {
                         sender,
@@ -806,11 +840,24 @@ impl FleetReadService {
                         generation,
                         started,
                         build,
+                        timed_out,
                     }
                 }
             };
             match decision {
-                RefreshDecision::Backoff { code, error } => {
+                RefreshDecision::Backoff {
+                    code,
+                    error,
+                    consecutive_failures,
+                    window_secs,
+                } => {
+                    tracing::warn!(
+                        target: FLEET_READS_TRACE_TARGET,
+                        scope = scope_name(scope),
+                        consecutive_failures,
+                        window_secs,
+                        "fleet snapshot back-off engaged",
+                    );
                     let latest = self.cached_scoped_snapshot(scope)?;
                     return match latest {
                         Some(snapshot) => Ok(mark_stale(snapshot, code)),
@@ -819,13 +866,14 @@ impl FleetReadService {
                 }
                 RefreshDecision::Join {
                     receiver,
-                    generation,
+                    timed_out,
+                    ..
                 } => {
                     if let Some(snapshot) = self
                         .wait_for_build(
                             scope,
                             receiver,
-                            generation,
+                            timed_out,
                             force,
                             force_since,
                             &mut joins,
@@ -841,15 +889,21 @@ impl FleetReadService {
                     generation,
                     started,
                     build,
+                    timed_out,
                 } => {
                     self.spawn_scoped_build(
-                        scope, sender, generation, started, build,
+                        scope,
+                        sender,
+                        generation,
+                        started,
+                        build,
+                        timed_out.clone(),
                     );
                     if let Some(snapshot) = self
                         .wait_for_build(
                             scope,
                             receiver,
-                            generation,
+                            timed_out,
                             force,
                             force_since,
                             &mut joins,
@@ -874,10 +928,72 @@ impl FleetReadService {
         generation: u64,
         started: Instant,
         build: BuildSnapshotRequest,
+        timed_out: Arc<AtomicU64>,
     ) {
         let inner = Arc::clone(&self.inner);
+        let watchdog_inner = Arc::clone(&inner);
         tokio::spawn(async move {
-            let outcome = run_scoped_build(&inner, build, started).await;
+            tokio::time::sleep(LONG_RUNNING_BUILD_WARN_AFTER).await;
+            let in_flight = match scope_state_for(&watchdog_inner, scope).lock()
+            {
+                Ok(state) => {
+                    state.in_flight.as_ref().is_some_and(|in_flight| {
+                        in_flight.generation == generation
+                    })
+                }
+                Err(_) => false,
+            };
+            if in_flight {
+                tracing::warn!(
+                    target: FLEET_READS_TRACE_TARGET,
+                    scope = scope_name(scope),
+                    elapsed_secs =
+                        LONG_RUNNING_BUILD_WARN_AFTER.as_secs(),
+                    "fleet snapshot build still running",
+                );
+            }
+        });
+        tokio::spawn(async move {
+            let refresh_timeout = inner.refresh_timeout;
+            let outcome = run_scoped_build(&inner, scope, build, started).await;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let timed_out_waiters =
+                timed_out.load(std::sync::atomic::Ordering::Relaxed);
+            let (outcome_str, served_rows, refresh_count) =
+                match (&outcome.snapshot, &outcome.error) {
+                    (Some(snapshot), _) => (
+                        "ok".to_string(),
+                        snapshot.wire.summaries.len() as u64,
+                        snapshot.refresh_count,
+                    ),
+                    (None, Some(error)) => (error.safe_code(), 0, 0),
+                    (None, None) => ("backend".to_string(), 0, 0),
+                };
+            let failed = outcome.snapshot.is_none();
+            let slow = Duration::from_millis(duration_ms) > refresh_timeout;
+            if failed || slow {
+                tracing::warn!(
+                    target: FLEET_READS_TRACE_TARGET,
+                    scope = scope_name(scope),
+                    outcome = outcome_str.as_str(),
+                    duration_ms,
+                    served_rows,
+                    refresh_count,
+                    timed_out_waiters,
+                    "fleet snapshot build finished",
+                );
+            } else {
+                tracing::info!(
+                    target: FLEET_READS_TRACE_TARGET,
+                    scope = scope_name(scope),
+                    outcome = outcome_str.as_str(),
+                    duration_ms,
+                    served_rows,
+                    refresh_count,
+                    timed_out_waiters,
+                    "fleet snapshot build finished",
+                );
+            }
             {
                 let mut state = match scope_state_for(&inner, scope).lock() {
                     Ok(guard) => guard,
@@ -898,12 +1014,13 @@ impl FleetReadService {
 
     /// Wait at most `refresh_timeout` for the joined build. Returns `None`
     /// when a forced caller must loop and join or start a newer build;
-    /// every other path returns its response directly.
+    /// every other path returns its response directly. Timeouts only bump
+    /// the shared waiter counter; they are never logged per request.
     async fn wait_for_build(
         &self,
         scope: SnapshotScope,
         receiver: watch::Receiver<Option<RefreshOutcome>>,
-        _generation: u64,
+        timed_out: Arc<AtomicU64>,
         force: bool,
         force_since: Instant,
         joins: &mut u32,
@@ -981,6 +1098,7 @@ impl FleetReadService {
                 }))
             }
             Err(_) => {
+                timed_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if !force {
                     return Ok(Some(self.timeout_response(scope, wait_start)?));
                 }
@@ -1095,6 +1213,11 @@ impl FleetReadService {
                 return;
             }
             if overlay.in_flight {
+                tracing::debug!(
+                    target: FLEET_READS_TRACE_TARGET,
+                    reason = "coalescing_slot_busy",
+                    "fleet overlay skipped",
+                );
                 return;
             }
             overlay.in_flight = true;
@@ -1106,6 +1229,11 @@ impl FleetReadService {
                 if let Ok(mut overlay) = self.inner.overlay.lock() {
                     overlay.in_flight = false;
                 }
+                tracing::debug!(
+                    target: FLEET_READS_TRACE_TARGET,
+                    reason = "index_contention",
+                    "fleet overlay skipped",
+                );
                 return;
             }
         };
@@ -1147,7 +1275,7 @@ impl FleetReadService {
 enum RefreshDecision {
     Join {
         receiver: watch::Receiver<Option<RefreshOutcome>>,
-        generation: u64,
+        timed_out: Arc<AtomicU64>,
     },
     Start {
         sender: watch::Sender<Option<RefreshOutcome>>,
@@ -1155,10 +1283,13 @@ enum RefreshDecision {
         generation: u64,
         started: Instant,
         build: BuildSnapshotRequest,
+        timed_out: Arc<AtomicU64>,
     },
     Backoff {
         code: String,
         error: FleetReadError,
+        consecutive_failures: u32,
+        window_secs: u64,
     },
 }
 
@@ -1173,9 +1304,11 @@ fn scope_state_for(
 }
 
 /// Run one snapshot build while holding a gateway-wide index permit for
-/// the whole blocking build.
+/// the whole blocking build. Successful Presentation builds checkpoint an
+/// oversized index WAL best-effort while still holding the permit.
 async fn run_scoped_build(
     inner: &Arc<FleetReadServiceInner>,
+    scope: SnapshotScope,
     build: BuildSnapshotRequest,
     started: Instant,
 ) -> RefreshOutcome {
@@ -1187,9 +1320,42 @@ async fn run_scoped_build(
             error: Some(FleetReadError::Backend("index_permits".to_string())),
         };
     };
-    let result =
-        tokio::task::spawn_blocking(move || build_snapshot_blocking(build))
-            .await;
+    let index_path = build.index_path.clone();
+    let is_presentation = matches!(scope, SnapshotScope::Presentation);
+    #[cfg(test)]
+    let hook_inner = Arc::clone(inner);
+    let result = tokio::task::spawn_blocking(move || {
+        let snapshot = build_snapshot_blocking(build)?;
+        if is_presentation {
+            #[cfg(test)]
+            hook_inner
+                .checkpoint_hook_calls
+                .fetch_add(1, Ordering::Relaxed);
+            match checkpoint_agent_artifact_index_wal_if_oversized(
+                &index_path,
+                AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
+            ) {
+                Ok(outcome) if outcome.checkpoint_attempted => {
+                    tracing::info!(
+                        target: FLEET_READS_TRACE_TARGET,
+                        wal_bytes_before = outcome.wal_bytes_before,
+                        wal_bytes_after = outcome.wal_bytes_after,
+                        "fleet index WAL checkpointed",
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        target: FLEET_READS_TRACE_TARGET,
+                        error = error.as_str(),
+                        "fleet index WAL checkpoint failed",
+                    );
+                }
+            }
+        }
+        Ok::<_, FleetReadError>(snapshot)
+    })
+    .await;
     match result {
         Ok(Ok(snapshot)) => RefreshOutcome {
             started,

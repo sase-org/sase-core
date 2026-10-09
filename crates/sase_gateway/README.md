@@ -287,6 +287,19 @@ text. Update status polling is authoritative in the MVP, even though update star
 Duplicate, stale, ambiguous-prefix, already-handled, unsupported, and missing-target cases return typed `ApiErrorWire`
 records and never overwrite existing response files.
 
+## Fleet Snapshot Logging
+
+`sase_gateway serve` installs a `tracing` subscriber that writes
+human-readable logs to stderr. Set `RUST_LOG` to tune verbosity
+(default `info`; `tower_http` request spans stay at `warn` so the default
+output keeps only fleet events). Every Presentation/History snapshot build
+logs its scope, outcome, duration, served rows, refresh count and timed-out
+waiters (`info` on success, `warn` on failure or slowness); back-off
+engagement and builds still running after 60 s log at `warn`, and skipped
+overlay passes log at `debug`. Successful Presentation builds also
+checkpoint an oversized artifact-index WAL best-effort without failing the
+build.
+
 ## Local Run
 
 ```bash

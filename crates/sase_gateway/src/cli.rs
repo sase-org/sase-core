@@ -14,6 +14,22 @@ use crate::{
 /// slow rebuild multiply into hundreds of index-scanning threads.
 const GATEWAY_MAX_BLOCKING_THREADS: usize = 32;
 
+/// Install the gateway's `tracing` subscriber exactly once.
+///
+/// The subscriber writes human-readable logs to stderr with an `EnvFilter`
+/// from `RUST_LOG` (default `info`, with `tower_http` held at `warn` so
+/// per-request spans stay out of the default output). It uses `try_init`
+/// so tests and repeated calls never panic.
+pub fn init_gateway_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 pub fn run_gateway_cli(
     args: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
@@ -34,6 +50,7 @@ pub fn run_gateway_cli(
     if wrote_contract {
         return Ok(());
     }
+    init_gateway_tracing();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(GATEWAY_MAX_BLOCKING_THREADS)
@@ -352,6 +369,12 @@ mod tests {
     fn unknown_argument_is_rejected() {
         let err = parse_gateway_args(["--bogus".to_string()]).unwrap_err();
         assert_eq!(err, "unknown argument: --bogus");
+    }
+
+    #[test]
+    fn gateway_tracing_install_is_idempotent() {
+        init_gateway_tracing();
+        init_gateway_tracing();
     }
 
     #[test]
