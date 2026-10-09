@@ -9,6 +9,7 @@ mod lifecycle_warm;
 mod links;
 mod links_evidence;
 mod notes_update;
+mod proof_bounded;
 mod publish_direct;
 mod read_model_mutations;
 mod snooze_plus_one;
