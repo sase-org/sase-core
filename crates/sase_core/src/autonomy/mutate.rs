@@ -108,6 +108,10 @@ fn same_state(
 
 /// Apply a resolved target to `base`: bump the revision, recompute the
 /// digest, and stamp the actor.
+///
+/// A human (TUI/CLI) mutation is provenance-truthful: its source becomes
+/// the mutating surface (`tui`/`cli`) instead of retaining the launch
+/// source. Inheritance keeps `inherited` because it runs as `host`.
 fn apply_target(
     base: &AutonomyRecordWire,
     profile: &str,
@@ -117,13 +121,24 @@ fn apply_target(
     now: &str,
 ) -> AutonomyRecordWire {
     let policy = profile_policy(profile);
+    let source = if actor.kind == "human" {
+        if actor.surface == super::wires::AUTONOMY_SOURCE_TUI
+            || actor.surface == super::wires::AUTONOMY_SOURCE_CLI
+        {
+            actor.surface.clone()
+        } else {
+            super::wires::AUTONOMY_SOURCE_TUI.to_string()
+        }
+    } else {
+        base.source.clone()
+    };
     AutonomyRecordWire {
         schema_version: base.schema_version,
         profile: profile.to_string(),
         selection: selection.to_string(),
         policy: policy.clone(),
         overrides: base.overrides.clone(),
-        source: base.source.clone(),
+        source,
         inherited_from: base.inherited_from.clone(),
         last,
         revision: base.revision + 1,
