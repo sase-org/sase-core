@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use rusqlite::{Connection, OptionalExtension};
 
+use super::super::handoff_wire::ToolRunJoinRecordWire;
 use super::super::store::connection::runs_column_set;
 use super::super::store::{triage_tables_present, typical_duration_for};
 use super::super::triage::{
@@ -296,6 +297,44 @@ pub(super) fn batch_sample_max(
         let max_ts: Option<i64> = row.get(1)?;
         if let Some(max_ts) = max_ts {
             out.insert(run_id, max_ts);
+        }
+    }
+    Ok(out)
+}
+
+/// One `(kind, id)` join record per run, in one `run_id IN (...)`
+/// statement over `join_json`. Malformed records read as absent, and stores
+/// written before the column existed select a NULL placeholder, so reads
+/// keep working before the next write open. `release_join` clears the
+/// record, so the glance shows `None` again.
+pub(super) fn batch_joins(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<HashMap<String, (String, String)>, ToolRunError> {
+    let mut out = HashMap::new();
+    if run_ids.is_empty() {
+        return Ok(out);
+    }
+    let columns = runs_column_set(conn)?;
+    if !columns.contains("join_json") {
+        return Ok(out);
+    }
+    let placeholders = placeholders(run_ids.len());
+    let sql = format!(
+        "SELECT run_id, join_json FROM runs WHERE run_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(run_ids.iter()))?;
+    while let Some(row) = rows.next()? {
+        let run_id: String = row.get(0)?;
+        let raw: Option<String> = row.get(1)?;
+        let Some(raw) = raw else { continue };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<ToolRunJoinRecordWire>(&raw)
+        {
+            out.insert(run_id, (record.kind, record.id));
         }
     }
     Ok(out)
@@ -793,6 +832,7 @@ fn fallback_summary(
 pub(super) struct BatchContext {
     stages: HashMap<String, StageAgg>,
     samples: HashMap<String, i64>,
+    joins: HashMap<String, (String, String)>,
     verdicts: HashMap<String, ToolRunVerdictSummaryWire>,
     references: HashMap<String, Option<(String, Option<u32>)>>,
     typicals: HashMap<String, (Option<i64>, u32)>,
@@ -808,6 +848,7 @@ impl BatchContext {
         Ok(Self {
             stages: batch_stage_aggs(conn, run_ids)?,
             samples: batch_sample_max(conn, run_ids)?,
+            joins: batch_joins(conn, run_ids)?,
             verdicts: verdict_summary_for_runs(conn, run_ids)?,
             references: HashMap::new(),
             typicals: HashMap::new(),
@@ -881,6 +922,12 @@ impl BatchContext {
                 None => (0, None, None),
             };
         let sample_max = self.samples.get(&row.run_id).copied();
+        let (join_kind, join_id) = self
+            .joins
+            .get(&row.run_id)
+            .cloned()
+            .map(|(kind, id)| (Some(kind), Some(id)))
+            .unwrap_or((None, None));
         let (reference_run_id, stages_expected) =
             match self.reference_for_row(conn, row)? {
                 Some((id, expected)) => (Some(id), expected),
@@ -906,6 +953,8 @@ impl BatchContext {
             bead: row.bead.clone(),
             owner_kind: row.owner_kind.clone(),
             owner_id: row.owner_id.clone(),
+            join_kind,
+            join_id,
             parent_run_id: row.parent_run_id.clone(),
             created_ts: row.created_ts,
             running_ts: row.running_ts,

@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use super::super::catalog::normalize_tool_definition;
 use super::super::handoff_wire::{
-    ToolRunStopRequestWire, ToolRunTerminalCauseWire,
+    ToolRunJoinOutcomeWire, ToolRunJoinRequestWire,
+    ToolRunReleaseJoinRequestWire, ToolRunStopRequestWire,
+    ToolRunTerminalCauseWire,
 };
 use super::super::store::{
-    append_event, begin, finish, request_stop, summarize,
+    append_event, begin, finish, join, release_join, request_stop, summarize,
 };
 use super::super::wire::{
     ToolArgsPolicyWire, ToolDefinitionWire, ToolFingerprintSpecWire,
@@ -544,6 +546,70 @@ fn glance_lists_unsettled_newest_first() {
     assert_eq!(live_wire.state, ToolRunStateWire::Running);
     assert_eq!(live_wire.last_activity_ts, NOW - 10);
     assert!(!live_wire.stop_requested);
+}
+
+#[test]
+fn glance_carries_join_fact_through_join_and_release() {
+    let (_temp, path) = store();
+    let started = begin_run(&path, BeginArgs::named("check"));
+    let run_id = started.run.run_id.clone();
+    let glanced_row = |path: &Path| {
+        tool_run_live_glance(path, glance_request(), Duration::from_secs(1))
+            .unwrap()
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == run_id)
+            .expect("live run in glance")
+    };
+    // Unjoined runs carry no join fact.
+    let wire = glanced_row(&path);
+    assert_eq!(wire.join_kind, None);
+    assert_eq!(wire.join_id, None);
+    // Seed the starter a handoff begin would have stored so the run joins
+    // through the real write path.
+    let starter =
+        serde_json::json!({"agent": "agent-1", "pid": 999}).to_string();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE runs SET starter_json = ?1 WHERE run_id = ?2",
+            rusqlite::params![starter, run_id],
+        )
+        .unwrap();
+    let joined = join(
+        &path,
+        ToolRunJoinRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.clone(),
+            joiner_kind: "monitor".into(),
+            joiner_id: "mon-1".into(),
+            agent: Some("agent-1".into()),
+            requested_by: Some("agent-1".into()),
+            now_ts: Some(NOW + 10),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(joined.outcome, ToolRunJoinOutcomeWire::Joined);
+    let wire = glanced_row(&path);
+    assert_eq!(wire.join_kind.as_deref(), Some("monitor"));
+    assert_eq!(wire.join_id.as_deref(), Some("mon-1"));
+    // Release clears the record, so the glance shows `None` again.
+    release_join(
+        &path,
+        ToolRunReleaseJoinRequestWire {
+            schema_version: TOOL_RUN_WIRE_SCHEMA_VERSION,
+            run_id: run_id.clone(),
+            joiner_kind: "monitor".into(),
+            joiner_id: "mon-1".into(),
+            now_ts: Some(NOW + 20),
+        },
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    let wire = glanced_row(&path);
+    assert_eq!(wire.join_kind, None);
+    assert_eq!(wire.join_id, None);
 }
 
 #[test]

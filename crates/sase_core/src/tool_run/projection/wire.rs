@@ -134,6 +134,10 @@ pub struct ToolRunGlanceWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
     pub created_ts: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

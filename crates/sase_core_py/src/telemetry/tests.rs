@@ -1593,3 +1593,143 @@ fn tool_run_glance_projection_bindings_round_trip() {
         .is_err());
     });
 }
+
+#[test]
+fn tool_run_glance_join_fact_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("tools").join("runs.sqlite");
+        let glance = |py: Python<'_>| {
+            let glance_obj = json_value_to_py(
+                py,
+                &json!({"schema_version": 1, "now_ts": 1_700_000_100}),
+            )
+            .unwrap();
+            let glance_request =
+                glance_obj.bind(py).downcast::<PyDict>().unwrap();
+            let glanced = py_tool_run_live_glance(
+                py,
+                path.to_str().unwrap(),
+                glance_request,
+                1_000,
+            )
+            .unwrap();
+            py_to_json_value(glanced.bind(py)).unwrap()
+        };
+        // A starter-scoped detached run starts unjoined.
+        let begin_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "tool_name": "check",
+                "definition": {
+                    "schema_version": 1,
+                    "name": "check",
+                    "argv": ["just", "check"],
+                    "description": "check",
+                    "stages": "run_silent",
+                    "inputs": ["Justfile"],
+                    "env": [],
+                    "args": "deny",
+                    "fingerprint": {"repos": [], "toolchain": {}}
+                },
+                "display_argv": ["just", "check"],
+                "project": "sase",
+                "now_ts": 1_700_000_000,
+                "commit_running": false,
+                "launch_mode": "handoff",
+                "owner_kind": "proc",
+                "owner_id": "proc-1",
+                "wrapper_pid": 111,
+                "boot_id": "boot-1",
+                "process_start_identity": "boot-1:111",
+                "launch": {
+                    "argv": ["just", "check"],
+                    "tool_name": "check",
+                    "extra_args": [],
+                    "display_argv": ["just", "check"],
+                    "definition": {
+                        "schema_version": 1,
+                        "name": "check",
+                        "argv": ["just", "check"],
+                        "description": "check",
+                        "stages": "run_silent",
+                        "inputs": ["Justfile"],
+                        "env": [],
+                        "args": "deny",
+                        "fingerprint": {"repos": [], "toolchain": {}}
+                    },
+                    "adhoc": false,
+                    "continuation_mode": "always"
+                },
+                "starter": {
+                    "agent": "agent-1",
+                    "pid": 4242,
+                    "boot_id": "boot-1",
+                    "process_start_identity": "boot-1:4242"
+                }
+            }),
+        )
+        .unwrap();
+        let begin_request = begin_obj.bind(py).downcast::<PyDict>().unwrap();
+        let started =
+            py_tool_run_begin(py, path.to_str().unwrap(), begin_request, 1_000)
+                .unwrap();
+        let started = py_to_json_value(started.bind(py)).unwrap();
+        let run_id = started["run"]["run_id"].as_str().unwrap().to_string();
+        let glanced = glance(py);
+        assert_eq!(glanced["runs"][0]["run_id"], json!(run_id));
+        assert!(glanced["runs"][0].get("join_kind").is_none());
+        assert!(glanced["runs"][0].get("join_id").is_none());
+        // Joining publishes the join fact on the glance row.
+        let join_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "joiner_kind": "monitor",
+                "joiner_id": "mon-1",
+                "agent": "agent-1",
+                "requested_by": "agent-1",
+                "now_ts": 1_700_000_010
+            }),
+        )
+        .unwrap();
+        let join_request = join_obj.bind(py).downcast::<PyDict>().unwrap();
+        let joined =
+            py_tool_run_join(py, path.to_str().unwrap(), join_request, 1_000)
+                .unwrap();
+        let joined = py_to_json_value(joined.bind(py)).unwrap();
+        assert_eq!(joined["outcome"], json!("joined"));
+        let glanced = glance(py);
+        assert_eq!(glanced["runs"][0]["join_kind"], json!("monitor"));
+        assert_eq!(glanced["runs"][0]["join_id"], json!("mon-1"));
+        // Release clears the record, so the glance shows `None` again.
+        let release_obj = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "run_id": run_id,
+                "joiner_kind": "monitor",
+                "joiner_id": "mon-1",
+                "now_ts": 1_700_000_020
+            }),
+        )
+        .unwrap();
+        let release_request =
+            release_obj.bind(py).downcast::<PyDict>().unwrap();
+        let released = py_tool_run_release_join(
+            py,
+            path.to_str().unwrap(),
+            release_request,
+            1_000,
+        )
+        .unwrap();
+        let released = py_to_json_value(released.bind(py)).unwrap();
+        assert_eq!(released["outcome"], json!("released"));
+        let glanced = glance(py);
+        assert!(glanced["runs"][0].get("join_kind").is_none());
+        assert!(glanced["runs"][0].get("join_id").is_none());
+    });
+}
