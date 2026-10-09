@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1](https://github.com/sase-org/sase-core/compare/v0.37.0...v0.37.1) - 2026-10-09
+
+### Added
+
+- *(autonomy)* core summary, sentences, mutation, and decision log
+- *(autonomy)* add core record, compatibility profiles, and evaluate()
+- *(beads)* unify open, close and remove mutations on one view commit
+- *(bead-mutations)* unify links, +1 and snooze onto view-commit runner
+- *(beads)* unify claims, ready marking and dependencies on one view commit
+- *(beads)* unify create and notes mutations on one view commit
+- *(tool-run)* add join_kind/join_id to live-glance wire with binding tests (sase-1ih.2)
+- *(beads)* port links, +1 and snooze mutations onto the mutation view
+- *(beads)* port claims, ready marking and dependencies onto the mutation view
+- *(beads)* port open, close and remove onto the mutation view
+- *(beads)* one mutation view with shared algorithms and full notes family
+- *(beads)* direct write-through read-model publication without second sweep or snapshot
+- *(auto)* fail-closed %auto grammar classifier in sase-core
+- *(beads)* indexed allocation metadata, shared mutation view/publish, cached create port
+- *(macro)* quote-aware paren close in completion trigger context
+- *(beads)* add indexed note/update read-model path with tail-refresh write-through
+- *(plan)* repair decision warning, archive, unicode, fence, and sheet contracts
+- *(wait)* support wait-for-epic flip in plan resolution and directive metadata
+- *(plan)* add decision sheet, summary, and prompt-block backend
+- *(sase-core)* add plan decision human quote matcher with PyO3 binding
+- *(sase-core)* add plan decisions resolver payload/digest/resolve with PyO3 bindings
+- *(plan)* validate plan decisions grammar with Archived mode and additive wire
+- *(bead)* read-model mutation groundwork for sase-1h8.13
+- *(bead)* add indexed read-model query layer with Python bindings
+- *(wait)* wire wait_epic_follows scan fields and dismissed-member reducer fix (sase-1h7.5)
+- *(bead)* add seal-watch threshold probe and binding
+- *(bead)* skip projection rewrite on event-store save; add referenced-artifact-ids query (sase-1h8.11)
+- *(bead-read-model)* snapshot-plus-tail incremental refresh in sase-core
+- *(bead)* report update request-order IDs and enforce create parent (sase-1h8.7)
+- *(bead)* add versioned SQLite read model with freshness token and parity harness
+- *(bead)* one-replay core support for in-mutation resolution and target probing
+- *(wait)* add pure wait_epic_follow reducer with Python binding (sase-1h7.4)
+- *(wait)* mirror wait_for_epics_of in scan wires and editor grammar (sase-1h7.3)
+- *(artifact-link)* widen produced-by guidance to bead sources
+- *(core)* bead board_snapshot with single-read list/ready/blocked
+- *(wire)* add CreatedEpicWire to agent-meta wire
+- *(bead-store)* add bead_store_fingerprint core binding with stat-only exact key
+- *(beads)* one parse, one validation, no lockless-read deletes (sase-1h8.4)
+- *(instructions)* instruction manifest v1 wire schema, binding, and golden fixture (sase-1h3.2)
+
+### Fixed
+
+- *(bead-read-model)* stop unlinking the live read-model cache under concurrent access
+- *(sase-1id)* carry auto_approve_argument on AgentMetaWire; canonical %auto colon errors
+- *(bead)* normalize lock_wait_ms in replay goldens and split golden case table
+- *(bead-tests)* pin lock_wait_ms to zero in replay goldens
+- *(triage)* point environment and bead remedies at install-venv/install-dev
+- *(tests)* expect no issues.jsonl-missing warning for event-store bead reads
+
+### Other
+
+- *(bead)* split mutation into single-algorithm modules with replay goldens
+- *(bead-read-model)* split over-cap store and tail into resume, refresh, and meta-keys modules
+- *(sase-core)* add mutation replay golden coverage for all entry points
+- *(beads)* run nine mutation suites in cached and replay modes
+- *(sase-core)* prove bounded mutation work and every-family read-model parity
+- *(bead-mutation)* add mode-parameterized dual-mode parity fixtures
+- *(wait)* expect the for_epic keyword in directive contract and LSP completion tests
+
 ## [0.37.0](https://github.com/sase-org/sase-core/compare/v0.36.6...v0.37.0) - 2026-10-06
 
 ### Added

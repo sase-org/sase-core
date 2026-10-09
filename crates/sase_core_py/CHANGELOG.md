@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1](https://github.com/sase-org/sase-core/compare/v0.37.0...v0.37.1) - 2026-10-09
+
+### Added
+
+- *(autonomy)* core summary, sentences, mutation, and decision log
+- *(autonomy)* add core record, compatibility profiles, and evaluate()
+- *(tool-run)* add join_kind/join_id to live-glance wire with binding tests (sase-1ih.2)
+- *(auto)* fail-closed %auto grammar classifier in sase-core
+- *(plan)* repair decision warning, archive, unicode, fence, and sheet contracts
+- *(plan)* add decision sheet, summary, and prompt-block backend
+- *(sase-core)* add plan decision human quote matcher with PyO3 binding
+- *(sase-core)* add plan decisions resolver payload/digest/resolve with PyO3 bindings
+- *(plan)* validate plan decisions grammar with Archived mode and additive wire
+- *(bead)* add indexed read-model query layer with Python bindings
+- *(bead)* add seal-watch threshold probe and binding
+- *(bead)* skip projection rewrite on event-store save; add referenced-artifact-ids query (sase-1h8.11)
+- *(bead-read-model)* snapshot-plus-tail incremental refresh in sase-core
+- *(bead)* add versioned SQLite read model with freshness token and parity harness
+- *(bead)* one-replay core support for in-mutation resolution and target probing
+- *(wait)* add pure wait_epic_follow reducer with Python binding (sase-1h7.4)
+- *(wait)* mirror wait_for_epics_of in scan wires and editor grammar (sase-1h7.3)
+- *(core)* bead board_snapshot with single-read list/ready/blocked
+- *(bead-store)* add bead_store_fingerprint core binding with stat-only exact key
+- *(instructions)* instruction manifest v1 wire schema, binding, and golden fixture (sase-1h3.2)
+
+### Other
+
+- *(wait)* expect the for_epic keyword in directive contract and LSP completion tests
+
 ## [0.37.0](https://github.com/sase-org/sase-core/compare/v0.36.6...v0.37.0) - 2026-10-06
 
 ### Added
