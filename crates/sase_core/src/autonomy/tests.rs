@@ -548,3 +548,399 @@ fn fleet_auto_approved_routes_through_evaluate() {
         Some("epic")
     ));
 }
+
+use super::wires::AutonomyLastWire;
+
+#[test]
+fn summary_covers_every_profile() {
+    use super::summary::{
+        autonomy_profiles, autonomy_summary, AUTONOMY_COVERAGE,
+    };
+    // (selection, class, short)
+    for (selection, class, short) in [
+        (None, "manual", "tales ✋ · epics ✋ · questions ✋"),
+        (Some(""), "autopilot", "tales ✓ · epics ✓ · questions first"),
+        (
+            Some("tale"),
+            "attended",
+            "tales ✓ · epics ✋ · questions first",
+        ),
+        (
+            Some("epic"),
+            "attended",
+            "tales ✋ · epics ✓ · questions first",
+        ),
+    ] {
+        let summary = autonomy_summary(&resolve(selection));
+        assert_eq!(summary.class, class, "selection {selection:?}");
+        assert_eq!(summary.short, short, "selection {selection:?}");
+        assert_eq!(summary.coverage, AUTONOMY_COVERAGE);
+        assert_eq!(summary.cells.len(), 3);
+        assert_eq!(summary.revision, 1);
+        let kinds: Vec<&str> = summary
+            .cells
+            .iter()
+            .map(|cell| cell.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["plan", "epic", "question"]);
+        for cell in &summary.cells {
+            assert_eq!(cell.rule, format!("gates.{}", cell.kind));
+            if cell.glyph == "✓" {
+                assert_ne!(cell.effect, "Waits for you");
+            } else {
+                assert_eq!(cell.glyph, "✋");
+                assert_eq!(cell.effect, "Waits for you");
+            }
+        }
+    }
+    // Exact effect wording from the UX baseline.
+    let standard = autonomy_summary(&resolve(Some("")));
+    assert_eq!(
+        standard.cells[0].effect,
+        "Tales: approve + archive, then implement"
+    );
+    assert_eq!(standard.cells[1].effect, "Epics: archive + launch workers");
+    assert_eq!(standard.cells[2].effect, "Questions: take the first option");
+    // Sentences are stable snapshots.
+    assert_eq!(
+        autonomy_summary(&resolve(None)).sentence,
+        "Manual: every plan, epic, and question waits for you."
+    );
+    assert_eq!(
+        standard.sentence,
+        "Standard: tales approve + archive; epics launch; questions take \
+         the first option."
+    );
+    assert_eq!(
+        autonomy_summary(&resolve(Some("tale"))).sentence,
+        "Tale: tales approve + archive; epic plans wait; questions take \
+         the first option."
+    );
+    assert_eq!(
+        autonomy_summary(&resolve(Some("epic"))).sentence,
+        "Epic: tale plans wait; epics launch; questions take the first \
+         option."
+    );
+    // The catalog mirrors the summary builders.
+    let catalog = autonomy_profiles();
+    assert_eq!(catalog.len(), 4);
+    for entry in &catalog {
+        assert_eq!(entry.layer, "builtin");
+        let summary = autonomy_summary(&resolve(match entry.name.as_str() {
+            "manual" => None,
+            "standard" => Some(""),
+            "tale" => Some("tale"),
+            _ => Some("epic"),
+        }));
+        assert_eq!(entry.cells, summary.cells, "profile {}", entry.name);
+        assert_eq!(entry.oneliner, summary.short, "profile {}", entry.name);
+    }
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.kind.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("manual", "manual"),
+            ("standard", "default"),
+            ("tale", "compatibility"),
+            ("epic", "compatibility"),
+        ]
+    );
+}
+
+#[test]
+fn decision_sentences_render_both_examples() {
+    use super::sentences::autonomy_decision_sentence;
+    use super::wires::AutonomyDecisionSentenceContextWire;
+    let plan = AutonomyDecisionSentenceContextWire {
+        gate_kind: "plan".to_string(),
+    };
+    let epic = AutonomyDecisionSentenceContextWire {
+        gate_kind: "epic_plan".to_string(),
+    };
+    assert_eq!(
+        autonomy_decision_sentence(&decide(Some(""), "plan"), &plan),
+        "✓ tale approved + archived · standard · gates.plan"
+    );
+    assert_eq!(
+        autonomy_decision_sentence(&decide(Some("tale"), "epic_plan"), &epic),
+        "✋ epic plan waits for you · tale · gates.epic"
+    );
+    let question = AutonomyDecisionSentenceContextWire {
+        gate_kind: "question".to_string(),
+    };
+    assert_eq!(
+        autonomy_decision_sentence(
+            &decide(Some("epic"), "question"),
+            &question
+        ),
+        "✓ question answered with the first option · epic · gates.question"
+    );
+    assert_eq!(
+        autonomy_decision_sentence(&decide(None, "question"), &question),
+        "✋ question waits for you · manual · gates.question"
+    );
+}
+
+#[test]
+fn awareness_text_renders_tale_snapshot_and_manual_none() {
+    use super::sentences::autonomy_awareness_text;
+    assert_eq!(autonomy_awareness_text(&resolve(None)), None);
+    assert_eq!(
+        autonomy_awareness_text(&resolve(Some("tale"))).as_deref(),
+        Some(
+            "SASE autonomy: tale (advisory; covers host checkpoints only, \
+             your shell is not restricted)\n\
+             - Tale plans: approved and archived automatically, then \
+             implemented without review.\n\
+             - Epic plans: wait for a human review before anything launches.\n\
+             - Questions: answered automatically with each question's first \
+             option; no human reads them, so put your recommended option \
+             first.\n\
+             - Launch, sudo, and custom gates: wait for a human."
+        )
+    );
+    for selection in [Some(""), Some("epic")] {
+        let text = autonomy_awareness_text(&resolve(selection)).expect("block");
+        assert_eq!(text.lines().count(), 5);
+        assert!(text
+            .ends_with("- Launch, sudo, and custom gates: wait for a human."));
+    }
+}
+
+#[test]
+fn mutate_covers_every_status() {
+    use super::mutate::mutate_autonomy;
+    use super::wires::AutonomyMutateRequestWire;
+    let agent = AutonomyActorWire {
+        kind: "agent".to_string(),
+        surface: "prompt".to_string(),
+        principal: "sase.x".to_string(),
+    };
+    let human = AutonomyActorWire {
+        kind: "human".to_string(),
+        surface: "tui".to_string(),
+        principal: "bryan.zeus".to_string(),
+    };
+    let mutate = |record: &AutonomyRecordWire,
+                  selection: &str,
+                  expected: Option<u64>,
+                  actor: &AutonomyActorWire| {
+        mutate_autonomy(
+            record,
+            &AutonomyMutateRequestWire {
+                selection: selection.to_string(),
+                expected_revision: expected,
+                actor: actor.clone(),
+                now: "2026-10-09T12:00:00Z".to_string(),
+            },
+        )
+        .expect("actor valid")
+    };
+    // Stale: the expected revision differs.
+    let tale = resolve(Some("tale"));
+    let stale = mutate(&tale, "manual", Some(99), &human);
+    assert_eq!(stale.status, "stale");
+    assert_eq!(stale.record.revision, 1);
+    // Unchanged: the same selection keeps its revision.
+    let same = mutate(&tale, "tale", Some(1), &human);
+    assert_eq!(same.status, "unchanged");
+    assert_eq!(same.record.revision, 1);
+    // Agent widening is refused: tale -> standard would widen epic.
+    let refused = mutate(&tale, "", None, &agent);
+    assert_eq!(refused.status, "refused");
+    assert_eq!(refused.record.revision, 1);
+    assert!(refused.reason.contains("epic"), "{}", refused.reason);
+    // Agent narrowing is allowed: tale -> manual.
+    let narrowed = mutate(&tale, "manual", None, &agent);
+    assert_eq!(narrowed.status, "applied");
+    assert_eq!(narrowed.record.profile, "manual");
+    assert_eq!(narrowed.record.revision, 2);
+    assert_eq!(
+        narrowed.record.last,
+        Some(AutonomyLastWire {
+            profile: "tale".to_string(),
+            selection: "tale".to_string(),
+        })
+    );
+    // Human widening is allowed.
+    let widened = mutate(&tale, "", None, &human);
+    assert_eq!(widened.status, "applied");
+    assert_eq!(widened.record.profile, "standard");
+    assert_eq!(widened.record.revision, 2);
+    assert_eq!(
+        widened.record.updated_by.as_ref().expect("actor").kind,
+        "human"
+    );
+    // Restore with a last brings it back; without one gives standard.
+    let restored = mutate(&narrowed.record, "restore", None, &human);
+    assert_eq!(restored.status, "applied");
+    assert_eq!(restored.record.profile, "tale");
+    assert_eq!(restored.record.selection, "tale");
+    let fresh_manual = resolve(None);
+    let restored_default = mutate(&fresh_manual, "restore", None, &human);
+    assert_eq!(restored_default.status, "applied");
+    assert_eq!(restored_default.record.profile, "standard");
+    // Full `%auto:` spellings are accepted.
+    let spelled = mutate(&fresh_manual, "%auto:epic", None, &human);
+    assert_eq!(spelled.status, "applied");
+    assert_eq!(spelled.record.profile, "epic");
+    // Unknown spellings are refused, never applied.
+    let bogus = mutate(&fresh_manual, "bogus", None, &human);
+    assert_eq!(bogus.status, "refused");
+    assert_eq!(bogus.record.revision, 1);
+}
+
+#[test]
+fn inherit_keeps_narrows_or_refuses() {
+    use super::mutate::autonomy_inherit;
+    let host = AutonomyActorWire {
+        kind: "host".to_string(),
+        surface: "successor".to_string(),
+        principal: "sase-host".to_string(),
+    };
+    // Pure inheritance carries policy/profile/selection/last unchanged.
+    let tale = resolve(Some("tale"));
+    let inherited =
+        autonomy_inherit(&tale, "sase.1", None, &host, "2026-10-09T12:00Z")
+            .expect("actor valid");
+    assert_eq!(inherited.status, "inherited");
+    assert_eq!(inherited.record.profile, "tale");
+    assert_eq!(inherited.record.selection, "tale");
+    assert_eq!(inherited.record.policy, tale.policy);
+    assert_eq!(inherited.record.last, tale.last);
+    assert_eq!(inherited.record.source, "inherited");
+    assert_eq!(inherited.record.inherited_from.as_deref(), Some("sase.1"));
+    assert_eq!(inherited.record.revision, 1);
+    // Explicit narrowing applies as an agent actor.
+    let narrowed = autonomy_inherit(&tale, "sase.1", Some("manual"), &host, "")
+        .expect("actor valid");
+    assert_eq!(narrowed.status, "narrowed");
+    assert_eq!(narrowed.record.profile, "manual");
+    assert_eq!(narrowed.record.revision, 2);
+    assert_eq!(
+        narrowed.record.last,
+        Some(AutonomyLastWire {
+            profile: "tale".to_string(),
+            selection: "tale".to_string(),
+        })
+    );
+    // Explicit widening keeps the inherited record with its reason.
+    let refused = autonomy_inherit(&tale, "sase.1", Some(""), &host, "")
+        .expect("actor valid");
+    assert_eq!(refused.status, "refused");
+    assert_eq!(refused.record.profile, "tale");
+    assert_eq!(refused.record.revision, 1);
+    assert!(refused.reason.contains("kept the inherited record"));
+    // A matching explicit selection stays inherited without a bump.
+    let matched = autonomy_inherit(&tale, "sase.1", Some("tale"), &host, "")
+        .expect("actor valid");
+    assert_eq!(matched.status, "inherited");
+    assert_eq!(matched.record.revision, 1);
+}
+
+#[test]
+fn decision_log_round_trips_filters_and_rotates() {
+    use super::decision_log::{
+        append_autonomy_decision_with_cap, read_autonomy_decisions,
+    };
+    use super::wires::{AutonomyLogEntryWire, AutonomyLogQueryWire};
+    let temp = tempfile::tempdir().expect("temp home");
+    let home = temp.path();
+    // An empty store reads empty.
+    let empty = read_autonomy_decisions(home, &AutonomyLogQueryWire::default())
+        .expect("read");
+    assert!(empty.is_empty());
+    let entry = |agent: &str, kind: &str, at: &str| AutonomyLogEntryWire {
+        schema_version: 1,
+        at: at.to_string(),
+        agent: agent.to_string(),
+        agent_session: "sase.sess".to_string(),
+        project: "sase".to_string(),
+        gate_kind: kind.to_string(),
+        gate_id: format!("{agent}-{kind}"),
+        creator_role: "top_level".to_string(),
+        decision: decide(Some("tale"), kind),
+    };
+    append_autonomy_decision_with_cap(
+        home,
+        &entry("a", "plan", "2026-10-09T10:00:00Z"),
+        1024,
+    )
+    .expect("append");
+    append_autonomy_decision_with_cap(
+        home,
+        &entry("b", "epic_plan", "2026-10-09T11:00:00Z"),
+        1024,
+    )
+    .expect("append");
+    // Newest first.
+    let all = read_autonomy_decisions(home, &AutonomyLogQueryWire::default())
+        .expect("read");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].agent, "b");
+    assert_eq!(all[1].agent, "a");
+    // Filters.
+    let query = |query: AutonomyLogQueryWire| {
+        read_autonomy_decisions(home, &query).expect("read")
+    };
+    assert_eq!(
+        query(AutonomyLogQueryWire {
+            agent: Some("a".to_string()),
+            ..Default::default()
+        })
+        .len(),
+        1
+    );
+    assert_eq!(
+        query(AutonomyLogQueryWire {
+            since: Some("2026-10-09T10:30:00Z".to_string()),
+            ..Default::default()
+        })
+        .len(),
+        1
+    );
+    assert_eq!(
+        query(AutonomyLogQueryWire {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .len(),
+        1
+    );
+    assert!(!query(AutonomyLogQueryWire {
+        outcome: Some("auto".to_string()),
+        ..Default::default()
+    })
+    .is_empty());
+    // A torn last line does not lose the segment.
+    let live = home.join("autonomy").join("decisions.jsonl");
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&live)
+            .expect("open");
+        file.write_all(b"{\"torn\": ").expect("write");
+    }
+    assert_eq!(
+        read_autonomy_decisions(home, &AutonomyLogQueryWire::default())
+            .expect("read")
+            .len(),
+        2
+    );
+    // Rotation keeps one prior segment and both stay readable.
+    append_autonomy_decision_with_cap(
+        home,
+        &entry("c", "plan", "2026-10-09T12:00:00Z"),
+        100,
+    )
+    .expect("append");
+    assert!(home.join("autonomy").join("decisions.jsonl.1").exists());
+    let rotated =
+        read_autonomy_decisions(home, &AutonomyLogQueryWire::default())
+            .expect("read");
+    assert!(rotated.iter().any(|item| item.agent == "c"));
+    assert!(rotated.iter().any(|item| item.agent == "a"));
+}
