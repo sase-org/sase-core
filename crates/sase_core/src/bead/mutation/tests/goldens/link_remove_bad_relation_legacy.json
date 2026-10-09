@@ -1,0 +1,8 @@
+{
+  "scenario": "link_remove_bad_relation_legacy",
+  "outcome": "err kind=validation message=unknown relation `frobnicate`; expected one of cites, read, related, supersedes, implements, derives-from, produced-by, launched, awaits",
+  "files": {
+    "config.json": "{\n  \"issue_prefix\": \"sase\",\n  \"next_counter\": 3,\n  \"owner\": \"owner@example.com\"\n}\n",
+    "issues.jsonl": "{\"id\":\"sase-1\",\"title\":\"Alpha\",\"status\":\"open\",\"issue_type\":\"plan\",\"tier\":\"epic\",\"parent_id\":null,\"owner\":\"owner@example.com\",\"assignee\":\"\",\"created_at\":\"2026-01-01T00:00:00Z\",\"created_by\":\"creator-agent\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"closed_at\":null,\"close_reason\":null,\"description\":\"\",\"design\":\"\",\"links\":[{\"target_ref\":\"bead:sase-2\",\"relation\":\"related\",\"description\":\"shares a root cause\",\"origin\":\"manual\",\"direction\":\"out\",\"uses\":1}],\"model\":\"\",\"is_ready_to_work\":false,\"changespec_name\":\"\",\"changespec_bug_id\":\"\",\"dependencies\":[]}\n{\"id\":\"sase-2\",\"title\":\"Beta\",\"status\":\"open\",\"issue_type\":\"plan\",\"tier\":\"epic\",\"parent_id\":null,\"owner\":\"owner@example.com\",\"assignee\":\"\",\"created_at\":\"2026-01-01T00:01:00Z\",\"created_by\":\"creator-agent\",\"updated_at\":\"2026-01-01T00:01:00Z\",\"closed_at\":null,\"close_reason\":null,\"description\":\"\",\"design\":\"\",\"model\":\"\",\"is_ready_to_work\":false,\"changespec_name\":\"\",\"changespec_bug_id\":\"\",\"dependencies\":[]}\n"
+  }
+}

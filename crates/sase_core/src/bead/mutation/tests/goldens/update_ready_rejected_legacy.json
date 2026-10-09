@@ -1,0 +1,8 @@
+{
+  "scenario": "update_ready_rejected_legacy",
+  "outcome": "err kind=validation message=is_ready_to_work cannot be set via update(); use mark_ready_to_work() instead.",
+  "files": {
+    "config.json": "{\n  \"issue_prefix\": \"sase\",\n  \"next_counter\": 2,\n  \"owner\": \"owner@example.com\"\n}\n",
+    "issues.jsonl": "{\"id\":\"sase-1\",\"title\":\"Alpha\",\"status\":\"open\",\"issue_type\":\"plan\",\"tier\":\"epic\",\"parent_id\":null,\"owner\":\"owner@example.com\",\"assignee\":\"\",\"created_at\":\"2026-01-01T00:00:00Z\",\"created_by\":\"creator-agent\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"closed_at\":null,\"close_reason\":null,\"description\":\"\",\"design\":\"\",\"model\":\"\",\"is_ready_to_work\":false,\"changespec_name\":\"\",\"changespec_bug_id\":\"\",\"dependencies\":[]}\n"
+  }
+}

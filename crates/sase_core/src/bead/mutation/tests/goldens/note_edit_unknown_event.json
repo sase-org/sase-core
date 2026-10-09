@@ -1,0 +1,10 @@
+{
+  "scenario": "note_edit_unknown_event",
+  "outcome": "err kind=not_found message=Note not found: note-999",
+  "files": {
+    "config.json": "{\n  \"issue_prefix\": \"sase\",\n  \"next_counter\": 2,\n  \"owner\": \"owner@example.com\"\n}\n",
+    "events/manifest.json": "{\n  \"schema_version\": 1,\n  \"stream_count\": 1,\n  \"generated_from\": \"issues.jsonl\",\n  \"migration_tool\": \"sase-core bead events\"\n}",
+    "events/streams/sase-1.jsonl": "{\"schema_version\":1,\"event_id\":\"sase-1:000001:issue_created:sase-1:68673db84614e0976f4ea0729c8b78e6862d8fe648ff5153ab1324fad8983370\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"actor\":\"creator-agent\",\"operation\":\"issue_created\",\"issue_id\":\"sase-1\",\"payload\":{\"kind\":\"issue_created\",\"issue\":{\"id\":\"sase-1\",\"title\":\"Task\",\"status\":\"open\",\"issue_type\":\"task\",\"parent_id\":null,\"owner\":\"owner@example.com\",\"assignee\":\"\",\"created_at\":\"2026-01-01T00:00:00Z\",\"created_by\":\"creator-agent\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"closed_at\":null,\"close_reason\":null,\"description\":\"\",\"design\":\"\",\"model\":\"\",\"size\":\"small\",\"task_type\":\"bug\",\"is_ready_to_work\":false,\"changespec_name\":\"\",\"changespec_bug_id\":\"\",\"dependencies\":[]}}}\n{\"schema_version\":1,\"event_id\":\"sase-1:000002:note_appended:sase-1:000847c065bbab15db743cb089c4e6f0c905c62baa6aabc9d2431a22824f9ae5\",\"timestamp\":\"2026-01-01T00:01:00Z\",\"actor\":\"agent-1\",\"operation\":\"note_appended\",\"issue_id\":\"sase-1\",\"payload\":{\"kind\":\"note_appended\",\"entry\":\"first note\"}}\n",
+    "issues.jsonl": "{\"id\":\"sase-1\",\"title\":\"Task\",\"status\":\"open\",\"issue_type\":\"task\",\"parent_id\":null,\"owner\":\"owner@example.com\",\"assignee\":\"\",\"created_at\":\"2026-01-01T00:00:00Z\",\"created_by\":\"creator-agent\",\"updated_at\":\"2026-01-01T00:00:00Z\",\"closed_at\":null,\"close_reason\":null,\"description\":\"\",\"design\":\"\",\"model\":\"\",\"size\":\"small\",\"task_type\":\"bug\",\"is_ready_to_work\":false,\"changespec_name\":\"\",\"changespec_bug_id\":\"\",\"dependencies\":[]}\n"
+  }
+}

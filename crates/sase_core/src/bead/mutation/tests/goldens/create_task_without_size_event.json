@@ -1,0 +1,8 @@
+{
+  "scenario": "create_task_without_size_event",
+  "outcome": "err kind=validation message=new task issue creation requires an explicit size",
+  "files": {
+    "config.json": "{\n  \"issue_prefix\": \"sase\",\n  \"next_counter\": 1,\n  \"owner\": \"owner@example.com\"\n}\n",
+    "issues.jsonl": ""
+  }
+}

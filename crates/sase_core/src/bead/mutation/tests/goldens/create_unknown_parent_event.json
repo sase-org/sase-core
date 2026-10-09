@@ -1,0 +1,8 @@
+{
+  "scenario": "create_unknown_parent_event",
+  "outcome": "err kind=not_found message=Issue not found: sase-999",
+  "files": {
+    "config.json": "{\n  \"issue_prefix\": \"sase\",\n  \"next_counter\": 1,\n  \"owner\": \"owner@example.com\"\n}\n",
+    "issues.jsonl": ""
+  }
+}
