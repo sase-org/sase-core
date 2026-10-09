@@ -601,8 +601,8 @@ fn run_remove_link(
         return Ok(MutationStep::Done(result));
     }
     let mut touched: Vec<String> = Vec::new();
-    // Receipts this removal already staged, mirroring the replay path where
-    // the in-memory streams carry staged events.
+    // Receipts this removal already staged, matching the replay backing
+    // where the owned store's in-memory streams carry staged events.
     let mut staged_receipts: BTreeSet<String> = BTreeSet::new();
     for (holder_id, stored_target, stored_relation, stored_direction) in
         &removed

@@ -361,8 +361,7 @@ fn run_close(
             &mut batch,
         )? {
             // Already closed: the row still joins the commit's expected
-            // set, exactly as the old cached path passed its unchanged
-            // rows to the commit tail, so stage it verbatim.
+            // set, so stage it verbatim alongside the changed rows.
             let unchanged = view.get(&issue_id)?;
             view.stage_issue(unchanged.clone());
             batch.returned.push(unchanged);

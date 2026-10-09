@@ -42,7 +42,6 @@ use crate::bead::read_model::{
 use crate::bead::wire::{BeadError, IssueWire};
 
 /// How rows are retrieved: indexed cache rows or a replay slice.
-#[allow(dead_code)]
 pub(crate) enum MutationViewBacking {
     Cached {
         cache_path: PathBuf,
@@ -65,13 +64,9 @@ pub(crate) enum MutationViewBacking {
 /// that persists both backings. Algorithms stage rows with
 /// `stage_issue`/`stage_removal`, mint with [`MutationView::stage_event`],
 /// and finish with `commit`, so one closure serves both backings through
-/// [`super::runner::run_mutation`].
-///
-/// The lookup surface (children/descendants/ancestors/reverse-dependents,
-/// stream routing, receipt checks) is consumed incrementally as operation
-/// ports land; until the full mutation surface is ported, not every
-/// method has a production caller yet.
-#[allow(dead_code)]
+/// [`super::runner::run_mutation`]. Every ordinary mutation entry point
+/// runs its single algorithm through that runner; no entry point keeps a
+/// second copy of its algorithm.
 pub(crate) struct MutationView {
     beads_dir: PathBuf,
     backing: MutationViewBacking,
@@ -87,7 +82,6 @@ pub(crate) struct MutationView {
     durably_written: bool,
 }
 
-#[allow(dead_code)]
 impl MutationView {
     /// Open the warmest usable view inside the mutation flock.
     ///
@@ -96,6 +90,10 @@ impl MutationView {
     /// externally changed, or unusable cache falls back to the replay
     /// slice the caller already loaded; genuine store corruption is an
     /// error, exactly as the replay load would fail with it.
+    ///
+    /// Test-only: production mutations enter through the runner
+    /// (`load_cached`, then `load_replay` on decline).
+    #[cfg(test)]
     pub(crate) fn load(
         beads_dir: &Path,
         replay_issues: &[IssueWire],
@@ -153,6 +151,10 @@ impl MutationView {
     }
 
     /// Replay backing for uncached stores and proven repair paths.
+    ///
+    /// Test-only: production mutations build the replay backing through
+    /// `load_replay`, which owns its store.
+    #[cfg(test)]
     pub(crate) fn with_replay(
         beads_dir: &Path,
         replay_issues: &[IssueWire],
@@ -748,6 +750,10 @@ impl MutationView {
     }
 
     /// Ancestor chain from the direct parent upward.
+    ///
+    /// Test-only: no production mutation reads the ancestor chain through
+    /// the view today. Kept as covered lookup surface for the view tests.
+    #[cfg(test)]
     pub(crate) fn ancestors(
         &self,
         issue_id: &str,
@@ -769,6 +775,10 @@ impl MutationView {
     }
 
     /// Dependency targets of one bead, in stored order.
+    ///
+    /// Test-only: no production mutation reads dependency targets through
+    /// the view today. Kept as covered lookup surface for the view tests.
+    #[cfg(test)]
     pub(crate) fn dependency_targets(
         &self,
         issue_id: &str,
@@ -1285,7 +1295,7 @@ fn read_cache_witness(cache_path: &Path) -> Result<CacheWitness, BeadError> {
 /// all-zero witness, and the later CAS treats it as stale (skip and
 /// repair) rather than failing the mutation. Used by tests only; the
 /// warm paths read the witness from their admitted view.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn read_admission_witness(cache_path: &Path) -> CacheWitness {
     read_cache_witness(cache_path).unwrap_or_default()
 }

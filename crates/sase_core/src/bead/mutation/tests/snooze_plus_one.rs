@@ -19,6 +19,7 @@ use std::thread;
 use crate::bead::events::reduce_event_streams;
 use crate::bead::jsonl::import_issues_from_jsonl;
 use crate::bead::mutation::plus_one_snooze::deferral_length_label;
+use crate::bead::mutation::shared::mint_stream_event;
 use crate::bead::wire::BeadReopenCauseWire;
 use std::collections::BTreeSet;
 #[test]
@@ -373,20 +374,22 @@ fn a_store_bricked_by_a_close_over_a_snooze_loads_again() {
     // `issue_closed` event lands on disk while issues.jsonl still reads
     // `snoozed`, exactly the shape the old close left behind.
     let mut store = MutableStore::load(&beads_dir).unwrap();
-    store
-        .append_issue_event(
-            &task_id,
-            BeadEventOperationWire::IssueClosed,
-            BeadEventPayloadWire::IssueClosed {
-                close_reason: Some("bricked by the old close".to_string()),
-                resolution: Some(BeadResolutionWire::Canceled),
-                forced_descendant_ids: Vec::new(),
-                closed_by: None,
-            },
-            "2026-01-02T00:00:00Z",
-            "owner",
-        )
-        .unwrap();
+    // The fixture task is top-level, so its stream is its own ID.
+    let stream = store.streams.stream_mut(&task_id).unwrap();
+    mint_stream_event(
+        stream,
+        BeadEventOperationWire::IssueClosed,
+        BeadEventPayloadWire::IssueClosed {
+            close_reason: Some("bricked by the old close".to_string()),
+            resolution: Some(BeadResolutionWire::Canceled),
+            forced_descendant_ids: Vec::new(),
+            closed_by: None,
+        },
+        "2026-01-02T00:00:00Z",
+        "owner",
+        &task_id,
+    )
+    .unwrap();
     write_event_store(&beads_dir, store.streams.all()).unwrap();
 
     let issue = read_store_issues(&beads_dir)
@@ -406,15 +409,17 @@ fn an_invalid_derived_state_leaves_the_event_streams_untouched() {
     let before = read_event_store(&beads_dir).unwrap().1;
 
     let mut store = MutableStore::load(&beads_dir).unwrap();
-    store
-        .append_issue_event(
-            &task_id,
-            BeadEventOperationWire::IssueOpened,
-            BeadEventPayloadWire::IssueOpened,
-            "2026-01-02T00:00:00Z",
-            "owner",
-        )
-        .unwrap();
+    // The fixture task is top-level, so its stream is its own ID.
+    let stream = store.streams.stream_mut(&task_id).unwrap();
+    mint_stream_event(
+        stream,
+        BeadEventOperationWire::IssueOpened,
+        BeadEventPayloadWire::IssueOpened,
+        "2026-01-02T00:00:00Z",
+        "owner",
+        &task_id,
+    )
+    .unwrap();
     // A non-snoozed issue that still carries snooze metadata: the derived
     // state the close used to persist an event ahead of.
     let index = store.issue_index(&task_id).unwrap();

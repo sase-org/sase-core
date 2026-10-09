@@ -6,7 +6,6 @@ use super::runner::MutationStep;
 use super::store::normalize_model;
 use super::store::now_utc;
 use super::store::outcome;
-use super::store::MutableStore;
 use super::view::MutationView;
 use crate::bead::events::archive_close_metadata;
 use crate::bead::events::clear_snooze_record;
@@ -89,40 +88,6 @@ pub fn append_issue_note(
             attachments.clone(),
         )
     })
-}
-
-pub(crate) fn append_note_to_store(
-    store: &mut MutableStore,
-    issue_index: usize,
-    entry: &str,
-    author: &str,
-    now: &str,
-    attachments: &[crate::note_attachment::BeadNoteAttachmentWire],
-) -> Result<IssueWire, BeadError> {
-    let issue_id = store.issues[issue_index].id.clone();
-    let event_id = store.append_issue_event(
-        &issue_id,
-        BeadEventOperationWire::NoteAppended,
-        BeadEventPayloadWire::NoteAppended {
-            entry: entry.to_string(),
-            attachments: attachments.to_vec(),
-        },
-        now,
-        author,
-    )?;
-    if let Some(note) = crate::bead::wire::BeadNoteWire::from_event(
-        &event_id,
-        now,
-        author,
-        entry,
-        attachments.to_vec(),
-    ) {
-        store.issues[issue_index].notes.push(note);
-    }
-    store.issues[issue_index].updated_at = now.to_string();
-    let issue = store.issues[issue_index].clone();
-    issue.validate()?;
-    Ok(issue)
 }
 
 /// Rewrite a note's text, with `attachments` replacing the manifest when

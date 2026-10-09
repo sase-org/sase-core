@@ -1,9 +1,9 @@
-//! One copy of the mutation write helpers shared by every warm path.
+//! One copy of the mutation write helpers shared by every mutation path.
 //!
 //! Event minting, lazy physical-stream loading, and the manifest total each
-//! exist exactly once here. The warm create and notes-family paths delegate
-//! to these, so cached and replay backings run the same byte-preserving
-//! write and the same publish contract.
+//! exist exactly once here. Every mutation family delegates to these, so
+//! cached and replay backings run the same byte-preserving write and the
+//! same publish contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -28,8 +28,9 @@ use crate::bead::wire::IssueWire;
 ///
 /// The ordinal is the stream's next position, and the event ID binds the
 /// stream, ordinal, timestamp, actor, operation, issue, and payload. This
-/// is the single minting helper for every warm mutation; `MutableStore`
-/// keeps its own append path for the replay backing only.
+/// is the single minting helper for every mutation: both the cached and
+/// the replay backing mint through `MutationView::stage_event`, which
+/// calls this helper, so ordinals and event IDs match byte for byte.
 pub(crate) fn mint_stream_event(
     stream: &mut BeadEventStreamWire,
     operation: BeadEventOperationWire,

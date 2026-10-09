@@ -23,6 +23,11 @@
 //! replaced by `<EVENT_HASH>`; every other byte is exact. The comparison
 //! normalizes the same way, so later phases still pin routing, payloads,
 //! ordering and counts.
+//!
+//! `cached_golden_bytes_match_replay` reruns every scenario below on a
+//! git-backed store, where the single view algorithm takes the cached
+//! path, and pins the identical outcome and bytes. It never regenerates
+//! the goldens: a mismatch is a defect in the unified algorithm.
 
 use super::super::*;
 use crate::artifact_link::ArtifactLinkOriginWire;
@@ -596,6 +601,11 @@ struct Case {
     seed: SeedKind,
     backings: Backings,
     normalize_remove: bool,
+    /// The act runs through `run_mutation` (and, on a git-backed store,
+    /// through the cached path). Controls such as `init_store` and
+    /// `export_jsonl` bypass the runner, so the cached-byte test compares
+    /// their bytes without asserting the cached path ran.
+    cached_act: bool,
     act: fn(&Path, &SeedIds) -> String,
 }
 
@@ -610,6 +620,24 @@ fn case(
         seed,
         backings,
         normalize_remove: false,
+        cached_act: true,
+        act,
+    }
+}
+
+/// A control scenario whose act bypasses the mutation runner.
+fn control_case(
+    name: &'static str,
+    seed: SeedKind,
+    backings: Backings,
+    act: fn(&Path, &SeedIds) -> String,
+) -> Case {
+    Case {
+        name,
+        seed,
+        backings,
+        normalize_remove: false,
+        cached_act: false,
         act,
     }
 }
@@ -624,6 +652,7 @@ fn remove_case(
         seed,
         backings: Backings::Both,
         normalize_remove: true,
+        cached_act: true,
         act,
     }
 }
@@ -930,7 +959,7 @@ fn cases() -> Vec<Case> {
     use Backings::*;
     use SeedKind::*;
     vec![
-        case("init_again", Empty, Both, |dir, _| {
+        control_case("init_again", Empty, Both, |dir, _| {
             let root = dir.parent().unwrap();
             let name = dir.file_name().unwrap().to_str().unwrap();
             outcome_string(init_store(root, name, "sase", OWNER))
@@ -1121,10 +1150,10 @@ fn cases() -> Vec<Case> {
         case("unmark_not_ready", Tree, Both, |d, s| {
             unmk_ready(d, &s.epic)
         }),
-        case("export_seeded", Tree, EventOnly, |d, _| {
+        control_case("export_seeded", Tree, EventOnly, |d, _| {
             outcome_string(export_jsonl(d))
         }),
-        case("export_legacy", Tree, LegacyOnly, |d, _| {
+        control_case("export_legacy", Tree, LegacyOnly, |d, _| {
             outcome_string(export_jsonl(d))
         }),
         case("dep_add", TwoPlans, Both, |d, s| {
@@ -1328,12 +1357,42 @@ fn run_case(
     update: bool,
     failures: &mut Vec<String>,
 ) {
+    run_case_inner(case, backing, false, update, failures);
+}
+
+/// Run one golden scenario on a git-backed store and compare it against
+/// the same committed replay golden.
+///
+/// The `.git` dir admits the cached path, so the seed and the act run the
+/// single view algorithm through the cached backing (legacy stores still
+/// decline to the replay backing, exactly as in production). The
+/// read-model cache lives under `<git-dir>/sase/`, outside the beads dir,
+/// so `snapshot_store` never sees it and every compared file must match
+/// the replay golden byte for byte. `update` is never honored here:
+/// goldens regenerate from the replay oracle only.
+fn run_cached_case(case: &Case, backing: Backing, failures: &mut Vec<String>) {
+    run_case_inner(case, backing, true, false, failures);
+}
+
+fn run_case_inner(
+    case: &Case,
+    backing: Backing,
+    cached: bool,
+    update: bool,
+    failures: &mut Vec<String>,
+) {
     let scenario = format!("{}_{}", case.name, backing.as_str());
     // Every tempdir below must outlive the act + snapshot.
     let event_temp = tempdir().expect("event seed tempdir");
+    if cached {
+        fs::create_dir_all(event_temp.path().join(".git")).unwrap();
+    }
     let mut keep: Vec<tempfile::TempDir> = Vec::new();
     let (seed, beads_dir) = if case.seed == SeedKind::LegacyMixedPrefix {
         let (temp, dest) = legacy_mixed_prefix_store();
+        if cached {
+            fs::create_dir_all(temp.path().join(".git")).unwrap();
+        }
         keep.push(temp);
         (SeedIds::default(), dest)
     } else {
@@ -1348,12 +1407,52 @@ fn run_case(
                 } else {
                     transplant_as_legacy(&event_beads)
                 };
+                if cached {
+                    fs::create_dir_all(temp.path().join(".git")).unwrap();
+                }
                 keep.push(temp);
                 (seed, dest)
             }
         }
     };
+    if cached && backing == Backing::Event && case.seed != SeedKind::Empty {
+        // Warm the read-model cache the way production reads do, so the
+        // act below takes the cached path. (An `Empty` seed has no event
+        // store yet, so its act is legitimately the store's first
+        // mutation and runs the replay decline, exactly as in
+        // production; those scenarios prove git-indifference only.)
+        let cache_path =
+            crate::bead::read_model::read_model_cache_path_for_store(
+                &beads_dir,
+            )
+            .expect("cached golden run must admit the cached path");
+        assert!(
+            crate::bead::read_model::ensure_cache_ready_at(
+                &beads_dir,
+                &cache_path
+            )
+            .unwrap(),
+            "scenario {scenario}: cache warm-up failed",
+        );
+    }
     let outcome = (case.act)(&beads_dir, &seed);
+    if cached
+        && backing == Backing::Event
+        && case.cached_act
+        && case.seed != SeedKind::Empty
+    {
+        // Without this the comparison could pass vacuously as
+        // replay-vs-replay; the cache file proves the cached path ran.
+        let cache_path =
+            crate::bead::read_model::read_model_cache_path_for_store(
+                &beads_dir,
+            )
+            .expect("cached golden run must admit the cached path");
+        assert!(
+            cache_path.is_file(),
+            "scenario {scenario}: cached run left no cache file",
+        );
+    }
     let mut files = snapshot_store(&beads_dir);
     if case.normalize_remove {
         normalize_remove_timestamps(&mut files);
@@ -1393,6 +1492,30 @@ fn replay_golden_bytes_are_pinned() {
     assert!(
         failures.is_empty(),
         "{} replay golden mismatch(es):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Cached-mode runs produce the committed replay golden bytes
+/// (`sase-1h8.13.1.9.8`).
+///
+/// Every golden scenario runs again on a git-backed store, where the
+/// single view algorithm takes the cached path, and must produce the
+/// identical outcome and identical bytes for every non-cache file. Any
+/// mismatch is a defect in the unified algorithm: this test never
+/// regenerates goldens, even under `UPDATE_MUTATION_GOLDENS=1`.
+#[test]
+fn cached_golden_bytes_match_replay() {
+    let mut failures = Vec::new();
+    for case in &cases() {
+        for backing in case.backings.list() {
+            run_cached_case(case, *backing, &mut failures);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} cached-vs-golden mismatch(es):\n{}",
         failures.len(),
         failures.join("\n\n")
     );

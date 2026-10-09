@@ -8,20 +8,16 @@ use crate::bead::config::load_config;
 use crate::bead::config::save_config;
 use crate::bead::config::BeadConfigWire;
 use crate::bead::events::import_issues_to_event_streams;
-use crate::bead::events::mint_bead_event_id;
 use crate::bead::events::reduce_parsed_event_streams;
 use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
-use crate::bead::events::BeadEventRecordWire;
 use crate::bead::events::BeadEventStreamWire;
-use crate::bead::events::BEAD_EVENT_SCHEMA_VERSION;
 use crate::bead::jsonl::event_store_present;
 use crate::bead::jsonl::import_issues_from_jsonl;
 use crate::bead::jsonl::prune_removed_flag_event_streams;
 use crate::bead::jsonl::read_event_store;
 use crate::bead::jsonl::write_event_store_changed;
 use crate::bead::jsonl::write_issues_jsonl;
-use crate::bead::read::resolve_issue_id_in_issues;
 use crate::bead::wire::validate_model_value;
 use crate::bead::wire::validate_unique_external_refs;
 use crate::bead::wire::BeadError;
@@ -379,6 +375,8 @@ impl MutableStore {
         write_issues_jsonl(&self.beads_dir, &self.issues)
     }
 
+    /// Test-only row read-back for mutation tests.
+    #[cfg(test)]
     pub(crate) fn issue_index(
         &self,
         issue_id: &str,
@@ -389,20 +387,8 @@ impl MutableStore {
             .ok_or_else(|| not_found(issue_id))
     }
 
-    /// Resolve a raw CLI-provided bead ID against the loaded store.
-    ///
-    /// Shorthand resolves to its full canonical ID exactly as the read path
-    /// does; full IDs pass through untouched. Call this at the top of every
-    /// mutation entry point that accepts caller-supplied IDs so the locked
-    /// load is the single store read: callers must not pre-resolve (and
-    /// pre-read) before calling in.
-    pub(crate) fn resolve_issue_id(
-        &self,
-        issue_id: &str,
-    ) -> Result<String, BeadError> {
-        resolve_issue_id_in_issues(&self.issues, issue_id)
-    }
-
+    /// Test-only row read-back for mutation tests.
+    #[cfg(test)]
     pub(crate) fn get_issue(
         &self,
         issue_id: &str,
@@ -411,63 +397,6 @@ impl MutableStore {
             .iter()
             .find(|issue| issue.id == issue_id)
             .ok_or_else(|| not_found(issue_id))
-    }
-
-    pub(crate) fn append_issue_event(
-        &mut self,
-        issue_id: &str,
-        operation: BeadEventOperationWire,
-        payload: BeadEventPayloadWire,
-        timestamp: &str,
-        actor: &str,
-    ) -> Result<String, BeadError> {
-        let stream_id = self.stream_id_for_issue(issue_id)?;
-        let stream = self.stream_for_mut(&stream_id)?;
-        let ordinal = stream.events.len() + 1;
-        let event_id = mint_bead_event_id(
-            &stream_id, ordinal, timestamp, actor, operation, issue_id,
-            &payload,
-        )?;
-        let event = BeadEventRecordWire {
-            schema_version: BEAD_EVENT_SCHEMA_VERSION,
-            event_id,
-            timestamp: timestamp.to_string(),
-            actor: actor.to_string(),
-            operation,
-            issue_id: issue_id.to_string(),
-            payload,
-        };
-        event.validate()?;
-        let event_id = event.event_id.clone();
-        stream.events.push(event);
-        Ok(event_id)
-    }
-
-    pub(crate) fn stream_for_mut(
-        &mut self,
-        stream_id: &str,
-    ) -> Result<&mut BeadEventStreamWire, BeadError> {
-        self.streams.stream_mut(stream_id)
-    }
-
-    pub(crate) fn stream_id_for_issue(
-        &self,
-        issue_id: &str,
-    ) -> Result<String, BeadError> {
-        let issue = self.get_issue(issue_id)?;
-        if issue.issue_type == IssueTypeWire::Plan {
-            return Ok(issue.id.clone());
-        }
-        Ok(issue
-            .parent_id
-            .as_ref()
-            .filter(|parent_id| {
-                self.issues
-                    .iter()
-                    .any(|candidate| candidate.id == **parent_id)
-            })
-            .cloned()
-            .unwrap_or_else(|| issue.id.clone()))
     }
 }
 
@@ -560,6 +489,8 @@ pub(crate) fn find_git_root(path: &Path) -> Result<Option<PathBuf>, BeadError> {
     }
 }
 
+/// Test-only: the only remaining callers are the test read-back helpers.
+#[cfg(test)]
 pub(crate) fn not_found(issue_id: &str) -> BeadError {
     BeadError {
         kind: "not_found".to_string(),

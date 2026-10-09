@@ -17,6 +17,7 @@ use crate::bead::config::default_config;
 use crate::bead::config::save_config;
 use crate::bead::events::reduce_event_streams;
 use crate::bead::events::BeadIssueUpdateEventFieldsWire;
+use crate::bead::mutation::shared::mint_stream_event;
 #[test]
 fn one_mutation_touches_only_the_mutated_stream_file() {
     run_dual_mode_test(|_mode| {
@@ -248,15 +249,18 @@ fn mutable_appends_mint_stable_content_hashed_event_ids() {
             (&mut duplicate, alpha_payload),
             (&mut beta, beta_payload),
         ] {
-            store
-                .append_issue_event(
-                    &epic.id,
-                    BeadEventOperationWire::IssueUpdated,
-                    payload,
-                    "2026-01-01T00:01:00Z",
-                    "owner@example.com",
-                )
-                .unwrap();
+            // The epic is a top-level plan, so its stream is its own ID.
+            let stream_id = epic.id.clone();
+            let stream = store.streams.stream_mut(&stream_id).unwrap();
+            mint_stream_event(
+                stream,
+                BeadEventOperationWire::IssueUpdated,
+                payload,
+                "2026-01-01T00:01:00Z",
+                "owner@example.com",
+                &epic.id,
+            )
+            .unwrap();
         }
 
         let alpha_id = &alpha.streams.all()[0].events.last().unwrap().event_id;
