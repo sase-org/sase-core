@@ -2,8 +2,6 @@ use super::mutation_wire::BeadMutationOutcomeWire;
 use super::runner::run_mutation;
 use super::runner::MutationStep;
 use super::view::MutationView;
-use crate::artifact_link::canonicalize_artifact_link_ref;
-use crate::artifact_link::BeadLinkDirectionWire;
 use crate::artifact_ref::normalize_artifact_ref_list;
 use crate::bead::config::default_config;
 use crate::bead::config::load_config;
@@ -415,59 +413,6 @@ impl MutableStore {
             .iter()
             .find(|issue| issue.id == issue_id)
             .ok_or_else(|| not_found(issue_id))
-    }
-
-    pub(crate) fn artifact_link_projection_receipt_seen_on(
-        &self,
-        issue_id: &str,
-        operation_id: &str,
-        operation: BeadEventOperationWire,
-        target_ref: &str,
-        relation: &str,
-        direction: BeadLinkDirectionWire,
-    ) -> Result<bool, BeadError> {
-        let target_ref = canonicalize_artifact_link_ref(target_ref)
-            .map_err(link_mutation_error)?;
-        let stream_id = self.stream_id_for_issue(issue_id)?;
-        let Some(stream) = self
-            .streams
-            .all()
-            .iter()
-            .find(|stream| stream.stream_id == stream_id)
-        else {
-            return Ok(false);
-        };
-        Ok(stream.events.iter().any(|event| match &event.payload {
-            BeadEventPayloadWire::LinkAdded {
-                operation_id: Some(existing),
-                target_ref: existing_target,
-                relation: existing_relation,
-                direction: existing_direction,
-                ..
-            } if operation == BeadEventOperationWire::LinkAdded => {
-                existing == operation_id
-                    && existing_relation == relation
-                    && *existing_direction == direction
-                    && canonicalize_artifact_link_ref(existing_target)
-                        .map(|canonical| canonical == target_ref)
-                        .unwrap_or(false)
-            }
-            BeadEventPayloadWire::LinkRemoved {
-                operation_id: Some(existing),
-                target_ref: existing_target,
-                relation: existing_relation,
-                direction: existing_direction,
-                ..
-            } if operation == BeadEventOperationWire::LinkRemoved => {
-                existing == operation_id
-                    && existing_relation == relation
-                    && *existing_direction == direction
-                    && canonicalize_artifact_link_ref(existing_target)
-                        .map(|canonical| canonical == target_ref)
-                        .unwrap_or(false)
-            }
-            _ => false,
-        }))
     }
 
     pub(crate) fn append_issue_event(
