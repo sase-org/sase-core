@@ -8,6 +8,8 @@ mod dual_mode;
 mod lifecycle_warm;
 mod links;
 mod links_evidence;
+mod links_projection;
+mod notes_attachments;
 mod notes_update;
 mod proof_bounded;
 mod publish_direct;
