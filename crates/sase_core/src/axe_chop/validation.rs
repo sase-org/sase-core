@@ -19,7 +19,7 @@ const CHOP_REPORT_MAX_COLUMNS: usize = 6;
 const CHOP_REPORT_MAX_TEXT_CHARS: usize = 512;
 const CHOP_REPORT_MAX_TITLE_CHARS: usize = 64;
 const CHOP_REPORT_GLYPHS: &[char] = &[
-    '▲', '◆', '•', '·', '●', '○', '✓', '✗', '↗', '↷', '⏱', '!', '▸', '─',
+    '▲', '◆', '•', '·', '●', '○', '✓', '✗', '↗', '↷', '⏱', '!', '▸', '─', '↻',
 ];
 
 /// Parse and validate one versioned chop result JSON document.

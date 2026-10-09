@@ -16,6 +16,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::agent_auto_restart::AgentRecoveryWire;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -277,6 +279,10 @@ pub struct DoneMarkerWire {
     pub continuation_budget_decision_path: Option<String>,
     #[serde(default)]
     pub monitor_followup_budget_decision_path: Option<String>,
+    /// Auto-restart recovery state (`pending | deferred | launching |
+    /// declined | launched`). In-flight states render as restarting.
+    #[serde(default)]
+    pub recovery: Option<AgentRecoveryWire>,
 }
 
 /// Bounded JSON value stored under `agent_meta.json::output_variables`.

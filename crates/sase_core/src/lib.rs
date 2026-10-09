@@ -12,6 +12,7 @@
 
 pub mod agent_archive;
 pub mod agent_artifact_run_retention;
+pub mod agent_auto_restart;
 pub mod agent_clan_record;
 pub mod agent_clan_tribe;
 pub mod agent_cleanup;
@@ -168,6 +169,29 @@ pub use agent_archive::{
     AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
     AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
     AgentArchiveVisibilityWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+};
+pub use agent_auto_restart::{
+    advance_auto_restart_ledger, agent_auto_restart_wire_schema_version,
+    auto_restart_lineage_root, auto_restart_recovery_is_in_flight,
+    claim_auto_restart_ledger, classify_agent_failure, classify_phase,
+    derive_auto_restart_episode, fired_witnesses,
+    AgentFailureAttributeErrorWire, AgentFailureChainLinkWire,
+    AgentFailureFactsWire, AgentFailureFrameWire, AgentFailureImportErrorWire,
+    AgentRecoveryWire, AutoRestartContextWire, AutoRestartEpisodeWire,
+    AutoRestartFileProofWire, AutoRestartLedgerError,
+    AutoRestartLedgerHistoryWire, AutoRestartLedgerRecordWire,
+    AutoRestartManagedRootWire, AutoRestartProbeWire,
+    AutoRestartRefreshLogLineWire, AutoRestartWitnessesWire,
+    RecoveryVerdictWire, AGENT_AUTO_RESTART_WIRE_SCHEMA_VERSION,
+    LEDGER_CLAIMED, LEDGER_DECLINED, LEDGER_DEFERRED,
+    LEDGER_EVENT_BEGIN_LAUNCH, LEDGER_EVENT_DECLINE, LEDGER_EVENT_DEFER,
+    LEDGER_EVENT_LAUNCHED, LEDGER_EVENT_RECLAIM, LEDGER_EVENT_SETTLED_FAILED,
+    LEDGER_EVENT_SETTLED_OK, LEDGER_LAUNCHED, LEDGER_LAUNCHING,
+    LEDGER_SETTLED_FAILED, LEDGER_SETTLED_OK, MODE_ASK, MODE_DECLINE,
+    MODE_DEFER, MODE_NOTIFY_POST_PROVIDER, MODE_RELAUNCH, PHASE_PLAN_HANDOFF,
+    PHASE_POST_PROVIDER, PHASE_PRE_PROVIDER, PHASE_UNKNOWN,
+    RECOVERY_IN_FLIGHT_STATES, TIER_DATA_FORMAT, TIER_REAL_BUG,
+    TIER_RUST_BINDING, TIER_TORN_PYTHON,
 };
 pub use agent_clan_tribe::{
     resolve_clan_summary, resolve_clan_tribe, ClanSummaryResolutionWire,

@@ -46,6 +46,7 @@ use crate::project_spec::{
 use crate::queue_directive::{
     authored_queue_weight_is_valid, queue_weight_is_valid,
 };
+use crate::AgentRecoveryWire;
 
 const USED_MACROS_FILE: &str = "macros.json";
 // legacy xprompt spelling
@@ -1864,7 +1865,24 @@ fn done_marker_from_object(data: &Map<String, Value>) -> DoneMarkerWire {
         monitor_followup_budget_decision_path: coerce_str(
             data.get("monitor_followup_budget_decision_path"),
         ),
+        recovery: coerce_recovery(data.get("recovery")),
     }
+}
+
+fn coerce_recovery(value: Option<&Value>) -> Option<AgentRecoveryWire> {
+    let obj = value.and_then(|item| item.as_object())?;
+    if obj.is_empty() {
+        return None;
+    }
+    Some(AgentRecoveryWire {
+        state: coerce_str(obj.get("state")),
+        reason: coerce_str(obj.get("reason")),
+        reason_text: coerce_str(obj.get("reason_text")),
+        requested_at: coerce_str(obj.get("requested_at")),
+        updated_at: coerce_str(obj.get("updated_at")),
+        episode_id: coerce_str(obj.get("episode_id")),
+        ledger_key: coerce_str(obj.get("ledger_key")),
+    })
 }
 
 fn running_marker_from_object(data: &Map<String, Value>) -> RunningMarkerWire {

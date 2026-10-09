@@ -21,6 +21,7 @@
 // outside the user-written function body.
 #![allow(clippy::useless_conversion)]
 
+mod agent_auto_restart;
 mod agent_custody;
 mod agent_holds;
 mod agent_identity;
@@ -81,6 +82,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     editor_content::register_editor_content(m)?;
     agent_scan::register_agent_scan(m)?;
     agent_tab::register_agent_tab(m)?;
+    agent_auto_restart::register_agent_auto_restart(m)?;
     agent_custody::register_agent_custody(m)?;
     bead_decisions::register_bead_decisions(m)?;
     beads::register_beads(m)?;
