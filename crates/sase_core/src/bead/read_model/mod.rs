@@ -42,5 +42,6 @@ pub use store::{
     READ_MODEL_SCHEMA_VERSION,
 };
 pub(crate) use store::{
-    fingerprint_manifest_config, ManifestConfigFingerprint,
+    drop_cache_file, fingerprint_manifest_config, read_invalidated_generation,
+    ManifestConfigFingerprint,
 };

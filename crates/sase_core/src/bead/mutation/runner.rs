@@ -42,14 +42,24 @@ pub(crate) fn run_mutation(
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     with_bead_mutation_lock(beads_dir, operation_name, || {
         if let Some(mut view) = MutationView::load_cached(beads_dir)? {
-            match run(&mut view)? {
-                MutationStep::Done(outcome) => return Ok(outcome),
-                MutationStep::NeedsReplay if view.durably_written() => {
+            match run(&mut view) {
+                Ok(MutationStep::Done(outcome)) => return Ok(outcome),
+                Ok(MutationStep::NeedsReplay) if view.durably_written() => {
                     return Err(BeadError::io(format!(
                         "mutation {operation_name} declined after a durable write; a retry would double-append"
                     )));
                 }
-                MutationStep::NeedsReplay => {}
+                Ok(MutationStep::NeedsReplay) => {}
+                // A cache fault before any durable write replays the
+                // same algorithm on the replay backing instead of
+                // failing the mutation; the fault already invalidated
+                // the cache best-effort so the next pass rebuilds.
+                // Any other error propagates: only the cache may fail
+                // open, never the store, and never after an append.
+                Err(error)
+                    if error.kind == "cache_fault"
+                        && !view.durably_written() => {}
+                Err(error) => return Err(error),
             }
         }
         let mut view = MutationView::load_replay(beads_dir)?;

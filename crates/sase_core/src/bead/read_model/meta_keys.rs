@@ -10,7 +10,7 @@ use super::store::{
     READ_MODEL_SCHEMA_VERSION,
 };
 
-pub(super) fn tail_meta_defaults() -> [(&'static str, String); 16] {
+pub(super) fn tail_meta_defaults() -> [(&'static str, String); 17] {
     [
         ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
         ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
@@ -20,6 +20,7 @@ pub(super) fn tail_meta_defaults() -> [(&'static str, String); 16] {
         ("frontier", String::new()),
         ("generation", "0".to_string()),
         ("content_generation", "0".to_string()),
+        ("invalidated_generation", "0".to_string()),
         ("manifest_schema_version", "0".to_string()),
         ("manifest_stream_count", "0".to_string()),
         ("config_canonical", String::new()),

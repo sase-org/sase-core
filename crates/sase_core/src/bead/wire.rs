@@ -113,6 +113,17 @@ impl BeadError {
         }
     }
 
+    /// A cache fault on the mutation warm path: the cache disappeared or
+    /// was invalidated between admission and this read. The runner falls
+    /// back to the replay backing before any durable write instead of
+    /// failing the mutation. Never constructed after a durable write.
+    pub fn cache_fault(message: impl Into<String>) -> Self {
+        Self {
+            kind: "cache_fault".to_string(),
+            message: message.into(),
+        }
+    }
+
     pub fn json(message: impl Into<String>) -> Self {
         Self {
             kind: "json".to_string(),

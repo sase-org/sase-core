@@ -1,3 +1,4 @@
+mod cache_fault_fallback;
 mod claims;
 mod claims_deps;
 mod close;

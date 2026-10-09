@@ -10,6 +10,12 @@
 //! Concurrency rules:
 //!
 //! - Readers never take the bead flock.
+//! - No path unlinks, replaces, or truncates a live SQLite cache file:
+//!   invalidation happens in place inside one `IMMEDIATE` transaction
+//!   (rows stay readable, the generation moves monotonically so any
+//!   in-flight writer's compare-and-swap loses). Only a file provably
+//!   not a SQLite database is ever unlinked, since no WAL connection
+//!   can hold it open.
 //! - Cache writes run in one `IMMEDIATE` SQLite transaction guarded by a
 //!   generation compare-and-swap: a writer commits only if the generation
 //!   it started from is still current, and it never pairs newer
@@ -19,7 +25,8 @@
 //!   replays itself and serves that without writing. It never waits on
 //!   another process's rebuild, and it never serves stale data: after a
 //!   rebuild commits, a fresh sweep revalidates what was stored, and any
-//!   concurrent change discards the file and serves a replay instead.
+//!   concurrent change invalidates the file in place and serves a replay
+//!   instead.
 //!
 //! Known limitation for `read-model-tail` to close: the rebuild reads the
 //! store without the mutation lock, so a mutation landing mid-rebuild can
@@ -33,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -1883,21 +1891,11 @@ fn diff_issue_ids(replay: &[IssueWire], cached: &[IssueWire]) -> Vec<String> {
     differing
 }
 
-fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
-    if cache_path.is_file() {
-        return Ok(());
-    }
-    if let Some(parent) = cache_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|_| Fault::Cache)?;
-        }
-    }
-    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
-    connection
-        .execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
+/// Full cache schema: every table and index a cache file must carry.
+///
+/// Applied with `IF NOT EXISTS` so healing a schema-less or partially
+/// initialized file is additive and never touches existing rows.
+const CACHE_SCHEMA_DDL: &str = "
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -1966,9 +1964,21 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
                 parent_id TEXT PRIMARY KEY,
                 max_suffix INTEGER NOT NULL
             );
-            ",
-        )
+            ";
+
+/// Apply the full cache schema to an open connection.
+///
+/// Additive (`IF NOT EXISTS`): safe on healthy, schema-less, and
+/// partially initialized files alike, and never touches existing rows.
+fn apply_schema_ddl(connection: &Connection) -> Result<(), Fault> {
+    connection
+        .execute_batch(CACHE_SCHEMA_DDL)
         .map_err(|_| Fault::Cache)?;
+    Ok(())
+}
+
+/// Insert any missing meta default without touching existing keys.
+fn insert_meta_defaults(connection: &Connection) -> Result<(), Fault> {
     for (key, value) in tail_meta_defaults() {
         connection
             .execute(
@@ -1978,6 +1988,191 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
             .map_err(|_| Fault::Cache)?;
     }
     Ok(())
+}
+
+/// Counter for atomic-create sibling temp files.
+static CREATE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Sibling temp path for an atomic cache create, unique per process.
+fn create_temp_path(cache_path: &Path) -> PathBuf {
+    let counter = CREATE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_name = cache_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bead-read-model.sqlite".to_string());
+    cache_path.with_file_name(format!(
+        "{file_name}.tmp.{}.{}",
+        std::process::id(),
+        counter
+    ))
+}
+
+/// Remove the main cache file and every WAL companion.
+fn remove_cache_files(cache_path: &Path) {
+    for companion in [
+        cache_path.to_path_buf(),
+        cache_path.with_extension("sqlite-wal"),
+        cache_path.with_extension("sqlite-shm"),
+        cache_path.with_extension("sqlite-journal"),
+    ] {
+        let _ = fs::remove_file(companion);
+    }
+}
+
+/// Remove only WAL companions, for a missing main file no live
+/// connection can hold open.
+fn remove_cache_companions(cache_path: &Path) {
+    for companion in [
+        cache_path.with_extension("sqlite-wal"),
+        cache_path.with_extension("sqlite-shm"),
+        cache_path.with_extension("sqlite-journal"),
+    ] {
+        let _ = fs::remove_file(companion);
+    }
+}
+
+/// Create the cache file atomically: build the schema in a sibling temp
+/// file and publish it with a no-clobber hard link, then remove the
+/// temp. A losing racer just uses the winner's file.
+///
+/// The temp lives in the same directory (so the same filesystem on
+/// macOS and Linux) and is built without WAL, so no companions escape.
+/// Companions are cleared first only when the main file is absent, which
+/// post-`drop_cache_file` means no live connection can hold them.
+fn create_cache_atomically(cache_path: &Path) -> Result<(), Fault> {
+    if let Some(parent) = cache_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|_| Fault::Cache)?;
+        }
+    }
+    if cache_path.is_file() {
+        // A concurrent creator won: use the winner's file.
+        return heal_schema_in_place(cache_path);
+    }
+    remove_cache_companions(cache_path);
+    let temp_path = create_temp_path(cache_path);
+    let created = (|| {
+        let connection =
+            Connection::open(&temp_path).map_err(|_| Fault::Cache)?;
+        apply_schema_ddl(&connection)?;
+        insert_meta_defaults(&connection)?;
+        drop(connection);
+        match fs::hard_link(&temp_path, cache_path) {
+            Ok(()) => Ok(()),
+            // Another creator won between the check and the link.
+            Err(_) if cache_path.is_file() => Ok(()),
+            Err(_) => Err(Fault::Cache),
+        }
+    })();
+    let _ = fs::remove_file(&temp_path);
+    created
+}
+
+/// Heal an existing database file in place: create any missing schema
+/// object and backfill any missing meta key, without touching rows.
+///
+/// A valid-but-schema-less or partially initialized file left by an
+/// older build heals on the next freshness pass instead of staying
+/// `Fault::Cache` forever. Never unlinks: a concurrent connection may
+/// hold the file open.
+fn heal_schema_in_place(cache_path: &Path) -> Result<(), Fault> {
+    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+    apply_schema_ddl(&connection)?;
+    backfill_meta_keys(&connection)?;
+    Ok(())
+}
+
+/// Read one meta counter, defaulting to zero when absent.
+fn meta_counter_value(
+    connection: &Connection,
+    key: &str,
+) -> Result<u64, Fault> {
+    let value: Option<String> = connection
+        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .map_err(|_| Fault::Cache)?;
+    Ok(value.and_then(|value| value.parse().ok()).unwrap_or(0))
+}
+
+/// Invalidate the cache in place inside one write transaction.
+///
+/// Rows, streams, and the frontier stay readable; the token is cleared
+/// and the streams marker removed so the next freshness probe rebuilds
+/// instead of serving, while the generation, content generation, and
+/// invalidation marker move monotonically so any in-flight writer's
+/// compare-and-swap loses rather than committing stale rows. The
+/// version keys reset to current: a version-mismatched file heals to
+/// the running version here, the way file recreation used to reset
+/// them, so the rebuild the next pass runs commits under a matching
+/// version instead of mismatching forever.
+fn invalidate_cache_in_place(cache_path: &Path) -> Result<(), Fault> {
+    let connection = open_read_write(cache_path, REBUILD_BUSY_TIMEOUT)?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|_| Fault::Cache)?;
+    let outcome = (|| {
+        apply_schema_ddl(&connection)?;
+        backfill_meta_keys(&connection)?;
+        let generation = meta_counter_value(&connection, "generation")?;
+        let content = meta_counter_value(&connection, "content_generation")?;
+        let invalidated =
+            meta_counter_value(&connection, "invalidated_generation")?;
+        for (key, value) in [
+            ("generation", generation.saturating_add(1).to_string()),
+            ("content_generation", content.saturating_add(1).to_string()),
+            (
+                "invalidated_generation",
+                invalidated.saturating_add(1).to_string(),
+            ),
+            ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
+            ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
+            ("crate_version", crate_version()),
+            ("token", String::new()),
+            ("last_sweep_ns", "0".to_string()),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    rusqlite::params![key, value],
+                )
+                .map_err(|_| Fault::Cache)?;
+        }
+        connection
+            .execute("DELETE FROM meta WHERE key = 'streams_known'", [])
+            .map_err(|_| Fault::Cache)?;
+        Ok::<(), Fault>(())
+    })();
+    match outcome {
+        Ok(()) => {
+            connection
+                .execute_batch("COMMIT")
+                .map_err(|_| Fault::Cache)?;
+        }
+        Err(_) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(Fault::Cache);
+        }
+    }
+    Ok(())
+}
+
+/// Ensure a usable cache file exists, healing in place when it does.
+///
+/// A missing file is created atomically (sibling temp plus no-clobber
+/// link) so concurrent openers never observe a schema-less file. An
+/// existing database — including a schema-less one — is healed in
+/// place and never unlinked. Only a file provably not a database is
+/// unlinked before creation, since no WAL connection can hold it open.
+fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
+    if !cache_path.is_file() {
+        return create_cache_atomically(cache_path);
+    }
+    if cache_file_is_not_a_database(cache_path) {
+        remove_cache_files(cache_path);
+        return create_cache_atomically(cache_path);
+    }
+    heal_schema_in_place(cache_path)
 }
 
 pub(super) fn open_read_only(
@@ -1999,7 +2194,15 @@ pub(super) fn open_read_write(
     cache_path: &Path,
     busy_timeout: Duration,
 ) -> Result<Connection, Fault> {
-    let connection = Connection::open(cache_path).map_err(|_| Fault::Cache)?;
+    // Never implicitly create: a missing cache is a cold start the
+    // caller builds through `ensure_schema`, and creating an empty file
+    // here would publish a schema-less database concurrent openers
+    // could observe and never heal from.
+    let connection = Connection::open_with_flags(
+        cache_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|_| Fault::Cache)?;
     connection
         .busy_timeout(busy_timeout)
         .map_err(|_| Fault::Cache)?;
@@ -2007,6 +2210,21 @@ pub(super) fn open_read_write(
         .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
         .map_err(|_| Fault::Cache)?;
     Ok(connection)
+}
+
+/// Read the invalidation marker for a mutation admitted on this cache.
+///
+/// `pub(crate)` for the mutation view's staleness check; missing keys
+/// read as zero, matching [`read_meta`].
+pub(crate) fn read_invalidated_generation(connection: &Connection) -> u64 {
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'invalidated_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    value.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
 fn count_rows(connection: &Connection, table: &str) -> usize {
@@ -2034,14 +2252,25 @@ fn cache_file_size(cache_path: &Path) -> u64 {
     size
 }
 
-/// Delete the cache file and its WAL companions: derived data only.
-pub(super) fn drop_cache_file(cache_path: &Path) {
-    for companion in [
-        cache_path.to_path_buf(),
-        cache_path.with_extension("sqlite-wal"),
-        cache_path.with_extension("sqlite-shm"),
-        cache_path.with_extension("sqlite-journal"),
-    ] {
-        let _ = fs::remove_file(companion);
+/// Invalidate the cache without ever pulling a live database out from
+/// under its connections: derived data only, the event store is untouched.
+///
+/// A file provably not a SQLite database is unlinked with its WAL
+/// companions, since no WAL connection can hold it open. Anything else
+/// — including a schema-less file a concurrent opener may hold — is
+/// invalidated in place inside a write transaction: rows stay readable,
+/// the generation moves so in-flight compare-and-swaps lose, and the
+/// next freshness pass rebuilds.
+pub(crate) fn drop_cache_file(cache_path: &Path) {
+    if !cache_path.is_file() {
+        // No live connection can hold an absent path: clear stale
+        // companions so the next atomic create starts clean.
+        remove_cache_companions(cache_path);
+        return;
     }
+    if cache_file_is_not_a_database(cache_path) {
+        remove_cache_files(cache_path);
+        return;
+    }
+    let _ = invalidate_cache_in_place(cache_path);
 }

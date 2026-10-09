@@ -21,10 +21,10 @@
 //! mutation's overlaid rows; `Skipped` (no usable cache, or a lost
 //! content-generation race) writes nothing — the append already moved
 //! the token, and the read path's guarded tail repairs; `Invalidated`
-//! drops the cache file so the next read cannot serve stale rows and
-//! instead rebuilds from a full replay. After a durable append a cache
-//! problem never fails the mutation, never retries it, and never
-//! appends twice.
+//! invalidates the cache in place so the next read cannot serve stale
+//! rows and instead rebuilds from a full replay. After a durable append
+//! a cache problem never fails the mutation, never retries it, and
+//! never appends twice.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -90,9 +90,9 @@ pub(crate) enum PublishOutcome {
     /// was written; the read path repairs on next access.
     Skipped,
     /// The cache could not accept this append (backdated events,
-    /// config change, stream-set change, or a cache fault). The file
-    /// was dropped so the next read rebuilds instead of serving stale
-    /// rows.
+    /// config change, stream-set change, or a cache fault). The cache
+    /// was invalidated in place so the next read rebuilds instead of
+    /// serving stale rows.
     Invalidated { reason: String },
 }
 

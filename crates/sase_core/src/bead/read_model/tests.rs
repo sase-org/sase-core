@@ -502,3 +502,82 @@ fn warm_reads_count_serves_without_new_generations() {
     assert_eq!(status.tail_count, 0);
     assert_eq!(status.rebuild_count, 1);
 }
+
+#[test]
+fn invalidation_never_unlinks_a_live_cache() {
+    use std::time::Duration;
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_store_path(&temp);
+    seed_event_store(&beads_dir);
+
+    rebuild_read_model_at(&beads_dir, &cache_path).unwrap();
+    let before = read_model_status_at(&beads_dir, &cache_path);
+    assert_eq!(before.generation, 1);
+
+    // A read-only connection held open across the invalidation, like a
+    // concurrent reader's: unlinking the file (or its WAL companions)
+    // under it is what crashed readers with `no such table` and SIGBUS.
+    let held =
+        super::store::open_read_only(&cache_path, Duration::from_secs(5))
+            .unwrap();
+    let held_rows: i64 = held
+        .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(held_rows, 2);
+
+    super::store::drop_cache_file(&cache_path);
+
+    // The file was never unlinked, so the held connection still reads
+    // the intact rows instead of failing.
+    assert!(cache_path.is_file());
+    let reread: i64 = held
+        .query_row("SELECT COUNT(*) FROM issues", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(reread, 2);
+    drop(held);
+
+    // The generation moved monotonically so any in-flight writer's
+    // compare-and-swap loses rather than committing stale rows.
+    let reopened =
+        super::store::open_read_only(&cache_path, Duration::from_secs(5))
+            .unwrap();
+    let meta = super::store::read_meta(&reopened).unwrap();
+    assert_eq!(meta.generation, before.generation + 1);
+    drop(reopened);
+
+    // The next freshness pass rebuilds instead of serving, and the
+    // cache verifies against a full replay.
+    assert!(
+        super::store::ensure_cache_ready_at(&beads_dir, &cache_path).unwrap()
+    );
+    let status = read_model_status_at(&beads_dir, &cache_path);
+    assert!(status.fresh, "{}", status.reason);
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.matched, "{}", verify.reason);
+}
+
+#[test]
+fn schemaless_cache_file_heals_on_next_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let (beads_dir, cache_path) = test_store_path(&temp);
+    seed_event_store(&beads_dir);
+
+    // A valid-but-schema-less SQLite file, like the implicit
+    // `Connection::open` creation used to publish before any schema
+    // existed: concurrent openers could observe it and fault forever.
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    rusqlite::Connection::open(&cache_path).unwrap();
+
+    // The next freshness pass heals the schema and the rows in place
+    // instead of staying `Fault::Cache` forever.
+    assert!(
+        super::store::ensure_cache_ready_at(&beads_dir, &cache_path).unwrap()
+    );
+    let status = read_model_status_at(&beads_dir, &cache_path);
+    assert!(status.fresh, "{}", status.reason);
+    assert_eq!(status.issues, 2);
+    let verify = read_model_verify_cache_at(&beads_dir, &cache_path);
+    assert!(verify.matched, "{}", verify.reason);
+}

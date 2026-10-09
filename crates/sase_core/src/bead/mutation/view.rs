@@ -36,8 +36,8 @@ use crate::bead::events::{
 use crate::bead::jsonl::{event_streams_dir, read_event_stream_file};
 use crate::bead::read_model::alloc;
 use crate::bead::read_model::{
-    ensure_cache_ready_for_mutation_at, read_model_cache_path_for_store,
-    CacheWitness,
+    drop_cache_file, ensure_cache_ready_for_mutation_at,
+    read_invalidated_generation, read_model_cache_path_for_store, CacheWitness,
 };
 use crate::bead::wire::{BeadError, IssueWire};
 
@@ -46,6 +46,11 @@ pub(crate) enum MutationViewBacking {
     Cached {
         cache_path: PathBuf,
         witness: CacheWitness,
+        /// Invalidation marker at admission: a newer marker on a later
+        /// read means the cache was invalidated in between, and the
+        /// cached path declines to the replay backing instead of
+        /// reading rows a rebuild is about to replace.
+        admitted_invalidated: u64,
     },
     Replay,
 }
@@ -125,6 +130,12 @@ impl MutationView {
                 crate::bead::mutation::store::store_io_stats::record_load();
                 let witness =
                     read_cache_witness(&cache_path).unwrap_or_default();
+                let admitted_invalidated = Connection::open_with_flags(
+                    &cache_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map(|connection| read_invalidated_generation(&connection))
+                .unwrap_or(0);
                 let config =
                     load_config(beads_dir, default_config("beads", ""))?;
                 Ok(Some(Self {
@@ -132,6 +143,7 @@ impl MutationView {
                     backing: MutationViewBacking::Cached {
                         cache_path,
                         witness,
+                        admitted_invalidated,
                     },
                     replay_issues: Vec::new(),
                     replay_store: None,
@@ -375,7 +387,7 @@ impl MutationView {
                         [issue_id],
                         |row| row.get(0),
                     )
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 Ok(count > 0)
             }
             MutationViewBacking::Replay => {
@@ -499,14 +511,50 @@ impl MutationView {
         }
     }
 
+    /// A cache fault on the cached path: invalidate best-effort so the
+    /// next freshness pass rebuilds, then report fallback to the runner.
+    ///
+    /// Only ever built before the first durable write; the runner
+    /// refuses a decline afterwards, so a cache fault can never retry
+    /// or double-append a mutation.
+    fn cache_fault(&self, message: String) -> BeadError {
+        if let MutationViewBacking::Cached { cache_path, .. } = &self.backing {
+            drop_cache_file(cache_path);
+        }
+        BeadError::cache_fault(message)
+    }
+
+    /// Open the admitted cache for one cached read.
+    ///
+    /// A missing or unreadable file, or a newer invalidation marker
+    /// than the admission one, declines with a cache fault instead of
+    /// failing the mutation: the runner replays the same algorithm on
+    /// the replay backing.
     fn open_cached(&self) -> Result<Connection, BeadError> {
         match &self.backing {
-            MutationViewBacking::Cached { cache_path, .. } => {
-                Connection::open_with_flags(
+            MutationViewBacking::Cached {
+                cache_path,
+                admitted_invalidated,
+                ..
+            } => {
+                let connection = Connection::open_with_flags(
                     cache_path,
                     OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
-                .map_err(|error| BeadError::io(error.to_string()))
+                .map_err(|error| {
+                    self.cache_fault(format!(
+                        "cached read-model unreadable: {error}"
+                    ))
+                })?;
+                if read_invalidated_generation(&connection)
+                    != *admitted_invalidated
+                {
+                    return Err(self.cache_fault(
+                        "cached read-model invalidated after admission"
+                            .to_string(),
+                    ));
+                }
+                Ok(connection)
             }
             MutationViewBacking::Replay => Err(BeadError::io(
                 "mutation view has no cached backing".to_string(),
@@ -550,14 +598,14 @@ impl MutationView {
                     .prepare(
                         "SELECT issue_id FROM suffix_catalog WHERE suffix = ?1 ORDER BY issue_id",
                     )
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let rows = statement
                     .query_map([suffix], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 for row in rows {
-                    candidates.insert(
-                        row.map_err(|error| BeadError::io(error.to_string()))?,
-                    );
+                    candidates.insert(row.map_err(|error| {
+                        self.cache_fault(error.to_string())
+                    })?);
                 }
             }
             MutationViewBacking::Replay => {
@@ -592,8 +640,9 @@ impl MutationView {
     ///
     /// Overlay entries win so a batch reads its staged final state.
     /// Memoized rows avoid re-hydrating the same affected row twice.
-    /// SQLite and row-decode faults stay `io` errors and are never
-    /// collapsed into semantic `not_found`.
+    /// SQLite and row-decode faults decline with a cache fault (the
+    /// runner replays) and are never collapsed into semantic
+    /// `not_found`.
     pub(crate) fn get(&self, issue_id: &str) -> Result<IssueWire, BeadError> {
         if let Some(entry) = self.overlay.get(issue_id) {
             return entry.clone().ok_or_else(|| BeadError {
@@ -609,21 +658,21 @@ impl MutationView {
                 let connection = self.open_cached()?;
                 let mut statement = connection
                     .prepare("SELECT row FROM issues WHERE id = ?1")
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mut rows = statement
                     .query([issue_id])
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 match rows
                     .next()
-                    .map_err(|error| BeadError::io(error.to_string()))?
+                    .map_err(|error| self.cache_fault(error.to_string()))?
                 {
                     Some(row) => {
                         let text: String = row.get(0).map_err(|error| {
-                            BeadError::io(error.to_string())
+                            self.cache_fault(error.to_string())
                         })?;
                         let issue: IssueWire = serde_json::from_str(&text)
                             .map_err(|error| {
-                                BeadError::io(format!(
+                                self.cache_fault(format!(
                                     "cached issue row is not valid: {error}"
                                 ))
                             })?;
@@ -668,17 +717,17 @@ impl MutationView {
                     .prepare(
                         "SELECT row FROM issues WHERE parent = ?1 ORDER BY created_at ASC, position ASC",
                     )
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mapped = statement
                     .query_map([parent_id], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mut hydrated: u64 = 0;
                 for row in mapped {
-                    let text: String =
-                        row.map_err(|error| BeadError::io(error.to_string()))?;
+                    let text: String = row
+                        .map_err(|error| self.cache_fault(error.to_string()))?;
                     let issue: IssueWire = serde_json::from_str(&text)
                         .map_err(|error| {
-                            BeadError::io(format!(
+                            self.cache_fault(format!(
                                 "cached issue row is not valid: {error}"
                             ))
                         })?;
@@ -807,14 +856,14 @@ impl MutationView {
                     .prepare(
                         "SELECT src FROM edges WHERE dst = ?1 AND kind = 'depends_on' ORDER BY src ASC",
                     )
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mapped = statement
                     .query_map([issue_id], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 for row in mapped {
-                    ids.insert(
-                        row.map_err(|error| BeadError::io(error.to_string()))?,
-                    );
+                    ids.insert(row.map_err(|error| {
+                        self.cache_fault(error.to_string())
+                    })?);
                 }
             }
             MutationViewBacking::Replay => {
@@ -875,7 +924,7 @@ impl MutationView {
                         [src_id, dst_id],
                         |row| row.get(0),
                     )
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 Ok(count > 0)
             }
             MutationViewBacking::Replay => Ok(self
@@ -905,18 +954,18 @@ impl MutationView {
                 let connection = self.open_cached()?;
                 let mut statement = connection
                     .prepare("SELECT row FROM issues WHERE external_ref = ?1")
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mapped = statement
                     .query_map([normalized_ref], |row| row.get::<_, String>(0))
-                    .map_err(|error| BeadError::io(error.to_string()))?;
+                    .map_err(|error| self.cache_fault(error.to_string()))?;
                 let mut hydrated: u64 = 0;
                 for row in mapped {
-                    let text: String =
-                        row.map_err(|error| BeadError::io(error.to_string()))?;
+                    let text: String = row
+                        .map_err(|error| self.cache_fault(error.to_string()))?;
                     hydrated = hydrated.saturating_add(1);
                     candidate =
                         Some(serde_json::from_str(&text).map_err(|error| {
-                            BeadError::io(format!(
+                            self.cache_fault(format!(
                                 "cached issue row is not valid: {error}"
                             ))
                         })?);
@@ -968,7 +1017,8 @@ impl MutationView {
             MutationViewBacking::Cached { .. } => {
                 let connection = self.open_cached()?;
                 let mut stored =
-                    alloc::stored_top_max(&connection, issue_prefix)?
+                    alloc::stored_top_max(&connection, issue_prefix)
+                        .map_err(|error| self.cache_fault(error.message))?
                         .unwrap_or(0);
                 let mut overlay_max: u64 = 0;
                 let mut removes_max = false;
@@ -1036,14 +1086,14 @@ impl MutationView {
         let upper = format!("{issue_prefix}.");
         let mut stmt = connection
             .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
-            .map_err(|error| BeadError::io(error.to_string()))?;
+            .map_err(|error| self.cache_fault(error.to_string()))?;
         let mapped = stmt
             .query_map([lower, upper], |row| row.get::<_, String>(0))
-            .map_err(|error| BeadError::io(error.to_string()))?;
+            .map_err(|error| self.cache_fault(error.to_string()))?;
         let mut max_seen: u64 = 0;
         for row in mapped {
             let id: String =
-                row.map_err(|error| BeadError::io(error.to_string()))?;
+                row.map_err(|error| self.cache_fault(error.to_string()))?;
             if self.overlay.get(&id).is_some_and(|entry| entry.is_none()) {
                 continue;
             }
@@ -1073,7 +1123,8 @@ impl MutationView {
             MutationViewBacking::Cached { .. } => {
                 let connection = self.open_cached()?;
                 let mut stored =
-                    alloc::stored_child_max(&connection, parent_id)?
+                    alloc::stored_child_max(&connection, parent_id)
+                        .map_err(|error| self.cache_fault(error.message))?
                         .unwrap_or(0);
                 let mut overlay_max: u64 = 0;
                 let mut removes_max = false;
@@ -1140,14 +1191,14 @@ impl MutationView {
         let upper = format!("{parent_id}/");
         let mut stmt = connection
             .prepare("SELECT id FROM issues WHERE id >= ?1 AND id < ?2")
-            .map_err(|error| BeadError::io(error.to_string()))?;
+            .map_err(|error| self.cache_fault(error.to_string()))?;
         let mapped = stmt
             .query_map([lower, upper], |row| row.get::<_, String>(0))
-            .map_err(|error| BeadError::io(error.to_string()))?;
+            .map_err(|error| self.cache_fault(error.to_string()))?;
         let mut local_max: u64 = 0;
         for row in mapped {
             let id: String =
-                row.map_err(|error| BeadError::io(error.to_string()))?;
+                row.map_err(|error| self.cache_fault(error.to_string()))?;
             if self.overlay.get(&id).is_some_and(|entry| entry.is_none()) {
                 continue;
             }
