@@ -799,3 +799,131 @@ fn full_history_revalidate_repairs_hidden_toggle_via_dirty_directory() {
     assert!(fresh.records.is_empty());
     assert!(fresh.stats.rows_repaired >= 1);
 }
+
+#[test]
+fn full_history_revalidate_repairs_several_stale_rows_in_one_pass() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let mut dirs = Vec::new();
+    for n in 0..3 {
+        let dir = artifact(&projects, &format!("20260521160{n}00"));
+        write_completed_artifact(&dir, &format!("batch-{n}"));
+        dirs.push(dir);
+    }
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Mutate every row behind the index's back: content changes alter
+    // the marker signatures, so one Revalidate pass must repair all
+    // three rows with the same outcome as three single-row passes.
+    for (n, dir) in dirs.iter().enumerate() {
+        write_json(
+            &dir.join("done.json"),
+            json!({
+                "outcome": "completed",
+                "finished_at": 1779999999.0,
+                "name": format!("batch-{n}-renamed"),
+                "cl_name": "cl",
+            }),
+        );
+    }
+
+    let fresh = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_revalidate_query(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(fresh.stats.rows_repaired, 3);
+    let mut timestamps: Vec<&str> = fresh
+        .records
+        .iter()
+        .map(|record| record.timestamp.as_str())
+        .collect();
+    timestamps.sort_unstable();
+    assert_eq!(
+        timestamps,
+        vec!["20260521160000", "20260521160100", "20260521160200"]
+    );
+    for record in &fresh.records {
+        assert!(
+            record.done.as_ref().is_some_and(|done| done
+                .name
+                .as_deref()
+                .is_some_and(|name| name.ends_with("-renamed"))),
+            "repaired row carries refreshed content: {}",
+            record.timestamp
+        );
+    }
+
+    // The batched write persisted every repair: a Cached query decodes
+    // the same rows from the index without rescanning.
+    let cached = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_cached_query(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(cached.records.len(), 3);
+    assert_eq!(cached.stats.rows_repaired, 0);
+}
+
+#[test]
+fn unchanged_full_history_revalidate_commits_nothing() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let dir = artifact(&projects, "20260521162000");
+    write_completed_artifact(&dir, "steady");
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    // Persistent observer: it must stay open across both passes.
+    // SQLite auto-checkpoints the WAL when the last connection closes,
+    // which hides committed frames from a freshly opened observer.
+    let observer = Connection::open(&index).unwrap();
+    let data_version = || {
+        observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before: i64 = data_version();
+    let first = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_revalidate_query(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(first.records.len(), 1);
+    let after_first: i64 = data_version();
+    assert!(
+        after_first > before,
+        "first pass stamps the reconcile watermark"
+    );
+
+    let second = query_agent_artifact_index(
+        &index,
+        &projects,
+        full_history_revalidate_query(),
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+    assert_eq!(second.records.len(), 1);
+    assert_eq!(
+        data_version(),
+        after_first,
+        "unchanged second pass must commit nothing"
+    );
+}

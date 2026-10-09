@@ -8,6 +8,7 @@
 
 mod alias_history;
 mod candidates;
+mod checkpoint;
 mod dismissal;
 mod index_wire;
 mod lineage;
@@ -23,6 +24,11 @@ mod storage;
 mod tests;
 
 pub use alias_history::query_agent_alias_history;
+
+pub use checkpoint::{
+    checkpoint_agent_artifact_index_wal_if_oversized,
+    AgentArtifactIndexWalCheckpointWire,
+};
 
 pub use dismissal::{
     reconcile_agent_artifact_index_dismissed_agent_session_members,
@@ -57,6 +63,8 @@ pub use maintenance::{
 };
 
 pub use output_variables::query_agent_output_variable_history;
+
+pub use storage::AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES;
 
 pub use query::{
     agent_artifact_index_status, find_gate_turn_by_gate_id,

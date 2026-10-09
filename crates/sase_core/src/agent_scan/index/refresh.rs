@@ -77,19 +77,41 @@ pub(super) fn stamp_source_reconcile_watermark(
     conn: &Connection,
     projects_root: &Path,
 ) -> Result<(), String> {
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-        params![
-            SOURCE_RECONCILE_ROOT_META_KEY,
-            projects_root_key(projects_root)
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-        params![SOURCE_RECONCILE_OK_META_KEY, "1"],
-    )
-    .map_err(|e| e.to_string())?;
+    // Every full-history Revalidate pass used to rewrite these rows
+    // unconditionally, committing a write transaction on each pass even
+    // when nothing changed. Write only the keys whose value would
+    // change so an unchanged pass commits nothing.
+    let root_value = projects_root_key(projects_root);
+    let stored_root: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [SOURCE_RECONCILE_ROOT_META_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if stored_root.as_deref() != Some(root_value.as_str()) {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![SOURCE_RECONCILE_ROOT_META_KEY, root_value],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let stored_ok: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [SOURCE_RECONCILE_OK_META_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if stored_ok.as_deref() != Some("1") {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![SOURCE_RECONCILE_OK_META_KEY, "1"],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -158,9 +180,12 @@ pub(super) fn reconcile_source_directories(
         indexed_dirs.difference(&source_dirs).cloned().collect();
     if !missing.is_empty() {
         stats.rows_removed += missing.len() as u64;
-        delete_agent_artifact_projection_rows(conn, &missing)?;
     }
 
+    // Scan phase: all filesystem and signature work happens outside any
+    // transaction. The write phase below applies the collected repairs
+    // and discoveries inside one transaction per pass.
+    let mut repairs: Vec<(PathBuf, AgentArtifactRecordWire)> = Vec::new();
     let mut dirty_dirs = Vec::new();
     for (artifact_dir, indexed_at) in &indexed_rows {
         if missing.iter().any(|dir| dir == artifact_dir) {
@@ -200,21 +225,40 @@ pub(super) fn reconcile_source_directories(
                 &artifact_dir,
                 options,
             ) {
-                let _ = upsert_record(conn, &row_projects_root, &refreshed);
+                repairs.push((row_projects_root, refreshed));
                 stats.rows_repaired += 1;
             }
         }
     }
 
+    let mut discoveries: Vec<AgentArtifactRecordWire> = Vec::new();
     for artifact_dir in source_dirs.difference(&indexed_dirs) {
         let path = PathBuf::from(artifact_dir);
         if let Some(record) =
             scan_agent_artifact_dir(projects_root, &path, options)
         {
-            upsert_record(conn, projects_root, &record)?;
+            discoveries.push(record);
             stats.rows_discovered += 1;
         }
     }
+
+    // Write phase: one transaction per pass. Repairs stay best-effort
+    // (a failed repair must not abort the batch), while a failed
+    // discovery upsert still propagates with `?` as before.
+    if missing.is_empty() && repairs.is_empty() && discoveries.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if !missing.is_empty() {
+        delete_agent_artifact_projection_rows(&tx, &missing)?;
+    }
+    for (row_projects_root, refreshed) in &repairs {
+        let _ = upsert_record(&tx, row_projects_root, refreshed);
+    }
+    for record in &discoveries {
+        upsert_record(&tx, projects_root, record)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -485,6 +529,10 @@ pub(super) fn refresh_stale_rows(
         }
     }
 
+    // Scan phase: all filesystem and signature work happens outside
+    // any transaction. The write phase below applies the collected
+    // repairs and removals inside one transaction per pass.
+    let mut repairs: Vec<(PathBuf, AgentArtifactRecordWire)> = Vec::new();
     let mut missing = Vec::new();
     for row in pending {
         stats.marker_signatures_checked += 1;
@@ -497,16 +545,26 @@ pub(super) fn refresh_stale_rows(
         if let Some(refreshed) =
             scan_agent_artifact_dir(&projects_root, &artifact_dir, options)
         {
-            let _ = upsert_record(conn, &projects_root, &refreshed);
+            repairs.push((projects_root, refreshed));
             stats.rows_repaired += 1;
         } else {
             missing.push(row.artifact_dir);
         }
     }
+    if repairs.is_empty() && missing.is_empty() {
+        return Ok(());
+    }
+    // Write phase: one transaction per pass. Repairs stay best-effort
+    // (a failed repair must not abort the batch), as before.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for (projects_root, refreshed) in &repairs {
+        let _ = upsert_record(&tx, projects_root, refreshed);
+    }
     if !missing.is_empty() {
         stats.rows_removed += missing.len() as u64;
-        delete_agent_artifact_projection_rows(conn, &missing)?;
+        delete_agent_artifact_projection_rows(&tx, &missing)?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 

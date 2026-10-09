@@ -1,4 +1,5 @@
 use super::alias_history::effective_model_alias_trail;
+use super::checkpoint::checkpoint_agent_artifact_index_wal_if_oversized;
 use super::index_wire::{
     AgentArtifactIndexUpdateWire, AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
     DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
@@ -14,8 +15,8 @@ use super::refresh::{
 };
 use super::storage::{
     open_index, open_index_for_rebuild, open_index_with_busy_timeout,
-    resolve_index_artifact_dir, DEFAULT_INDEX_BUSY_TIMEOUT,
-    GATE_TURN_INDEX_COLUMN,
+    resolve_index_artifact_dir, AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
+    DEFAULT_INDEX_BUSY_TIMEOUT, GATE_TURN_INDEX_COLUMN,
 };
 use crate::agent_scan::scanner::{
     scan_agent_artifact_dir, scan_agent_artifacts,
@@ -187,6 +188,15 @@ pub fn terminalize_stale_active_agent_artifact_index_rows(
         &mut conn,
         DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
     )?;
+    // Background maintenance owns WAL housekeeping: drop this handle
+    // first so the checkpoint never waits on itself, then checkpoint
+    // best-effort. A busy or failed checkpoint is a normal outcome for
+    // a background pass, never a terminalization error.
+    drop(conn);
+    let _ = checkpoint_agent_artifact_index_wal_if_oversized(
+        index_path,
+        AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
+    );
 
     Ok(AgentArtifactIndexUpdateWire {
         schema_version: AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,

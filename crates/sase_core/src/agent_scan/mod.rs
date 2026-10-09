@@ -19,7 +19,9 @@ pub mod selector;
 pub mod wire;
 
 pub use index::{
-    agent_artifact_index_status, delete_agent_artifact_index_row,
+    agent_artifact_index_status,
+    checkpoint_agent_artifact_index_wal_if_oversized,
+    delete_agent_artifact_index_row,
     delete_agent_artifact_index_row_with_busy_timeout,
     find_gate_turn_by_gate_id, load_agent_artifact_records,
     prune_hidden_terminal_agent_artifact_index_rows, query_agent_alias_history,
@@ -38,10 +40,13 @@ pub use index::{
     AgentArtifactCandidateFilterWire, AgentArtifactIndexDismissalReconcileWire,
     AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
     AgentArtifactIndexStatusWire, AgentArtifactIndexUpdateWire,
-    AgentArtifactIndexVacuumWire, AgentSessionDismissalLineageCandidateWire,
+    AgentArtifactIndexVacuumWire, AgentArtifactIndexWalCheckpointWire,
+    AgentSessionDismissalLineageCandidateWire,
     AgentSessionDismissalLineageResultWire,
     AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
-    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
+    AGENT_ARTIFACT_INDEX_SCHEMA_VERSION,
+    AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES,
+    DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
 };
 pub use layout::{
     canonical_agent_artifact_path, collect_workflow_artifact_candidates,

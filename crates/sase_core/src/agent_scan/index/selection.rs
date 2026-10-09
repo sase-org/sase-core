@@ -50,11 +50,26 @@ pub(super) fn select_records(
             select_pending_rows_for_query(conn, &query, by_dir)?
         };
 
+    // Resolve phase: decode or rescan every pending row without
+    // writing. All filesystem and signature work happens outside any
+    // transaction; the write phase below applies the collected repairs
+    // and removals inside one transaction per pass.
+    let mut resolved: Vec<(String, AgentArtifactRecordWire)> =
+        Vec::with_capacity(pending.len());
+    // `repairs` holds the write-phase upsert inputs as indexes into
+    // `resolved`, so the refreshed record is never cloned.
+    let mut repairs: Vec<(PathBuf, usize)> = Vec::new();
     let mut missing = Vec::new();
     for row in pending {
+        let PendingRow {
+            artifact_dir,
+            row_projects_root,
+            record_json,
+            stored,
+        } = row;
         let record = match query.freshness {
             AgentArtifactIndexFreshnessWire::Cached => {
-                match decode_agent_artifact_record_json(&row.record_json) {
+                match decode_agent_artifact_record_json(&record_json) {
                     Ok(record) => {
                         stats.record_json_decoded += 1;
                         record
@@ -68,9 +83,9 @@ pub(super) fn select_records(
             AgentArtifactIndexFreshnessWire::Revalidate => {
                 stats.marker_signatures_checked += 1;
                 let current =
-                    MarkerSignatures::from_artifact_dir(&row.artifact_dir);
-                if row.stored == current {
-                    match decode_agent_artifact_record_json(&row.record_json) {
+                    MarkerSignatures::from_artifact_dir(&artifact_dir);
+                if stored == current {
+                    match decode_agent_artifact_record_json(&record_json) {
                         Ok(record) => {
                             stats.record_json_decoded += 1;
                             record
@@ -81,34 +96,46 @@ pub(super) fn select_records(
                         }
                     }
                 } else {
-                    let projects_root = PathBuf::from(&row.row_projects_root);
-                    let artifact_dir = PathBuf::from(&row.artifact_dir);
+                    let projects_root = PathBuf::from(&row_projects_root);
+                    let scanned_dir = PathBuf::from(&artifact_dir);
                     match scan_agent_artifact_dir(
                         &projects_root,
-                        &artifact_dir,
+                        &scanned_dir,
                         options,
                     ) {
                         Some(refreshed) => {
-                            // Best-effort: persist the refreshed record so the
-                            // next query sees fresh data without re-doing the
-                            // rescan. A single INSERT ... ON CONFLICT is
-                            // atomic in SQLite, so concurrent readers see
-                            // either the old or new row but never a torn
-                            // write. Upsert failure is non-fatal — we still
-                            // return the refreshed record to the caller.
-                            let _ =
-                                upsert_record(conn, &projects_root, &refreshed);
                             stats.rows_repaired += 1;
+                            repairs.push((projects_root, resolved.len()));
                             refreshed
                         }
                         None => {
-                            missing.push(row.artifact_dir.clone());
+                            missing.push(artifact_dir);
                             continue;
                         }
                     }
                 }
             }
         };
+        resolved.push((artifact_dir, record));
+    }
+    // Write phase: one transaction per pass. Repairs stay best-effort:
+    // persisting the refreshed record lets the next query see fresh
+    // data without re-doing the rescan, and upsert failure is
+    // non-fatal — the refreshed record is still returned below.
+    if query.freshness == AgentArtifactIndexFreshnessWire::Revalidate
+        && (!repairs.is_empty() || !missing.is_empty())
+    {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        for (projects_root, index) in &repairs {
+            let _ = upsert_record(&tx, projects_root, &resolved[*index].1);
+        }
+        if !missing.is_empty() {
+            stats.rows_removed += missing.len() as u64;
+            delete_agent_artifact_projection_rows(&tx, &missing)?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    for (artifact_dir, record) in resolved {
         if !project_allowed_by_filter(&record.project_name, project_filter) {
             continue;
         }
@@ -119,12 +146,8 @@ pub(super) fn select_records(
             query.include_hidden,
             query.only_monitors,
         )? {
-            by_dir.insert(row.artifact_dir, record);
+            by_dir.insert(artifact_dir, record);
         }
-    }
-    if !missing.is_empty() {
-        stats.rows_removed += missing.len() as u64;
-        delete_agent_artifact_projection_rows(conn, &missing)?;
     }
     Ok(())
 }

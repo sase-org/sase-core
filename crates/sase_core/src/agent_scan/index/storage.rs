@@ -17,6 +17,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(super) const DEFAULT_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cap for the artifact-index WAL file, in bytes (64 MiB).
+///
+/// SQLite truncates the WAL back on checkpoint once it grows past this
+/// size. The index is a rebuildable derived cache, so bounding the WAL
+/// matters more than squeezing the last frame out of a crash window.
+/// Shared with the oversized-WAL checkpoint helper as its default
+/// threshold.
+pub const AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES: u64 = 67_108_864;
+
 /// Indexed `agent_artifacts` column projecting the owning gate-turn id.
 pub(super) const GATE_TURN_INDEX_COLUMN: &str = "gate_turn_id";
 
@@ -36,6 +45,8 @@ pub(super) fn open_index_with_busy_timeout(
     conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA journal_size_limit = {AGENT_ARTIFACT_INDEX_WAL_SIZE_LIMIT_BYTES};
         PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
