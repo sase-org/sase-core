@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.2](https://github.com/sase-org/sase-core/compare/v0.37.1...v0.37.2) - 2026-10-09
+
+### Added
+
+- *(agent-scan)* bound index WAL growth and batch self-heal repairs
+
+### Fixed
+
+- *(bead)* use stable file-identity fallback on Windows
+
 ## [0.37.1](https://github.com/sase-org/sase-core/compare/v0.37.0...v0.37.1) - 2026-10-09
 
 ### Added
