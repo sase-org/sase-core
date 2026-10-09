@@ -430,7 +430,9 @@ type EventStreamsWithSignatures = (
     Vec<(String, StreamFileSignature)>,
 );
 
-/// Inode of `metadata`, or 0 on platforms without a stable file index.
+/// Inode of `metadata`, or 0 on platforms without a stable file index
+/// (including Windows, where `MetadataExt::file_index` is nightly-only
+/// behind `windows_by_handle`, rust-lang/rust#63010).
 pub(in crate::bead) fn file_inode(metadata: &fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
@@ -438,7 +440,10 @@ pub(in crate::bead) fn file_inode(metadata: &fs::Metadata) -> u64 {
     }
     #[cfg(windows)]
     {
-        std::os::windows::fs::MetadataExt::file_index(metadata)
+        // Nightly-only API (see above): stable wheel builds report 0.
+        // Freshness still keys on size and mtime.
+        let _ = metadata;
+        0
     }
     #[cfg(not(any(unix, windows)))]
     {

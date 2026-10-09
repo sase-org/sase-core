@@ -184,7 +184,12 @@ fn file_inode(metadata: &fs::Metadata) -> u64 {
     }
     #[cfg(windows)]
     {
-        std::os::windows::fs::MetadataExt::file_index(metadata)
+        // `MetadataExt::file_index` is nightly-only (`windows_by_handle`,
+        // rust-lang/rust#63010): it does not compile on the stable toolchain
+        // the wheel builds use, so stable Windows reports 0 like platforms
+        // without a file-index API. Freshness still keys on size and mtime.
+        let _ = metadata;
+        0
     }
     #[cfg(not(any(unix, windows)))]
     {
