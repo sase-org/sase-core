@@ -9,6 +9,11 @@ use crate::{
     server::{serve, GatewayConfig},
 };
 
+/// Cap on Tokio blocking threads for the gateway runtime. Fleet snapshot
+/// builds run on blocking threads, and the default pool of 512 let one
+/// slow rebuild multiply into hundreds of index-scanning threads.
+const GATEWAY_MAX_BLOCKING_THREADS: usize = 32;
+
 pub fn run_gateway_cli(
     args: impl IntoIterator<Item = String>,
 ) -> Result<(), String> {
@@ -29,7 +34,10 @@ pub fn run_gateway_cli(
     if wrote_contract {
         return Ok(());
     }
-    let runtime = tokio::runtime::Runtime::new()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(GATEWAY_MAX_BLOCKING_THREADS)
+        .build()
         .map_err(|err| format!("failed to create tokio runtime: {err}"))?;
     runtime
         .block_on(serve(cli.config))

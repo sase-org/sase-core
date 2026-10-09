@@ -3,7 +3,7 @@
 use sase_core::fleet_contract::FleetContractError;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum FleetReadError {
     #[error("{0}")]
     Validation(String),

@@ -1,11 +1,13 @@
 //! `FleetReadService`: snapshot-backed fleet read APIs with refresh
 //! coalescing and stale retention.
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use sase_core::{
@@ -31,15 +33,15 @@ use sase_core::{
         FleetProjectEligibilityRequestWire,
         FleetProjectEligibilityResponseWire, FleetProjectEligibilityWire,
         FleetSummaryResponseWire, ObservationFreshnessWire, OwnerLivenessWire,
-        ResourceRevisionWire, StoreCursorWire, FLEET_CONTRACT_SCHEMA_VERSION,
-        FLEET_READ_DEFAULT_REPLAY_EVENTS,
+        ResolvedAgentDetailWire, ResourceRevisionWire, StoreCursorWire,
+        FLEET_CONTRACT_SCHEMA_VERSION, FLEET_READ_DEFAULT_REPLAY_EVENTS,
     },
     fleet_owner_facts::{HostOwnerFileObserver, OwnerFileObserver},
     host_liveness::{HostOwnerLivenessObserver, OwnerLivenessObserver},
     list_project_records, query_agent_artifact_index,
     resolve_agent_session_dismissal_lineage,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{watch, Semaphore};
 
 use super::{
     content::read_content_range,
@@ -59,9 +61,103 @@ use crate::fleet_launch::FleetLaunchStore;
 
 pub(super) const SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// First back-off window after one failed snapshot build. The window
+/// doubles per consecutive failure up to [`SNAPSHOT_BACKOFF_MAX`].
+const SNAPSHOT_BACKOFF_FIRST: Duration = Duration::from_secs(15);
+/// Upper bound for the exponential snapshot-build back-off window.
+const SNAPSHOT_BACKOFF_MAX: Duration = Duration::from_secs(120);
+/// Gateway-wide cap on concurrent artifact-index operations held by
+/// snapshot builds and the overlay pass.
+const SNAPSHOT_INDEX_PERMITS: usize = 2;
+/// Upper bound on how many in-flight builds a forced refresh joins before
+/// it falls back to a timeout response instead of waiting forever on a
+/// wedged build.
+const FORCE_REFRESH_MAX_JOINS: u32 = 4;
+
 #[derive(Clone)]
 pub struct FleetReadService {
     inner: Arc<FleetReadServiceInner>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SnapshotScope {
+    Presentation,
+    History,
+}
+
+/// Outcome of one detached snapshot build, shared with every caller that
+/// joined it while it was in flight.
+#[derive(Clone, Debug)]
+struct RefreshOutcome {
+    /// Monotonic instant the build task was spawned. A forced refresh
+    /// only accepts an outcome whose build began after the forced call,
+    /// so `reconcile` always sees a post-settlement view.
+    started: Instant,
+    snapshot: Option<CachedFleetSnapshot>,
+    error: Option<FleetReadError>,
+}
+
+/// Handle to the one running build for a scope. The build task owns the
+/// watch sender and every waiter clones the receiver, so a completion can
+/// never be missed between subscribing and waiting.
+struct InFlightJoin {
+    generation: u64,
+    receiver: watch::Receiver<Option<RefreshOutcome>>,
+}
+
+/// Per-scope refresh state behind a plain mutex. The mutex is never held
+/// across an `.await`.
+struct ScopeState {
+    cache: Option<CachedFleetSnapshot>,
+    in_flight: Option<InFlightJoin>,
+    last_failure_at: Option<Instant>,
+    last_error: Option<FleetReadError>,
+    consecutive_failures: u32,
+    generation: u64,
+    builds_started: u64,
+}
+
+impl ScopeState {
+    fn new() -> Self {
+        Self {
+            cache: None,
+            in_flight: None,
+            last_failure_at: None,
+            last_error: None,
+            consecutive_failures: 0,
+            generation: 0,
+            builds_started: 0,
+        }
+    }
+
+    /// Remaining back-off, if a recent failure still forbids new builds.
+    fn backoff_remaining(&self) -> Option<Duration> {
+        let last = self.last_failure_at?;
+        let shift = self.consecutive_failures.saturating_sub(1).min(16);
+        let window = SNAPSHOT_BACKOFF_FIRST
+            .checked_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))?
+            .min(SNAPSHOT_BACKOFF_MAX);
+        window.checked_sub(last.elapsed())
+    }
+}
+
+/// Coalescing and memo slot for the presentation overlay pass. At most one
+/// overlay query runs at a time; concurrent callers skip, and a burst of
+/// catalog pages against one snapshot replays one memoized result.
+struct OverlayState {
+    in_flight: bool,
+    memo_key: Option<(u64, FleetCatalogScopeWire, Vec<String>)>,
+    memo_details: Vec<ResolvedAgentDetailWire>,
+}
+
+impl OverlayState {
+    fn new() -> Self {
+        Self {
+            in_flight: false,
+            memo_key: None,
+            memo_details: Vec::new(),
+        }
+    }
 }
 
 struct FleetReadServiceInner {
@@ -69,13 +165,15 @@ struct FleetReadServiceInner {
     index_path: PathBuf,
     projects_root: PathBuf,
     refresh_timeout: Duration,
-    cache: Mutex<Option<CachedFleetSnapshot>>,
-    refresh_lock: AsyncMutex<()>,
-    history_cache: Mutex<Option<CachedFleetSnapshot>>,
-    history_refresh_lock: AsyncMutex<()>,
+    presentation: Mutex<ScopeState>,
+    history: Mutex<ScopeState>,
+    index_permits: Arc<Semaphore>,
+    overlay: Mutex<OverlayState>,
     events: FleetInvalidationHub,
     liveness: Arc<dyn OwnerLivenessObserver>,
     owner_files: Arc<dyn OwnerFileObserver>,
+    #[cfg(test)]
+    overlay_queries: AtomicUsize,
 }
 
 impl std::fmt::Debug for FleetReadService {
@@ -117,16 +215,18 @@ impl FleetReadService {
                 projects_root: sase_home.join("projects"),
                 sase_home,
                 refresh_timeout,
-                cache: Mutex::new(None),
-                refresh_lock: AsyncMutex::new(()),
-                history_cache: Mutex::new(None),
-                history_refresh_lock: AsyncMutex::new(()),
+                presentation: Mutex::new(ScopeState::new()),
+                history: Mutex::new(ScopeState::new()),
+                index_permits: Arc::new(Semaphore::new(SNAPSHOT_INDEX_PERMITS)),
+                overlay: Mutex::new(OverlayState::new()),
                 events: FleetInvalidationHub::new(
                     FLEET_READ_DEFAULT_REPLAY_EVENTS,
                 )
                 .expect("default fleet replay capacity is valid"),
                 liveness,
                 owner_files: Arc::new(HostOwnerFileObserver::default()),
+                #[cfg(test)]
+                overlay_queries: AtomicUsize::new(0),
             }),
         }
     }
@@ -391,11 +491,11 @@ impl FleetReadService {
     #[cfg(test)]
     pub fn refresh_count_for_test(&self) -> u64 {
         self.inner
-            .cache
+            .presentation
             .lock()
             .ok()
-            .and_then(|cache| {
-                cache.as_ref().map(|snapshot| snapshot.refresh_count)
+            .and_then(|state| {
+                state.cache.as_ref().map(|snapshot| snapshot.refresh_count)
             })
             .unwrap_or(0)
     }
@@ -403,11 +503,11 @@ impl FleetReadService {
     #[cfg(test)]
     pub fn history_refresh_count_for_test(&self) -> u64 {
         self.inner
-            .history_cache
+            .history
             .lock()
             .ok()
-            .and_then(|cache| {
-                cache.as_ref().map(|snapshot| snapshot.refresh_count)
+            .and_then(|state| {
+                state.cache.as_ref().map(|snapshot| snapshot.refresh_count)
             })
             .unwrap_or(0)
     }
@@ -415,10 +515,10 @@ impl FleetReadService {
     #[cfg(test)]
     pub fn history_cache_initialized_for_test(&self) -> bool {
         self.inner
-            .history_cache
+            .history
             .lock()
             .ok()
-            .and_then(|cache| cache.as_ref().map(|_| ()))
+            .and_then(|state| state.cache.as_ref().map(|_| ()))
             .is_some()
     }
 
@@ -426,8 +526,8 @@ impl FleetReadService {
     /// older than it really is, without a wall-clock sleep.
     #[cfg(test)]
     pub fn age_cache_for_test(&self, seconds: f64) {
-        if let Ok(mut cache) = self.inner.cache.lock() {
-            if let Some(snapshot) = cache.as_mut() {
+        if let Ok(mut state) = self.inner.presentation.lock() {
+            if let Some(snapshot) = state.cache.as_mut() {
                 snapshot.build_instant -= Duration::from_secs_f64(seconds);
             }
         }
@@ -435,11 +535,123 @@ impl FleetReadService {
 
     #[cfg(test)]
     pub fn age_history_cache_for_test(&self, seconds: f64) {
-        if let Ok(mut cache) = self.inner.history_cache.lock() {
-            if let Some(snapshot) = cache.as_mut() {
+        if let Ok(mut state) = self.inner.history.lock() {
+            if let Some(snapshot) = state.cache.as_mut() {
                 snapshot.build_instant -= Duration::from_secs_f64(seconds);
             }
         }
+    }
+
+    /// Number of snapshot builds started for the presentation scope,
+    /// including builds whose waiters timed out and builds that failed.
+    #[cfg(test)]
+    pub fn builds_started_for_test(&self) -> u64 {
+        self.inner
+            .presentation
+            .lock()
+            .ok()
+            .map(|state| state.builds_started)
+            .unwrap_or(0)
+    }
+
+    /// Number of snapshot builds started for the history scope.
+    #[cfg(test)]
+    pub fn history_builds_started_for_test(&self) -> u64 {
+        self.inner
+            .history
+            .lock()
+            .ok()
+            .map(|state| state.builds_started)
+            .unwrap_or(0)
+    }
+
+    /// Whether a presentation snapshot build is currently in flight.
+    #[cfg(test)]
+    pub fn snapshot_build_in_flight_for_test(&self) -> bool {
+        self.inner
+            .presentation
+            .lock()
+            .ok()
+            .map(|state| state.in_flight.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Whether a history snapshot build is currently in flight.
+    #[cfg(test)]
+    pub fn history_build_in_flight_for_test(&self) -> bool {
+        self.inner
+            .history
+            .lock()
+            .ok()
+            .map(|state| state.in_flight.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Consecutive presentation build failures still counting toward the
+    /// back-off schedule.
+    #[cfg(test)]
+    pub fn consecutive_failures_for_test(&self) -> u32 {
+        self.inner
+            .presentation
+            .lock()
+            .ok()
+            .map(|state| state.consecutive_failures)
+            .unwrap_or(0)
+    }
+
+    /// Consecutive history build failures still counting toward back-off.
+    #[cfg(test)]
+    pub fn history_consecutive_failures_for_test(&self) -> u32 {
+        self.inner
+            .history
+            .lock()
+            .ok()
+            .map(|state| state.consecutive_failures)
+            .unwrap_or(0)
+    }
+
+    /// Expire the presentation back-off window without sleeping, so the
+    /// next read attempts a new build.
+    #[cfg(test)]
+    pub fn expire_backoff_for_test(&self) {
+        if let Ok(mut state) = self.inner.presentation.lock() {
+            state.last_failure_at = None;
+        }
+    }
+
+    /// Expire the history back-off window without sleeping.
+    #[cfg(test)]
+    pub fn expire_history_backoff_for_test(&self) {
+        if let Ok(mut state) = self.inner.history.lock() {
+            state.last_failure_at = None;
+        }
+    }
+
+    /// Number of overlay index queries actually executed. Memo hits and
+    /// contention skips do not count.
+    #[cfg(test)]
+    pub fn overlay_query_count_for_test(&self) -> usize {
+        self.inner.overlay_queries.load(Ordering::Relaxed)
+    }
+
+    /// Hold every index permit for as long as the returned guards live, so
+    /// tests can prove the overlay pass skips under contention.
+    #[cfg(test)]
+    pub async fn hold_all_index_permits_for_test(
+        &self,
+    ) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        let mut permits = Vec::new();
+        for _ in 0..SNAPSHOT_INDEX_PERMITS {
+            permits.push(
+                self.inner
+                    .index_permits
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("test index permits are acquirable"),
+            );
+        }
+        permits
     }
 
     /// Return the current snapshot with every row and the envelope stamped
@@ -470,58 +682,7 @@ impl FleetReadService {
         &self,
         force: bool,
     ) -> Result<CachedFleetSnapshot, FleetReadError> {
-        if !force {
-            if let Some(snapshot) = self.unexpired_cached_snapshot()? {
-                return Ok(snapshot);
-            }
-        }
-        let _guard = self.inner.refresh_lock.lock().await;
-        if !force {
-            if let Some(snapshot) = self.unexpired_cached_snapshot()? {
-                return Ok(snapshot);
-            }
-        }
-        let previous = self.cached_snapshot()?;
-        let build = BuildSnapshotRequest {
-            sase_home: self.inner.sase_home.clone(),
-            index_path: self.inner.index_path.clone(),
-            projects_root: self.inner.projects_root.clone(),
-            cursor: self.inner.events.current_cursor(),
-            prior_refresh_count: previous
-                .as_ref()
-                .map(|snapshot| snapshot.refresh_count)
-                .unwrap_or(0),
-            scope: FleetCatalogScopeWire::Presentation,
-            liveness: Arc::clone(&self.inner.liveness),
-            owner_files: Arc::clone(&self.inner.owner_files),
-        };
-        let result = tokio::time::timeout(
-            self.inner.refresh_timeout,
-            tokio::task::spawn_blocking(move || build_snapshot_blocking(build)),
-        )
-        .await;
-        let snapshot = match result {
-            Ok(Ok(Ok(snapshot))) => snapshot,
-            Ok(Ok(Err(error))) => {
-                return self.retain_previous_or_error(previous, error)
-            }
-            Ok(Err(_)) => {
-                return self.retain_previous_or_error(
-                    previous,
-                    FleetReadError::Backend("snapshot_join".to_string()),
-                )
-            }
-            Err(_) => {
-                return self.retain_previous_or_error(
-                    previous,
-                    FleetReadError::Timeout("snapshot_refresh".to_string()),
-                )
-            }
-        };
-        *self.inner.cache.lock().map_err(|_| {
-            FleetReadError::Backend("snapshot_cache".to_string())
-        })? = Some(snapshot.clone());
-        Ok(snapshot)
+        self.refresh_scope(SnapshotScope::Presentation, force).await
     }
 
     async fn stamped_history_snapshot(
@@ -549,90 +710,332 @@ impl FleetReadService {
         &self,
         force: bool,
     ) -> Result<CachedFleetSnapshot, FleetReadError> {
+        self.refresh_scope(SnapshotScope::History, force).await
+    }
+
+    /// Single-flight snapshot refresh for one scope.
+    ///
+    /// At most one build runs per scope. The first caller that needs a
+    /// rebuild spawns a detached task that always fills the cache when it
+    /// finishes, even after every waiter has timed out; every other caller
+    /// joins that build and waits at most `refresh_timeout`. No caller can
+    /// drop, abort, or start a second build while one is in flight.
+    async fn refresh_scope(
+        &self,
+        scope: SnapshotScope,
+        force: bool,
+    ) -> Result<CachedFleetSnapshot, FleetReadError> {
+        let force_since = Instant::now();
         if !force {
-            if let Some(snapshot) = self.unexpired_cached_history_snapshot()? {
+            if let Some(snapshot) = self.unexpired_scoped_snapshot(scope)? {
                 return Ok(snapshot);
             }
         }
-        let _guard = self.inner.history_refresh_lock.lock().await;
-        if !force {
-            if let Some(snapshot) = self.unexpired_cached_history_snapshot()? {
-                return Ok(snapshot);
+        // Forced callers only accept a snapshot built after this call, so
+        // `reconcile` always sees a post-settlement view. A wedged build
+        // must not hang a forced caller forever, so re-joins are bounded.
+        let mut joins = 0u32;
+        loop {
+            let decision = {
+                let mut state =
+                    self.scope_state(scope).lock().map_err(|_| {
+                        FleetReadError::Backend("snapshot_cache".to_string())
+                    })?;
+                if let Some(cached) = state.cache.clone() {
+                    let fresh = cached.build_instant.elapsed().as_secs_f64()
+                        < FLEET_SNAPSHOT_STALE_SECONDS;
+                    if fresh && (!force || cached.build_instant >= force_since)
+                    {
+                        return Ok(cached);
+                    }
+                }
+                if let Some(in_flight) = state.in_flight.as_ref() {
+                    RefreshDecision::Join {
+                        receiver: in_flight.receiver.clone(),
+                        generation: in_flight.generation,
+                    }
+                } else if state.backoff_remaining().is_some() {
+                    RefreshDecision::Backoff {
+                        code: state
+                            .last_error
+                            .as_ref()
+                            .map(FleetReadError::safe_code)
+                            .unwrap_or_else(|| "backend".to_string()),
+                        error: state.last_error.clone().unwrap_or_else(|| {
+                            FleetReadError::Backend(
+                                "snapshot_backoff".to_string(),
+                            )
+                        }),
+                    }
+                } else {
+                    let (sender, receiver) =
+                        watch::channel::<Option<RefreshOutcome>>(None);
+                    state.generation = state.generation.saturating_add(1);
+                    let generation = state.generation;
+                    state.builds_started =
+                        state.builds_started.saturating_add(1);
+                    let started = Instant::now();
+                    let build = BuildSnapshotRequest {
+                        sase_home: self.inner.sase_home.clone(),
+                        index_path: self.inner.index_path.clone(),
+                        projects_root: self.inner.projects_root.clone(),
+                        cursor: self.inner.events.current_cursor(),
+                        prior_refresh_count: state
+                            .cache
+                            .as_ref()
+                            .map(|snapshot| snapshot.refresh_count)
+                            .unwrap_or(0),
+                        scope: match scope {
+                            SnapshotScope::Presentation => {
+                                FleetCatalogScopeWire::Presentation
+                            }
+                            SnapshotScope::History => {
+                                FleetCatalogScopeWire::History
+                            }
+                        },
+                        liveness: Arc::clone(&self.inner.liveness),
+                        owner_files: Arc::clone(&self.inner.owner_files),
+                    };
+                    state.in_flight = Some(InFlightJoin {
+                        generation,
+                        receiver: receiver.clone(),
+                    });
+                    RefreshDecision::Start {
+                        sender,
+                        receiver,
+                        generation,
+                        started,
+                        build,
+                    }
+                }
+            };
+            match decision {
+                RefreshDecision::Backoff { code, error } => {
+                    let latest = self.cached_scoped_snapshot(scope)?;
+                    return match latest {
+                        Some(snapshot) => Ok(mark_stale(snapshot, code)),
+                        None => Err(error),
+                    };
+                }
+                RefreshDecision::Join {
+                    receiver,
+                    generation,
+                } => {
+                    if let Some(snapshot) = self
+                        .wait_for_build(
+                            scope,
+                            receiver,
+                            generation,
+                            force,
+                            force_since,
+                            &mut joins,
+                        )
+                        .await?
+                    {
+                        return Ok(snapshot);
+                    }
+                }
+                RefreshDecision::Start {
+                    sender,
+                    receiver,
+                    generation,
+                    started,
+                    build,
+                } => {
+                    self.spawn_scoped_build(
+                        scope, sender, generation, started, build,
+                    );
+                    if let Some(snapshot) = self
+                        .wait_for_build(
+                            scope,
+                            receiver,
+                            generation,
+                            force,
+                            force_since,
+                            &mut joins,
+                        )
+                        .await?
+                    {
+                        return Ok(snapshot);
+                    }
+                }
             }
         }
-        let previous = self.cached_history_snapshot()?;
-        let build = BuildSnapshotRequest {
-            sase_home: self.inner.sase_home.clone(),
-            index_path: self.inner.index_path.clone(),
-            projects_root: self.inner.projects_root.clone(),
-            cursor: self.inner.events.current_cursor(),
-            prior_refresh_count: previous
-                .as_ref()
-                .map(|snapshot| snapshot.refresh_count)
-                .unwrap_or(0),
-            scope: FleetCatalogScopeWire::History,
-            liveness: Arc::clone(&self.inner.liveness),
-            owner_files: Arc::clone(&self.inner.owner_files),
-        };
-        let result = tokio::time::timeout(
+    }
+
+    /// Spawn the detached task for one snapshot build. The task holds a
+    /// gateway-wide index permit for the whole blocking build, then
+    /// records its outcome and wakes every waiter. It always fills the
+    /// cache on success, even when every waiter already timed out.
+    fn spawn_scoped_build(
+        &self,
+        scope: SnapshotScope,
+        sender: watch::Sender<Option<RefreshOutcome>>,
+        generation: u64,
+        started: Instant,
+        build: BuildSnapshotRequest,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let outcome = run_scoped_build(&inner, build, started).await;
+            {
+                let mut state = match scope_state_for(&inner, scope).lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let current =
+                    state.in_flight.as_ref().is_some_and(|in_flight| {
+                        in_flight.generation == generation
+                    });
+                if current {
+                    commit_scoped_outcome(&mut state, &outcome);
+                    state.in_flight = None;
+                }
+            }
+            let _ = sender.send(Some(outcome));
+        });
+    }
+
+    /// Wait at most `refresh_timeout` for the joined build. Returns `None`
+    /// when a forced caller must loop and join or start a newer build;
+    /// every other path returns its response directly.
+    async fn wait_for_build(
+        &self,
+        scope: SnapshotScope,
+        receiver: watch::Receiver<Option<RefreshOutcome>>,
+        _generation: u64,
+        force: bool,
+        force_since: Instant,
+        joins: &mut u32,
+    ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
+        let mut receiver = receiver;
+        let wait_start = Instant::now();
+        let outcome = tokio::time::timeout(
             self.inner.refresh_timeout,
-            tokio::task::spawn_blocking(move || build_snapshot_blocking(build)),
+            receiver.wait_for(|slot| slot.is_some()),
         )
-        .await;
-        let snapshot = match result {
-            Ok(Ok(Ok(snapshot))) => snapshot,
-            Ok(Ok(Err(error))) => {
-                return self.retain_previous_history_or_error(previous, error)
+        .await
+        .map(|waited| waited.is_ok());
+        match outcome {
+            Ok(true) => {
+                let completed = receiver.borrow().as_ref().cloned();
+                match completed {
+                    Some(outcome) if outcome.snapshot.is_some() => {
+                        if !force || outcome.started >= force_since {
+                            Ok(outcome.snapshot)
+                        } else if *joins >= FORCE_REFRESH_MAX_JOINS {
+                            Ok(Some(self.timeout_response(scope, wait_start)?))
+                        } else {
+                            *joins += 1;
+                            Ok(None)
+                        }
+                    }
+                    Some(outcome) => {
+                        let latest = self.cached_scoped_snapshot(scope)?;
+                        Ok(Some(match latest {
+                            Some(snapshot) => mark_stale(
+                                snapshot,
+                                outcome
+                                    .error
+                                    .as_ref()
+                                    .map(FleetReadError::safe_code)
+                                    .unwrap_or_else(|| "backend".to_string()),
+                            ),
+                            None => {
+                                return Err(outcome.error.unwrap_or_else(
+                                    || {
+                                        FleetReadError::Backend(
+                                            "snapshot_join".to_string(),
+                                        )
+                                    },
+                                ));
+                            }
+                        }))
+                    }
+                    None => {
+                        let latest = self.cached_scoped_snapshot(scope)?;
+                        Ok(Some(match latest {
+                            Some(snapshot) => {
+                                mark_stale(snapshot, "backend".to_string())
+                            }
+                            None => {
+                                return Err(FleetReadError::Backend(
+                                    "snapshot_join".to_string(),
+                                ));
+                            }
+                        }))
+                    }
+                }
             }
-            Ok(Err(_)) => {
-                return self.retain_previous_history_or_error(
-                    previous,
-                    FleetReadError::Backend("snapshot_join".to_string()),
-                )
+            Ok(false) => {
+                let latest = self.cached_scoped_snapshot(scope)?;
+                Ok(Some(match latest {
+                    Some(snapshot) => {
+                        mark_stale(snapshot, "backend".to_string())
+                    }
+                    None => {
+                        return Err(FleetReadError::Backend(
+                            "snapshot_join".to_string(),
+                        ));
+                    }
+                }))
             }
             Err(_) => {
-                return self.retain_previous_history_or_error(
-                    previous,
-                    FleetReadError::Timeout("snapshot_refresh".to_string()),
-                )
+                if !force {
+                    return Ok(Some(self.timeout_response(scope, wait_start)?));
+                }
+                if *joins >= FORCE_REFRESH_MAX_JOINS {
+                    return Ok(Some(self.timeout_response(scope, wait_start)?));
+                }
+                *joins += 1;
+                Ok(None)
             }
-        };
-        *self.inner.history_cache.lock().map_err(|_| {
-            FleetReadError::Backend("history_snapshot_cache".to_string())
-        })? = Some(snapshot.clone());
-        Ok(snapshot)
+        }
     }
 
-    fn cached_snapshot(
+    /// Timeout fallback: serve the build that landed during our wait when
+    /// one did, otherwise the previous snapshot marked stale, or a timeout
+    /// error on a cold cache. The cached entry is never rewritten.
+    fn timeout_response(
         &self,
+        scope: SnapshotScope,
+        wait_start: Instant,
+    ) -> Result<CachedFleetSnapshot, FleetReadError> {
+        let latest = self.cached_scoped_snapshot(scope)?;
+        match latest {
+            Some(snapshot) if snapshot.build_instant >= wait_start => {
+                Ok(snapshot)
+            }
+            Some(snapshot) => Ok(mark_stale(snapshot, "timeout".to_string())),
+            None => {
+                Err(FleetReadError::Timeout("snapshot_refresh".to_string()))
+            }
+        }
+    }
+
+    fn scope_state(&self, scope: SnapshotScope) -> &Mutex<ScopeState> {
+        scope_state_for(&self.inner, scope)
+    }
+
+    fn cached_scoped_snapshot(
+        &self,
+        scope: SnapshotScope,
     ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
-        self.inner
-            .cache
+        self.scope_state(scope)
             .lock()
             .map_err(|_| FleetReadError::Backend("snapshot_cache".to_string()))
-            .map(|snapshot| snapshot.clone())
-    }
-
-    fn cached_history_snapshot(
-        &self,
-    ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
-        self.inner
-            .history_cache
-            .lock()
-            .map_err(|_| {
-                FleetReadError::Backend("history_snapshot_cache".to_string())
-            })
-            .map(|snapshot| snapshot.clone())
+            .map(|state| state.cache.clone())
     }
 
     /// The cached snapshot, unless it has reached the stale threshold: an
     /// aged-out entry is treated as a cache miss so the caller falls through
     /// to a genuine rebuild attempt instead of serving a frozen snapshot
     /// forever.
-    fn unexpired_cached_snapshot(
+    fn unexpired_scoped_snapshot(
         &self,
+        scope: SnapshotScope,
     ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
-        let Some(snapshot) = self.cached_snapshot()? else {
+        let Some(snapshot) = self.cached_scoped_snapshot(scope)? else {
             return Ok(None);
         };
         if snapshot.build_instant.elapsed().as_secs_f64()
@@ -643,20 +1046,11 @@ impl FleetReadService {
         Ok(Some(snapshot))
     }
 
-    fn unexpired_cached_history_snapshot(
-        &self,
-    ) -> Result<Option<CachedFleetSnapshot>, FleetReadError> {
-        let Some(snapshot) = self.cached_history_snapshot()? else {
-            return Ok(None);
-        };
-        if snapshot.build_instant.elapsed().as_secs_f64()
-            >= FLEET_SNAPSHOT_STALE_SECONDS
-        {
-            return Ok(None);
-        }
-        Ok(Some(snapshot))
-    }
-
+    /// Best-effort overlay of settled launches that are missing from the
+    /// snapshot. The pass never waits for an index permit: it skips when
+    /// none is free. At most one overlay query runs at a time and the
+    /// result is memoized per snapshot, so a burst of catalog pages runs
+    /// at most one index query.
     async fn overlay_missing_into_snapshot(
         &self,
         snapshot: &mut CachedFleetSnapshot,
@@ -684,6 +1078,39 @@ impl FleetReadService {
         if missing.is_empty() {
             return;
         }
+        missing.sort();
+        let memo_key = (
+            snapshot.refresh_count,
+            snapshot.wire.catalog_scope,
+            missing.clone(),
+        );
+        {
+            let Ok(mut overlay) = self.inner.overlay.lock() else {
+                return;
+            };
+            if overlay.memo_key.as_ref() == Some(&memo_key) {
+                let details = overlay.memo_details.clone();
+                drop(overlay);
+                merge_overlaid_details(snapshot, &details);
+                return;
+            }
+            if overlay.in_flight {
+                return;
+            }
+            overlay.in_flight = true;
+        }
+        let permit = match self.inner.index_permits.clone().try_acquire_owned()
+        {
+            Ok(permit) => permit,
+            Err(_) => {
+                if let Ok(mut overlay) = self.inner.overlay.lock() {
+                    overlay.in_flight = false;
+                }
+                return;
+            }
+        };
+        #[cfg(test)]
+        self.inner.overlay_queries.fetch_add(1, Ordering::Relaxed);
         let sase_home = self.inner.sase_home.clone();
         let index_path = self.inner.index_path.clone();
         let projects_root = self.inner.projects_root.clone();
@@ -691,6 +1118,7 @@ impl FleetReadService {
         let owner_files = Arc::clone(&self.inner.owner_files);
         let freshness = snapshot.wire.freshness.freshness;
         let overlaid = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             overlay_missing_blocking(
                 &sase_home,
                 &index_path,
@@ -705,57 +1133,133 @@ impl FleetReadService {
         .ok()
         .and_then(|result| result.ok())
         .unwrap_or_default();
-        for detail in overlaid {
-            let key = detail.summary.logical_key.clone();
-            if snapshot.summaries_by_logical_key.contains_key(&key) {
-                continue;
-            }
-            snapshot.wire.summaries.push(detail.summary.clone());
-            snapshot
-                .summaries_by_logical_key
-                .insert(key.clone(), detail.summary.clone());
-            snapshot.details_by_logical_key.insert(key, detail);
+        if let Ok(mut overlay) = self.inner.overlay.lock() {
+            overlay.in_flight = false;
+            overlay.memo_key = Some(memo_key);
+            overlay.memo_details = overlaid.clone();
         }
-        snapshot.wire.summaries.sort_by(|left, right| {
-            left.logical_key
-                .cmp(&right.logical_key)
-                .then_with(|| left.exact_key.cmp(&right.exact_key))
-        });
+        merge_overlaid_details(snapshot, &overlaid);
     }
+}
 
-    fn retain_previous_or_error(
-        &self,
-        previous: Option<CachedFleetSnapshot>,
+/// One synchronous decision of the refresh loop, made under the scope
+/// mutex and acted on after it is released.
+enum RefreshDecision {
+    Join {
+        receiver: watch::Receiver<Option<RefreshOutcome>>,
+        generation: u64,
+    },
+    Start {
+        sender: watch::Sender<Option<RefreshOutcome>>,
+        receiver: watch::Receiver<Option<RefreshOutcome>>,
+        generation: u64,
+        started: Instant,
+        build: BuildSnapshotRequest,
+    },
+    Backoff {
+        code: String,
         error: FleetReadError,
-    ) -> Result<CachedFleetSnapshot, FleetReadError> {
-        let Some(mut snapshot) = previous else {
-            return Err(error);
-        };
-        snapshot.wire.freshness.freshness = ObservationFreshnessWire::Stale;
-        snapshot.wire.freshness.partial = true;
-        snapshot.wire.freshness.error = Some(error.safe_code());
-        *self.inner.cache.lock().map_err(|_| {
-            FleetReadError::Backend("snapshot_cache".to_string())
-        })? = Some(snapshot.clone());
-        Ok(snapshot)
-    }
+    },
+}
 
-    fn retain_previous_history_or_error(
-        &self,
-        previous: Option<CachedFleetSnapshot>,
-        error: FleetReadError,
-    ) -> Result<CachedFleetSnapshot, FleetReadError> {
-        let Some(mut snapshot) = previous else {
-            return Err(error);
-        };
-        snapshot.wire.freshness.freshness = ObservationFreshnessWire::Stale;
-        snapshot.wire.freshness.partial = true;
-        snapshot.wire.freshness.error = Some(error.safe_code());
-        *self.inner.history_cache.lock().map_err(|_| {
-            FleetReadError::Backend("history_snapshot_cache".to_string())
-        })? = Some(snapshot.clone());
-        Ok(snapshot)
+fn scope_state_for(
+    inner: &FleetReadServiceInner,
+    scope: SnapshotScope,
+) -> &Mutex<ScopeState> {
+    match scope {
+        SnapshotScope::Presentation => &inner.presentation,
+        SnapshotScope::History => &inner.history,
     }
+}
+
+/// Run one snapshot build while holding a gateway-wide index permit for
+/// the whole blocking build.
+async fn run_scoped_build(
+    inner: &Arc<FleetReadServiceInner>,
+    build: BuildSnapshotRequest,
+    started: Instant,
+) -> RefreshOutcome {
+    let permit = inner.index_permits.clone().acquire_owned().await;
+    let Ok(_permit) = permit else {
+        return RefreshOutcome {
+            started,
+            snapshot: None,
+            error: Some(FleetReadError::Backend("index_permits".to_string())),
+        };
+    };
+    let result =
+        tokio::task::spawn_blocking(move || build_snapshot_blocking(build))
+            .await;
+    match result {
+        Ok(Ok(snapshot)) => RefreshOutcome {
+            started,
+            snapshot: Some(snapshot),
+            error: None,
+        },
+        Ok(Err(error)) => RefreshOutcome {
+            started,
+            snapshot: None,
+            error: Some(error),
+        },
+        Err(_) => RefreshOutcome {
+            started,
+            snapshot: None,
+            error: Some(FleetReadError::Backend("snapshot_join".to_string())),
+        },
+    }
+}
+
+/// Record a finished build: a success fills the cache and resets the
+/// failure tracking, while a failure records the error and extends the
+/// back-off schedule. A late-but-successful build is a success.
+fn commit_scoped_outcome(state: &mut ScopeState, outcome: &RefreshOutcome) {
+    if let Some(snapshot) = outcome.snapshot.clone() {
+        state.cache = Some(snapshot);
+        state.last_failure_at = None;
+        state.last_error = None;
+        state.consecutive_failures = 0;
+    } else {
+        state.last_failure_at = Some(Instant::now());
+        state.consecutive_failures =
+            state.consecutive_failures.saturating_add(1);
+        if let Some(error) = outcome.error.clone() {
+            state.last_error = Some(error);
+        }
+    }
+}
+
+/// Mark a returned copy stale without touching the cached entry's
+/// `build_instant`, so the cache keeps its real age.
+fn mark_stale(
+    mut snapshot: CachedFleetSnapshot,
+    code: String,
+) -> CachedFleetSnapshot {
+    snapshot.wire.freshness.freshness = ObservationFreshnessWire::Stale;
+    snapshot.wire.freshness.partial = true;
+    snapshot.wire.freshness.error = Some(code);
+    snapshot
+}
+
+fn merge_overlaid_details(
+    snapshot: &mut CachedFleetSnapshot,
+    overlaid: &[ResolvedAgentDetailWire],
+) {
+    for detail in overlaid {
+        let key = detail.summary.logical_key.clone();
+        if snapshot.summaries_by_logical_key.contains_key(&key) {
+            continue;
+        }
+        snapshot.wire.summaries.push(detail.summary.clone());
+        snapshot
+            .summaries_by_logical_key
+            .insert(key.clone(), detail.summary.clone());
+        snapshot.details_by_logical_key.insert(key, detail.clone());
+    }
+    snapshot.wire.summaries.sort_by(|left, right| {
+        left.logical_key
+            .cmp(&right.logical_key)
+            .then_with(|| left.exact_key.cmp(&right.exact_key))
+    });
 }
 
 fn overlay_missing_blocking(
