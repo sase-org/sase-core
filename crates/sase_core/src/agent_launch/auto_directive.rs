@@ -45,8 +45,11 @@ pub struct AutoDirectiveDiagnostic {
 /// Classify one `%auto`/`%a` occurrence.
 ///
 /// `form` is the occurrence's surface form, `raw_value` its colon value
-/// (`""` for bare, `"true"` for `+`), and `spelling` the source text shown
-/// in rejection messages.
+/// (`""` for bare, `"true"` for `+`), and `spelling` the source text.
+/// Colon rejection messages name the canonical `%auto:<unquoted value>`
+/// spelling (the form Python and the prompt bar already show), so every
+/// surface reports one identical message. Paren rejections keep the
+/// literal source slice on both sides.
 pub fn classify_auto_directive(
     form: AutoDirectiveForm,
     raw_value: &str,
@@ -84,10 +87,15 @@ pub fn classify_auto_directive(
             argument: None,
         });
     }
+    let display = if form == AutoDirectiveForm::Colon {
+        format!("%auto:{raw_value}")
+    } else {
+        spelling.to_string()
+    };
     Err(AutoDirectiveDiagnostic {
         code: INVALID_AUTO_CODE,
         message: format!(
-            "Invalid %auto spelling '{spelling}': unknown auto mode \
+            "Invalid %auto spelling '{display}': unknown auto mode \
             '{raw_value}'. Use %auto, %auto+, or %auto:<mode> with mode \
             plan, tale, or epic; %auto:manual and %auto:off disable \
             automatic approval.",
@@ -230,9 +238,16 @@ mod tests {
             let diagnostic =
                 classify_auto_directive(form, value, spelling).unwrap_err();
             assert_eq!(diagnostic.code, "invalid-auto");
+            // Colon rejections name the canonical `%auto:<unquoted value>`
+            // spelling; paren rejections keep the literal source slice.
+            let expected = if form == AutoDirectiveForm::Colon {
+                format!("%auto:{value}")
+            } else {
+                spelling.to_string()
+            };
             assert!(
-                diagnostic.message.contains(spelling),
-                "message names {spelling:?}: {}",
+                diagnostic.message.contains(&expected),
+                "message names {expected:?}: {}",
                 diagnostic.message
             );
             for mode in ["plan", "tale", "epic"] {

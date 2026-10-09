@@ -741,6 +741,14 @@ pub struct AgentMetaWire {
     /// stay byte-stable and no wire schema bump is needed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wait_epic_follows: Vec<WaitEpicFollowEntryWire>,
+    /// Raw `%auto` argument retained from directive extraction (live-meta
+    /// `auto_approve_argument`). Trailing for the same key-order stability;
+    /// additive serde-default and omitted when absent, so existing scan
+    /// payloads stay byte-stable and no schema bump is needed. Lets status
+    /// derivation tell a parked cross-tier gate (e.g. `%auto:tale` on an
+    /// epic plan) apart from a covered bare `%auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve_argument: Option<String>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.

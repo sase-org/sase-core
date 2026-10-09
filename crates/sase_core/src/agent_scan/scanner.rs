@@ -1572,6 +1572,7 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         wait_epic_follows: coerce_wait_epic_follows(
             data.get("wait_epic_follows"),
         ),
+        auto_approve_argument: coerce_str(data.get("auto_approve_argument")),
     }
 }
 
@@ -3131,6 +3132,35 @@ mod tests {
         data.insert("name".to_string(), json!("probe"));
         data.insert("wait_epic_follows".to_string(), value);
         agent_meta_from_object(&data)
+    }
+
+    fn meta_with_auto_argument(value: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("auto_approve_argument".to_string(), value);
+        agent_meta_from_object(&data)
+    }
+
+    #[test]
+    fn scanner_reads_auto_approve_argument() {
+        assert_eq!(
+            meta_with_auto_argument(json!("plan"))
+                .auto_approve_argument
+                .as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            meta_with_auto_argument(json!("tale"))
+                .auto_approve_argument
+                .as_deref(),
+            Some("tale")
+        );
+        for value in [json!(42), json!(null), json!({}), json!([])] {
+            assert_eq!(
+                meta_with_auto_argument(value).auto_approve_argument,
+                None
+            );
+        }
     }
 
     #[test]
