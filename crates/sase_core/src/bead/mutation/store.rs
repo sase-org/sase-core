@@ -1,7 +1,6 @@
 use super::mutation_wire::BeadMutationOutcomeWire;
-use super::shared::commit_staged_write;
-use super::shared::load_mutation_stream;
-use super::shared::mint_stream_event;
+use super::runner::run_mutation;
+use super::runner::MutationStep;
 use super::view::MutationView;
 use crate::artifact_link::canonicalize_artifact_link_ref;
 use crate::artifact_link::BeadLinkDirectionWire;
@@ -130,87 +129,26 @@ pub(crate) fn set_ready_to_work(
     reject_already_ready: bool,
     now: Option<String>,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
-    with_bead_mutation_lock(beads_dir, "set_ready_to_work", || {
-        if let Some(view) = MutationView::load_cached(beads_dir)? {
-            if let Some(outcome) = try_cached_set_ready(
-                beads_dir,
-                view,
-                epic_id,
-                ready,
-                reject_already_ready,
-                now.clone(),
-            )? {
-                return Ok(outcome);
-            }
-        }
-        let mut store = MutableStore::load(beads_dir)?;
-        let epic_id = store.resolve_issue_id(epic_id)?;
-        let index = store.issue_index(&epic_id)?;
-        if store.issues[index].issue_type != IssueTypeWire::Plan {
-            return Err(BeadError {
-                kind: "not_a_plan".to_string(),
-                message: format!(
-                    "is_ready_to_work only applies to plan beads (got phase for {epic_id})"
-                ),
-            });
-        }
-        let tier = store.issues[index].tier.as_ref();
-        if !matches!(tier, Some(BeadTierWire::Epic)) {
-            return Err(BeadError {
-                kind: "not_workable_plan".to_string(),
-                message: format!(
-                    "sase bead work only applies to epic plan beads (got {} for {epic_id})",
-                    tier_label(tier)
-                ),
-            });
-        }
-        if reject_already_ready && store.issues[index].is_ready_to_work {
-            return Err(BeadError {
-                kind: "already_ready".to_string(),
-                message: format!(
-                    "{epic_id} is already marked is_ready_to_work=True"
-                ),
-            });
-        }
-        store.issues[index].is_ready_to_work = ready;
-        store.issues[index].updated_at = now.unwrap_or_else(now_utc);
-        let issue = store.issues[index].clone();
-        store.append_issue_event(
-            &epic_id,
-            if ready {
-                BeadEventOperationWire::ReadyMarked
-            } else {
-                BeadEventOperationWire::ReadyUnmarked
-            },
-            if ready {
-                BeadEventPayloadWire::ReadyMarked
-            } else {
-                BeadEventPayloadWire::ReadyUnmarked
-            },
-            &issue.updated_at,
-            &issue.created_by,
-        )?;
-        store.save()?;
-
-        let mut result = outcome("ready_to_work", true, vec![issue.id.clone()]);
-        result.issue = Some(issue);
-        Ok(result)
+    run_mutation(beads_dir, "set_ready_to_work", |view| {
+        run_set_ready(view, epic_id, ready, reject_already_ready, now.clone())
     })
 }
 
-/// Cached `set_ready_to_work` over the view: one row plus one stream.
+/// The single `set_ready_to_work` algorithm, over the view on both
+/// backings.
 ///
 /// Shorthand resolves through the view, exactly as the locked replay
-/// load does. Returns `Ok(None)` when the affected stream file is
-/// missing so replay owns the corruption error.
-fn try_cached_set_ready(
-    beads_dir: &Path,
-    view: MutationView,
+/// load did. The row stages before its event so stream routing sees it;
+/// one `commit` persists both backings. A decline retries the same
+/// closure on the replay backing; errors preserve the replay oracle's
+/// kinds and messages.
+fn run_set_ready(
+    view: &mut MutationView,
     epic_id: &str,
     ready: bool,
     reject_already_ready: bool,
     now: Option<String>,
-) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
+) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError> {
     let resolved = view.resolve(epic_id)?;
     let current = view.get(&resolved)?;
     if current.issue_type != IssueTypeWire::Plan {
@@ -239,18 +177,12 @@ fn try_cached_set_ready(
             ),
         });
     }
-    let mut view = view;
     let mut issue = current;
     issue.is_ready_to_work = ready;
     issue.updated_at = now.unwrap_or_else(now_utc);
     view.stage_issue(issue.clone());
-    let stream_id = view.stream_id_for_issue(&issue.id)?;
-    let Some(mut stream) = load_mutation_stream(beads_dir, &stream_id)? else {
-        return Ok(None);
-    };
-    let base_len = stream.events.len();
-    mint_stream_event(
-        &mut stream,
+    let Some(_) = view.stage_event(
+        &issue.id,
         if ready {
             BeadEventOperationWire::ReadyMarked
         } else {
@@ -263,29 +195,17 @@ fn try_cached_set_ready(
         },
         &issue.updated_at,
         &issue.created_by,
-        &issue.id,
-    )?;
-    let fallback = default_config("beads", "");
-    let config = load_config(beads_dir, fallback)?;
-    let expected = vec![(issue.id.clone(), issue.clone())];
-    let cache_path_buf =
-        crate::bead::read_model::read_model_cache_path_for_store(beads_dir);
-    let committed = commit_staged_write(
-        beads_dir,
-        cache_path_buf.as_deref(),
-        view.witness(),
-        &config,
-        std::slice::from_ref(&stream),
-        std::slice::from_ref(&base_len),
-        &expected,
-    )?;
-    let Some(mut rows) = committed else {
-        return Ok(None);
+    )?
+    else {
+        return Ok(MutationStep::NeedsReplay);
+    };
+    let Some(mut rows) = view.commit(&[issue.id.clone()])? else {
+        return Ok(MutationStep::NeedsReplay);
     };
     let issue = rows.pop().expect("one ready row");
     let mut result = outcome("ready_to_work", true, vec![issue.id.clone()]);
     result.issue = Some(issue);
-    Ok(Some(result))
+    Ok(MutationStep::Done(result))
 }
 
 pub(crate) fn normalize_model(value: String) -> Result<String, BeadError> {
