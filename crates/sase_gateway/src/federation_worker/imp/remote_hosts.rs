@@ -68,6 +68,9 @@ pub(super) struct RemoteHost {
 pub(super) struct RemoteHostRuntime {
     verified: bool,
     quarantine: Option<FederationErrorWire>,
+    backoff_until: Option<Instant>,
+    consecutive_failures: u32,
+    last_error: Option<FederationErrorWire>,
 }
 
 impl RemoteHost {
@@ -84,6 +87,12 @@ impl RemoteHost {
             runtime: Arc::new(AsyncMutex::new(RemoteHostRuntime::default())),
             permits: Arc::new(Semaphore::new(DEFAULT_PER_HOST_IN_FLIGHT)),
         })
+    }
+
+    pub(super) fn matches_config(&self, config: &ValidatedHostConfig) -> bool {
+        self.alias == config.alias
+            && self.plan == config.plan
+            && self.bearer_token.as_ref() == config.bearer_token.as_str()
     }
 
     pub(super) fn empty_result(
@@ -475,6 +484,83 @@ impl ReadOperation {
     }
 }
 
+/// Back-off window for the given consecutive retryable-failure count (at
+/// least 1): 5 s base, doubling per failure, capped at 120 s.
+pub(super) fn host_read_backoff_window(consecutive_failures: u32) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(5);
+    let secs = HOST_READ_BACKOFF_BASE
+        .as_secs()
+        .saturating_mul(1 << shift)
+        .min(HOST_READ_BACKOFF_MAX.as_secs());
+    Duration::from_secs(secs)
+}
+
+/// Retryable remote-read failures that engage per-host read back-off,
+/// including the hello step. Anything else (unauthorized, not_found,
+/// invalid*, quarantined, …) is returned without backing off.
+pub(super) fn is_retryable_read_error(error: &FederationErrorWire) -> bool {
+    matches!(
+        error.code.as_str(),
+        "deadline" | "timeout" | "unavailable" | "internal"
+    )
+}
+
+impl RemoteHost {
+    /// While the host is backing off after a retryable failure, describe the
+    /// short-circuit error: it reuses the triggering error's code (so
+    /// `status_from_error` yields the same status vocabulary) with target
+    /// `backoff` and the remaining window in its message. No new status or
+    /// error-code value is introduced.
+    pub(super) async fn backoff_error(&self) -> Option<FederationErrorWire> {
+        let runtime = self.runtime.lock().await;
+        let until = runtime.backoff_until?;
+        let triggering = runtime.last_error.clone()?;
+        let now = Instant::now();
+        if now >= until {
+            return None;
+        }
+        let remaining_secs = until
+            .saturating_duration_since(now)
+            .as_millis()
+            .div_ceil(1000);
+        Some(federation_error(
+            &triggering.code,
+            &format!(
+                "host backing off for {}s after {} failure",
+                remaining_secs.max(1),
+                triggering.code,
+            ),
+            Some("backoff"),
+        ))
+    }
+
+    pub(super) async fn record_read_success(&self) {
+        let mut runtime = self.runtime.lock().await;
+        runtime.consecutive_failures = 0;
+        runtime.backoff_until = None;
+        runtime.last_error = None;
+    }
+
+    pub(super) async fn record_read_failure(&self, error: FederationErrorWire) {
+        let mut runtime = self.runtime.lock().await;
+        runtime.consecutive_failures =
+            runtime.consecutive_failures.saturating_add(1);
+        let window = host_read_backoff_window(runtime.consecutive_failures);
+        runtime.backoff_until = Some(Instant::now() + window);
+        runtime.last_error = Some(error);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn clear_backoff_for_test(&self) {
+        self.runtime.lock().await.backoff_until = None;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn backoff_failures_for_test(&self) -> u32 {
+        self.runtime.lock().await.consecutive_failures
+    }
+}
+
 pub(super) async fn read_one_host(
     host: Arc<RemoteHost>,
     operation: ReadOperation,
@@ -490,6 +576,9 @@ pub(super) async fn read_one_host(
     };
     if cache_only {
         return cached_or_error(&host, &cache, &cache_key, None).await;
+    }
+    if let Some(backoff) = host.backoff_error().await {
+        return cached_or_error(&host, &cache, &cache_key, Some(backoff)).await;
     }
     let result = with_deadline(deadline, async {
         let _global = global.acquire_owned().await.map_err(|_| {
@@ -512,6 +601,7 @@ pub(super) async fn read_one_host(
     .await;
     match result {
         Ok(payload) => {
+            host.record_read_success().await;
             let entry = {
                 let mut cache = cache.lock().await;
                 let entry = cache.store(
@@ -531,6 +621,9 @@ pub(super) async fn read_one_host(
             )
         }
         Err(error) => {
+            if is_retryable_read_error(&error) {
+                host.record_read_failure(error.clone()).await;
+            }
             cached_or_error(&host, &cache, &cache_key, Some(error)).await
         }
     }

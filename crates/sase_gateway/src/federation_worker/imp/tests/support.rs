@@ -3,7 +3,12 @@ use sase_core::fleet_contract::{
     fleet_catalog_snapshot_id, FleetCatalogScopeWire,
 };
 use serde_json::json;
-use std::{path::Path, process::Command, time::Duration};
+use std::{
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -495,6 +500,86 @@ pub(super) fn tls_host(
         },
         "bearer_token": format!("token-{alias}"),
     })
+}
+
+/// HTTPS fixture whose accept loop can be flipped into hanging: while
+/// `hang` is set, accepted connections are held open without answering (so
+/// reads resolve only via the worker's deadline); otherwise requests are
+/// served like [`start_https_fixture`]. `connections` counts every accepted
+/// TCP connection, so tests can prove a backed-off read made no request.
+pub(super) struct ToggleFixture {
+    pub(super) port: u16,
+    pub(super) requests: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    pub(super) connections: Arc<AtomicUsize>,
+    pub(super) hang: Arc<AtomicBool>,
+}
+
+pub(super) async fn start_toggle_fixture(
+    root: &Path,
+    ca_ref: &str,
+    installation_id: &str,
+) -> ToggleFixture {
+    let cert_dir = root.join("certs").join(ca_ref);
+    fs::create_dir_all(&cert_dir).unwrap();
+    let ca_path = cert_dir.join("ca.pem");
+    let cert_path = cert_dir.join("cert.pem");
+    let key_path = cert_dir.join("key.pem");
+    generate_loopback_certificate(&ca_path, &cert_path, &key_path);
+    let trust_dir = root.join("fleet").join("trust").join("ca");
+    fs::create_dir_all(&trust_dir).unwrap();
+    fs::copy(&ca_path, trust_dir.join(format!("{ca_ref}.pem"))).unwrap();
+
+    let config = rustls_server_config(&cert_path, &key_path);
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let connections = Arc::new(AtomicUsize::new(0));
+    let hang = Arc::new(AtomicBool::new(false));
+    let recorded = requests.clone();
+    let counted = connections.clone();
+    let hanging = hang.clone();
+    let installation = installation_id.to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _addr)) = listener.accept().await else {
+                return;
+            };
+            counted.fetch_add(1, Ordering::SeqCst);
+            if hanging.load(Ordering::SeqCst) {
+                tokio::spawn(async move {
+                    let _held = stream;
+                    std::future::pending::<()>().await;
+                });
+                continue;
+            }
+            let acceptor = acceptor.clone();
+            let recorded = recorded.clone();
+            let installation = installation.clone();
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let Some((path, body)) = read_http_request(&mut stream).await
+                else {
+                    return;
+                };
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(json!({"path": path, "body": body}));
+                let payload =
+                    https_fixture_payload(&installation, &path, body.as_ref());
+                write_http_json(&mut stream, payload).await;
+            });
+        }
+    });
+    ToggleFixture {
+        port,
+        requests,
+        connections,
+        hang,
+    }
 }
 
 pub(super) fn request_paths(

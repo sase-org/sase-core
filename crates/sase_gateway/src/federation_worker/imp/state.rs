@@ -33,6 +33,11 @@ impl FederationWorkerState {
         &self,
         configs: Vec<FederationHostConfigWire>,
     ) -> Result<JsonValue, FederationErrorWire> {
+        // Snapshot the current hosts so unchanged entries reuse their
+        // RemoteHost: the HTTP client and connection pool, hello
+        // verification, quarantine, per-host permits and back-off state then
+        // survive the replace_config that every TUI refresh sends.
+        let existing = self.hosts.read().await.clone();
         let mut hosts = BTreeMap::new();
         let mut results = Vec::new();
         for config in configs {
@@ -60,30 +65,42 @@ impl FederationWorkerState {
                             }
                         }
                         std::collections::btree_map::Entry::Vacant(entry) => {
-                            match RemoteHost::new(
-                                validated.clone(),
-                                &self.config.sase_home,
-                            ) {
-                                Ok(host) => {
-                                    let host = Arc::new(host);
-                                    let response =
-                                        host.empty_result("configured");
-                                    entry.insert(host);
-                                    response
+                            if let Some(reused) = existing
+                                .get(&installation_id)
+                                .filter(|old| old.matches_config(&validated))
+                            {
+                                let response =
+                                    reused.empty_result("configured");
+                                entry.insert(reused.clone());
+                                response
+                            } else {
+                                match RemoteHost::new(
+                                    validated.clone(),
+                                    &self.config.sase_home,
+                                ) {
+                                    Ok(host) => {
+                                        let host = Arc::new(host);
+                                        let response =
+                                            host.empty_result("configured");
+                                        entry.insert(host);
+                                        response
+                                    }
+                                    Err(error) => FederationHostResultWire {
+                                        schema_version:
+                                            FEDERATION_IPC_SCHEMA_VERSION,
+                                        alias: validated.alias,
+                                        provider_ref: validated
+                                            .plan
+                                            .provider_ref,
+                                        installation_id,
+                                        endpoint: validated.plan.endpoint,
+                                        status: status_from_error(&error),
+                                        cached: false,
+                                        age_seconds: None,
+                                        payload: None,
+                                        error: Some(error),
+                                    },
                                 }
-                                Err(error) => FederationHostResultWire {
-                                    schema_version:
-                                        FEDERATION_IPC_SCHEMA_VERSION,
-                                    alias: validated.alias,
-                                    provider_ref: validated.plan.provider_ref,
-                                    installation_id,
-                                    endpoint: validated.plan.endpoint,
-                                    status: status_from_error(&error),
-                                    cached: false,
-                                    age_seconds: None,
-                                    payload: None,
-                                    error: Some(error),
-                                },
                             }
                         }
                     }

@@ -533,3 +533,486 @@ async fn worker_bounds_deadline_and_preserves_fast_host_beside_hung_host() {
     assert_eq!(shutdown["shutdown"], json!(true));
     worker.await.unwrap().unwrap();
 }
+
+fn system_host_config(
+    alias: &str,
+    pin: &str,
+    endpoint: &str,
+    bearer_token: &str,
+) -> FederationHostConfigWire {
+    FederationHostConfigWire {
+        schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+        alias: Some(alias.to_string()),
+        plan: ConnectionPlanWire {
+            schema_version: 1,
+            provider_ref: "builtin:https".to_string(),
+            endpoint: endpoint.to_string(),
+            credential_ref: format!("cred-{alias}"),
+            pinned_installation_id: pin.to_string(),
+            connection_kind: sase_core::FleetConnectionKindWire::Gateway,
+            tls: sase_core::TlsTrustSettingsWire {
+                schema_version: 1,
+                mode: sase_core::TlsTrustModeWire::SystemRoots,
+                ca_ref: None,
+                server_name_ref: None,
+            },
+        },
+        bearer_token: bearer_token.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn replace_config_reuses_unchanged_remote_hosts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = Arc::new(FederationWorkerState::new(
+        FederationWorkerConfig::new(tmp.path()),
+    ));
+    let pin_a = format!(
+        "{}{}",
+        sase_core::FLEET_INSTALLATION_ID_PREFIX,
+        "a".repeat(64)
+    );
+    let pin_b = format!(
+        "{}{}",
+        sase_core::FLEET_INSTALLATION_ID_PREFIX,
+        "b".repeat(64)
+    );
+    let endpoint_a = "https://127.0.0.1:11443".to_string();
+    let endpoint_b = "https://127.0.0.1:12443".to_string();
+    state
+        .replace_config(vec![
+            system_host_config("apollo", &pin_a, &endpoint_a, "token-apollo"),
+            system_host_config("zeus", &pin_b, &endpoint_b, "token-zeus"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(state.hosts.read().await.len(), 2);
+    let first = state.hosts.read().await.clone();
+
+    // Identical configs reuse both hosts, keeping their result rows.
+    let response = state
+        .replace_config(vec![
+            system_host_config("apollo", &pin_a, &endpoint_a, "token-apollo"),
+            system_host_config("zeus", &pin_b, &endpoint_b, "token-zeus"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(response["configured_hosts"], json!(2), "{response}");
+    assert_eq!(response["hosts"][0]["status"], json!("configured"));
+    assert_eq!(response["hosts"][1]["status"], json!("configured"));
+    let second = state.hosts.read().await.clone();
+    assert!(
+        Arc::ptr_eq(first.get(&pin_a).unwrap(), second.get(&pin_a).unwrap()),
+        "an unchanged host must survive replace_config",
+    );
+    assert!(
+        Arc::ptr_eq(first.get(&pin_b).unwrap(), second.get(&pin_b).unwrap()),
+        "an unchanged host must survive replace_config",
+    );
+
+    // A changed endpoint rebuilds only that host.
+    let endpoint_a2 = "https://127.0.0.1:13443".to_string();
+    state
+        .replace_config(vec![
+            system_host_config("apollo", &pin_a, &endpoint_a2, "token-apollo"),
+            system_host_config("zeus", &pin_b, &endpoint_b, "token-zeus"),
+        ])
+        .await
+        .unwrap();
+    let third = state.hosts.read().await.clone();
+    assert!(
+        !Arc::ptr_eq(second.get(&pin_a).unwrap(), third.get(&pin_a).unwrap()),
+        "a changed endpoint must build a new host",
+    );
+    assert!(
+        Arc::ptr_eq(second.get(&pin_b).unwrap(), third.get(&pin_b).unwrap()),
+        "an unchanged host must survive replace_config",
+    );
+
+    // A changed bearer token rebuilds only that host.
+    state
+        .replace_config(vec![
+            system_host_config("apollo", &pin_a, &endpoint_a2, "token-apollo"),
+            system_host_config(
+                "zeus",
+                &pin_b,
+                &endpoint_b,
+                "token-zeus-rotated",
+            ),
+        ])
+        .await
+        .unwrap();
+    let fourth = state.hosts.read().await.clone();
+    assert!(
+        Arc::ptr_eq(third.get(&pin_a).unwrap(), fourth.get(&pin_a).unwrap()),
+        "an unchanged host must survive replace_config",
+    );
+    assert!(
+        !Arc::ptr_eq(third.get(&pin_b).unwrap(), fourth.get(&pin_b).unwrap()),
+        "a changed bearer token must build a new host",
+    );
+
+    // Removed hosts drop while the survivor is still reused.
+    state
+        .replace_config(vec![system_host_config(
+            "zeus",
+            &pin_b,
+            &endpoint_b,
+            "token-zeus-rotated",
+        )])
+        .await
+        .unwrap();
+    let fifth = state.hosts.read().await.clone();
+    assert_eq!(fifth.len(), 1);
+    assert!(
+        Arc::ptr_eq(fourth.get(&pin_b).unwrap(), fifth.get(&pin_b).unwrap()),
+        "an unchanged host must survive replace_config",
+    );
+}
+
+#[test]
+fn host_backoff_schedule_doubles_and_caps() {
+    assert_eq!(host_read_backoff_window(1), Duration::from_secs(5));
+    assert_eq!(host_read_backoff_window(2), Duration::from_secs(10));
+    assert_eq!(host_read_backoff_window(3), Duration::from_secs(20));
+    assert_eq!(host_read_backoff_window(4), Duration::from_secs(40));
+    assert_eq!(host_read_backoff_window(5), Duration::from_secs(80));
+    assert_eq!(host_read_backoff_window(6), Duration::from_secs(120));
+    assert_eq!(host_read_backoff_window(100), Duration::from_secs(120));
+}
+
+#[test]
+fn read_backoff_triggers_only_on_retryable_errors() {
+    for code in ["deadline", "timeout", "unavailable", "internal"] {
+        assert!(
+            is_retryable_read_error(&federation_error(code, "x", None)),
+            "{code} must engage back-off",
+        );
+    }
+    for code in [
+        "unauthorized",
+        "not_found",
+        "invalid_request",
+        "invalid_response",
+        "quarantined",
+        "stale",
+        "unsupported_version",
+        "missing_credential",
+    ] {
+        assert!(
+            !is_retryable_read_error(&federation_error(code, "x", None)),
+            "{code} must not engage back-off",
+        );
+    }
+}
+
+fn sample_launch_request(
+    installation_id: &str,
+) -> sase_core::FleetLaunchRequestWire {
+    sase_core::FleetLaunchRequestWire {
+        schema_version: 1,
+        key: sase_core::ScopedOperationKeyWire {
+            schema_version: 1,
+            controller_id: "controller-1".to_string(),
+            operation_id: "op-1".to_string(),
+        },
+        target_installation_id: installation_id.to_string(),
+        intent: sase_core::FleetLaunchIntentWire {
+            schema_version: 1,
+            prompt: "hello".to_string(),
+            request_id: None,
+            display_name: None,
+            name: None,
+            model: None,
+            provider: None,
+            runtime: None,
+            project: sase_core::FleetLaunchProjectContextWire {
+                schema_version: 1,
+                provider_ref: None,
+                project_id: "proj".to_string(),
+                revision: None,
+                patch_ref: None,
+            },
+            dry_run: Some(true),
+            follow: false,
+            references: vec![],
+        },
+        payload_fingerprint: sase_core::PayloadFingerprintWire {
+            schema_version: 1,
+            sha256: "b".repeat(64),
+        },
+        acceptance_window_seconds: 30.0,
+    }
+}
+
+fn sample_mutation_request_for(
+    installation_id: &str,
+) -> sase_core::FleetMutationRequestWire {
+    let target = sase_core::AgentInstanceLocatorWire {
+        schema_version: 1,
+        logical: sase_core::LogicalAgentLocatorWire {
+            schema_version: 1,
+            project: sase_core::ProjectLocatorWire {
+                schema_version: 1,
+                origin: sase_core::OriginLocatorWire {
+                    schema_version: 1,
+                    installation_id: installation_id.to_string(),
+                },
+                project_id: "proj".to_string(),
+            },
+            agent_id: "alpha".to_string(),
+            agent_session_id: None,
+        },
+        turn_id: "ace-run".to_string(),
+        run_id: "20260906120000".to_string(),
+        attempt_id: "attempt-0".to_string(),
+    };
+    let logical_key = sase_core::logical_locator_key(&target.logical).unwrap();
+    sase_core::FleetMutationRequestWire {
+        schema_version: 1,
+        key: sase_core::ScopedOperationKeyWire {
+            schema_version: 1,
+            controller_id: "controller-1".to_string(),
+            operation_id: "op-1".to_string(),
+        },
+        target_installation_id: installation_id.to_string(),
+        intent: sase_core::FleetMutationIntentWire {
+            schema_version: 1,
+            kind: sase_core::FleetMutationKindWire::Stop,
+            row_revision: sase_core::ResourceRevisionWire {
+                schema_version: 1,
+                logical_key,
+                revision: 1,
+            },
+            target,
+            reason: Some("stop".to_string()),
+            fork_prompt: None,
+            kill_source_first: None,
+            follow: false,
+        },
+        payload_fingerprint: sase_core::PayloadFingerprintWire {
+            schema_version: 1,
+            sha256: "a".repeat(64),
+        },
+        acceptance_window_seconds: 30.0,
+    }
+}
+
+/// A slow host engages per-host read back-off: the second read serves the
+/// cached payload without contacting the host, the window expiry lets reads
+/// through again, a success resets the failure count, and user-initiated
+/// launch/mutate still contact the host while reads back off.
+#[tokio::test]
+async fn read_backoff_serves_cache_and_short_circuits_slow_host() {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pin = format!(
+        "{}{}",
+        sase_core::FLEET_INSTALLATION_ID_PREFIX,
+        "c".repeat(64)
+    );
+    let fixture = start_toggle_fixture(tmp.path(), "toggle-ca", &pin).await;
+    let state = Arc::new(FederationWorkerState::new(
+        FederationWorkerConfig::new(tmp.path()),
+    ));
+    let host_wire: FederationHostConfigWire = serde_json::from_value(tls_host(
+        "apollo",
+        &pin,
+        fixture.port,
+        "pinned_ca",
+        Some("toggle-ca"),
+    ))
+    .unwrap();
+    let replace = state.replace_config(vec![host_wire]).await.unwrap();
+    assert_eq!(replace["configured_hosts"], json!(1), "{replace}");
+    let host = state.hosts.read().await.get(&pin).unwrap().clone();
+    let connections = || fixture.connections.load(Ordering::SeqCst);
+    let deadline = || RequestDeadline {
+        unix_ms: Some(unix_now_ms() + 700),
+    };
+    let summary_hosts = |value: &serde_json::Value| {
+        value["hosts"].as_array().unwrap()[0].clone()
+    };
+
+    // A healthy read succeeds and records no failure.
+    let first = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    assert_eq!(summary_hosts(&first)["status"], json!("ok"), "{first}");
+    assert_eq!(host.backoff_failures_for_test().await, 0);
+    let served = connections();
+    assert!(served > 0, "the healthy read must contact the host");
+    let paths = request_paths(&fixture.requests);
+    assert!(
+        paths.iter().any(|path| path == "/api/fleet/v1/hello"),
+        "fixture did not receive hello: {paths:?}",
+    );
+
+    // While the host hangs, the read times out but still serves the cached
+    // payload as stale, and engages back-off.
+    fixture.hang.store(true, Ordering::SeqCst);
+    let failed = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    let failed_host = summary_hosts(&failed);
+    assert_eq!(failed_host["status"], json!("stale"), "{failed}");
+    assert_eq!(failed_host["cached"], json!(true));
+    assert_eq!(
+        failed_host["payload"],
+        summary_hosts(&first)["payload"],
+        "a timed-out read must serve the cached payload",
+    );
+    assert_eq!(failed_host["error"]["target"], json!("deadline_unix_ms"));
+    assert_eq!(host.backoff_failures_for_test().await, 1);
+    assert!(
+        connections() > served,
+        "the timed-out read must have contacted the host",
+    );
+
+    // An immediate second read makes no HTTP request and reports the
+    // back-off instead: same status vocabulary, target backoff.
+    let before = connections();
+    let started = Instant::now();
+    let backed = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    let backed_host = summary_hosts(&backed);
+    assert_eq!(backed_host["status"], json!("stale"), "{backed}");
+    assert_eq!(backed_host["cached"], json!(true));
+    assert_eq!(
+        backed_host["payload"],
+        summary_hosts(&first)["payload"],
+        "a backed-off read must serve the cached payload",
+    );
+    assert_eq!(backed_host["error"]["code"], json!("deadline"));
+    assert_eq!(backed_host["error"]["target"], json!("backoff"));
+    assert!(
+        backed_host["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("backing off for"),
+        "the back-off error must name the remaining window: {backed}",
+    );
+    assert_eq!(
+        connections(),
+        before,
+        "a backed-off read must not contact the host",
+    );
+    assert_eq!(host.backoff_failures_for_test().await, 1);
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "a backed-off read must not wait for the deadline",
+    );
+
+    // Per-host catalog reads share the same short-circuit.
+    let catalog = state
+        .read_catalog_hosts(
+            vec![FederationHostCatalogQueryWire {
+                schema_version: FEDERATION_IPC_SCHEMA_VERSION,
+                installation_id: pin.clone(),
+                query: sase_core::FleetCatalogQueryWire {
+                    schema_version: 1,
+                    scope: sase_core::FleetCatalogScopeWire::Presentation,
+                    snapshot_id: None,
+                    cursor: None,
+                    limit: Some(10),
+                    project_ids: vec![],
+                    query: None,
+                    status_buckets: vec![],
+                    include_terminal: true,
+                },
+            }],
+            false,
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        catalog["hosts"][0]["error"]["target"],
+        json!("backoff"),
+        "{catalog}",
+    );
+    assert_eq!(
+        connections(),
+        before,
+        "a backed-off catalog read must not contact the host",
+    );
+
+    // After the window, a read contacts the host again.
+    host.clear_backoff_for_test().await;
+    let failed_again = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    let failed_again_host = summary_hosts(&failed_again);
+    assert_eq!(failed_again_host["status"], json!("stale"));
+    assert_eq!(
+        failed_again_host["error"]["target"],
+        json!("deadline_unix_ms"),
+        "after the window the read must contact the host again: {failed_again}",
+    );
+    assert!(connections() > before);
+    assert_eq!(host.backoff_failures_for_test().await, 2);
+
+    // A success resets the failure count.
+    fixture.hang.store(false, Ordering::SeqCst);
+    host.clear_backoff_for_test().await;
+    let recovered = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        summary_hosts(&recovered)["status"],
+        json!("ok"),
+        "{recovered}",
+    );
+    assert_eq!(host.backoff_failures_for_test().await, 0);
+
+    // User-initiated launch and mutate still contact the host while reads
+    // back off.
+    fixture.hang.store(true, Ordering::SeqCst);
+    let hang_failed = state
+        .read_all(ReadOperation::Summary, false, deadline())
+        .await
+        .unwrap();
+    assert_eq!(
+        summary_hosts(&hang_failed)["error"]["target"],
+        json!("deadline_unix_ms"),
+    );
+    assert_eq!(host.backoff_failures_for_test().await, 1);
+    let before_launch = connections();
+    let launch_error = state
+        .launch_one(
+            "apollo".to_string(),
+            sample_launch_request(&pin),
+            deadline(),
+        )
+        .await
+        .unwrap_err();
+    assert!(connections() > before_launch);
+    assert_ne!(
+        launch_error.target.as_deref(),
+        Some("backoff"),
+        "a launch during read back-off must contact the host",
+    );
+    let before_mutate = connections();
+    let mutate_error = state
+        .mutate_one(
+            "apollo".to_string(),
+            sample_mutation_request_for(&pin),
+            deadline(),
+        )
+        .await
+        .unwrap_err();
+    assert!(connections() > before_mutate);
+    assert_ne!(
+        mutate_error.target.as_deref(),
+        Some("backoff"),
+        "a mutate during read back-off must contact the host",
+    );
+}

@@ -11,7 +11,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use fs2::FileExt;
@@ -42,6 +42,11 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_CONNECTIONS: usize = 32;
 const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 const DEFAULT_PER_HOST_IN_FLIGHT: usize = 4;
+/// Base per-host read back-off after a retryable remote failure, doubling
+/// per consecutive failure up to `HOST_READ_BACKOFF_MAX`. While backing off,
+/// reads serve cached data instead of contacting the host.
+const HOST_READ_BACKOFF_BASE: Duration = Duration::from_secs(5);
+const HOST_READ_BACKOFF_MAX: Duration = Duration::from_secs(120);
 const DEFAULT_CACHE_ENTRY_LIMIT: usize = 256;
 const DEFAULT_CACHE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 /// Slack added to the outer envelope-level deadline beyond the requested
