@@ -7,7 +7,6 @@ use crate::bead::config::default_config;
 use crate::bead::config::load_config;
 use crate::bead::config::save_config;
 use crate::bead::config::BeadConfigWire;
-use crate::bead::events::clear_snooze_record;
 use crate::bead::events::import_issues_to_event_streams;
 use crate::bead::events::mint_bead_event_id;
 use crate::bead::events::reduce_parsed_event_streams;
@@ -26,7 +25,6 @@ use crate::bead::read::resolve_issue_id_in_issues;
 use crate::bead::wire::validate_model_value;
 use crate::bead::wire::validate_unique_external_refs;
 use crate::bead::wire::BeadError;
-use crate::bead::wire::BeadResolutionWire;
 use crate::bead::wire::BeadTierWire;
 use crate::bead::wire::IssueTypeWire;
 use crate::bead::wire::IssueWire;
@@ -470,26 +468,6 @@ impl MutableStore {
             })
             .cloned()
             .unwrap_or_else(|| issue.id.clone()))
-    }
-
-    pub(crate) fn close_one(
-        &mut self,
-        issue_id: &str,
-        closed_at: &str,
-        reason: Option<String>,
-        resolution: BeadResolutionWire,
-    ) -> Result<Option<IssueWire>, BeadError> {
-        let index = self.issue_index(issue_id)?;
-        if self.issues[index].status == StatusWire::Closed {
-            return Ok(None);
-        }
-        self.issues[index].status = StatusWire::Closed;
-        self.issues[index].closed_at = Some(closed_at.to_string());
-        self.issues[index].close_reason = reason;
-        self.issues[index].resolution = Some(resolution);
-        clear_snooze_record(&mut self.issues[index]);
-        self.issues[index].updated_at = closed_at.to_string();
-        Ok(Some(self.issues[index].clone()))
     }
 }
 
