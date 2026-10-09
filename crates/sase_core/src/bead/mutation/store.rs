@@ -205,7 +205,7 @@ pub(crate) fn set_ready_to_work(
 /// missing so replay owns the corruption error.
 fn try_cached_set_ready(
     beads_dir: &Path,
-    view: MutationView<'_>,
+    view: MutationView,
     epic_id: &str,
     ready: bool,
     reject_already_ready: bool,
@@ -666,55 +666,6 @@ pub(crate) fn collect_descendants<'a>(
     }
 }
 
-pub(crate) fn next_top_level_counter(
-    issue_prefix: &str,
-    config_counter: u64,
-    issues: &[IssueWire],
-) -> u64 {
-    std::cmp::max(
-        config_counter,
-        max_top_level_counter(issue_prefix, issues) + 1,
-    )
-}
-
-pub(crate) fn next_child_id(parent_id: &str, issues: &[IssueWire]) -> String {
-    let local_max = issues
-        .iter()
-        .filter_map(|issue| direct_child_counter(parent_id, &issue.id))
-        .max()
-        .unwrap_or(0);
-    format!("{parent_id}.{}", local_max + 1)
-}
-
-pub(crate) fn max_top_level_counter(
-    issue_prefix: &str,
-    issues: &[IssueWire],
-) -> u64 {
-    let expected_prefix = format!("{issue_prefix}-");
-    issues
-        .iter()
-        .map(|issue| issue.id.as_str())
-        .filter_map(|issue_id| {
-            issue_id.strip_prefix(&expected_prefix).map(str::to_string)
-        })
-        .filter(|suffix| !suffix.contains('.'))
-        .filter_map(|suffix| from_base36(&suffix))
-        .max()
-        .unwrap_or(0)
-}
-
-pub(crate) fn direct_child_counter(
-    parent_id: &str,
-    issue_id: &str,
-) -> Option<u64> {
-    let prefix = format!("{parent_id}.");
-    let suffix = issue_id.strip_prefix(&prefix)?;
-    if suffix.contains('.') {
-        return None;
-    }
-    suffix.parse::<u64>().ok()
-}
-
 pub(crate) fn mutation_status_value(status: &StatusWire) -> &'static str {
     match status {
         StatusWire::Open => "open",
@@ -737,10 +688,6 @@ pub(crate) fn to_base36(mut n: u64) -> String {
         n /= 36;
     }
     digits.iter().rev().collect()
-}
-
-pub(crate) fn from_base36(value: &str) -> Option<u64> {
-    u64::from_str_radix(value, 36).ok()
 }
 
 pub(crate) fn now_utc() -> String {

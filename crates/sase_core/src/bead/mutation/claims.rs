@@ -445,7 +445,7 @@ pub fn preclaim_epic_work_plan(
 /// owns the corruption error.
 fn try_cached_claim_launch(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     agent_name: &str,
     now: Option<String>,
@@ -524,7 +524,7 @@ fn try_cached_claim_launch(
 /// outcome without writing, byte-identical to replay.
 fn try_cached_claim_wait(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     agent_name: &str,
     now: Option<String>,
@@ -609,7 +609,7 @@ fn try_cached_claim_wait(
 /// without writing, byte-identical to replay.
 fn try_cached_claim_release(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     agent_name: &str,
     now: Option<String>,
@@ -679,7 +679,7 @@ fn try_cached_claim_release(
 /// ID so phases sharing their epic's stream mint into one loaded stream.
 fn try_cached_preclaim(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     epic_id: &str,
     assignments: &[BeadPreclaimAssignmentWire],
     epic_agent_name: Option<String>,

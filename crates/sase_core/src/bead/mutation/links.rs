@@ -700,7 +700,7 @@ fn link_projection_matches_desired(
 #[allow(clippy::too_many_arguments)]
 fn try_cached_add_link(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     target_ref: &str,
     relation: &str,
@@ -865,7 +865,7 @@ fn try_cached_add_link(
 /// behavior.
 fn try_cached_link_projections(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     requests: &[PreparedLinkProjection],
 ) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
     let fallback = default_config("beads", "");
@@ -1082,7 +1082,7 @@ fn try_cached_link_projections(
 #[allow(clippy::too_many_arguments)]
 fn try_cached_remove_link(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     target_ref: &str,
     relation: Option<&str>,
@@ -1221,7 +1221,7 @@ fn try_cached_remove_link(
 /// against the affected rows only. An unresolvable bead ID keeps its
 /// canonical spelling, exactly as the replay path does.
 fn canonicalize_bead_link_target_via_view(
-    view: &MutationView<'_>,
+    view: &MutationView,
     target_ref: &str,
 ) -> Result<String, BeadError> {
     let canonical = canonicalize_artifact_link_ref(target_ref)
@@ -1240,7 +1240,7 @@ fn canonicalize_bead_link_target_via_view(
 /// already holds the reverse link. Only the source and the candidate peer
 /// rows load.
 fn undirected_holder_issue_id_via_view(
-    view: &MutationView<'_>,
+    view: &MutationView,
     source_id: &str,
     source_ref: &str,
     target_ref: &str,
@@ -1271,7 +1271,7 @@ fn undirected_holder_issue_id_via_view(
 /// ambiguous peer contributes nothing, exactly as on the replay path.
 #[allow(clippy::too_many_arguments)]
 fn collect_removable_bead_links_via_view(
-    view: &MutationView<'_>,
+    view: &MutationView,
     source_id: &str,
     source_ref: &str,
     target_ref: &str,

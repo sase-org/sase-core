@@ -711,7 +711,7 @@ fn lifecycle_stream_slot(
 /// stream file is missing so replay owns the corruption error.
 fn try_cached_open(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     now: Option<String>,
 ) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
@@ -829,7 +829,7 @@ fn try_cached_open(
 /// returns them in chain order. Callers mint one `IssueOpened` event
 /// per returned ancestor in its own stream.
 fn reopen_closed_ancestors_via_view(
-    view: &mut MutationView<'_>,
+    view: &mut MutationView,
     issue_id: &str,
     opened_at: &str,
 ) -> Result<Vec<IssueWire>, BeadError> {
@@ -897,7 +897,7 @@ struct CachedCloseEvent {
 #[allow(clippy::too_many_arguments)]
 fn try_cached_close(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_ids: &[String],
     reason: Option<String>,
     resolution: Option<BeadResolutionWire>,
@@ -1194,7 +1194,7 @@ fn try_cached_close(
 /// all-issue scan. Every closed row is staged immediately so later
 /// sibling checks see the staged final state.
 fn cached_close_one_and_delegated_parent(
-    view: &mut MutationView<'_>,
+    view: &mut MutationView,
     issue_id: &str,
     closed_at: &str,
     reason: Option<String>,
@@ -1282,7 +1282,7 @@ fn cached_close_one_and_delegated_parent(
 /// owns the corruption and legacy behavior.
 fn try_cached_remove(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_ids: &[String],
 ) -> Result<Option<BeadMutationOutcomeWire>, BeadError> {
     // Resolve inside the locked admission: the single view read is the

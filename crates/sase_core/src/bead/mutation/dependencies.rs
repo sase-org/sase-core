@@ -304,7 +304,7 @@ pub fn remove_bead_references(
 /// replay owns the corruption error.
 fn try_cached_add_dependency(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     depends_on_id: &str,
     now: Option<String>,
@@ -379,7 +379,7 @@ fn try_cached_add_dependency(
 /// point lookups, never a whole-store status map.
 fn try_cached_remove_dependencies(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     depends_on_ids: &[String],
     now: Option<String>,
@@ -479,7 +479,7 @@ fn try_cached_remove_dependencies(
 /// without writing.
 fn try_cached_add_references(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     references: &[String],
     now: Option<String>,
@@ -546,7 +546,7 @@ fn try_cached_add_references(
 /// A no-op (nothing present) returns a no-change outcome without writing.
 fn try_cached_remove_references(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     references: &[String],
     now: Option<String>,
@@ -619,7 +619,7 @@ fn try_cached_remove_references(
 /// status map treats a missing target. Genuine cache faults (`io`)
 /// propagate; only semantic `not_found` is skipped.
 fn active_blockers_via_view(
-    view: &MutationView<'_>,
+    view: &MutationView,
     issue_id: &str,
 ) -> Result<Vec<String>, BeadError> {
     use crate::bead::wire::StatusWire;

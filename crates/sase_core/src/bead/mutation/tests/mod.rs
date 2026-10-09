@@ -18,4 +18,5 @@ mod replay_goldens;
 mod snooze_plus_one;
 mod store;
 mod support;
+mod view_commit;
 mod view_core;

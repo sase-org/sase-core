@@ -23,8 +23,16 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
+use super::shared::{
+    commit_staged_write, load_mutation_stream, mint_stream_event,
+    new_mutation_stream,
+};
+use super::store::MutableStore;
 use crate::artifact_link::BeadLinkDirectionWire;
-use crate::bead::events::{BeadEventOperationWire, BeadEventPayloadWire};
+use crate::bead::config::{default_config, load_config, BeadConfigWire};
+use crate::bead::events::{
+    BeadEventOperationWire, BeadEventPayloadWire, BeadEventStreamWire,
+};
 use crate::bead::jsonl::{event_streams_dir, read_event_stream_file};
 use crate::bead::read_model::alloc;
 use crate::bead::read_model::{
@@ -51,21 +59,36 @@ pub(crate) enum MutationViewBacking {
 /// cached rows are memoized so a batch reads each affected row once and
 /// always sees its staged final state through the overlay.
 ///
+/// The view also owns the mutation's write state: the config (loaded once
+/// on the cached backing, borrowed from the owned store on replay),
+/// lazily loaded event streams, and the single [`MutationView::commit`]
+/// that persists both backings. Algorithms stage rows with
+/// `stage_issue`/`stage_removal`, mint with [`MutationView::stage_event`],
+/// and finish with `commit`, so one closure serves both backings through
+/// [`super::runner::run_mutation`].
+///
 /// The lookup surface (children/descendants/ancestors/reverse-dependents,
 /// stream routing, receipt checks) is consumed incrementally as operation
 /// ports land; until the full mutation surface is ported, not every
 /// method has a production caller yet.
 #[allow(dead_code)]
-pub(crate) struct MutationView<'a> {
+pub(crate) struct MutationView {
     beads_dir: PathBuf,
     backing: MutationViewBacking,
-    replay_issues: Option<&'a [IssueWire]>,
+    replay_issues: Vec<IssueWire>,
+    replay_store: Option<MutableStore>,
+    config: Option<BeadConfigWire>,
+    staged_streams: BTreeMap<String, BeadEventStreamWire>,
+    staged_base_lens: BTreeMap<String, usize>,
+    stream_order: Vec<String>,
+    stage_order: Vec<String>,
     overlay: BTreeMap<String, Option<IssueWire>>,
     memoized: RefCell<BTreeMap<String, IssueWire>>,
+    durably_written: bool,
 }
 
 #[allow(dead_code)]
-impl<'a> MutationView<'a> {
+impl MutationView {
     /// Open the warmest usable view inside the mutation flock.
     ///
     /// Forces the full signature sweep (never the 60 s token-only skip),
@@ -75,7 +98,7 @@ impl<'a> MutationView<'a> {
     /// error, exactly as the replay load would fail with it.
     pub(crate) fn load(
         beads_dir: &Path,
-        replay_issues: &'a [IssueWire],
+        replay_issues: &[IssueWire],
     ) -> Result<Self, BeadError> {
         if let Some(view) = Self::load_cached(beads_dir)? {
             return Ok(view);
@@ -104,15 +127,24 @@ impl<'a> MutationView<'a> {
                 crate::bead::mutation::store::store_io_stats::record_load();
                 let witness =
                     read_cache_witness(&cache_path).unwrap_or_default();
+                let config =
+                    load_config(beads_dir, default_config("beads", ""))?;
                 Ok(Some(Self {
                     beads_dir: beads_dir.to_path_buf(),
                     backing: MutationViewBacking::Cached {
                         cache_path,
                         witness,
                     },
-                    replay_issues: None,
+                    replay_issues: Vec::new(),
+                    replay_store: None,
+                    config: Some(config),
+                    staged_streams: BTreeMap::new(),
+                    staged_base_lens: BTreeMap::new(),
+                    stream_order: Vec::new(),
+                    stage_order: Vec::new(),
                     overlay: BTreeMap::new(),
                     memoized: RefCell::new(BTreeMap::new()),
+                    durably_written: false,
                 }))
             }
             Ok(false) => Ok(None),
@@ -123,15 +155,48 @@ impl<'a> MutationView<'a> {
     /// Replay backing for uncached stores and proven repair paths.
     pub(crate) fn with_replay(
         beads_dir: &Path,
-        replay_issues: &'a [IssueWire],
+        replay_issues: &[IssueWire],
     ) -> Self {
         Self {
             beads_dir: beads_dir.to_path_buf(),
             backing: MutationViewBacking::Replay,
-            replay_issues: Some(replay_issues),
+            replay_issues: replay_issues.to_vec(),
+            replay_store: None,
+            config: None,
+            staged_streams: BTreeMap::new(),
+            staged_base_lens: BTreeMap::new(),
+            stream_order: Vec::new(),
+            stage_order: Vec::new(),
             overlay: BTreeMap::new(),
             memoized: RefCell::new(BTreeMap::new()),
+            durably_written: false,
         }
+    }
+
+    /// Replay backing that owns its store, for the mutation runner.
+    ///
+    /// The full replay runs here, exactly as `MutableStore::load` does
+    /// today; the cloned issue list serves overlay-aware lookups while the
+    /// owned store serves event staging, the config, and the commit. Built
+    /// only when the cached path declines or admits nothing, never
+    /// speculatively next to an admitted cache.
+    pub(crate) fn load_replay(beads_dir: &Path) -> Result<Self, BeadError> {
+        let store = MutableStore::load(beads_dir)?;
+        let replay_issues = store.issues.clone();
+        Ok(Self {
+            beads_dir: beads_dir.to_path_buf(),
+            backing: MutationViewBacking::Replay,
+            replay_issues,
+            replay_store: Some(store),
+            config: None,
+            staged_streams: BTreeMap::new(),
+            staged_base_lens: BTreeMap::new(),
+            stream_order: Vec::new(),
+            stage_order: Vec::new(),
+            overlay: BTreeMap::new(),
+            memoized: RefCell::new(BTreeMap::new()),
+            durably_written: false,
+        })
     }
 
     /// Baseline witness for pre-write validation, if cached.
@@ -162,13 +227,274 @@ impl<'a> MutationView<'a> {
         self.memoized
             .borrow_mut()
             .insert(issue.id.clone(), issue.clone());
+        if !self.stage_order.iter().any(|id| id == &issue.id) {
+            self.stage_order.push(issue.id.clone());
+        }
         self.overlay.insert(issue.id.clone(), Some(issue));
     }
 
     /// Record a pending removal tombstone in the overlay.
     pub(crate) fn stage_removal(&mut self, issue_id: &str) {
         self.memoized.borrow_mut().remove(issue_id);
+        if !self.stage_order.iter().any(|id| id == issue_id) {
+            self.stage_order.push(issue_id.to_string());
+        }
         self.overlay.insert(issue_id.to_string(), None);
+    }
+
+    /// True once this view durably wrote; a later decline is a bug.
+    ///
+    /// The runner refuses a "needs replay" decline after the first durable
+    /// write, so a cache fault can never retry or double-append a mutation.
+    pub(crate) fn durably_written(&self) -> bool {
+        self.durably_written
+    }
+
+    /// The store config: loaded once on the cached backing, owned by the
+    /// replay store on the replay backing.
+    pub(crate) fn config(&self) -> Result<&BeadConfigWire, BeadError> {
+        match &self.backing {
+            MutationViewBacking::Cached { .. } => self.config.as_ref(),
+            MutationViewBacking::Replay => {
+                self.replay_store.as_ref().map(|store| &store.config)
+            }
+        }
+        .ok_or_else(|| {
+            BeadError::io("mutation view has no store config".to_string())
+        })
+    }
+
+    /// Mutable access to the store config (for example the create counter).
+    pub(crate) fn config_mut(
+        &mut self,
+    ) -> Result<&mut BeadConfigWire, BeadError> {
+        match &mut self.backing {
+            MutationViewBacking::Cached { .. } => self.config.as_mut(),
+            MutationViewBacking::Replay => {
+                self.replay_store.as_mut().map(|store| &mut store.config)
+            }
+        }
+        .ok_or_else(|| {
+            BeadError::io("mutation view has no store config".to_string())
+        })
+    }
+
+    /// Mint one event for `issue_id` into its physical stream.
+    ///
+    /// The stream routes through [`MutationView::stream_id_for_issue`]
+    /// against staged state, so a staged create or parent move already
+    /// steers later events. The stream loads lazily: through
+    /// `load_mutation_stream` on cached, and from the owned store's
+    /// tracked streams on replay (missing streams are created exactly as
+    /// `TrackedEventStreams::stream_mut` does). Minting runs through the
+    /// single shared helper on both backings, so ordinals and event IDs
+    /// match the replay oracle byte for byte.
+    ///
+    /// Callers must stage the issue first so routing sees it. Returns
+    /// `Ok(None)` when the caller must decline to the replay backing: a
+    /// missing or unreadable stream file for an already-stored stream, on
+    /// the cached backing only. A missing file for a brand-new stream (one
+    /// no stored row claims) starts that stream instead. On the replay
+    /// backing a decline is unreachable; without an owned store it is an
+    /// `io` bug error.
+    pub(crate) fn stage_event(
+        &mut self,
+        issue_id: &str,
+        operation: BeadEventOperationWire,
+        payload: BeadEventPayloadWire,
+        timestamp: &str,
+        actor: &str,
+    ) -> Result<Option<String>, BeadError> {
+        let stream_id = self.stream_id_for_issue(issue_id)?;
+        match &self.backing {
+            MutationViewBacking::Cached { .. } => {
+                if !self.staged_streams.contains_key(&stream_id) {
+                    let loaded =
+                        load_mutation_stream(&self.beads_dir, &stream_id)?;
+                    match loaded {
+                        Some(stream) => {
+                            self.staged_base_lens
+                                .insert(stream_id.clone(), stream.events.len());
+                            self.staged_streams
+                                .insert(stream_id.clone(), stream);
+                            self.stream_order.push(stream_id.clone());
+                        }
+                        None if self.backing_contains(&stream_id)? => {
+                            return Ok(None);
+                        }
+                        None => {
+                            self.staged_base_lens.insert(stream_id.clone(), 0);
+                            self.staged_streams.insert(
+                                stream_id.clone(),
+                                new_mutation_stream(&stream_id),
+                            );
+                            self.stream_order.push(stream_id.clone());
+                        }
+                    }
+                }
+                let stream = self
+                    .staged_streams
+                    .get_mut(&stream_id)
+                    .ok_or_else(|| {
+                        BeadError::io(format!(
+                            "mutation view lost staged stream {stream_id}"
+                        ))
+                    })?;
+                let event_id = mint_stream_event(
+                    stream, operation, payload, timestamp, actor, issue_id,
+                )?;
+                Ok(Some(event_id))
+            }
+            MutationViewBacking::Replay => {
+                let store = self.replay_store.as_mut().ok_or_else(|| {
+                    BeadError::io(
+                        "replay mutation view has no owned store".to_string(),
+                    )
+                })?;
+                let stream = store.streams.stream_mut(&stream_id)?;
+                let event_id = mint_stream_event(
+                    stream, operation, payload, timestamp, actor, issue_id,
+                )?;
+                Ok(Some(event_id))
+            }
+        }
+    }
+
+    /// Whether a stored (backing) row claims `issue_id`, ignoring the
+    /// overlay, so a missing stream file declines for stored streams but
+    /// starts brand-new ones.
+    fn backing_contains(&self, issue_id: &str) -> Result<bool, BeadError> {
+        match &self.backing {
+            MutationViewBacking::Cached { .. } => {
+                let connection = self.open_cached()?;
+                let count: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM issues WHERE id = ?1",
+                        [issue_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| BeadError::io(error.to_string()))?;
+                Ok(count > 0)
+            }
+            MutationViewBacking::Replay => {
+                Ok(self.replay_issues.iter().any(|issue| issue.id == issue_id))
+            }
+        }
+    }
+
+    /// Persist every staged row and event on either backing.
+    ///
+    /// On cached this is today's `commit_staged_write` behavior, including
+    /// the manifest total, writer signatures, config, publish and
+    /// reducer-truth corrections; a missing manifest declines (`Ok(None)`)
+    /// before any durable write. On replay the overlay applies to the owned
+    /// store's full issue list in staging order (changed rows replace in
+    /// place, new issues append in creation order, removals remove) and
+    /// then exactly `MutableStore::save` runs, so legacy stores rewrite
+    /// `issues.jsonl` and event stores do not. Returns the committed rows
+    /// in `expected_ids` order: corrected rows on cached, staged rows on
+    /// replay. A staged ID missing from the overlay is an `io` bug error.
+    pub(crate) fn commit(
+        &mut self,
+        expected_ids: &[String],
+    ) -> Result<Option<Vec<IssueWire>>, BeadError> {
+        match &self.backing {
+            MutationViewBacking::Cached { .. } => {
+                let mut expected = Vec::with_capacity(expected_ids.len());
+                for id in expected_ids {
+                    match self.overlay.get(id) {
+                        Some(Some(issue)) => {
+                            expected.push((id.clone(), issue.clone()));
+                        }
+                        _ => {
+                            return Err(BeadError::io(format!(
+                                "mutation view commit is missing staged row {id}"
+                            )));
+                        }
+                    }
+                }
+                let mut streams = Vec::with_capacity(self.stream_order.len());
+                let mut base_lens = Vec::with_capacity(self.stream_order.len());
+                for stream_id in &self.stream_order.clone() {
+                    if let Some(stream) = self.staged_streams.get(stream_id) {
+                        streams.push(stream.clone());
+                        base_lens.push(
+                            self.staged_base_lens
+                                .get(stream_id)
+                                .copied()
+                                .unwrap_or(0),
+                        );
+                    }
+                }
+                let config = self
+                    .config
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BeadError::io(
+                            "cached mutation view has no config".to_string(),
+                        )
+                    })?
+                    .clone();
+                let committed = commit_staged_write(
+                    &self.beads_dir.clone(),
+                    self.cache_path().map(Path::to_path_buf).as_deref(),
+                    self.witness(),
+                    &config,
+                    &streams,
+                    &base_lens,
+                    &expected,
+                )?;
+                if committed.is_some() {
+                    self.durably_written = true;
+                }
+                Ok(committed)
+            }
+            MutationViewBacking::Replay => {
+                let order = self.stage_order.clone();
+                let store = self.replay_store.as_mut().ok_or_else(|| {
+                    BeadError::io(
+                        "replay mutation view has no owned store".to_string(),
+                    )
+                })?;
+                for id in &order {
+                    match self.overlay.get(id) {
+                        Some(Some(issue)) => {
+                            if let Some(index) = store
+                                .issues
+                                .iter()
+                                .position(|row| row.id == *id)
+                            {
+                                store.issues[index] = issue.clone();
+                            } else {
+                                store.issues.push(issue.clone());
+                            }
+                        }
+                        Some(None) => {
+                            store.issues.retain(|row| row.id != *id);
+                        }
+                        None => {
+                            return Err(BeadError::io(format!(
+                                "mutation view commit is missing staged row {id}"
+                            )));
+                        }
+                    }
+                }
+                store.save()?;
+                self.durably_written = true;
+                let mut rows = Vec::with_capacity(expected_ids.len());
+                for id in expected_ids {
+                    match self.overlay.get(id) {
+                        Some(Some(issue)) => rows.push(issue.clone()),
+                        _ => {
+                            return Err(BeadError::io(format!(
+                                "mutation view commit is missing staged row {id}"
+                            )));
+                        }
+                    }
+                }
+                Ok(Some(rows))
+            }
+        }
     }
 
     fn open_cached(&self) -> Result<Connection, BeadError> {
@@ -233,7 +559,7 @@ impl<'a> MutationView<'a> {
                 }
             }
             MutationViewBacking::Replay => {
-                let issues = self.replay_issues.unwrap_or(&[]);
+                let issues = &self.replay_issues;
                 for issue in issues {
                     if issue.id.ends_with(suffix)
                         && issue.id.len() > suffix.len()
@@ -316,7 +642,6 @@ impl<'a> MutationView<'a> {
             }
             MutationViewBacking::Replay => self
                 .replay_issues
-                .unwrap_or(&[])
                 .iter()
                 .find(|issue| issue.id == issue_id)
                 .cloned()
@@ -364,7 +689,7 @@ impl<'a> MutationView<'a> {
                 );
             }
             MutationViewBacking::Replay => {
-                for issue in self.replay_issues.unwrap_or(&[]) {
+                for issue in &self.replay_issues {
                     if issue.parent_id.as_deref() == Some(parent_id) {
                         rows.insert(issue.id.clone(), issue.clone());
                     }
@@ -483,7 +808,7 @@ impl<'a> MutationView<'a> {
                 }
             }
             MutationViewBacking::Replay => {
-                for issue in self.replay_issues.unwrap_or(&[]) {
+                for issue in &self.replay_issues {
                     if issue
                         .dependencies
                         .iter()
@@ -545,7 +870,6 @@ impl<'a> MutationView<'a> {
             }
             MutationViewBacking::Replay => Ok(self
                 .replay_issues
-                .unwrap_or(&[])
                 .iter()
                 .find(|issue| issue.id == src_id)
                 .is_some_and(|issue| {
@@ -595,7 +919,6 @@ impl<'a> MutationView<'a> {
             MutationViewBacking::Replay => {
                 candidate = self
                     .replay_issues
-                    .unwrap_or(&[])
                     .iter()
                     .find(|issue| issue.external_ref == normalized_ref)
                     .cloned();
@@ -667,7 +990,6 @@ impl<'a> MutationView<'a> {
                 let mut max_seen: u64 = 0;
                 let mut ids: Vec<String> = self
                     .replay_issues
-                    .unwrap_or(&[])
                     .iter()
                     .map(|issue| issue.id.clone())
                     .collect();
@@ -773,7 +1095,7 @@ impl<'a> MutationView<'a> {
                 let prefix = format!("{parent_id}.");
                 let mut local_max: u64 = 0;
                 let mut ids: Vec<String> = Vec::new();
-                for issue in self.replay_issues.unwrap_or(&[]) {
+                for issue in &self.replay_issues {
                     ids.push(issue.id.clone());
                 }
                 for (id, entry) in &self.overlay {

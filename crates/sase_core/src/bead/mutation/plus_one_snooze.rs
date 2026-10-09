@@ -428,7 +428,7 @@ pub fn snooze_task(
 #[allow(clippy::too_many_arguments)]
 fn try_cached_plus_one(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     reporter: &str,
     note: &str,
@@ -590,7 +590,7 @@ fn try_cached_plus_one(
 #[allow(clippy::too_many_arguments)]
 fn try_cached_snooze(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     until: &str,
     plus_ones: Option<u32>,
@@ -715,7 +715,7 @@ fn try_cached_snooze(
 /// record left behind.
 fn try_cached_cancel_snooze(
     beads_dir: &Path,
-    mut view: MutationView<'_>,
+    mut view: MutationView,
     issue_id: &str,
     actor: &str,
     now: Option<String>,

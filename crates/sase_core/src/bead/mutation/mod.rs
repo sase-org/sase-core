@@ -8,6 +8,7 @@ mod links;
 mod mutation_wire;
 mod notes_update;
 mod plus_one_snooze;
+pub(crate) mod runner;
 pub(crate) mod shared;
 mod store;
 // Shared cached/replay lookup layer for warm mutations.
