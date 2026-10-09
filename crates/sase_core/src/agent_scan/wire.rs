@@ -749,6 +749,15 @@ pub struct AgentMetaWire {
     /// epic plan) apart from a covered bare `%auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_approve_argument: Option<String>,
+    /// Core-owned autonomy record (`%auto` E1 `core_policy` phase).
+    /// Trailing for the same key-order stability; additive serde-default
+    /// and omitted when absent, so existing scan payloads stay
+    /// byte-stable and no wire schema bump is needed. When present, the
+    /// scanner derives the legacy `approve` / `auto_approve_plan_action`
+    /// wire fields from it, so fleet facts and the gateway keep working
+    /// when Python stops writing legacy keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<crate::autonomy::AutonomyRecordWire>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.

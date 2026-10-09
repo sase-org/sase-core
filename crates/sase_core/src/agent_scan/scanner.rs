@@ -1433,6 +1433,21 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
     let queue_capacity_multiplier =
         crate::queue_directive::queue_capacity_multiplier_from_map(data);
 
+    let autonomy = autonomy_record_from_value(data.get("autonomy"));
+    // When the core-owned record is present it wins over stale legacy
+    // keys, so fleet facts and the gateway keep working once Python
+    // stops writing them.
+    let (approve, auto_approve_plan_action) = match &autonomy {
+        Some(record) => {
+            let projection =
+                crate::autonomy::autonomy_legacy_projection(record);
+            (projection.approve, projection.auto_approve_plan_action)
+        }
+        None => (
+            coerce_bool_truthy(data.get("approve")),
+            coerce_str(data.get("auto_approve_plan_action")),
+        ),
+    };
     AgentMetaWire {
         name: coerce_str(data.get("name")),
         artifact_agent_id: coerce_str(data.get("artifact_agent_id")),
@@ -1490,10 +1505,8 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
         workspace_num: coerce_int(data.get("workspace_num")),
         workspace_dir: coerce_str(data.get("workspace_dir")),
         linked_repos: coerce_object_list(data.get("linked_repos")),
-        approve: coerce_bool_truthy(data.get("approve")),
-        auto_approve_plan_action: coerce_str(
-            data.get("auto_approve_plan_action"),
-        ),
+        approve,
+        auto_approve_plan_action,
         hidden: coerce_bool_truthy(data.get("hidden")),
         plan: coerce_bool_truthy(data.get("plan")),
         plan_approved: coerce_bool_truthy(data.get("plan_approved")),
@@ -1573,7 +1586,20 @@ fn agent_meta_from_object(data: &Map<String, Value>) -> AgentMetaWire {
             data.get("wait_epic_follows"),
         ),
         auto_approve_argument: coerce_str(data.get("auto_approve_argument")),
+        autonomy,
     }
+}
+
+/// Read the core-owned autonomy record, tolerantly: a malformed record
+/// degrades to `None` (legacy keys decide) instead of failing the scan.
+fn autonomy_record_from_value(
+    value: Option<&Value>,
+) -> Option<crate::autonomy::AutonomyRecordWire> {
+    let obj = value?.as_object()?;
+    serde_json::from_value::<crate::autonomy::AutonomyRecordWire>(
+        Value::Object(obj.clone()),
+    )
+    .ok()
 }
 
 /// Fold the flat `monitor_*` / `gate_*` marker keys into one
@@ -3141,6 +3167,13 @@ mod tests {
         agent_meta_from_object(&data)
     }
 
+    fn meta_with_autonomy(value: Value) -> AgentMetaWire {
+        let mut data = Map::new();
+        data.insert("name".to_string(), json!("probe"));
+        data.insert("autonomy".to_string(), value);
+        agent_meta_from_object(&data)
+    }
+
     #[test]
     fn scanner_reads_auto_approve_argument() {
         assert_eq!(
@@ -3161,6 +3194,42 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn scanner_derives_legacy_auto_fields_from_autonomy_record() {
+        let record = crate::autonomy::resolve_autonomy_selection(
+            Some("tale"),
+            "prompt",
+            &crate::autonomy::AutonomyActorWire::default(),
+            "",
+        )
+        .unwrap();
+        let meta = meta_with_autonomy(serde_json::to_value(&record).unwrap());
+        assert_eq!(meta.autonomy.as_ref(), Some(&record));
+        // Stale legacy keys lose to the record projection.
+        assert!(!meta.approve);
+        assert_eq!(meta.auto_approve_plan_action.as_deref(), Some("tale"));
+
+        // Without a record the legacy keys read through untouched.
+        let mut data = Map::new();
+        data.insert("approve".to_string(), json!(true));
+        let bare = agent_meta_from_object(&data);
+        assert_eq!(bare.autonomy, None);
+        assert!(bare.approve);
+        assert_eq!(bare.auto_approve_plan_action, None);
+
+        // A malformed record degrades to the legacy keys.
+        let degraded = meta_with_autonomy(json!({"profile": 7}));
+        assert_eq!(degraded.autonomy, None);
+    }
+
+    #[test]
+    fn agent_meta_wire_omits_absent_autonomy() {
+        let encoded = serde_json::to_value(AgentMetaWire::default()).unwrap();
+        assert!(encoded.get("autonomy").is_none());
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.autonomy, None);
     }
 
     #[test]

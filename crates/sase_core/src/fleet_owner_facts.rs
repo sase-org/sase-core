@@ -416,11 +416,19 @@ pub fn derive_owner_record_facts(
         .to_string();
     }
 
-    let auto_approved = meta.approve
-        || meta
-            .auto_approve_plan_action
-            .as_deref()
-            .is_some_and(|value| !value.is_empty());
+    let plan_submitted_for_auto = !meta.plan_submitted_at.is_empty();
+    let tier_for_auto =
+        if meta.plan && plan_submitted_for_auto && !meta.plan_approved {
+            files.plan_tier(record)
+        } else {
+            None
+        };
+    let auto_approved = crate::autonomy::fleet_auto_approved(
+        meta.approve,
+        meta.auto_approve_plan_action.as_deref(),
+        meta.autonomy.as_ref(),
+        tier_for_auto.as_deref(),
+    );
     let mut plan_tier = None;
     if meta.plan {
         let plan_submitted = !meta.plan_submitted_at.is_empty();

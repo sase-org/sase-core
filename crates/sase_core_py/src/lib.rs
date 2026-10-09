@@ -29,6 +29,7 @@ mod agent_scan;
 mod agent_tab;
 mod artifact_links;
 mod artifact_refs;
+mod autonomy;
 mod axe;
 mod bead_decisions;
 mod beads;
@@ -87,6 +88,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     plans::register_plans(m)?;
     artifact_refs::register_artifact_refs(m)?;
     artifact_links::register_artifact_links(m)?;
+    autonomy::register_autonomy(m)?;
     migration::register_migration(m)?;
     notifications::register_notifications(m)?;
     procs::register_procs(m)?;
