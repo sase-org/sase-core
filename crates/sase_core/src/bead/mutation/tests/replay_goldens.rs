@@ -24,6 +24,11 @@
 //! normalizes the same way, so later phases still pin routing, payloads,
 //! ordering and counts.
 //!
+//! `lock_wait_ms` is flock timing telemetry, not mutation behavior: an
+//! uncontended acquire costs 0ms on a fast runner and a few ms on a loaded
+//! one, so the harness pins it at zero before comparing (real contention
+//! coverage lives in `links.rs`).
+//!
 //! `cached_golden_bytes_match_replay` reruns every scenario below on a
 //! git-backed store, where the single view algorithm takes the cached
 //! path, and pins the identical outcome and bytes. It never regenerates
@@ -215,6 +220,23 @@ fn normalize_remove_timestamps(files: &mut BTreeMap<String, String>) {
         if trailing {
             content.push('\n');
         }
+    }
+}
+
+/// Pin wall-clock flock telemetry at zero before a golden comparison.
+/// Error outcomes carry no lock timing and pass through untouched; the
+/// struct round-trip keeps every other byte (including key order) exact.
+fn normalize_lock_wait_ms(outcome: String) -> String {
+    const PREFIX: &str = "ok ";
+    let Some(payload) = outcome.strip_prefix(PREFIX) else {
+        return outcome;
+    };
+    match serde_json::from_str::<BeadMutationOutcomeWire>(payload) {
+        Ok(mut wire) => {
+            wire.lock_wait_ms = 0;
+            format!("{PREFIX}{}", serde_json::to_string(&wire).unwrap())
+        }
+        Err(_) => outcome,
     }
 }
 
@@ -1435,7 +1457,7 @@ fn run_case_inner(
             "scenario {scenario}: cache warm-up failed",
         );
     }
-    let outcome = (case.act)(&beads_dir, &seed);
+    let outcome = normalize_lock_wait_ms((case.act)(&beads_dir, &seed));
     if cached
         && backing == Backing::Event
         && case.cached_act
@@ -1519,4 +1541,19 @@ fn cached_golden_bytes_match_replay() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn lock_wait_normalization_pins_zero_regardless_of_measured_wait() {
+    let measured =
+        "ok {\"operation\":\"rm\",\"changed\":true,\"lock_wait_ms\":6}"
+            .to_string();
+    let normalized = normalize_lock_wait_ms(measured);
+    assert!(
+        normalized.contains("\"lock_wait_ms\":0"),
+        "unexpected normalized outcome: {normalized}"
+    );
+    assert!(!normalized.contains("\"lock_wait_ms\":6"), "{normalized}");
+    let err = "err kind=lock message=timed out".to_string();
+    assert_eq!(normalize_lock_wait_ms(err.clone()), err);
 }
