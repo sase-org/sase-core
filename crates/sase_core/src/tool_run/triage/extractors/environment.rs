@@ -6,7 +6,7 @@ const MARKERS: &[(&str, &[&str], &str)] = &[
     (
         "missing_binding",
         &["missing required binding(s)", "does not expose binding"],
-        "just install",
+        "just install-venv",
     ),
     (
         "core_import",
@@ -14,7 +14,7 @@ const MARKERS: &[(&str, &[&str], &str)] = &[
             "cannot import sase_core_rs",
             "No module named 'sase_core_rs'",
         ],
-        "just install",
+        "just install-venv",
     ),
     (
         "stale_core",
@@ -24,7 +24,7 @@ const MARKERS: &[(&str, &[&str], &str)] = &[
     (
         "core_wheel",
         &["SASE_CORE_WHEEL does not name a wheel file"],
-        "just install",
+        "just install-venv",
     ),
     (
         "required_plugins",
@@ -34,7 +34,7 @@ const MARKERS: &[(&str, &[&str], &str)] = &[
     (
         "keep_sorted_missing",
         &["error: keep-sorted is required"],
-        "just install",
+        "just install-venv",
     ),
 ];
 
@@ -72,7 +72,7 @@ pub fn remedy_for(kind: &str) -> &'static str {
         "missing_binding"
         | "core_import"
         | "core_wheel"
-        | "keep_sorted_missing" => "just install",
+        | "keep_sorted_missing" => "just install-venv",
         _ => "sase update",
     }
 }

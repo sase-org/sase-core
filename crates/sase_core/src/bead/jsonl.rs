@@ -917,7 +917,7 @@ pub(in crate::bead) fn parse_event_stream_bytes(
                         .is_err()
                         {
                             return BeadError::validation(format!(
-                                "unknown bead event operation `{operation}` in {} line {}; run `just install` to update sase-core",
+                                "unknown bead event operation `{operation}` in {} line {}; run `sase update` or `just install-dev` to update sase-core",
                                 path.display(),
                                 index + 1
                             ));
@@ -1491,7 +1491,9 @@ mod tests {
 
         assert!(error.message.contains("future_operation"));
         assert!(error.message.contains(path.to_string_lossy().as_ref()));
-        assert!(error.message.contains("just install"));
+        assert!(error.message.contains("sase update"));
+        assert!(error.message.contains("just install-dev"));
+        assert!(!error.message.contains("just install`"));
     }
 
     #[test]

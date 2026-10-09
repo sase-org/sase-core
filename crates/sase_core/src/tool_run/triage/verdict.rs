@@ -251,7 +251,7 @@ fn failure_kind(
 }
 
 fn environment_remedy() -> &'static str {
-    "run `just install` or `sase update` and retry"
+    "run `just install-venv` or `sase update` and retry"
 }
 
 /// Pure failure-kind plus verdict evaluation in contract order.
