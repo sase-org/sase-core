@@ -14,6 +14,7 @@ mod notes_update;
 mod proof_bounded;
 mod publish_direct;
 mod read_model_mutations;
+mod replay_golden_cases;
 mod replay_goldens;
 mod snooze_plus_one;
 mod store;
