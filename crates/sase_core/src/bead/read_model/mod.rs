@@ -9,8 +9,11 @@
 pub(crate) mod alloc;
 mod freshness;
 mod location;
+mod meta_keys;
 pub(crate) mod publish;
 pub mod queries;
+mod refresh;
+mod resume;
 mod store;
 mod tail;
 #[cfg(test)]

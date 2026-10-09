@@ -55,6 +55,9 @@ use crate::bead::read_model::freshness::{
 use crate::bead::read_model::location::read_model_cache_path_for_store;
 use crate::bead::wire::{BeadError, IssueWire};
 
+use super::meta_keys::{backfill_meta_keys, tail_meta_defaults};
+use super::refresh::{refresh_changed_store, RefreshFinish};
+
 /// Schema version of the read-model SQLite file.
 ///
 /// Any schema change means drop and rebuild: old files are never migrated.
@@ -407,7 +410,7 @@ pub fn rebuild_read_model_at(
     rebuild_catch_store_errors(beads_dir, cache_path, true)
 }
 
-fn crate_version() -> String {
+pub(super) fn crate_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
@@ -961,60 +964,6 @@ fn rebuild_cold(
     )
 }
 
-/// How a refresh finishes: with a full snapshot for serving reads,
-/// or with readiness only for admission and publication paths that load
-/// exactly the rows they need afterwards and must not pay a full-row
-/// deserialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RefreshFinish {
-    Snapshot,
-    Readiness,
-}
-
-/// Serve-or-refresh decision for a store whose sweep differs from the
-/// cache: try the incremental tail first, and rebuild only when a tail
-/// precondition fails. The fallback reason becomes the rebuild's
-/// telemetry so doctor shows why the tail path was refused.
-fn refresh_changed_store(
-    beads_dir: &Path,
-    cache_path: &Path,
-    connection: Connection,
-    meta: &CacheMeta,
-    token: &str,
-    sweep: &StoreSignatures,
-    finish: RefreshFinish,
-) -> Result<Option<CachedStoreSnapshot>, Fault> {
-    match super::tail::try_tail_apply(
-        beads_dir,
-        cache_path,
-        &connection,
-        meta,
-        token,
-        sweep,
-        finish,
-    ) {
-        Ok(super::tail::TailDecision::Served(snapshot)) => {
-            note_serve_outcome(&connection);
-            Ok(snapshot)
-        }
-        Ok(super::tail::TailDecision::Tailed(snapshot)) => Ok(snapshot),
-        Ok(super::tail::TailDecision::Fallback(reason)) => {
-            let start_generation = meta.generation;
-            let token = token.to_string();
-            drop(connection);
-            rebuild_from_replay(
-                beads_dir,
-                cache_path,
-                &token,
-                start_generation,
-                &format!("tail fallback: {reason}"),
-            )
-            .map(Some)
-        }
-        Err(fault) => Err(fault),
-    }
-}
-
 /// Rebuild from a forced full replay and commit under generation CAS.
 ///
 /// `reason` records why the replay ran (cold start, explicit rebuild, or
@@ -1201,7 +1150,7 @@ pub(super) fn read_meta(connection: &Connection) -> Result<CacheMeta, String> {
 /// Parse one outcome counter from the meta map, defaulting to zero.
 ///
 /// Caches written before `read-model-tail` have no counter keys; they
-/// backfill through [`backfill_meta_keys`] instead of dropping.
+/// backfill through [`super::meta_keys::backfill_meta_keys`] instead of dropping.
 fn meta_counter(values: &BTreeMap<String, String>, key: &str) -> u64 {
     values
         .get(key)
@@ -2028,82 +1977,6 @@ fn ensure_schema(cache_path: &Path) -> Result<(), Fault> {
             )
             .map_err(|_| Fault::Cache)?;
     }
-    Ok(())
-}
-
-/// Default values for every meta key, including the `read-model-tail`
-/// manifest/config fingerprints and outcome telemetry.
-///
-/// Shared by fresh-file creation and [`backfill_meta_keys`] so caches
-/// written before `read-model-tail` gain the new keys without a drop and
-/// rebuild.
-fn tail_meta_defaults() -> [(&'static str, String); 16] {
-    [
-        ("schema_version", READ_MODEL_SCHEMA_VERSION.to_string()),
-        ("reducer_version", READ_MODEL_REDUCER_VERSION.to_string()),
-        ("crate_version", crate_version()),
-        ("token", String::new()),
-        ("last_sweep_ns", "0".to_string()),
-        ("frontier", String::new()),
-        ("generation", "0".to_string()),
-        ("content_generation", "0".to_string()),
-        ("manifest_schema_version", "0".to_string()),
-        ("manifest_stream_count", "0".to_string()),
-        ("config_canonical", String::new()),
-        ("outcome_serve", "0".to_string()),
-        ("outcome_tail", "0".to_string()),
-        ("outcome_rebuild", "0".to_string()),
-        ("last_refresh", String::new()),
-        ("last_refresh_reason", String::new()),
-    ]
-}
-
-/// Heal pre-tail caches: insert any missing meta key without touching the
-/// rows, counters, or generation. Runs on every read before the freshness
-/// decision, so a cache written by `read-model-store` gains tail support
-/// on its next read instead of rebuilding.
-pub(super) fn backfill_meta_keys(connection: &Connection) -> Result<(), Fault> {
-    let defaults = tail_meta_defaults();
-    let placeholders =
-        defaults.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
-    for (key, _) in &defaults {
-        params.push(key);
-    }
-    let present: i64 = connection
-        .query_row(
-            &format!("SELECT COUNT(*) FROM meta WHERE key IN ({placeholders})"),
-            params.as_slice(),
-            |row| row.get(0),
-        )
-        .map_err(|_| Fault::Cache)?;
-    if present as usize >= defaults.len() {
-        return Ok(());
-    }
-    for (key, value) in &defaults {
-        connection
-            .execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
-                rusqlite::params![key, value],
-            )
-            .map_err(|_| Fault::Cache)?;
-    }
-    Ok(())
-}
-
-/// Record the post-write freshness token without moving the sweep time.
-///
-/// Direct publication recomputes the token after its own append: the
-/// stored token must describe the published files so the next read
-/// serves token-only, while `last_sweep_ns` stays at the admission
-/// sweep so out-of-band writers stay bounded by the 60 s rule.
-pub(super) fn set_token_in_txn(
-    connection: &Connection,
-    token: &str,
-) -> Result<(), WriteFault> {
-    connection
-        .execute("UPDATE meta SET value = ?1 WHERE key = 'token'", [token])
-        .map_err(|_| WriteFault::Other)?;
     Ok(())
 }
 
