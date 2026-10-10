@@ -3,9 +3,7 @@ use std::sync::Arc;
 use tower_lsp_server::{LspService, UriExt};
 
 use super::super::actions::{document_eligible, should_invalidate_for_uri};
-use super::super::initialize::{
-    accept_legacy_xprompt_names_from_env, config_from_initialize,
-};
+use super::super::initialize::config_from_initialize;
 use super::super::jinja::jinja_scope_for_document;
 use super::super::state::ServerConfig;
 use super::support::*;
@@ -26,8 +24,7 @@ impl HomeGuard {
         let temp = tempfile::tempdir().unwrap();
         let prev_home = std::env::var_os("HOME");
         // Point HOME at an empty dir so the real ~/.config/sase/sase.yml
-        // (which carries a retired `xprompts:` key) never poisons
-        // false-policy Rust loads.
+        // never poisons Rust loads.
         std::env::set_var("HOME", temp.path());
         // Clear transport vars that could redirect the loader at real dirs.
         for key in [
@@ -104,9 +101,10 @@ fn macro_config_filenames_invalidate() {
 }
 
 #[test]
-fn legacy_policy_defaults_true_and_parses_init_option() {
+fn legacy_policy_is_unconditional() {
     assert!(ServerConfig::default().accept_legacy_xprompt_names);
-    assert!(accept_legacy_xprompt_names_from_env());
+    // The retired initialization option no longer changes policy: even an
+    // explicit `false` still accepts retired xprompt spellings.
     let params = serde_json::from_value::<lsp_types::InitializeParams>(
         serde_json::json!({
             "processId": null,
@@ -117,8 +115,8 @@ fn legacy_policy_defaults_true_and_parses_init_option() {
     )
     .unwrap();
     let config = config_from_initialize(&params);
-    assert!(!config.accept_legacy_xprompt_names);
-    let params_true = serde_json::from_value::<lsp_types::InitializeParams>(
+    assert!(config.accept_legacy_xprompt_names);
+    let params_plain = serde_json::from_value::<lsp_types::InitializeParams>(
         serde_json::json!({
             "processId": null,
             "rootUri": null,
@@ -126,7 +124,7 @@ fn legacy_policy_defaults_true_and_parses_init_option() {
         }),
     )
     .unwrap();
-    assert!(config_from_initialize(&params_true).accept_legacy_xprompt_names);
+    assert!(config_from_initialize(&params_plain).accept_legacy_xprompt_names);
 }
 
 #[test]
@@ -399,7 +397,7 @@ async fn false_policy_never_merges_unverified_helper_data() {
 }
 
 #[tokio::test]
-async fn false_policy_rejects_retired_sources_but_keeps_canonical() {
+async fn denied_policy_still_loads_retired_sources_through_rust() {
     use sase_core::{
         HelperHostBridge, HostBridgeError, MobileHelperProjectContextWire,
         MobileHelperProjectScopeWire, MobileHelperResultWire,
@@ -446,7 +444,11 @@ async fn false_policy_rejects_retired_sources_but_keeps_canonical() {
     std::fs::write(legacy.join("oldie.md"), "old body").unwrap();
     let cache = CatalogCache::new(Arc::new(EmptyHelper));
     let root = Some(temp.path().to_path_buf());
-    let legacy_false = cache
+    // The retired switch no longer changes loader policy: even a denied
+    // load accepts retired sources through the Rust loader. (An accepted
+    // load instead trusts the helper bridge, which is pinned by the
+    // cache-isolation test below.)
+    let legacy_entries = cache
         .refresh_for_completion_with_policy(
             "retired".to_string(),
             None,
@@ -455,15 +457,12 @@ async fn false_policy_rejects_retired_sources_but_keeps_canonical() {
         )
         .await
         .unwrap();
-    assert!(
-        !legacy_false.iter().any(|e| e.name == "oldie"),
-        "retired source survived false"
-    );
-    // Canonical layout survives false.
+    assert!(legacy_entries.iter().any(|e| e.name == "oldie"));
+    // Canonical layout loads regardless of the retired switch.
     let macros = temp.path().join("sase/macros");
     std::fs::create_dir_all(&macros).unwrap();
     std::fs::write(macros.join("newbie.md"), "new body").unwrap();
-    // Use a fresh key so the earlier empty-false result is not reused.
+    // Use a fresh key so the earlier retired results are not reused.
     let canonical_false = cache
         .refresh_for_completion_with_policy(
             "retired2".to_string(),

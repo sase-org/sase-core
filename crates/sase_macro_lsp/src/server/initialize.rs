@@ -43,35 +43,10 @@ pub(super) fn config_from_initialize(
         machine_catalog: machine_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
         glossary_catalog: glossary_catalog_path(),
-        accept_legacy_xprompt_names:
-            accept_legacy_xprompt_names_from_initialize(params)
-                .unwrap_or_else(accept_legacy_xprompt_names_from_env),
+        // Retired xprompt spellings are always accepted: the legacy
+        // initialization option and environment switch are gone.
+        accept_legacy_xprompt_names: true,
     }
-}
-
-pub(super) fn accept_legacy_xprompt_names_from_initialize(
-    params: &InitializeParams,
-) -> Option<bool> {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("accept_legacy_xprompt_names"))
-        .and_then(serde_json::Value::as_bool)
-}
-
-pub(super) fn accept_legacy_xprompt_names_from_env() -> bool {
-    // No transport env name for this policy; default true.
-    // An explicit `SASE_ACCEPT_LEGACY_XPROMPT_NAMES=0/false` opts out.
-    std::env::var("SASE_ACCEPT_LEGACY_XPROMPT_NAMES")
-        .ok()
-        .as_deref()
-        .map(|value| {
-            !matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(true)
 }
 
 /// Feature flags carried into core completion contracts.

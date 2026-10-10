@@ -2,11 +2,10 @@
 //!
 //! [`normalize_macro_config_layer`] maps one already-decoded authored config
 //! layer to canonical macro spellings. Its input is the decoded mapping plus
-//! an explicit `accept_legacy_xprompt_names` boolean; its output is the
-//! canonical mapping plus source-qualified retirement diagnostics. Callers
-//! pass the flag state explicitly so raw flag-bootstrap layers (read via
-//! `load_config_layers()` before any flag snapshot exists) never recurse
-//! into flag resolution.
+//! the retired `accept_legacy_xprompt_names` wire field, which is accepted
+//! and ignored: retired xprompt spellings are always accepted as aliases.
+//! Its output is the canonical mapping plus source-qualified retirement
+//! diagnostics.
 //!
 //! Covered keys (plan `202610/macro_syntax_cutover.md`, compatibility
 //! section): top-level `xprompts`/`macros` and
@@ -19,9 +18,8 @@
 //!
 //! Presence (not truthiness) decides: a legacy key present with a null,
 //! empty-mapping, false, or empty-string value is still an alias. Supplying
-//! both spellings in the same authored mapping is an error in both flag
-//! states, as is a legacy spelling when the flag is off. Errors say
-//! `<old> is retired; use <new>`.
+//! both spellings in the same authored mapping is an error; collision errors
+//! say `<old> and <new> cannot be combined; use only <new>`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -41,6 +39,9 @@ const LEGACY_MENTOR_FIELD: &str = "xprompt"; // legacy xprompt spelling
 ///
 /// `source` names the layer for diagnostics (for example `"user"` or a file
 /// path); it defaults to empty when the caller has no identity to keep.
+/// `accept_legacy_xprompt_names` is a retired rollout switch: it is accepted
+/// for wire compatibility and ignored, since retired xprompt spellings are
+/// always accepted as aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacroLayerNormalizeRequestWire {
     pub layer: Value,
@@ -75,16 +76,18 @@ pub struct MacroLayerNormalizeWire {
     pub diagnostics: Vec<MacroSyntaxDiagnosticWire>,
 }
 
-fn retired_message(legacy: &str, canonical: &str) -> String {
-    format!("{legacy} is retired; use {canonical}")
-}
-
 fn collision_message(legacy: &str, canonical: &str) -> String {
     format!("{legacy} and {canonical} cannot be combined; use only {canonical}")
 }
 
+/// Human-readable note for an accepted retired alias, naming the
+/// replacement. This feeds retirement diagnostics (e.g. doctor); it is not
+/// a rejection.
+fn retired_message(legacy: &str, canonical: &str) -> String {
+    format!("{legacy} is retired; use {canonical}")
+}
+
 struct Normalizer<'a> {
-    accept_legacy: bool,
     source: &'a str,
     diagnostics: Vec<MacroSyntaxDiagnosticWire>,
 }
@@ -92,10 +95,9 @@ struct Normalizer<'a> {
 impl<'a> Normalizer<'a> {
     /// Move `legacy` to `canonical` inside `map` by presence.
     ///
-    /// Both present is an error in both flag states. Legacy present alone is
-    /// an error when the flag is off and an accepted alias (recorded in
-    /// `diagnostics`) when the flag is on. Canonical present alone passes
-    /// through untouched.
+    /// Both present is an error. Legacy present alone is an accepted alias
+    /// (recorded in `diagnostics`). Canonical present alone passes through
+    /// untouched.
     fn move_key(
         &mut self,
         map: &mut Map<String, Value>,
@@ -112,11 +114,6 @@ impl<'a> Normalizer<'a> {
         }
         if !has_legacy {
             return Ok(());
-        }
-        if !self.accept_legacy {
-            return Err(ConfigError::validation(retired_message(
-                legacy, canonical,
-            )));
         }
         let value = map.remove(legacy).expect("presence checked above");
         map.insert(canonical.to_string(), value);
@@ -148,8 +145,10 @@ pub fn normalize_macro_config_layer(
             ));
         }
     };
+    // The retired `accept_legacy_xprompt_names` switch is ignored: retired
+    // xprompt spellings are always accepted as aliases.
+    let _ = request.accept_legacy_xprompt_names;
     let mut normalizer = Normalizer {
-        accept_legacy: request.accept_legacy_xprompt_names,
         source: request.source.as_str(),
         diagnostics: Vec::new(),
     };
@@ -266,13 +265,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_keys_reject_when_not_accepted() {
-        let err = normalize_macro_config_layer(&request(
-            json!({"xprompts": {"a": {}}}),
-            false,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("xprompts is retired; use macros"));
+    fn legacy_keys_move_even_when_switch_denied() {
+        // The retired switch no longer changes policy: `false` accepts the
+        // same aliases as `true`.
+        for accept in [false, true] {
+            let out = normalize_macro_config_layer(&request(
+                json!({"xprompts": {"a": {}}}),
+                accept,
+            ))
+            .unwrap();
+            assert_eq!(out.canonical, json!({"macros": {"a": {}}}));
+            assert_eq!(out.diagnostics.len(), 1);
+        }
     }
 
     #[test]
@@ -290,13 +294,13 @@ mod tests {
                 .unwrap()
                 .contains_key("xprompts"));
         }
-        // ... and presence still rejects when the flag is off.
-        let err = normalize_macro_config_layer(&request(
+        // ... and presence still normalizes when the switch is denied.
+        let denied = normalize_macro_config_layer(&request(
             json!({"xprompts": null}),
             false,
         ))
-        .unwrap_err();
-        assert!(err.to_string().contains("xprompts is retired"));
+        .unwrap();
+        assert!(denied.canonical.get("macros").is_some());
     }
 
     #[test]

@@ -9,13 +9,19 @@ fn write_macro(dir: &Path, name: &str, body: &str) {
 }
 
 #[test]
-fn catalog_options_default_to_accepting_legacy() {
+fn catalog_loaders_accept_legacy_regardless_of_switch() {
     assert!(MacroCatalogLoadOptions::new(None).accept_legacy_xprompt_names);
     assert!(MacroCatalogLoadOptions::default().accept_legacy_xprompt_names);
     assert!(CatalogLoader::default().accepts_legacy());
+    // The retired switch no longer changes policy: a denied loader still
+    // accepts retired sources.
     let options = MacroCatalogLoadOptions::new(None).with_legacy_policy(false);
-    assert!(!options.accept_legacy_xprompt_names);
-    assert!(!CatalogLoader::new(&options).accepts_legacy());
+    assert!(CatalogLoader::new(&options).accepts_legacy());
+    let denied = CatalogLoader {
+        accept_legacy_xprompt_names: false,
+        ..CatalogLoader::default()
+    };
+    assert!(denied.accepts_legacy());
 }
 
 #[test]
@@ -187,7 +193,7 @@ fn macro_env_precedence_is_new_first() {
 }
 
 #[test]
-fn policy_false_skips_retired_but_keeps_skills_memory_and_config() {
+fn denied_policy_still_loads_retired_alongside_skills_memory_and_config() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("workspace");
     let home = temp.path().join("home");
@@ -222,18 +228,19 @@ fn policy_false_skips_retired_but_keeps_skills_memory_and_config() {
         accept_legacy_xprompt_names: false,
         ..CatalogLoader::default()
     };
-    assert!(!loader.accepts_legacy());
+    // The retired switch no longer changes policy: denied loaders accept.
+    assert!(loader.accepts_legacy());
     let _ = &options;
     let all = loader.load_all_macros(None).unwrap();
     assert!(all.contains_key("keep"));
-    assert!(!all.contains_key("drop"));
+    assert!(all.contains_key("drop"));
     assert!(all.contains_key("skill/stay"));
     assert!(all.contains_key("memory/glossary"));
     assert!(all.contains_key("cfg_keep"));
 }
 
 #[test]
-fn policy_false_skips_explicit_retired_and_plugin_retired() {
+fn denied_policy_loads_explicit_retired_and_plugin_retired() {
     let temp = tempfile::tempdir().unwrap();
     let canonical = temp.path().join("canonical");
     write_macro(&canonical, "new.md", "Canonical body");
@@ -244,8 +251,8 @@ fn policy_false_skips_explicit_retired_and_plugin_retired() {
             ..MacroCatalogResourcePaths::default()
         })
         .with_legacy_policy(false);
-    // Pin home to an isolated temp dir: ambient ~/.config would otherwise
-    // leak a retired authored key into this false-policy load and fail it.
+    // Pin home to an isolated temp dir so ambient ~/.config never leaks
+    // into this load.
     let home = temp.path().join("home");
     fs::create_dir_all(&home).unwrap();
     let mut loader = CatalogLoader::new(&options);

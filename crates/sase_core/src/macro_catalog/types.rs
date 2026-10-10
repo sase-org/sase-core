@@ -118,6 +118,8 @@ impl MacroCatalogLoadOptions {
         self
     }
 
+    /// Retired rollout switch, kept for wire compatibility and ignored:
+    /// the loader always accepts retired xprompt sources.
     pub fn with_legacy_policy(mut self, accept: bool) -> Self {
         self.accept_legacy_xprompt_names = accept;
         self

@@ -183,7 +183,9 @@ impl CatalogLoader {
             plugin_skill_dirs,
             plugin_config_paths,
             input_type_registry,
-            accept_legacy_xprompt_names: options.accept_legacy_xprompt_names,
+            // The retired legacy-names switch is ignored: retired xprompt
+            // sources are always accepted.
+            accept_legacy_xprompt_names: true,
             known_workspaces: known_projects.workspaces,
             canonical_project_refs: known_projects.canonical_refs,
             skill_issues: RefCell::new(Vec::new()),
@@ -390,16 +392,21 @@ impl CatalogLoader {
         }
     }
 
+    /// Whether retired xprompt spellings load. Always true now that the
+    /// rollout switch retired; the field is accepted for compatibility and
+    /// ignored.
     pub(super) fn accepts_legacy(&self) -> bool {
-        self.accept_legacy_xprompt_names
+        let _ = self.accept_legacy_xprompt_names;
+        true
     }
 
-    /// Whether a retired xprompt-named directory/resource source loads under
-    /// the current policy. Explicit retired options and plugin metadata are
-    /// skipped when false; canonical macro sources always load. Skills,
-    /// memory, config, and durable readers stay unconditional.
+    /// Whether a retired xprompt-named directory/resource source loads.
+    /// Always true now that the rollout switch retired; canonical macro
+    /// sources always load. Skills, memory, config, and durable readers
+    /// stay unconditional.
     fn retired_allowed(&self) -> bool {
-        self.accept_legacy_xprompt_names
+        let _ = self.accept_legacy_xprompt_names;
+        true
     }
 
     pub(super) fn load_all_macros(

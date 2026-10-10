@@ -74,21 +74,20 @@ fn config_both_keys_is_an_error_even_when_empty() {
 }
 
 #[test]
-fn config_retired_key_errors_under_false_policy() {
+fn config_retired_key_loads_under_both_policies() {
     let temp = tempfile::tempdir().unwrap();
     let home = isolated_home(&temp);
     let old_path = write_config(
         &temp.path().join("old"),
         "xprompts:\n  ship:\n    content: Ship it\n",
     );
-    let error = loader_with_config(&old_path, &home, false)
-        .load_config_macros(None)
-        .expect_err("retired authored key must error when false");
-    assert!(
-        matches!(error, MacroCatalogLoadError::RetiredAuthoredKey(_)),
-        "{error:?}"
-    );
-    assert!(error.to_string().contains("macros"), "{error}");
+    // The retired switch no longer changes policy: both values accept.
+    for accept in [false, true] {
+        let macros = loader_with_config(&old_path, &home, accept)
+            .load_config_macros(None)
+            .unwrap();
+        assert_eq!(macros["ship"].content, "Ship it");
+    }
 
     let new_path = write_config(
         &temp.path().join("new"),
@@ -140,7 +139,7 @@ fn markdown_frontmatter_macros_section_loads_locals() {
 }
 
 #[test]
-fn markdown_frontmatter_both_keys_and_false_policy_error() {
+fn markdown_frontmatter_both_keys_conflict_and_retired_loads() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("macros");
     fs::create_dir_all(&dir).unwrap();
@@ -171,17 +170,15 @@ fn markdown_frontmatter_both_keys_and_false_policy_error() {
         "---\nxprompts:\n  _helper:\n    content: Helper\n---\nBody",
     )
     .unwrap();
-    let strict = CatalogLoader {
+    // The retired switch no longer changes policy: a denied loader still
+    // accepts the retired-only frontmatter section.
+    let denied = CatalogLoader {
         accept_legacy_xprompt_names: false,
         ..CatalogLoader::default()
     };
-    let error = strict
-        .load_macros_from_dir(&alone, None, false)
-        .expect_err("retired authored key must error when false");
-    assert!(
-        matches!(error, MacroCatalogLoadError::RetiredAuthoredKey(_)),
-        "{error:?}"
-    );
+    let all = denied.load_macros_from_dir(&alone, None, false).unwrap();
+    assert_eq!(all["retired"].local_macros.len(), 1);
+    assert_eq!(all["retired"].local_macros[0].name, "_helper");
 }
 
 #[test]

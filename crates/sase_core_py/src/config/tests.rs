@@ -1212,7 +1212,8 @@ fn macro_layer_normalize_binding_round_trips_python_dicts() {
         assert_eq!(result["diagnostics"].as_array().unwrap().len(), 2);
         assert_eq!(result["diagnostics"][0]["source"], json!("user"));
 
-        // Rejected legacy input surfaces the retirement error.
+        // The retired switch no longer changes policy: denied legacy
+        // input normalizes the same as accepted input.
         let request = json_value_to_py(
             py,
             &json!({
@@ -1223,10 +1224,12 @@ fn macro_layer_normalize_binding_round_trips_python_dicts() {
         )
         .unwrap();
         let request = request.bind(py).downcast::<PyDict>().unwrap();
-        let err = py_normalize_macro_config_layer(py, request).unwrap_err();
-        assert!(err.to_string().contains("xprompts is retired; use macros"));
+        let result = py_normalize_macro_config_layer(py, request).unwrap();
+        let result = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(result["canonical"]["macros"], json!({"a": {}}));
+        assert_eq!(result["diagnostics"].as_array().unwrap().len(), 1);
 
-        // Both spellings collide in both flag states.
+        // Both spellings collide regardless of the retired switch.
         for accept in [true, false] {
             let request = json_value_to_py(
                 py,

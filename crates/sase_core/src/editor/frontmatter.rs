@@ -707,8 +707,8 @@ fn validate_top_level_fields(builder: &mut FrontmatterDiagnosticBuilder<'_>) {
 /// Both `macros:` (canonical) and `xprompts:` (retired) are detected by
 /// presence before their values are parsed, so empty or null input still
 /// counts as a conflict. Supplying both spellings is an error naming
-/// `macros`; the retired spelling under a false legacy policy is rejected
-/// by catalog loading instead, which owns the policy.
+/// `macros`; the retired spelling alone is always accepted by catalog
+/// loading, which owns the policy.
 fn validate_local_section_keys(
     builder: &mut FrontmatterDiagnosticBuilder<'_>,
     mapping: &Mapping,

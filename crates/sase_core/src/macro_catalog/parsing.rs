@@ -338,22 +338,19 @@ fn has_authored_key(data: &serde_yaml::Mapping, key: &str) -> bool {
 ///
 /// Both `macros:` (canonical) and `xprompts:` (retired) are detected by
 /// presence before their values are parsed, so empty or null input still
-/// counts. Supplying both spellings is an error, and a retired key is an
-/// error naming `macros` when the legacy policy is false.
+/// counts. Supplying both spellings is an error. A retired key is always
+/// accepted now that the rollout switch retired.
 pub(super) fn authored_macro_sections<'a>(
     data: &'a serde_yaml::Mapping,
     source: &str,
     accept_legacy_xprompt_names: bool,
 ) -> Result<Vec<&'a serde_yaml::Mapping>, MacroCatalogLoadError> {
+    // Retired switch kept for compatibility and ignored.
+    let _ = accept_legacy_xprompt_names;
     let has_legacy = has_authored_key(data, "xprompts");
     let has_canonical = has_authored_key(data, "macros");
     if has_legacy && has_canonical {
         return Err(MacroCatalogLoadError::DuplicateAuthoredKeys(
-            source.to_string(),
-        ));
-    }
-    if has_legacy && !accept_legacy_xprompt_names {
-        return Err(MacroCatalogLoadError::RetiredAuthoredKey(
             source.to_string(),
         ));
     }

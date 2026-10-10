@@ -1,7 +1,6 @@
 use super::initialize::{
-    accept_legacy_xprompt_names_from_env, artifact_ref_catalog_path,
-    glossary_catalog_path, machine_catalog_path, model_catalog_path,
-    vcs_project_catalog_path,
+    artifact_ref_catalog_path, glossary_catalog_path, machine_catalog_path,
+    model_catalog_path, vcs_project_catalog_path,
 };
 use super::*;
 
@@ -31,9 +30,9 @@ pub(super) struct ServerConfig {
     /// catalogs are cached briefly and invalidated by file signature, explicit
     /// refresh, or watched project config changes.
     pub(super) glossary_catalog: Option<PathBuf>,
-    /// Startup-resolved legacy-loading policy. Defaults true; when false,
-    /// retired `xprompt` definition sources and authored keys are rejected.
-    /// Never re-read on keystrokes; part of the catalog cache identity.
+    /// Legacy-loading policy. Always true now that the rollout switch
+    /// retired: retired `xprompt` definition sources and authored keys are
+    /// accepted. Part of the catalog cache identity.
     pub(super) accept_legacy_xprompt_names: bool,
 }
 
@@ -50,7 +49,7 @@ impl Default for ServerConfig {
             machine_catalog: machine_catalog_path(),
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
-            accept_legacy_xprompt_names: accept_legacy_xprompt_names_from_env(),
+            accept_legacy_xprompt_names: true,
         }
     }
 }
