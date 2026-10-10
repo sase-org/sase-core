@@ -3,7 +3,7 @@
 //! Readers that find no record translate the legacy keys exactly as
 //! today's readers do (`get_auto_plan_approval_action`,
 //! `_raw_auto_plan_argument`, and the `_plan_gate_metadata` coverage
-//! tables). Writers behind the `autonomy_record_only` sunset flag
+//! tables). Writers from the retired `autonomy_record_only` sunset flag
 //! reproduce today's writer output from `record.selection` through
 //! [`autonomy_legacy_projection`].
 
