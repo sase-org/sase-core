@@ -43,8 +43,6 @@ pub(super) fn config_from_initialize(
         machine_catalog: machine_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
         glossary_catalog: glossary_catalog_path(),
-        queue_capacity_budget: queue_capacity_budget_from_initialize(params)
-            .unwrap_or_else(queue_capacity_budget_from_env),
         accept_legacy_xprompt_names:
             accept_legacy_xprompt_names_from_initialize(params)
                 .unwrap_or_else(accept_legacy_xprompt_names_from_env),
@@ -76,39 +74,12 @@ pub(super) fn accept_legacy_xprompt_names_from_env() -> bool {
         .unwrap_or(true)
 }
 
-pub(super) fn queue_capacity_budget_from_initialize(
-    params: &InitializeParams,
-) -> Option<bool> {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("queue_capacity_budget"))
-        .and_then(serde_json::Value::as_bool)
-}
-
-pub(super) fn queue_capacity_budget_from_env() -> bool {
-    std::env::var(QUEUE_CAPACITY_BUDGET_ENV)
-        .ok()
-        .as_deref()
-        .map(env_flag_enabled)
-        .unwrap_or(true)
-}
-
-pub(super) fn env_flag_enabled(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
-pub(super) fn enabled_feature_flags(
-    queue_capacity_budget: bool,
-) -> Vec<String> {
-    let mut flags = Vec::new();
-    if queue_capacity_budget {
-        flags.push("queue_capacity_budget".to_string());
-    }
-    flags
+/// Feature flags carried into core completion contracts.
+///
+/// The queue capacity budget is unconditional now that its sunset flag
+/// retired, so no per-launch flag travels here anymore.
+pub(super) fn enabled_feature_flags() -> Vec<String> {
+    Vec::new()
 }
 
 fn catalog_path_from_env(env: &str) -> Option<PathBuf> {

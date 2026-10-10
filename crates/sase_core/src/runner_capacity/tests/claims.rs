@@ -17,11 +17,11 @@ fn shared_agent_session_claim_counts_once_for_capacity() {
     let result = snapshot(8.0, vec![serial_root, serial_child, waiting_agent]);
     assert_eq!(result.occupied_lanes, 1);
     assert_eq!(result.occupied_capacity, 2.0);
-    assert_eq!(
-        result.first_eligible_artifact_dir.as_deref(),
-        Some("/tmp/waiter")
-    );
-    assert!(waiter(&result, "waiter").eligible);
+    assert!(result.first_eligible_artifact_dir.is_none());
+    let blocked = waiter(&result, "waiter");
+    assert!(!blocked.eligible);
+    assert_eq!(blocked.admission_limit, 2.0);
+    assert_eq!(blocked.blockers[0].code, "insufficient-capacity");
 }
 
 #[test]

@@ -53,7 +53,7 @@ impl MacroLspServer {
             &document,
             to_editor_position(position),
             entries.as_slice(),
-            &enabled_feature_flags(config.queue_capacity_budget),
+            &enabled_feature_flags(),
             routing.as_ref(),
         ) {
             return Some(lsp_hover(hover));

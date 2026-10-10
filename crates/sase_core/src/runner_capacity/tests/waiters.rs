@@ -225,5 +225,5 @@ fn multiplier_capacity_resolves_for_waiters_and_preserves_legacy_behavior() {
     let legacy_result = snapshot(5.0, vec![legacy]);
     let legacy_waiter = waiter(&legacy_result, "legacy");
     assert_eq!(legacy_waiter.queue_capacity_multiplier, Some(1.5));
-    assert_eq!(legacy_waiter.admission_limit, 5.0);
+    assert_eq!(legacy_waiter.admission_limit, 7.5);
 }

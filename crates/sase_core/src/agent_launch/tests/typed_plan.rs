@@ -821,10 +821,10 @@ fn typed_launch_parses_queue_spellings_and_round_trips() {
     assert_eq!(cleaned, "Do work");
 
     let both =
-        plan_queue("%w(builder, time=5m) %q(1, p=20, weight=2)\nDo work");
+        plan_queue("%w(builder, time=5m) %q(2, p=20, weight=2)\nDo work");
     match &both.units[0].payload {
         LaunchUnitPayloadWire::Agent(agent) => {
-            assert_eq!(agent.authored_queue_capacity(), Some(1));
+            assert_eq!(agent.authored_queue_capacity(), Some(2));
             assert_eq!(agent.wait_priority, Some(20));
             assert_eq!(agent.queue_weight, Some(2.0));
             assert!(agent.queue_weight_explicit);
@@ -840,7 +840,7 @@ fn typed_launch_parses_queue_spellings_and_round_trips() {
         },
         &[],
     );
-    assert!(rebuilt.contains("%queue(capacity=1, priority=20, weight=2)"));
+    assert!(rebuilt.contains("%queue(capacity=2, priority=20, weight=2)"));
     assert!(!rebuilt.contains("%wait(runners="));
     assert!(!rebuilt.contains("%queue(runners="));
     assert!(!rebuilt.contains("%wait(priority="));
@@ -968,7 +968,7 @@ fn typed_launch_proc_queue_changes_content_digest() {
 #[test]
 fn typed_launch_composes_disjoint_queue_and_fanout() {
     let plan = plan_typed_launch_units_with_flags(
-        "%q:0 %queue(priority=10)\nFirst\n---\n%q(p=1, w=.25)\nSecond",
+        "%q:1 %queue(priority=10)\nFirst\n---\n%q(p=1, w=.25)\nSecond",
         Some("multi_prompt"),
         Some("sase"),
         &[],
@@ -976,7 +976,7 @@ fn typed_launch_composes_disjoint_queue_and_fanout() {
     .unwrap();
     match &plan.units[0].payload {
         LaunchUnitPayloadWire::Agent(agent) => {
-            assert_eq!(agent.authored_queue_capacity(), Some(0));
+            assert_eq!(agent.authored_queue_capacity(), Some(1));
             assert_eq!(agent.wait_priority, Some(10));
             assert_eq!(agent.prompt, "First");
         }

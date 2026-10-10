@@ -50,15 +50,19 @@ fn default_weights_match_serial_and_parallel_lane_counting() {
 }
 
 #[test]
-fn explicit_capacity_cannot_bypass_global_budget() {
+fn explicit_capacity_budget_replaces_global_limit() {
     let occupied = running("occupied", Some(1.0));
     let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
     waiter.queue_capacity = Some(99);
     waiter.queue_capacity_explicit = true;
 
     let result = snapshot(1.0, vec![occupied, waiter]);
-    assert!(result.first_eligible_artifact_dir.is_none());
-    assert_eq!(result.waiters[0].blockers[0].code, "insufficient-capacity");
+    assert_eq!(
+        result.first_eligible_artifact_dir.as_deref(),
+        Some("/tmp/waiter")
+    );
+    assert!(result.waiters[0].eligible);
+    assert_eq!(result.waiters[0].admission_limit, 99.0);
     assert_eq!(result.waiters[0].wait_capacity_shortfall, 0.0);
 }
 
@@ -108,7 +112,7 @@ fn capacity_budget_below_global_limit_is_strict() {
 }
 
 #[test]
-fn four_light_claims_satisfy_capacity_one() {
+fn over_budget_weight_blocks_behind_full_capacity_one() {
     let mut records: Vec<RunnerCapacityRecordWire> = (0..4)
         .map(|index| running(&format!("light{index}"), Some(0.25)))
         .collect();
@@ -121,12 +125,12 @@ fn four_light_claims_satisfy_capacity_one() {
     let result = snapshot(8.0, records);
     assert_eq!(result.occupied_capacity, 1.0);
     assert_eq!(result.occupied_lanes, 4);
-    assert_eq!(
-        result.first_eligible_artifact_dir.as_deref(),
-        Some("/tmp/waiter")
-    );
-    assert!(waiter(&result, "waiter").eligible);
-    assert_eq!(waiter(&result, "waiter").wait_capacity_shortfall, 0.0);
+    assert!(result.first_eligible_artifact_dir.is_none());
+    let blocked = waiter(&result, "waiter");
+    assert!(!blocked.eligible);
+    assert_eq!(blocked.admission_limit, 1.0);
+    assert_eq!(blocked.blockers[0].code, "insufficient-capacity");
+    assert_eq!(blocked.wait_capacity_shortfall, 0.0);
 }
 
 #[test]
@@ -138,25 +142,32 @@ fn one_heavy_claim_exceeds_capacity_one() {
 
     let result = snapshot(8.0, vec![occupied, waiter]);
     assert!(result.first_eligible_artifact_dir.is_none());
-    assert_eq!(result.waiters[0].blockers[0].code, "capacity-condition");
-    assert_eq!(result.waiters[0].blockers[0].occupied_capacity, Some(2.0));
-    assert_eq!(result.waiters[0].blockers[0].capacity_threshold, Some(1));
-    assert_eq!(result.waiters[0].wait_capacity_shortfall, 1.0);
+    assert_eq!(result.waiters[0].blockers[0].code, "insufficient-capacity");
+    assert_eq!(result.waiters[0].wait_capacity_shortfall, 0.0);
 }
 
 #[test]
-fn capacity_zero_is_true_drain_including_tiny_weight() {
+fn legacy_capacity_zero_with_negligible_load_admits_immediately() {
     let occupied = running("tiny", Some(f64::MIN_POSITIVE));
-    let mut waiter = waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
-    waiter.queue_capacity = Some(0);
-    waiter.queue_capacity_explicit = true;
+    let mut waiting_agent =
+        waiting("waiter", "2026-09-10T00:00:00Z", Some(0.25));
+    waiting_agent.queue_capacity = Some(0);
+    waiting_agent.queue_capacity_explicit = true;
 
-    let blocked = snapshot(8.0, vec![occupied, waiter.clone()]);
-    assert!(blocked.first_eligible_artifact_dir.is_none());
-    assert_eq!(blocked.waiters[0].blockers[0].code, "capacity-condition");
-    assert!(blocked.waiters[0].wait_capacity_shortfall > 0.0);
+    let admitted = snapshot(8.0, vec![occupied, waiting_agent.clone()]);
+    assert_eq!(
+        admitted.first_eligible_artifact_dir.as_deref(),
+        Some("/tmp/waiter")
+    );
+    let admitted_waiter = waiter(&admitted, "waiter");
+    assert!(admitted_waiter.eligible);
+    assert_eq!(admitted_waiter.admission_limit, 0.25);
+    assert!(admitted
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "legacy-capacity-zero"));
 
-    occupied_drain_admits(waiter);
+    occupied_drain_admits(waiting_agent);
 }
 
 #[test]

@@ -768,7 +768,7 @@ pub fn directive_snippet_recipes(
 
 pub fn directive_snippet_recipes_with_flags(
     name: &str,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> Vec<DirectiveSnippetRecipeContract> {
     match name {
         "alt" => vec![recipe(
@@ -791,19 +791,10 @@ pub fn directive_snippet_recipes_with_flags(
             ),
         ],
         "queue" => {
-            let budget = crate::queue_directive::queue_capacity_budget_enabled(
-                enabled_feature_flags,
-            );
-            let colon_help = if budget {
-                "Set this launch's capacity budget with the short alias."
-            } else {
-                "Set a weighted-load capacity threshold with the short alias."
-            };
-            let paren_help = if budget {
-                "Set this launch's capacity budget and priority."
-            } else {
-                "Set both weighted-load capacity and priority."
-            };
+            let colon_help =
+                "Set this launch's capacity budget with the short alias.";
+            let paren_help =
+                "Set this launch's capacity budget and priority.";
             vec![
                 colon_recipe("queue", "5"),
                 recipe(

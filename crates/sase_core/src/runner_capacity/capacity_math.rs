@@ -31,37 +31,6 @@ pub(super) fn waiter_capacity_shortfall(
     }
 }
 
-pub(super) fn waiter_capacity_condition_shortfall(
-    occupied_capacity: f64,
-    wait_capacity: Option<u32>,
-) -> f64 {
-    let Some(threshold) = wait_capacity else {
-        return 0.0;
-    };
-    if !occupied_capacity_exceeds_threshold(occupied_capacity, threshold) {
-        return 0.0;
-    }
-    if threshold == 0 {
-        occupied_capacity.max(0.0)
-    } else {
-        (occupied_capacity - f64::from(threshold)).max(0.0)
-    }
-}
-
-pub(super) fn occupied_capacity_exceeds_threshold(
-    occupied_capacity: f64,
-    threshold: u32,
-) -> bool {
-    if !occupied_capacity.is_finite() {
-        return true;
-    }
-    if threshold == 0 {
-        occupied_capacity > 0.0
-    } else {
-        !capacity_fits(occupied_capacity, f64::from(threshold))
-    }
-}
-
 pub(super) fn weights_equal(left: f64, right: f64) -> bool {
     if !left.is_finite() || !right.is_finite() {
         return false;

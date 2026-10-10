@@ -25,10 +25,15 @@ pub fn queue_directive_enabled(_enabled_feature_flags: &[String]) -> bool {
     true
 }
 
-pub fn queue_capacity_budget_enabled(enabled_feature_flags: &[String]) -> bool {
-    enabled_feature_flags
-        .iter()
-        .any(|flag| flag == QUEUE_CAPACITY_BUDGET_FLAG)
+/// Return whether the `%queue` capacity budget is enabled.
+///
+/// The capacity budget is unconditional now that the sunset flag retired;
+/// the argument is kept for source compatibility with callers from the
+/// temporary migration window.
+pub fn queue_capacity_budget_enabled(
+    _enabled_feature_flags: &[String],
+) -> bool {
+    true
 }
 
 /// Fold legacy `wait_runners*` keys into canonical `queue_capacity*`.
@@ -133,9 +138,10 @@ pub fn queue_capacity_multiplier_from_map(
 
 /// Shared persisted-zero translation for admission and continuation resume.
 ///
-/// Newly authored zero capacity remains a parse error when the budget flag is on.
-/// A persisted explicit zero becomes an exact effective-weight drain budget
-/// rather than a rounded integer or a silent fall-back to the global limit.
+/// Newly authored zero capacity remains a parse error now that the capacity
+/// budget is unconditional. A persisted explicit zero becomes an exact
+/// effective-weight drain budget rather than a rounded integer or a silent
+/// fall-back to the global limit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersistedQueueCapacityNormWire {
@@ -157,7 +163,7 @@ pub fn normalize_persisted_queue_capacity(
     queue_capacity_explicit: bool,
     effective_weight: f64,
     global_limit: f64,
-    capacity_budget: bool,
+    _capacity_budget: bool,
 ) -> PersistedQueueCapacityNormWire {
     normalize_persisted_queue_capacity_with_multiplier(
         queue_capacity,
@@ -165,7 +171,7 @@ pub fn normalize_persisted_queue_capacity(
         None,
         effective_weight,
         global_limit,
-        capacity_budget,
+        true,
     )
 }
 
@@ -178,7 +184,7 @@ pub fn normalize_persisted_queue_capacity_with_multiplier(
     queue_capacity_multiplier: Option<f64>,
     effective_weight: f64,
     global_limit: f64,
-    capacity_budget: bool,
+    _capacity_budget: bool,
 ) -> PersistedQueueCapacityNormWire {
     let multiplier = if queue_capacity.is_none() {
         queue_capacity_multiplier
@@ -188,12 +194,11 @@ pub fn normalize_persisted_queue_capacity_with_multiplier(
     };
     if let Some(multiplier) = multiplier {
         return PersistedQueueCapacityNormWire {
-            admission_limit: if capacity_budget {
-                resolve_queue_capacity_multiplier(multiplier, global_limit)
-                    .unwrap_or(global_limit)
-            } else {
-                global_limit
-            },
+            admission_limit: resolve_queue_capacity_multiplier(
+                multiplier,
+                global_limit,
+            )
+            .unwrap_or(global_limit),
             authored_capacity: None,
             authored_multiplier: Some(multiplier),
             authored_explicit: true,
@@ -202,7 +207,7 @@ pub fn normalize_persisted_queue_capacity_with_multiplier(
             reauthor_multiplier: Some(multiplier),
         };
     }
-    if !capacity_budget || !queue_capacity_explicit {
+    if !queue_capacity_explicit {
         return PersistedQueueCapacityNormWire {
             admission_limit: global_limit,
             authored_capacity: queue_capacity,
@@ -373,13 +378,12 @@ pub fn collect_queue_fields(
 
 pub fn collect_queue_fields_with_flags(
     occurrences: &[QueueOccurrenceWire],
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> QueueCollectResultWire {
     let mut fields = QueueFieldsWire::default();
     let mut errors = Vec::new();
-    let capacity_budget = queue_capacity_budget_enabled(enabled_feature_flags);
     for occurrence in occurrences {
-        match parse_queue_occurrence(occurrence, capacity_budget) {
+        match parse_queue_occurrence(occurrence) {
             Ok(part) => {
                 if let Err(error) =
                     merge_queue_part(&mut fields, part, occurrence.source_span)
@@ -391,9 +395,7 @@ pub fn collect_queue_fields_with_flags(
         }
     }
     if errors.is_empty() {
-        if let Err(error) =
-            validate_queue_budget_fields(&fields, capacity_budget)
-        {
+        if let Err(error) = validate_queue_budget_fields(&fields) {
             errors.push(error);
         }
     }
@@ -465,13 +467,9 @@ pub fn parse_queue_capacity(raw: &str) -> Result<u32, QueueParseErrorWire> {
 
 pub fn parse_queue_capacity_with_flags(
     raw: &str,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> Result<u32, QueueParseErrorWire> {
-    parse_capacity_absolute(
-        raw,
-        None,
-        queue_capacity_budget_enabled(enabled_feature_flags),
-    )
+    parse_capacity_absolute(raw, None)
 }
 
 /// Validate an integer capacity or `<M>x` multiplier through the same
@@ -484,13 +482,9 @@ pub fn parse_queue_capacity_value(
 
 pub fn parse_queue_capacity_value_with_flags(
     raw: &str,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> Result<QueueCapacityValueWire, QueueParseErrorWire> {
-    Ok(capacity_kind_to_wire(parse_capacity(
-        raw,
-        None,
-        queue_capacity_budget_enabled(enabled_feature_flags),
-    )?))
+    Ok(capacity_kind_to_wire(parse_capacity(raw, None)?))
 }
 
 /// Return whether `value` is a finite multiplier greater than zero, with at
@@ -529,7 +523,6 @@ pub fn queue_directive_disabled_message() -> String {
 
 fn parse_queue_occurrence(
     occurrence: &QueueOccurrenceWire,
-    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     match queue_form(&occurrence.source, occurrence.has_plus_suffix) {
@@ -539,21 +532,20 @@ fn parse_queue_occurrence(
             span,
         )),
         QueueForm::Bare => Err(empty_queue_error(span)),
-        QueueForm::Colon => parse_colon_occurrence(occurrence, capacity_budget),
+        QueueForm::Colon => parse_colon_occurrence(occurrence),
         QueueForm::Parenthesized { closed: false } => Err(queue_error(
             "malformed-queue",
             "Malformed %queue(...) directive: missing closing ')'.",
             span,
         )),
         QueueForm::Parenthesized { closed: true } => {
-            parse_parenthesized_occurrence(occurrence, capacity_budget)
+            parse_parenthesized_occurrence(occurrence)
         }
     }
 }
 
 fn parse_colon_occurrence(
     occurrence: &QueueOccurrenceWire,
-    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     if occurrence.args.iter().any(|arg| arg.name.is_some()) {
@@ -577,13 +569,11 @@ fn parse_colon_occurrence(
     Ok(capacity_kind_to_fields(parse_capacity(
         &positionals[0].value,
         span,
-        capacity_budget,
     )?))
 }
 
 fn parse_parenthesized_occurrence(
     occurrence: &QueueOccurrenceWire,
-    capacity_budget: bool,
 ) -> Result<QueueFieldsWire, QueueParseErrorWire> {
     let span = Some(occurrence.source_span);
     if occurrence.args.is_empty()
@@ -608,12 +598,7 @@ fn parse_parenthesized_occurrence(
                     return Err(extra_positional_error(span));
                 }
                 positional_seen = true;
-                assign_capacity(
-                    &mut fields,
-                    &arg.value,
-                    span,
-                    capacity_budget,
-                )?;
+                assign_capacity(&mut fields, &arg.value, span)?;
             }
             Some(literal) => {
                 if literal.is_empty() {
@@ -636,12 +621,7 @@ fn parse_parenthesized_occurrence(
                 seen_literals.push(key.clone());
                 match canonical_queue_key(&key).as_str() {
                     "capacity" => {
-                        assign_capacity(
-                            &mut fields,
-                            &arg.value,
-                            span,
-                            capacity_budget,
-                        )?;
+                        assign_capacity(&mut fields, &arg.value, span)?;
                     }
                     "priority" => {
                         assign_priority(&mut fields, &arg.value, span)?;
@@ -684,12 +664,11 @@ fn assign_capacity(
     fields: &mut QueueFieldsWire,
     raw: &str,
     span: Option<[usize; 2]>,
-    capacity_budget: bool,
 ) -> Result<(), QueueParseErrorWire> {
     if queue_fields_has_capacity(fields) {
         return Err(duplicate_field_error("capacity", span));
     }
-    apply_capacity_kind(fields, parse_capacity(raw, span, capacity_budget)?);
+    apply_capacity_kind(fields, parse_capacity(raw, span)?);
     Ok(())
 }
 
@@ -747,7 +726,6 @@ fn merge_queue_part(
 fn parse_capacity(
     raw: &str,
     span: Option<[usize; 2]>,
-    capacity_budget: bool,
 ) -> Result<QueueCapacityKind, QueueParseErrorWire> {
     if raw.ends_with('x') {
         return parse_capacity_multiplier(raw, span)
@@ -756,14 +734,12 @@ fn parse_capacity(
     if raw.ends_with('X') {
         return Err(invalid_capacity_multiplier_error(span));
     }
-    parse_capacity_absolute(raw, span, capacity_budget)
-        .map(QueueCapacityKind::Absolute)
+    parse_capacity_absolute(raw, span).map(QueueCapacityKind::Absolute)
 }
 
 fn parse_capacity_absolute(
     raw: &str,
     span: Option<[usize; 2]>,
-    capacity_budget: bool,
 ) -> Result<u32, QueueParseErrorWire> {
     let digits = parse_non_negative_decimal(raw)
         .map_err(|kind| integer_error("capacity", kind, span))?;
@@ -777,7 +753,7 @@ fn parse_capacity_absolute(
             span,
         )
     })?;
-    if capacity_budget && value == 0 {
+    if value == 0 {
         return Err(invalid_capacity_zero_error(span));
     }
     Ok(value)
@@ -959,11 +935,7 @@ fn capacity_kind_to_wire(kind: QueueCapacityKind) -> QueueCapacityValueWire {
 
 fn validate_queue_budget_fields(
     fields: &QueueFieldsWire,
-    capacity_budget: bool,
 ) -> Result<(), QueueParseErrorWire> {
-    if !capacity_budget {
-        return Ok(());
-    }
     if fields.queue_capacity_multiplier.is_some() {
         return Ok(());
     }
@@ -1114,7 +1086,7 @@ fn duplicate_field_error(
 fn obsolete_runners_error(span: Option<[usize; 2]>) -> QueueParseErrorWire {
     queue_error(
         "obsolete-queue-runners",
-        "%queue(runners=...) has been renamed. Use %queue(capacity=N) or %q:N; capacity is a weighted-load threshold, not a count of running agents.",
+        "%queue(runners=...) has been renamed. Use %queue(capacity=N) or %q:N; capacity is this launch's capacity budget, not a count of running agents.",
         span,
     )
 }
@@ -1343,12 +1315,16 @@ mod tests {
     }
 
     #[test]
-    fn explicit_zero_is_distinct_from_omitted() {
-        let zero = collect_ok(&[occ("%q:0", vec![positional("0")])]);
-        assert_eq!(zero.queue_capacity, Some(0));
-        assert_eq!(zero.priority, None);
+    fn newly_authored_zero_capacity_is_rejected() {
+        for occurrence in [
+            occ("%q:0", vec![positional("0")]),
+            occ("%queue(capacity=0)", vec![named("capacity", "0")]),
+        ] {
+            let errors = collect_err(std::slice::from_ref(&occurrence));
+            assert_eq!(errors[0].code, "invalid-queue-capacity-zero");
+            assert!(errors[0].message.contains("%q:1"), "{errors:?}");
+        }
         let omitted = QueueFieldsWire::default();
-        assert_ne!(zero, omitted);
         assert_eq!(format_queue_directive(&omitted), None);
         let default_priority = collect_ok(&[occ(
             "%queue(priority=10)",
@@ -1358,42 +1334,31 @@ mod tests {
     }
 
     #[test]
-    fn capacity_budget_flag_rejects_zero_capacity() {
-        let flags = capacity_budget_flags();
-        for occurrence in [
-            occ("%q:0", vec![positional("0")]),
-            occ("%queue(capacity=0)", vec![named("capacity", "0")]),
-        ] {
-            let errors = collect_err_with_flags(&[occurrence], &flags);
-            assert_eq!(errors[0].code, "invalid-queue-capacity-zero");
-            assert!(errors[0].message.contains("%q:1"), "{errors:?}");
+    fn zero_capacity_value_is_rejected_unconditionally() {
+        for flags in [Vec::new(), capacity_budget_flags()] {
+            let error =
+                parse_queue_capacity_with_flags("0", &flags).unwrap_err();
+            assert_eq!(error.code, "invalid-queue-capacity-zero");
         }
-        assert_eq!(parse_queue_capacity("0"), Ok(0));
-        let error = parse_queue_capacity_with_flags("0", &flags).unwrap_err();
-        assert_eq!(error.code, "invalid-queue-capacity-zero");
+        assert_eq!(
+            parse_queue_capacity("0").unwrap_err().code,
+            "invalid-queue-capacity-zero"
+        );
     }
 
     #[test]
-    fn capacity_budget_flag_rejects_weight_over_capacity() {
+    fn weight_over_capacity_is_rejected_unconditionally() {
         let occurrence = occ(
             "%q(capacity=1, w=2)",
             vec![named("capacity", "1"), named("w", "2")],
         );
-        let old = collect_ok(std::slice::from_ref(&occurrence));
-        assert_eq!(old.queue_capacity, Some(1));
-        assert_eq!(old.weight, Some(2.0));
-
-        let flags = capacity_budget_flags();
-        let errors = collect_err_with_flags(&[occurrence], &flags);
+        let errors = collect_err(std::slice::from_ref(&occurrence));
         assert_eq!(errors[0].code, "queue-weight-exceeds-capacity");
 
-        let composed = collect_err_with_flags(
-            &[
-                occ("%q:1", vec![positional("1")]),
-                occ("%q(w=2)", vec![named("w", "2")]),
-            ],
-            &flags,
-        );
+        let composed = collect_err(&[
+            occ("%q:1", vec![positional("1")]),
+            occ("%q(w=2)", vec![named("w", "2")]),
+        ]);
         assert_eq!(composed[0].code, "queue-weight-exceeds-capacity");
     }
 
@@ -1552,7 +1517,10 @@ mod tests {
             "queue-overflow-capacity"
         );
         assert_eq!(parse_queue_capacity(&u32::MAX.to_string()), Ok(u32::MAX));
-        assert_eq!(parse_queue_capacity("0"), Ok(0));
+        assert_eq!(
+            parse_queue_capacity("0").unwrap_err().code,
+            "invalid-queue-capacity-zero"
+        );
         assert_eq!(
             parse_queue_capacity("4294967296").unwrap_err().code,
             "queue-overflow-capacity"
@@ -1723,12 +1691,6 @@ mod tests {
         assert_eq!(positive.admission_limit, 100.0);
         assert_eq!(positive.reauthor_capacity, Some(100));
         assert!(!positive.legacy_zero);
-
-        let off =
-            normalize_persisted_queue_capacity(Some(0), true, 0.25, 8.0, false);
-        assert_eq!(off.admission_limit, 8.0);
-        assert_eq!(off.reauthor_capacity, Some(0));
-        assert!(!off.legacy_zero);
 
         let zero_weight =
             normalize_persisted_queue_capacity(Some(0), true, 0.0, 8.0, true);
@@ -1961,17 +1923,6 @@ mod tests {
         assert_eq!(on.authored_multiplier, Some(1.5));
         assert_eq!(on.reauthor_multiplier, Some(1.5));
         assert!(on.authored_explicit);
-
-        let off = normalize_persisted_queue_capacity_with_multiplier(
-            None,
-            false,
-            Some(1.5),
-            0.25,
-            5.0,
-            false,
-        );
-        assert_eq!(off.admission_limit, 5.0);
-        assert_eq!(off.reauthor_multiplier, Some(1.5));
 
         let integer_wins = normalize_persisted_queue_capacity_with_multiplier(
             Some(4),

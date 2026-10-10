@@ -4,14 +4,13 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 
 use crate::queue_directive::{
-    normalize_persisted_queue_capacity_with_multiplier,
-    queue_capacity_budget_enabled, queue_weight_is_valid, DEFAULT_QUEUE_WEIGHT,
+    normalize_persisted_queue_capacity_with_multiplier, queue_weight_is_valid,
+    DEFAULT_QUEUE_WEIGHT,
 };
 
 use super::capacity_math::{
-    capacity_fits, compare_f64, compensated_sum,
-    occupied_capacity_exceeds_threshold, ulp_at,
-    waiter_capacity_condition_shortfall, waiter_capacity_shortfall,
+    capacity_fits, compare_f64, compensated_sum, ulp_at,
+    waiter_capacity_shortfall,
 };
 use super::holds::hold_barrier_blockers;
 use super::records::{
@@ -31,10 +30,8 @@ struct WaiterEvaluation<'a> {
     claims: &'a [RunnerCapacityClaimWire],
     occupied_capacity: f64,
     requested_weight: f64,
-    queue_capacity: Option<u32>,
     admission_limit: f64,
     zero_drain_barrier: bool,
-    capacity_budget: bool,
     priority: i32,
     fail_closed: bool,
 }
@@ -62,7 +59,6 @@ pub(super) fn build_waiters(
 
     let mut drafts = Vec::new();
     let mut prior_eligible = false;
-    let capacity_budget = queue_capacity_budget_enabled(&request.feature_flags);
     for record in candidates {
         let priority = normalize_wait_priority(record.wait_priority);
         let requested_weight =
@@ -76,7 +72,6 @@ pub(super) fn build_waiters(
             requested_weight,
             queue_capacity,
             queue_capacity_multiplier,
-            capacity_budget,
             diagnostics,
         );
         let mut blockers = waiter_blockers(WaiterEvaluation {
@@ -85,10 +80,8 @@ pub(super) fn build_waiters(
             claims,
             occupied_capacity,
             requested_weight,
-            queue_capacity,
             admission_limit,
             zero_drain_barrier,
-            capacity_budget,
             priority,
             fail_closed,
         });
@@ -113,14 +106,7 @@ pub(super) fn build_waiters(
         } else {
             waiter_capacity_shortfall(claims, requested_weight, admission_limit)
         };
-        let wait_capacity_shortfall = if capacity_budget {
-            0.0
-        } else {
-            waiter_capacity_condition_shortfall(
-                occupied_capacity,
-                queue_capacity,
-            )
-        };
+        let wait_capacity_shortfall = 0.0;
         drafts.push(WaiterDraft {
             record,
             wire: RunnerCapacityWaiterWire {
@@ -161,7 +147,6 @@ fn waiter_admission_limit(
     requested_weight: f64,
     queue_capacity: Option<u32>,
     queue_capacity_multiplier: Option<f64>,
-    capacity_budget: bool,
     diagnostics: &mut Vec<RunnerCapacityDiagnosticWire>,
 ) -> (f64, bool) {
     let normalized = normalize_persisted_queue_capacity_with_multiplier(
@@ -170,7 +155,7 @@ fn waiter_admission_limit(
         queue_capacity_multiplier,
         requested_weight,
         request.effective_limit,
-        capacity_budget,
+        true,
     );
     if normalized.legacy_zero {
         diagnostics.push(diagnostic(
@@ -287,29 +272,6 @@ fn waiter_blockers(
                     Some(free_capacity),
                     None,
                     None,
-                    Some(eval.admission_limit),
-                ));
-            }
-        }
-    }
-    if !eval.capacity_budget {
-        if let Some(threshold) = eval.queue_capacity {
-            if occupied_capacity_exceeds_threshold(
-                eval.occupied_capacity,
-                threshold,
-            ) {
-                let message = if threshold == 0 {
-                    "Occupied weighted load must drain to zero before this capacity-0 waiter can start."
-                } else {
-                    "Occupied weighted load exceeds this explicit capacity threshold."
-                };
-                blockers.push(blocker(
-                    "capacity-condition",
-                    message,
-                    None,
-                    None,
-                    Some(eval.occupied_capacity),
-                    Some(threshold),
                     Some(eval.admission_limit),
                 ));
             }

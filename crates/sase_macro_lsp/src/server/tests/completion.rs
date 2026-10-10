@@ -795,7 +795,7 @@ async fn identity_and_static_value_roles_use_the_shared_contract() {
 }
 
 #[tokio::test]
-async fn directive_name_completion_documents_queue_capacity_flag_state() {
+async fn directive_name_completion_documents_queue_capacity_budget() {
     let (service, _) = LspService::new(|client| {
         MacroLspServer::with_bridge(
             client,
@@ -818,21 +818,6 @@ async fn directive_name_completion_documents_queue_capacity_flag_state() {
         Some(
             "Set this launch's capacity budget, <M>x multiplier of this machine's max_running_agents budget, priority, and capacity weight"
         )
-    );
-
-    server.config.write().unwrap().queue_capacity_budget = false;
-    let response = server
-        .completion_for_text("%q".to_string(), Position::new(0, 2))
-        .await
-        .unwrap();
-    let items = completion_items(response);
-    let queue = items
-        .iter()
-        .find(|item| item.label == "%queue")
-        .expect("%queue item");
-    assert_eq!(
-        markdown_documentation(queue),
-        Some("Set weighted-load capacity, priority, and capacity weight")
     );
 }
 
@@ -896,9 +881,6 @@ async fn queue_completion_avoids_agent_targets() {
         .await
         .iter()
         .all(|value| value != "planner"));
-    server.config.write().unwrap().queue_capacity_budget = false;
-    assert_eq!(labels_at(server, "%q:").await, vec!["0", "1"]);
-    assert_eq!(labels_at(server, "%queue(capacity=").await, vec!["0", "1"]);
 }
 
 #[tokio::test]

@@ -3,9 +3,8 @@ use super::super::wire::{
 };
 use super::metadata::{
     DIRECTIVES, HIDDEN_COMPLETION_DIRECTIVES, HIDDEN_DIRECTIVE_ALIASES,
-    IF_DIRECTIVE, QUEUE_DIRECTIVE_OFF, QUEUE_DIRECTIVE_ON,
+    IF_DIRECTIVE, QUEUE_DIRECTIVE_ON,
 };
-use crate::queue_directive::queue_capacity_budget_enabled;
 
 pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
     directive_is_hidden_from_name_completion_with_flags(name, &[])
@@ -65,13 +64,9 @@ pub fn if_directive_metadata(
 }
 
 pub fn queue_directive_metadata(
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> &'static DirectiveMetadata {
-    if queue_capacity_budget_enabled(enabled_feature_flags) {
-        &QUEUE_DIRECTIVE_ON
-    } else {
-        &QUEUE_DIRECTIVE_OFF
-    }
+    &QUEUE_DIRECTIVE_ON
 }
 
 /// Owned JSON-shaped copy of the canonical directive completion contract.

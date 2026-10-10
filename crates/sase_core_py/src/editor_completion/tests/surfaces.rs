@@ -484,7 +484,7 @@ fn directive_contract_and_completion_bindings_return_plain_json_shapes() {
         )
         .unwrap();
         assert_eq!(zero_formatted.as_deref(), Some("%queue(weight=0)"));
-        assert_eq!(py_parse_queue_capacity("0", None).unwrap(), 0);
+        assert!(py_parse_queue_capacity("0", None).is_err());
         assert_eq!(py_parse_queue_capacity("3", None).unwrap(), 3);
         assert!(py_parse_queue_capacity(
             "0",
