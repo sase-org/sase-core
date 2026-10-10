@@ -85,6 +85,12 @@ pub struct ProcWire {
     pub settled_at: Option<String>,
     #[serde(default)]
     pub finished_by: Option<String>,
+    /// Frozen command observation captured when settlement begins.
+    ///
+    /// Distinct from [`ProcWire::result`], which also carries operation
+    /// validation and follow-up information after bookkeeping finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_outcome: Option<ProcObservedSettlementOutcomeWire>,
     #[serde(default)]
     pub result: Option<serde_json::Value>,
     #[serde(
@@ -231,13 +237,31 @@ pub struct ProcStopRequestWire {
     pub reason: Option<String>,
 }
 
+/// One durably observed command result, frozen at settlement begin.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcObservedSettlementOutcomeWire {
+    pub status: String,
+    pub termination_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub command_ended_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcSettlementWire {
     pub proc_id: String,
     pub supervisor_id: String,
     pub settling_at: String,
     pub exit_code: Option<i32>,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ProcObservedSettlementOutcomeWire>,
+    /// Existing settlement sidecar JSON used only to adopt a pre-crash
+    /// observation onto a legacy settling row that has no frozen store field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -455,6 +479,12 @@ pub struct ProcUpdateWire {
         skip_serializing_if = "Option::is_none"
     )]
     pub finished_by: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub settlement_outcome: Option<Option<ProcObservedSettlementOutcomeWire>>,
     #[serde(
         default,
         deserialize_with = "deserialize_present_option",

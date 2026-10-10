@@ -251,3 +251,116 @@ fn reserve_proc_uses_proc_name_spelling() {
         assert!(outcome["proc"].get("shell_kind").is_none());
     });
 }
+
+#[test]
+fn begin_proc_settlement_round_trips_optional_outcome() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp
+            .path()
+            .join("settlement.jsonl")
+            .to_string_lossy()
+            .into_owned();
+        let reserve = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 5,
+                "proc_id": "proc-outcome",
+                "label": "Outcome proc",
+                "kind": "detached",
+                "argv": ["true"],
+                "cwd": "/tmp",
+                "project": "sase",
+                "workspace_num": 1,
+                "session_id": null,
+                "session_label": null,
+                "origin": "test",
+                "cl_name": null,
+                "tags": [],
+                "created_at": "2026-10-10T12:00:00Z",
+                "log_path": "/tmp/proc-outcome.log",
+                "log_owner": "proc-store",
+                "concurrency_keys": [],
+                "request_fingerprint": "fp-outcome",
+                "reserved_by": "agent-one",
+                "timeout_seconds": null,
+                "idle_timeout_seconds": null
+            }),
+        )
+        .unwrap();
+        let reserve = reserve.bind(py).downcast::<PyDict>().unwrap();
+        py_reserve_proc(py, &store_path, reserve, 10).unwrap();
+
+        let claim = json_value_to_py(
+            py,
+            &json!({
+                "proc_id": "proc-outcome",
+                "supervisor_id": "supervisor-a",
+                "claimed_at": "2026-10-10T12:00:01Z",
+                "pid": 9,
+                "pgid": 9
+            }),
+        )
+        .unwrap();
+        let claim = claim.bind(py).downcast::<PyDict>().unwrap();
+        py_claim_proc_supervisor(py, &store_path, claim).unwrap();
+
+        let settlement = json_value_to_py(
+            py,
+            &json!({
+                "proc_id": "proc-outcome",
+                "supervisor_id": "supervisor-a",
+                "settling_at": "2026-10-10T12:12:19Z",
+                "exit_code": 0,
+                "message": "completed successfully",
+                "outcome": {
+                    "status": "success",
+                    "termination_reason": "success",
+                    "exit_code": 0,
+                    "message": "completed successfully",
+                    "command_ended_at": "2026-10-10T12:12:19Z"
+                }
+            }),
+        )
+        .unwrap();
+        let settlement = settlement.bind(py).downcast::<PyDict>().unwrap();
+        let settling =
+            py_begin_proc_settlement(py, &store_path, settlement).unwrap();
+        let settling = py_to_json_value(settling.bind(py)).unwrap();
+        assert_eq!(settling["proc"]["status"], json!("settling"));
+        assert_eq!(
+            settling["proc"]["settlement_outcome"],
+            json!({
+                "status": "success",
+                "termination_reason": "success",
+                "exit_code": 0,
+                "message": "completed successfully",
+                "command_ended_at": "2026-10-10T12:12:19Z"
+            })
+        );
+
+        let legacy = json_value_to_py(
+            py,
+            &json!({
+                "proc_id": "proc-outcome",
+                "supervisor_id": "supervisor-a",
+                "settling_at": "2026-10-10T12:12:30Z",
+                "exit_code": 0,
+                "message": "supervisor exited without reporting"
+            }),
+        )
+        .unwrap();
+        let legacy = legacy.bind(py).downcast::<PyDict>().unwrap();
+        let replay = py_begin_proc_settlement(py, &store_path, legacy).unwrap();
+        let replay = py_to_json_value(replay.bind(py)).unwrap();
+        assert_eq!(
+            replay["proc"]["settlement_outcome"]["command_ended_at"],
+            json!("2026-10-10T12:12:19Z")
+        );
+        assert_eq!(
+            replay["proc"]["settlement_outcome"]["termination_reason"],
+            json!("success")
+        );
+    });
+}

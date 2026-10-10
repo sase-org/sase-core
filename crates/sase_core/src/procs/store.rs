@@ -260,15 +260,7 @@ pub fn begin_proc_settlement(
         ensure_named_proc(proc)?;
         ensure_not_terminal(proc, "begin settlement")?;
         ensure_supervisor_matches(proc, &settlement.supervisor_id)?;
-        proc.status = "settling".to_string();
-        proc.settling_started_at = Some(settlement.settling_at.clone());
-        if settlement.exit_code.is_some() {
-            proc.exit_code = settlement.exit_code;
-        }
-        if settlement.message.is_some() {
-            proc.message.clone_from(&settlement.message);
-        }
-        Ok(())
+        super::settlement::apply_begin_settlement(proc, settlement)
     })
 }
 
@@ -775,6 +767,7 @@ fn proc_from_reserve_request(
         settled_by: None,
         settled_at: None,
         finished_by: None,
+        settlement_outcome: None,
         result: None,
         prompt_proc: request.prompt_proc.clone(),
         service: request.service.clone(),
@@ -1065,6 +1058,9 @@ fn apply_update(
     if let Some(value) = &update.finished_by {
         proc.finished_by.clone_from(value);
     }
+    if let Some(value) = &update.settlement_outcome {
+        proc.settlement_outcome.clone_from(value);
+    }
     if let Some(value) = &update.result {
         proc.result.clone_from(value);
     }
@@ -1193,6 +1189,9 @@ fn normalize_and_validate_proc(
     .map_err(|reason| invalid_proc(proc, reason))?;
     validate_timestamp_field("settled_at", proc.settled_at.as_ref())
         .map_err(|reason| invalid_proc(proc, reason))?;
+    if let Some(outcome) = &proc.settlement_outcome {
+        super::settlement::validate_persisted_outcome(proc, outcome)?;
+    }
     Ok(())
 }
 
@@ -1530,6 +1529,7 @@ mod tests {
             settled_by: None,
             settled_at: None,
             finished_by: None,
+            settlement_outcome: None,
             result: None,
             prompt_proc: None,
             service: None,
@@ -2334,6 +2334,8 @@ mod tests {
                 settling_at: "2026-07-25T12:00:03Z".to_string(),
                 exit_code: Some(0),
                 message: Some("done".to_string()),
+                outcome: None,
+                sidecar: None,
             },
         )
         .unwrap()

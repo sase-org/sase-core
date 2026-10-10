@@ -801,6 +801,7 @@ mod tests {
             settled_by: None,
             settled_at: None,
             finished_by: None,
+            settlement_outcome: None,
             result: None,
             prompt_proc: None,
             service: None,

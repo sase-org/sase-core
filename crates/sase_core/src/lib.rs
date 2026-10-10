@@ -1328,7 +1328,8 @@ pub use plan::{
 pub use procs::{
     append_proc, begin_proc_settlement, claim_proc_supervisor, finish_proc,
     prune_procs, read_procs_snapshot, request_proc_stop, reserve_proc,
-    update_proc, ProcAppendOutcomeWire, ProcFinishWire, ProcPruneOutcomeWire,
+    select_settlement_outcome, update_proc, ProcAppendOutcomeWire,
+    ProcFinishWire, ProcObservedSettlementOutcomeWire, ProcPruneOutcomeWire,
     ProcReserveOutcomeWire, ProcReserveWire, ProcServiceWire,
     ProcSettlementWire, ProcStopRequestWire, ProcStoreError,
     ProcStoreSnapshotWire, ProcStoreStatsWire, ProcSupervisorClaimWire,
