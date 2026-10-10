@@ -1,15 +1,17 @@
 //! Client-side notification delivery rules.
 //!
 //! A rule matches notifications by tab, sender, action, tag, title, or note
-//! text and decides whether a TUI toast is shown and how the arrival is
-//! announced. Delivery is purely a presentation decision: no rule ever changes
-//! whether a notification is created, stored, read, muted, or snoozed.
+//! text and decides whether a TUI toast is shown, how the arrival is
+//! announced, and whether the row is delivered to Telegram. Delivery is
+//! purely a presentation decision: no rule ever changes whether a
+//! notification is created, stored, read, muted, or snoozed.
 //!
 //! Resolution is "first matching rule that sets a field wins that field".
 //! Rules are consulted in descending `priority`, ties broken by position, and
-//! `toast` and `sound` are resolved independently. A field no matching rule
-//! sets keeps the built-in default (`toast: true`, `sound: bell`), which is
-//! what every notification did before rules existed.
+//! `toast`, `sound`, and `telegram` are resolved independently. A field no
+//! matching rule sets keeps the built-in default (`toast: true`,
+//! `sound: bell`, `telegram: true`), which is what every notification did
+//! before rules existed.
 
 use std::cmp::Reverse;
 use std::fmt;
@@ -53,6 +55,11 @@ pub struct NotificationRuleWire {
     /// field to later rules. See [`NotificationSoundWire::from_setting`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound: Option<String>,
+    /// Whether the row may be delivered to Telegram; unset leaves the field
+    /// to later rules. `true` permits delivery (subject to the transport's
+    /// own eligibility checks); `false` suppresses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<bool>,
 }
 
 /// The criteria of one rule: all-of across criteria, any-of within a list.
@@ -148,11 +155,11 @@ impl NotificationSoundWire {
 
 /// The resolved delivery for one notification.
 ///
-/// `toast_rule` and `sound_rule` name the rule that decided each field (its
-/// `name`, else `rule[<index>]`, the zero-based position in the rule list
-/// that was resolved), and are `None` when the field kept the built-in
-/// default. That is all `sase notify rules --explain` needs, with no second
-/// evaluation pass.
+/// `toast_rule`, `sound_rule`, and `telegram_rule` name the rule that decided
+/// each field (its `name`, else `rule[<index>]`, the zero-based position in
+/// the rule list that was resolved), and are `None` when the field kept the
+/// built-in default. That is all `sase notify rules --explain` needs, with no
+/// second evaluation pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationDeliveryWire {
     pub schema_version: u32,
@@ -162,10 +169,22 @@ pub struct NotificationDeliveryWire {
     pub toast_rule: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sound_rule: Option<String>,
+    /// Whether Telegram delivery is permitted. Legacy payloads without this
+    /// field read as `true`, preserving the pre-rule behavior.
+    #[serde(default = "default_telegram_delivery")]
+    pub telegram: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_rule: Option<String>,
+}
+
+/// The built-in Telegram delivery: permitted, decided by no rule.
+fn default_telegram_delivery() -> bool {
+    true
 }
 
 impl Default for NotificationDeliveryWire {
-    /// The built-in delivery: toast and ring the bell, decided by no rule.
+    /// The built-in delivery: toast, ring the bell, and permit Telegram,
+    /// decided by no rule.
     fn default() -> Self {
         Self {
             schema_version: NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
@@ -173,6 +192,8 @@ impl Default for NotificationDeliveryWire {
             sound: NotificationSoundWire::Bell,
             toast_rule: None,
             sound_rule: None,
+            telegram: true,
+            telegram_rule: None,
         }
     }
 }
@@ -247,6 +268,7 @@ struct CompiledRule {
     label: String,
     toast: Option<bool>,
     sound: Option<NotificationSoundWire>,
+    telegram: Option<bool>,
     criteria: CompiledCriteria,
 }
 
@@ -280,7 +302,7 @@ fn compile_rule(
         .sound
         .as_deref()
         .and_then(NotificationSoundWire::from_setting);
-    if rule.toast.is_none() && sound.is_none() {
+    if rule.toast.is_none() && sound.is_none() && rule.telegram.is_none() {
         return None;
     }
     let label = rule
@@ -293,6 +315,7 @@ fn compile_rule(
         label,
         toast: rule.toast,
         sound,
+        telegram: rule.telegram,
         criteria: CompiledCriteria {
             tab: compile_globs(criteria.tab.as_deref(), normalize_tab),
             sender: compile_globs(criteria.sender.as_deref(), identity),
@@ -341,10 +364,12 @@ fn resolve_compiled(
     let facts = RowFacts::from_row(row);
     let mut toast_open = true;
     let mut sound_open = true;
+    let mut telegram_open = true;
     for rule in rules {
         let toast = rule.toast.filter(|_| toast_open);
         let sound = rule.sound.as_ref().filter(|_| sound_open);
-        if toast.is_none() && sound.is_none() {
+        let telegram = rule.telegram.filter(|_| telegram_open);
+        if toast.is_none() && sound.is_none() && telegram.is_none() {
             continue;
         }
         if !rule.criteria.matches(&facts) {
@@ -360,7 +385,12 @@ fn resolve_compiled(
             delivery.sound_rule = Some(rule.label.clone());
             sound_open = false;
         }
-        if !toast_open && !sound_open {
+        if let Some(telegram) = telegram {
+            delivery.telegram = telegram;
+            delivery.telegram_rule = Some(rule.label.clone());
+            telegram_open = false;
+        }
+        if !toast_open && !sound_open && !telegram_open {
             break;
         }
     }
@@ -833,8 +863,10 @@ mod tests {
         let delivery = built_in();
         assert!(delivery.toast);
         assert_eq!(delivery.sound, NotificationSoundWire::Bell);
+        assert!(delivery.telegram);
         assert_eq!(delivery.toast_rule, None);
         assert_eq!(delivery.sound_rule, None);
+        assert_eq!(delivery.telegram_rule, None);
         assert_eq!(
             delivery.schema_version,
             NOTIFICATION_STORE_WIRE_SCHEMA_VERSION
@@ -1329,6 +1361,7 @@ mod tests {
         let bare = rule(json!({}));
         assert_eq!(bare, NotificationRuleWire::default());
         assert_eq!(bare.priority, 0);
+        assert_eq!(bare.telegram, None);
 
         let full = rule(json!({
             "name": "n",
@@ -1337,6 +1370,7 @@ mod tests {
             "match": {"tab": "beads", "tags": ["a", "b"]},
             "toast": false,
             "sound": "none",
+            "telegram": false,
         }));
         let round_tripped: NotificationRuleWire =
             serde_json::from_value(serde_json::to_value(&full).unwrap())
@@ -1357,6 +1391,7 @@ mod tests {
                 "schema_version": NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
                 "toast": true,
                 "sound": {"kind": "bell"},
+                "telegram": true,
             })
         );
 
@@ -1382,5 +1417,150 @@ mod tests {
             json!({"kind": "file", "path": "/x/y z.wav"})
         );
         assert_eq!(value["sound_rule"], json!("rule[0]"));
+
+        // Telegram defaults to true alongside the TUI defaults.
+        assert_eq!(value["telegram"], json!(true));
+        assert_eq!(value.get("telegram_rule"), None);
+    }
+
+    #[test]
+    fn telegram_defaults_to_true_and_resolves_independently() {
+        // No rules: Telegram permitted by default.
+        assert!(resolve_notification_delivery(&[], &axe_error()).telegram);
+        assert_eq!(
+            resolve_notification_delivery(&[], &axe_error()).telegram_rule,
+            None
+        );
+
+        // A telegram-only rule suppresses Telegram without touching TUI.
+        let rules = vec![rule(json!({
+            "name": "no-tg",
+            "match": {"tab": "beads"},
+            "telegram": false,
+        }))];
+        let triage = resolve_notification_delivery(&rules, &task_triage());
+        assert!(!triage.telegram);
+        assert_eq!(triage.telegram_rule.as_deref(), Some("no-tg"));
+        assert!(triage.toast);
+        assert_eq!(triage.toast_rule, None);
+        assert_eq!(triage.sound, NotificationSoundWire::Bell);
+
+        // Non-matching rows stay permitted.
+        let axe = resolve_notification_delivery(&rules, &axe_error());
+        assert!(axe.telegram);
+        assert_eq!(axe.telegram_rule, None);
+
+        // A toast-only rule never suppresses Telegram.
+        let rules = vec![rule(json!({
+            "match": {"tab": "beads"},
+            "toast": false,
+            "sound": "none",
+        }))];
+        let triage = resolve_notification_delivery(&rules, &task_triage());
+        assert!(triage.telegram);
+        assert_eq!(triage.telegram_rule, None);
+        assert!(!triage.toast);
+    }
+
+    #[test]
+    fn telegram_rule_after_tui_rule_still_applies() {
+        // The global TUI rule sets toast/sound but not telegram; the Athena
+        // telegram rule later in list order must still be consulted.
+        let rules = vec![
+            rule(json!({
+                "name": "quiet-task-beads",
+                "match": {"tab": "beads"},
+                "toast": false,
+                "sound": "none",
+            })),
+            rule(json!({
+                "name": "quiet-task-beads-telegram",
+                "match": {"tab": "beads"},
+                "telegram": false,
+            })),
+        ];
+        let delivery = resolve_notification_delivery(&rules, &task_triage());
+        assert!(!delivery.toast);
+        assert_eq!(delivery.toast_rule.as_deref(), Some("quiet-task-beads"));
+        assert!(!delivery.telegram);
+        assert_eq!(
+            delivery.telegram_rule.as_deref(),
+            Some("quiet-task-beads-telegram")
+        );
+
+        // Reversed priority still respects first-match-per-field.
+        let rules = vec![
+            rule(json!({
+                "name": "allow",
+                "priority": 10,
+                "telegram": true,
+            })),
+            rule(json!({
+                "name": "deny",
+                "telegram": false,
+            })),
+        ];
+        let delivery = resolve_notification_delivery(&rules, &axe_error());
+        assert!(delivery.telegram);
+        assert_eq!(delivery.telegram_rule.as_deref(), Some("allow"));
+
+        // Equal priorities keep list order.
+        let rules = vec![
+            rule(json!({"name": "a", "telegram": false})),
+            rule(json!({"name": "b", "telegram": true})),
+        ];
+        let delivery = resolve_notification_delivery(&rules, &axe_error());
+        assert!(!delivery.telegram);
+        assert_eq!(delivery.telegram_rule.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn telegram_suppression_serializes_and_legacy_payloads_default_true() {
+        let rules = vec![rule(json!({"name": "no-tg", "telegram": false}))];
+        let value = serde_json::to_value(resolve_notification_delivery(
+            &rules,
+            &axe_error(),
+        ))
+        .unwrap();
+        assert_eq!(value["telegram"], json!(false));
+        assert_eq!(value["telegram_rule"], json!("no-tg"));
+
+        // Legacy delivery payloads without the additive fields read as
+        // permitted with no deciding rule.
+        let legacy: NotificationDeliveryWire = serde_json::from_value(json!({
+            "schema_version": NOTIFICATION_STORE_WIRE_SCHEMA_VERSION,
+            "toast": true,
+            "sound": {"kind": "bell"},
+        }))
+        .unwrap();
+        assert!(legacy.telegram);
+        assert_eq!(legacy.telegram_rule, None);
+
+        // Old rules without the field mean unset.
+        let old = rule(json!({"toast": false}));
+        assert_eq!(old.telegram, None);
+    }
+
+    #[test]
+    fn telegram_rejects_non_boolean_shapes() {
+        for bad in [json!("no"), json!(0), json!(1), json!("false")] {
+            let err = serde_json::from_value::<NotificationRuleWire>(json!({
+                "telegram": bad,
+            }))
+            .unwrap_err()
+            .to_string();
+            assert!(!err.is_empty(), "telegram={bad}");
+        }
+    }
+
+    #[test]
+    fn telegram_only_rule_is_effective_and_not_a_no_op() {
+        let rules = vec![rule(json!({"name": "tg-only", "telegram": false}))];
+        let delivery = resolve_notification_delivery(&rules, &axe_error());
+        assert!(!delivery.telegram);
+        assert_eq!(delivery.telegram_rule.as_deref(), Some("tg-only"));
+        // TUI fields keep their defaults.
+        assert!(delivery.toast);
+        assert_eq!(delivery.sound, NotificationSoundWire::Bell);
     }
 }

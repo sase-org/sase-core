@@ -521,6 +521,8 @@ fn notification_delivery_binding_resolves_a_batch_in_one_call() {
         assert_eq!(deliveries[0]["sound"], json!({"kind": "none"}));
         assert_eq!(deliveries[0]["toast_rule"], json!("quiet-task-beads"));
         assert_eq!(deliveries[0]["sound_rule"], json!("quiet-task-beads"));
+        assert_eq!(deliveries[0]["telegram"], json!(true));
+        assert_eq!(deliveries[0].get("telegram_rule"), None);
         assert_eq!(deliveries[1]["toast"], json!(true));
         assert_eq!(
             deliveries[1]["sound"],
@@ -528,9 +530,10 @@ fn notification_delivery_binding_resolves_a_batch_in_one_call() {
         );
         assert_eq!(deliveries[1].get("toast_rule"), None);
         assert_eq!(deliveries[1]["sound_rule"], json!("chime"));
+        assert_eq!(deliveries[1]["telegram"], json!(true));
         assert!(deliveries[1]["schema_version"].is_u64());
 
-        // No rules is today's behavior: toast, and ring the bell.
+        // No rules is today's behavior: toast, ring the bell, permit Telegram.
         let empty = PyList::empty_bound(py);
         let result =
             py_resolve_notification_deliveries(py, &empty, &notifications)
@@ -539,9 +542,70 @@ fn notification_delivery_binding_resolves_a_batch_in_one_call() {
         for delivery in value.as_array().unwrap() {
             assert_eq!(delivery["toast"], json!(true));
             assert_eq!(delivery["sound"], json!({"kind": "bell"}));
+            assert_eq!(delivery["telegram"], json!(true));
             assert_eq!(delivery.get("toast_rule"), None);
             assert_eq!(delivery.get("sound_rule"), None);
+            assert_eq!(delivery.get("telegram_rule"), None);
         }
+
+        // A telegram-only rule suppresses Telegram without touching TUI.
+        let tg_rules = PyList::empty_bound(py);
+        append_json(
+            py,
+            &tg_rules,
+            json!({
+                "name": "quiet-task-beads-telegram",
+                "match": {"tab": "beads"},
+                "telegram": false,
+            }),
+        );
+        let result =
+            py_resolve_notification_deliveries(py, &tg_rules, &notifications)
+                .unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        let deliveries = value.as_array().unwrap();
+        assert_eq!(deliveries[0]["telegram"], json!(false));
+        assert_eq!(
+            deliveries[0]["telegram_rule"],
+            json!("quiet-task-beads-telegram")
+        );
+        assert_eq!(deliveries[0]["toast"], json!(true));
+        assert_eq!(deliveries[1]["telegram"], json!(true));
+        assert_eq!(deliveries[1].get("telegram_rule"), None);
+
+        // Global TUI rule plus Athena telegram rule resolve independently.
+        let layered = PyList::empty_bound(py);
+        append_json(
+            py,
+            &layered,
+            json!({
+                "name": "quiet-task-beads",
+                "match": {"tab": "beads"},
+                "toast": false,
+                "sound": "none",
+            }),
+        );
+        append_json(
+            py,
+            &layered,
+            json!({
+                "name": "quiet-task-beads-telegram",
+                "match": {"tab": "beads"},
+                "telegram": false,
+            }),
+        );
+        let result =
+            py_resolve_notification_deliveries(py, &layered, &notifications)
+                .unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        let deliveries = value.as_array().unwrap();
+        assert_eq!(deliveries[0]["toast"], json!(false));
+        assert_eq!(deliveries[0]["telegram"], json!(false));
+        assert_eq!(deliveries[0]["toast_rule"], json!("quiet-task-beads"));
+        assert_eq!(
+            deliveries[0]["telegram_rule"],
+            json!("quiet-task-beads-telegram")
+        );
 
         // An empty batch resolves to an empty list.
         let none = PyList::empty_bound(py);
