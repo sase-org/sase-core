@@ -4,7 +4,10 @@
 //! stable archive query, facet, visibility, and verification wire contracts live
 //! here so other frontends can use the same backend surface.
 
+pub mod status;
 pub mod wire;
+
+pub use status::{archive_outcome_for_status, status_bucket_for_status};
 
 use std::collections::BTreeSet;
 use std::fs;

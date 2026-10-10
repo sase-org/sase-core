@@ -11,6 +11,20 @@ use crate::procs::proc_store_result_to_py;
 
 use pyo3::wrap_pyfunction;
 
+use sase_core::agent_archive::status_bucket_for_status as core_status_bucket_for_status;
+
+/// Map canonical agent status text to its live status bucket.
+///
+/// The caller passes glyph-stripped canonical text; the core owns the table.
+#[pyfunction]
+#[pyo3(name = "status_bucket_for_status")]
+fn py_status_bucket_for_status<'py>(
+    py: Python<'py>,
+    canonical_status: &str,
+) -> PyResult<PyObject> {
+    serialize_to_py(py, core_status_bucket_for_status(canonical_status))
+}
+
 /// Replace dismissed identities in the persistent artifact index.
 #[pyfunction]
 #[pyo3(
@@ -751,6 +765,7 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_replace_agent_artifact_index_dismissed_agents,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_status_bucket_for_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_validate_agent_archive_key, m)?)?;

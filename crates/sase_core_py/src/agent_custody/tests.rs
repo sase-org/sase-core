@@ -93,6 +93,38 @@ fn agent_archive_capability_bindings_are_exported_and_preserve_shapes() {
 }
 
 #[test]
+fn status_bucket_binding_round_trips_canonical_text() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        let binding = module.getattr("status_bucket_for_status").unwrap();
+        for (canonical, bucket) in [
+            ("DONE", "Done"),
+            ("TALE DONE", "Done"),
+            ("EPIC CREATED", "Done"),
+            ("FAILED", "Failed"),
+            ("PLAN FAILED", "Failed"),
+            ("RUNNING", "Running"),
+            ("WAITING", "Waiting"),
+            ("QUESTION", "Stopped"),
+        ] {
+            let value = binding.call1((canonical,)).unwrap();
+            assert_eq!(
+                py_to_json_value(&value).unwrap(),
+                json!(bucket),
+                "{canonical}"
+            );
+        }
+        let direct = py_status_bucket_for_status(py, "STARTING").unwrap();
+        assert_eq!(
+            py_to_json_value(direct.bind(py)).unwrap(),
+            json!("Starting")
+        );
+    });
+}
+
+#[test]
 fn agent_publication_batch_binding_returns_plain_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
