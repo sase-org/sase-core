@@ -31,11 +31,10 @@ pub fn plan_edit(
 ) -> Result<ConfigEditPlanWire, ConfigError> {
     let (requested_key_path, _display_path) = request.resolved_path()?;
     let merge_key_path = normalize_config_key_path(&requested_key_path);
-    let view_key_path = if request.routine_job_contract {
-        public_key_path(&merge_key_path)
-    } else {
-        merge_key_path.clone()
-    };
+    // The retired `routine_job_contract` switch is ignored: edit previews
+    // always use the public routine/job projection.
+    let _ = request.routine_job_contract;
+    let view_key_path = public_key_path(&merge_key_path);
     let display_path = display_config_path(&view_key_path);
     let target_idx = request
         .layers
@@ -72,7 +71,6 @@ pub fn plan_edit(
         &merge_key_path,
         &requested_key_path,
         &target_normalized.sources,
-        request.routine_job_contract,
     );
 
     let (op, new_value, has_value, write_key_path) = match request
@@ -124,16 +122,10 @@ pub fn plan_edit(
         }
     };
 
-    let original_merged = merge_layers_for_general_view(
-        &request.layers,
-        request.routine_job_contract,
-    );
+    let original_merged = merge_layers_for_general_view(&request.layers);
     let mut candidate_layers = request.layers.clone();
     candidate_layers[target_idx].value = Value::Object(target_obj);
-    let candidate_merged = merge_layers_for_general_view(
-        &candidate_layers,
-        request.routine_job_contract,
-    );
+    let candidate_merged = merge_layers_for_general_view(&candidate_layers);
     diagnostics.extend(original_merged.diagnostics);
     diagnostics.extend(candidate_merged.diagnostics);
 
@@ -178,7 +170,6 @@ struct GeneralMergedConfig {
 
 fn merge_layers_for_general_view(
     layers: &[ConfigLayerInputWire],
-    routine_job_contract: bool,
 ) -> GeneralMergedConfig {
     let mut internal = Value::Object(Map::new());
     let mut diagnostics = Vec::new();
@@ -195,11 +186,9 @@ fn merge_layers_for_general_view(
             internal = Value::Object(deep_merge_objects(&base, obj, strategy));
         }
     }
-    let view = if routine_job_contract {
-        public_project_root(&internal)
-    } else {
-        internal
-    };
+    // The retired `routine_job_contract` switch is gone: general views
+    // always use the public routine/job projection.
+    let view = public_project_root(&internal);
     GeneralMergedConfig {
         view: canonicalize_value(&view),
         diagnostics,

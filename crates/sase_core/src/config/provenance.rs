@@ -30,10 +30,10 @@ pub fn build_inventory(
     request: &ConfigInventoryRequestWire,
 ) -> Result<ConfigInventoryWire, ConfigError> {
     let model = build_field_model(&request.schema)?;
-    let merged = merge_layers_for_general_view(
-        &request.layers,
-        request.routine_job_contract,
-    );
+    // The retired `routine_job_contract` switch is ignored: the inventory
+    // view always uses the public routine/job projection.
+    let _ = request.routine_job_contract;
+    let merged = merge_layers_for_general_view(&request.layers);
 
     let mut diagnostics = merged.diagnostics;
     diagnostics.extend(agent_tribe_alias_diagnostics(&request.layers));
@@ -140,7 +140,6 @@ struct GeneralMergedConfig {
 
 fn merge_layers_for_general_view(
     layers: &[ConfigLayerInputWire],
-    routine_job_contract: bool,
 ) -> GeneralMergedConfig {
     let mut internal = Value::Object(Map::new());
     let mut normalized_layers = Vec::with_capacity(layers.len());
@@ -161,11 +160,9 @@ fn merge_layers_for_general_view(
         normalized_layers.push(normalized);
     }
 
-    let view = if routine_job_contract {
-        public_project_root(&internal)
-    } else {
-        internal.clone()
-    };
+    // The retired `routine_job_contract` switch is gone: the inventory
+    // view always uses the public routine/job projection.
+    let view = public_project_root(&internal);
 
     GeneralMergedConfig {
         view: canonicalize_value(&view),
@@ -335,30 +332,6 @@ mod tests {
         })
     }
 
-    fn legacy_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "axe": {
-                    "type": "object",
-                    "properties": {
-                        "lumberjacks": {
-                            "type": "object",
-                            "properties": {
-                                "checks": {
-                                    "type": "object",
-                                    "properties": {
-                                        "interval": {"type": "integer"}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     fn field<'a>(
         inventory: &'a ConfigInventoryWire,
         path: &str,
@@ -426,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn inventory_legacy_projection_still_merges_canonical_aliases() {
+    fn inventory_canonical_projection_merges_both_alias_spellings() {
         let request = ConfigInventoryRequestWire {
-            schema: legacy_schema(),
+            schema: canonical_schema(),
             layers: vec![
                 layer(
                     "defaults",
@@ -441,11 +414,13 @@ mod tests {
             ],
             deprecations: BTreeMap::new(),
             unsupported: Vec::new(),
+            // Retired switch: accepted and ignored; the canonical
+            // routine/job projection is always returned.
             routine_job_contract: false,
         };
 
         let inventory = build_inventory(&request).unwrap();
-        let interval = field(&inventory, "axe.lumberjacks.checks.interval");
+        let interval = field(&inventory, "axe.routines.checks.interval");
         assert_eq!(interval.effective_value, json!(19));
         assert_eq!(interval.contributions.len(), 2);
     }

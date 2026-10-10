@@ -146,6 +146,8 @@ pub struct AxeConfigComposeRequestWire {
     pub require_descriptions: bool,
     #[serde(default)]
     pub require_description_shape: bool,
+    /// Retired rollout switch: accepted for wire compatibility and ignored.
+    /// The public routine/job projection is always returned.
     #[serde(default)]
     pub routine_job_contract: bool,
 }
@@ -224,11 +226,11 @@ pub fn compose_axe_config(
         request.require_description_shape,
     )?;
     let provenance = provenance_wire(&exact_provenance);
-    let (public_config, public_provenance) = if request.routine_job_contract {
-        public_projection(&effective_config, &provenance)
-    } else {
-        (effective_config.clone(), provenance.clone())
-    };
+    // The retired `routine_job_contract` switch is ignored: the public
+    // routine/job projection is always returned.
+    let _ = request.routine_job_contract;
+    let (public_config, public_provenance) =
+        public_projection(&effective_config, &provenance);
     let mut entries = Vec::new();
     build_inventory(
         &effective_config,
@@ -300,7 +302,7 @@ pub fn plan_axe_entry_mutation(
         layers: request.layers.clone(),
         require_descriptions: request.require_descriptions,
         require_description_shape: request.require_description_shape,
-        routine_job_contract: false,
+        routine_job_contract: true,
     })?;
     if let Some(entry) = original
         .entries
@@ -340,7 +342,7 @@ pub fn plan_axe_entry_mutation(
         layers: candidate_layers,
         require_descriptions: request.require_descriptions,
         require_description_shape: request.require_description_shape,
-        routine_job_contract: false,
+        routine_job_contract: true,
     })?;
     let after =
         selected_value(&candidate.effective_config, &request.selector).cloned();
@@ -915,7 +917,6 @@ pub(super) fn source_path_for_normalized_edit(
     normalized_path: &[String],
     requested_path: &[String],
     sources: &BTreeMap<Vec<String>, Vec<String>>,
-    routine_job_contract: bool,
 ) -> Vec<String> {
     if let Some(source) = sources.get(normalized_path) {
         return source.clone();
@@ -928,11 +929,10 @@ pub(super) fn source_path_for_normalized_edit(
         })
         .max_by_key(|(path, _)| path.len())
     else {
-        return fallback_public_or_requested_path(
-            normalized_path,
-            requested_path,
-            routine_job_contract,
-        );
+        // No authored source to preserve: keep the caller's requested
+        // spelling for the new write. Effective views still project the
+        // canonical routine/job keys.
+        return requested_path.to_vec();
     };
 
     let mut result = source_prefix.clone();
@@ -983,18 +983,6 @@ pub(super) fn plan_generic_axe_list_edit(
         has_value: true,
         new_value: contribution,
     }))
-}
-
-fn fallback_public_or_requested_path(
-    normalized_path: &[String],
-    requested_path: &[String],
-    routine_job_contract: bool,
-) -> Vec<String> {
-    if routine_job_contract {
-        public_key_path(normalized_path)
-    } else {
-        requested_path.to_vec()
-    }
 }
 
 fn source_segment_for_normalized_path(

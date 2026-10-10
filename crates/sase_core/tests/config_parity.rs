@@ -697,68 +697,62 @@ fn plan_edit_exact_key_path_preserves_dotted_mapping_keys() {
         plan.write_plan.key_path,
         vec!["axe", "lumberjacks", "release.check", "interval"]
     );
+    // The retired `routine_job_contract` switch is accepted and ignored:
+    // candidate and preview views always use the public projection while
+    // the write plan keeps the requested source spelling.
     assert_eq!(
-        plan.candidate_config["axe"]["lumberjacks"]["release.check"]
-            ["interval"],
+        plan.candidate_config["axe"]["routines"]["release.check"]["interval"],
         json!(5)
     );
     assert_eq!(
         plan.effective_preview.path,
-        "axe.lumberjacks.release.check.interval"
+        "axe.routines.release.check.interval"
     );
 }
 
 #[test]
 fn plan_edit_promotes_list_form_jobs_for_generic_public_edits() {
-    for routine_job_contract in [false, true] {
-        let request: ConfigEditRequestWire = serde_json::from_value(json!({
-            "schema": {"type": "object"},
-            "layers": [
-                {
-                    "name": "user",
-                    "path": "/tmp/sase.yml",
-                    "writable": true,
-                    "list_strategy": "replace",
-                    "value": {"axe": {"lumberjacks": {"checks": {
-                        "chops": [
-                            {"name": "hook", "script": "old-script"},
-                            {"name": "other", "enabled": true}
-                        ]
-                    }}}}
-                }
-            ],
-            "target_layer": "user",
-            "path": "axe.routines.checks.jobs.hook.script",
-            "op": {"kind": "set", "value": "new-script"},
-            "routine_job_contract": routine_job_contract
-        }))
-        .unwrap();
+    // The retired `routine_job_contract` switch is accepted and ignored:
+    // the candidate config always uses the public routine/job projection.
+    let request: ConfigEditRequestWire = serde_json::from_value(json!({
+        "schema": {"type": "object"},
+        "layers": [
+            {
+                "name": "user",
+                "path": "/tmp/sase.yml",
+                "writable": true,
+                "list_strategy": "replace",
+                "value": {"axe": {"lumberjacks": {"checks": {
+                    "chops": [
+                        {"name": "hook", "script": "old-script"},
+                        {"name": "other", "enabled": true}
+                    ]
+                }}}}
+            }
+        ],
+        "target_layer": "user",
+        "path": "axe.routines.checks.jobs.hook.script",
+        "op": {"kind": "set", "value": "new-script"},
+        "routine_job_contract": false
+    }))
+    .unwrap();
 
-        let plan = config_plan_edit(&request).unwrap();
+    let plan = config_plan_edit(&request).unwrap();
 
-        assert_eq!(
-            plan.write_plan.key_path,
-            vec!["axe", "lumberjacks", "checks", "chops"]
-        );
-        assert_eq!(plan.write_plan.op, "set");
-        assert_eq!(plan.write_plan.new_value["hook"]["script"], "new-script");
-        assert_eq!(plan.write_plan.new_value["other"]["enabled"], true);
-        assert_eq!(plan.effective_preview.before, json!("old-script"));
-        assert_eq!(plan.effective_preview.after, json!("new-script"));
-        if routine_job_contract {
-            assert_eq!(
-                plan.candidate_config["axe"]["routines"]["checks"]["jobs"]
-                    ["hook"]["script"],
-                json!("new-script")
-            );
-        } else {
-            assert_eq!(
-                plan.candidate_config["axe"]["lumberjacks"]["checks"]["chops"]
-                    ["hook"]["script"],
-                json!("new-script")
-            );
-        }
-    }
+    assert_eq!(
+        plan.write_plan.key_path,
+        vec!["axe", "lumberjacks", "checks", "chops"]
+    );
+    assert_eq!(plan.write_plan.op, "set");
+    assert_eq!(plan.write_plan.new_value["hook"]["script"], "new-script");
+    assert_eq!(plan.write_plan.new_value["other"]["enabled"], true);
+    assert_eq!(plan.effective_preview.before, json!("old-script"));
+    assert_eq!(plan.effective_preview.after, json!("new-script"));
+    assert_eq!(
+        plan.candidate_config["axe"]["routines"]["checks"]["jobs"]["hook"]
+            ["script"],
+        json!("new-script")
+    );
 }
 
 #[test]
