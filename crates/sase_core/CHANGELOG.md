@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0](https://github.com/sase-org/sase-core/compare/v0.37.2...v0.38.0) - 2026-10-10
+
+### Added
+
+- *(core)* expose session agent model summaries
+- *(archive)* query compiled corpus for summary, rows, lookup, and count
+- *(archive)* compile v3 archive corpus
+- *(procs)* freeze observed command outcome at begin_proc_settlement
+- *(config)* retire legacy axe/config wires in sase-core for publication-services flags
+- *(notifications)* resolve telegram field in core rule matcher
+- *(agent-archive)* add live status-bucket match with outcome derived from bucket
+- *(autonomy)* [**breaking**] remove agent awareness text and binding
+- *(macros)* retire legacy-xprompt opt-out; unconditional alias acceptance
+- *(launch)* retire queue_capacity_budget opt-out; unconditional capacity budgets
+- *(launch)* retire typed launch-units opt-in; unconditional typed diagnostics
+- *(agent)* add agent auto-restart core modules and scan wire
+- *(archive)* bind corpus compile, summary, rows, lookup, and count
+
+### Fixed
+
+- *(auto-restart)* tighten classifier origin, ledger times, and error routing
+- *(autonomy)* human mutations stamp mutating-surface provenance
+
 ## [0.37.2](https://github.com/sase-org/sase-core/compare/v0.37.1...v0.37.2) - 2026-10-09
 
 ### Added
