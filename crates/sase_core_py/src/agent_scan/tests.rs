@@ -49,6 +49,41 @@ fn temp_agent_stats_root() -> tempfile::TempDir {
 }
 
 #[test]
+fn agent_model_summary_binding_round_trips_python_dict() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "turns": [
+                    {"kind": "agent", "provider": "codex", "model": "gpt-5"},
+                    {"kind": "agent", "provider": "claude", "model": "opus"},
+                    {"kind": "agent", "provider": "codex", "model": "gpt-5"},
+                    {"kind": "monitor", "provider": "codex", "model": "ignored"},
+                    {"kind": "agent", "provider": null, "model": "@unresolved"}
+                ]
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let module = PyModule::new_bound(py, "agent_scan_test").unwrap();
+        register_agent_scan(&module).unwrap();
+        let result = module
+            .getattr("summarize_agent_models")
+            .unwrap()
+            .call1((request,))
+            .unwrap();
+        let result = py_to_json_value(&result).unwrap();
+
+        assert_eq!(result["models"].as_array().unwrap().len(), 2);
+        assert_eq!(result["models"][0]["model"], json!("gpt-5"));
+        assert_eq!(result["models"][1]["model"], json!("opus"));
+        assert_eq!(result["latest"]["model"], json!("gpt-5"));
+        assert_eq!(result["unknown_turn_count"], json!(1));
+    });
+}
+
+#[test]
 fn agent_stats_binding_round_trips_python_dict() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

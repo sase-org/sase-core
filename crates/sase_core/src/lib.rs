@@ -21,6 +21,7 @@ pub mod agent_hold;
 pub mod agent_hold_deadlock;
 pub mod agent_identity;
 pub mod agent_launch;
+pub mod agent_models;
 pub mod agent_name_template;
 pub mod agent_ownership;
 pub mod agent_publication_batches;

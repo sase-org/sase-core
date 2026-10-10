@@ -7,6 +7,9 @@ use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 use crate::telemetry::{telemetry_request_from_pydict, telemetry_result_to_py};
 
 use pyo3::wrap_pyfunction;
+use sase_core::agent_models::{
+    summarize_agent_models, AgentModelSummaryRequestWire,
+};
 
 /// Walk an agent-artifact tree and return the snapshot dict.
 ///
@@ -84,6 +87,24 @@ fn py_aggregate_clan_runtime<'py>(
         PyValueError::new_err(format!("internal serialize error: {error}"))
     })?;
     json_value_to_py(py, &value)
+}
+
+/// Summarize recorded provider/model identities for an ordered session projection.
+#[pyfunction]
+#[pyo3(name = "summarize_agent_models")]
+fn py_summarize_agent_models<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: AgentModelSummaryRequestWire = serde_json::from_value(value)
+        .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid AgentModelSummaryRequestWire dict: {error}"
+        ))
+    })?;
+    let summary = summarize_agent_models(request);
+    serialize_to_py(py, &summary)
 }
 
 /// Build the canonical physical path for one agent artifact timestamp.
@@ -954,6 +975,7 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_scan_agent_artifacts, m)?)?;
     m.add_function(wrap_pyfunction!(py_scan_agent_artifact_dirs, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_clan_runtime, m)?)?;
+    m.add_function(wrap_pyfunction!(py_summarize_agent_models, m)?)?;
     m.add_function(wrap_pyfunction!(py_canonical_agent_artifact_path, m)?)?;
     m.add_function(wrap_pyfunction!(py_resolve_agent_artifact_path, m)?)?;
     m.add_function(wrap_pyfunction!(
