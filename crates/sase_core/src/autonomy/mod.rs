@@ -29,7 +29,7 @@ pub use profiles::{
 pub use resolve::{
     resolve_autonomy_selection, valid_actor_kinds, valid_sources, AutonomyError,
 };
-pub use sentences::{autonomy_awareness_text, autonomy_decision_sentence};
+pub use sentences::autonomy_decision_sentence;
 pub use summary::{
     autonomy_profiles, autonomy_summary, summary_cell, summary_class,
     summary_sentence, summary_short, AUTONOMY_CLASS_ATTENDED,

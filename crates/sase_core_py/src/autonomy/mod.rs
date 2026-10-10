@@ -218,17 +218,6 @@ fn py_autonomy_decision_sentence<'py>(
     ))
 }
 
-/// The advisory awareness block for one record, or `None` for `manual`.
-#[pyfunction]
-#[pyo3(name = "autonomy_awareness_text")]
-fn py_autonomy_awareness_text(
-    record: &Bound<'_, PyAny>,
-) -> PyResult<Option<String>> {
-    let value = py_to_json_value(record)?;
-    let parsed = parse_record(&value)?;
-    Ok(sase_core::autonomy::autonomy_awareness_text(&parsed))
-}
-
 /// Apply a `%auto` selection change to a live record with revision and
 /// actor checks. Returns `{status, record, reason}` with status
 /// `applied`, `unchanged`, `refused`, or `stale`.
@@ -354,7 +343,6 @@ pub(crate) fn register_autonomy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_autonomy_wire_schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_decision_sentence, m)?)?;
-    m.add_function(wrap_pyfunction!(py_autonomy_awareness_text, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_mutate, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_inherit, m)?)?;
     m.add_function(wrap_pyfunction!(py_autonomy_profiles, m)?)?;

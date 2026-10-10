@@ -30,7 +30,7 @@ pub const AUTONOMY_EFFECT_QUESTION_AUTO: &str =
 /// Effect wording for a kind that waits for a human.
 pub const AUTONOMY_EFFECT_WAIT: &str = "Waits for you";
 
-/// Coverage line carried by every summary and awareness block.
+/// Coverage line carried by every summary.
 pub const AUTONOMY_COVERAGE: &str =
     "Covers host checkpoints only · the agent's shell is not restricted";
 

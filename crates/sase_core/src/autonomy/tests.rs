@@ -684,32 +684,6 @@ fn decision_sentences_render_both_examples() {
 }
 
 #[test]
-fn awareness_text_renders_tale_snapshot_and_manual_none() {
-    use super::sentences::autonomy_awareness_text;
-    assert_eq!(autonomy_awareness_text(&resolve(None)), None);
-    assert_eq!(
-        autonomy_awareness_text(&resolve(Some("tale"))).as_deref(),
-        Some(
-            "SASE autonomy: tale (advisory; covers host checkpoints only, \
-             your shell is not restricted)\n\
-             - Tale plans: approved and archived automatically, then \
-             implemented without review.\n\
-             - Epic plans: wait for a human review before anything launches.\n\
-             - Questions: answered automatically with each question's first \
-             option; no human reads them, so put your recommended option \
-             first.\n\
-             - Launch, sudo, and custom gates: wait for a human."
-        )
-    );
-    for selection in [Some(""), Some("epic")] {
-        let text = autonomy_awareness_text(&resolve(selection)).expect("block");
-        assert_eq!(text.lines().count(), 5);
-        assert!(text
-            .ends_with("- Launch, sudo, and custom gates: wait for a human."));
-    }
-}
-
-#[test]
 fn mutate_covers_every_status() {
     use super::mutate::mutate_autonomy;
     use super::wires::AutonomyMutateRequestWire;

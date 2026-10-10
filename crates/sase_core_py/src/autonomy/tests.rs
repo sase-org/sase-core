@@ -117,7 +117,7 @@ fn autonomy_resolve_selection_rejects_bad_spellings() {
 }
 
 #[test]
-fn autonomy_summary_sentence_and_awareness_bindings() {
+fn autonomy_summary_and_sentence_bindings() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let resolve_request = py_dict(
@@ -154,12 +154,6 @@ fn autonomy_summary_sentence_and_awareness_bindings() {
             )
         );
         assert_eq!(summary["cells"].as_array().unwrap().len(), 3);
-
-        let awareness =
-            py_autonomy_awareness_text(record_arg.as_any()).unwrap();
-        let text = awareness.expect("tale has a block");
-        assert!(text.starts_with("SASE autonomy: tale (advisory;"));
-        assert_eq!(text.lines().count(), 5);
 
         let evaluate_request = py_dict(
             py,
