@@ -39,7 +39,7 @@ pub enum AgentArchiveCompileError {
 }
 
 #[derive(Clone, Copy)]
-enum ArchiveTimezone {
+pub(super) enum ArchiveTimezone {
     Iana(Tz),
     Fixed(FixedOffset),
 }
@@ -62,12 +62,18 @@ pub fn compile_agent_archive_corpus(
         request.index_status,
         AgentArchiveIndexProbeStatusWire::Missing
     ) {
-        return Ok(empty_corpus(AgentArchiveCorpusStatusWire::Missing));
+        return Ok(empty_corpus(
+            AgentArchiveCorpusStatusWire::Missing,
+            request.timezone,
+        ));
     }
 
     let index_path = Path::new(&request.root).join(INDEX_FILENAME);
     if !index_path.is_file() {
-        return Ok(empty_corpus(AgentArchiveCorpusStatusWire::Missing));
+        return Ok(empty_corpus(
+            AgentArchiveCorpusStatusWire::Missing,
+            request.timezone,
+        ));
     }
 
     let conn = Connection::open_with_flags(
@@ -107,12 +113,15 @@ pub fn compile_agent_archive_corpus(
         .and_then(|value| value.parse::<u32>().ok())
         != Some(INDEX_SCHEMA_VERSION)
     {
-        return Ok(empty_corpus(AgentArchiveCorpusStatusWire::Unsupported {
-            error: AgentArchiveUnsupportedIndexWire {
-                expected_schema_version: INDEX_SCHEMA_VERSION,
-                actual_schema_version,
+        return Ok(empty_corpus(
+            AgentArchiveCorpusStatusWire::Unsupported {
+                error: AgentArchiveUnsupportedIndexWire {
+                    expected_schema_version: INDEX_SCHEMA_VERSION,
+                    actual_schema_version,
+                },
             },
-        }));
+            request.timezone,
+        ));
     }
 
     let timezone = parse_timezone(&request.timezone).ok_or_else(|| {
@@ -192,6 +201,7 @@ pub fn compile_agent_archive_corpus(
     let containers = compile_containers(&compiled_rows);
     Ok(AgentArchiveCorpusWire {
         status,
+        timezone: request.timezone,
         rows,
         containers,
         name_map,
@@ -200,9 +210,11 @@ pub fn compile_agent_archive_corpus(
 
 fn empty_corpus(
     status: AgentArchiveCorpusStatusWire,
+    timezone: String,
 ) -> AgentArchiveCorpusWire {
     AgentArchiveCorpusWire {
         status,
+        timezone,
         rows: Vec::new(),
         containers: Vec::new(),
         name_map: BTreeMap::new(),
@@ -488,7 +500,7 @@ fn compile_containers(rows: &[CompiledRow]) -> Vec<AgentArchiveContainerWire> {
         .collect()
 }
 
-fn worse_outcome(
+pub(super) fn worse_outcome(
     left: AgentArchiveOutcomeWire,
     right: AgentArchiveOutcomeWire,
 ) -> AgentArchiveOutcomeWire {
@@ -514,7 +526,7 @@ fn outcome_wire(outcome: &str) -> AgentArchiveOutcomeWire {
     }
 }
 
-fn parse_timezone(value: &str) -> Option<ArchiveTimezone> {
+pub(super) fn parse_timezone(value: &str) -> Option<ArchiveTimezone> {
     let value = value.trim();
     if let Ok(timezone) = value.parse::<Tz>() {
         return Some(ArchiveTimezone::Iana(timezone));

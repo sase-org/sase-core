@@ -9,13 +9,20 @@ pub mod status;
 pub mod wire;
 
 pub use corpus::{
-    compile_agent_archive_corpus, AgentArchiveCompileError,
+    compile_agent_archive_corpus, count_agent_archive_corpus,
+    lookup_agent_archive_corpus, rows_agent_archive_corpus,
+    summarize_agent_archive_corpus, AgentArchiveCompileError,
     AgentArchiveCompileRequestWire, AgentArchiveContainerWire,
     AgentArchiveCorpusRowWire, AgentArchiveCorpusStatusWire,
-    AgentArchiveCorpusWire, AgentArchiveIndexProbeStatusWire,
-    AgentArchiveLinkFacetsWire, AgentArchiveNameMatchWire,
-    AgentArchiveOutcomeWire, AgentArchiveTimeBasisWire,
-    AgentArchiveUnsupportedIndexWire,
+    AgentArchiveCorpusWire, AgentArchiveCountRequestWire,
+    AgentArchiveIndexProbeStatusWire, AgentArchiveLightRowWire,
+    AgentArchiveLinkFacetsWire, AgentArchiveLookupRequestWire,
+    AgentArchiveNameMatchWire, AgentArchiveOutcomeWire,
+    AgentArchiveQueryCountWire, AgentArchiveQueryError,
+    AgentArchiveQueryGroupWire, AgentArchiveQueryLookupWire,
+    AgentArchiveQueryRowsWire, AgentArchiveQuerySummaryWire,
+    AgentArchiveRowsRequestWire, AgentArchiveSummaryRequestWire,
+    AgentArchiveTimeBasisWire, AgentArchiveUnsupportedIndexWire,
 };
 
 pub use status::{archive_outcome_for_status, status_bucket_for_status};
