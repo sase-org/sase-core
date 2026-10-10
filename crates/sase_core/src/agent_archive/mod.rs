@@ -4,8 +4,19 @@
 //! stable archive query, facet, visibility, and verification wire contracts live
 //! here so other frontends can use the same backend surface.
 
+pub mod corpus;
 pub mod status;
 pub mod wire;
+
+pub use corpus::{
+    compile_agent_archive_corpus, AgentArchiveCompileError,
+    AgentArchiveCompileRequestWire, AgentArchiveContainerWire,
+    AgentArchiveCorpusRowWire, AgentArchiveCorpusStatusWire,
+    AgentArchiveCorpusWire, AgentArchiveIndexProbeStatusWire,
+    AgentArchiveLinkFacetsWire, AgentArchiveNameMatchWire,
+    AgentArchiveOutcomeWire, AgentArchiveTimeBasisWire,
+    AgentArchiveUnsupportedIndexWire,
+};
 
 pub use status::{archive_outcome_for_status, status_bucket_for_status};
 

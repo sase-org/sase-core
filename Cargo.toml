@@ -24,6 +24,7 @@ serde_yaml = "0.9"
 thiserror = "1"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = { version = "0.9", default-features = false, features = ["std"] }
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

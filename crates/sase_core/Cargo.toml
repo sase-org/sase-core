@@ -21,6 +21,7 @@ aho-corasick = { version = "1" }
 unicode-normalization = { workspace = true }
 unicode-casefold = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 fs2 = { workspace = true }
 rand = { workspace = true }
 rusqlite = { workspace = true }
