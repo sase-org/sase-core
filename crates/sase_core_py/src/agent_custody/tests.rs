@@ -397,3 +397,149 @@ fn plan_agent_ownership_batch_binding_rejects_schema_mismatch() {
         assert!(err.to_string().contains("schema mismatch"));
     });
 }
+
+#[test]
+fn agent_archive_corpus_bindings_round_trip_missing_index() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "compile_agent_archive_corpus",
+            "summarize_agent_archive_corpus",
+            "rows_agent_archive_corpus",
+            "lookup_agent_archive_corpus",
+            "count_agent_archive_corpus",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+
+        // A root without an index file compiles to a missing, empty corpus
+        // without creating or rebuilding anything on disk.
+        let temp = tempfile::tempdir().unwrap();
+        let request_obj = json_value_to_py(
+            py,
+            &json!({
+                "root": temp.path().to_string_lossy(),
+                "index_status": {"status": "missing"},
+                "timezone": "America/New_York",
+            }),
+        )
+        .unwrap();
+        let request = request_obj.bind(py).downcast::<PyDict>().unwrap();
+        let corpus = py_compile_agent_archive_corpus(py, request).unwrap();
+        let corpus_value = py_to_json_value(corpus.bind(py)).unwrap();
+        assert_eq!(corpus_value["status"], json!({"status": "missing"}));
+        assert_eq!(corpus_value["rows"], json!([]));
+        assert_eq!(corpus_value["timezone"], json!("America/New_York"));
+        assert!(
+            !temp.path().join("index.sqlite").exists(),
+            "compile must not create the index"
+        );
+        let corpus_bound = corpus.bind(py);
+        let corpus_dict = corpus_bound.downcast::<PyDict>().unwrap();
+
+        let profile = json!({
+            "pane_id": "agents-archive",
+            "boolean": true,
+            "fields": [
+                {"key": "name", "exact_match": true, "searchable": true},
+                {
+                    "key": "outcome",
+                    "value_kind": "enum",
+                    "static_values": ["done", "failed", "interrupted"],
+                },
+            ],
+        });
+
+        let count_obj =
+            json_value_to_py(py, &json!({"query": "", "profile": profile}))
+                .unwrap();
+        let count_request = count_obj.bind(py).downcast::<PyDict>().unwrap();
+        let count =
+            py_count_agent_archive_corpus(py, corpus_dict, count_request)
+                .unwrap();
+        assert_eq!(
+            py_to_json_value(count.bind(py)).unwrap(),
+            json!({"count": 0})
+        );
+        // The registered module attribute serves the same call.
+        let via_module = module
+            .getattr("count_agent_archive_corpus")
+            .unwrap()
+            .call1((corpus_dict, count_request))
+            .unwrap();
+        assert_eq!(py_to_json_value(&via_module).unwrap(), json!({"count": 0}));
+
+        let summary_obj = json_value_to_py(
+            py,
+            &json!({
+                "query": "",
+                "profile": profile,
+                "group_by": "day",
+            }),
+        )
+        .unwrap();
+        let summary_request =
+            summary_obj.bind(py).downcast::<PyDict>().unwrap();
+        let summary =
+            py_summarize_agent_archive_corpus(py, corpus_dict, summary_request)
+                .unwrap();
+        let summary = py_to_json_value(summary.bind(py)).unwrap();
+        assert_eq!(summary["total"], json!(0));
+        assert_eq!(summary["groups"], json!([]));
+
+        let rows_obj = json_value_to_py(
+            py,
+            &json!({
+                "query": "",
+                "profile": profile,
+                "group_by": "day",
+                "group_key": "2025-01-01",
+                "offset": 0,
+                "limit": 10,
+            }),
+        )
+        .unwrap();
+        let rows_request = rows_obj.bind(py).downcast::<PyDict>().unwrap();
+        let rows = py_rows_agent_archive_corpus(py, corpus_dict, rows_request)
+            .unwrap();
+        let rows = py_to_json_value(rows.bind(py)).unwrap();
+        assert_eq!(rows["rows"], json!([]));
+        assert_eq!(rows["total"], json!(0));
+
+        let lookup_obj =
+            json_value_to_py(py, &json!({"name": "no-such-agent"})).unwrap();
+        let lookup_request = lookup_obj.bind(py).downcast::<PyDict>().unwrap();
+        let lookup =
+            py_lookup_agent_archive_corpus(py, corpus_dict, lookup_request)
+                .unwrap();
+        assert_eq!(
+            py_to_json_value(lookup.bind(py)).unwrap(),
+            json!({"row": null})
+        );
+
+        // An unknown group_by is a typed error, not a panic or empty page.
+        let bad_group_obj = json_value_to_py(
+            py,
+            &json!({
+                "query": "",
+                "profile": profile,
+                "group_by": "century",
+            }),
+        )
+        .unwrap();
+        let bad_group_request =
+            bad_group_obj.bind(py).downcast::<PyDict>().unwrap();
+        let err = py_summarize_agent_archive_corpus(
+            py,
+            corpus_dict,
+            bad_group_request,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported archive group_by"),
+            "unexpected error: {err}"
+        );
+    });
+}
