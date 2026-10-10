@@ -43,8 +43,6 @@ pub(super) fn config_from_initialize(
         machine_catalog: machine_catalog_path(),
         artifact_ref_catalog: artifact_ref_catalog_path(),
         glossary_catalog: glossary_catalog_path(),
-        typed_launch_units: typed_launch_units_from_initialize(params)
-            .unwrap_or_else(typed_launch_units_from_env),
         queue_capacity_budget: queue_capacity_budget_from_initialize(params)
             .unwrap_or_else(queue_capacity_budget_from_env),
         accept_legacy_xprompt_names:
@@ -78,24 +76,6 @@ pub(super) fn accept_legacy_xprompt_names_from_env() -> bool {
         .unwrap_or(true)
 }
 
-pub(super) fn typed_launch_units_from_initialize(
-    params: &InitializeParams,
-) -> Option<bool> {
-    params
-        .initialization_options
-        .as_ref()
-        .and_then(|options| options.get("typed_launch_units"))
-        .and_then(serde_json::Value::as_bool)
-}
-
-pub(super) fn typed_launch_units_from_env() -> bool {
-    std::env::var(TYPED_LAUNCH_UNITS_ENV)
-        .ok()
-        .as_deref()
-        .map(env_flag_enabled)
-        .unwrap_or(false)
-}
-
 pub(super) fn queue_capacity_budget_from_initialize(
     params: &InitializeParams,
 ) -> Option<bool> {
@@ -122,13 +102,9 @@ pub(super) fn env_flag_enabled(value: &str) -> bool {
 }
 
 pub(super) fn enabled_feature_flags(
-    typed_launch_units: bool,
     queue_capacity_budget: bool,
 ) -> Vec<String> {
     let mut flags = Vec::new();
-    if typed_launch_units {
-        flags.push("typed_launch_units".to_string());
-    }
     if queue_capacity_budget {
         flags.push("queue_capacity_budget".to_string());
     }

@@ -1283,10 +1283,7 @@ mod tests {
     fn legacy_flag_helpers_always_enable_queue() {
         assert_eq!(queue_directive_flag_key(), "queue_directive");
         assert!(queue_directive_enabled(&[]));
-        assert!(queue_directive_enabled(&[
-            "typed_launch_units".to_string(),
-            "queue_directive".to_string(),
-        ]));
+        assert!(queue_directive_enabled(&["queue_directive".to_string()]));
     }
 
     #[test]

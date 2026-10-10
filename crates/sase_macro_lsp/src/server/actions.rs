@@ -53,10 +53,7 @@ impl MacroLspServer {
             &document,
             to_editor_position(position),
             entries.as_slice(),
-            &enabled_feature_flags(
-                config.typed_launch_units,
-                config.queue_capacity_budget,
-            ),
+            &enabled_feature_flags(config.queue_capacity_budget),
             routing.as_ref(),
         ) {
             return Some(lsp_hover(hover));
@@ -123,10 +120,8 @@ impl MacroLspServer {
             entries.as_slice(),
             routing.as_ref(),
         );
-        diagnostics.extend(editor_typed_launch_directive_diagnostics(
-            &document,
-            config.typed_launch_units,
-        ));
+        diagnostics
+            .extend(editor_typed_launch_directive_diagnostics(&document));
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());
         let artifact_catalog =
@@ -307,9 +302,7 @@ impl MacroLspServer {
             }
         }
 
-        if config.typed_launch_units {
-            actions.extend(typed_launch_code_actions(&uri, &document, range));
-        }
+        actions.extend(typed_launch_code_actions(&uri, &document, range));
 
         let vcs_catalog =
             load_vcs_project_catalog(config.vcs_project_catalog.as_deref());

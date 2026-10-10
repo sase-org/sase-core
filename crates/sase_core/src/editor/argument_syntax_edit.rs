@@ -493,6 +493,7 @@ mod tests {
     fn converts_supported_double_colon_directives() {
         for (source, expected) in [
             ("%proc:: <cursor>", "%proc():: "),
+            ("%if:: <cursor>", "%if():: "),
             ("%clan:: <cursor>", "%clan():: "),
             ("%c:: <cursor>", "%c():: "),
         ] {
@@ -518,7 +519,6 @@ mod tests {
         for source in [
             "%q:: <cursor>",
             "%model:: <cursor>",
-            "%if:: <cursor>",
             "%xprompts_enabled:: <cursor>",
             "%unknown:: <cursor>",
             "word%clan:: <cursor>",

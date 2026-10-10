@@ -204,7 +204,6 @@ const ALT_FORMS: &[DirectiveSyntaxForm] = &[
     DirectiveSyntaxForm::Colon,
     DirectiveSyntaxForm::Parenthesized,
 ];
-const PAREN: &[DirectiveSyntaxForm] = &[DirectiveSyntaxForm::Parenthesized];
 const PAREN_DOUBLE_COLON: &[DirectiveSyntaxForm] = &[
     DirectiveSyntaxForm::Parenthesized,
     DirectiveSyntaxForm::DoubleColon,
@@ -393,25 +392,19 @@ const IF_KEYWORDS: &[DirectiveKeywordSpec] = &[DirectiveKeywordSpec {
     suggested_values: SHOULD_RUN_SUGGESTIONS,
 }];
 
-pub(super) const IF_DIRECTIVE_OFF: DirectiveMetadata = DirectiveMetadata {
+pub(super) const IF_DIRECTIVE: DirectiveMetadata = DirectiveMetadata {
     name: "if",
     alias: None,
     description:
-        "Statically omit a prompt segment, or gate launch with a typed predicate when enabled",
-    argument_hint: "(should_run=true|false)",
+        "Statically omit a prompt segment, or gate launch with a typed predicate",
+    argument_hint: "(should_run=true|false) or :: plus one bash/python fence",
     takes_argument: true,
     allows_multiple: false,
-    syntax_forms: PAREN,
+    syntax_forms: PAREN_DOUBLE_COLON,
     positional_role: None,
     positional_suggestions: &[],
     keywords: IF_KEYWORDS,
     dynamic_keyword_role: None,
-};
-
-pub(super) const IF_DIRECTIVE_ON: DirectiveMetadata = DirectiveMetadata {
-    syntax_forms: PAREN_DOUBLE_COLON,
-    argument_hint: "(should_run=true|false) or :: plus one bash/python fence",
-    ..IF_DIRECTIVE_OFF
 };
 
 const QUEUE_KEYWORDS: &[DirectiveKeywordSpec] = &[
@@ -761,7 +754,7 @@ pub const DIRECTIVES: &[DirectiveMetadata] = &[
         keywords: &[],
         dynamic_keyword_role: None,
     },
-    IF_DIRECTIVE_OFF,
+    IF_DIRECTIVE,
     DirectiveMetadata {
         name: "proc",
         alias: None,

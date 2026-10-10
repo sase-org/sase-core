@@ -432,7 +432,7 @@ async fn snippet_clients_receive_identity_and_clan_forms() {
 }
 
 #[tokio::test]
-async fn typed_launch_directive_recipes_follow_flag_and_snippet_support() {
+async fn typed_launch_directive_recipes_are_unconditional() {
     let (service, _) = LspService::new(|client| {
         MacroLspServer::with_bridge(client, Arc::new(bridge_with_catalog(None)))
     });
@@ -441,29 +441,20 @@ async fn typed_launch_directive_recipes_follow_flag_and_snippet_support() {
         let mut config = server.config.write().unwrap();
         *config = ServerConfig {
             snippet_support: true,
-            typed_launch_units: false,
             ..ServerConfig::default()
         };
     }
 
-    let disabled = server
-        .completion_for_text("%if".to_string(), Position::new(0, 3))
-        .await
-        .unwrap();
-    let disabled_items = completion_items(disabled);
-    assert_snippet_item(
-        &disabled_items,
-        "%if(should_run=...)",
-        "%if(should_run=${1|true,false|})$0",
-    );
-    assert!(!disabled_items.iter().any(|item| item.label == "%if:: bash"));
-
-    server.config.write().unwrap().typed_launch_units = true;
     let enabled = server
         .completion_for_text("%if".to_string(), Position::new(0, 3))
         .await
         .unwrap();
     let enabled_items = completion_items(enabled);
+    assert_snippet_item(
+        &enabled_items,
+        "%if(should_run=...)",
+        "%if(should_run=${1|true,false|})$0",
+    );
     assert_snippet_item(
         &enabled_items,
         "%if:: bash",

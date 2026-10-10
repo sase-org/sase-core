@@ -285,11 +285,21 @@ async fn stdio_jsonrpc_on_type_formatting_moves_double_colon_delimiter() {
             .await;
     assert_eq!(apply_text_edits("%clan:: (", &directive), "%clan():: ");
 
-    for (version, text, character) in [
-        (14, "#foo::\t(", 8),
-        (15, "#foo:::(", 8),
-        (16, "%if:: (", 7),
-    ] {
+    did_change(&mut client_writer, uri, 13, "%if:: (").await;
+    let typed_directive = request_on_type(
+        &mut client_writer,
+        &mut client_reader,
+        uri,
+        13,
+        7,
+        "(",
+    )
+    .await;
+    assert_eq!(apply_text_edits("%if:: (", &typed_directive), "%if():: ");
+
+    for (version, text, character) in
+        [(14, "#foo::\t(", 8), (15, "#foo:::(", 8)]
+    {
         did_change(&mut client_writer, uri, version, text).await;
         assert_eq!(
             request_on_type(

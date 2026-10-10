@@ -174,21 +174,12 @@ async fn exposes_hover_diagnostics_code_actions_and_definition() {
 }
 
 #[tokio::test]
-async fn typed_launch_diagnostics_and_code_actions_use_cached_flag() {
+async fn typed_launch_diagnostics_and_code_actions_are_unconditional() {
     let (service, _) = LspService::new(|client| {
         MacroLspServer::with_bridge(client, Arc::new(bridge_with_catalog(None)))
     });
     let server = service.inner();
 
-    let disabled = server
-        .diagnostics_for_text("%if::\n\n```bash\ntrue\n```".to_string())
-        .await;
-    assert!(diagnostics_contain_code(
-        &disabled,
-        "typed_launch_units_disabled"
-    ));
-
-    server.config.write().unwrap().typed_launch_units = true;
     let missing_fence = server
         .diagnostics_for_text("%if::\n\nReview".to_string())
         .await;

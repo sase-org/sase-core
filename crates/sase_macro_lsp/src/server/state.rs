@@ -1,8 +1,7 @@
 use super::initialize::{
     accept_legacy_xprompt_names_from_env, artifact_ref_catalog_path,
     glossary_catalog_path, machine_catalog_path, model_catalog_path,
-    queue_capacity_budget_from_env, typed_launch_units_from_env,
-    vcs_project_catalog_path,
+    queue_capacity_budget_from_env, vcs_project_catalog_path,
 };
 use super::*;
 
@@ -32,8 +31,6 @@ pub(super) struct ServerConfig {
     /// catalogs are cached briefly and invalidated by file signature, explicit
     /// refresh, or watched project config changes.
     pub(super) glossary_catalog: Option<PathBuf>,
-    /// Startup-resolved `typed_launch_units` flag. Never re-read on keystrokes.
-    pub(super) typed_launch_units: bool,
     /// Startup-resolved `queue_capacity_budget` sunset flag. Defaults on.
     pub(super) queue_capacity_budget: bool,
     /// Startup-resolved legacy-loading policy. Defaults true; when false,
@@ -55,7 +52,6 @@ impl Default for ServerConfig {
             machine_catalog: machine_catalog_path(),
             artifact_ref_catalog: artifact_ref_catalog_path(),
             glossary_catalog: glossary_catalog_path(),
-            typed_launch_units: typed_launch_units_from_env(),
             queue_capacity_budget: queue_capacity_budget_from_env(),
             accept_legacy_xprompt_names: accept_legacy_xprompt_names_from_env(),
         }

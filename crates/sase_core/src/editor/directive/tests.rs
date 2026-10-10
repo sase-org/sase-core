@@ -261,7 +261,10 @@ fn contract_covers_the_audited_directive_matrix() {
     );
     assert_eq!(
         if_directive.syntax_forms,
-        vec![DirectiveSyntaxForm::Parenthesized]
+        vec![
+            DirectiveSyntaxForm::Parenthesized,
+            DirectiveSyntaxForm::DoubleColon
+        ]
     );
     assert_eq!(
         if_directive
@@ -274,26 +277,14 @@ fn contract_covers_the_audited_directive_matrix() {
     assert!(!directive_is_hidden_from_name_completion("if"));
     assert!(!directive_is_hidden_from_name_completion_with_flags(
         "if",
-        &["typed_launch_units".to_string()]
+        &[]
     ));
-    let flagged_if =
-        directive_contract_with_flags(&["typed_launch_units".to_string()])
-            .into_iter()
-            .find(|entry| entry.name == "if")
-            .expect("flagged if contract");
-    assert_eq!(
-        flagged_if.syntax_forms,
-        vec![
-            DirectiveSyntaxForm::Parenthesized,
-            DirectiveSyntaxForm::DoubleColon
-        ]
-    );
 
     let proc = contract
         .iter()
         .find(|entry| entry.name == "proc")
         .expect("proc contract");
-    assert_eq!(proc.feature_flag.as_deref(), Some("typed_launch_units"));
+    assert_eq!(proc.feature_flag.as_deref(), None);
     assert_eq!(proc.body_kind, crate::DirectiveBodyKind::OptionalFencedCode);
     assert_eq!(
         proc.keywords
@@ -684,9 +675,14 @@ fn removed_auto_approve_aliases_do_not_resolve_or_complete() {
     assert!(build_directive_completion_candidates("%approve")
         .candidates
         .is_empty());
-    assert!(build_directive_completion_candidates("%p")
-        .candidates
-        .is_empty());
+    assert_eq!(
+        build_directive_completion_candidates("%p")
+            .candidates
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .collect::<Vec<_>>(),
+        ["proc"]
+    );
     assert_eq!(
         build_directive_completion_candidates("%ta")
             .candidates
@@ -1270,7 +1266,6 @@ fn macros_enabled_alias_canonicalizes_to_legacy() {
     for contract in [
         directive_contract(),
         directive_contract_with_flags(&[]),
-        directive_contract_with_flags(&["typed_launch_units".to_string()]),
         directive_contract_with_flags(&["queue_capacity_budget".to_string()]),
     ] {
         assert!(contract

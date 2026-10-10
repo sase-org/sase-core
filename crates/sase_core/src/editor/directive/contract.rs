@@ -1,10 +1,9 @@
 use super::super::wire::{
-    directive_feature_flag, DirectiveContractEntry, DirectiveMetadata,
-    DirectiveSyntaxForm,
+    DirectiveContractEntry, DirectiveMetadata, DirectiveSyntaxForm,
 };
 use super::metadata::{
     DIRECTIVES, HIDDEN_COMPLETION_DIRECTIVES, HIDDEN_DIRECTIVE_ALIASES,
-    IF_DIRECTIVE_OFF, IF_DIRECTIVE_ON, QUEUE_DIRECTIVE_OFF, QUEUE_DIRECTIVE_ON,
+    IF_DIRECTIVE, QUEUE_DIRECTIVE_OFF, QUEUE_DIRECTIVE_ON,
 };
 use crate::queue_directive::queue_capacity_budget_enabled;
 
@@ -12,18 +11,13 @@ pub fn directive_is_hidden_from_name_completion(name: &str) -> bool {
     directive_is_hidden_from_name_completion_with_flags(name, &[])
 }
 
-/// Hide gated directives unless *enabled_feature_flags* contains their flag.
+/// Hide retired directives from name completion; every live directive,
+/// including `%if` and `%proc`, is always shown.
 pub fn directive_is_hidden_from_name_completion_with_flags(
     name: &str,
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> bool {
-    if HIDDEN_COMPLETION_DIRECTIVES.contains(&name) {
-        return true;
-    }
-    match directive_feature_flag(name) {
-        Some(flag) => !enabled_feature_flags.iter().any(|value| value == flag),
-        None => false,
-    }
+    HIDDEN_COMPLETION_DIRECTIVES.contains(&name)
 }
 
 pub fn canonical_directive_name(raw: &str) -> Option<&'static str> {
@@ -65,16 +59,9 @@ pub fn directive_metadata_with_flags(
 }
 
 pub fn if_directive_metadata(
-    enabled_feature_flags: &[String],
+    _enabled_feature_flags: &[String],
 ) -> &'static DirectiveMetadata {
-    if enabled_feature_flags
-        .iter()
-        .any(|value| value == "typed_launch_units")
-    {
-        &IF_DIRECTIVE_ON
-    } else {
-        &IF_DIRECTIVE_OFF
-    }
+    &IF_DIRECTIVE
 }
 
 pub fn queue_directive_metadata(

@@ -921,9 +921,8 @@ pub use feature_flag_state::{
 pub use fenced_code::{
     fenced_block_details, fenced_block_details_wire, fenced_block_ranges,
     language_from_info_string, scan_directive_owned_fences,
-    typed_launch_units_flag_key, CodeDirectiveDiagnosticWire,
-    CodeDirectiveScanWire, CodeDirectiveSpanWire, CodeLanguage, CodeValue,
-    CodeValueWire, FencedBlock, FencedBlockWire,
+    CodeDirectiveDiagnosticWire, CodeDirectiveScanWire, CodeDirectiveSpanWire,
+    CodeLanguage, CodeValue, CodeValueWire, FencedBlock, FencedBlockWire,
     CODE_VALUE_WIRE_SCHEMA_VERSION,
 };
 pub use finalizer::{

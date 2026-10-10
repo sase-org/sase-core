@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 pub const CODE_VALUE_WIRE_SCHEMA_VERSION: u32 = 1;
 
 const PREVIEW_MAX_CHARS: usize = 80;
-const TYPED_LAUNCH_UNITS_FLAG: &str = "typed_launch_units";
 
 /// Supported interpreters for directive-owned code and `type: code` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -314,11 +313,6 @@ pub fn scan_directive_owned_fences(text: &str) -> CodeDirectiveScanWire {
         directives,
         diagnostics,
     }
-}
-
-/// Feature-flag key that gates `%if` and `%proc`.
-pub fn typed_launch_units_flag_key() -> &'static str {
-    TYPED_LAUNCH_UNITS_FLAG
 }
 
 /// Resolve a fence info-string (or unlabelled fence) to a supported language.

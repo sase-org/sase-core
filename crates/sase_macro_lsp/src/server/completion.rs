@@ -325,10 +325,7 @@ impl MacroLspServer {
                 items.extend(directive_snippet_items(
                     context.token.as_ref().map(|token| token.text.as_str()),
                     context.replacement_range,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.queue_capacity_budget,
-                    ),
+                    &enabled_feature_flags(config.queue_capacity_budget),
                     config.snippet_support,
                 ));
             }
@@ -650,7 +647,6 @@ impl MacroLspServer {
     ) -> CompletionResponse {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
-                config.typed_launch_units,
                 config.queue_capacity_budget,
             ),
             ..DirectiveCompletionInventories::default()
@@ -690,7 +686,6 @@ impl MacroLspServer {
     ) -> DirectiveCompletionInventories {
         let mut inventories = DirectiveCompletionInventories {
             enabled_feature_flags: enabled_feature_flags(
-                config.typed_launch_units,
                 config.queue_capacity_budget,
             ),
             ..DirectiveCompletionInventories::default()
@@ -943,10 +938,7 @@ impl MacroLspServer {
             CompletionContextKind::DirectiveName => {
                 editor_build_directive_completion_candidates_with_flags(
                     token,
-                    &enabled_feature_flags(
-                        config.typed_launch_units,
-                        config.queue_capacity_budget,
-                    ),
+                    &enabled_feature_flags(config.queue_capacity_budget),
                 )
             }
             CompletionContextKind::DirectiveArgument
