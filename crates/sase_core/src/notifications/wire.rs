@@ -313,6 +313,11 @@ pub struct NotificationReconcileRequestWire {
     pub notifications: Vec<NotificationWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reversible_dismiss_marker_key: Option<String>,
+    /// When true, copy `files` from the input row onto the on-disk row.
+    /// Default false so existing callers never move evidence links.
+    /// Does not touch timestamps or delivery cursors.
+    #[serde(default)]
+    pub refresh_files: bool,
 }
 
 /// Outcome counts for one [`super::store::reconcile_notification_rows`] call.

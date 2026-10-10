@@ -32,6 +32,12 @@ pub fn combined_text(context: &AutoRestartContextWire) -> String {
     .to_ascii_lowercase()
 }
 
+/// Exception text only: `error_text` plus `traceback_text`. Never the
+/// log tail — a logger line mentioning `sase.*` is not origin evidence.
+pub fn exception_text(context: &AutoRestartContextWire) -> String {
+    format!("{}\n{}", context.error_text, context.traceback_text)
+}
+
 fn has_any(haystack: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| haystack.contains(marker))
 }
@@ -173,7 +179,7 @@ fn looks_like_managed_module(value: &str) -> bool {
 ///
 /// The classifier only sees module names and file paths, not a live
 /// filesystem, so it applies a conservative name-and-path rule: a
-/// `sase.*` / `sase_core*` module is managed unless every concrete file
+/// `sase.*` / `sase_core*` module is managed unless any concrete file
 /// path on record sits under the workspace directory.
 pub fn origin_is_managed(
     origin_module: Option<&str>,
@@ -181,11 +187,10 @@ pub fn origin_is_managed(
     context: &AutoRestartContextWire,
 ) -> bool {
     let module = origin_module.unwrap_or("");
-    let workspace = context
-        .workspace_dir
-        .as_deref()
-        .unwrap_or("\u{0}no-workspace\u{0}");
     if !looks_like_managed_module(module) {
+        return false;
+    }
+    if origin_is_workspace(candidate_files, context) {
         return false;
     }
     if candidate_files.is_empty() {
@@ -194,15 +199,9 @@ pub fn origin_is_managed(
         // traceback exists, and log-only rows carry none.
         return true;
     }
-    let workspace = normalize_path(workspace);
     let mut saw_managed_root = false;
     for file in candidate_files {
         let file = normalize_path(file);
-        if !workspace.is_empty()
-            && (file == workspace || file.starts_with(&format!("{workspace}/")))
-        {
-            return false;
-        }
         if is_under_managed_root(&file, context) || file.contains("sase") {
             saw_managed_root = true;
         }
@@ -210,16 +209,73 @@ pub fn origin_is_managed(
     saw_managed_root
 }
 
+/// True when any candidate file sits under `context.workspace_dir`.
+///
+/// Trailing slashes on either side are stripped, and the comparison is
+/// whole path components so `/opt/sase` does not match `/opt/sase-other`.
+pub fn origin_is_workspace(
+    candidate_files: &[String],
+    context: &AutoRestartContextWire,
+) -> bool {
+    let Some(workspace) = context.workspace_dir.as_deref() else {
+        return false;
+    };
+    let workspace = normalize_path(workspace);
+    if workspace.is_empty() {
+        return false;
+    }
+    candidate_files.iter().any(|file| {
+        let file = normalize_path(file);
+        path_is_under(&file, &workspace)
+    })
+}
+
+/// True when `error_text` / structured facts look like an import or
+/// attribute error that could have a workspace origin.
+pub fn looks_like_import_or_attribute_error(
+    facts: Option<&AgentFailureFactsWire>,
+    context: &AutoRestartContextWire,
+) -> bool {
+    if let Some(facts) = facts {
+        if facts.import_error.is_some() || facts.attribute_error.is_some() {
+            return true;
+        }
+        if facts.exception_chain.iter().any(|link| {
+            matches!(
+                link.r#type.as_str(),
+                "ImportError" | "ModuleNotFoundError" | "AttributeError"
+            )
+        }) {
+            return true;
+        }
+    }
+    let own = exception_text(context).to_ascii_lowercase();
+    own.contains("cannot import name")
+        || own.contains("no module named")
+        || own.contains("has no attribute")
+        || own.contains("partially initialized module")
+}
+
 fn normalize_path(value: &str) -> String {
-    value.replace('\\', "/").trim().to_string()
+    let replaced = value.replace('\\', "/");
+    let trimmed = replaced.trim();
+    if trimmed.len() <= 1 {
+        return trimmed.to_string();
+    }
+    trimmed.trim_end_matches('/').to_string()
+}
+
+fn path_is_under(file: &str, base: &str) -> bool {
+    if base.is_empty() {
+        return false;
+    }
+    file == base || file.starts_with(&format!("{base}/"))
 }
 
 fn is_under_managed_root(file: &str, context: &AutoRestartContextWire) -> bool {
     for root in &context.managed_roots {
         let base = normalize_path(&root.root);
-        if !base.is_empty()
-            && (file == base || file.starts_with(&format!("{base}/")))
-        {
+        if path_is_under(file, &base) {
             return true;
         }
     }
@@ -245,11 +301,7 @@ pub fn candidate_files(
             }
         }
     }
-    for line in context
-        .traceback_text
-        .split_whitespace()
-        .chain(context.log_tail.split_whitespace())
-    {
+    for line in context.traceback_text.split_whitespace() {
         let trimmed = line.trim_matches(|c| {
             c == '"' || c == '\'' || c == ',' || c == '(' || c == ')'
         });
@@ -428,13 +480,11 @@ fn module_of_link(
 fn match_text_fallback(
     context: &AutoRestartContextWire,
 ) -> Option<FamilyMatch> {
-    let haystack = combined_text(context);
     // A traceback quoted in agent output is not a failure signature.
     // Heuristic: the failure text itself must carry the signature, not
-    // only the log tail.
-    let own_text =
-        format!("{}\n{}", context.error_text, context.traceback_text)
-            .to_ascii_lowercase();
+    // only the log tail. Origin module and missing symbol come from the
+    // exception line, never from `log_tail`.
+    let own_text = exception_text(context).to_ascii_lowercase();
     let files = candidate_files(None, context);
     let managed = |module: Option<String>| {
         origin_is_managed(module.as_deref(), &files, context)
@@ -448,17 +498,22 @@ fn match_text_fallback(
             tier: TIER_DATA_FORMAT,
             family: "data_format_skew",
             signature: "data written by a newer sase".to_string(),
-            origin_module: find_module(&haystack),
+            origin_module: find_module(&own_text),
             missing_symbol: None,
         });
     }
     if own_text.contains("does not expose binding") {
+        let line = line_containing(
+            &[&context.error_text, &context.traceback_text],
+            "does not expose binding",
+        )
+        .unwrap_or("");
         return Some(FamilyMatch {
             tier: TIER_RUST_BINDING,
             family: "rust_binding_or_wire_skew",
             signature: "sase_core_rs binding missing".to_string(),
             origin_module: Some("sase_core_rs".to_string()),
-            missing_symbol: find_quoted(&own_text),
+            missing_symbol: quoted_tokens(line).into_iter().next(),
         });
     }
     if own_text.contains("wire schema mismatch")
@@ -475,8 +530,7 @@ fn match_text_fallback(
         });
     }
     if own_text.contains("cannot import name") {
-        let module = find_module(&haystack);
-        let symbol = find_quoted(&own_text);
+        let (module, symbol) = extract_cannot_import_name(context);
         if managed(module.clone()) {
             return Some(FamilyMatch {
                 tier: TIER_TORN_PYTHON,
@@ -489,7 +543,7 @@ fn match_text_fallback(
         return None;
     }
     if own_text.contains("no module named") {
-        let module = find_module(&haystack);
+        let module = extract_no_module_named(context);
         if managed(module.clone()) {
             return Some(FamilyMatch {
                 tier: TIER_TORN_PYTHON,
@@ -502,20 +556,21 @@ fn match_text_fallback(
         return None;
     }
     if own_text.contains("has no attribute") {
-        let module = find_module(&haystack);
+        let (module, symbol) = extract_has_no_attribute(context);
         if managed(module.clone()) {
             return Some(FamilyMatch {
                 tier: TIER_TORN_PYTHON,
                 family: "module_has_no_attribute",
                 signature: "AttributeError in managed module".to_string(),
                 origin_module: module,
-                missing_symbol: None,
+                missing_symbol: symbol,
             });
         }
         return None;
     }
     if own_text.contains("partially initialized module") {
-        let module = find_module(&haystack);
+        let module = extract_partially_initialized(context)
+            .or_else(|| find_module(&own_text));
         if managed(module.clone()) {
             return Some(FamilyMatch {
                 tier: TIER_TORN_PYTHON,
@@ -542,9 +597,21 @@ fn find_module(haystack: &str) -> Option<String> {
     None
 }
 
-/// Find the first single- or double-quoted symbol in text.
-fn find_quoted(haystack: &str) -> Option<String> {
+fn line_containing<'a>(texts: &[&'a str], needle: &str) -> Option<&'a str> {
+    let needle = needle.to_ascii_lowercase();
+    for text in texts {
+        for line in text.lines() {
+            if line.to_ascii_lowercase().contains(&needle) {
+                return Some(line);
+            }
+        }
+    }
+    None
+}
+
+fn quoted_tokens(haystack: &str) -> Vec<String> {
     let bytes = haystack.as_bytes();
+    let mut tokens = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
         let quote = bytes[index];
@@ -554,12 +621,71 @@ fn find_quoted(haystack: &str) -> Option<String> {
                 end += 1;
             }
             if end < bytes.len() && end > index + 1 && end - index < 160 {
-                return Some(haystack[index + 1..end].to_string());
+                tokens.push(haystack[index + 1..end].to_string());
+                index = end + 1;
+                continue;
             }
-            index = end + 1;
+            index = end.saturating_add(1);
         } else {
             index += 1;
         }
     }
-    None
+    tokens
+}
+
+/// `cannot import name 'X' from 'M'` — symbol and module from that line.
+fn extract_cannot_import_name(
+    context: &AutoRestartContextWire,
+) -> (Option<String>, Option<String>) {
+    let line = line_containing(
+        &[&context.error_text, &context.traceback_text],
+        "cannot import name",
+    )
+    .unwrap_or("");
+    let quotes = quoted_tokens(line);
+    let symbol = quotes.first().cloned();
+    let module = quotes.get(1).cloned().or_else(|| find_module(line));
+    (module, symbol)
+}
+
+/// `No module named 'X'`.
+fn extract_no_module_named(context: &AutoRestartContextWire) -> Option<String> {
+    let line = line_containing(
+        &[&context.error_text, &context.traceback_text],
+        "no module named",
+    )?;
+    quoted_tokens(line)
+        .into_iter()
+        .next()
+        .or_else(|| find_module(line))
+}
+
+/// `module 'M' has no attribute 'X'`.
+fn extract_has_no_attribute(
+    context: &AutoRestartContextWire,
+) -> (Option<String>, Option<String>) {
+    let line = line_containing(
+        &[&context.error_text, &context.traceback_text],
+        "has no attribute",
+    )
+    .unwrap_or("");
+    let quotes = quoted_tokens(line);
+    if quotes.len() >= 2 {
+        return (Some(quotes[0].clone()), Some(quotes[1].clone()));
+    }
+    (find_module(line), quotes.first().cloned())
+}
+
+/// `partially initialized module 'M'`.
+fn extract_partially_initialized(
+    context: &AutoRestartContextWire,
+) -> Option<String> {
+    let line = line_containing(
+        &[&context.error_text, &context.traceback_text],
+        "partially initialized module",
+    )?;
+    quoted_tokens(line)
+        .into_iter()
+        .next()
+        .or_else(|| find_module(line))
 }

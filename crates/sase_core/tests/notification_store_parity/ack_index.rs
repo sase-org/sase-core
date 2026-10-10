@@ -111,6 +111,7 @@ fn notification_store_writes_bump_generation_and_noops_do_not() {
         &NotificationReconcileRequestWire {
             notifications: Vec::new(),
             reversible_dismiss_marker_key: None,
+            refresh_files: false,
         },
     )
     .unwrap();

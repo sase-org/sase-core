@@ -24,6 +24,7 @@ fn reconcile_request(
     NotificationReconcileRequestWire {
         notifications: rows,
         reversible_dismiss_marker_key: Some(MARKER_KEY.to_string()),
+        refresh_files: false,
     }
 }
 
@@ -220,6 +221,49 @@ fn reconcile_refresh_copies_only_owned_fields() {
 }
 
 #[test]
+fn reconcile_refresh_files_replaces_files_without_moving_cursors() {
+    let temp = tempdir().unwrap();
+    let path = store_path(temp.path());
+    let mut row = notification("episode-1");
+    row.read = true;
+    row.files = vec!["old.md".to_string()];
+    row.timestamp = "2026-10-09T12:00:00+00:00".to_string();
+    row.resurfaced_at = Some("2026-10-09T12:01:00+00:00".to_string());
+    rewrite_notifications(&path, &[row]).unwrap();
+
+    let mut incoming = notification("episode-1");
+    incoming.notes = vec!["live report".to_string()];
+    incoming.files =
+        vec!["error_report.md".to_string(), "evidence/bundle".to_string()];
+    incoming.timestamp = "1999-01-01T00:00:00+00:00".to_string();
+    incoming.resurfaced_at = Some("1999-01-01T00:00:00+00:00".to_string());
+    incoming.read = false;
+    let request = NotificationReconcileRequestWire {
+        notifications: vec![incoming],
+        reversible_dismiss_marker_key: None,
+        refresh_files: true,
+    };
+    let outcome = reconcile_notification_rows(&path, &request).unwrap();
+    assert_eq!(outcome.updated, 1);
+
+    let rows = read_notifications_snapshot(&path, true)
+        .unwrap()
+        .notifications;
+    let merged = &rows[0];
+    assert_eq!(
+        merged.files,
+        vec!["error_report.md".to_string(), "evidence/bundle".to_string()]
+    );
+    assert_eq!(merged.notes, vec!["live report".to_string()]);
+    assert_eq!(merged.timestamp, "2026-10-09T12:00:00+00:00");
+    assert_eq!(
+        merged.resurfaced_at.as_deref(),
+        Some("2026-10-09T12:01:00+00:00")
+    );
+    assert!(merged.read);
+}
+
+#[test]
 fn reconcile_auto_dismisses_with_the_marker() {
     let temp = tempdir().unwrap();
     let path = store_path(temp.path());
@@ -304,6 +348,7 @@ fn reconcile_without_a_marker_key_never_changes_dismissals() {
     let request = NotificationReconcileRequestWire {
         notifications: vec![notification("remote-1")],
         reversible_dismiss_marker_key: None,
+        refresh_files: false,
     };
     let outcome = reconcile_notification_rows(&path, &request).unwrap();
     assert_eq!(outcome.resurfaced, 0);

@@ -69,12 +69,18 @@ fn py_classify_agent_failure<'py>(
 }
 
 /// Advance one ledger record; illegal transitions raise `ValueError`.
+///
+/// `at` is an optional ISO-8601 timestamp. Released callers may omit it.
 #[pyfunction]
-#[pyo3(name = "advance_auto_restart_ledger")]
+#[pyo3(
+    name = "advance_auto_restart_ledger",
+    signature = (record, event, *, at = None)
+)]
 fn py_advance_auto_restart_ledger<'py>(
     py: Python<'py>,
     record: &Bound<'py, PyDict>,
     event: &str,
+    at: Option<&str>,
 ) -> PyResult<PyObject> {
     let record: AutoRestartLedgerRecordWire = serde_json::from_value(
         py_to_json_value(record.as_any())?,
@@ -84,20 +90,26 @@ fn py_advance_auto_restart_ledger<'py>(
             "record is not a valid AutoRestartLedgerRecordWire dict: {error}"
         ))
     })?;
-    let updated = core_advance_ledger(&record, event)
+    let updated = core_advance_ledger(&record, event, at)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &updated)
 }
 
 /// Create a freshly claimed ledger record for one lineage.
+///
+/// `at` is an optional ISO-8601 timestamp. Released callers may omit it.
 #[pyfunction]
-#[pyo3(name = "claim_auto_restart_ledger")]
+#[pyo3(
+    name = "claim_auto_restart_ledger",
+    signature = (key, lineage_root, *, at = None)
+)]
 fn py_claim_auto_restart_ledger<'py>(
     py: Python<'py>,
     key: &str,
     lineage_root: &str,
+    at: Option<&str>,
 ) -> PyResult<PyObject> {
-    let record = core_claim_ledger(key, lineage_root);
+    let record = core_claim_ledger(key, lineage_root, at);
     serialize_to_py(py, &record)
 }
 

@@ -52,9 +52,13 @@ pub enum AutoRestartLedgerError {
 }
 
 /// Advance one ledger record through the transition table.
+///
+/// `at` is an optional ISO-8601 timestamp stamped onto the new history
+/// entry. A `reclaim` also refreshes `claimed_at`.
 pub fn advance_auto_restart_ledger(
     record: &AutoRestartLedgerRecordWire,
     event: &str,
+    at: Option<&str>,
 ) -> Result<AutoRestartLedgerRecordWire, AutoRestartLedgerError> {
     let next = match (record.state.as_str(), event) {
         (LEDGER_CLAIMED, LEDGER_EVENT_DEFER) => LEDGER_DEFERRED,
@@ -80,33 +84,44 @@ pub fn advance_auto_restart_ledger(
     if next == LEDGER_DEFERRED {
         updated.deferrals = updated.deferrals.saturating_add(1);
     }
+    if event == LEDGER_EVENT_RECLAIM {
+        if let Some(stamp) = at.filter(|value| !value.is_empty()) {
+            updated.claimed_at = Some(stamp.to_string());
+        }
+    }
     updated
         .history
         .push(super::wire::AutoRestartLedgerHistoryWire {
             state: next.to_string(),
-            at: None,
+            at: at.filter(|value| !value.is_empty()).map(str::to_string),
             note: Some(format!("event {event}")),
         });
     Ok(updated)
 }
 
 /// Create a freshly claimed ledger record for one lineage.
+///
+/// `at` is an optional ISO-8601 timestamp for `claimed_at` and the
+/// opening history entry. Released callers may omit it.
 pub fn claim_auto_restart_ledger(
     key: &str,
     lineage_root: &str,
+    at: Option<&str>,
 ) -> AutoRestartLedgerRecordWire {
+    let stamp = at.filter(|value| !value.is_empty()).map(str::to_string);
     let mut record = AutoRestartLedgerRecordWire {
         schema_version: AGENT_AUTO_RESTART_WIRE_SCHEMA_VERSION,
         key: key.to_string(),
         lineage_root: lineage_root.to_string(),
         state: LEDGER_CLAIMED.to_string(),
+        claimed_at: stamp.clone(),
         ..Default::default()
     };
     record
         .history
         .push(super::wire::AutoRestartLedgerHistoryWire {
             state: LEDGER_CLAIMED.to_string(),
-            at: None,
+            at: stamp,
             note: Some("claimed".to_string()),
         });
     record

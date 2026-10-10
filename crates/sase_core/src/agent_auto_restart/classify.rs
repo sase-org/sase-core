@@ -6,7 +6,8 @@
 //! runs the fresh-interpreter probe only when it matters.
 
 use super::catalog::{
-    combined_text, match_family, never_restart_reason, TIER_DATA_FORMAT,
+    candidate_files, combined_text, looks_like_import_or_attribute_error,
+    match_family, never_restart_reason, origin_is_workspace, TIER_DATA_FORMAT,
     TIER_REAL_BUG, TIER_RUST_BINDING, TIER_TORN_PYTHON,
 };
 use super::episode::derive_auto_restart_episode;
@@ -71,6 +72,23 @@ pub fn classify_agent_failure(
     let matched = match matched {
         Some(matched) => matched,
         None => {
+            let files = candidate_files(facts, context);
+            if looks_like_import_or_attribute_error(facts, context)
+                && origin_is_workspace(&files, context)
+            {
+                return decline(
+                    "",
+                    "",
+                    "workspace origin",
+                    None,
+                    None,
+                    classify_phase(facts, context),
+                    "workspace_origin",
+                    "ImportError originated in the agent workspace, not managed sase code",
+                    witnesses_fired,
+                    episode_id,
+                );
+            }
             return decline(
                 "",
                 "",
@@ -138,6 +156,23 @@ pub fn classify_agent_failure(
                 episode_id,
             };
         }
+        PHASE_UNKNOWN => {
+            return RecoveryVerdictWire {
+                schema_version: AGENT_AUTO_RESTART_WIRE_SCHEMA_VERSION,
+                tier: matched.tier.to_string(),
+                family: matched.family.to_string(),
+                signature: matched.signature.clone(),
+                origin_module: matched.origin_module.clone(),
+                missing_symbol: matched.missing_symbol.clone(),
+                phase_class,
+                mode: MODE_ASK.to_string(),
+                reason: "phase_unknown".to_string(),
+                reason_text: "couldn't tell whether it reached its model turn"
+                    .to_string(),
+                witnesses_fired,
+                episode_id,
+            };
+        }
         _ => {}
     }
 
@@ -184,22 +219,28 @@ pub fn classify_agent_failure(
             };
         }
         if tier12 && probe_present && !probe_ok {
-            return RecoveryVerdictWire {
-                schema_version: AGENT_AUTO_RESTART_WIRE_SCHEMA_VERSION,
-                tier: matched.tier.to_string(),
-                family: matched.family.to_string(),
-                signature: matched.signature.clone(),
-                origin_module: matched.origin_module.clone(),
-                missing_symbol: matched.missing_symbol.clone(),
-                phase_class,
-                mode: MODE_DEFER.to_string(),
-                reason: "probe_failed".to_string(),
-                reason_text:
-                    "fresh-interpreter probe failed; deferred, not relaunched"
-                        .to_string(),
-                witnesses_fired,
-                episode_id,
-            };
+            // Tier 1 still needs an update witness. A failed probe
+            // without W1/W2 is a real bug, not a deferral.
+            let can_defer_failed_probe =
+                matched.tier == TIER_RUST_BINDING || has_w1 || has_w2;
+            if can_defer_failed_probe {
+                return RecoveryVerdictWire {
+                    schema_version: AGENT_AUTO_RESTART_WIRE_SCHEMA_VERSION,
+                    tier: matched.tier.to_string(),
+                    family: matched.family.to_string(),
+                    signature: matched.signature.clone(),
+                    origin_module: matched.origin_module.clone(),
+                    missing_symbol: matched.missing_symbol.clone(),
+                    phase_class,
+                    mode: MODE_DEFER.to_string(),
+                    reason: "probe_failed".to_string(),
+                    reason_text:
+                        "fresh-interpreter probe failed; deferred, not relaunched"
+                            .to_string(),
+                    witnesses_fired,
+                    episode_id,
+                };
+            }
         }
         return decline(
             matched.tier,
@@ -313,38 +354,33 @@ pub fn classify_phase(
 
 /// Legacy rows have no breadcrumbs: treat the row as pre-provider only
 /// when its frames include no provider/finalizer frames, or when the log
-/// shows the refresh line and no provider start.
+/// shows the refresh line and no provider start. Otherwise stay
+/// `unknown` — that class never relaunches.
 fn legacy_phase_class(
     facts: Option<&AgentFailureFactsWire>,
     context: &AutoRestartContextWire,
 ) -> String {
+    if let Some(facts) = facts {
+        if !facts.frames.is_empty() {
+            for frame in &facts.frames {
+                let function = frame.function.to_ascii_lowercase();
+                if PROVIDER_FRAMES.iter().any(|m| function.contains(m)) {
+                    return PHASE_POST_PROVIDER.to_string();
+                }
+            }
+            return PHASE_PRE_PROVIDER.to_string();
+        }
+    }
     let haystack = combined_text(context);
     if haystack.contains("run_execution_loop")
         || haystack.contains("invoke_agent")
     {
-        // `finaliz` also matches "finalizer", which proves post-provider
-        // work started.
         return PHASE_POST_PROVIDER.to_string();
-    }
-    if let Some(facts) = facts {
-        for frame in &facts.frames {
-            let function = frame.function.to_ascii_lowercase();
-            if PROVIDER_FRAMES.iter().any(|m| function.contains(m)) {
-                return PHASE_POST_PROVIDER.to_string();
-            }
-        }
     }
     if haystack.contains("refreshing sase runner code after dependency wait")
         && !haystack.contains("provider start")
         && !haystack.contains("model turn")
     {
-        return PHASE_PRE_PROVIDER.to_string();
-    }
-    // Frames exist but prove nothing either way: unknown, and unknown
-    // never relaunches without witnesses... the witness gate below
-    // still requires W1/W2, so returning pre_provider here is safe:
-    // without an update witness the verdict declines anyway.
-    if facts.is_some_and(|f| !f.frames.is_empty()) {
         return PHASE_PRE_PROVIDER.to_string();
     }
     PHASE_UNKNOWN.to_string()

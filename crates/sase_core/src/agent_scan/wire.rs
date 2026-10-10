@@ -764,6 +764,14 @@ pub struct AgentMetaWire {
     /// when Python stops writing legacy keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<crate::autonomy::AutonomyRecordWire>,
+    /// Update-skew auto-restart provenance (`agent_meta.auto_restart`,
+    /// written on replacement rows by the healer). Trailing for the same
+    /// key-order stability; additive serde-default and omitted when
+    /// absent, so existing scan payloads stay byte-stable and no schema
+    /// bump is needed. Tolerant pass-through object for the Agents-tab
+    /// provenance block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_restart: Option<Map<String, Value>>,
 }
 
 /// One entry of `agent_meta.json`'s `created_epics` record.
@@ -1974,5 +1982,29 @@ mod tests {
         let decoded: AgentMetaWire =
             serde_json::from_value(old_record).unwrap();
         assert!(decoded.created_epics.is_empty());
+    }
+
+    #[test]
+    fn agent_meta_wire_round_trips_auto_restart() {
+        let mut provenance = serde_json::Map::new();
+        provenance.insert(
+            "episode_id".to_string(),
+            serde_json::json!("sase@9fd8a08"),
+        );
+        provenance.insert("from_rev".to_string(), serde_json::json!("9c5000f"));
+        let meta = AgentMetaWire {
+            auto_restart: Some(provenance),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(encoded["auto_restart"]["episode_id"], "sase@9fd8a08");
+        let decoded: AgentMetaWire = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn agent_meta_wire_omits_absent_auto_restart() {
+        let encoded = serde_json::to_value(AgentMetaWire::default()).unwrap();
+        assert!(encoded.get("auto_restart").is_none());
     }
 }

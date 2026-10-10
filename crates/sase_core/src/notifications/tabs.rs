@@ -457,6 +457,10 @@ mod tests {
 
         assert_eq!(tab_key_for(&hitl).0, HITL_TAB_KEY);
         assert_eq!(tab_key_for(&error).0, ERRORS_TAB_KEY);
+        let mut auto_restart = notification("ar");
+        auto_restart.action = Some("ViewErrorReport".to_string());
+        auto_restart.sender = "agent.auto-restart".to_string();
+        assert_eq!(tab_key_for(&auto_restart).0, ERRORS_TAB_KEY);
         assert_eq!(tab_key_for(&tagged), ("beta".to_string(), TAB_KIND_TAG));
         assert_eq!(tab_key_for(&notification("g")).0, GENERAL_TAB_KEY);
     }

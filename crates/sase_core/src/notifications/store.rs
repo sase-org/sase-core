@@ -1183,6 +1183,9 @@ fn reconcile_notification_rows_unlocked(
         merged.action.clone_from(&input.action);
         merged.action_data.clone_from(&input.action_data);
         merged.silent = input.silent;
+        if request.refresh_files {
+            merged.files.clone_from(&input.files);
+        }
         let disk_has_marker = marker.is_some_and(|key| {
             on_disk.action_data.get(key) == Some(&"true".to_string())
         });

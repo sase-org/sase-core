@@ -3,7 +3,7 @@
 use super::classify::{
     classify_agent_failure, MODE_ASK, MODE_DECLINE, MODE_DEFER,
     MODE_NOTIFY_POST_PROVIDER, MODE_RELAUNCH, PHASE_PLAN_HANDOFF,
-    PHASE_POST_PROVIDER, PHASE_PRE_PROVIDER,
+    PHASE_POST_PROVIDER, PHASE_PRE_PROVIDER, PHASE_UNKNOWN,
 };
 use super::episode::derive_auto_restart_episode;
 use super::ledger::{
@@ -129,6 +129,7 @@ fn workspace_origin_import_error_never_matches() {
     };
     let verdict = classify_agent_failure(None, &context, &witnesses);
     assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "workspace_origin");
 }
 
 #[test]
@@ -249,60 +250,85 @@ fn legacy_provider_frames_mean_post_provider() {
 
 #[test]
 fn every_ledger_transition_legal_and_illegal() {
-    let record = claim_auto_restart_ledger("k", "root");
+    let record = claim_auto_restart_ledger("k", "root", None);
     assert_eq!(record.state, LEDGER_CLAIMED);
 
     let deferred =
-        advance_auto_restart_ledger(&record, LEDGER_EVENT_DEFER).unwrap();
+        advance_auto_restart_ledger(&record, LEDGER_EVENT_DEFER, None).unwrap();
     assert_eq!(deferred.state, LEDGER_DEFERRED);
     assert_eq!(deferred.deferrals, 1);
 
     let reclaimed =
-        advance_auto_restart_ledger(&deferred, LEDGER_EVENT_RECLAIM).unwrap();
+        advance_auto_restart_ledger(&deferred, LEDGER_EVENT_RECLAIM, None)
+            .unwrap();
     assert_eq!(reclaimed.state, LEDGER_CLAIMED);
 
-    let launching =
-        advance_auto_restart_ledger(&reclaimed, LEDGER_EVENT_BEGIN_LAUNCH)
-            .unwrap();
+    let launching = advance_auto_restart_ledger(
+        &reclaimed,
+        LEDGER_EVENT_BEGIN_LAUNCH,
+        None,
+    )
+    .unwrap();
     assert_eq!(launching.state, LEDGER_LAUNCHING);
 
     let launched =
-        advance_auto_restart_ledger(&launching, LEDGER_EVENT_LAUNCHED).unwrap();
+        advance_auto_restart_ledger(&launching, LEDGER_EVENT_LAUNCHED, None)
+            .unwrap();
     assert_eq!(launched.state, LEDGER_LAUNCHED);
 
     let settled =
-        advance_auto_restart_ledger(&launched, LEDGER_EVENT_SETTLED_OK)
+        advance_auto_restart_ledger(&launched, LEDGER_EVENT_SETTLED_OK, None)
             .unwrap();
     assert_eq!(settled.state, LEDGER_SETTLED_OK);
 
     // Illegal: claimed cannot settle, launched cannot reclaim, settled
     // is terminal, unknown events fail.
+    assert!(advance_auto_restart_ledger(
+        &record,
+        LEDGER_EVENT_SETTLED_OK,
+        None
+    )
+    .is_err());
     assert!(
-        advance_auto_restart_ledger(&record, LEDGER_EVENT_SETTLED_OK).is_err()
+        advance_auto_restart_ledger(&launched, LEDGER_EVENT_RECLAIM, None)
+            .is_err()
     );
     assert!(
-        advance_auto_restart_ledger(&launched, LEDGER_EVENT_RECLAIM).is_err()
+        advance_auto_restart_ledger(&settled, LEDGER_EVENT_DECLINE, None)
+            .is_err()
     );
-    assert!(
-        advance_auto_restart_ledger(&settled, LEDGER_EVENT_DECLINE).is_err()
-    );
-    assert!(advance_auto_restart_ledger(&record, "bogus").is_err());
+    assert!(advance_auto_restart_ledger(&record, "bogus", None).is_err());
 
     // launching → settled_failed and launched → settled_failed.
-    let failed =
-        advance_auto_restart_ledger(&launching, LEDGER_EVENT_SETTLED_FAILED)
-            .unwrap();
+    let failed = advance_auto_restart_ledger(
+        &launching,
+        LEDGER_EVENT_SETTLED_FAILED,
+        None,
+    )
+    .unwrap();
     assert_eq!(failed.state, LEDGER_SETTLED_FAILED);
     assert!(
-        advance_auto_restart_ledger(&launched, LEDGER_EVENT_SETTLED_FAILED)
-            .unwrap()
-            .state
+        advance_auto_restart_ledger(
+            &launched,
+            LEDGER_EVENT_SETTLED_FAILED,
+            None
+        )
+        .unwrap()
+        .state
             == LEDGER_SETTLED_FAILED
     );
 
     // deferred → declined.
     assert_eq!(
-        advance_auto_restart_ledger(&deferred, LEDGER_EVENT_DECLINE)
+        advance_auto_restart_ledger(&deferred, LEDGER_EVENT_DECLINE, None)
+            .unwrap()
+            .state,
+        LEDGER_DECLINED
+    );
+
+    // claimed → declined is a legal transition.
+    assert_eq!(
+        advance_auto_restart_ledger(&record, LEDGER_EVENT_DECLINE, None)
             .unwrap()
             .state,
         LEDGER_DECLINED
@@ -344,4 +370,154 @@ fn in_flight_states_map_to_restarting() {
     assert!(!auto_restart_recovery_is_in_flight(Some("declined")));
     assert!(!auto_restart_recovery_is_in_flight(Some("launched")));
     assert!(!auto_restart_recovery_is_in_flight(None));
+}
+
+fn waiter_traceback() -> String {
+    format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/axe/run_agent_wait.py\", line 88, in wait_for_dependencies\n    refresh_runner_code_after_wait()\n  File \"/opt/sase/src/sase/axe/run_agent_runner_refresh.py\", line 42, in refresh_runner_code_after_wait\n    cont_mod = importlib.import_module(mod)\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 1, in <module>\n{INCIDENT_ERROR}"
+    )
+}
+
+#[test]
+fn waiter_incident_relaunch_extracts_missing_symbol_from_error_line() {
+    let mut context = managed_context();
+    context.traceback_text = waiter_traceback();
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_RELAUNCH);
+    assert_eq!(verdict.phase_class, PHASE_PRE_PROVIDER);
+    assert_eq!(
+        verdict.missing_symbol.as_deref(),
+        Some("auto_launch_prefix")
+    );
+    assert_eq!(
+        verdict.origin_module.as_deref(),
+        Some("sase.monitor.continuation_delivery")
+    );
+}
+
+#[test]
+fn workspace_origin_with_trailing_slash_declines_even_with_witnesses() {
+    let mut context = managed_context();
+    context.workspace_dir = Some("/opt/sase/".to_string());
+    context.error_text =
+        "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
+            .to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
+        context.error_text
+    );
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "workspace_origin");
+}
+
+#[test]
+fn workspace_origin_without_trailing_slash_declines() {
+    let mut context = managed_context();
+    context.workspace_dir = Some("/opt/sase".to_string());
+    context.error_text =
+        "ImportError: cannot import name 'helper' from 'sase.monitor.continuation_delivery'"
+            .to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/monitor/continuation_delivery.py\", line 3, in <module>\n{}",
+        context.error_text
+    );
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "workspace_origin");
+}
+
+#[test]
+fn third_party_import_error_does_not_match_from_log_tail_sase_logger() {
+    let mut context = managed_context();
+    context.error_text =
+        "ModuleNotFoundError: No module named 'requests'".to_string();
+    context.traceback_text = context.error_text.clone();
+    context.log_tail = "2026-10-09 12:04:00 [sase.axe] INFO refresh complete\n2026-10-09 12:04:01 [sase.monitor.continuation_delivery] ERROR boom".to_string();
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "no_update_signature");
+}
+
+#[test]
+fn unknown_phase_asks_and_never_relaunches() {
+    let mut context = managed_context();
+    context.lifecycle_phase = None;
+    context.log_tail = String::new();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/foo.py\", line 1, in helper\n{INCIDENT_ERROR}"
+    );
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(verdict.phase_class, PHASE_UNKNOWN);
+    assert_eq!(verdict.mode, MODE_ASK);
+    assert_eq!(verdict.reason, "phase_unknown");
+    assert!(verdict.reason_text.contains("couldn't tell"));
+}
+
+#[test]
+fn tier1_failed_probe_without_update_witness_declines() {
+    let witnesses = AutoRestartWitnessesWire {
+        schema_version: 1,
+        probe: Some(AutoRestartProbeWire {
+            ok: false,
+            failures: vec!["sase.monitor.continuation_delivery".to_string()],
+        }),
+        ..Default::default()
+    };
+    let verdict = classify_agent_failure(None, &managed_context(), &witnesses);
+    assert_eq!(verdict.mode, MODE_DECLINE);
+    assert_eq!(verdict.reason, "no_update_witness");
+}
+
+#[test]
+fn missing_symbol_comes_from_the_matched_error_line_not_first_quote() {
+    let mut context = managed_context();
+    context.error_text = INCIDENT_ERROR.to_string();
+    context.traceback_text = format!(
+        "Traceback (most recent call last):\n  File \"/opt/sase/src/sase/axe/run_agent_runner.py\", line 18, in main\n    run()\n{INCIDENT_ERROR}"
+    );
+    let verdict = classify_agent_failure(None, &context, &strong_witnesses());
+    assert_eq!(
+        verdict.missing_symbol.as_deref(),
+        Some("auto_launch_prefix")
+    );
+}
+
+#[test]
+fn ledger_stamps_claimed_at_and_history_at() {
+    const STAMP: &str = "2026-10-09T12:04:00+00:00";
+    const LATER: &str = "2026-10-09T12:05:00+00:00";
+    let record = claim_auto_restart_ledger("k", "root", Some(STAMP));
+    assert_eq!(record.claimed_at.as_deref(), Some(STAMP));
+    assert_eq!(record.history[0].at.as_deref(), Some(STAMP));
+
+    let declined =
+        advance_auto_restart_ledger(&record, LEDGER_EVENT_DECLINE, Some(LATER))
+            .unwrap();
+    assert_eq!(declined.state, LEDGER_DECLINED);
+    assert_eq!(declined.claimed_at.as_deref(), Some(STAMP));
+    assert_eq!(declined.history.last().unwrap().at.as_deref(), Some(LATER));
+
+    let deferred =
+        advance_auto_restart_ledger(&record, LEDGER_EVENT_DEFER, Some(LATER))
+            .unwrap();
+    let reclaimed = advance_auto_restart_ledger(
+        &deferred,
+        LEDGER_EVENT_RECLAIM,
+        Some(LATER),
+    )
+    .unwrap();
+    assert_eq!(reclaimed.state, LEDGER_CLAIMED);
+    assert_eq!(reclaimed.claimed_at.as_deref(), Some(LATER));
+}
+
+#[test]
+fn episode_falls_back_to_identity_revisions_before_refresh_log() {
+    let mut witnesses = strong_witnesses();
+    witnesses.file_proof = None;
+    witnesses.refresh_log_line = None;
+    let episode = derive_auto_restart_episode(&witnesses);
+    assert_eq!(episode.id, "sase@9c5000f-9fd8a08");
+    assert_eq!(episode.from_rev.as_deref(), Some("9c5000f"));
+    assert_eq!(episode.to_rev.as_deref(), Some("9fd8a08"));
 }

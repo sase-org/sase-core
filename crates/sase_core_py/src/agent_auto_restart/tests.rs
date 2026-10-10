@@ -81,13 +81,15 @@ fn classify_binding_relaunches_incident() {
 fn ledger_binding_rejects_illegal_transitions() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
-        let record = py_claim_auto_restart_ledger(py, "k", "root").unwrap();
+        let record =
+            py_claim_auto_restart_ledger(py, "k", "root", None).unwrap();
         let record = record.bind(py).downcast::<PyDict>().unwrap();
         assert!(
-            py_advance_auto_restart_ledger(py, record, "settled_ok").is_err()
+            py_advance_auto_restart_ledger(py, record, "settled_ok", None)
+                .is_err()
         );
         let deferred =
-            py_advance_auto_restart_ledger(py, record, "defer").unwrap();
+            py_advance_auto_restart_ledger(py, record, "defer", None).unwrap();
         let value = py_to_json_value(deferred.bind(py)).unwrap();
         assert_eq!(value["state"], json!("deferred"));
         assert_eq!(value["deferrals"], json!(1));
@@ -108,6 +110,34 @@ fn episode_and_in_flight_bindings() {
         assert_eq!(
             py_auto_restart_lineage_root("row", Some("lineage"), None),
             "lineage"
+        );
+    });
+}
+
+#[test]
+fn ledger_binding_stamps_optional_at() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        const STAMP: &str = "2026-10-09T12:04:00+00:00";
+        let record =
+            py_claim_auto_restart_ledger(py, "k", "root", Some(STAMP)).unwrap();
+        let value = py_to_json_value(record.bind(py)).unwrap();
+        assert_eq!(value["claimed_at"], json!(STAMP));
+        assert_eq!(value["history"][0]["at"], json!(STAMP));
+        let record = record.bind(py).downcast::<PyDict>().unwrap();
+        let declined = py_advance_auto_restart_ledger(
+            py,
+            record,
+            "decline",
+            Some("2026-10-09T12:05:00+00:00"),
+        )
+        .unwrap();
+        let value = py_to_json_value(declined.bind(py)).unwrap();
+        assert_eq!(value["state"], json!("declined"));
+        assert_eq!(value["claimed_at"], json!(STAMP));
+        assert_eq!(
+            value["history"][1]["at"],
+            json!("2026-10-09T12:05:00+00:00")
         );
     });
 }

@@ -566,7 +566,10 @@ pub fn mobile_notification_error_from_wire(
     notification: &NotificationWire,
 ) -> bool {
     notification.action.as_deref() == Some("ViewErrorReport")
-        && matches!(notification.sender.as_str(), "axe" | "user-agent")
+        && matches!(
+            notification.sender.as_str(),
+            "axe" | "user-agent" | "agent.auto-restart"
+        )
 }
 
 pub fn mobile_notification_priority_from_wire(
@@ -1504,6 +1507,14 @@ mod tests {
         };
         assert!(mobile_notification_error_from_wire(&user_agent_error));
         assert!(!mobile_notification_priority_from_wire(&user_agent_error));
+
+        let auto_restart_error = NotificationWire {
+            sender: "agent.auto-restart".to_string(),
+            action: Some("ViewErrorReport".to_string()),
+            ..Default::default()
+        };
+        assert!(mobile_notification_error_from_wire(&auto_restart_error));
+        assert!(!mobile_notification_priority_from_wire(&auto_restart_error));
 
         let axe_other = NotificationWire {
             sender: "axe".to_string(),

@@ -67,12 +67,31 @@ pub fn derive_auto_restart_episode(
 fn revision_range(
     witnesses: &AutoRestartWitnessesWire,
 ) -> (Option<String>, Option<String>) {
+    // Prefer boot/current identity revisions, then the refresh log line.
+    if let (Some(from), Some(to)) = (
+        identity_revision(witnesses.boot_identity.as_deref()),
+        identity_revision(witnesses.current_identity.as_deref()),
+    ) {
+        return (Some(from), Some(to));
+    }
     match witnesses.refresh_log_line.as_ref() {
         Some(line) if !line.from.is_empty() || !line.to.is_empty() => {
             (short_opt(&line.from), short_opt(&line.to))
         }
         _ => (None, None),
     }
+}
+
+fn identity_revision(identity: Option<&str>) -> Option<String> {
+    let identity = identity?.trim();
+    if identity.is_empty() {
+        return None;
+    }
+    let rev = match identity.rsplit_once('@') {
+        Some((_, rev)) if !rev.trim().is_empty() => rev.trim(),
+        _ => identity,
+    };
+    short_opt(rev)
 }
 
 fn short_opt(rev: &str) -> Option<String> {
