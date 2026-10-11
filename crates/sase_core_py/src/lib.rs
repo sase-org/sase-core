@@ -52,6 +52,7 @@ mod notifications;
 mod plans;
 mod prelude;
 mod procs;
+mod project_onboarding;
 mod project_tag;
 mod prompt_prediction;
 mod prose_diff;
@@ -94,6 +95,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     migration::register_migration(m)?;
     notifications::register_notifications(m)?;
     procs::register_procs(m)?;
+    project_onboarding::register_project_onboarding(m)?;
     project_tag::register_project_tag(m)?;
     prose_diff::register_prose_diff(m)?;
     memory_history::register_memory_history(m)?;

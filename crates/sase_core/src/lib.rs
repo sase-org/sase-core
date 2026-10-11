@@ -105,6 +105,7 @@ pub mod pending_commit_checkpoint;
 pub mod perf_logs;
 pub mod plan;
 pub mod procs;
+pub mod project_onboarding;
 pub mod project_spec;
 pub mod project_tag;
 pub mod prompt_archive;
