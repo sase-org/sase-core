@@ -11,17 +11,19 @@ use crate::procs::proc_store_result_to_py;
 
 use pyo3::wrap_pyfunction;
 
+use std::sync::Arc;
+
 use sase_core::agent_archive::corpus::compile_agent_archive_corpus as core_compile_agent_archive_corpus;
 use sase_core::agent_archive::corpus::count_agent_archive_corpus as core_count_agent_archive_corpus;
 use sase_core::agent_archive::corpus::lookup_agent_archive_corpus as core_lookup_agent_archive_corpus;
 use sase_core::agent_archive::corpus::rows_agent_archive_corpus as core_rows_agent_archive_corpus;
 use sase_core::agent_archive::corpus::summarize_agent_archive_corpus as core_summarize_agent_archive_corpus;
 use sase_core::agent_archive::corpus::AgentArchiveCompileRequestWire as CorpusCompileRequestWire;
-use sase_core::agent_archive::corpus::AgentArchiveCorpusWire as CorpusWire;
 use sase_core::agent_archive::corpus::AgentArchiveCountRequestWire as CorpusCountRequestWire;
 use sase_core::agent_archive::corpus::AgentArchiveLookupRequestWire as CorpusLookupRequestWire;
 use sase_core::agent_archive::corpus::AgentArchiveRowsRequestWire as CorpusRowsRequestWire;
 use sase_core::agent_archive::corpus::AgentArchiveSummaryRequestWire as CorpusSummaryRequestWire;
+use sase_core::agent_archive::corpus::PreparedAgentArchiveCorpus;
 use sase_core::agent_archive::status_bucket_for_status as core_status_bucket_for_status;
 
 /// Map canonical agent status text to its live status bucket.
@@ -128,16 +130,37 @@ fn py_agent_archive_facet_counts<'py>(
     json_value_to_py(py, &value)
 }
 
+#[pyclass(name = "AgentArchiveCorpusHandle", module = "sase_core_rs", frozen)]
+struct PyAgentArchiveCorpusHandle {
+    corpus: Arc<PreparedAgentArchiveCorpus>,
+}
+
+#[pymethods]
+impl PyAgentArchiveCorpusHandle {
+    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
+        serialize_to_py(py, &self.corpus.status)
+    }
+
+    #[getter]
+    fn timezone(&self) -> &str {
+        &self.corpus.timezone
+    }
+
+    fn __len__(&self) -> usize {
+        self.corpus.len()
+    }
+}
+
 /// Compile the current v3 archive index into an immutable query-ready corpus.
 ///
 /// The caller probes index state first and passes it as
 /// `index_status`; this binding never creates or rebuilds the index.
 #[pyfunction]
 #[pyo3(name = "compile_agent_archive_corpus")]
-fn py_compile_agent_archive_corpus<'py>(
-    py: Python<'py>,
-    request: &Bound<'py, PyDict>,
-) -> PyResult<PyObject> {
+fn py_compile_agent_archive_corpus(
+    py: Python<'_>,
+    request: &Bound<'_, PyDict>,
+) -> PyResult<PyAgentArchiveCorpusHandle> {
     let value = py_to_json_value(request.as_any())?;
     let request: CorpusCompileRequestWire =
         serde_json::from_value(value).map_err(|e| {
@@ -148,24 +171,19 @@ fn py_compile_agent_archive_corpus<'py>(
     let result = py
         .allow_threads(|| core_compile_agent_archive_corpus(request))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-    serialize_to_py(py, &result)
+    Ok(PyAgentArchiveCorpusHandle {
+        corpus: Arc::new(result),
+    })
 }
 
 /// Group matching archive presentation roots, omitting empty groups.
 #[pyfunction]
 #[pyo3(name = "summarize_agent_archive_corpus")]
-fn py_summarize_agent_archive_corpus<'py>(
-    py: Python<'py>,
-    corpus: &Bound<'py, PyDict>,
-    request: &Bound<'py, PyDict>,
+fn py_summarize_agent_archive_corpus(
+    py: Python<'_>,
+    corpus: &PyAgentArchiveCorpusHandle,
+    request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
-    let corpus_value = py_to_json_value(corpus.as_any())?;
-    let corpus: CorpusWire =
-        serde_json::from_value(corpus_value).map_err(|e| {
-            PyValueError::new_err(format!(
-                "corpus is not a valid AgentArchiveCorpusWire dict: {e}"
-            ))
-        })?;
     let value = py_to_json_value(request.as_any())?;
     let request: CorpusSummaryRequestWire =
         serde_json::from_value(value).map_err(|e| {
@@ -173,8 +191,11 @@ fn py_summarize_agent_archive_corpus<'py>(
                 "request is not a valid AgentArchiveSummaryRequestWire dict: {e}"
             ))
         })?;
+    let corpus = Arc::clone(&corpus.corpus);
     let result = py
-        .allow_threads(|| core_summarize_agent_archive_corpus(&corpus, request))
+        .allow_threads(move || {
+            core_summarize_agent_archive_corpus(&corpus, request)
+        })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &result)
 }
@@ -182,18 +203,11 @@ fn py_summarize_agent_archive_corpus<'py>(
 /// Return one offset/limit window of light rows inside a single group.
 #[pyfunction]
 #[pyo3(name = "rows_agent_archive_corpus")]
-fn py_rows_agent_archive_corpus<'py>(
-    py: Python<'py>,
-    corpus: &Bound<'py, PyDict>,
-    request: &Bound<'py, PyDict>,
+fn py_rows_agent_archive_corpus(
+    py: Python<'_>,
+    corpus: &PyAgentArchiveCorpusHandle,
+    request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
-    let corpus_value = py_to_json_value(corpus.as_any())?;
-    let corpus: CorpusWire =
-        serde_json::from_value(corpus_value).map_err(|e| {
-            PyValueError::new_err(format!(
-                "corpus is not a valid AgentArchiveCorpusWire dict: {e}"
-            ))
-        })?;
     let value = py_to_json_value(request.as_any())?;
     let request: CorpusRowsRequestWire = serde_json::from_value(value)
         .map_err(|e| {
@@ -201,8 +215,9 @@ fn py_rows_agent_archive_corpus<'py>(
                 "request is not a valid AgentArchiveRowsRequestWire dict: {e}"
             ))
         })?;
+    let corpus = Arc::clone(&corpus.corpus);
     let result = py
-        .allow_threads(|| core_rows_agent_archive_corpus(&corpus, request))
+        .allow_threads(move || core_rows_agent_archive_corpus(&corpus, request))
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &result)
 }
@@ -210,18 +225,11 @@ fn py_rows_agent_archive_corpus<'py>(
 /// Resolve one exact archive name to its owner's light row, if any.
 #[pyfunction]
 #[pyo3(name = "lookup_agent_archive_corpus")]
-fn py_lookup_agent_archive_corpus<'py>(
-    py: Python<'py>,
-    corpus: &Bound<'py, PyDict>,
-    request: &Bound<'py, PyDict>,
+fn py_lookup_agent_archive_corpus(
+    py: Python<'_>,
+    corpus: &PyAgentArchiveCorpusHandle,
+    request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
-    let corpus_value = py_to_json_value(corpus.as_any())?;
-    let corpus: CorpusWire =
-        serde_json::from_value(corpus_value).map_err(|e| {
-            PyValueError::new_err(format!(
-                "corpus is not a valid AgentArchiveCorpusWire dict: {e}"
-            ))
-        })?;
     let value = py_to_json_value(request.as_any())?;
     let request: CorpusLookupRequestWire = serde_json::from_value(value)
         .map_err(|e| {
@@ -229,26 +237,21 @@ fn py_lookup_agent_archive_corpus<'py>(
                 "request is not a valid AgentArchiveLookupRequestWire dict: {e}"
             ))
         })?;
-    let result =
-        py.allow_threads(|| core_lookup_agent_archive_corpus(&corpus, request));
+    let corpus = Arc::clone(&corpus.corpus);
+    let result = py.allow_threads(move || {
+        core_lookup_agent_archive_corpus(&corpus, request)
+    });
     serialize_to_py(py, &result)
 }
 
 /// Count matching archive presentation roots for a query.
 #[pyfunction]
 #[pyo3(name = "count_agent_archive_corpus")]
-fn py_count_agent_archive_corpus<'py>(
-    py: Python<'py>,
-    corpus: &Bound<'py, PyDict>,
-    request: &Bound<'py, PyDict>,
+fn py_count_agent_archive_corpus(
+    py: Python<'_>,
+    corpus: &PyAgentArchiveCorpusHandle,
+    request: &Bound<'_, PyDict>,
 ) -> PyResult<PyObject> {
-    let corpus_value = py_to_json_value(corpus.as_any())?;
-    let corpus: CorpusWire =
-        serde_json::from_value(corpus_value).map_err(|e| {
-            PyValueError::new_err(format!(
-                "corpus is not a valid AgentArchiveCorpusWire dict: {e}"
-            ))
-        })?;
     let value = py_to_json_value(request.as_any())?;
     let request: CorpusCountRequestWire = serde_json::from_value(value)
         .map_err(|e| {
@@ -256,8 +259,11 @@ fn py_count_agent_archive_corpus<'py>(
                 "request is not a valid AgentArchiveCountRequestWire dict: {e}"
             ))
         })?;
+    let corpus = Arc::clone(&corpus.corpus);
     let result = py
-        .allow_threads(|| core_count_agent_archive_corpus(&corpus, request))
+        .allow_threads(move || {
+            core_count_agent_archive_corpus(&corpus, request)
+        })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     serialize_to_py(py, &result)
 }
@@ -913,6 +919,7 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_status_bucket_for_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_query_agent_archive, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_archive_facet_counts, m)?)?;
+    m.add_class::<PyAgentArchiveCorpusHandle>()?;
     m.add_function(wrap_pyfunction!(py_compile_agent_archive_corpus, m)?)?;
     m.add_function(wrap_pyfunction!(py_summarize_agent_archive_corpus, m)?)?;
     m.add_function(wrap_pyfunction!(py_rows_agent_archive_corpus, m)?)?;

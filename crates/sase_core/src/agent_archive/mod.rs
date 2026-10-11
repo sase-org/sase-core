@@ -23,6 +23,7 @@ pub use corpus::{
     AgentArchiveQueryRowsWire, AgentArchiveQuerySummaryWire,
     AgentArchiveRowsRequestWire, AgentArchiveSummaryRequestWire,
     AgentArchiveTimeBasisWire, AgentArchiveUnsupportedIndexWire,
+    PreparedAgentArchiveCorpus,
 };
 
 pub use status::{archive_outcome_for_status, status_bucket_for_status};

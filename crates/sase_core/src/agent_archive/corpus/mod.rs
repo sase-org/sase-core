@@ -1,4 +1,5 @@
 mod compile;
+mod prepared;
 mod query;
 mod wire;
 
@@ -6,6 +7,7 @@ mod wire;
 mod tests;
 
 pub use compile::{compile_agent_archive_corpus, AgentArchiveCompileError};
+pub use prepared::PreparedAgentArchiveCorpus;
 pub use query::{
     count_agent_archive_corpus, lookup_agent_archive_corpus,
     rows_agent_archive_corpus, summarize_agent_archive_corpus,

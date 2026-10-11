@@ -19,6 +19,7 @@
 //! text — never via regex.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -126,7 +127,7 @@ pub struct QueryCorpus {
     pub searchable_text: Vec<String>,
     pub searchable_lower: Vec<String>,
     pub profile_digest: String,
-    indexed: Vec<IndexedQueryRow>,
+    indexed: Arc<Vec<IndexedQueryRow>>,
 }
 
 impl QueryCorpus {
@@ -147,6 +148,36 @@ impl QueryCorpus {
         rows: Vec<QueryRow>,
     ) -> Self {
         Self::from_parts(profile, rows, Vec::new())
+    }
+
+    /// Build a generic corpus from already-indexed rows.
+    ///
+    /// Archive compile pre-indexes rows so the first query does not repeat
+    /// that work. The profile digest still comes from the query-time profile.
+    pub fn from_indexed_rows(
+        profile: &CompiledQueryProfile,
+        indexed: Arc<Vec<IndexedQueryRow>>,
+    ) -> Self {
+        let searchable_text = indexed
+            .iter()
+            .map(|row| row.searchable_text.clone())
+            .collect();
+        let searchable_lower = indexed
+            .iter()
+            .map(|row| row.searchable_lower.clone())
+            .collect();
+        Self {
+            specs: Vec::new(),
+            name_map: HashMap::new(),
+            lower_names: Vec::new(),
+            base_statuses: Vec::new(),
+            project_names: Vec::new(),
+            sibling_bases: Vec::new(),
+            searchable_text,
+            searchable_lower,
+            profile_digest: profile.digest.clone(),
+            indexed,
+        }
     }
 
     fn from_parts(
@@ -188,7 +219,7 @@ impl QueryCorpus {
             searchable_text,
             searchable_lower,
             profile_digest: profile.digest.clone(),
-            indexed,
+            indexed: Arc::new(indexed),
         }
     }
 

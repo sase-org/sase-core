@@ -1,26 +1,25 @@
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use crate::agent_archive::corpus::compile::{
-    parse_timezone, worse_outcome, ArchiveTimezone,
+use crate::agent_archive::corpus::compile::worse_outcome;
+use crate::agent_archive::corpus::prepared::{
+    outcome_key, PreparedAgentArchiveCorpus,
 };
 use crate::agent_archive::corpus::wire::{
-    AgentArchiveCorpusRowWire, AgentArchiveCorpusWire,
-    AgentArchiveCountRequestWire, AgentArchiveLightRowWire,
-    AgentArchiveLookupRequestWire, AgentArchiveOutcomeWire,
-    AgentArchiveQueryCountWire, AgentArchiveQueryError,
-    AgentArchiveQueryGroupWire, AgentArchiveQueryLookupWire,
-    AgentArchiveQueryRowsWire, AgentArchiveQuerySummaryWire,
-    AgentArchiveRowsRequestWire, AgentArchiveSummaryRequestWire,
+    AgentArchiveCorpusRowWire, AgentArchiveCountRequestWire,
+    AgentArchiveLightRowWire, AgentArchiveLookupRequestWire,
+    AgentArchiveOutcomeWire, AgentArchiveQueryCountWire,
+    AgentArchiveQueryError, AgentArchiveQueryGroupWire,
+    AgentArchiveQueryLookupWire, AgentArchiveQueryRowsWire,
+    AgentArchiveQuerySummaryWire, AgentArchiveRowsRequestWire,
+    AgentArchiveSummaryRequestWire,
 };
 use crate::agent_identity::normalize_agent_archive_name;
 use crate::query::evaluator::{
-    compile_query_with_profile, try_evaluate_query_many_in_corpus, QueryCorpus,
+    compile_query_with_profile, try_evaluate_query_many_in_corpus,
 };
 use crate::query::profile::CompiledQueryProfile;
-use crate::query::row::{QueryFieldValues, QueryPredicateFacts, QueryRow};
 
 #[derive(Clone, Copy)]
 enum GroupBy {
@@ -37,7 +36,7 @@ enum PresentationRoot {
 
 /// Number of matching presentation roots for `request.query`.
 pub fn count_agent_archive_corpus(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     request: AgentArchiveCountRequestWire,
 ) -> Result<AgentArchiveQueryCountWire, AgentArchiveQueryError> {
     let matching = matching_indexes(corpus, &request.query, &request.profile)?;
@@ -48,7 +47,7 @@ pub fn count_agent_archive_corpus(
 
 /// Group matching presentation roots, omitting empty groups.
 pub fn summarize_agent_archive_corpus(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     request: AgentArchiveSummaryRequestWire,
 ) -> Result<AgentArchiveQuerySummaryWire, AgentArchiveQueryError> {
     let group_by = parse_group_by(&request.group_by)?;
@@ -85,7 +84,7 @@ pub fn summarize_agent_archive_corpus(
 
 /// One offset/limit window of light rows inside `group_key`.
 pub fn rows_agent_archive_corpus(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     request: AgentArchiveRowsRequestWire,
 ) -> Result<AgentArchiveQueryRowsWire, AgentArchiveQueryError> {
     let group_by = parse_group_by(&request.group_by)?;
@@ -130,7 +129,7 @@ pub fn rows_agent_archive_corpus(
 
 /// Exact name lookup, including a workflow child that resolves to its owner.
 pub fn lookup_agent_archive_corpus(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     request: AgentArchiveLookupRequestWire,
 ) -> AgentArchiveQueryLookupWire {
     let name = request.name.trim();
@@ -143,25 +142,18 @@ pub fn lookup_agent_archive_corpus(
             candidates.push(canonical);
         }
     }
-    let mut owners = Vec::new();
+    let mut best: Option<usize> = None;
     for candidate in &candidates {
-        let Some(matches) = corpus.name_map.get(candidate) else {
+        let Some(indexes) = corpus.name_indexes.get(candidate) else {
             continue;
         };
-        for item in matches {
-            if !owners.iter().any(|key| key == &item.owner_key) {
-                owners.push(item.owner_key.clone());
-            }
+        for &index in indexes {
+            best = Some(best.map_or(index, |current| current.min(index)));
         }
     }
-    for row in &corpus.rows {
-        if owners.iter().any(|key| key == &row.archive_key) {
-            return AgentArchiveQueryLookupWire {
-                row: Some(member_light_row(row)),
-            };
-        }
+    AgentArchiveQueryLookupWire {
+        row: best.map(|index| member_light_row(&corpus.rows[index])),
     }
-    AgentArchiveQueryLookupWire { row: None }
 }
 
 fn parse_group_by(value: &str) -> Result<GroupBy, AgentArchiveQueryError> {
@@ -175,7 +167,7 @@ fn parse_group_by(value: &str) -> Result<GroupBy, AgentArchiveQueryError> {
 }
 
 fn matching_indexes(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     query: &str,
     profile: &Value,
 ) -> Result<Vec<usize>, AgentArchiveQueryError> {
@@ -183,10 +175,10 @@ fn matching_indexes(
         return Ok((0..corpus.rows.len()).collect());
     }
     let compiled_profile = CompiledQueryProfile::from_wire(profile)?;
-    let rows = corpus.rows.iter().map(query_row_from_corpus_row).collect();
-    let query_corpus = QueryCorpus::from_rows(&compiled_profile, rows);
+    let query_corpus = corpus.query_corpus(&compiled_profile);
     let program = compile_query_with_profile(query, &compiled_profile)?;
-    let mask = try_evaluate_query_many_in_corpus(&program, &query_corpus)?;
+    let mask =
+        try_evaluate_query_many_in_corpus(&program, query_corpus.as_ref())?;
     Ok(mask
         .iter()
         .enumerate()
@@ -195,7 +187,7 @@ fn matching_indexes(
 }
 
 fn presentation_roots(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     matching: &[usize],
 ) -> Vec<PresentationRoot> {
     let mut members_by_container: BTreeMap<String, Vec<usize>> =
@@ -228,13 +220,13 @@ fn presentation_roots(
 }
 
 fn group_key(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     root: &PresentationRoot,
     group_by: GroupBy,
 ) -> String {
     match group_by {
         GroupBy::Day => {
-            local_day_key(root_activity(corpus, root), &corpus.timezone)
+            corpus.local_day_keys[representative_index(root)].clone()
         }
         GroupBy::Project => representative(corpus, root)
             .project
@@ -248,8 +240,15 @@ fn group_key(
     }
 }
 
+fn representative_index(root: &PresentationRoot) -> usize {
+    match root {
+        PresentationRoot::Member { index } => *index,
+        PresentationRoot::Container { members, .. } => members[0],
+    }
+}
+
 fn representative<'a>(
-    corpus: &'a AgentArchiveCorpusWire,
+    corpus: &'a PreparedAgentArchiveCorpus,
     root: &PresentationRoot,
 ) -> &'a AgentArchiveCorpusRowWire {
     match root {
@@ -259,14 +258,14 @@ fn representative<'a>(
 }
 
 fn root_activity<'a>(
-    corpus: &'a AgentArchiveCorpusWire,
+    corpus: &'a PreparedAgentArchiveCorpus,
     root: &PresentationRoot,
 ) -> Option<&'a String> {
     representative(corpus, root).last_activity_at.as_ref()
 }
 
 fn root_outcome(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     root: &PresentationRoot,
 ) -> AgentArchiveOutcomeWire {
     match root {
@@ -302,7 +301,7 @@ fn member_light_row(
 }
 
 fn container_light_row(
-    corpus: &AgentArchiveCorpusWire,
+    corpus: &PreparedAgentArchiveCorpus,
     key: &str,
     members: &[usize],
 ) -> AgentArchiveLightRowWire {
@@ -334,145 +333,5 @@ fn container_light_row(
         start_time: newest.start_time.clone(),
         runtime_seconds: newest.runtime_seconds,
         restorable,
-    }
-}
-
-fn query_row_from_corpus_row(row: &AgentArchiveCorpusRowWire) -> QueryRow {
-    let mut fields = BTreeMap::new();
-    let mut names = Vec::new();
-    push_unique(&mut names, row.agent_name.as_deref());
-    push_unique(&mut names, row.canonical_name.as_deref());
-    push_unique(&mut names, row.global_name.as_deref());
-    fields.insert("name".into(), QueryFieldValues::from_strings(names.clone()));
-    insert_opt(&mut fields, "session", row.session.as_deref());
-    insert_opt(&mut fields, "clan", row.clan.as_deref());
-    insert_opt(&mut fields, "project", row.project.as_deref());
-    insert_opt(&mut fields, "role", row.role.as_deref());
-    insert_opt(&mut fields, "workflow", row.workflow.as_deref());
-    insert_opt(&mut fields, "model", row.model.as_deref());
-    insert_opt(&mut fields, "provider", row.provider.as_deref());
-    fields.insert(
-        "kind".into(),
-        QueryFieldValues::from_string(row.kind.clone()),
-    );
-    fields.insert(
-        "status".into(),
-        QueryFieldValues::from_string(row.status.clone()),
-    );
-    fields.insert(
-        "outcome".into(),
-        QueryFieldValues::from_string(outcome_key(row.outcome)),
-    );
-    insert_opt(&mut fields, "tab", row.tab.as_deref());
-    insert_opt(&mut fields, "tribe", row.tribe.as_deref());
-    insert_opt(&mut fields, "clan_tribe", row.clan_tribe.as_deref());
-    fields.insert(
-        "restorable".into(),
-        QueryFieldValues::from_string(bool_text(row.restorable)),
-    );
-    fields.insert(
-        "linked".into(),
-        QueryFieldValues::from_string(bool_text(row.linked)),
-    );
-    fields.insert(
-        "retry".into(),
-        QueryFieldValues::from_string(bool_text(row.retry)),
-    );
-    fields.insert(
-        "relation".into(),
-        QueryFieldValues::from_strings(row.relations.clone()),
-    );
-    fields.insert(
-        "artifact".into(),
-        QueryFieldValues::from_strings(row.artifacts.clone()),
-    );
-    fields.insert(
-        "attempt".into(),
-        QueryFieldValues::from_string(row.attempt.to_string()),
-    );
-    if let Some(epoch) = epoch_seconds(row.start_time.as_deref()) {
-        fields.insert(
-            "since".into(),
-            QueryFieldValues::from_string(epoch.clone()),
-        );
-        fields.insert("until".into(), QueryFieldValues::from_string(epoch));
-    }
-    if let Some(epoch) = epoch_seconds(row.last_activity_at.as_deref()) {
-        fields.insert(
-            "after".into(),
-            QueryFieldValues::from_string(epoch.clone()),
-        );
-        fields.insert("before".into(), QueryFieldValues::from_string(epoch));
-    }
-    if let Some(runtime) = row.runtime_seconds {
-        let text = runtime.to_string();
-        fields
-            .insert("min".into(), QueryFieldValues::from_string(text.clone()));
-        fields.insert("max".into(), QueryFieldValues::from_string(text));
-    }
-    QueryRow {
-        fields,
-        searchable_text: names.join("\n"),
-        predicates: QueryPredicateFacts::default(),
-    }
-}
-
-fn insert_opt(
-    fields: &mut BTreeMap<String, QueryFieldValues>,
-    key: &str,
-    value: Option<&str>,
-) {
-    if let Some(value) = value {
-        fields.insert(key.to_string(), QueryFieldValues::from_string(value));
-    }
-}
-
-fn push_unique(values: &mut Vec<String>, value: Option<&str>) {
-    let Some(value) = value else {
-        return;
-    };
-    if !values.iter().any(|item| item == value) {
-        values.push(value.to_string());
-    }
-}
-
-fn bool_text(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
-    }
-}
-
-fn outcome_key(outcome: AgentArchiveOutcomeWire) -> &'static str {
-    match outcome {
-        AgentArchiveOutcomeWire::Done => "done",
-        AgentArchiveOutcomeWire::Failed => "failed",
-        AgentArchiveOutcomeWire::Interrupted => "interrupted",
-    }
-}
-
-fn epoch_seconds(value: Option<&str>) -> Option<String> {
-    DateTime::parse_from_rfc3339(value?)
-        .ok()
-        .map(|timestamp| timestamp.timestamp().to_string())
-}
-
-fn local_day_key(last_activity_at: Option<&String>, timezone: &str) -> String {
-    let Some(raw) = last_activity_at else {
-        return String::new();
-    };
-    let Ok(parsed) = DateTime::parse_from_rfc3339(raw) else {
-        return String::new();
-    };
-    let utc = parsed.with_timezone(&Utc);
-    match parse_timezone(timezone) {
-        Some(ArchiveTimezone::Iana(timezone)) => {
-            utc.with_timezone(&timezone).format("%Y-%m-%d").to_string()
-        }
-        Some(ArchiveTimezone::Fixed(offset)) => {
-            utc.with_timezone(&offset).format("%Y-%m-%d").to_string()
-        }
-        None => utc.format("%Y-%m-%d").to_string(),
     }
 }

@@ -252,3 +252,58 @@ fn compile_reports_missing_rebuilding_and_unsupported_index_status() {
     assert!(corpus.rows.is_empty());
     assert!(corpus.name_map.is_empty());
 }
+
+#[test]
+fn compile_resolves_workflow_child_owner_by_parent_timestamp() {
+    let temp = tempdir().unwrap();
+    let mut conn = create_index(temp.path(), 3);
+
+    let mut parent = TestRow::new("parent-run");
+    parent.agent_name = Some("260101.parent".to_string());
+    parent.raw_suffix = Some("20260512120000".to_string());
+    insert_row(&mut conn, temp.path(), &parent);
+
+    let mut child = TestRow::new("child-run");
+    child.agent_name = Some("260101.child".to_string());
+    child.is_workflow_child = true;
+    child.parent_timestamp = Some("20260512120000".to_string());
+    insert_row(&mut conn, temp.path(), &child);
+
+    let corpus = compile_agent_archive_corpus(request(
+        temp.path(),
+        AgentArchiveIndexProbeStatusWire::Ok,
+        BTreeMap::new(),
+    ))
+    .unwrap();
+
+    assert_eq!(corpus.rows.len(), 1);
+    let child_matches = corpus.name_map.get("child").unwrap();
+    assert_eq!(child_matches.len(), 1);
+    assert!(child_matches[0].is_workflow_child);
+    assert_eq!(child_matches[0].owner_key.source_run_id, "parent-run");
+}
+
+#[test]
+fn compile_drops_orphan_workflow_child_names() {
+    let temp = tempdir().unwrap();
+    let mut conn = create_index(temp.path(), 3);
+
+    insert_row(&mut conn, temp.path(), &TestRow::new("lonely-parent"));
+
+    let mut orphan = TestRow::new("orphan-child");
+    orphan.agent_name = Some("260101.orphan".to_string());
+    orphan.is_workflow_child = true;
+    orphan.parent_timestamp = Some("missing-parent".to_string());
+    insert_row(&mut conn, temp.path(), &orphan);
+
+    let corpus = compile_agent_archive_corpus(request(
+        temp.path(),
+        AgentArchiveIndexProbeStatusWire::Ok,
+        BTreeMap::new(),
+    ))
+    .unwrap();
+
+    assert_eq!(corpus.rows.len(), 1);
+    assert!(!corpus.name_map.contains_key("orphan"));
+    assert!(!corpus.name_map.contains_key("260101.orphan"));
+}

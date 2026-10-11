@@ -68,7 +68,9 @@ fn create_index(root: &Path, schema_version: u32) -> Connection {
              retry_attempt INTEGER NOT NULL,
              retry_of_timestamp TEXT,
              durably_revivable INTEGER NOT NULL,
-             is_workflow_child INTEGER NOT NULL
+             is_workflow_child INTEGER NOT NULL,
+             raw_suffix TEXT,
+             parent_timestamp TEXT
          );
          CREATE TABLE archive_visibility_projection (
              source_username TEXT NOT NULL,
@@ -117,6 +119,8 @@ struct TestRow {
     retry_of_timestamp: Option<String>,
     restorable: bool,
     is_workflow_child: bool,
+    raw_suffix: Option<String>,
+    parent_timestamp: Option<String>,
 }
 
 impl TestRow {
@@ -146,11 +150,12 @@ fn insert_row(conn: &mut Connection, root: &Path, row: &TestRow) {
              agent_clan_generation, project_name, agent_session_role, workflow,
              agent_type, status, start_time, stop_time, dismissed_at, model,
              llm_provider, agent_tab, tribe, clan_tribe, runtime, retry_attempt,
-             retry_of_timestamp, durably_revivable, is_workflow_child
+             retry_of_timestamp, durably_revivable, is_workflow_child,
+             raw_suffix, parent_timestamp
          ) VALUES (
              ?1, ?2, 'bryan', 'athena', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
              ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-             ?23, ?24, ?25, ?26
+             ?23, ?24, ?25, ?26, ?27, ?28
          )",
         params![
             bundle_path.to_string_lossy(),
@@ -179,6 +184,8 @@ fn insert_row(conn: &mut Connection, root: &Path, row: &TestRow) {
             row.retry_of_timestamp,
             i64::from(row.restorable),
             i64::from(row.is_workflow_child),
+            row.raw_suffix.as_deref().unwrap_or(&row.id),
+            row.parent_timestamp,
         ],
     )
     .unwrap();

@@ -6,16 +6,17 @@ use tempfile::tempdir;
 
 use super::{create_index, insert_row, request, TestRow};
 use crate::agent_archive::corpus::compile::compile_agent_archive_corpus;
+use crate::agent_archive::corpus::prepared::PreparedAgentArchiveCorpus;
 use crate::agent_archive::corpus::query::{
     count_agent_archive_corpus, lookup_agent_archive_corpus,
     rows_agent_archive_corpus, summarize_agent_archive_corpus,
 };
 use crate::agent_archive::corpus::wire::{
-    AgentArchiveCorpusWire, AgentArchiveCountRequestWire,
-    AgentArchiveIndexProbeStatusWire, AgentArchiveLightRowWire,
-    AgentArchiveLinkFacetsWire, AgentArchiveLookupRequestWire,
-    AgentArchiveOutcomeWire, AgentArchiveQueryError,
-    AgentArchiveRowsRequestWire, AgentArchiveSummaryRequestWire,
+    AgentArchiveCountRequestWire, AgentArchiveIndexProbeStatusWire,
+    AgentArchiveLightRowWire, AgentArchiveLinkFacetsWire,
+    AgentArchiveLookupRequestWire, AgentArchiveOutcomeWire,
+    AgentArchiveQueryError, AgentArchiveRowsRequestWire,
+    AgentArchiveSummaryRequestWire,
 };
 
 fn archive_profile() -> Value {
@@ -69,7 +70,7 @@ fn archive_profile() -> Value {
     })
 }
 
-fn compile_fixture() -> AgentArchiveCorpusWire {
+fn compile_fixture() -> PreparedAgentArchiveCorpus {
     let temp = tempdir().unwrap();
     let mut conn = create_index(temp.path(), 3);
 
@@ -443,4 +444,72 @@ fn query_order_is_newest_activity_first_and_stable_on_ties() {
         vec!["alpha", "beta", "clan-new", "tie-a", "tie-b"]
     );
     assert_eq!(page.rows[3].last_activity_at, page.rows[4].last_activity_at);
+}
+
+#[test]
+fn query_lookup_resolves_child_with_own_run_id_via_parent_timestamp() {
+    let temp = tempdir().unwrap();
+    let mut conn = create_index(temp.path(), 3);
+
+    let mut parent = TestRow::new("owner");
+    parent.agent_name = Some("250302.owner".to_string());
+    parent.raw_suffix = Some("20260512120000".to_string());
+    insert_row(&mut conn, temp.path(), &parent);
+
+    let mut child = TestRow::new("child-own-id");
+    child.agent_name = Some("250302.step".to_string());
+    child.is_workflow_child = true;
+    child.parent_timestamp = Some("20260512120000".to_string());
+    insert_row(&mut conn, temp.path(), &child);
+
+    let corpus = compile_agent_archive_corpus(request(
+        temp.path(),
+        AgentArchiveIndexProbeStatusWire::Ok,
+        BTreeMap::new(),
+    ))
+    .unwrap();
+    let lookup = |name: &str| {
+        lookup_agent_archive_corpus(
+            &corpus,
+            AgentArchiveLookupRequestWire {
+                name: name.to_string(),
+            },
+        )
+        .row
+        .unwrap()
+        .archive_key
+        .source_run_id
+    };
+    assert_eq!(lookup("step"), "owner");
+    assert_eq!(lookup("250302.step"), "owner");
+    assert_eq!(lookup("bryan.athena.step"), "owner");
+}
+
+#[test]
+fn query_lookup_returns_empty_for_orphan_workflow_child() {
+    let temp = tempdir().unwrap();
+    let mut conn = create_index(temp.path(), 3);
+
+    insert_row(&mut conn, temp.path(), &TestRow::new("present"));
+
+    let mut orphan = TestRow::new("orphan-child");
+    orphan.agent_name = Some("250302.orphan".to_string());
+    orphan.is_workflow_child = true;
+    orphan.parent_timestamp = Some("no-such-parent".to_string());
+    insert_row(&mut conn, temp.path(), &orphan);
+
+    let corpus = compile_agent_archive_corpus(request(
+        temp.path(),
+        AgentArchiveIndexProbeStatusWire::Ok,
+        BTreeMap::new(),
+    ))
+    .unwrap();
+    assert!(lookup_agent_archive_corpus(
+        &corpus,
+        AgentArchiveLookupRequestWire {
+            name: "orphan".to_string(),
+        },
+    )
+    .row
+    .is_none());
 }
