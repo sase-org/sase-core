@@ -458,3 +458,105 @@ fn sidecar_publication_binding_returns_plain_dict() {
         );
     });
 }
+
+#[test]
+fn git_lock_bindings_round_trip_classify_and_decide() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        assert_eq!(
+            module
+                .getattr("git_lock_wire_schema_version")
+                .unwrap()
+                .call0()
+                .unwrap()
+                .extract::<u32>()
+                .unwrap(),
+            1
+        );
+        let delays = module
+            .getattr("parse_git_lock_retry_delays")
+            .unwrap()
+            .call1(("0.1,0.2",))
+            .unwrap()
+            .extract::<Vec<f64>>()
+            .unwrap();
+        assert_eq!(delays, vec![0.1, 0.2]);
+
+        let observation = json_value_to_py(
+            py,
+            &json!({
+                "exit_status": 128,
+                "stdout": "",
+                "stderr": "error: Unable to create '/repo/.git/index.lock': File exists.",
+                "timed_out": false,
+                "signal_terminated": false,
+                "resolved_index_lock_path": "/repo/.git/index.lock"
+            }),
+        )
+        .unwrap();
+        let classified = module
+            .getattr("classify_git_lock_failure")
+            .unwrap()
+            .call1((observation.bind(py).downcast::<PyDict>().unwrap(),))
+            .unwrap();
+        let classified_value = py_to_json_value(&classified).unwrap();
+        assert_eq!(classified_value["kind"], json!("index_lock"));
+        assert_eq!(classified_value["retryable"], json!(true));
+
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "failure": classified_value,
+                "delays": [0.1, 0.2],
+                "allow_lock_removal": true,
+                "attempts": 3,
+                "now_unix_ns": 20_000_000_000i64,
+                "remaining_recovery_budget_ns": 30_000_000_000i64,
+                "cancelled": false,
+                "removal_already_attempted": false,
+                "identity_disqualified": false,
+                "first_snapshot": {
+                    "path": "/repo/.git/index.lock",
+                    "file_type": "regular",
+                    "device": 1,
+                    "inode": 4,
+                    "size": 8,
+                    "mtime_ns": 0,
+                    "ctime_ns": 0
+                },
+                "current_snapshot": {
+                    "path": "/repo/.git/index.lock",
+                    "file_type": "regular",
+                    "device": 1,
+                    "inode": 4,
+                    "size": 8,
+                    "mtime_ns": 0,
+                    "ctime_ns": 0
+                },
+                "path_match": {
+                    "schema_version": 1,
+                    "matched_path": "/repo/.git/index.lock",
+                    "eligible_for_removal": true,
+                    "reason": "matched"
+                },
+                "owner": {
+                    "schema_version": 1,
+                    "status": "absent",
+                    "reason": "none"
+                }
+            }),
+        )
+        .unwrap();
+        let decision = module
+            .getattr("decide_git_lock_recovery")
+            .unwrap()
+            .call1((request.bind(py).downcast::<PyDict>().unwrap(),))
+            .unwrap();
+        let decision_value = py_to_json_value(&decision).unwrap();
+        assert_eq!(decision_value["action"], json!("remove_then_retry"));
+        assert_eq!(decision_value["claim_lock_removed"], json!(true));
+    });
+}

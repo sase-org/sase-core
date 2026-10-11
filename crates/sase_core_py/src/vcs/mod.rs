@@ -4,6 +4,8 @@ use crate::prelude::*;
 
 use crate::json_bridge::{json_value_to_py, py_to_json_value, serialize_to_py};
 
+mod git_lock;
+
 use crate::provider_policy::provider_priority_dict_from_py;
 
 use pyo3::wrap_pyfunction;
@@ -718,6 +720,7 @@ pub(crate) fn register_vcs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_classify_commit_types, m)?)?;
     m.add_function(wrap_pyfunction!(py_aggregate_commit_log, m)?)?;
     m.add_function(wrap_pyfunction!(py_parse_merge_summary, m)?)?;
+    git_lock::register_git_lock(m)?;
     Ok(())
 }
 

@@ -74,6 +74,7 @@ pub mod fleet_presentation;
 pub(crate) mod fs_sig;
 pub mod gate_decision;
 pub mod gate_followup;
+pub mod git_lock;
 pub mod git_object_sharing;
 pub mod git_query;
 pub mod glossary;
