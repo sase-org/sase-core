@@ -155,6 +155,13 @@ fn unknown_decision_fields_are_errors() {
         .find(|diagnostic| diagnostic.code == "decision-unknown-field")
         .unwrap();
     assert_eq!(diagnostic.field_path, "decisions.tui_note.surprise");
+    assert!(
+        diagnostic.message.contains(
+            "allowed fields are ask, choices, default, why, memory, requested, corrects, answer"
+        ),
+        "{}",
+        diagnostic.message
+    );
 }
 
 #[test]
@@ -398,6 +405,17 @@ fn why_is_bounded_and_forbidden_on_memory() {
         plan_validate(&tale(decisions, &mentioned("tui_note")), "tale")
             .unwrap();
     assert!(codes(&result).contains(&"decision-why-on-memory"));
+    let why = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "decision-why-on-memory")
+        .unwrap();
+    assert!(
+        why.message
+            .contains("its `requested` or `corrects` quote explains it"),
+        "{}",
+        why.message
+    );
 }
 
 #[test]
@@ -477,6 +495,18 @@ fn requested_is_memory_only_bounded_and_required_for_true() {
         plan_validate(&tale(decisions, &mentioned("tui_note")), "tale")
             .unwrap();
     assert!(codes(&result).contains(&"decision-requested-missing"));
+    let missing = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "decision-requested-missing")
+        .unwrap();
+    assert!(
+        missing
+            .message
+            .contains("`requested` or the claim it corrects in `corrects`"),
+        "{}",
+        missing.message
+    );
 
     // Malformed quotes share one code; the bounds are 3-300 characters.
     for requested in ["ab", &"q".repeat(301)] {
@@ -498,6 +528,82 @@ fn requested_is_memory_only_bounded_and_required_for_true() {
         plan_validate(&tale(decisions, &mentioned("tui_note")), "tale")
             .unwrap();
     assert!(result.ok, "{:?}", result.diagnostics);
+}
+
+#[test]
+fn corrects_is_memory_only_bounded_exclusive_and_justifies_true() {
+    // `corrects` on a plain toggle or a choice is rejected.
+    for decisions in [
+        "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n    corrects: sase plan approve writes the durable plan\n",
+        "decisions:\n  grouping:\n    ask: How?\n    choices:\n      mode: Group by mode\n      pane: Group by pane\n    default: mode\n    corrects: sase plan approve writes the durable plan\n",
+    ] {
+        let result =
+            plan_validate(&tale(decisions, "# Plan\n"), "tale").unwrap();
+        assert!(
+            codes(&result).contains(&"decision-corrects-not-memory"),
+            "{decisions:?}: {:?}",
+            result.diagnostics
+        );
+    }
+
+    // Malformed quotes share one code; the bounds are 3-300 characters.
+    for corrects in ["ab", &"q".repeat(301), "42"] {
+        let decisions = if corrects == "42" {
+            "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: true\n    memory:\n      - tui.md\n    corrects: 42\n".to_string()
+        } else {
+            format!(
+                "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: true\n    memory:\n      - tui.md\n    corrects: {corrects}\n"
+            )
+        };
+        let result =
+            plan_validate(&tale(&decisions, &mentioned("tui_note")), "tale")
+                .unwrap();
+        assert!(
+            codes(&result).contains(&"decision-corrects-invalid"),
+            "{corrects:?}: {:?}",
+            result.diagnostics
+        );
+    }
+
+    // Both quotes together are rejected on `.corrects`.
+    let decisions = "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: true\n    memory:\n      - tui.md\n    requested: please update the tui note\n    corrects: sase plan approve writes the durable plan\n";
+    let result =
+        plan_validate(&tale(decisions, &mentioned("tui_note")), "tale")
+            .unwrap();
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|item| item.code == "decision-corrects-with-requested")
+        .unwrap();
+    assert_eq!(diagnostic.field_path, "decisions.tui_note.corrects");
+    assert!(
+        diagnostic
+            .message
+            .contains("keep `requested` when the user asked"),
+        "{}",
+        diagnostic.message
+    );
+
+    // A verified-shape `corrects` quote lets a memory default of true through.
+    let decisions = "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: true\n    memory:\n      - tui.md\n    corrects: sase plan approve writes the durable plan\n";
+    let result =
+        plan_validate(&tale(decisions, &mentioned("tui_note")), "tale")
+            .unwrap();
+    assert!(result.ok, "{:?}", result.diagnostics);
+    let value = serde_json::to_value(result.plan.unwrap()).unwrap();
+    assert_eq!(
+        value["decisions"],
+        json!([
+            {
+                "id": "tui_note",
+                "kind": "toggle",
+                "ask": "Do tui_note?",
+                "default": true,
+                "memory": {"selectors": ["tui.md"]},
+                "corrects": "sase plan approve writes the durable plan",
+            }
+        ])
+    );
 }
 
 fn stamped_tale(stamps: &str, decisions: &str, body: &str) -> String {

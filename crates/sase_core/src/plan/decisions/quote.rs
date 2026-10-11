@@ -1,10 +1,12 @@
-//! Human quote matching for memory decision verification.
+//! Quote matching for memory decision verification.
 //!
 //! This module implements the `quotes` phase of
 //! `plan:202610/core_plan_decisions.md` (outer design, human quote
-//! matcher). The Python host classifies which texts are human-authored
-//! and supplies them as ordered `{source, ref, text}` records; Rust
-//! never authenticates a source or reads memory files.
+//! matcher). The Python host classifies which texts to search and
+//! supplies them as ordered `{source, ref, text}` records: human-authored
+//! text for `requested:` verification, or the current memory-note text
+//! for `corrects:` verification. Rust never authenticates a source or
+//! reads memory files.
 //!
 //! Both sides normalize with NFKC, full non-Turkic Unicode casefold,
 //! straight quote/dash equivalents, and collapsed Unicode whitespace.

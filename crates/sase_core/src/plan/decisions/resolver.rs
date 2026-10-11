@@ -17,8 +17,14 @@ use crate::plan::validate::ValidatedPlanWire;
 use crate::plan::wire::PlanError;
 
 /// Provenance values the host may report for a memory decision.
-pub const DECISION_PROVENANCES: &[&str] =
-    &["asked", "not_asked", "quote_not_found", "inherited"];
+pub const DECISION_PROVENANCES: &[&str] = &[
+    "asked",
+    "not_asked",
+    "quote_not_found",
+    "inherited",
+    "correction",
+    "claim_not_found",
+];
 
 /// One host-resolved memory record frozen into a decision definition.
 ///
@@ -44,9 +50,10 @@ pub struct PlanDecisionMemoryRecordWire {
 /// Typed host facts for one decision, keyed by decision id.
 ///
 /// A memory decision authored with default true has effective default false
-/// unless `requested_verified` is true. Missing verification facts fail
-/// closed. Inherited authorization arrives here as trusted host context,
-/// never inferred from quote text or a submitted answer.
+/// unless `requested_verified` is true: the authored true default is
+/// verified (`asked`, `correction`, or `inherited`). Missing verification
+/// facts fail closed. Inherited authorization arrives here as trusted host
+/// context, never inferred from quote text or a submitted answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanDecisionHostFactWire {
     #[serde(default)]
@@ -80,6 +87,8 @@ pub struct PlanDecisionDefinitionWire {
     pub memory: Option<PlanDecisionMemoryWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects: Option<String>,
     /// Verification provenance for memory decisions; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
@@ -159,7 +168,8 @@ pub fn plan_decisions_payload(
             if !DECISION_PROVENANCES.contains(&name.as_str()) {
                 return Err(PlanError::validation(format!(
                     "unknown decision provenance \"{name}\" for \"{}\"; \
-                     expected asked, not_asked, quote_not_found, or inherited",
+                     expected asked, not_asked, quote_not_found, inherited, \
+                     correction, or claim_not_found",
                     decision.id,
                 )));
             }
@@ -185,6 +195,7 @@ pub fn plan_decisions_payload(
             effective_default,
             memory: decision.memory.clone(),
             requested: decision.requested.clone(),
+            corrects: decision.corrects.clone(),
             provenance,
             requested_verified,
             resolved,
@@ -427,6 +438,7 @@ mod tests {
             default: json!(default),
             memory: None,
             requested: None,
+            corrects: None,
             answer: None,
         }
     }
@@ -445,6 +457,7 @@ mod tests {
             requested: Some(
                 "and note the convention in the tui memory".to_string(),
             ),
+            corrects: None,
             answer: None,
         }
     }
@@ -468,6 +481,7 @@ mod tests {
             default: json!("pane"),
             memory: None,
             requested: None,
+            corrects: None,
             answer: None,
         }
     }
@@ -571,6 +585,70 @@ mod tests {
         assert!(!definitions[0].requested_verified);
         assert_eq!(definitions[0].provenance, Some("not_asked".to_string()));
         assert!(definitions[0].resolved.is_empty());
+    }
+
+    #[test]
+    fn payload_correction_keeps_true_default() {
+        let mut decision = memory_toggle("tui_note");
+        decision.requested = None;
+        decision.corrects =
+            Some("sase plan approve writes the durable plan".to_string());
+        let plan = validated(vec![decision]);
+        let mut facts = BTreeMap::new();
+        facts.insert(
+            "tui_note".to_string(),
+            PlanDecisionHostFactWire {
+                requested_verified: true,
+                provenance: Some("correction".to_string()),
+                resolved: vec![record("tui.md")],
+            },
+        );
+        let definitions = plan_decisions_payload(&plan, &facts).unwrap();
+        assert_eq!(definitions[0].effective_default, json!(true));
+        assert_eq!(definitions[0].provenance, Some("correction".to_string()));
+        assert!(definitions[0].requested_verified);
+        assert_eq!(
+            definitions[0].corrects,
+            Some("sase plan approve writes the durable plan".to_string())
+        );
+    }
+
+    #[test]
+    fn payload_claim_not_found_clamps_to_false() {
+        let mut decision = memory_toggle("tui_note");
+        decision.requested = None;
+        decision.corrects =
+            Some("sase plan approve writes the durable plan".to_string());
+        let plan = validated(vec![decision]);
+        let mut facts = BTreeMap::new();
+        facts.insert(
+            "tui_note".to_string(),
+            PlanDecisionHostFactWire {
+                requested_verified: false,
+                provenance: Some("claim_not_found".to_string()),
+                resolved: vec![record("tui.md")],
+            },
+        );
+        let definitions = plan_decisions_payload(&plan, &facts).unwrap();
+        assert_eq!(definitions[0].default, json!(true));
+        assert_eq!(definitions[0].effective_default, json!(false));
+        assert_eq!(
+            definitions[0].provenance,
+            Some("claim_not_found".to_string())
+        );
+        assert!(!definitions[0].requested_verified);
+    }
+
+    #[test]
+    fn payload_omits_corrects_from_json_when_none() {
+        let definitions = definitions();
+        let value = serde_json::to_value(&definitions).unwrap();
+        assert!(value[0].get("corrects").is_none());
+        assert!(value[1].get("corrects").is_none());
+        let without = plan_decisions_digest(&definitions).unwrap();
+        let back: Vec<PlanDecisionDefinitionWire> =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(plan_decisions_digest(&back).unwrap(), without);
     }
 
     #[test]

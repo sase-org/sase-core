@@ -2,7 +2,7 @@
 //!
 //! Covers every rule in Section 2 of `plan:202610/plan_decisions.md` for both
 //! tale and epic plans: decision ids, fields, kinds, defaults, memory
-//! selectors, requested quotes, system-written answers and stamps, the
+//! selectors, requested and corrects quotes, system-written answers and stamps, the
 //! reserved `phases[].when`, and the Archived completeness rule. Body checks
 //! (callouts, unreferenced decisions, uncovered memory edits) live here too
 //! so frontmatter and body share one outcome.
@@ -44,6 +44,7 @@ const DECISION_FIELDS: &[&str] = &[
     "why",
     "memory",
     "requested",
+    "corrects",
     "answer",
 ];
 
@@ -403,7 +404,7 @@ fn validate_one_decision(
                 "decision-unknown-field",
                 format!("{field_path}.{name}"),
                 format!(
-                    "unknown decision field `{name}`; allowed fields are ask, choices, default, why, memory, requested, answer"
+                    "unknown decision field `{name}`; allowed fields are ask, choices, default, why, memory, requested, corrects, answer"
                 ),
             );
         }
@@ -591,7 +592,7 @@ fn validate_one_decision(
                 "decision-why-on-memory",
                 format!("{field_path}.why"),
                 format!(
-                    "decision `{id}` is a memory decision and must not carry `why`; the requested quote explains it"
+                    "decision `{id}` is a memory decision and must not carry `why`; its `requested` or `corrects` quote explains it"
                 ),
             );
         }
@@ -708,57 +709,116 @@ fn validate_one_decision(
     }
 
     let mut requested = None;
-    match mapping_value(entry, "requested") {
-        None => {
-            if has_memory && !is_choice && default_bool == Some(true) {
-                decision_error(&mut outcome.diagnostics, index,
-                    "decision-requested-missing",
-                    format!("{field_path}.requested"),
-                    format!(
-                        "decision `{id}` is a memory decision defaulting to true and must quote the human request in `requested`"
-                    ),
-                );
-            }
-        }
-        Some(value) => {
-            if !has_memory || is_choice {
-                decision_error(&mut outcome.diagnostics, index,
-                    "decision-requested-not-memory",
-                    format!("{field_path}.requested"),
-                    format!(
-                        "decision `{id}` field `requested` is allowed on memory toggles only"
-                    ),
-                );
-            }
-            match value.as_str() {
-                Some(raw) => {
-                    let quote = raw.trim().to_string();
-                    let chars = quote.chars().count();
-                    if quote.is_empty()
-                        || !is_one_line(&quote)
-                        || !(3..=300).contains(&chars)
-                    {
-                        decision_error(&mut outcome.diagnostics, index,
-                            "decision-requested-invalid",
-                            format!("{field_path}.requested"),
-                            format!(
-                                "decision `{id}` field `requested` must be one line of 3-300 characters"
-                            ),
-                        );
-                    } else {
-                        requested = Some(quote);
-                    }
-                }
-                None => decision_error(&mut outcome.diagnostics, index,
-                    "decision-requested-invalid",
-                    format!("{field_path}.requested"),
-                    format!(
-                        "decision `{id}` field `requested` must be a string, found {}",
-                        yaml_type_name(value)
-                    ),
+    if let Some(value) = mapping_value(entry, "requested") {
+        if !has_memory || is_choice {
+            decision_error(&mut outcome.diagnostics, index,
+                "decision-requested-not-memory",
+                format!("{field_path}.requested"),
+                format!(
+                    "decision `{id}` field `requested` is allowed on memory toggles only"
                 ),
-            }
+            );
         }
+        match value.as_str() {
+            Some(raw) => {
+                let quote = raw.trim().to_string();
+                let chars = quote.chars().count();
+                if quote.is_empty()
+                    || !is_one_line(&quote)
+                    || !(3..=300).contains(&chars)
+                {
+                    decision_error(&mut outcome.diagnostics, index,
+                        "decision-requested-invalid",
+                        format!("{field_path}.requested"),
+                        format!(
+                            "decision `{id}` field `requested` must be one line of 3-300 characters"
+                        ),
+                    );
+                } else {
+                    requested = Some(quote);
+                }
+            }
+            None => decision_error(&mut outcome.diagnostics, index,
+                "decision-requested-invalid",
+                format!("{field_path}.requested"),
+                format!(
+                    "decision `{id}` field `requested` must be a string, found {}",
+                    yaml_type_name(value)
+                ),
+            ),
+        }
+    }
+
+    let mut corrects = None;
+    if let Some(value) = mapping_value(entry, "corrects") {
+        if !has_memory || is_choice {
+            decision_error(&mut outcome.diagnostics, index,
+                "decision-corrects-not-memory",
+                format!("{field_path}.corrects"),
+                format!(
+                    "decision `{id}` field `corrects` is allowed on memory toggles only"
+                ),
+            );
+        }
+        match value.as_str() {
+            Some(raw) => {
+                let quote = raw.trim().to_string();
+                let chars = quote.chars().count();
+                if quote.is_empty()
+                    || !is_one_line(&quote)
+                    || !(3..=300).contains(&chars)
+                {
+                    decision_error(&mut outcome.diagnostics, index,
+                        "decision-corrects-invalid",
+                        format!("{field_path}.corrects"),
+                        format!(
+                            "decision `{id}` field `corrects` must be one line of 3-300 characters"
+                        ),
+                    );
+                } else {
+                    corrects = Some(quote);
+                }
+            }
+            None => decision_error(&mut outcome.diagnostics, index,
+                "decision-corrects-invalid",
+                format!("{field_path}.corrects"),
+                format!(
+                    "decision `{id}` field `corrects` must be a string, found {}",
+                    yaml_type_name(value)
+                ),
+            ),
+        }
+    }
+
+    if mapping_value(entry, "requested").is_some()
+        && mapping_value(entry, "corrects").is_some()
+    {
+        decision_error(
+            &mut outcome.diagnostics,
+            index,
+            "decision-corrects-with-requested",
+            format!("{field_path}.corrects"),
+            format!(
+                "decision `{id}` carries both `requested` and `corrects`; keep `requested` when the user asked for the change"
+            ),
+        );
+    }
+
+    if has_memory
+        && !is_choice
+        && default_bool == Some(true)
+        && requested.is_none()
+        && corrects.is_none()
+    {
+        decision_error(
+            &mut outcome.diagnostics,
+            index,
+            "decision-requested-missing",
+            format!("{field_path}.requested"),
+            format!(
+                "decision `{id}` is a memory decision defaulting to true and must quote the human request in `requested` or the claim it corrects in `corrects`"
+            ),
+        );
     }
 
     let mut answer = None;
@@ -814,6 +874,7 @@ fn validate_one_decision(
             None
         },
         requested,
+        corrects,
         answer,
     };
     let info = DecisionBodyInfo {

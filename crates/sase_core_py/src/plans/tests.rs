@@ -178,6 +178,7 @@ fn plan_validation_bindings_round_trip_json_shapes() {
             "decisions.<id>.why",
             "decisions.<id>.memory",
             "decisions.<id>.requested",
+            "decisions.<id>.corrects",
             "decided_by",
             "decided_via",
         ] {

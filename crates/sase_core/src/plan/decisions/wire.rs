@@ -36,6 +36,8 @@ pub struct PlanDecisionWire {
     pub memory: Option<PlanDecisionMemoryWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects: Option<String>,
     /// System-written answer; only present outside Authoring mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<JsonValue>,

@@ -14,6 +14,8 @@ pub mod sheet;
 pub mod wire;
 
 #[cfg(test)]
+mod sheet_tests;
+#[cfg(test)]
 mod tests;
 
 pub use callout::{

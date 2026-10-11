@@ -31,9 +31,9 @@ pub const DECISION_SURFACES: &[&str] = &["tui", "telegram", "mobile", "cli"];
 
 /// One memory row's frozen authorization context.
 ///
-/// `quote` is the authored human quote (`requested` on the frozen
-/// definition). `quote_not_found` and `inherited` provenance stay
-/// visible here; an unverified quote is never authorization.
+/// `quote` is `requested`, falling back to `corrects`. Readers tell
+/// the two apart by provenance. An unverified quote is never
+/// authorization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanDecisionSheetMemoryWire {
     pub selectors: Vec<String>,
@@ -139,7 +139,10 @@ pub fn plan_decision_sheet(
                     .provenance
                     .clone()
                     .unwrap_or_else(|| "not_asked".to_string()),
-                quote: definition.requested.clone(),
+                quote: definition
+                    .requested
+                    .clone()
+                    .or_else(|| definition.corrects.clone()),
             }
         });
         rows.push(PlanDecisionSheetRowWire {
@@ -415,11 +418,11 @@ fn block_row(
             row.id,
         );
         // Only an unrequested memory change left off without human review
-        // files skipped work. Verified requested (`asked`) or inherited rows
-        // left off, and every human-declined row, stay quiet.
+        // files skipped work. Verified `asked`, `correction`, and inherited
+        // rows left off, and every human-declined row, stay quiet.
         let unrequested = matches!(
             memory.provenance.as_str(),
-            "not_asked" | "quote_not_found"
+            "not_asked" | "quote_not_found" | "claim_not_found"
         );
         if decided_by == "auto" && unrequested {
             if audience == "tale_coder" {
@@ -619,10 +622,11 @@ fn check_sheet_row(row: &PlanDecisionSheetRowWire) -> Result<(), PlanError> {
             }
         }
         match memory.provenance.as_str() {
-            "asked" | "not_asked" | "quote_not_found" | "inherited" => {}
+            "asked" | "not_asked" | "quote_not_found" | "inherited"
+            | "correction" | "claim_not_found" => {}
             other => {
                 return Err(PlanError::validation(format!(
-                    "unknown memory provenance {:?} for {:?}; expected asked, not_asked, quote_not_found, or inherited",
+                    "unknown memory provenance {:?} for {:?}; expected asked, not_asked, quote_not_found, inherited, correction, or claim_not_found",
                     other, row.id,
                 )));
             }
@@ -717,6 +721,7 @@ mod tests {
             effective_default: json!("pane"),
             memory: None,
             requested: None,
+            corrects: None,
             provenance: None,
             requested_verified: false,
             resolved: Vec::new(),
@@ -750,6 +755,7 @@ mod tests {
             requested: Some(
                 "and note the convention in the tui memory".to_string(),
             ),
+            corrects: None,
             provenance: Some("asked".to_string()),
             requested_verified: true,
             resolved: vec![memory_record()],
@@ -767,6 +773,7 @@ mod tests {
             effective_default: json!(false),
             memory: None,
             requested: None,
+            corrects: None,
             provenance: None,
             requested_verified: false,
             resolved: Vec::new(),
@@ -1419,7 +1426,9 @@ mod tests {
         for (provenance, files_task) in [
             ("not_asked", true),
             ("quote_not_found", true),
+            ("claim_not_found", true),
             ("asked", false),
+            ("correction", false),
             ("inherited", false),
         ] {
             let mut memory = memory_definition();
