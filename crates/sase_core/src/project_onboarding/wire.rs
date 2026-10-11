@@ -1,5 +1,5 @@
-//! Versioned wire contract for project-onboarding classification and
-//! repository-creation form evaluation.
+//! Versioned wire contract for project-onboarding classification,
+//! repository-creation form evaluation, and onboarding plan derivation.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -51,6 +51,83 @@ pub const ERROR_INVALID_CHOICE: &str = "invalid_choice";
 pub const ERROR_DISABLED_CHOICE: &str = "disabled_choice";
 pub const ERROR_CONFLICT: &str = "conflict";
 pub const ERROR_REQUIRES: &str = "requires";
+
+pub const MODE_ADD: &str = "add";
+pub const MODE_CREATE: &str = "create";
+
+pub const ACTOR_HUMAN: &str = "human";
+pub const ACTOR_AGENT: &str = "agent";
+
+pub const SETUP_AUTO: &str = "auto";
+pub const SETUP_ON: &str = "on";
+pub const SETUP_OFF: &str = "off";
+
+pub const REMOTE_FOUND: &str = "found";
+pub const REMOTE_NOT_FOUND: &str = "not_found";
+pub const REMOTE_UNAVAILABLE: &str = "unavailable";
+
+pub const CHECKOUT_ABSENT: &str = "absent";
+pub const CHECKOUT_MATCHING: &str = "matching";
+pub const CHECKOUT_MISMATCH: &str = "mismatch";
+pub const CHECKOUT_NOT_GIT: &str = "not_git";
+pub const CHECKOUT_EMPTY_DIR: &str = "empty_dir";
+
+pub const PLAN_STATUS_READY: &str = "ready";
+pub const PLAN_STATUS_BLOCKED: &str = "blocked";
+pub const PLAN_STATUS_CURRENT: &str = "current";
+
+pub const STEP_CREATE_REMOTE: &str = "create_remote";
+pub const STEP_CHECKOUT: &str = "checkout";
+pub const STEP_REENABLE: &str = "reenable";
+pub const STEP_IDENTITY: &str = "identity";
+pub const STEP_MANAGE: &str = "manage";
+pub const STEP_CURRENT: &str = "current";
+pub const STEP_INIT: &str = "init";
+
+pub const STEP_PENDING: &str = "pending";
+pub const STEP_DONE: &str = "done";
+pub const STEP_SKIPPED: &str = "skipped";
+
+pub const OPERATION_CREATE: &str = "create";
+pub const OPERATION_UPDATE: &str = "update";
+pub const OPERATION_VALIDATE: &str = "validate";
+
+pub const KEY_SOURCE_EXISTING: &str = "existing";
+pub const KEY_SOURCE_ALLOCATED: &str = "allocated";
+
+pub const NAME_SOURCE_EXISTING: &str = "existing";
+pub const NAME_SOURCE_REQUESTED: &str = "requested";
+pub const NAME_SOURCE_ALLOCATED: &str = "allocated";
+
+pub const SETUP_CODE_AGENT: &str = "agent";
+pub const SETUP_CODE_NEW_REPO: &str = "new_repo";
+pub const SETUP_CODE_ALREADY_MANAGED: &str = "already_managed";
+pub const SETUP_CODE_UNMANAGED_CAN_PUSH: &str = "unmanaged_can_push";
+pub const SETUP_CODE_NO_PUSH: &str = "no_push";
+pub const SETUP_CODE_UNKNOWN_PUSH: &str = "unknown_push";
+pub const SETUP_CODE_ON: &str = "on";
+pub const SETUP_CODE_OFF: &str = "off";
+
+pub const BLOCKER_REMOTE_EXISTS: &str = "remote_exists";
+pub const BLOCKER_REMOTE_UNKNOWN: &str = "remote_unknown";
+pub const BLOCKER_HUMAN_ONLY: &str = "human_only";
+pub const BLOCKER_NO_CREATE_RIGHTS: &str = "no_create_rights";
+pub const BLOCKER_INVALID_OPTION: &str = "invalid_option";
+pub const BLOCKER_CHECKOUT_CONFLICT: &str = "checkout_conflict";
+pub const BLOCKER_NOT_FOUND: &str = "not_found";
+pub const BLOCKER_INVALID_NAME: &str = "invalid_name";
+pub const BLOCKER_NAME_TAKEN: &str = "name_taken";
+pub const BLOCKER_ALIAS_TAKEN: &str = "alias_taken";
+pub const BLOCKER_CONFIG_DIRTY: &str = "config_dirty";
+pub const BLOCKER_NOT_ON_DEFAULT_BRANCH: &str = "not_on_default_branch";
+pub const BLOCKER_NO_PUSH: &str = "no_push";
+
+pub const WARNING_NOT_LAUNCHABLE: &str = "not_launchable";
+pub const WARNING_UNKNOWN_PUSH: &str = "unknown_push";
+pub const WARNING_REMOTE_UNVERIFIED: &str = "remote_unverified";
+
+pub const STORAGE_SEPARATE_REPO: &str = "separate_repo";
+pub const WORKFLOW_GIT: &str = "git";
 
 fn default_schema_version() -> u32 {
     PROJECT_ONBOARDING_WIRE_SCHEMA_VERSION
@@ -378,4 +455,266 @@ pub struct CreationFormStateWire {
     pub errors: Vec<CreationFormErrorWire>,
     #[serde(default)]
     pub valid: bool,
+}
+
+/// Provider identity of the repository being added or created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingTargetWire {
+    #[serde(default)]
+    pub workflow_type: String,
+    #[serde(default)]
+    pub provider_display: String,
+    #[serde(default)]
+    pub identity_key: String,
+    #[serde(default, rename = "ref")]
+    pub repo_ref: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub web_url: String,
+    #[serde(default)]
+    pub checkout_dir: String,
+    #[serde(default)]
+    pub project_key_base: String,
+    #[serde(default)]
+    pub project_name_base: String,
+    #[serde(default)]
+    pub storage_policy: String,
+}
+
+/// Caller-requested identity and setup options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingRequestedWire {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub setup: String,
+    #[serde(default)]
+    pub make_current: bool,
+}
+
+/// Create-mode remote options included in the intent fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingCreationWire {
+    #[serde(default)]
+    pub visibility: String,
+    #[serde(default)]
+    pub summary: Vec<String>,
+}
+
+/// Intent half of an onboarding plan request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingRequestWire {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub actor: String,
+    #[serde(default)]
+    pub target: ProjectOnboardingTargetWire,
+    #[serde(default)]
+    pub requested: ProjectOnboardingRequestedWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<ProjectOnboardingCreationWire>,
+}
+
+/// Observed remote repository for planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingRemoteFactsWire {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub visibility: String,
+    #[serde(default)]
+    pub is_empty: Option<bool>,
+    #[serde(default)]
+    pub is_archived: Option<bool>,
+    #[serde(default)]
+    pub can_push: Option<bool>,
+    #[serde(default)]
+    pub sase_managed: Option<bool>,
+    #[serde(default)]
+    pub repo_id: String,
+    #[serde(default)]
+    pub default_branch: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Journal evidence that this intent already created a remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingJournalFactsWire {
+    #[serde(default)]
+    pub intent_recorded_at: String,
+    #[serde(default)]
+    pub remote_created: bool,
+    #[serde(default)]
+    pub repo_id: String,
+}
+
+/// Observed checkout directory for planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingCheckoutFactsWire {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub origin_url: String,
+    #[serde(default)]
+    pub config_dirty: bool,
+    #[serde(default)]
+    pub on_default_branch: Option<bool>,
+}
+
+/// Existing project record for the target, when one is already registered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingRecordFactsWire {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// One already-registered project used for identity collision checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingProjectFactsWire {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// Host-gathered facts the planner consumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingFactsWire {
+    #[serde(default)]
+    pub remote: ProjectOnboardingRemoteFactsWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<ProjectOnboardingJournalFactsWire>,
+    #[serde(default)]
+    pub checkout: ProjectOnboardingCheckoutFactsWire,
+    #[serde(default)]
+    pub local_managed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<ProjectOnboardingRecordFactsWire>,
+    #[serde(default)]
+    pub projects: Vec<ProjectOnboardingProjectFactsWire>,
+    #[serde(default)]
+    pub creation_errors: Vec<CreationFormErrorWire>,
+    #[serde(default)]
+    pub can_create: Option<bool>,
+}
+
+/// Combined plan request envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingPlanInputWire {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub request: ProjectOnboardingRequestWire,
+    #[serde(default)]
+    pub facts: ProjectOnboardingFactsWire,
+}
+
+/// Previewed project identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingIdentityWire {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub key_source: String,
+    #[serde(default)]
+    pub name_source: String,
+}
+
+/// Resolved setup policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingSetupWire {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// One ordered onboarding step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingStepWire {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub operation: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub remote: bool,
+    #[serde(default)]
+    pub requires_tty: bool,
+    #[serde(default)]
+    pub handoff: bool,
+}
+
+/// One plan warning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingWarningWire {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// One plan blocker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingBlockerWire {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hint: String,
+}
+
+/// Derived onboarding plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectOnboardingPlanWire {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub intent_fingerprint: String,
+    #[serde(default)]
+    pub identity: ProjectOnboardingIdentityWire,
+    #[serde(default)]
+    pub setup: ProjectOnboardingSetupWire,
+    #[serde(default)]
+    pub steps: Vec<ProjectOnboardingStepWire>,
+    #[serde(default)]
+    pub warnings: Vec<ProjectOnboardingWarningWire>,
+    #[serde(default)]
+    pub blockers: Vec<ProjectOnboardingBlockerWire>,
 }

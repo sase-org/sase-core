@@ -1,5 +1,5 @@
-//! Project-onboarding bindings: classify candidates and evaluate
-//! repository-creation forms.
+//! Project-onboarding bindings: classify candidates, evaluate
+//! repository-creation forms, and derive onboarding plans.
 
 use crate::json_bridge::{py_to_json_value, serialize_to_py};
 use crate::prelude::*;
@@ -8,8 +8,10 @@ use pyo3::wrap_pyfunction;
 use sase_core::project_onboarding::{
     classify_project_candidates as core_classify_project_candidates,
     evaluate_repo_creation_form as core_evaluate_repo_creation_form,
+    plan_project_onboarding as core_plan_project_onboarding,
     project_onboarding_wire_schema_version as core_wire_version,
     CreationFormRequestWire, ProjectCandidateInputWire, ProjectOnboardingError,
+    ProjectOnboardingPlanInputWire,
 };
 
 fn project_onboarding_error_to_pyerr(error: ProjectOnboardingError) -> PyErr {
@@ -65,6 +67,27 @@ fn py_evaluate_repo_creation_form<'py>(
     serialize_to_py(py, &result)
 }
 
+/// Derive an onboarding plan from intent and observed facts.
+#[pyfunction]
+#[pyo3(name = "plan_project_onboarding")]
+fn py_plan_project_onboarding<'py>(
+    py: Python<'py>,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let request: ProjectOnboardingPlanInputWire = serde_json::from_value(
+        py_to_json_value(request.as_any())?,
+    )
+    .map_err(|error| {
+        PyValueError::new_err(format!(
+            "request is not a valid ProjectOnboardingPlanInputWire dict: {error}"
+        ))
+    })?;
+    let result = py
+        .allow_threads(|| core_plan_project_onboarding(&request))
+        .map_err(project_onboarding_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
 pub(crate) fn register_project_onboarding(
     m: &Bound<'_, PyModule>,
 ) -> PyResult<()> {
@@ -74,6 +97,7 @@ pub(crate) fn register_project_onboarding(
     )?)?;
     m.add_function(wrap_pyfunction!(py_classify_project_candidates, m)?)?;
     m.add_function(wrap_pyfunction!(py_evaluate_repo_creation_form, m)?)?;
+    m.add_function(wrap_pyfunction!(py_plan_project_onboarding, m)?)?;
     Ok(())
 }
 

@@ -803,7 +803,7 @@ fn normalize_project_name_for_update(
     Ok(Some(project_name.to_string()))
 }
 
-fn is_valid_sase_project_name(project_name: &str) -> bool {
+pub(crate) fn is_valid_sase_project_name(project_name: &str) -> bool {
     !project_name.is_empty()
         && project_name != "."
         && project_name != ".."
