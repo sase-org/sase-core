@@ -771,6 +771,28 @@ fn callout_branches_validate_against_definitions() {
 }
 
 #[test]
+fn prettier_joined_toggle_callout_with_equals_in_prose_validates() {
+    // Prettier joins a header with its first body line, so prose with `=`
+    // lands on the header line. The id is still the first word and the
+    // callout is the default (yes) branch.
+    let decisions = "decisions:\n  ref_in_done:\n    ask: Count refs in done?\n    default: true\n";
+    let body = "# Plan\nShip ref_in_done.\n> [!decision] ref_in_done With `ref_in_done = yes` (default), `#ref`/`^ref` tasks count\n> in `done`, as before.\n";
+    let result = plan_validate(&tale(decisions, body), "tale").unwrap();
+    assert!(result.ok, "{:?}", result.diagnostics);
+    assert!(
+        !codes(&result).contains(&"decision-branch-unknown"),
+        "{:?}",
+        result.diagnostics
+    );
+    let plan = result.plan.unwrap();
+    assert_eq!(plan.decision_callouts.len(), 1);
+    let callout = &plan.decision_callouts[0];
+    assert_eq!(callout.id, "ref_in_done");
+    assert_eq!(callout.key, None);
+    assert_eq!(callout.branch, "yes");
+}
+
+#[test]
 fn unreferenced_decisions_warn_unless_mentioned() {
     let decisions =
         "decisions:\n  tui_note:\n    ask: Do tui_note?\n    default: false\n";

@@ -2,8 +2,12 @@
 //!
 //! A callout header is `> [!decision] <id>`, `> [!decision] <id> = <key>`,
 //! or `> [!decision] <id> = no` on a blockquote line outside fenced code.
-//! The callout span runs to the end of that blockquote. All line numbers are
-//! original-document lines (frontmatter included).
+//! The id is the first word after the marker, and the line has a branch only
+//! when `=` directly follows the id. Any other text on the header line is
+//! prose and is ignored, so a header that a Markdown formatter joined with its
+//! first body line parses the same as the unjoined form. The callout span runs
+//! to the end of that blockquote. All line numbers are original-document lines
+//! (frontmatter included).
 
 use super::wire::PlanDecisionCalloutWire;
 
@@ -11,7 +15,8 @@ use super::wire::PlanDecisionCalloutWire;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawCallout {
     pub id: String,
-    /// The branch token after `=`, if any. Prose after it is ignored.
+    /// The branch token after an `=` that directly follows the id, if any.
+    /// Prose after the header tokens is ignored.
     pub value: Option<String>,
     /// Original-document line of the header (for diagnostics).
     pub header_line: u64,
@@ -146,20 +151,19 @@ fn parse_callout_header(line: &str) -> Option<(String, Option<String>)> {
     if after.is_empty() {
         return Some((String::new(), None));
     }
-    match after.find('=') {
-        None => {
-            let id = first_token(after);
-            Some((id, None))
-        }
-        Some(cut) => {
-            let id = after[..cut].trim().to_string();
-            let value_part = after[cut + 1..].trim();
-            if value_part.is_empty() {
-                return Some((id, Some(String::new())));
-            }
-            Some((id, Some(first_token(value_part))))
-        }
-    }
+    // The id runs to the first whitespace or `=`. A branch exists only when
+    // `=` directly follows the id (after optional whitespace); any other
+    // text on the line is prose, so a header that a Markdown formatter joined
+    // with its first body line parses like the unjoined form.
+    let id_end = after
+        .find(|c: char| c.is_whitespace() || c == '=')
+        .unwrap_or(after.len());
+    let id = after[..id_end].to_string();
+    let Some(value_part) = after[id_end..].trim_start().strip_prefix('=')
+    else {
+        return Some((id, None));
+    };
+    Some((id, Some(first_token(value_part))))
 }
 
 fn first_token(text: &str) -> String {
@@ -380,6 +384,62 @@ mod tests {
         assert_eq!(callouts[1].value.as_deref(), Some("mode"));
         assert_eq!(callouts[2].id, "tui_note");
         assert_eq!(callouts[2].value.as_deref(), Some("no"));
+    }
+
+    fn header(line: &str) -> (String, Option<String>) {
+        parse_callout_header(line).expect("decision header")
+    }
+
+    #[test]
+    fn prettier_joined_toggle_header_has_no_branch() {
+        let (id, value) = header(
+            "> [!decision] ref_in_done With `ref_in_done = yes` (default), \
+             `#ref`/`^ref` tasks count",
+        );
+        assert_eq!(id, "ref_in_done");
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn trailing_prose_never_changes_the_parsed_header() {
+        let prose = "With `x = yes` (default), a = b and = more";
+        let cases: [(&str, &str, Option<&str>); 7] = [
+            ("id", "id", None),
+            ("id = key", "id", Some("key")),
+            ("id=key", "id", Some("key")),
+            ("id =key", "id", Some("key")),
+            ("id = no thanks", "id", Some("no")),
+            ("id =", "id", Some("")),
+            ("", "", None),
+        ];
+        for (header_text, id, value) in cases {
+            let alone = header(&format!("> [!decision] {header_text}"));
+            assert_eq!(alone, (id.to_string(), value.map(str::to_string)));
+            // A header with nothing after its last token (the bare marker,
+            // `id =`) has no token of its own to protect: the first prose
+            // word becomes the id or branch. Covered separately below.
+            if id.is_empty() || value == Some("") {
+                continue;
+            }
+            let joined =
+                header(&format!("> [!decision] {header_text} {prose}"));
+            assert_eq!(joined, alone, "header {header_text:?} with prose");
+        }
+    }
+
+    #[test]
+    fn headers_missing_a_token_take_it_from_following_prose() {
+        let (id, value) = header("> [!decision] id = With `x = yes`");
+        assert_eq!((id.as_str(), value.as_deref()), ("id", Some("With")));
+        let (id, value) = header("> [!decision] With `x = yes`");
+        assert_eq!((id.as_str(), value), ("With", None));
+    }
+
+    #[test]
+    fn branch_header_with_later_equals_keeps_first_token() {
+        let (id, value) = header("> [!decision] grouping = mode where a = b");
+        assert_eq!(id, "grouping");
+        assert_eq!(value.as_deref(), Some("mode"));
     }
 
     #[test]
