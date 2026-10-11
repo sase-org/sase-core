@@ -90,7 +90,7 @@ fn plan_validation_bindings_round_trip_json_shapes() {
             .unwrap()
             .iter()
             .any(|field| { field["name"] == json!("parent_bead") }));
-        for field_name in ["bead", "parent"] {
+        for field_name in ["bead", "parent", "project"] {
             assert!(schema_value
                 .as_array()
                 .unwrap()
@@ -104,7 +104,7 @@ fn plan_validation_bindings_round_trip_json_shapes() {
         assert!(tale_schema_value.as_array().unwrap().iter().any(|field| {
             field["name"] == json!("size") && field["required"] == json!(true)
         }));
-        for field_name in ["bead", "parent"] {
+        for field_name in ["bead", "parent", "project"] {
             assert!(tale_schema_value
                 .as_array()
                 .unwrap()

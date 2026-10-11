@@ -488,6 +488,7 @@ mod tests {
             bead: None,
             proposed_by: None,
             parent: None,
+            project: None,
             decisions,
             decision_callouts: Vec::new(),
             decided_by: None,

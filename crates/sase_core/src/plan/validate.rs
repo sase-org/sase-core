@@ -34,6 +34,7 @@ const SYSTEM_FIELDS: &[&str] = &[
     "decided_by",
     "decided_via",
     "prompt",
+    "project",
     "bead",
     "proposed_by",
     "parent",
@@ -151,6 +152,8 @@ pub struct ValidatedPlanWire {
     pub bead: Option<String>,
     pub proposed_by: Option<String>,
     pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<PlanDecisionWire>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -437,6 +440,13 @@ pub fn plan_frontmatter_schema(
             json!("bbugyi200.athena.q8--plan"),
         ),
         field_spec(
+            "project",
+            "non-empty string",
+            false,
+            "SASE project this machine-local proposal belongs to, written by `sase plan propose`; removed when the plan is archived into a project plan store.",
+            json!("sase"),
+        ),
+        field_spec(
             "parent",
             "non-empty string",
             false,
@@ -539,6 +549,8 @@ impl<'a> Validator<'a> {
             PlanTier::Epic => None,
         };
         let model = self.optional_model(mapping, "model", &index);
+        let project =
+            self.optional_non_empty_string(mapping, "project", &index);
         let bead = self.optional_non_empty_string(mapping, "bead", &index);
         let proposed_by =
             self.optional_non_empty_string(mapping, "proposed_by", &index);
@@ -634,6 +646,7 @@ impl<'a> Validator<'a> {
             bead,
             proposed_by,
             parent,
+            project,
             decisions: frontmatter.decisions,
             decision_callouts: body_outcome.callouts,
             decided_by: frontmatter.decided_by,
@@ -1607,6 +1620,7 @@ mod tests {
                 bead: Some("sase-88.1".to_string()),
                 proposed_by: None,
                 parent: Some("sase/repos/plans/202607/parent.md".to_string(),),
+                project: None,
                 decisions: Vec::new(),
                 decision_callouts: Vec::new(),
                 decided_by: None,
@@ -1900,6 +1914,7 @@ mod tests {
                 bead: None,
                 proposed_by: None,
                 parent: None,
+                project: None,
                 decisions: Vec::new(),
                 decision_callouts: Vec::new(),
                 decided_by: None,
@@ -2167,6 +2182,60 @@ mod tests {
     }
 
     #[test]
+    fn machine_local_project_field_validates_and_round_trips_in_every_mode() {
+        for tier in ["tale", "epic"] {
+            let extra = match tier {
+                "tale" => "size: small\n".to_string(),
+                "epic" => "phases:\n  - id: core\n    title: Core\n    depends_on: []\n    description: Core section validates project metadata.\n    size: small\n"
+                    .to_string(),
+                _ => unreachable!(),
+            };
+            let without = format!(
+                "---\ntier: {tier}\ntitle: Project metadata\ngoal: Validate project metadata\n{extra}---\nbody\n"
+            );
+
+            for mode in ["authoring", "launch", "archived"] {
+                let with = without.replace(
+                    "goal: Validate project metadata\n",
+                    "goal: Validate project metadata\nproject: ' Display Name '\n",
+                );
+                let result =
+                    plan_validate_with_mode(&with, tier, mode).unwrap();
+                assert!(result.ok, "{tier}/{mode}: {:?}", result.diagnostics);
+                let plan = result.plan.unwrap();
+                assert_eq!(plan.project.as_deref(), Some("Display Name"));
+                assert_eq!(
+                    serde_json::to_value(&plan).unwrap()["project"],
+                    json!("Display Name")
+                );
+
+                let no_project = plan_validate_with_mode(&without, tier, mode)
+                    .unwrap()
+                    .plan
+                    .unwrap();
+                assert!(serde_json::to_value(no_project)
+                    .unwrap()
+                    .get("project")
+                    .is_none());
+
+                for (value, code) in [
+                    ("'   '", "value-empty"),
+                    ("[display, name]", "type-mismatch"),
+                ] {
+                    let invalid = with.replace("' Display Name '", value);
+                    let result =
+                        plan_validate_with_mode(&invalid, tier, mode).unwrap();
+                    assert!(!result.ok, "{tier}/{mode}: {value}");
+                    assert!(result.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.field_path == "project"
+                            && diagnostic.code == code
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn schema_is_ordered_and_contains_exact_phase_guidance() {
         let tale = plan_frontmatter_schema("tale").unwrap();
         assert_eq!(
@@ -2194,8 +2263,9 @@ mod tests {
                 "decided_via",
                 "bead",
                 "proposed_by",
+                "project",
                 "parent",
-                "bead_id"
+                "bead_id",
             ]
         );
         let epic = plan_frontmatter_schema("epic").unwrap();
@@ -2233,8 +2303,9 @@ mod tests {
                 "decided_via",
                 "bead",
                 "proposed_by",
+                "project",
                 "parent",
-                "bead_id"
+                "bead_id",
             ]
         );
         let phase_description = epic
@@ -2274,6 +2345,10 @@ mod tests {
             (
                 "proposed_by",
                 "Name of the SASE agent that proposed this plan, written by SASE.",
+            ),
+            (
+                "project",
+                "SASE project this machine-local proposal belongs to, written by `sase plan propose`; removed when the plan is archived into a project plan store.",
             ),
             (
                 "parent",
