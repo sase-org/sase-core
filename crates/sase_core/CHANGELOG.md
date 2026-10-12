@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0](https://github.com/sase-org/sase-core/compare/v0.38.0...v0.39.0) - 2026-10-12
+
+### Added
+
+- *(project-onboarding)* preserve setup obligations during recovery
+- *(plan)* [**breaking**] allow memory decisions to default true via corrects quotes
+- *(project-onboarding)* derive ordered onboarding plans from facts
+- *(project-onboarding)* classify candidates and evaluate creation forms
+
 ## [0.38.0](https://github.com/sase-org/sase-core/compare/v0.37.2...v0.38.0) - 2026-10-11
 
 ### Added
