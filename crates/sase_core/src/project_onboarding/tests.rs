@@ -272,6 +272,48 @@ fn numbered_copy_and_third_party_local_are_hidden() {
 }
 
 #[test]
+fn primary_checkout_plus_numbered_sibling_stays_local_in_both_orders() {
+    for primary_first in [true, false] {
+        let mut input = classify_input();
+        let mut primary = local("github.com/sase-org/sase", "sase-org", "sase");
+        primary.path = "/tmp/sase-org/sase".into();
+        let mut sibling = local("github.com/sase-org/sase", "sase-org", "sase");
+        sibling.numbered_copy = true;
+        sibling.path = "/tmp/sase-org/sase_2".into();
+        if primary_first {
+            input.local.extend([primary, sibling]);
+        } else {
+            input.local.extend([sibling, primary]);
+        }
+        let result = classify_project_candidates(&input).unwrap();
+        let row = row_by_name(&result, "sase");
+        assert!(
+            row.hidden_reason.is_empty(),
+            "primary_first={primary_first}: hidden as {}",
+            row.hidden_reason
+        );
+        assert_eq!(row.group, GROUP_LOCAL);
+        assert_eq!(row.local_path, "/tmp/sase-org/sase");
+    }
+}
+
+#[test]
+fn inventory_only_identity_seeds_no_selectable_row() {
+    let mut input = classify_input();
+    input.inventory.push(ProjectCandidateInventoryWire {
+        identity_key: "github.com/steveyegge/beads".into(),
+        kind: INVENTORY_EXTERNAL.into(),
+        open_count: 4,
+        last_open_at: "2026-10-01T00:00:00Z".into(),
+        ..ProjectCandidateInventoryWire::default()
+    });
+    let result = classify_project_candidates(&input).unwrap();
+    assert!(result.groups.is_empty());
+    assert!(result.search_only.is_empty());
+    assert!(result.hidden.is_empty());
+}
+
+#[test]
 fn enabled_project_is_search_only_and_disabled_gets_a_group() {
     let mut input = classify_input();
     input
@@ -638,9 +680,43 @@ fn defaults_fill_effective_options_and_bools_normalize() {
     );
     assert_eq!(state.effective_options.get("add_readme").unwrap(), "true");
     assert_eq!(state.effective_options.get("issues").unwrap(), "true");
-    assert!(!state.effective_options.contains_key("wiki"));
+    // An explicitly-off bool is a real setting, not an absence.
+    assert_eq!(state.effective_options.get("wiki").unwrap(), "false");
     assert!(!field_state(&state, "wiki").is_set);
     assert_eq!(field_state(&state, "wiki").value, "false");
+}
+
+#[test]
+fn explicit_false_on_default_true_bool_is_kept_in_both_modes() {
+    for mode in [FORM_MODE_LENIENT, FORM_MODE_STRICT] {
+        let state = evaluate(vec![("issues", "false")], mode);
+        assert!(state.valid, "mode {mode}: {:?}", state.errors);
+        assert_eq!(state.effective_options.get("issues").unwrap(), "false");
+        assert!(!field_state(&state, "issues").is_set);
+    }
+}
+
+#[test]
+fn strict_ignores_off_values_of_excluded_fields_but_keeps_conflicts() {
+    // add_readme=false requests nothing, so template plus an off bool is
+    // harmless even in strict mode.
+    let harmless = evaluate(
+        vec![("template", "sase-org/template"), ("add_readme", "false")],
+        FORM_MODE_STRICT,
+    );
+    assert!(harmless.valid, "{:?}", harmless.errors);
+    assert!(!harmless.effective_options.contains_key("add_readme"));
+    assert!(!field_state(&harmless, "add_readme").available);
+
+    // gitignore=Python requests the excluded behavior, so it stays an error.
+    let conflict = evaluate(
+        vec![("template", "sase-org/template"), ("gitignore", "Python")],
+        FORM_MODE_STRICT,
+    );
+    assert!(!conflict.valid);
+    assert!(conflict.errors.iter().any(|error| {
+        error.field == "gitignore" && error.code == ERROR_CONFLICT
+    }));
 }
 
 #[test]

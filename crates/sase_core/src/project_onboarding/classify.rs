@@ -91,7 +91,10 @@ pub fn classify_project_candidates(
     }
     seed_from_journals(&mut merged, &input.journals);
     seed_from_projects(&mut merged, &input.projects);
-    seed_from_inventory(&mut merged, &input.inventory);
+    // Inventory never seeds rows: its wire rows carry no ref or path, so an
+    // inventory-only identity would land in Suggested with nothing the TUI or
+    // CLI can act on. Inventory only annotates rows other sources produced
+    // (linked chips, sidecar hiding, open-count ranking).
 
     let mut grouped: HashMap<String, Vec<RankedRow>> = HashMap::new();
     let mut search_only = Vec::new();
@@ -379,10 +382,22 @@ fn merge_local(
     if !local.owner.is_empty() {
         entry.owner = local.owner.clone();
     }
-    if !local.path.is_empty() {
-        entry.local_path = local.path.clone();
+    if !entry.has_local {
+        entry.numbered_copy = local.numbered_copy;
+        if !local.path.is_empty() {
+            entry.local_path = local.path.clone();
+        }
+    } else {
+        // A primary checkout plus a numbered sibling is still the primary:
+        // the merged row is a numbered copy only when every local entry is
+        // numbered, and the path prefers the non-numbered checkout.
+        entry.numbered_copy = entry.numbered_copy && local.numbered_copy;
+        if !local.path.is_empty()
+            && (!local.numbered_copy || entry.local_path.is_empty())
+        {
+            entry.local_path = local.path.clone();
+        }
     }
-    entry.numbered_copy |= local.numbered_copy;
     entry.has_local = true;
 }
 
@@ -432,22 +447,6 @@ fn seed_from_projects(
                     project.name.clone()
                 };
             }
-        }
-    }
-}
-
-fn seed_from_inventory(
-    merged: &mut BTreeMap<String, MergedCandidate>,
-    inventory: &[ProjectCandidateInventoryWire],
-) {
-    for item in inventory {
-        let key = fold_key(&item.identity_key);
-        if key.is_empty() {
-            continue;
-        }
-        let entry = merged.entry(key).or_default();
-        if entry.identity_key.is_empty() {
-            entry.identity_key = item.identity_key.clone();
         }
     }
 }

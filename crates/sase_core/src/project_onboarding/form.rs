@@ -85,7 +85,12 @@ pub fn evaluate_repo_creation_form(
                     message: format!("{} is required", field_label(item.field)),
                 });
             }
-            if is_set
+            // Never drop an explicit bool setting: a default-true bool set to
+            // "false" is a real choice the provider create must receive.
+            let is_bool_value = item.field.kind == FIELD_KIND_BOOL
+                && is_bool_value(&item.value);
+            if is_bool_value
+                || is_set
                 || (!item.value.is_empty() && item.value == item.field.default)
             {
                 effective.insert(field.name.clone(), item.value.clone());
@@ -93,7 +98,9 @@ pub fn evaluate_repo_creation_form(
         } else if strict {
             if let Some(supplied) = item.supplied.as_ref() {
                 let (normalized, _) = normalize_value(item.field, supplied);
-                if normalized != item.field.default {
+                if normalized != item.field.default
+                    && requests_excluded_behavior(item.field, &normalized)
+                {
                     match unavail_kind {
                         UnavailKind::Requires => {
                             errors.push(CreationFormErrorWire {
@@ -213,6 +220,26 @@ fn field_is_set(field: &RepoCreationFieldWire, value: &str) -> bool {
     } else {
         !value.is_empty()
     }
+}
+
+fn is_bool_value(value: &str) -> bool {
+    value == "true" || value == "false"
+}
+
+/// A supplied value on an unavailable field only conflicts when it requests
+/// the excluded behavior. An empty value or an explicit "off" bool leaves the
+/// field effectively unset, so strict mode must not flag it.
+fn requests_excluded_behavior(
+    field: &RepoCreationFieldWire,
+    normalized: &str,
+) -> bool {
+    if normalized.is_empty() {
+        return false;
+    }
+    if field.kind == FIELD_KIND_BOOL && normalized == "false" {
+        return false;
+    }
+    true
 }
 
 fn set_field_names<'a>(
