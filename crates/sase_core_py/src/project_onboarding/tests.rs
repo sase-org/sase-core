@@ -171,6 +171,55 @@ fn plan_binding_round_trips_fresh_add() {
 }
 
 #[test]
+fn plan_binding_round_trips_management_recovery_facts() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = json_value_to_py(
+            py,
+            &json!({
+                "schema_version": 1,
+                "request": {
+                    "mode": "add",
+                    "actor": "human",
+                    "target": {
+                        "workflow_type": "gh",
+                        "identity_key": "github.com/sase-org/bob",
+                        "ref": "sase-org/bob",
+                        "display": "sase-org/bob",
+                        "checkout_dir": "/tmp/bob",
+                        "project_key_base": "gh_sase-org__bob",
+                        "project_name_base": "bob",
+                        "storage_policy": "separate_repo"
+                    },
+                    "requested": {"setup": "auto", "make_current": false}
+                },
+                "facts": {
+                    "remote": {
+                        "status": "found",
+                        "can_push": true,
+                        "sase_managed": true
+                    },
+                    "local_managed": true,
+                    "checkout": {"state": "matching", "config_dirty": true},
+                    "journal": {
+                        "setup_required": true,
+                        "management_incomplete": true,
+                        "config_changes_owned": true
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let request = request.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_plan_project_onboarding(py, request).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value["setup"]["code"], json!("resuming"));
+        assert_eq!(value["steps"][3]["state"], json!("pending"));
+        assert!(value["blockers"].as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
 fn plan_binding_rejects_bad_schema() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {

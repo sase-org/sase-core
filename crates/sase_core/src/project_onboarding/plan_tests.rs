@@ -274,6 +274,7 @@ fn journal_repo_id_match_adopts_the_remote() {
         intent_recorded_at: "2026-10-11T00:00:00Z".into(),
         remote_created: true,
         repo_id: "R_bob".into(),
+        ..ProjectOnboardingJournalFactsWire::default()
     });
     let plan = plan_of(&input);
     assert_eq!(step(&plan, STEP_CREATE_REMOTE).state, STEP_DONE);
@@ -291,6 +292,7 @@ fn journal_without_id_adopts_empty_remote_of_requested_visibility() {
         intent_recorded_at: "2026-10-11T00:00:00Z".into(),
         remote_created: true,
         repo_id: String::new(),
+        ..ProjectOnboardingJournalFactsWire::default()
     });
     let plan = plan_of(&input);
     assert_eq!(step(&plan, STEP_CREATE_REMOTE).state, STEP_DONE);
@@ -306,6 +308,7 @@ fn journal_without_id_does_not_adopt_a_non_empty_remote() {
         intent_recorded_at: "2026-10-11T00:00:00Z".into(),
         remote_created: false,
         repo_id: String::new(),
+        ..ProjectOnboardingJournalFactsWire::default()
     });
     let plan = plan_of(&input);
     assert!(blocker_codes(&plan).contains(&BLOCKER_REMOTE_EXISTS));
@@ -572,6 +575,63 @@ fn local_managed_counts_as_managed() {
     input.facts.record = Some(matching_record());
     let plan = plan_of(&input);
     assert_eq!(plan.setup.code, SETUP_CODE_ALREADY_MANAGED);
+}
+
+#[test]
+fn matching_intent_keeps_its_setup_obligation_after_marker_write() {
+    let mut input = add_input();
+    input.facts.remote.sase_managed = Some(true);
+    input.facts.local_managed = Some(true);
+    input.facts.checkout.state = CHECKOUT_MATCHING.into();
+    input.facts.checkout.config_dirty = true;
+    input.facts.record = Some(matching_record());
+    input.facts.journal = Some(ProjectOnboardingJournalFactsWire {
+        setup_required: Some(true),
+        management_incomplete: true,
+        config_changes_owned: true,
+        ..ProjectOnboardingJournalFactsWire::default()
+    });
+
+    let plan = plan_of(&input);
+    assert!(plan.setup.enabled);
+    assert_eq!(plan.setup.code, SETUP_CODE_RESUMING);
+    assert_eq!(step(&plan, STEP_MANAGE).state, STEP_PENDING);
+    assert_eq!(step(&plan, STEP_INIT).state, STEP_PENDING);
+    assert!(!blocker_codes(&plan).contains(&BLOCKER_CONFIG_DIRTY));
+}
+
+#[test]
+fn recovery_ownership_does_not_waive_other_blockers() {
+    let mut input = add_input();
+    input.facts.checkout.config_dirty = true;
+    input.facts.checkout.on_default_branch = Some(false);
+    input.facts.journal = Some(ProjectOnboardingJournalFactsWire {
+        setup_required: Some(true),
+        management_incomplete: true,
+        config_changes_owned: false,
+        ..ProjectOnboardingJournalFactsWire::default()
+    });
+
+    let plan = plan_of(&input);
+    assert!(blocker_codes(&plan).contains(&BLOCKER_CONFIG_DIRTY));
+    assert!(blocker_codes(&plan).contains(&BLOCKER_NOT_ON_DEFAULT_BRANCH));
+}
+
+#[test]
+fn agent_auto_setup_does_not_adopt_a_human_journal_obligation() {
+    let mut input = add_input();
+    input.request.actor = ACTOR_AGENT.into();
+    input.facts.journal = Some(ProjectOnboardingJournalFactsWire {
+        setup_required: Some(true),
+        management_incomplete: true,
+        config_changes_owned: true,
+        ..ProjectOnboardingJournalFactsWire::default()
+    });
+
+    let plan = plan_of(&input);
+    assert_eq!(plan.setup.code, SETUP_CODE_AGENT);
+    assert!(!plan.setup.enabled);
+    assert_eq!(step(&plan, STEP_MANAGE).state, STEP_SKIPPED);
 }
 
 #[test]

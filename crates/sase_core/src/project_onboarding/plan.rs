@@ -27,7 +27,8 @@ use super::wire::{
     PROJECT_ONBOARDING_WIRE_SCHEMA_VERSION, PROJECT_STATE_DISABLED,
     REMOTE_FOUND, REMOTE_NOT_FOUND, REMOTE_UNAVAILABLE, SETUP_AUTO,
     SETUP_CODE_AGENT, SETUP_CODE_ALREADY_MANAGED, SETUP_CODE_NEW_REPO,
-    SETUP_CODE_NO_PUSH, SETUP_CODE_OFF, SETUP_CODE_ON, SETUP_CODE_UNKNOWN_PUSH,
+    SETUP_CODE_NO_PUSH, SETUP_CODE_OFF, SETUP_CODE_ON, SETUP_CODE_RESOLVED_OFF,
+    SETUP_CODE_RESUMING, SETUP_CODE_UNKNOWN_PUSH,
     SETUP_CODE_UNMANAGED_CAN_PUSH, SETUP_OFF, SETUP_ON, STEP_CHECKOUT,
     STEP_CREATE_REMOTE, STEP_CURRENT, STEP_DONE, STEP_IDENTITY, STEP_INIT,
     STEP_MANAGE, STEP_PENDING, STEP_REENABLE, STEP_SKIPPED,
@@ -443,6 +444,27 @@ fn resolve_setup(
                         .to_string(),
                 };
             }
+            if let Some(journal) = facts.journal.as_ref() {
+                if journal.management_incomplete
+                    || journal.setup_required == Some(true)
+                {
+                    return ProjectOnboardingSetupWire {
+                        enabled: true,
+                        code: SETUP_CODE_RESUMING.to_string(),
+                        reason: "resuming setup for this onboarding intent"
+                            .to_string(),
+                    };
+                }
+                if journal.setup_required == Some(false) {
+                    return ProjectOnboardingSetupWire {
+                        enabled: false,
+                        code: SETUP_CODE_RESOLVED_OFF.to_string(),
+                        reason:
+                            "setup was resolved off for this onboarding intent"
+                                .to_string(),
+                    };
+                }
+            }
             if managed {
                 return ProjectOnboardingSetupWire {
                     enabled: false,
@@ -796,8 +818,18 @@ fn manage_step(
     blockers: &mut Vec<ProjectOnboardingBlockerWire>,
 ) -> ProjectOnboardingStepWire {
     let managed = is_managed(facts);
+    let management_incomplete = facts
+        .journal
+        .as_ref()
+        .is_some_and(|journal| journal.management_incomplete);
+    let config_changes_owned = facts
+        .journal
+        .as_ref()
+        .is_some_and(|journal| journal.config_changes_owned);
     if setup.enabled && !managed {
-        if facts.checkout.config_dirty {
+        if facts.checkout.config_dirty
+            && !(management_incomplete && config_changes_owned)
+        {
             blockers.push(blocker(
                 BLOCKER_CONFIG_DIRTY,
                 "sase/sase.yml has local edits",
@@ -821,6 +853,8 @@ fn manage_step(
     };
     let detail = if state == STEP_SKIPPED {
         setup.reason.clone()
+    } else if management_incomplete {
+        "resume the recorded marker commit and push".to_string()
     } else {
         "commit and push sase/sase.yml is_sase_managed".to_string()
     };
@@ -909,7 +943,12 @@ fn journal_owns_remote(
 }
 
 fn is_managed(facts: &ProjectOnboardingFactsWire) -> bool {
-    facts.remote.sase_managed == Some(true) || facts.local_managed == Some(true)
+    !facts
+        .journal
+        .as_ref()
+        .is_some_and(|journal| journal.management_incomplete)
+        && (facts.remote.sase_managed == Some(true)
+            || facts.local_managed == Some(true))
 }
 
 fn occupied_refs(

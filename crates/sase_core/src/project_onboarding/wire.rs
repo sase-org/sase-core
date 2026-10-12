@@ -105,6 +105,8 @@ pub const SETUP_CODE_ALREADY_MANAGED: &str = "already_managed";
 pub const SETUP_CODE_UNMANAGED_CAN_PUSH: &str = "unmanaged_can_push";
 pub const SETUP_CODE_NO_PUSH: &str = "no_push";
 pub const SETUP_CODE_UNKNOWN_PUSH: &str = "unknown_push";
+pub const SETUP_CODE_RESUMING: &str = "resuming";
+pub const SETUP_CODE_RESOLVED_OFF: &str = "resolved_off";
 pub const SETUP_CODE_ON: &str = "on";
 pub const SETUP_CODE_OFF: &str = "off";
 
@@ -557,6 +559,15 @@ pub struct ProjectOnboardingJournalFactsWire {
     pub remote_created: bool,
     #[serde(default)]
     pub repo_id: String,
+    /// Setup decision captured for this active intent before any effects ran.
+    #[serde(default)]
+    pub setup_required: Option<bool>,
+    /// A matching intent has started management but has not verified its push.
+    #[serde(default)]
+    pub management_incomplete: bool,
+    /// Current config bytes exactly match the marker content recorded by that effect.
+    #[serde(default)]
+    pub config_changes_owned: bool,
 }
 
 /// Observed checkout directory for planning.
