@@ -79,6 +79,7 @@ fn compile_fixture() -> PreparedAgentArchiveCorpus {
     alpha.project_name = Some("sase".to_string());
     alpha.model = Some("muse".to_string());
     alpha.stop_time = Some("2025-03-02T12:00:00Z".to_string());
+    alpha.dismissed_at = Some("2025-03-02T12:30:00Z".to_string());
     alpha.restorable = true;
     insert_row(&mut conn, temp.path(), &alpha);
 
@@ -348,6 +349,18 @@ fn query_windows_page_flattened_rows_and_insert_expanded_members() {
     assert_eq!(second.rows[0].member_count, 2);
     assert_eq!(second.rows[0].agent_name.as_deref(), Some("review"));
     assert_eq!(second.rows[0].outcome, AgentArchiveOutcomeWire::Failed);
+    assert_eq!(
+        second.rows[0].stop_time.as_deref(),
+        Some("2025-03-02T10:00:00Z")
+    );
+    assert!(
+        second.rows[0]
+            .bundle_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("clan-new.json")),
+        "container bundle_path={:?}",
+        second.rows[0].bundle_path
+    );
 
     let expanded = rows_agent_archive_corpus(
         &corpus,
@@ -369,6 +382,47 @@ fn query_windows_page_flattened_rows_and_insert_expanded_members() {
     assert_eq!(
         expanded.rows[2].agent_name.as_deref(),
         Some("250302.clan-old")
+    );
+}
+
+#[test]
+fn query_light_rows_carry_bundle_path_stop_time_and_dismissed_at() {
+    let corpus = compile_fixture();
+    let page = rows_agent_archive_corpus(
+        &corpus,
+        rows_request("", "day", "2025-03-02", 0, 10, &[]),
+    )
+    .unwrap();
+    let alpha = page
+        .rows
+        .iter()
+        .find(|row| row.archive_key.source_run_id == "alpha")
+        .expect("alpha light row");
+    assert_eq!(alpha.stop_time.as_deref(), Some("2025-03-02T12:00:00Z"));
+    assert_eq!(alpha.dismissed_at.as_deref(), Some("2025-03-02T12:30:00Z"));
+    assert!(
+        alpha
+            .bundle_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("alpha.json")),
+        "alpha bundle_path={:?}",
+        alpha.bundle_path
+    );
+
+    let clan = page
+        .rows
+        .iter()
+        .find(|row| row.container)
+        .expect("clan container light row");
+    assert_eq!(clan.archive_key.source_run_id, "clan-new");
+    assert_eq!(clan.stop_time.as_deref(), Some("2025-03-02T10:00:00Z"));
+    assert_eq!(clan.dismissed_at, None);
+    assert!(
+        clan.bundle_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("clan-new.json")),
+        "clan bundle_path={:?}",
+        clan.bundle_path
     );
 }
 

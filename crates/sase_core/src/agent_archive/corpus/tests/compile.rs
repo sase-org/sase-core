@@ -119,6 +119,19 @@ fn compile_derives_time_bases_runtime_and_utc_instants() {
         rows["ended"].start_time.as_deref(),
         Some("2025-01-01T15:00:00Z")
     );
+    assert_eq!(
+        rows["ended"].stop_time.as_deref(),
+        Some("2025-01-01T16:00:00Z")
+    );
+    assert_eq!(rows["ended"].dismissed_at, None);
+    assert!(
+        rows["ended"]
+            .bundle_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("ended.json")),
+        "ended bundle_path={:?}",
+        rows["ended"].bundle_path
+    );
     assert_eq!(rows["ended"].runtime_seconds, Some(3_600));
 
     assert_eq!(
@@ -127,6 +140,11 @@ fn compile_derives_time_bases_runtime_and_utc_instants() {
     );
     assert_eq!(
         rows["dismissed"].last_activity_at.as_deref(),
+        Some("2025-07-01T14:00:00Z")
+    );
+    assert_eq!(rows["dismissed"].stop_time, None);
+    assert_eq!(
+        rows["dismissed"].dismissed_at.as_deref(),
         Some("2025-07-01T14:00:00Z")
     );
     assert_eq!(rows["dismissed"].runtime_seconds, Some(125));
@@ -141,6 +159,9 @@ fn compile_derives_time_bases_runtime_and_utc_instants() {
     );
     assert_eq!(rows["no-times"].last_activity_at, None);
     assert_eq!(rows["no-times"].time_basis, None);
+    assert_eq!(rows["no-times"].stop_time, None);
+    assert_eq!(rows["no-times"].dismissed_at, None);
+    assert!(rows["no-times"].bundle_path.is_some());
     assert_eq!(rows["no-times"].runtime_seconds, None);
 }
 

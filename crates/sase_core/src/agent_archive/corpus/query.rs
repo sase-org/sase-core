@@ -295,6 +295,9 @@ fn member_light_row(
         last_activity_at: row.last_activity_at.clone(),
         time_basis: row.time_basis,
         start_time: row.start_time.clone(),
+        stop_time: row.stop_time.clone(),
+        dismissed_at: row.dismissed_at.clone(),
+        bundle_path: row.bundle_path.clone(),
         runtime_seconds: row.runtime_seconds,
         restorable: row.restorable,
     }
@@ -331,6 +334,9 @@ fn container_light_row(
         last_activity_at: newest.last_activity_at.clone(),
         time_basis: newest.time_basis,
         start_time: newest.start_time.clone(),
+        stop_time: newest.stop_time.clone(),
+        dismissed_at: newest.dismissed_at.clone(),
+        bundle_path: newest.bundle_path.clone(),
         runtime_seconds: newest.runtime_seconds,
         restorable,
     }

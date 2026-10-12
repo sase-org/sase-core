@@ -106,6 +106,12 @@ pub struct AgentArchiveCorpusRowWire {
     pub last_activity_at: Option<String>,
     pub time_basis: Option<AgentArchiveTimeBasisWire>,
     pub start_time: Option<String>,
+    #[serde(default)]
+    pub stop_time: Option<String>,
+    #[serde(default)]
+    pub dismissed_at: Option<String>,
+    #[serde(default)]
+    pub bundle_path: Option<String>,
     pub runtime_seconds: Option<i64>,
     pub attempt: i64,
     pub retry: bool,
@@ -221,6 +227,12 @@ pub struct AgentArchiveLightRowWire {
     pub last_activity_at: Option<String>,
     pub time_basis: Option<AgentArchiveTimeBasisWire>,
     pub start_time: Option<String>,
+    #[serde(default)]
+    pub stop_time: Option<String>,
+    #[serde(default)]
+    pub dismissed_at: Option<String>,
+    #[serde(default)]
+    pub bundle_path: Option<String>,
     pub runtime_seconds: Option<i64>,
     pub restorable: bool,
 }
