@@ -676,3 +676,130 @@ fn agent_archive_corpus_bindings_round_trip_v3_index() {
         );
     });
 }
+
+#[test]
+fn dismissed_bundle_index_bindings_are_exported_and_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "upsert_dismissed_bundle_summary",
+            "delete_dismissed_bundle_summaries_for_suffixes",
+            "query_dismissed_bundle_summaries",
+            "query_dismissed_bundle_paths_by_suffixes",
+            "set_dismissed_bundle_visibility_for_suffixes",
+            "query_dismissed_bundle_summary_identities",
+            "dismissed_bundle_index_signature",
+            "rebuild_dismissed_bundle_index",
+            "dismissed_bundle_index_progress",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_string_lossy().into_owned();
+        let bundle_path = temp
+            .path()
+            .join("20260512120000.json")
+            .to_string_lossy()
+            .into_owned();
+        let bundle = json!({
+            "raw_suffix": "20260512120000",
+            "status": "DONE",
+            "cl_name": "cl_a",
+            "agent_type": "run",
+            "agent_name": "agent-1",
+            "source_username": "alice",
+            "source_machine": "athena",
+            "source_run_id": "run-1",
+            "start_time": "2026-05-12T12:00:00",
+            "dismissed_at": "2026-05-12T12:30:00",
+            "model": "m1",
+            "llm_provider": "p1",
+        });
+        std::fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap())
+            .unwrap();
+
+        assert!(py_upsert_dismissed_bundle_summary(
+            py,
+            &root,
+            &bundle_path,
+            &serde_json::to_string(&bundle).unwrap(),
+        )
+        .unwrap());
+        assert!(py_upsert_dismissed_bundle_summary(
+            py,
+            &root,
+            &bundle_path,
+            "[1]"
+        )
+        .is_err());
+
+        let signature = py_dismissed_bundle_index_signature(py, &root).unwrap();
+        let signature = py_to_json_value(signature.bind(py)).unwrap();
+        assert_eq!(signature["schema_version"], json!(3));
+        assert_eq!(signature["row_count"], json!(1));
+
+        let request = request_dict(py, json!({}));
+        let rows =
+            py_query_dismissed_bundle_summaries(py, &root, &request).unwrap();
+        let rows = py_to_json_value(rows.bind(py)).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["agent_id"], json!("alice.athena@run-1"));
+
+        let paths = py_query_dismissed_bundle_paths_by_suffixes(
+            py,
+            &root,
+            vec!["20260512120000".to_string()],
+        )
+        .unwrap();
+        let paths = py_to_json_value(paths.bind(py)).unwrap();
+        assert_eq!(paths, json!([bundle_path]));
+
+        let changed = py_set_dismissed_bundle_visibility_for_suffixes(
+            py,
+            &root,
+            vec!["20260512120000".to_string()],
+            "visible",
+            Some("2026-05-12T13:00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(changed, 1);
+
+        let identities =
+            py_query_dismissed_bundle_summary_identities(py, &root).unwrap();
+        let identities = py_to_json_value(identities.bind(py)).unwrap();
+        assert_eq!(identities, json!([]));
+
+        // Paths follow the hidden default, so the visible row drops out.
+        let paths = py_query_dismissed_bundle_paths_by_suffixes(
+            py,
+            &root,
+            vec!["20260512120000".to_string()],
+        )
+        .unwrap();
+        let paths = py_to_json_value(paths.bind(py)).unwrap();
+        assert_eq!(paths, json!([]));
+
+        let progress = py_dismissed_bundle_index_progress(py, &root).unwrap();
+        let progress = py_to_json_value(progress.bind(py)).unwrap();
+        assert_eq!(progress, json!({"rebuilding": false, "indexed_rows": 0}));
+
+        let report = py_rebuild_dismissed_bundle_index(py, &root).unwrap();
+        let report = py_to_json_value(report.bind(py)).unwrap();
+        assert_eq!(report, json!({"indexed_rows": 1, "skipped_corrupt": 0}));
+
+        assert!(py_delete_dismissed_bundle_summaries_for_suffixes(
+            py,
+            &root,
+            vec!["20260512120000".to_string()],
+        )
+        .unwrap());
+        let signature = py_dismissed_bundle_index_signature(py, &root).unwrap();
+        let signature = py_to_json_value(signature.bind(py)).unwrap();
+        assert_eq!(signature["row_count"], json!(0));
+    });
+}

@@ -6,6 +6,7 @@
 
 pub mod corpus;
 pub mod status;
+pub mod store;
 pub mod wire;
 
 pub use corpus::{
@@ -36,10 +37,17 @@ use std::time::UNIX_EPOCH;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params_from_iter, Connection, OptionalExtension, Row};
 use serde_json::Value as JsonValue;
-use sha2::{Digest, Sha256};
 
 use crate::agent_identity::AgentOwnerIdentity;
 
+pub use store::{
+    delete_bundle_summaries_for_suffixes, index_signature,
+    open_archive_store_read_only, open_archive_store_writable,
+    open_existing_store_writable, query_bundle_paths_by_suffixes,
+    query_summaries, query_summary_identities, rebuild_index, rebuild_progress,
+    set_visibility_for_suffixes, upsert_bundle_summary, ArchiveStoreError,
+    ARCHIVE_STORE_INDEX_FILENAME, ARCHIVE_STORE_SCHEMA_VERSION,
+};
 pub use wire::{
     AgentArchiveCapabilitiesWire, AgentArchiveCapabilityFactsWire,
     AgentArchiveCapabilityValidationRequestWire, AgentArchiveFacetCountWire,
@@ -49,10 +57,12 @@ pub use wire::{
     AgentArchiveQueryRequestWire, AgentArchiveReviveMarkReportWire,
     AgentArchiveReviveMarkRequestWire, AgentArchiveScrubReportWire,
     AgentArchiveSummaryWire, AgentArchiveVerifyReportWire,
-    AgentArchiveVisibilityWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
+    AgentArchiveVisibilityWire, DismissedBundleIndexIdentityWire,
+    DismissedBundleIndexProgressWire, DismissedBundleIndexQueryWire,
+    DismissedBundleIndexRebuildReportWire, DismissedBundleIndexSignatureWire,
+    DismissedBundleSummaryWire, AGENT_ARCHIVE_WIRE_SCHEMA_VERSION,
 };
 
-const INDEX_FILENAME: &str = "index.sqlite";
 const MAX_SOURCE_RUN_ID_BYTES: usize = 128;
 
 pub fn validate_agent_archive_key(
@@ -445,14 +455,8 @@ pub fn verify_agent_archive_index(root: &Path) -> AgentArchiveVerifyReportWire {
 }
 
 fn open_existing_index(root: &Path) -> Result<Option<Connection>, String> {
-    let index_path = root.join(INDEX_FILENAME);
-    if !index_path.is_file() {
-        return Ok(None);
-    }
-    let conn = Connection::open(index_path).map_err(|e| e.to_string())?;
-    conn.pragma_update(None, "busy_timeout", 30000)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(conn))
+    crate::agent_archive::store::open_existing_store_writable(root)
+        .map_err(|e| e.to_string())
 }
 
 fn facet_column(facet: &str) -> Result<&'static str, String> {
@@ -591,12 +595,9 @@ fn file_signature(path: &Path) -> Result<(i64, i64), String> {
 }
 
 fn archive_payload_hash(bundle: &JsonValue) -> String {
-    let mut payload = bundle.clone();
-    if let Some(object) = payload.as_object_mut() {
-        object.remove("archive_payload_sha256");
-    }
-    let encoded = serde_json::to_vec(&payload).unwrap_or_default();
-    hex::encode(Sha256::digest(&encoded))
+    // Canonical sorted-keys encoding, identical to Python's
+    // `_archive_payload_hash` (and to `store::archive_payload_hash_canonical`).
+    store::archive_payload_hash_canonical(bundle)
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -1047,7 +1048,8 @@ mod tests {
 
     fn create_index(root: &Path) -> Connection {
         fs::create_dir_all(root).unwrap();
-        let conn = Connection::open(root.join(INDEX_FILENAME)).unwrap();
+        let conn =
+            Connection::open(root.join(ARCHIVE_STORE_INDEX_FILENAME)).unwrap();
         conn.execute_batch(
             "
             CREATE TABLE dismissed_bundle_summaries (

@@ -911,6 +911,188 @@ fn py_apply_agent_artifact_run_retention<'py>(
     )
 }
 
+use sase_core::agent_archive::store::ArchiveStoreError;
+use sase_core::agent_archive::store::{
+    delete_bundle_summaries_for_suffixes as core_delete_bundle_summaries_for_suffixes,
+    index_signature as core_dismissed_bundle_index_signature,
+    query_bundle_paths_by_suffixes as core_query_bundle_paths_by_suffixes,
+    query_summaries as core_query_dismissed_bundle_summaries,
+    query_summary_identities as core_query_summary_identities,
+    rebuild_index as core_rebuild_dismissed_bundle_index,
+    rebuild_progress as core_dismissed_bundle_index_progress,
+    set_visibility_for_suffixes as core_set_visibility_for_suffixes,
+    upsert_bundle_summary as core_upsert_bundle_summary,
+};
+use sase_core::agent_archive::DismissedBundleIndexQueryWire;
+
+fn store_error_to_pyerr(error: ArchiveStoreError) -> PyErr {
+    PyRuntimeError::new_err(error.to_string())
+}
+
+/// Insert or update one dismissed-bundle summary row from its bundle JSON.
+#[pyfunction]
+#[pyo3(name = "upsert_dismissed_bundle_summary")]
+fn py_upsert_dismissed_bundle_summary(
+    py: Python<'_>,
+    root: &str,
+    bundle_path: &str,
+    bundle_json: &str,
+) -> PyResult<bool> {
+    let bundle: serde_json::Value =
+        serde_json::from_str(bundle_json).map_err(|e| {
+            PyValueError::new_err(format!("bundle_json is not valid JSON: {e}"))
+        })?;
+    if !bundle.is_object() {
+        return Err(PyValueError::new_err("bundle_json must be a JSON object"));
+    }
+    py.allow_threads(|| {
+        core_upsert_bundle_summary(
+            &PathBuf::from(root),
+            &PathBuf::from(bundle_path),
+            &bundle,
+        )
+    })
+    .map_err(store_error_to_pyerr)?;
+    Ok(true)
+}
+
+/// Delete all dismissed-bundle summary rows for the given raw suffixes.
+#[pyfunction]
+#[pyo3(name = "delete_dismissed_bundle_summaries_for_suffixes")]
+fn py_delete_dismissed_bundle_summaries_for_suffixes(
+    py: Python<'_>,
+    root: &str,
+    suffixes: Vec<String>,
+) -> PyResult<bool> {
+    py.allow_threads(|| {
+        core_delete_bundle_summaries_for_suffixes(
+            &PathBuf::from(root),
+            &suffixes,
+        )
+    })
+    .map_err(store_error_to_pyerr)?;
+    Ok(true)
+}
+
+/// Query dismissed-bundle summaries, returning None when unusable.
+#[pyfunction]
+#[pyo3(name = "query_dismissed_bundle_summaries")]
+fn py_query_dismissed_bundle_summaries<'py>(
+    py: Python<'py>,
+    root: &str,
+    request: &Bound<'py, PyDict>,
+) -> PyResult<PyObject> {
+    let value = py_to_json_value(request.as_any())?;
+    let request: DismissedBundleIndexQueryWire = serde_json::from_value(value)
+        .map_err(|e| {
+            PyValueError::new_err(format!(
+                "request is not a valid DismissedBundleIndexQueryWire dict: {e}"
+            ))
+        })?;
+    let result = py
+        .allow_threads(|| {
+            core_query_dismissed_bundle_summaries(&PathBuf::from(root), request)
+        })
+        .map_err(store_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+/// Return indexed bundle paths for suffixes, or None when unusable.
+#[pyfunction]
+#[pyo3(name = "query_dismissed_bundle_paths_by_suffixes")]
+fn py_query_dismissed_bundle_paths_by_suffixes<'py>(
+    py: Python<'py>,
+    root: &str,
+    suffixes: Vec<String>,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_query_bundle_paths_by_suffixes(&PathBuf::from(root), suffixes)
+        })
+        .map_err(store_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+/// Set local visibility for all indexed rows matching suffixes.
+#[pyfunction]
+#[pyo3(
+    name = "set_dismissed_bundle_visibility_for_suffixes",
+    signature = (root, suffixes, visibility, revived_at = None, dismissed_at = None, pinned_at = None)
+)]
+fn py_set_dismissed_bundle_visibility_for_suffixes(
+    py: Python<'_>,
+    root: &str,
+    suffixes: Vec<String>,
+    visibility: &str,
+    revived_at: Option<&str>,
+    dismissed_at: Option<&str>,
+    pinned_at: Option<&str>,
+) -> PyResult<i64> {
+    py.allow_threads(|| {
+        core_set_visibility_for_suffixes(
+            &PathBuf::from(root),
+            &suffixes,
+            visibility,
+            revived_at,
+            dismissed_at,
+            pinned_at,
+        )
+    })
+    .map_err(store_error_to_pyerr)
+}
+
+/// Return distinct hidden summary identities, or None when unusable.
+#[pyfunction]
+#[pyo3(name = "query_dismissed_bundle_summary_identities")]
+fn py_query_dismissed_bundle_summary_identities<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| core_query_summary_identities(&PathBuf::from(root)))
+        .map_err(store_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+/// Return the cheap index signature, or None when unusable.
+#[pyfunction]
+#[pyo3(name = "dismissed_bundle_index_signature")]
+fn py_dismissed_bundle_index_signature<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let result = py.allow_threads(|| {
+        core_dismissed_bundle_index_signature(&PathBuf::from(root))
+    });
+    serialize_to_py(py, &result)
+}
+
+/// Rebuild the index from bundle files, quarantining corruption first.
+#[pyfunction]
+#[pyo3(name = "rebuild_dismissed_bundle_index")]
+fn py_rebuild_dismissed_bundle_index<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let result = py
+        .allow_threads(|| {
+            core_rebuild_dismissed_bundle_index(&PathBuf::from(root))
+        })
+        .map_err(store_error_to_pyerr)?;
+    serialize_to_py(py, &result)
+}
+
+/// Cheap in-process view of an active rebuild, without touching SQLite.
+#[pyfunction]
+#[pyo3(name = "dismissed_bundle_index_progress")]
+fn py_dismissed_bundle_index_progress<'py>(
+    py: Python<'py>,
+    root: &str,
+) -> PyResult<PyObject> {
+    let result = core_dismissed_bundle_index_progress(&PathBuf::from(root));
+    serialize_to_py(py, &result)
+}
+
 pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(
         py_replace_agent_artifact_index_dismissed_agents,
@@ -936,6 +1118,27 @@ pub(crate) fn register_agent_custody(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_verify_agent_archive_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_upsert_dismissed_bundle_summary, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_delete_dismissed_bundle_summaries_for_suffixes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_query_dismissed_bundle_summaries, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_query_dismissed_bundle_paths_by_suffixes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_set_dismissed_bundle_visibility_for_suffixes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_query_dismissed_bundle_summary_identities,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_dismissed_bundle_index_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rebuild_dismissed_bundle_index, m)?)?;
+    m.add_function(wrap_pyfunction!(py_dismissed_bundle_index_progress, m)?)?;
     m.add_function(wrap_pyfunction!(py_save_dismissed_agent_group, m)?)?;
     m.add_function(wrap_pyfunction!(py_list_dismissed_agent_groups, m)?)?;
     m.add_function(wrap_pyfunction!(py_load_dismissed_agent_group, m)?)?;

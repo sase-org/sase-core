@@ -6,7 +6,7 @@ use chrono::{
     SecondsFormat, TimeZone, Utc,
 };
 use chrono_tz::Tz;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 use thiserror::Error;
 
 use crate::agent_archive::archive_outcome_for_status;
@@ -169,15 +169,16 @@ pub fn compile_agent_archive_corpus(
         ));
     }
 
-    let conn = Connection::open_with_flags(
-        &index_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    let conn = crate::agent_archive::store::open_archive_store_read_only(
+        Path::new(&request.root),
     )
-    .map_err(|error| AgentArchiveCompileError::OpenIndex(error.to_string()))?;
-    conn.pragma_update(None, "busy_timeout", 30_000)
-        .map_err(|error| {
-            AgentArchiveCompileError::ReadIndex(error.to_string())
-        })?;
+    .map_err(|error| AgentArchiveCompileError::OpenIndex(error.to_string()))?
+    .ok_or_else(|| {
+        AgentArchiveCompileError::OpenIndex(format!(
+            "archive index is missing: {}",
+            index_path.display()
+        ))
+    })?;
 
     let meta_table_exists = conn
         .query_row(
