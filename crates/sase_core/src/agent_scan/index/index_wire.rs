@@ -249,6 +249,20 @@ pub struct AgentArtifactIndexUpdateWire {
     pub hidden_terminal_rows_pruned: u64,
 }
 
+/// Column-projected rows from `agent_artifacts`, in caller column order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentArtifactIndexProjectionWire {
+    pub schema_version: i64,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+/// One `agent_artifact_aliases` row.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentArtifactAliasWire {
+    pub alias_path: String,
+    pub artifact_dir: String,
+}
+
 /// Lightweight status for the persistent artifact index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentArtifactIndexStatusWire {

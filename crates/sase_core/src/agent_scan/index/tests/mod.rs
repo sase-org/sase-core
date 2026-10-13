@@ -4,6 +4,7 @@ mod clan_context;
 mod history;
 mod lineage;
 mod machine_projection;
+mod readers;
 mod self_heal;
 mod storage;
 mod support;

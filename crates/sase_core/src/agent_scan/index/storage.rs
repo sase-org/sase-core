@@ -379,6 +379,25 @@ pub(super) fn open_index_read_only(
     Ok(conn)
 }
 
+/// Open the index read-only without creating, migrating, or falling
+/// back to a read-write connection.
+///
+/// Unlike [`open_index_read_only`], a missing or stale file is not
+/// upgraded. Callers that must observe the on-disk schema as-is (the
+/// lifecycle version probe and column projections) use this path.
+pub(super) fn open_index_read_only_no_migrate(
+    index_path: &Path,
+    busy_timeout: Duration,
+) -> Result<Connection, String> {
+    let conn = Connection::open_with_flags(
+        index_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.busy_timeout(busy_timeout).map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
 pub(super) fn read_index_schema_version(
     conn: &Connection,
 ) -> Result<u32, String> {

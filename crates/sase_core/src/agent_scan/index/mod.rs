@@ -15,6 +15,7 @@ mod lineage;
 mod maintenance;
 mod output_variables;
 mod query;
+mod readers;
 mod record_summary;
 mod refresh;
 mod selection;
@@ -40,8 +41,9 @@ pub use dismissal::{
 pub use index_wire::{
     AgentAliasHistoryGroupWire, AgentAliasHistoryLimitWire,
     AgentAliasHistoryQueryWire, AgentAliasHistoryWire, AgentAliasRunWire,
-    AgentArtifactCandidateFieldWire, AgentArtifactCandidateFilterWire,
-    AgentArtifactIndexFreshnessWire, AgentArtifactIndexQueryWire,
+    AgentArtifactAliasWire, AgentArtifactCandidateFieldWire,
+    AgentArtifactCandidateFilterWire, AgentArtifactIndexFreshnessWire,
+    AgentArtifactIndexProjectionWire, AgentArtifactIndexQueryWire,
     AgentArtifactIndexStatusWire, AgentArtifactIndexUpdateWire,
     AgentArtifactIndexVacuumWire, AGENT_ALIAS_HISTORY_WIRE_SCHEMA_VERSION,
     AGENT_ARTIFACT_INDEX_SCHEMA_VERSION, DEFAULT_HIDDEN_TERMINAL_HOT_ROWS,
@@ -71,6 +73,13 @@ pub use query::{
     load_agent_artifact_records, query_agent_artifact_index,
     read_agent_artifact_index_meta, vacuum_agent_artifact_index,
     write_agent_artifact_index_meta,
+};
+
+pub use readers::{
+    delete_agent_artifact_alias, list_agent_artifact_aliases,
+    load_agent_artifact_index_projection,
+    read_agent_artifact_index_schema_version, upsert_agent_artifact_alias,
+    AGENT_ARTIFACT_INDEX_PROJECTION_BUSY_TIMEOUT,
 };
 
 pub(crate) use maintenance::cl_name_is_unknownish;

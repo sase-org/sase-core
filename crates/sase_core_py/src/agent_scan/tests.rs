@@ -596,3 +596,100 @@ fn gate_turn_lookup_binding_serves_turn_records_without_legacy_name() {
         );
     });
 }
+
+#[test]
+fn artifact_index_reader_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let temp = tempfile::tempdir().unwrap();
+        let projects = temp.path().join("projects");
+        let dir = projects
+            .join("proj")
+            .join("artifacts")
+            .join("ace-run")
+            .join("20261013120000");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agent_meta.json"),
+            serde_json::to_string(&json!({"name": "reader-binding"})).unwrap(),
+        )
+        .unwrap();
+        let index = temp.path().join("agent_artifact_index.sqlite");
+        sase_core::rebuild_agent_artifact_index(
+            &index,
+            &projects,
+            sase_core::AgentArtifactScanOptionsWire::default(),
+        )
+        .unwrap();
+        let index_str = index.to_string_lossy().into_owned();
+
+        let version =
+            py_read_agent_artifact_index_schema_version(py, &index_str);
+        assert_eq!(
+            version,
+            Some(i64::from(sase_core::AGENT_ARTIFACT_INDEX_SCHEMA_VERSION))
+        );
+
+        let missing = temp.path().join("missing.sqlite");
+        assert_eq!(
+            py_read_agent_artifact_index_schema_version(
+                py,
+                missing.to_str().unwrap(),
+            ),
+            None
+        );
+
+        let columns = vec![
+            "artifact_dir".to_string(),
+            "project_name".to_string(),
+            "hidden".to_string(),
+        ];
+        let projection = py_load_agent_artifact_index_projection(
+            py, &index_str, columns, 250,
+        )
+        .unwrap();
+        let projection = py_to_json_value(projection.bind(py)).unwrap();
+        assert_eq!(
+            projection["schema_version"],
+            json!(sase_core::AGENT_ARTIFACT_INDEX_SCHEMA_VERSION)
+        );
+        assert_eq!(projection["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["rows"][0][1], json!("proj"));
+
+        let rejected = py_load_agent_artifact_index_projection(
+            py,
+            &index_str,
+            vec!["nope".to_string()],
+            250,
+        )
+        .unwrap_err();
+        assert!(rejected.is_instance_of::<PyValueError>(py));
+
+        py_upsert_agent_artifact_alias(
+            py,
+            &index_str,
+            "/old/path",
+            "/new/path",
+        )
+        .unwrap();
+        let aliases = py_list_agent_artifact_aliases(py, &index_str).unwrap();
+        let aliases = py_to_json_value(aliases.bind(py)).unwrap();
+        assert_eq!(
+            aliases,
+            json!([{
+                "alias_path": "/old/path",
+                "artifact_dir": "/new/path"
+            }])
+        );
+        py_delete_agent_artifact_alias(
+            py,
+            &index_str,
+            "/old/path",
+            "/new/path",
+        )
+        .unwrap();
+        let aliases = py_list_agent_artifact_aliases(py, &index_str).unwrap();
+        let aliases = py_to_json_value(aliases.bind(py)).unwrap();
+        assert_eq!(aliases, json!([]));
+    });
+}

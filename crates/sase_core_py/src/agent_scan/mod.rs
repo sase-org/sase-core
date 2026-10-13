@@ -440,6 +440,114 @@ fn py_read_agent_artifact_index_meta<'py>(
         .map_err(PyRuntimeError::new_err)
 }
 
+/// Read the stored schema version without migrating or creating the file.
+#[pyfunction]
+#[pyo3(name = "read_agent_artifact_index_schema_version")]
+fn py_read_agent_artifact_index_schema_version(
+    py: Python<'_>,
+    index_path: &str,
+) -> Option<i64> {
+    let index = PathBuf::from(index_path);
+    py.allow_threads(|| {
+        sase_core::agent_scan::read_agent_artifact_index_schema_version(&index)
+    })
+}
+
+fn projection_error_to_pyerr(err: String) -> PyErr {
+    if err.starts_with("unsupported agent_artifacts column")
+        || err == "columns must not be empty"
+    {
+        PyValueError::new_err(err)
+    } else {
+        PyRuntimeError::new_err(err)
+    }
+}
+
+/// Load selected `agent_artifacts` columns without migrating.
+#[pyfunction]
+#[pyo3(
+    name = "load_agent_artifact_index_projection",
+    signature = (index_path, columns, busy_timeout_ms = 250)
+)]
+fn py_load_agent_artifact_index_projection<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    columns: Vec<String>,
+    busy_timeout_ms: u64,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let projection = py
+        .allow_threads(|| {
+            sase_core::agent_scan::load_agent_artifact_index_projection(
+                &index,
+                &columns,
+                Duration::from_millis(busy_timeout_ms),
+            )
+        })
+        .map_err(projection_error_to_pyerr)?;
+    serialize_to_py(py, &projection)
+}
+
+/// Insert or replace one layout alias in the artifact index.
+#[pyfunction]
+#[pyo3(name = "upsert_agent_artifact_alias")]
+fn py_upsert_agent_artifact_alias<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    alias_path: &str,
+    artifact_dir: &str,
+) -> PyResult<()> {
+    let index = PathBuf::from(index_path);
+    let alias_path = alias_path.to_string();
+    let artifact_dir = artifact_dir.to_string();
+    py.allow_threads(|| {
+        sase_core::agent_scan::upsert_agent_artifact_alias(
+            &index,
+            &alias_path,
+            &artifact_dir,
+        )
+    })
+    .map_err(PyRuntimeError::new_err)
+}
+
+/// Delete layout aliases matching `alias_path` or `artifact_dir`.
+#[pyfunction]
+#[pyo3(name = "delete_agent_artifact_alias")]
+fn py_delete_agent_artifact_alias<'py>(
+    py: Python<'py>,
+    index_path: &str,
+    alias_path: &str,
+    artifact_dir: &str,
+) -> PyResult<()> {
+    let index = PathBuf::from(index_path);
+    let alias_path = alias_path.to_string();
+    let artifact_dir = artifact_dir.to_string();
+    py.allow_threads(|| {
+        sase_core::agent_scan::delete_agent_artifact_alias(
+            &index,
+            &alias_path,
+            &artifact_dir,
+        )
+    })
+    .map_err(PyRuntimeError::new_err)
+}
+
+/// List layout aliases from the artifact index.
+#[pyfunction]
+#[pyo3(name = "list_agent_artifact_aliases")]
+fn py_list_agent_artifact_aliases<'py>(
+    py: Python<'py>,
+    index_path: &str,
+) -> PyResult<PyObject> {
+    let index = PathBuf::from(index_path);
+    let aliases = py
+        .allow_threads(|| {
+            sase_core::agent_scan::list_agent_artifact_aliases(&index)
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    serialize_to_py(py, &aliases)
+}
+
 /// Write one metadata value in the persistent artifact index.
 #[pyfunction]
 #[pyo3(name = "write_agent_artifact_index_meta")]
@@ -1004,6 +1112,17 @@ pub(crate) fn register_agent_scan(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(py_read_agent_artifact_index_meta, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_read_agent_artifact_index_schema_version,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        py_load_agent_artifact_index_projection,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(py_upsert_agent_artifact_alias, m)?)?;
+    m.add_function(wrap_pyfunction!(py_delete_agent_artifact_alias, m)?)?;
+    m.add_function(wrap_pyfunction!(py_list_agent_artifact_aliases, m)?)?;
     m.add_function(wrap_pyfunction!(py_write_agent_artifact_index_meta, m)?)?;
     m.add_function(wrap_pyfunction!(py_agent_artifact_index_status, m)?)?;
     m.add_function(wrap_pyfunction!(py_vacuum_agent_artifact_index, m)?)?;
