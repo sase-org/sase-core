@@ -1,4 +1,4 @@
-//! Normalize and validate an instruction manifest v1 value.
+//! Normalize and validate an instruction manifest value.
 //!
 //! Parsing uses the wire types (unknown fields rejected); invariants from
 //! the E2 plan decision 8 are enforced here. `common_digest` is filled when
@@ -8,8 +8,8 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use super::wire::{
-    ActorWire, CacheWire, DeliveryStatusWire, InstructionManifestWire,
-    LifecycleWire, ModeWire, SectionStatusWire,
+    ActorWire, CacheWire, DeliveryStatusWire, DeliverySubagentWire,
+    InstructionManifestWire, LifecycleWire, ModeWire, SectionStatusWire,
     INSTRUCTION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 use crate::finalizer::canonical_json_sha256;
@@ -28,11 +28,12 @@ pub enum InstructionManifestError {
 /// Normalize one manifest JSON value.
 ///
 /// On success the returned value is the same manifest with `common_digest`
-/// filled when it was null. Unknown fields, bad enums, and every decision-8
+/// filled when it was null. Unknown fields, bad enums, and every wire
 /// invariant produce an error naming the failure.
 pub fn normalize_instruction_manifest(
     value: &JsonValue,
 ) -> Result<JsonValue, InstructionManifestError> {
+    reject_v1_delivery_fields(value)?;
     let mut manifest: InstructionManifestWire =
         serde_json::from_value(value.clone()).map_err(|error| {
             InstructionManifestError::Invalid(format!(
@@ -47,6 +48,9 @@ pub fn normalize_instruction_manifest(
         ));
     }
     validate_facts(&manifest)?;
+    if manifest.schema_version >= 2 {
+        validate_delivery(&manifest)?;
+    }
     validate_bundle(&manifest)?;
     validate_budget(&manifest)?;
     validate_sections(&manifest)?;
@@ -71,6 +75,28 @@ pub fn normalize_instruction_manifest(
             "unable to re-encode normalized manifest: {error}"
         ))
     })
+}
+
+fn reject_v1_delivery_fields(
+    value: &JsonValue,
+) -> Result<(), InstructionManifestError> {
+    let is_v1 =
+        value.get("schema_version").and_then(JsonValue::as_u64) == Some(1);
+    if !is_v1 {
+        return Ok(());
+    }
+    let Some(delivery) = value.get("delivery").and_then(JsonValue::as_object)
+    else {
+        return Ok(());
+    };
+    for field in ["subagent", "fallback"] {
+        if delivery.contains_key(field) {
+            return Err(invalid(format!(
+                "schema_version 1 cannot contain v2-only field delivery.{field}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Compute `common_digest` for a parsed manifest.
@@ -120,6 +146,129 @@ fn is_lower_hex(value: &str) -> bool {
 
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && is_lower_hex(value)
+}
+
+fn is_delivery_channel(value: &str) -> bool {
+    let Some((provider, channel)) = value.split_once('.') else {
+        return false;
+    };
+    let is_part = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'_'
+            })
+    };
+    is_part(provider) && is_part(channel)
+}
+
+fn validate_delivery(
+    manifest: &InstructionManifestWire,
+) -> Result<(), InstructionManifestError> {
+    let delivery = &manifest.delivery;
+    validate_delivery_slot(
+        delivery.status,
+        delivery.channel.as_deref(),
+        delivery.fallback.as_ref(),
+        "delivery",
+    )?;
+
+    if let Some(subagent) = delivery.subagent.as_ref() {
+        if manifest.facts.actor != ActorWire::SaseRoot
+            || !matches!(
+                delivery.status,
+                DeliveryStatusWire::Explicit
+                    | DeliveryStatusWire::InheritsNative
+            )
+        {
+            return Err(invalid(
+                "delivery.subagent requires facts.actor sase_root and delivery.status explicit or inherits_native".to_string(),
+            ));
+        }
+        if matches!(
+            subagent.status,
+            DeliveryStatusWire::Preview | DeliveryStatusWire::Shadow
+        ) {
+            return Err(invalid(
+                "delivery.subagent.status must not be preview or shadow"
+                    .to_string(),
+            ));
+        }
+        validate_subagent(subagent)?;
+    }
+
+    if manifest.facts.actor == ActorWire::NativeHelper
+        && delivery.status == DeliveryStatusWire::Explicit
+        && delivery.parent_invocation_id.is_none()
+    {
+        return Err(invalid(
+            "facts.actor native_helper with delivery.status explicit requires delivery.parent_invocation_id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_subagent(
+    subagent: &DeliverySubagentWire,
+) -> Result<(), InstructionManifestError> {
+    validate_delivery_slot(
+        subagent.status,
+        subagent.channel.as_deref(),
+        subagent.fallback.as_ref(),
+        "delivery.subagent",
+    )?;
+    if subagent.status == DeliveryStatusWire::Explicit {
+        let Some(bundle_sha256) = subagent.bundle_sha256.as_deref() else {
+            return Err(invalid(
+                "delivery.subagent status explicit requires bundle_sha256"
+                    .to_string(),
+            ));
+        };
+        if !is_sha256(bundle_sha256) {
+            return Err(invalid(format!(
+                "delivery.subagent.bundle_sha256 {bundle_sha256:?} is not 64 lowercase hex"
+            )));
+        }
+    } else if subagent.bundle_sha256.is_some() {
+        return Err(invalid(
+            "delivery.subagent.bundle_sha256 is only allowed when status is explicit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_delivery_slot(
+    status: DeliveryStatusWire,
+    channel: Option<&str>,
+    fallback: Option<&super::wire::DeliveryFallbackWire>,
+    path: &str,
+) -> Result<(), InstructionManifestError> {
+    if let Some(channel) = channel {
+        if !is_delivery_channel(channel) {
+            return Err(invalid(format!(
+                "{path}.channel {channel:?} must match ^[a-z0-9_]+\\.[a-z0-9_]+$"
+            )));
+        }
+    }
+    if status == DeliveryStatusWire::Explicit {
+        if channel.is_none() {
+            return Err(invalid(format!(
+                "{path}.status explicit requires channel"
+            )));
+        }
+        if fallback.is_some() {
+            return Err(invalid(format!(
+                "{path}.status explicit forbids fallback"
+            )));
+        }
+    }
+    if fallback.is_some() && status != DeliveryStatusWire::InheritsNative {
+        return Err(invalid(format!(
+            "{path}.fallback requires status inherits_native"
+        )));
+    }
+    Ok(())
 }
 
 fn is_blob_oid(value: &str) -> bool {

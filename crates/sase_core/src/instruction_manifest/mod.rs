@@ -1,4 +1,4 @@
-//! Instruction manifest v1 wire contract for E2 shadow renders.
+//! Instruction manifest wire contract for E2 shadow renders and E3 delivery.
 //!
 //! The host (Python) composes bundles and assembles manifests; this module
 //! owns the closed vocabulary, the validation invariants, and the
@@ -14,8 +14,9 @@ pub use normalize::{
 };
 pub use wire::{
     instruction_manifest_wire_schema_version, BudgetWire, BundleWire,
-    CompilerWire, DeliveryWire, FactsWire, InstructionManifestWire,
-    LayerBudgetWire, ObservationWire, SectionWire, SourceWire,
+    CompilerWire, DeliveryFallbackWire, DeliverySubagentWire, DeliveryWire,
+    FactsWire, FallbackReasonWire, InstructionManifestWire, LayerBudgetWire,
+    ObservationWire, SectionWire, SourceWire,
     INSTRUCTION_MANIFEST_WIRE_SCHEMA_VERSION,
 };
 

@@ -12,7 +12,7 @@ fn instruction_manifest_bindings_are_registered() {
         assert!(module
             .getattr("instruction_manifest_wire_schema_version")
             .is_ok());
-        assert_eq!(py_instruction_manifest_wire_schema_version(), 1);
+        assert_eq!(py_instruction_manifest_wire_schema_version(), 2);
     });
 }
 
@@ -24,6 +24,22 @@ fn normalize_instruction_manifest_binding_round_trips() {
             "../../../sase_core/tests/fixtures/instruction_manifest_v1.json"
         ))
         .expect("golden fixture must parse");
+        let manifest = json_value_to_py(py, &raw).unwrap();
+        let manifest = manifest.bind(py).downcast::<PyDict>().unwrap();
+        let result = py_normalize_instruction_manifest(py, manifest).unwrap();
+        let value = py_to_json_value(result.bind(py)).unwrap();
+        assert_eq!(value, raw);
+    });
+}
+
+#[test]
+fn normalize_instruction_manifest_binding_round_trips_v2() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../sase_core/tests/fixtures/instruction_manifest_v2.json"
+        ))
+        .expect("v2 golden fixture must parse");
         let manifest = json_value_to_py(py, &raw).unwrap();
         let manifest = manifest.bind(py).downcast::<PyDict>().unwrap();
         let result = py_normalize_instruction_manifest(py, manifest).unwrap();

@@ -1,4 +1,4 @@
-//! Instruction manifest v1 wire types and closed vocabulary.
+//! Instruction manifest wire types and closed vocabulary.
 //!
 //! Names are exact per the E2 plan decision 8. Every struct uses
 //! `deny_unknown_fields`; readers accept `schema_version` in
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Wire schema version for the instruction manifest contract.
-pub const INSTRUCTION_MANIFEST_WIRE_SCHEMA_VERSION: u32 = 1;
+pub const INSTRUCTION_MANIFEST_WIRE_SCHEMA_VERSION: u32 = 2;
 
 /// Return the instruction manifest wire schema version.
 pub fn instruction_manifest_wire_schema_version() -> u32 {
@@ -110,7 +110,7 @@ pub enum PurposeWire {
     ConflictRepair,
 }
 
-/// Delivery status vocabulary (E3 values frozen now, unused in E2).
+/// Delivery status vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatusWire {
@@ -120,6 +120,19 @@ pub enum DeliveryStatusWire {
     InheritsNative,
     InheritsRoot,
     None,
+}
+
+/// Closed reason vocabulary for an atomic legacy delivery fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackReasonWire {
+    ProviderLegacy,
+    FlagDisabled,
+    RenderFailed,
+    InvalidBundle,
+    Oversize,
+    UnsupportedCli,
+    DeliveryFailed,
 }
 
 /// Render-cache outcome vocabulary.
@@ -228,6 +241,28 @@ pub struct SectionWire {
     pub shadowed_by: Option<String>,
 }
 
+/// Reason and optional detail for retaining native instruction discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryFallbackWire {
+    pub reason: FallbackReasonWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Delivery slot for native subagents of a SASE root invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySubagentWire {
+    pub status: DeliveryStatusWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<DeliveryFallbackWire>,
+}
+
 /// Delivery identity block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,6 +270,10 @@ pub struct DeliveryWire {
     pub status: DeliveryStatusWire,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<DeliverySubagentWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<DeliveryFallbackWire>,
     pub invocation_id: String,
     pub invocation_seq: u64,
     pub attempt: u64,
