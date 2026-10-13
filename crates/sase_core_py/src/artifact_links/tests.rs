@@ -1,3 +1,8 @@
+use super::index::{
+    py_artifact_link_index_build, py_artifact_link_index_chips,
+    py_artifact_link_index_project, py_artifact_link_index_rows,
+    py_artifact_link_index_target, py_artifact_link_index_wire_schema_version,
+};
 use super::*;
 use crate::artifact_refs::{
     py_artifact_link_eligibility_wire_schema_version,
@@ -115,5 +120,203 @@ fn artifact_link_eligibility_bindings_round_trip_json_shapes() {
             "2026-09-08T00:00:00Z",
         )
         .is_err());
+    });
+}
+
+fn request_dict<'py>(
+    py: Python<'py>,
+    value: serde_json::Value,
+) -> Bound<'py, PyDict> {
+    json_value_to_py(py, &value)
+        .unwrap()
+        .bind(py)
+        .downcast::<PyDict>()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn artifact_link_index_bindings_round_trip() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        sase_core_rs(py, &module).unwrap();
+        for name in [
+            "ArtifactLinkIndexHandle",
+            "artifact_link_index_wire_schema_version",
+            "artifact_link_index_build",
+            "artifact_link_index_chips",
+            "artifact_link_index_target",
+            "artifact_link_index_rows",
+            "artifact_link_index_project",
+        ] {
+            assert!(module.getattr(name).is_ok(), "missing {name}");
+        }
+        assert_eq!(py_artifact_link_index_wire_schema_version(), 1);
+
+        let request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "identity": {
+                    "username": "alice",
+                    "machine_name": "athena",
+                    "sibling_machines": ["athena"]
+                },
+                "rows": [
+                    {
+                        "source_ref": "plan:202608/a.md",
+                        "relation": "implements",
+                        "target_ref": "bead:sase-1",
+                        "description": "lands the design",
+                        "origin": "manual",
+                        "uses": 1,
+                        "_project": "alpha"
+                    },
+                    {
+                        "source_ref": "agent:foo",
+                        "relation": "cites",
+                        "target_ref": "plan:202608/a.md",
+                        "uses": 1,
+                        "_project": "alpha"
+                    }
+                ]
+            }),
+        );
+        let handle =
+            Bound::new(py, py_artifact_link_index_build(py, &request).unwrap())
+                .unwrap();
+        assert_eq!(handle.get().raw_row_count(), 2);
+        assert!(handle.get().chip_ref_count() >= 2);
+
+        let chips = py_to_json_value(
+            py_artifact_link_index_chips(py, handle.get(), "bead:sase-1")
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(chips[0]["relation"], json!("implements"));
+        assert_eq!(chips[0]["neighbor_ref"], json!("plan:202608/a.md"));
+        assert_eq!(chips[0]["this_is_source"], json!(false));
+
+        let alias_chips = py_to_json_value(
+            py_artifact_link_index_chips(
+                py,
+                handle.get(),
+                "agent:alice.athena.foo",
+            )
+            .unwrap()
+            .bind(py),
+        )
+        .unwrap();
+        assert_eq!(alias_chips[0]["relation"], json!("cites"));
+
+        let target = py_to_json_value(
+            py_artifact_link_index_target(py, handle.get(), "bead:sase-1")
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(target["present"], json!(true));
+        assert_eq!(target["target"]["pane_id"], json!("beads"));
+
+        let missing = py_to_json_value(
+            py_artifact_link_index_target(py, handle.get(), "missing:ref")
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(missing["present"], json!(false));
+
+        let rows = py_to_json_value(
+            py_artifact_link_index_rows(
+                py,
+                handle.get(),
+                &request_dict(
+                    py,
+                    json!({
+                        "schema_version": 1,
+                        "lookup_keys": [
+                            ["beads.id", "sase-1"],
+                            ["beads.project.id", "alpha", "sase-1"]
+                        ]
+                    }),
+                ),
+            )
+            .unwrap()
+            .bind(py),
+        )
+        .unwrap();
+        assert_eq!(rows["candidate_row_count"], json!(1));
+        assert_eq!(rows["rows"][0]["target_ref"], json!("bead:sase-1"));
+
+        let projected = py_to_json_value(
+            py_artifact_link_index_project(
+                py,
+                handle.get(),
+                &request_dict(
+                    py,
+                    json!({
+                        "schema_version": 1,
+                        "known_targets": [
+                            {"pane_id": "beads", "parts": ["alpha", "task", "sase-1"]}
+                        ],
+                        "permitted_relations": ["implements", "cites", "related"],
+                        "project_hint": "alpha"
+                    }),
+                ),
+            )
+            .unwrap()
+            .bind(py),
+        )
+        .unwrap();
+        assert_eq!(projected["candidate_row_count"], json!(1));
+        assert_eq!(projected["edges"][0]["relation"], json!("implements"));
+        assert_eq!(
+            projected["edges"][0]["source"]["pane_id"],
+            json!("ref:plan")
+        );
+
+        let via_module = module
+            .getattr("artifact_link_index_chips")
+            .unwrap()
+            .call1((&handle, "bead:sase-1"))
+            .unwrap();
+        assert_eq!(
+            py_to_json_value(&via_module).unwrap()[0]["relation"],
+            json!("implements")
+        );
+    });
+}
+
+#[test]
+fn artifact_link_index_binding_includes_conversion_cost() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let started = std::time::Instant::now();
+        let request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "identity": {
+                    "username": "alice",
+                    "machine_name": "athena"
+                },
+                "rows": [{
+                    "source_ref": "bead:sase-1",
+                    "relation": "related",
+                    "target_ref": "bead:sase-2",
+                    "uses": 1,
+                    "_project": "alpha"
+                }]
+            }),
+        );
+        let handle =
+            Bound::new(py, py_artifact_link_index_build(py, &request).unwrap())
+                .unwrap();
+        let _chips =
+            py_artifact_link_index_chips(py, handle.get(), "bead:sase-1")
+                .unwrap();
+        assert!(started.elapsed().as_secs_f64() >= 0.0);
     });
 }

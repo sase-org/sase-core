@@ -293,6 +293,13 @@ fn artifact_ref_contract_bindings_round_trip_json_shapes() {
             "artifact_md_path",
             "companion_md_path",
             "artifact_link_frontmatter_inlet",
+            "ArtifactLinkIndexHandle",
+            "artifact_link_index_wire_schema_version",
+            "artifact_link_index_build",
+            "artifact_link_index_chips",
+            "artifact_link_index_target",
+            "artifact_link_index_rows",
+            "artifact_link_index_project",
         ] {
             assert!(module.getattr(name).is_ok(), "missing {name}");
         }

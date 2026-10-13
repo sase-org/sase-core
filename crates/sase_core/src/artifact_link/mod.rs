@@ -3,6 +3,7 @@
 
 mod cutover;
 mod events;
+mod index;
 mod inlet;
 mod managed_table;
 mod merge;
@@ -48,6 +49,18 @@ pub use events::{
     ArtifactLinkReducedVersionWire,
     ARTIFACT_LINK_EVENT_REDUCTION_WIRE_SCHEMA_VERSION,
     ARTIFACT_LINK_EVENT_WIRE_SCHEMA_VERSION,
+};
+pub use index::{
+    artifact_link_index_chips, artifact_link_index_project,
+    artifact_link_index_rows, artifact_link_index_target,
+    compile_artifact_link_index, ArtifactLinkIndexBuildRequestWire,
+    ArtifactLinkIndexChipWire, ArtifactLinkIndexIdentityWire,
+    ArtifactLinkIndexProjectRequestWire, ArtifactLinkIndexProjectResponseWire,
+    ArtifactLinkIndexProjectedEdgeWire, ArtifactLinkIndexRawRowWire,
+    ArtifactLinkIndexRelationMetaWire, ArtifactLinkIndexRowsRequestWire,
+    ArtifactLinkIndexRowsResponseWire, ArtifactLinkIndexStatsWire,
+    ArtifactLinkIndexTargetWire, PreparedArtifactLinkIndex,
+    ARTIFACT_LINK_INDEX_WIRE_SCHEMA_VERSION,
 };
 pub use inlet::{
     parse_artifact_link_frontmatter_inlet,

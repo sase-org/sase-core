@@ -1,5 +1,7 @@
 //! Artifact link store bindings: link operations and cutover.
 
+mod index;
+
 use crate::prelude::*;
 
 use crate::artifact_refs::artifact_ref_error_to_pyerr;
@@ -1369,6 +1371,7 @@ pub(crate) fn register_artifact_links(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bead_add_link, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_set_link_projection, m)?)?;
     m.add_function(wrap_pyfunction!(py_bead_remove_link, m)?)?;
+    index::register_artifact_link_index(m)?;
     Ok(())
 }
 
