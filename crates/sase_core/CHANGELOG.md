@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1](https://github.com/sase-org/sase-core/compare/v0.39.0...v0.39.1) - 2026-10-13
+
+### Added
+
+- *(archive)* emit bundle_path and times on archive light rows
+
+### Fixed
+
+- *(project-onboarding)* conflict excluded fields at default in strict mode
+- *(project-onboarding)* keep explicit off bools, strict excluded-field conflicts, primary-sibling LOCAL merge, annotation-only inventory
+
 ## [0.39.0](https://github.com/sase-org/sase-core/compare/v0.38.0...v0.39.0) - 2026-10-12
 
 ### Added
