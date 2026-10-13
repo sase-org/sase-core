@@ -98,9 +98,10 @@ pub fn evaluate_repo_creation_form(
         } else if strict {
             if let Some(supplied) = item.supplied.as_ref() {
                 let (normalized, _) = normalize_value(item.field, supplied);
-                if normalized != item.field.default
-                    && requests_excluded_behavior(item.field, &normalized)
-                {
+                // An explicit request for excluded behavior is a conflict even
+                // when it equals the field default (add_readme=true on a
+                // template).
+                if requests_excluded_behavior(item.field, &normalized) {
                     match unavail_kind {
                         UnavailKind::Requires => {
                             errors.push(CreationFormErrorWire {
@@ -227,8 +228,9 @@ fn is_bool_value(value: &str) -> bool {
 }
 
 /// A supplied value on an unavailable field only conflicts when it requests
-/// the excluded behavior. An empty value or an explicit "off" bool leaves the
-/// field effectively unset, so strict mode must not flag it.
+/// the excluded behavior, including a bool `"true"` that happens to equal the
+/// field default. An empty value or an explicit "off" bool leaves the field
+/// effectively unset, so strict mode must not flag it.
 fn requests_excluded_behavior(
     field: &RepoCreationFieldWire,
     normalized: &str,

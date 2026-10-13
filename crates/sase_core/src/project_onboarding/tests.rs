@@ -272,6 +272,21 @@ fn numbered_copy_and_third_party_local_are_hidden() {
 }
 
 #[test]
+fn all_numbered_local_set_stays_hidden_as_numbered_copy() {
+    let mut input = classify_input();
+    let mut first = local("github.com/sase-org/sase", "sase-org", "sase");
+    first.numbered_copy = true;
+    first.path = "/tmp/sase_2".into();
+    let mut second = local("github.com/sase-org/sase", "sase-org", "sase");
+    second.numbered_copy = true;
+    second.path = "/tmp/sase_3".into();
+    input.local.extend([first, second]);
+    let result = classify_project_candidates(&input).unwrap();
+    assert_eq!(hidden_reason(&result, "sase"), HIDDEN_NUMBERED_COPY);
+    assert!(result.groups.is_empty());
+}
+
+#[test]
 fn primary_checkout_plus_numbered_sibling_stays_local_in_both_orders() {
     for primary_first in [true, false] {
         let mut input = classify_input();
@@ -299,18 +314,32 @@ fn primary_checkout_plus_numbered_sibling_stays_local_in_both_orders() {
 
 #[test]
 fn inventory_only_identity_seeds_no_selectable_row() {
-    let mut input = classify_input();
-    input.inventory.push(ProjectCandidateInventoryWire {
-        identity_key: "github.com/steveyegge/beads".into(),
-        kind: INVENTORY_EXTERNAL.into(),
-        open_count: 4,
-        last_open_at: "2026-10-01T00:00:00Z".into(),
-        ..ProjectCandidateInventoryWire::default()
-    });
-    let result = classify_project_candidates(&input).unwrap();
-    assert!(result.groups.is_empty());
-    assert!(result.search_only.is_empty());
-    assert!(result.hidden.is_empty());
+    for kind in [INVENTORY_EXTERNAL, INVENTORY_LINKED, INVENTORY_SIDECAR] {
+        let mut input = classify_input();
+        input.inventory.push(ProjectCandidateInventoryWire {
+            identity_key: "github.com/steveyegge/beads".into(),
+            kind: kind.into(),
+            open_count: 4,
+            last_open_at: "2026-10-01T00:00:00Z".into(),
+            ..ProjectCandidateInventoryWire::default()
+        });
+        let result = classify_project_candidates(&input).unwrap();
+        assert!(
+            result.groups.is_empty(),
+            "kind {kind} seeded a group: {:?}",
+            result.groups
+        );
+        assert!(
+            result.search_only.is_empty(),
+            "kind {kind} seeded search_only: {:?}",
+            result.search_only
+        );
+        assert!(
+            result.hidden.is_empty(),
+            "kind {kind} seeded hidden: {:?}",
+            result.hidden
+        );
+    }
 }
 
 #[test]
@@ -717,6 +746,87 @@ fn strict_ignores_off_values_of_excluded_fields_but_keeps_conflicts() {
     assert!(conflict.errors.iter().any(|error| {
         error.field == "gitignore" && error.code == ERROR_CONFLICT
     }));
+}
+
+#[test]
+fn strict_template_plus_excluded_field_table() {
+    struct Case {
+        label: &'static str,
+        values: Vec<(&'static str, &'static str)>,
+        expect_valid: bool,
+        conflict_field: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            label: "add_readme=true equals the default and still conflicts",
+            values: vec![
+                ("template", "sase-org/template"),
+                ("add_readme", "true"),
+            ],
+            expect_valid: false,
+            conflict_field: Some("add_readme"),
+        },
+        Case {
+            label: "add_readme=false is omitted and valid",
+            values: vec![
+                ("template", "sase-org/template"),
+                ("add_readme", "false"),
+            ],
+            expect_valid: true,
+            conflict_field: None,
+        },
+        Case {
+            label: "empty add_readme is not a request",
+            values: vec![("template", "sase-org/template"), ("add_readme", "")],
+            expect_valid: true,
+            conflict_field: None,
+        },
+        Case {
+            label: "non-empty gitignore still conflicts",
+            values: vec![
+                ("template", "sase-org/template"),
+                ("gitignore", "Python"),
+            ],
+            expect_valid: false,
+            conflict_field: Some("gitignore"),
+        },
+    ];
+    for case in cases {
+        let state = evaluate(case.values.clone(), FORM_MODE_STRICT);
+        assert_eq!(
+            state.valid, case.expect_valid,
+            "{}: errors {:?}",
+            case.label, state.errors
+        );
+        if let Some(field) = case.conflict_field {
+            assert!(
+                state.errors.iter().any(|error| {
+                    error.field == field && error.code == ERROR_CONFLICT
+                }),
+                "{}: missing conflict on {field}: {:?}",
+                case.label,
+                state.errors
+            );
+            assert!(
+                !state.effective_options.contains_key(field),
+                "{}",
+                case.label
+            );
+        } else {
+            assert!(
+                !state.effective_options.contains_key("add_readme"),
+                "{}",
+                case.label
+            );
+            assert!(
+                !field_state(&state, "add_readme").available,
+                "{}",
+                case.label
+            );
+        }
+        let lenient = evaluate(case.values, FORM_MODE_LENIENT);
+        assert!(lenient.valid, "lenient stayed valid for {}", case.label);
+    }
 }
 
 #[test]
