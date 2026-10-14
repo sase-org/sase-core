@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0](https://github.com/sase-org/sase-core/compare/v0.39.1...v0.40.0) - 2026-10-14
+
+### Added
+
+- *(instruction-manifest)* [**breaking**] add v2 delivery slots and fallback
+- *(artifact_link)* add immutable inverted index and PyO3 handle
+- *(agent-archive)* move dismissed-bundle archive index into sase_core store
+- *(agent-scan)* add no-migrate index readers and alias bindings
+
+### Fixed
+
+- *(agent-archive)* keep dismissed-index queries read-only
+- *(artifact-link)* preserve legacy coercion in native index
+- *(artifact-link-index)* resolve colliding alias spellings in deterministic row order
+
 ## [0.39.1](https://github.com/sase-org/sase-core/compare/v0.39.0...v0.39.1) - 2026-10-13
 
 ### Added
