@@ -532,3 +532,164 @@ fn colliding_agent_alias_resolves_to_earliest_row_in_row_order() {
     assert_eq!(qualified.len(), 1);
     assert_eq!(qualified[0].relation, "produced-by");
 }
+
+fn compile_rows(rows: Vec<Value>) -> PreparedArtifactLinkIndex {
+    compile_artifact_link_index(ArtifactLinkIndexBuildRequestWire {
+        schema_version: ARTIFACT_LINK_INDEX_WIRE_SCHEMA_VERSION,
+        rows,
+        identity: ArtifactLinkIndexIdentityWire::default(),
+        relations: Vec::new(),
+    })
+    .unwrap()
+}
+
+fn chip_for(
+    rows: Vec<Value>,
+    reference: &str,
+) -> super::ArtifactLinkIndexChipWire {
+    let index = compile_rows(rows);
+    let chips = artifact_link_index_chips(&index, reference);
+    assert_eq!(chips.len(), 1, "expected one chip for {reference}");
+    chips.into_iter().next().unwrap()
+}
+
+fn row_with(field: &str, value: Value) -> Value {
+    let mut row = serde_json::Map::new();
+    row.insert(
+        "source_ref".to_string(),
+        Value::String("bead:a".to_string()),
+    );
+    row.insert(
+        "target_ref".to_string(),
+        Value::String("bead:b".to_string()),
+    );
+    row.insert("relation".to_string(), Value::String("related".to_string()));
+    row.insert(field.to_string(), value);
+    Value::Object(row)
+}
+
+#[test]
+fn tolerant_uses_match_legacy_truthiness_truncation_and_strings() {
+    for (value, expected) in [
+        (json!(true), 1),
+        (json!(false), 0),
+        (json!(2.9), 2),
+        (json!(2.0), 2),
+        (json!(-2.9), 0),
+        (json!("1_000"), 1000),
+        (json!("  5 "), 5),
+        (json!("+7"), 7),
+        (json!("-3"), 0),
+        (json!("1__000"), 0),
+        (json!("_5"), 0),
+        (json!("5_"), 0),
+        (json!("5.0"), 0),
+        (json!("١_٢"), 12),
+        (json!("184467440737095516160000"), u64::MAX),
+        (json!(""), 0),
+        (json!(null), 0),
+        (json!(0), 0),
+        (json!(0.0), 0),
+        (json!(5), 5),
+        (json!(-3), 0),
+        (json!([]), 0),
+        (json!({}), 0),
+        (json!([1]), 0),
+        (json!({"a": 1}), 0),
+    ] {
+        let chip = chip_for(vec![row_with("uses", value.clone())], "bead:a");
+        assert_eq!(chip.uses, expected, "uses {value}");
+    }
+}
+
+#[test]
+fn tolerant_string_fields_match_legacy_python_str() {
+    let chip = chip_for(vec![row_with("description", json!(false))], "bead:a");
+    assert_eq!(chip.why, "");
+    let chip = chip_for(vec![row_with("description", json!(true))], "bead:a");
+    assert_eq!(chip.why, "True");
+    let chip =
+        chip_for(vec![row_with("description", json!({"a": 1}))], "bead:a");
+    assert_eq!(chip.why, "{'a': 1}");
+    let chip = chip_for(vec![row_with("description", json!([1, 2]))], "bead:a");
+    assert_eq!(chip.why, "[1, 2]");
+    let chip = chip_for(
+        vec![row_with(
+            "description",
+            json!({"a": 1, "quote": "it's", "items": [true, null]}),
+        )],
+        "bead:a",
+    );
+    assert_eq!(
+        chip.why,
+        "{'a': 1, 'quote': \"it's\", 'items': [True, None]}"
+    );
+    let chip = chip_for(vec![row_with("description", json!(1e-7))], "bead:a");
+    assert_eq!(chip.why, "1e-07");
+    let chip = chip_for(vec![row_with("origin", json!(0))], "bead:a");
+    assert_eq!(chip.origin, "");
+    let chip = chip_for(vec![row_with("origin", json!(5))], "bead:a");
+    assert_eq!(chip.origin, "5");
+    let chip =
+        chip_for(vec![row_with("description", json!("  padded  "))], "bead:a");
+    assert_eq!(chip.why, "padded");
+}
+
+#[test]
+fn tolerant_duplicate_winner_uses_legacy_counts_and_edges_keep_first_row() {
+    let index = compile_rows(vec![
+        json!({
+            "source_ref": "patch:feat",
+            "relation": "cites",
+            "target_ref": "bead:sase-1",
+            "uses": 1,
+            "description": "first row",
+            "origin": "first",
+            "_project": "alpha",
+        }),
+        json!({
+            "source_ref": "patch:feat",
+            "relation": "cites",
+            "target_ref": "bead:sase-1",
+            "uses": "1_000",
+            "description": "larger same-project duplicate",
+            "origin": "same-project-winner",
+            "_project": "alpha",
+        }),
+        json!({
+            "source_ref": "patch:feat",
+            "relation": "cites",
+            "target_ref": "bead:sase-1",
+            "uses": 5000,
+            "description": "larger cross-project chip winner",
+            "origin": "cross-project-winner",
+            "_project": "beta",
+        }),
+    ]);
+    let chips = artifact_link_index_chips(&index, "patch:feat");
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].uses, 5000);
+    assert_eq!(chips[0].why, "larger cross-project chip winner");
+    assert_eq!(chips[0].origin, "cross-project-winner");
+    let project = artifact_link_index_project(
+        &index,
+        ArtifactLinkIndexProjectRequestWire {
+            schema_version: ARTIFACT_LINK_INDEX_WIRE_SCHEMA_VERSION,
+            known_targets: vec![identity("patches", &["alpha", "feat"])],
+            permitted_relations: all_relation_slugs(),
+            project_hint: Some("alpha".to_string()),
+        },
+    );
+    assert_eq!(project.edges.len(), 2);
+    assert_eq!(project.edges[0].source.parts, ["alpha", "feat"]);
+    assert_eq!(project.edges[0].description, "first row");
+    assert_eq!(project.edges[0].origin, "first");
+    assert_eq!(project.edges[0].uses, 1);
+    assert_eq!(project.edges[1].target.parts, ["beta", "task", "sase-1"]);
+    assert_eq!(
+        project.edges[1].description,
+        "larger cross-project chip winner"
+    );
+    assert_eq!(project.edges[1].origin, "cross-project-winner");
+    assert_eq!(project.edges[1].uses, 5000);
+}

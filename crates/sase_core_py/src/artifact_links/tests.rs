@@ -320,3 +320,102 @@ fn artifact_link_index_binding_includes_conversion_cost() {
         assert!(started.elapsed().as_secs_f64() >= 0.0);
     });
 }
+
+#[test]
+fn artifact_link_index_binding_preserves_tolerant_read_model_coercions() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let request = request_dict(
+            py,
+            json!({
+                "schema_version": 1,
+                "rows": [
+                    {
+                        "source_ref": "patch:feat",
+                        "relation": "cites",
+                        "target_ref": "bead:sase-1",
+                        "uses": true,
+                        "description": false,
+                        "origin": 0,
+                        "_project": "alpha"
+                    },
+                    {
+                        "source_ref": "patch:feat",
+                        "relation": "cites",
+                        "target_ref": "bead:sase-1",
+                        "uses": "1_000",
+                        "description": {"a": 1},
+                        "origin": "same-project-winner",
+                        "_project": "alpha"
+                    },
+                    {
+                        "source_ref": "patch:feat",
+                        "relation": "cites",
+                        "target_ref": "bead:sase-1",
+                        "uses": 5000,
+                        "description": true,
+                        "origin": false,
+                        "_project": "beta"
+                    },
+                    {
+                        "source_ref": "bead:float",
+                        "relation": "related",
+                        "target_ref": "bead:other",
+                        "uses": 2.9,
+                        "description": true
+                    }
+                ]
+            }),
+        );
+        let handle =
+            Bound::new(py, py_artifact_link_index_build(py, &request).unwrap())
+                .unwrap();
+
+        let chip = py_to_json_value(
+            py_artifact_link_index_chips(py, handle.get(), "patch:feat")
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(chip[0]["uses"], json!(5000));
+        assert_eq!(chip[0]["why"], json!("True"));
+        assert_eq!(chip[0]["origin"], json!(""));
+
+        let float_chip = py_to_json_value(
+            py_artifact_link_index_chips(py, handle.get(), "bead:float")
+                .unwrap()
+                .bind(py),
+        )
+        .unwrap();
+        assert_eq!(float_chip[0]["uses"], json!(2));
+        assert_eq!(float_chip[0]["why"], json!("True"));
+
+        let projected = py_to_json_value(
+            py_artifact_link_index_project(
+                py,
+                handle.get(),
+                &request_dict(
+                    py,
+                    json!({
+                        "schema_version": 1,
+                        "known_targets": [
+                            {"pane_id": "patches", "parts": ["alpha", "feat"]}
+                        ],
+                        "permitted_relations": ["cites"],
+                        "project_hint": "alpha"
+                    }),
+                ),
+            )
+            .unwrap()
+            .bind(py),
+        )
+        .unwrap();
+        assert_eq!(projected["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(projected["edges"][0]["description"], json!(""));
+        assert_eq!(projected["edges"][0]["origin"], json!(""));
+        assert_eq!(projected["edges"][0]["uses"], json!(1));
+        assert_eq!(projected["edges"][1]["description"], json!("True"));
+        assert_eq!(projected["edges"][1]["origin"], json!(""));
+        assert_eq!(projected["edges"][1]["uses"], json!(5000));
+    });
+}

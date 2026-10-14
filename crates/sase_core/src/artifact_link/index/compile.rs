@@ -155,12 +155,125 @@ fn parse_input_row(value: Value) -> IndexedRow {
 
 fn string_field(fields: &Map<String, Value>, key: &str) -> String {
     match fields.get(key) {
-        Some(Value::String(value)) => value.trim().to_string(),
-        Some(Value::Number(number)) => number.to_string(),
-        Some(Value::Bool(flag)) => flag.to_string(),
-        Some(Value::Null) | None => String::new(),
-        Some(other) => other.to_string(),
+        None => String::new(),
+        Some(value) => legacy_display_string(value).trim().to_string(),
     }
+}
+
+/// Recover the legacy Python aggregate-reader display semantics
+/// (`str(row.get(key) or "").strip()`).
+///
+/// Falsy inputs (null, false, zero numbers, empty string/list/map) yield
+/// empty; `True` yields `True`; non-empty lists/maps yield Python `str`
+/// (single-quoted, `True`/`False`/`None`) rather than JSON.
+fn legacy_display_string(value: &Value) -> String {
+    if is_python_falsy(value) {
+        return String::new();
+    }
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => String::new(),
+        Value::Number(number) => python_number_string(number),
+        Value::String(text) => text.clone(),
+        Value::Array(_) | Value::Object(_) => python_repr(value),
+    }
+}
+
+fn is_python_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(flag) => !flag,
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                int == 0
+            } else if let Some(uint) = number.as_u64() {
+                uint == 0
+            } else if let Some(float) = number.as_f64() {
+                float == 0.0
+            } else {
+                false
+            }
+        }
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(map) => map.is_empty(),
+    }
+}
+
+/// Python `repr` for JSON values, matching `str(list/dict)` output:
+/// single-quoted strings, `True`/`False`/`None`, `", "` separators.
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(number) => python_number_string(number),
+        Value::String(text) => python_string_repr(text),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(python_repr).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Object(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(key, val)| {
+                    format!("{}: {}", python_string_repr(key), python_repr(val))
+                })
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+    }
+}
+
+fn python_number_string(number: &serde_json::Number) -> String {
+    let value = number.to_string();
+    if !number.is_f64() {
+        return value;
+    }
+    let Some((mantissa, exponent)) = value.split_once(['e', 'E']) else {
+        return value;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return value;
+    };
+    let sign = if exponent >= 0 { '+' } else { '-' };
+    format!("{mantissa}e{sign}{:02}", exponent.unsigned_abs())
+}
+
+fn python_string_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' if quote == '\'' => out.push_str("\\'"),
+            '"' if quote == '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\x08"),
+            '\u{000c}' => out.push_str("\\x0c"),
+            ch if ch.is_control() => {
+                let code = ch as u32;
+                if code <= 0xff {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code <= 0xffff {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 fn optional_string_field(
@@ -179,30 +292,106 @@ fn parse_uses(value: Option<&Value>) -> u64 {
     let Some(value) = value else {
         return 0;
     };
-    let parsed = match value {
-        Value::Null => return 0,
+    // Legacy `int(row.get("uses") or 0)`: falsy inputs coerce to 0, truthy
+    // inputs go through `int()` with truncation and tolerated numeric
+    // strings (`1_000` -> 1000), then `max(0, ...)`.
+    if is_python_falsy(value) {
+        return 0;
+    }
+    match value {
+        Value::Null => 0,
+        Value::Bool(true) => 1,
+        Value::Bool(false) => 0,
         Value::Number(number) => {
             if let Some(int) = number.as_i64() {
-                int
+                int.max(0) as u64
             } else if let Some(uint) = number.as_u64() {
-                return uint;
+                uint
+            } else if let Some(float) = number.as_f64() {
+                if !float.is_finite() {
+                    0
+                } else {
+                    let truncated = float.trunc();
+                    if truncated <= 0.0 {
+                        0
+                    } else if truncated >= u64::MAX as f64 {
+                        u64::MAX
+                    } else {
+                        truncated as u64
+                    }
+                }
             } else {
-                return 0;
+                0
             }
         }
-        Value::String(text) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                return 0;
-            }
-            match trimmed.parse::<i64>() {
-                Ok(int) => int,
-                Err(_) => return 0,
-            }
-        }
-        _ => return 0,
+        Value::String(text) => parse_python_int_string(text),
+        Value::Array(_) | Value::Object(_) => 0,
+    }
+}
+
+/// Parse a decimal integer string with Python `int(s)` semantics: surrounding
+/// whitespace, an optional sign, Unicode decimal digits, and single
+/// underscores strictly between digits (`1_000` -> 1000, `1__000` invalid).
+/// Negative results clamp to 0; values beyond the wire's u64 range saturate.
+fn parse_python_int_string(text: &str) -> u64 {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let (negative, digits) = match trimmed.strip_prefix(['+', '-']) {
+        Some(rest) => (trimmed.starts_with('-'), rest),
+        None => (false, trimmed),
     };
-    parsed.max(0) as u64
+    if digits.is_empty() {
+        return 0;
+    }
+    let mut value = 0u64;
+    let mut previous_was_digit = false;
+    let mut has_digit = false;
+    for ch in digits.chars() {
+        if ch == '_' {
+            if !previous_was_digit {
+                return 0;
+            }
+            previous_was_digit = false;
+            continue;
+        }
+        let Some(digit) = decimal_digit_value(ch) else {
+            return 0;
+        };
+        has_digit = true;
+        previous_was_digit = true;
+        value = value.saturating_mul(10).saturating_add(u64::from(digit));
+    }
+    if !has_digit || !previous_was_digit || negative && value > 0 {
+        0
+    } else {
+        value
+    }
+}
+
+fn decimal_digit_value(ch: char) -> Option<u8> {
+    let code = ch as u32;
+    // Unicode decimal-number blocks (Nd), matching Python's int(str) digit
+    // acceptance while keeping this parser independent of Python and locale.
+    const ZEROES: &[u32] = &[
+        0x0030, 0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66,
+        0x0be6, 0x0c66, 0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040,
+        0x1090, 0x17e0, 0x1810, 0x1946, 0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0,
+        0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0, 0xa9f0, 0xaa50, 0xabf0,
+        0xff10, 0x104a0, 0x10d30, 0x11066, 0x110f0, 0x11136, 0x111d0, 0x112f0,
+        0x11450, 0x114d0, 0x11650, 0x116c0, 0x11730, 0x118e0, 0x11950, 0x11c50,
+        0x11d50, 0x11da0, 0x11f50, 0x16a60, 0x16ac0, 0x16b50, 0x1d7ce, 0x1d7d8,
+        0x1d7e2, 0x1d7ec, 0x1d7f6, 0x1e140, 0x1e2f0, 0x1e4f0, 0x1e5f1, 0x1e950,
+        0x1fbf0,
+    ];
+    ZEROES.iter().find_map(|&zero| {
+        if (zero..zero + 10).contains(&code) {
+            Some((code - zero) as u8)
+        } else {
+            None
+        }
+    })
 }
 
 fn build_inverted_index(
