@@ -481,3 +481,54 @@ fn neighbor_target_uses_row_project_not_first_indexed_target() {
         vec!["alpha", "task", "sase-1"]
     );
 }
+
+#[test]
+fn colliding_agent_alias_resolves_to_earliest_row_in_row_order() {
+    let identity = ArtifactLinkIndexIdentityWire {
+        username: Some("bbugyi200".to_string()),
+        machine_name: Some("athena".to_string()),
+        sibling_machines: vec!["athena".to_string()],
+        known_owner_roots: vec![
+            "athena".to_string(),
+            "bbugyi200.athena".to_string(),
+        ],
+    };
+    let request = ArtifactLinkIndexBuildRequestWire {
+        schema_version: ARTIFACT_LINK_INDEX_WIRE_SCHEMA_VERSION,
+        rows: vec![
+            json!({
+                "source_ref": "agent:072",
+                "relation": "read",
+                "target_ref": "plan:202609/x.md",
+                "uses": 1,
+                "_project": "alpha",
+            }),
+            json!({
+                "source_ref": "stitch:sase@0123456789abcdef0123456789abcdef01234567",
+                "relation": "produced-by",
+                "target_ref": "agent:bbugyi200.athena.072",
+                "uses": 1,
+                "_project": "alpha",
+            }),
+        ],
+        identity,
+        relations: Vec::new(),
+    };
+    let index = compile_artifact_link_index(request).unwrap();
+    // Both canonicals claim the `agent:athena.072` spelling; the earliest
+    // row's chips must win deterministically, matching the historical
+    // Python first-wins alias pass on every process.
+    for _ in 0..5 {
+        let chips = artifact_link_index_chips(&index, "agent:athena.072");
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].relation, "read");
+        assert_eq!(chips[0].neighbor_ref, "plan:202609/x.md");
+    }
+    let own = artifact_link_index_chips(&index, "agent:072");
+    assert_eq!(own.len(), 1);
+    assert_eq!(own[0].relation, "read");
+    let qualified =
+        artifact_link_index_chips(&index, "agent:bbugyi200.athena.072");
+    assert_eq!(qualified.len(), 1);
+    assert_eq!(qualified[0].relation, "produced-by");
+}

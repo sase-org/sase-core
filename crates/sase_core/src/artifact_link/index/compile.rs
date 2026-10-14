@@ -318,6 +318,11 @@ fn build_chip_index(
         HashMap::new();
     let mut targets: HashMap<String, Option<ArtifactRowIdentityWire>> =
         HashMap::new();
+    // Canonical first-occurrence order in winning-row order. The alias pass
+    // below must follow this order so colliding alias spellings resolve to
+    // the earliest row's chips deterministically, matching the historical
+    // Python index; HashMap iteration order is randomized per process.
+    let mut canon_order: Vec<String> = Vec::new();
     for key in &order {
         let Some(row) = best.get(key) else {
             continue;
@@ -326,6 +331,11 @@ fn build_chip_index(
         let project_hint = row.project.as_deref();
         record_indexed_target(&mut targets, &row.canon_source, project_hint);
         record_indexed_target(&mut targets, &row.canon_target, project_hint);
+        for endpoint in [&row.canon_source, &row.canon_target] {
+            if !grouped.contains_key(endpoint) {
+                canon_order.push(endpoint.clone());
+            }
+        }
         grouped
             .entry(row.canon_source.clone())
             .or_default()
@@ -368,13 +378,12 @@ fn build_chip_index(
         chips.insert(reference, Arc::from(entries));
     }
     let canonical_ref_count = chips.len();
-    let canonical_refs: Vec<String> = chips.keys().cloned().collect();
-    for reference in canonical_refs {
-        let Some(entries) = chips.get(&reference).cloned() else {
+    for reference in &canon_order {
+        let Some(entries) = chips.get(reference).cloned() else {
             continue;
         };
-        let target = targets.get(&reference).cloned().flatten();
-        for alias in aliases_for_ref(&reference, identity) {
+        let target = targets.get(reference).cloned().flatten();
+        for alias in aliases_for_ref(reference, identity) {
             chips
                 .entry(alias.clone())
                 .or_insert_with(|| Arc::clone(&entries));
