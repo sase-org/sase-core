@@ -1141,6 +1141,35 @@ const SUMMARY_SELECT: &str = "SELECT s.*,
         AND v.source_machine = s.source_machine
         AND v.source_run_id = s.source_run_id";
 
+/// Open an existing current-version compatible index for reads.
+///
+/// Returns `None` when the file is missing, unreadable, the stored
+/// `schema_version` is not `ARCHIVE_STORE_SCHEMA_VERSION`, or
+/// `schema_compatible` is false. Never migrates, takes a write
+/// transaction, or sets WAL.
+fn open_queryable_archive_store(root: &Path) -> Option<Connection> {
+    let conn = match open_archive_store_read_only(root) {
+        Ok(Some(conn)) => conn,
+        Ok(None) | Err(_) => return None,
+    };
+    let existing_version = schema_version_from_row(
+        conn.query_row(
+            "SELECT value FROM dismissed_bundle_index_meta \
+             WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok(),
+    );
+    if existing_version != Some(ARCHIVE_STORE_SCHEMA_VERSION) {
+        return None;
+    }
+    match schema_compatible(&conn) {
+        Ok(true) => Some(conn),
+        _ => None,
+    }
+}
+
 /// Query summaries with the Python `query_summaries` filters and ordering.
 /// Returns `None` when no usable index exists, matching Python.
 pub fn query_summaries(
@@ -1153,9 +1182,9 @@ pub fn query_summaries(
     if request.suffixes.as_ref().is_some_and(Vec::is_empty) {
         return Ok(Some(Vec::new()));
     }
-    let conn = match open_archive_store_writable(root) {
-        Ok(conn) => conn,
-        Err(_) => return Ok(None),
+    let conn = match open_queryable_archive_store(root) {
+        Some(conn) => conn,
+        None => return Ok(None),
     };
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -1461,9 +1490,9 @@ pub fn query_summary_identities(
     if !index_path_for_root(root).is_file() {
         return Ok(None);
     }
-    let conn = match open_archive_store_writable(root) {
-        Ok(conn) => conn,
-        Err(_) => return Ok(None),
+    let conn = match open_queryable_archive_store(root) {
+        Some(conn) => conn,
+        None => return Ok(None),
     };
     let mut stmt = match conn.prepare(
         "SELECT DISTINCT agent_type,

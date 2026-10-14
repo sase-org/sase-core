@@ -449,3 +449,166 @@ fn store_concurrent_upsert_and_compile_verify_ok() {
     assert!(report.ok, "verify failed: {report:?}");
     assert_eq!(report.indexed_rows, 8);
 }
+
+fn sqlite_file_fingerprint(root: &Path) -> (i64, i64) {
+    super::file_signature(&index_path_for_root(root)).unwrap()
+}
+
+fn sqlite_user_tables(root: &Path) -> Vec<String> {
+    let conn = Connection::open(index_path_for_root(root)).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .unwrap();
+    stmt.query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|name| name.unwrap())
+        .collect()
+}
+
+fn hidden_query() -> DismissedBundleIndexQueryWire {
+    DismissedBundleIndexQueryWire {
+        visibility: Some("hidden".to_string()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn store_queries_are_read_only_on_populated_wal_index() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    let first = write_bundle(root, "a.json", &sample_bundle("suf-1"));
+    // Keep a writer open so WAL sidecar files remain while queries run.
+    let writer = open_archive_store_writable(root).unwrap();
+    upsert_bundle_summary(root, &first, &read_bundle(&first).unwrap()).unwrap();
+    let wal = index_path_for_root(root).with_file_name("index.sqlite-wal");
+    let shm = index_path_for_root(root).with_file_name("index.sqlite-shm");
+    assert!(
+        wal.is_file() || shm.is_file(),
+        "expected WAL sidecar files from the open writer"
+    );
+
+    let before = sqlite_file_fingerprint(root);
+    let rows = query_summaries(root, hidden_query()).unwrap().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].raw_suffix, "suf-1");
+    let identities = query_summary_identities(root).unwrap().unwrap();
+    assert_eq!(identities.len(), 1);
+    assert_eq!(identities[0].raw_suffix.as_deref(), Some("suf-1"));
+    assert_eq!(sqlite_file_fingerprint(root), before);
+    drop(writer);
+}
+
+#[test]
+fn store_queries_return_none_for_old_or_incompatible_index_without_dropping_tables(
+) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let old_root = tmp.path().join("old");
+    fs::create_dir_all(&old_root).unwrap();
+    let old_conn = Connection::open(index_path_for_root(&old_root)).unwrap();
+    old_conn.execute_batch(META_DDL).unwrap();
+    old_conn.execute_batch(SUMMARIES_DDL).unwrap();
+    old_conn.execute_batch(PROJECTION_DDL).unwrap();
+    old_conn
+        .execute(
+            "INSERT OR REPLACE INTO dismissed_bundle_index_meta(key, value) \
+             VALUES ('schema_version', '2')",
+            [],
+        )
+        .unwrap();
+    old_conn
+        .execute(
+            "INSERT INTO dismissed_bundle_summaries (
+                bundle_path, agent_id, raw_suffix, shard, filename,
+                agent_type, cl_name, status, is_workflow_child, retry_attempt,
+                mtime_ns, size_bytes
+             ) VALUES ('/tmp/old.json', 'legacy:suf-old', 'suf-old', '',
+                'old.json', 'run', 'cl_old', 'DONE', 0, 0, 1, 2)",
+            [],
+        )
+        .unwrap();
+    old_conn
+        .execute_batch("CREATE TABLE legacy_data (value TEXT)")
+        .unwrap();
+    old_conn
+        .execute("INSERT INTO legacy_data VALUES ('keep')", [])
+        .unwrap();
+    drop(old_conn);
+
+    let old_tables = sqlite_user_tables(&old_root);
+    assert!(query_summaries(&old_root, hidden_query())
+        .unwrap()
+        .is_none());
+    assert!(query_summary_identities(&old_root).unwrap().is_none());
+    assert_eq!(sqlite_user_tables(&old_root), old_tables);
+    assert!(old_tables.iter().any(|name| name == "legacy_data"));
+    let old_count: i64 = Connection::open(index_path_for_root(&old_root))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM dismissed_bundle_summaries",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_count, 1);
+
+    let bad_root = tmp.path().join("incompatible");
+    fs::create_dir_all(&bad_root).unwrap();
+    let bad_conn = Connection::open(index_path_for_root(&bad_root)).unwrap();
+    bad_conn.execute_batch(META_DDL).unwrap();
+    bad_conn
+        .execute_batch(
+            "CREATE TABLE dismissed_bundle_summaries (
+                bundle_path TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                raw_suffix TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL
+            )",
+        )
+        .unwrap();
+    bad_conn
+        .execute(
+            "INSERT OR REPLACE INTO dismissed_bundle_index_meta(key, value) \
+             VALUES ('schema_version', '3')",
+            [],
+        )
+        .unwrap();
+    bad_conn
+        .execute(
+            "INSERT INTO dismissed_bundle_summaries (
+                bundle_path, agent_id, raw_suffix, mtime_ns, size_bytes
+             ) VALUES ('/tmp/bad.json', 'a', 'suf-bad', 1, 2)",
+            [],
+        )
+        .unwrap();
+    drop(bad_conn);
+
+    let bad_tables = sqlite_user_tables(&bad_root);
+    assert!(query_summaries(&bad_root, hidden_query())
+        .unwrap()
+        .is_none());
+    assert!(query_summary_identities(&bad_root).unwrap().is_none());
+    assert_eq!(sqlite_user_tables(&bad_root), bad_tables);
+    let bad_count: i64 = Connection::open(index_path_for_root(&bad_root))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM dismissed_bundle_summaries",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bad_count, 1);
+}
+
+#[test]
+fn store_queries_return_none_for_missing_index() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    assert!(query_summaries(root, hidden_query()).unwrap().is_none());
+    assert!(query_summary_identities(root).unwrap().is_none());
+    assert!(!index_path_for_root(root).exists());
+}
