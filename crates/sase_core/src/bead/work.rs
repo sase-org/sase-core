@@ -5,6 +5,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::dependency_waves::layer_dependency_waves;
+
 use super::read::read_store_issues;
 use super::wire::{
     BeadError, BeadTierWire, IssueTypeWire, IssueWire, PhaseSizeWire,
@@ -159,35 +161,19 @@ pub fn build_epic_work_plan_from_issues(
             )
         })
         .collect();
-    let mut waves: Vec<Vec<&str>> = Vec::new();
-    let mut placed: BTreeSet<&str> = BTreeSet::new();
-    let mut remaining = schedulable_phase_ids.clone();
-    while !remaining.is_empty() {
-        let mut ready: Vec<&str> = remaining
-            .iter()
-            .copied()
-            .filter(|pid| {
-                deps.get(pid)
-                    .is_some_and(|blockers| blockers.is_subset(&placed))
-            })
-            .collect();
-        ready.sort_by_key(|pid| sort_key.get(pid).copied().unwrap_or(("", "")));
-        if ready.is_empty() {
-            return Err(BeadError {
-                kind: "cycle".to_string(),
-                message: format!(
-                    "Cycle detected among phases of epic '{}': {}",
-                    epic_id,
-                    format_id_list(remaining.iter().copied())
-                ),
-            });
-        }
-        placed.extend(ready.iter().copied());
-        for pid in &ready {
-            remaining.remove(pid);
-        }
-        waves.push(ready);
+    let layered =
+        layer_dependency_waves(&schedulable_phase_ids, &deps, &sort_key);
+    if !layered.unresolved.is_empty() {
+        return Err(BeadError {
+            kind: "cycle".to_string(),
+            message: format!(
+                "Cycle detected among phases of epic '{}': {}",
+                epic_id,
+                format_id_list(layered.unresolved.iter().copied())
+            ),
+        });
     }
+    let waves = layered.waves;
 
     let assigned_waves = waves
         .iter()
@@ -640,5 +626,69 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(err.kind, "cycle");
+    }
+
+    #[test]
+    fn epic_launch_layers_match_clan_layers_for_declared_phase_waits() {
+        let p1 = phase("p1", "e1");
+        let mut p2 = phase("p2", "e1");
+        let mut p3 = phase("p3", "e1");
+        let mut p4 = phase("p4", "e1");
+        depends(&mut p2, "p1");
+        depends(&mut p3, "p1");
+        depends(&mut p4, "p2");
+        depends(&mut p4, "p3");
+        let plan = build_epic_work_plan_from_issues(
+            vec![epic("e1"), p1, p2, p3, p4],
+            "e1",
+        )
+        .unwrap();
+
+        let mut members = vec![
+            crate::clan_waves::ClanWaveMemberWire {
+                name: "e1.p1".to_string(),
+                launch_key: "01".to_string(),
+                ..Default::default()
+            },
+            crate::clan_waves::ClanWaveMemberWire {
+                name: "e1.p2".to_string(),
+                launch_key: "02".to_string(),
+                wait_for: vec!["e1.p1".to_string()],
+                ..Default::default()
+            },
+            crate::clan_waves::ClanWaveMemberWire {
+                name: "e1.p3".to_string(),
+                launch_key: "03".to_string(),
+                wait_for: vec!["e1.p1".to_string()],
+                ..Default::default()
+            },
+            crate::clan_waves::ClanWaveMemberWire {
+                name: "e1.p4".to_string(),
+                launch_key: "04".to_string(),
+                wait_for: vec!["e1.p2".to_string(), "e1.p3".to_string()],
+                ..Default::default()
+            },
+        ];
+        for member in &mut members {
+            member.phase_bead_id =
+                Some(member.name.trim_start_matches("e1.").to_string());
+        }
+        let clan = crate::clan_waves::project_clan_waves(
+            &crate::clan_waves::ClanWaveRequestWire {
+                clan_name: "e1".to_string(),
+                members,
+            },
+        );
+
+        let planned = plan
+            .waves
+            .iter()
+            .map(|wave| {
+                wave.iter()
+                    .map(|assignment| format!("e1.{}", assignment.bead_id))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(clan.waves, planned);
     }
 }

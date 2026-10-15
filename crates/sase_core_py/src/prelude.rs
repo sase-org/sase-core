@@ -516,6 +516,9 @@ pub(crate) use sase_core::bead_action::{
     validate_finalizer_bead_decision_from_json as core_validate_finalizer_bead_decision_from_json,
     BeadActionError, BEAD_ACTION_WIRE_SCHEMA_VERSION,
 };
+pub(crate) use sase_core::clan_waves::{
+    project_clan_waves as core_project_clan_waves, ClanWaveRequestWire,
+};
 pub(crate) use sase_core::commit_footer::{
     parse_commit_footer as core_parse_commit_footer,
     update_commit_footer as core_update_commit_footer, CommitFooterUpdateWire,

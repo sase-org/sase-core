@@ -34,6 +34,7 @@ mod autonomy;
 mod axe;
 mod bead_decisions;
 mod beads;
+mod clan_waves;
 mod command_line;
 mod config;
 mod continuation;
@@ -87,6 +88,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     agent_custody::register_agent_custody(m)?;
     bead_decisions::register_bead_decisions(m)?;
     beads::register_beads(m)?;
+    clan_waves::register_clan_waves(m)?;
     note_attachment::register_note_attachment(m)?;
     plans::register_plans(m)?;
     artifact_refs::register_artifact_refs(m)?;
