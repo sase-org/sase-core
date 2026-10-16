@@ -9,6 +9,8 @@ use crate::dependency_waves::layer_dependency_waves;
 /// One loaded direct member and the union of its declared waits.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClanWaveMemberWire {
+    /// Stable identity, independent of the names used to present this member.
+    pub key: String,
     pub name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
@@ -23,6 +25,7 @@ pub struct ClanWaveMemberWire {
     pub wait_for_hoods: Vec<String>,
     #[serde(default)]
     pub phase_bead_id: Option<String>,
+    /// The retry chain root's member key.
     #[serde(default)]
     pub retry_of: Option<String>,
     /// Candidate for the unnumbered final seal stage.
@@ -33,59 +36,96 @@ pub struct ClanWaveMemberWire {
 /// Inputs needed to project one clan generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClanWaveRequestWire {
-    pub clan_name: String,
+    #[serde(default)]
+    pub clan_names: Vec<String>,
     #[serde(default)]
     pub members: Vec<ClanWaveMemberWire>,
 }
 
-/// Resolved waits and dependency layers for one clan generation.
-///
-/// `waves` and `wave_of` use one-based wave numbers. Ghost names participate in
-/// both so a dismissed predecessor keeps subsequent wave numbers stable, but
-/// never appears as a loaded row. Seal members are separated from `waves` only
-/// when they make up the final resolved layer and another layer precedes them.
+/// One numbered dependency layer or the optional seal layer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClanWavesWire {
-    pub waves: Vec<Vec<String>>,
-    pub wave_of: BTreeMap<String, usize>,
-    pub preds: BTreeMap<String, Vec<String>>,
-    pub external_waits: BTreeMap<String, usize>,
-    pub ghosts: Vec<String>,
-    pub unresolved: Vec<String>,
-    pub seal: Vec<String>,
+pub struct ClanWaveWire {
+    /// One-based position in the full layer sequence, including the seal.
+    pub index: u32,
+    /// Numbered wave, or None for the seal.
+    #[serde(default)]
+    pub number: Option<u32>,
+    #[serde(default)]
+    pub seal: bool,
+    #[serde(default)]
+    pub member_keys: Vec<String>,
+    #[serde(default)]
+    pub ghost_names: Vec<String>,
 }
 
-/// Project the declared intra-clan waits into deterministic dependency layers.
+/// Placement and dependency detail for one loaded direct member.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClanWaveMemberPlacementWire {
+    pub key: String,
+    /// One-based layer position. None means unresolved; seal placements have an index.
+    #[serde(default)]
+    pub wave_index: Option<u32>,
+    /// Zero-based position in the final loaded-member display order.
+    #[serde(default)]
+    pub rank: u32,
+    #[serde(default)]
+    pub predecessor_keys: Vec<String>,
+    #[serde(default)]
+    pub ghost_predecessors: Vec<String>,
+    #[serde(default)]
+    pub external_wait_count: u32,
+}
+
+/// Deterministic key-based layout for one clan generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClanWavesWire {
+    #[serde(default)]
+    pub layered: bool,
+    #[serde(default)]
+    pub numbered_wave_count: u32,
+    #[serde(default)]
+    pub has_seal: bool,
+    #[serde(default)]
+    pub waves: Vec<ClanWaveWire>,
+    #[serde(default)]
+    pub members: Vec<ClanWaveMemberPlacementWire>,
+    #[serde(default)]
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LayoutNode {
+    Slot(String),
+    Ghost(String),
+}
+
+/// Project declared intra-clan waits into deterministic dependency layers.
 pub fn project_clan_waves(request: &ClanWaveRequestWire) -> ClanWavesWire {
     let mut members = request.members.iter().collect::<Vec<_>>();
     members.sort_by(|left, right| {
         left.launch_key
             .cmp(&right.launch_key)
             .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.key.cmp(&right.key))
     });
-    // Names are the row identities in the wire contract. If malformed input
-    // repeats one, keep the earliest launch deterministically.
-    let mut seen_names = BTreeSet::new();
-    members.retain(|member| seen_names.insert(member.name.as_str()));
 
-    let member_by_name: BTreeMap<&str, &ClanWaveMemberWire> = members
+    let member_by_key: BTreeMap<String, &ClanWaveMemberWire> = members
         .iter()
-        .map(|member| (member.name.as_str(), *member))
+        .map(|member| (member.key.clone(), *member))
         .collect();
-    let member_names: BTreeSet<String> = member_by_name
-        .keys()
-        .map(|name| (*name).to_string())
-        .collect();
+    let member_keys: BTreeSet<String> = member_by_key.keys().cloned().collect();
 
-    let mut name_lookup: BTreeMap<String, String> = member_by_name
-        .keys()
-        .map(|name| ((*name).to_string(), (*name).to_string()))
-        .collect();
+    // A presented spelling can identify more than one loaded unit. Keep every
+    // key so duplicate display names never discard a member or its wait edge.
+    let mut name_lookup: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for member in &members {
-        for alias in &member.aliases {
-            name_lookup
-                .entry(alias.clone())
-                .or_insert_with(|| member.name.clone());
+        for spelling in member_spellings(member) {
+            if !spelling.is_empty() {
+                name_lookup
+                    .entry(spelling.to_string())
+                    .or_default()
+                    .insert(member.key.clone());
+            }
         }
     }
 
@@ -94,17 +134,16 @@ pub fn project_clan_waves(request: &ClanWaveRequestWire) -> ClanWavesWire {
         if let Some(parent) = member
             .retry_of
             .as_deref()
-            .and_then(|name| name_lookup.get(name))
+            .filter(|key| member_keys.contains(*key))
         {
-            retry_parent.insert(member.name.clone(), parent.clone());
+            retry_parent.insert(member.key.clone(), parent.to_string());
         }
     }
-    let slot_of: BTreeMap<String, String> = member_by_name
+    let slot_of: BTreeMap<String, String> = member_by_key
         .keys()
-        .map(|name| {
-            let name = (*name).to_string();
-            let root = retry_slot_root(&name, &retry_parent);
-            (name, root)
+        .map(|key| {
+            let root = retry_slot_root(key, &retry_parent);
+            (key.clone(), root)
         })
         .collect();
 
@@ -112,119 +151,138 @@ pub fn project_clan_waves(request: &ClanWaveRequestWire) -> ClanWavesWire {
         BTreeMap::new();
     for member in &members {
         let slot = slot_of
-            .get(member.name.as_str())
+            .get(&member.key)
             .cloned()
-            .unwrap_or_else(|| member.name.clone());
+            .unwrap_or_else(|| member.key.clone());
         members_by_slot.entry(slot).or_default().push(member);
     }
     for (slot, slot_members) in &mut members_by_slot {
-        let slot = slot.as_str();
         slot_members.sort_by(|left, right| {
-            let left_is_root = left.name == slot;
-            let right_is_root = right.name == slot;
+            let left_is_root = left.key == *slot;
+            let right_is_root = right.key == *slot;
             right_is_root
                 .cmp(&left_is_root)
                 .then_with(|| left.launch_key.cmp(&right.launch_key))
                 .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.key.cmp(&right.key))
         });
     }
 
     let slot_order: BTreeMap<String, (String, String)> = members_by_slot
         .iter()
         .map(|(slot, slot_members)| {
-            let root = slot_members
-                .iter()
-                .find(|member| member.name == *slot)
-                .copied()
-                .unwrap_or(slot_members[0]);
-            (slot.clone(), (root.launch_key.clone(), slot.clone()))
+            let root =
+                member_by_key.get(slot).copied().unwrap_or(slot_members[0]);
+            (slot.clone(), (root.launch_key.clone(), root.name.clone()))
         })
         .collect();
-    let mut nodes: BTreeSet<String> = members_by_slot.keys().cloned().collect();
-    let mut dependencies: BTreeMap<String, BTreeSet<String>> = nodes
-        .iter()
+
+    let mut nodes: BTreeSet<LayoutNode> = members_by_slot
+        .keys()
         .cloned()
-        .map(|node| (node, BTreeSet::new()))
+        .map(LayoutNode::Slot)
+        .collect();
+    let mut dependencies: BTreeMap<LayoutNode, BTreeSet<LayoutNode>> = nodes
+        .iter()
+        .map(|node| (node.clone(), BTreeSet::new()))
         .collect();
     let mut external_by_member: BTreeMap<String, BTreeSet<String>> =
-        member_names
+        member_keys
             .iter()
             .cloned()
-            .map(|name| (name, BTreeSet::new()))
+            .map(|key| (key, BTreeSet::new()))
             .collect();
 
-    let bead_to_slot: BTreeMap<&str, String> = members
+    let mut bead_to_slots: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for member in &members {
+        if let Some(bead_id) = &member.phase_bead_id {
+            bead_to_slots
+                .entry(bead_id.clone())
+                .or_default()
+                .insert(slot_of[&member.key].clone());
+        }
+    }
+
+    let clan_names: BTreeSet<&str> = request
+        .clan_names
         .iter()
-        .filter_map(|member| {
-            member
-                .phase_bead_id
-                .as_deref()
-                .map(|bead| (bead, slot_of[member.name.as_str()].clone()))
-        })
+        .map(String::as_str)
+        .filter(|name| !name.is_empty())
         .collect();
     let mut ghosts = BTreeSet::new();
 
     for member in &members {
-        let owner_slot = &slot_of[member.name.as_str()];
+        let owner_slot = &slot_of[&member.key];
         let mut member_external = BTreeSet::new();
+
         for target in &member.wait_for {
-            if target == &request.clan_name {
+            if clan_names.contains(target.as_str()) {
                 add_hood_snapshot(
                     &mut dependencies,
                     owner_slot,
-                    &request.clan_name,
+                    target,
                     &member.launch_key,
                     &members,
                     &slot_of,
                 );
                 continue;
             }
+
             let target_name = strip_session_suffix(target);
-            let resolved = name_lookup
+            if let Some(target_keys) = name_lookup
                 .get(target)
-                .or_else(|| name_lookup.get(target_name));
-            if let Some(target_member) = resolved {
-                add_dependency(
-                    &mut dependencies,
-                    owner_slot,
-                    &slot_of[target_member],
-                );
+                .or_else(|| name_lookup.get(target_name))
+            {
+                for target_key in target_keys {
+                    add_dependency(
+                        &mut dependencies,
+                        owner_slot,
+                        &slot_of[target_key],
+                    );
+                }
                 continue;
             }
-            if target_name == request.clan_name {
+
+            if clan_names.contains(target_name) {
                 add_hood_snapshot(
                     &mut dependencies,
                     owner_slot,
-                    &request.clan_name,
+                    target_name,
                     &member.launch_key,
                     &members,
                     &slot_of,
                 );
                 continue;
             }
-            if is_inside_clan_hood(&request.clan_name, target_name) {
-                let ghost = target_name.to_string();
+
+            if is_inside_any_clan_hood(&request.clan_names, target_name) {
+                let ghost =
+                    canonical_ghost_name(&request.clan_names, target_name);
                 ghosts.insert(ghost.clone());
-                nodes.insert(ghost.clone());
-                dependencies.entry(ghost.clone()).or_default();
-                add_dependency(&mut dependencies, owner_slot, &ghost);
+                let ghost_node = LayoutNode::Ghost(ghost);
+                nodes.insert(ghost_node.clone());
+                dependencies.entry(ghost_node.clone()).or_default();
+                add_dependency_node(&mut dependencies, owner_slot, &ghost_node);
                 continue;
             }
+
             if !is_time_or_epic_follow(target) {
                 member_external.insert(format!("agent:{target}"));
             }
         }
 
         for bead_id in &member.wait_for_beads {
-            if let Some(predecessor) = bead_to_slot.get(bead_id.as_str()) {
-                add_dependency(&mut dependencies, owner_slot, predecessor);
+            if let Some(predecessor_slots) = bead_to_slots.get(bead_id) {
+                for predecessor in predecessor_slots {
+                    add_dependency(&mut dependencies, owner_slot, predecessor);
+                }
             } else {
                 member_external.insert(format!("bead:{bead_id}"));
             }
         }
 
         for hood in &member.wait_for_hoods {
-            if is_inside_clan_hood(&request.clan_name, hood) {
+            if is_inside_any_clan_hood(&request.clan_names, hood) {
                 add_hood_snapshot(
                     &mut dependencies,
                     owner_slot,
@@ -237,17 +295,25 @@ pub fn project_clan_waves(request: &ClanWaveRequestWire) -> ClanWavesWire {
                 member_external.insert(format!("hood:{hood}"));
             }
         }
-        external_by_member.insert(member.name.clone(), member_external);
+
+        external_by_member.insert(member.key.clone(), member_external);
     }
 
-    let mut order = slot_order;
+    let mut order = BTreeMap::new();
+    for (slot, (launch_key, root_name)) in &slot_order {
+        order.insert(
+            LayoutNode::Slot(slot.clone()),
+            (launch_key.clone(), root_name.clone()),
+        );
+    }
     for ghost in &ghosts {
-        nodes.insert(ghost.clone());
-        dependencies.entry(ghost.clone()).or_default();
-        order.insert(ghost.clone(), (String::new(), ghost.clone()));
+        let node = LayoutNode::Ghost(ghost.clone());
+        nodes.insert(node.clone());
+        dependencies.entry(node.clone()).or_default();
+        order.insert(node, (String::new(), ghost.clone()));
     }
-    let layered = layer_dependency_waves(&nodes, &dependencies, &order);
 
+    let layout = layer_dependency_waves(&nodes, &dependencies, &order);
     let seal_slots: BTreeSet<String> = members_by_slot
         .iter()
         .filter(|(_, slot_members)| {
@@ -255,82 +321,163 @@ pub fn project_clan_waves(request: &ClanWaveRequestWire) -> ClanWavesWire {
         })
         .map(|(slot, _)| slot.clone())
         .collect();
-    let mut resolved_slot_waves = layered.waves;
-    let mut seal_slots_out = Vec::new();
+    let mut resolved_slot_waves = layout.waves;
+    let mut seal_nodes = Vec::new();
     if resolved_slot_waves.len() > 1
         && resolved_slot_waves.last().is_some_and(|last| {
             !last.is_empty()
-                && last.iter().all(|node| seal_slots.contains(node))
+                && last.iter().all(|node| match node {
+                    LayoutNode::Slot(slot) => seal_slots.contains(slot),
+                    LayoutNode::Ghost(_) => false,
+                })
         })
     {
-        seal_slots_out = resolved_slot_waves.pop().unwrap_or_default();
+        seal_nodes = resolved_slot_waves.pop().unwrap_or_default();
     }
 
     let mut waves = Vec::new();
-    let mut wave_of = BTreeMap::new();
-    for (wave_index, slots) in resolved_slot_waves.iter().enumerate() {
-        let wave_number = wave_index + 1;
-        let mut wave_members = Vec::new();
-        for slot in slots {
-            if ghosts.contains(slot) {
-                wave_members.push(slot.clone());
-            } else if let Some(slot_members) = members_by_slot.get(slot) {
-                wave_members.extend(
-                    slot_members.iter().map(|member| member.name.clone()),
-                );
+    let mut ordered_member_keys = Vec::new();
+    let mut slot_wave_index = BTreeMap::new();
+    for (layer_index, layer) in resolved_slot_waves.iter().enumerate() {
+        let index = layer_index as u32 + 1;
+        let mut member_keys_in_wave = Vec::new();
+        let mut ghost_names = Vec::new();
+        for node in layer {
+            match node {
+                LayoutNode::Slot(slot) => {
+                    slot_wave_index.insert(slot.clone(), index);
+                    if let Some(slot_members) = members_by_slot.get(slot) {
+                        member_keys_in_wave.extend(
+                            slot_members
+                                .iter()
+                                .map(|member| member.key.clone()),
+                        );
+                    }
+                }
+                LayoutNode::Ghost(ghost) => ghost_names.push(ghost.clone()),
             }
         }
-        for name in &wave_members {
-            wave_of.insert(name.clone(), wave_number);
-        }
-        waves.push(wave_members);
+        ghost_names.sort();
+        ordered_member_keys.extend(member_keys_in_wave.iter().cloned());
+        waves.push(ClanWaveWire {
+            index,
+            number: Some(index),
+            seal: false,
+            member_keys: member_keys_in_wave,
+            ghost_names,
+        });
     }
 
-    let seal = flatten_slots(&seal_slots_out, &members_by_slot);
-    let mut unresolved_slots =
-        layered.unresolved.iter().cloned().collect::<Vec<_>>();
+    if !seal_nodes.is_empty() {
+        let index = waves.len() as u32 + 1;
+        let mut member_keys_in_wave = Vec::new();
+        for node in &seal_nodes {
+            if let LayoutNode::Slot(slot) = node {
+                slot_wave_index.insert(slot.clone(), index);
+                if let Some(slot_members) = members_by_slot.get(slot) {
+                    member_keys_in_wave.extend(
+                        slot_members.iter().map(|member| member.key.clone()),
+                    );
+                }
+            }
+        }
+        ordered_member_keys.extend(member_keys_in_wave.iter().cloned());
+        waves.push(ClanWaveWire {
+            index,
+            number: None,
+            seal: true,
+            member_keys: member_keys_in_wave,
+            ghost_names: Vec::new(),
+        });
+    }
+
+    let mut unresolved_slots = layout
+        .unresolved
+        .iter()
+        .filter_map(|node| match node {
+            LayoutNode::Slot(slot) => Some(slot.clone()),
+            LayoutNode::Ghost(_) => None,
+        })
+        .collect::<Vec<_>>();
     unresolved_slots.sort_by(|left, right| {
         order
-            .get(left)
-            .cmp(&order.get(right))
+            .get(&LayoutNode::Slot(left.clone()))
+            .cmp(&order.get(&LayoutNode::Slot(right.clone())))
             .then_with(|| left.cmp(right))
     });
-    let unresolved = flatten_slots(&unresolved_slots, &members_by_slot);
+    unresolved_slots.dedup();
 
-    let mut preds = BTreeMap::new();
-    let mut external_waits = BTreeMap::new();
-    for member in &members {
-        let slot = &slot_of[member.name.as_str()];
-        let mut member_preds = dependencies
-            .get(slot)
-            .into_iter()
-            .flat_map(|predecessors| predecessors.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        member_preds.sort_by(|left, right| {
-            order
+    let mut unresolved = Vec::new();
+    for slot in unresolved_slots {
+        if let Some(slot_members) = members_by_slot.get(&slot) {
+            unresolved
+                .extend(slot_members.iter().map(|member| member.key.clone()));
+        }
+    }
+    ordered_member_keys.extend(unresolved.iter().cloned());
+
+    let display_rank: BTreeMap<String, u32> = ordered_member_keys
+        .iter()
+        .enumerate()
+        .map(|(rank, key)| (key.clone(), rank as u32))
+        .collect();
+
+    let mut placements = Vec::with_capacity(ordered_member_keys.len());
+    for key in &ordered_member_keys {
+        let slot = &slot_of[key];
+        let node = LayoutNode::Slot(slot.clone());
+        let mut predecessor_keys = BTreeSet::new();
+        let mut ghost_predecessors = BTreeSet::new();
+        if let Some(predecessors) = dependencies.get(&node) {
+            for predecessor in predecessors {
+                match predecessor {
+                    LayoutNode::Slot(predecessor_slot) => {
+                        predecessor_keys.insert(predecessor_slot.clone());
+                    }
+                    LayoutNode::Ghost(ghost) => {
+                        ghost_predecessors.insert(ghost.clone());
+                    }
+                }
+            }
+        }
+        let mut predecessor_keys =
+            predecessor_keys.into_iter().collect::<Vec<_>>();
+        predecessor_keys.sort_by(|left, right| {
+            display_rank
                 .get(left)
-                .cmp(&order.get(right))
+                .cmp(&display_rank.get(right))
                 .then_with(|| left.cmp(right))
         });
-        preds.insert(member.name.clone(), member_preds);
-        external_waits.insert(
-            member.name.clone(),
-            external_by_member
-                .get(&member.name)
-                .map_or(0, BTreeSet::len),
-        );
+        placements.push(ClanWaveMemberPlacementWire {
+            key: key.clone(),
+            wave_index: slot_wave_index.get(slot).copied(),
+            rank: display_rank[key],
+            predecessor_keys,
+            ghost_predecessors: ghost_predecessors.into_iter().collect(),
+            external_wait_count: external_by_member
+                .get(key)
+                .map_or(0, |waits| waits.len() as u32),
+        });
     }
 
+    let numbered_wave_count =
+        waves.iter().filter(|wave| wave.number.is_some()).count() as u32;
+    let has_seal = waves.iter().any(|wave| wave.seal);
+    let layered = waves.len() >= 2 || !unresolved.is_empty();
+
     ClanWavesWire {
+        layered,
+        numbered_wave_count,
+        has_seal,
         waves,
-        wave_of,
-        preds,
-        external_waits,
-        ghosts: ghosts.into_iter().collect(),
+        members: placements,
         unresolved,
-        seal,
     }
+}
+
+fn member_spellings(member: &ClanWaveMemberWire) -> impl Iterator<Item = &str> {
+    std::iter::once(member.name.as_str())
+        .chain(member.aliases.iter().map(String::as_str))
 }
 
 fn retry_slot_root(
@@ -366,18 +513,34 @@ fn strip_session_suffix(name: &str) -> &str {
     }
 }
 
-fn is_inside_clan_hood(clan_name: &str, name: &str) -> bool {
-    name == clan_name
+fn is_inside_hood(hood: &str, name: &str) -> bool {
+    name == hood
         || name
-            .strip_prefix(clan_name)
+            .strip_prefix(hood)
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-fn member_is_in_hood(member_name: &str, hood: &str) -> bool {
-    member_name == hood
-        || member_name
-            .strip_prefix(hood)
-            .is_some_and(|suffix| suffix.starts_with('.'))
+fn is_inside_any_clan_hood(clan_names: &[String], name: &str) -> bool {
+    clan_names.iter().any(|clan| is_inside_hood(clan, name))
+}
+
+fn canonical_ghost_name(clan_names: &[String], name: &str) -> String {
+    let Some(canonical_clan) = clan_names.iter().find(|clan| !clan.is_empty())
+    else {
+        return name.to_string();
+    };
+    for clan in clan_names.iter().filter(|clan| !clan.is_empty()) {
+        if name == clan {
+            return canonical_clan.clone();
+        }
+        if let Some(suffix) = name
+            .strip_prefix(clan)
+            .filter(|suffix| suffix.starts_with('.'))
+        {
+            return format!("{canonical_clan}{suffix}");
+        }
+    }
+    name.to_string()
 }
 
 fn is_time_or_epic_follow(target: &str) -> bool {
@@ -390,20 +553,34 @@ fn is_time_or_epic_follow(target: &str) -> bool {
 }
 
 fn add_dependency(
-    dependencies: &mut BTreeMap<String, BTreeSet<String>>,
+    dependencies: &mut BTreeMap<LayoutNode, BTreeSet<LayoutNode>>,
     owner: &str,
     predecessor: &str,
 ) {
     if owner != predecessor {
         dependencies
-            .entry(owner.to_string())
+            .entry(LayoutNode::Slot(owner.to_string()))
             .or_default()
-            .insert(predecessor.to_string());
+            .insert(LayoutNode::Slot(predecessor.to_string()));
+    }
+}
+
+fn add_dependency_node(
+    dependencies: &mut BTreeMap<LayoutNode, BTreeSet<LayoutNode>>,
+    owner: &str,
+    predecessor: &LayoutNode,
+) {
+    let owner = LayoutNode::Slot(owner.to_string());
+    if &owner != predecessor {
+        dependencies
+            .entry(owner)
+            .or_default()
+            .insert(predecessor.clone());
     }
 }
 
 fn add_hood_snapshot(
-    dependencies: &mut BTreeMap<String, BTreeSet<String>>,
+    dependencies: &mut BTreeMap<LayoutNode, BTreeSet<LayoutNode>>,
     owner_slot: &str,
     hood: &str,
     owner_launch_key: &str,
@@ -411,34 +588,23 @@ fn add_hood_snapshot(
     slot_of: &BTreeMap<String, String>,
 ) {
     for candidate in members.iter().filter(|candidate| {
-        member_is_in_hood(&candidate.name, hood)
-            && candidate.launch_key.as_str() < owner_launch_key
+        candidate.launch_key.as_str() < owner_launch_key
+            && member_spellings(candidate)
+                .any(|spelling| is_inside_hood(hood, spelling))
     }) {
-        if let Some(predecessor) = slot_of.get(candidate.name.as_str()) {
+        if let Some(predecessor) = slot_of.get(&candidate.key) {
             add_dependency(dependencies, owner_slot, predecessor);
         }
     }
-}
-
-fn flatten_slots(
-    slots: &[String],
-    members_by_slot: &BTreeMap<String, Vec<&ClanWaveMemberWire>>,
-) -> Vec<String> {
-    let mut flattened = Vec::new();
-    for slot in slots {
-        if let Some(members) = members_by_slot.get(slot) {
-            flattened.extend(members.iter().map(|member| member.name.clone()));
-        }
-    }
-    flattened
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn member(name: &str, launch_key: &str) -> ClanWaveMemberWire {
+    fn member(key: &str, name: &str, launch_key: &str) -> ClanWaveMemberWire {
         ClanWaveMemberWire {
+            key: key.to_string(),
             name: name.to_string(),
             launch_key: launch_key.to_string(),
             ..ClanWaveMemberWire::default()
@@ -446,41 +612,56 @@ mod tests {
     }
 
     fn request(
-        clan_name: &str,
+        clan_names: &[&str],
         members: Vec<ClanWaveMemberWire>,
     ) -> ClanWaveRequestWire {
         ClanWaveRequestWire {
-            clan_name: clan_name.to_string(),
+            clan_names: clan_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
             members,
         }
     }
 
-    fn names(waves: &[Vec<String>]) -> Vec<Vec<&str>> {
+    fn names(waves: &[ClanWaveWire]) -> Vec<Vec<&str>> {
         waves
             .iter()
-            .map(|wave| wave.iter().map(String::as_str).collect())
+            .map(|wave| wave.member_keys.iter().map(String::as_str).collect())
             .collect()
     }
 
+    fn placement<'a>(
+        wire: &'a ClanWavesWire,
+        key: &str,
+    ) -> &'a ClanWaveMemberPlacementWire {
+        wire.members
+            .iter()
+            .find(|member| member.key == key)
+            .unwrap()
+    }
+
     #[test]
-    fn bob_cli_epic_projects_five_numbered_waves_and_a_land_seal() {
+    fn epic_layers_five_numbered_waves_and_a_seal() {
         let clan = "bob-cli-7v";
         let mut members = (1..=7)
             .map(|number| {
-                member(&format!("{clan}.{number}"), &format!("{number:02}"))
+                let name = format!("{clan}.{number}");
+                member(&name, &name, &format!("{number:02}"))
             })
             .collect::<Vec<_>>();
         members[3].wait_for = vec![format!("{clan}.1"), format!("{clan}.2")];
         members[4].wait_for = vec![format!("{clan}.3"), format!("{clan}.4")];
         members[5].wait_for = vec![format!("{clan}.5")];
         members[6].wait_for = vec![format!("{clan}.6")];
-        let mut land = member(&format!("{clan}.land"), "08");
+        let mut land =
+            member(&format!("{clan}.land"), &format!("{clan}.land"), "08");
         land.wait_for =
             (1..=7).map(|number| format!("{clan}.{number}")).collect();
         land.seal = true;
         members.push(land);
 
-        let result = project_clan_waves(&request(clan, members));
+        let result = project_clan_waves(&request(&[clan], members));
 
         assert_eq!(
             names(&result.waves),
@@ -490,12 +671,16 @@ mod tests {
                 vec!["bob-cli-7v.5"],
                 vec!["bob-cli-7v.6"],
                 vec!["bob-cli-7v.7"],
+                vec!["bob-cli-7v.land"],
             ]
         );
-        assert_eq!(result.seal, vec!["bob-cli-7v.land"]);
-        assert!(!result.wave_of.contains_key("bob-cli-7v.land"));
+        assert_eq!(result.numbered_wave_count, 5);
+        assert!(result.has_seal);
+        let seal = result.waves.last().unwrap();
+        assert_eq!((seal.index, seal.number, seal.seal), (6, None, true));
+        assert_eq!(placement(&result, "bob-cli-7v.land").wave_index, Some(6));
         assert_eq!(
-            result.preds["bob-cli-7v.4"],
+            placement(&result, "bob-cli-7v.4").predecessor_keys,
             vec!["bob-cli-7v.1", "bob-cli-7v.2"]
         );
     }
@@ -509,7 +694,8 @@ mod tests {
         .iter()
         .enumerate()
         .map(|(index, suffix)| {
-            member(&format!("{clan}.{suffix}"), &format!("{index:02}"))
+            let name = format!("{clan}.{suffix}");
+            member(&name, &name, &format!("{index:02}"))
         })
         .collect::<Vec<_>>();
         members[4].wait_for = ["cdx", "cld", "grk", "gem"]
@@ -523,7 +709,7 @@ mod tests {
             .map(|suffix| format!("{clan}.{suffix}"))
             .collect();
 
-        let result = project_clan_waves(&request(clan, members));
+        let result = project_clan_waves(&request(&[clan], members));
 
         assert_eq!(
             names(&result.waves),
@@ -532,7 +718,7 @@ mod tests {
                     "research.4j.cdx",
                     "research.4j.cld",
                     "research.4j.grk",
-                    "research.4j.gem",
+                    "research.4j.gem"
                 ],
                 vec!["research.4j.final"],
                 vec!["research.4j.image", "research.4j.audio"],
@@ -542,65 +728,85 @@ mod tests {
     }
 
     #[test]
-    fn toobig_chain_and_flat_clan_cover_long_and_one_wave_shapes() {
+    fn long_chain_and_flat_fanout_report_layered_state() {
         let clan = "toobig-5y";
         let mut chain = (1..=14)
             .map(|number| {
-                member(&format!("{clan}.{number}"), &format!("{number:02}"))
+                let name = format!("{clan}.{number}");
+                member(&name, &name, &format!("{number:02}"))
             })
             .collect::<Vec<_>>();
         for (number, phase) in chain.iter_mut().enumerate().skip(1) {
             phase.wait_for = vec![format!("{clan}.{number}")];
         }
-        let chain_result = project_clan_waves(&request(clan, chain));
-        assert_eq!(chain_result.waves.len(), 14);
-        assert_eq!(chain_result.wave_of["toobig-5y.14"], 14);
+        let chain_result = project_clan_waves(&request(&[clan], chain));
+        assert_eq!(chain_result.numbered_wave_count, 14);
+        assert!(chain_result.layered);
+        assert_eq!(
+            placement(&chain_result, "toobig-5y.14").wave_index,
+            Some(14)
+        );
 
         let flat = project_clan_waves(&request(
-            "review.2",
+            &["review.2"],
             vec![
-                member("review.2.a", "01"),
-                member("review.2.b", "02"),
-                member("review.2.c", "03"),
+                member("review-a", "review.2.a", "01"),
+                member("review-b", "review.2.b", "02"),
+                member("review-c", "review.2.c", "03"),
             ],
         ));
         assert_eq!(
             names(&flat.waves),
-            vec![vec!["review.2.a", "review.2.b", "review.2.c"]]
+            vec![vec!["review-a", "review-b", "review-c"]]
         );
+        assert!(!flat.layered);
     }
 
     #[test]
-    fn aliases_session_turns_and_retry_members_resolve_to_one_slot() {
-        let mut root = member("clan.a", "01");
+    fn aliases_sessions_and_retry_members_resolve_by_identity() {
+        let mut root = member("root-key", "clan.a", "01");
         root.aliases = vec!["a".to_string()];
-        let mut retry = member("clan.a.r1", "03");
-        retry.retry_of = Some("a".to_string());
+        let mut retry = member("retry-key", "clan.a.r1", "03");
+        retry.retry_of = Some("root-key".to_string());
         retry.wait_for = vec!["clan.b".to_string()];
-        let mut child = member("clan.c", "04");
+        let mut child = member("child-key", "clan.c", "04");
         child.wait_for =
             vec!["clan.a.r1--turn-2".to_string(), "a--plan".to_string()];
         let result = project_clan_waves(&request(
-            "clan",
-            vec![root, member("clan.b", "02"), retry, child],
+            &["clan"],
+            vec![root, member("blocker-key", "clan.b", "02"), retry, child],
         ));
 
         assert_eq!(
             names(&result.waves),
-            vec![vec!["clan.b"], vec!["clan.a", "clan.a.r1"], vec!["clan.c"],]
+            vec![
+                vec!["blocker-key"],
+                vec!["root-key", "retry-key"],
+                vec!["child-key"]
+            ]
         );
-        assert_eq!(result.wave_of["clan.a"], result.wave_of["clan.a.r1"]);
-        assert_eq!(result.preds["clan.a"], vec!["clan.b"]);
-        assert_eq!(result.preds["clan.a.r1"], vec!["clan.b"]);
-        assert_eq!(result.preds["clan.c"], vec!["clan.a"]);
+        assert_eq!(placement(&result, "retry-key").wave_index, Some(2));
+        assert_eq!(
+            placement(&result, "root-key").predecessor_keys,
+            vec!["blocker-key"]
+        );
+        assert_eq!(
+            placement(&result, "retry-key").predecessor_keys,
+            vec!["blocker-key"]
+        );
+        assert_eq!(
+            placement(&result, "child-key").predecessor_keys,
+            vec!["root-key"]
+        );
     }
 
     #[test]
-    fn dismissed_member_is_a_ghost_and_external_waits_are_counted() {
-        let mut final_member = member("clan.final", "02");
+    fn ghost_only_wave_preserves_numbering_and_external_wait_counts() {
+        let mut final_member = member("final", "clan.final", "02");
         final_member.wait_for = vec!["clan.dismissed".to_string()];
-        let mut external = member("clan.external", "03");
+        let mut external = member("external", "clan.external", "03");
         external.wait_for = vec![
+            "clan.final".to_string(),
             "other-clan.member".to_string(),
             "time=5m".to_string(),
             "for_epic=e2".to_string(),
@@ -608,85 +814,261 @@ mod tests {
         external.wait_for_beads = vec!["foreign-bead".to_string()];
         external.wait_for_hoods = vec!["another-hood".to_string()];
 
-        let result =
-            project_clan_waves(&request("clan", vec![final_member, external]));
+        let result = project_clan_waves(&request(
+            &["clan"],
+            vec![final_member, external],
+        ));
 
-        assert_eq!(result.ghosts, vec!["clan.dismissed"]);
-        assert_eq!(result.wave_of["clan.dismissed"], 1);
-        assert_eq!(result.wave_of["clan.final"], 2);
-        assert_eq!(result.external_waits["clan.external"], 3);
-        assert_eq!(result.external_waits["clan.final"], 0);
+        assert_eq!(result.waves[0].member_keys, Vec::<String>::new());
+        assert_eq!(result.waves[0].ghost_names, vec!["clan.dismissed"]);
+        assert_eq!(
+            (result.waves[0].index, result.waves[0].number),
+            (1, Some(1))
+        );
+        assert_eq!(result.numbered_wave_count, 3);
+        assert_eq!(placement(&result, "final").wave_index, Some(2));
+        assert_eq!(placement(&result, "external").wave_index, Some(3));
+        assert_eq!(
+            placement(&result, "final").ghost_predecessors,
+            vec!["clan.dismissed"]
+        );
+        assert_eq!(placement(&result, "external").external_wait_count, 3);
     }
 
     #[test]
-    fn bead_only_edges_repair_a_reworked_epic_and_preserve_the_seal() {
-        let mut first = member("clan.first", "01");
+    fn bead_edges_keep_the_land_on_the_seal_layer() {
+        let mut first = member("first", "clan.first", "01");
         first.phase_bead_id = Some("phase-1".to_string());
-        let mut land = member("clan.land", "02");
+        let mut land = member("land", "clan.land", "02");
         land.wait_for_beads = vec!["phase-1".to_string()];
         land.seal = true;
 
-        let result = project_clan_waves(&request("clan", vec![first, land]));
+        let result = project_clan_waves(&request(&["clan"], vec![first, land]));
 
-        assert_eq!(names(&result.waves), vec![vec!["clan.first"]]);
-        assert_eq!(result.preds["clan.land"], vec!["clan.first"]);
-        assert_eq!(result.seal, vec!["clan.land"]);
+        assert_eq!(result.numbered_wave_count, 1);
+        assert!(result.has_seal);
+        assert_eq!(result.waves[0].member_keys, vec!["first"]);
+        assert_eq!(result.waves[1].member_keys, vec!["land"]);
+        assert_eq!(placement(&result, "land").wave_index, Some(2));
+        assert_eq!(placement(&result, "land").predecessor_keys, vec!["first"]);
     }
 
     #[test]
-    fn clan_name_and_hood_waits_use_launch_snapshot_semantics() {
-        let mut second = member("clan.second", "02");
-        second.wait_for = vec!["clan".to_string()];
-        let mut third = member("clan.third", "03");
-        third.wait_for_hoods = vec!["clan".to_string()];
+    fn clan_name_and_subhood_waits_use_launch_snapshot_semantics() {
+        let mut presented_first = member("first", "clan.first", "01");
+        presented_first.aliases = vec!["fleet/clan.first".to_string()];
+        let mut second = member("second", "clan.second", "02");
+        second.aliases = vec!["fleet/clan.second".to_string()];
+        second.wait_for = vec!["fleet/clan".to_string()];
+        let mut nested = member("nested", "clan.feature.root", "03");
+        let mut fourth = member("fourth", "clan.fourth", "04");
+        fourth.wait_for_hoods = vec!["fleet/clan.feature".to_string()];
+        let mut fifth = member("fifth", "clan.fifth", "05");
+        fifth.wait_for_hoods = vec!["clan".to_string()];
+        nested.aliases = vec!["fleet/clan.feature.root".to_string()];
 
         let result = project_clan_waves(&request(
-            "clan",
-            vec![member("clan.first", "01"), second, third],
+            &["clan", "fleet/clan"],
+            vec![presented_first, second, nested, fourth, fifth],
         ));
 
         assert_eq!(
-            names(&result.waves),
-            vec![vec!["clan.first"], vec!["clan.second"], vec!["clan.third"]]
+            placement(&result, "second").predecessor_keys,
+            vec!["first"]
         );
-        assert_eq!(result.preds["clan.second"], vec!["clan.first"]);
         assert_eq!(
-            result.preds["clan.third"],
-            vec!["clan.first", "clan.second"]
+            placement(&result, "fourth").predecessor_keys,
+            vec!["nested"]
         );
+        assert_eq!(
+            placement(&result, "fifth").predecessor_keys,
+            vec!["first", "nested", "second", "fourth"]
+        );
+        assert_eq!(placement(&result, "second").wave_index, Some(2));
+        assert_eq!(placement(&result, "fourth").wave_index, Some(2));
+        assert_eq!(placement(&result, "fifth").wave_index, Some(3));
     }
 
     #[test]
     fn late_joiners_without_waits_stay_in_the_first_layer() {
-        let mut dependent = member("clan.dependent", "02");
+        let mut dependent = member("dependent", "clan.dependent", "02");
         dependent.wait_for = vec!["clan.first".to_string()];
         let result = project_clan_waves(&request(
-            "clan",
+            &["clan"],
             vec![
                 dependent,
-                member("clan.late", "03"),
-                member("clan.first", "01"),
+                member("late", "clan.late", "03"),
+                member("first", "clan.first", "01"),
             ],
         ));
 
         assert_eq!(
             names(&result.waves),
-            vec![vec!["clan.first", "clan.late"], vec!["clan.dependent"]]
+            vec![vec!["first", "late"], vec!["dependent"]]
         );
     }
 
     #[test]
-    fn cycle_members_and_dependents_are_unresolved_not_dropped() {
-        let mut a = member("clan.a", "03");
-        let mut b = member("clan.b", "02");
-        let mut c = member("clan.c", "01");
+    fn cycles_and_their_dependents_are_unresolved_without_dropping_members() {
+        let mut a = member("a", "clan.a", "03");
+        let mut b = member("b", "clan.b", "02");
+        let mut c = member("c", "clan.c", "01");
         a.wait_for = vec!["clan.b".to_string()];
         b.wait_for = vec!["clan.a".to_string()];
         c.wait_for = vec!["clan.b".to_string()];
 
-        let result = project_clan_waves(&request("clan", vec![a, b, c]));
+        let result = project_clan_waves(&request(&["clan"], vec![a, b, c]));
 
         assert!(result.waves.is_empty());
-        assert_eq!(result.unresolved, vec!["clan.c", "clan.b", "clan.a"]);
+        assert_eq!(result.unresolved, vec!["c", "b", "a"]);
+        assert!(result.layered);
+        assert!(result
+            .members
+            .iter()
+            .all(|member| member.wave_index.is_none()));
+    }
+
+    #[test]
+    fn diamond_and_asymmetric_overlap_keep_predecessors_in_display_order() {
+        let mut left_branch = member("left", "diamond.left", "02");
+        left_branch.wait_for = vec!["diamond.root".to_string()];
+        let mut right_branch = member("right", "diamond.right", "03");
+        right_branch.wait_for = vec!["diamond.root".to_string()];
+        let mut join_branch = member("join", "diamond.join", "04");
+        join_branch.wait_for =
+            vec!["diamond.left".to_string(), "diamond.right".to_string()];
+        let diamond = project_clan_waves(&request(
+            &["diamond"],
+            vec![
+                join_branch,
+                right_branch,
+                left_branch,
+                member("root", "diamond.root", "01"),
+            ],
+        ));
+        assert_eq!(
+            names(&diamond.waves),
+            vec![vec!["root"], vec!["left", "right"], vec!["join"]]
+        );
+
+        let mut left = member("p", "clan.p", "02");
+        left.wait_for = vec!["clan.r".to_string()];
+        let mut m = member("m", "clan.m", "04");
+        m.wait_for = vec!["clan.p".to_string(), "clan.q".to_string()];
+        let q = member("q", "clan.q", "03");
+        let r = member("r", "clan.r", "01");
+
+        let result =
+            project_clan_waves(&request(&["clan"], vec![m, q, left, r]));
+
+        assert_eq!(
+            names(&result.waves),
+            vec![vec!["r", "q"], vec!["p"], vec!["m"]]
+        );
+        assert_eq!(placement(&result, "m").predecessor_keys, vec!["q", "p"]);
+
+        let mut branch = member("branch", "asym.branch", "02");
+        branch.wait_for = vec!["asym.root".to_string()];
+        let mut join = member("join", "asym.join", "04");
+        join.wait_for =
+            vec!["asym.branch".to_string(), "asym.free".to_string()];
+        let asym = project_clan_waves(&request(
+            &["asym"],
+            vec![
+                join,
+                member("free", "asym.free", "03"),
+                branch,
+                member("root", "asym.root", "01"),
+            ],
+        ));
+        assert_eq!(
+            names(&asym.waves),
+            vec![vec!["root", "free"], vec!["branch"], vec!["join"]]
+        );
+    }
+
+    #[test]
+    fn duplicate_names_resolve_to_every_member_key() {
+        let mut first = member("first-key", "clan.same", "01");
+        first.aliases = vec!["presented/same".to_string()];
+        let mut second = member("second-key", "clan.other", "02");
+        second.aliases = vec!["presented/same".to_string()];
+        let mut waiter = member("waiter", "clan.waiter", "03");
+        waiter.wait_for = vec!["presented/same".to_string()];
+
+        let result = project_clan_waves(&request(
+            &["clan"],
+            vec![first, second, waiter],
+        ));
+
+        assert_eq!(result.members.len(), 3);
+        assert_eq!(
+            placement(&result, "waiter").predecessor_keys,
+            vec!["first-key", "second-key"]
+        );
+        assert_eq!(placement(&result, "waiter").wave_index, Some(2));
+    }
+
+    #[test]
+    fn retries_stay_after_the_root_even_when_another_member_launched_between_them(
+    ) {
+        let root = member("root", "clan.root", "01");
+        let other = member("other", "clan.other", "02");
+        let mut retry_one = member("retry-one", "clan.root.retry-1", "03");
+        retry_one.retry_of = Some("root".to_string());
+        let mut retry_two = member("retry-two", "clan.root.retry-2", "04");
+        retry_two.retry_of = Some("root".to_string());
+
+        let result = project_clan_waves(&request(
+            &["clan"],
+            vec![retry_two, other, retry_one, root],
+        ));
+
+        assert_eq!(
+            names(&result.waves),
+            vec![vec!["root", "retry-one", "retry-two", "other"]]
+        );
+        assert_eq!(placement(&result, "retry-two").wave_index, Some(1));
+    }
+
+    #[test]
+    fn land_sharing_the_final_layer_stays_numbered() {
+        let first = member("first", "clan.first", "01");
+        let mut second = member("second", "clan.second", "02");
+        second.wait_for = vec!["clan.first".to_string()];
+        let mut land = member("land", "clan.land", "03");
+        land.wait_for = vec!["clan.first".to_string()];
+        land.seal = true;
+        let result =
+            project_clan_waves(&request(&["clan"], vec![first, second, land]));
+
+        assert_eq!(result.numbered_wave_count, 2);
+        assert!(!result.has_seal);
+        assert!(result.waves.iter().all(|wave| !wave.seal));
+        assert_eq!(placement(&result, "land").wave_index, Some(2));
+        assert_eq!(
+            names(&result.waves),
+            vec![vec!["first"], vec!["second", "land"]]
+        );
+    }
+
+    #[test]
+    fn serde_defaults_cover_optional_and_list_fields() {
+        let wire: ClanWaveMemberWire =
+            serde_json::from_value(serde_json::json!({
+                "key": "k",
+                "name": "clan.member",
+            }))
+            .unwrap();
+        assert!(wire.aliases.is_empty());
+        assert!(wire.retry_of.is_none());
+        assert!(!wire.seal);
+
+        let request: ClanWaveRequestWire =
+            serde_json::from_value(serde_json::json!({
+                "members": [{"key": "k", "name": "clan.member"}],
+            }))
+            .unwrap();
+        assert!(request.clan_names.is_empty());
     }
 }

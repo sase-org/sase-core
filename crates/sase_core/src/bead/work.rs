@@ -644,38 +644,45 @@ mod tests {
         )
         .unwrap();
 
-        let mut members = vec![
-            crate::clan_waves::ClanWaveMemberWire {
-                name: "e1.p1".to_string(),
-                launch_key: "01".to_string(),
+        let launch_rank: BTreeMap<&str, usize> = plan
+            .phase_bead_ids
+            .iter()
+            .enumerate()
+            .map(|(rank, bead_id)| (bead_id.as_str(), rank))
+            .collect();
+        let mut members = Vec::new();
+        for assignment in plan.waves.iter().flatten() {
+            members.push(crate::clan_waves::ClanWaveMemberWire {
+                key: assignment.bead_id.clone(),
+                name: format!("e1.{}", assignment.bead_id),
+                launch_key: format!(
+                    "{:02}",
+                    launch_rank[assignment.bead_id.as_str()]
+                ),
+                wait_for: assignment
+                    .waits_on
+                    .iter()
+                    .map(|name| format!("e1.{name}"))
+                    .collect(),
+                phase_bead_id: Some(assignment.bead_id.clone()),
                 ..Default::default()
-            },
-            crate::clan_waves::ClanWaveMemberWire {
-                name: "e1.p2".to_string(),
-                launch_key: "02".to_string(),
-                wait_for: vec!["e1.p1".to_string()],
-                ..Default::default()
-            },
-            crate::clan_waves::ClanWaveMemberWire {
-                name: "e1.p3".to_string(),
-                launch_key: "03".to_string(),
-                wait_for: vec!["e1.p1".to_string()],
-                ..Default::default()
-            },
-            crate::clan_waves::ClanWaveMemberWire {
-                name: "e1.p4".to_string(),
-                launch_key: "04".to_string(),
-                wait_for: vec!["e1.p2".to_string(), "e1.p3".to_string()],
-                ..Default::default()
-            },
-        ];
-        for member in &mut members {
-            member.phase_bead_id =
-                Some(member.name.trim_start_matches("e1.").to_string());
+            });
         }
+        members.push(crate::clan_waves::ClanWaveMemberWire {
+            key: "land".to_string(),
+            name: plan.land_agent_name.clone(),
+            launch_key: "99".to_string(),
+            wait_for: plan
+                .land_waits_on
+                .iter()
+                .map(|name| format!("e1.{name}"))
+                .collect(),
+            seal: true,
+            ..Default::default()
+        });
         let clan = crate::clan_waves::project_clan_waves(
             &crate::clan_waves::ClanWaveRequestWire {
-                clan_name: "e1".to_string(),
+                clan_names: vec!["e1".to_string()],
                 members,
             },
         );
@@ -689,6 +696,27 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        assert_eq!(clan.waves, planned);
+        let projected = clan
+            .waves
+            .iter()
+            .filter(|wave| wave.number.is_some())
+            .map(|wave| {
+                wave.member_keys
+                    .iter()
+                    .map(|key| format!("e1.{key}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(projected, planned);
+        assert!(clan.has_seal);
+        assert!(clan.waves.last().unwrap().seal);
+        assert_eq!(
+            clan.members
+                .iter()
+                .find(|member| member.key == "land")
+                .unwrap()
+                .wave_index,
+            Some(plan.waves.len() as u32 + 1)
+        );
     }
 }
