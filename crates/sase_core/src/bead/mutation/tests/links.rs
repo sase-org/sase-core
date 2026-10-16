@@ -1078,6 +1078,7 @@ fn concurrent_update_and_claim_preserve_both_events_and_projection() {
             &claim_phase_id,
             "agent-1",
             Some("2026-01-01T00:03:00Z".to_string()),
+            &BeadLaunchClaimContextWire::default(),
         );
         claim_tx.send(()).unwrap();
         result
@@ -1178,6 +1179,7 @@ fn concurrent_launch_claims_preserve_sibling_events_and_projection() {
                     &bead_id,
                     &format!("agent-{}", index + 1),
                     Some(format!("2026-01-01T00:0{}:00Z", index + 1)),
+                    &BeadLaunchClaimContextWire::default(),
                 )
             })
         })

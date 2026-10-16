@@ -19,8 +19,9 @@ pub(crate) mod view;
 mod tests;
 
 pub use claims::{
-    claim_for_agent_launch, claim_for_agent_wait, preclaim_epic_work_plan,
-    release_agent_claim,
+    claim_for_agent_launch, claim_for_agent_wait, closed_bead_launch_note,
+    preclaim_epic_work_plan, release_agent_claim,
+    CLOSED_BEAD_LAUNCH_NOTE_PREFIX,
 };
 pub use close_remove::{
     close_issues, close_issues_with_note, open_issue, remove_issue,
@@ -36,9 +37,9 @@ pub use links::{
     set_bead_link_projections,
 };
 pub use mutation_wire::{
-    BeadCreateRequestWire, BeadLinkProjectionRequestWire,
-    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire,
-    BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
+    BeadCreateRequestWire, BeadLaunchClaimContextWire,
+    BeadLinkProjectionRequestWire, BeadMutationOutcomeWire,
+    BeadPreclaimAssignmentWire, BeadPreclaimRollbackWire, BeadUpdateFieldsWire,
 };
 pub use notes_update::{
     append_issue_note, edit_issue_note, remove_issue_note, update_issue,

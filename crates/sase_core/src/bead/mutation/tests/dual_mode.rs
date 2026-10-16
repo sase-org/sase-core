@@ -342,6 +342,7 @@ fn dual_mode_claims_match_replay() {
             &epic_id,
             "agent-2",
             Some("2026-01-01T00:05:00Z".to_string()),
+            &BeadLaunchClaimContextWire::default(),
         )
         .unwrap()
         .issue
@@ -351,6 +352,57 @@ fn dual_mode_claims_match_replay() {
     }
     assert_eq!(replay_json(&cached_beads), replay_json(&plain_beads));
     assert_cache_equals_replay(&cached_beads, "claims");
+}
+
+#[test]
+fn dual_mode_closed_bead_launch_attach_matches_replay() {
+    let (_cached_temp, cached_beads, _plain_temp, plain_beads) = dual_stores();
+    for beads_dir in [&cached_beads, &plain_beads] {
+        let (epic_id, phase_id, _) = seed_epic_phase_task(beads_dir);
+        close_issues(
+            beads_dir,
+            std::slice::from_ref(&phase_id),
+            Some("phase done".to_string()),
+            Some(BeadResolutionWire::Done),
+            false,
+            Some("2026-01-01T00:03:00Z".to_string()),
+        )
+        .unwrap();
+        close_issues(
+            beads_dir,
+            std::slice::from_ref(&epic_id),
+            Some("epic done".to_string()),
+            Some(BeadResolutionWire::Done),
+            false,
+            Some("2026-01-01T00:04:00Z".to_string()),
+        )
+        .unwrap();
+        let launch = BeadLaunchClaimContextWire {
+            submitted_at: Some("2026-01-01T00:05:00Z".to_string()),
+            run_id: Some("dual-run".to_string()),
+        };
+        let attached = claim_for_agent_launch(
+            beads_dir,
+            &phase_id,
+            "agent-attach",
+            Some("2026-01-01T00:06:00Z".to_string()),
+            &launch,
+        )
+        .unwrap();
+        assert!(attached.changed);
+        let issue = attached.issue.unwrap();
+        assert_eq!(issue.status, crate::bead::wire::StatusWire::Closed);
+        assert_eq!(attached.noted_ids, vec![phase_id.clone()]);
+        assert!(issue.notes.iter().any(|note| {
+            note.text.starts_with(CLOSED_BEAD_LAUNCH_NOTE_PREFIX)
+        }));
+        let reduced = reduces_to_store(beads_dir);
+        let reduced_phase =
+            reduced.iter().find(|row| row.id == phase_id).unwrap();
+        assert_eq!(reduced_phase, &issue);
+    }
+    assert_eq!(replay_json(&cached_beads), replay_json(&plain_beads));
+    assert_cache_equals_replay(&cached_beads, "closed-bead launch attach");
 }
 
 #[test]

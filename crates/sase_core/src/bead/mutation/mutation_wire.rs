@@ -142,6 +142,17 @@ impl Default for BeadLinkProjectionRequestWire {
     }
 }
 
+/// Launch provenance for `claim_for_agent_launch`'s closed-bead attach.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadLaunchClaimContextWire {
+    /// RFC 3339 time the launch was submitted; absent keeps the legacy closed error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<String>,
+    /// Run identifier quoted in the audit note (the run's artifacts timestamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadPreclaimAssignmentWire {
     pub bead_id: String,

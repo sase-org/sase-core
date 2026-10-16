@@ -212,7 +212,14 @@ fn snooze_task_rejects_bad_targets_times_and_statuses() {
 
         // An in-progress task is being worked on, so deferring it is a
         // contradiction rather than a deferral.
-        claim_for_agent_launch(&beads_dir, &task_id, "agent-a", now()).unwrap();
+        claim_for_agent_launch(
+            &beads_dir,
+            &task_id,
+            "agent-a",
+            now(),
+            &BeadLaunchClaimContextWire::default(),
+        )
+        .unwrap();
         let error = snooze_task(
             &beads_dir,
             &task_id,
@@ -466,6 +473,7 @@ fn reopening_and_launch_claiming_a_snoozed_task_drop_the_record() {
             &task_id,
             "agent-a",
             Some("2026-01-02T00:00:00Z".to_string()),
+            &BeadLaunchClaimContextWire::default(),
         )
         .unwrap()
         .issue

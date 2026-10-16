@@ -108,6 +108,7 @@ fn claims_deps_launch_claim_stays_warm() {
         &phase_id,
         "agent-1",
         Some("2026-01-01T00:03:00Z".to_string()),
+        &BeadLaunchClaimContextWire::default(),
     )
     .unwrap()
     .issue

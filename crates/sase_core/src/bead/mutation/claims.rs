@@ -1,3 +1,4 @@
+use super::mutation_wire::BeadLaunchClaimContextWire;
 use super::mutation_wire::BeadMutationOutcomeWire;
 use super::mutation_wire::BeadPreclaimAssignmentWire;
 use super::mutation_wire::BeadPreclaimRollbackWire;
@@ -14,27 +15,71 @@ use crate::bead::events::BeadEventOperationWire;
 use crate::bead::events::BeadEventPayloadWire;
 use crate::bead::events::BeadIssueUpdateEventFieldsWire;
 use crate::bead::wire::BeadError;
+use crate::bead::wire::BeadNoteWire;
 use crate::bead::wire::BeadReopenCauseWire;
+use crate::bead::wire::BeadResolutionWire;
 use crate::bead::wire::BeadTierWire;
 use crate::bead::wire::IssueTypeWire;
+use crate::bead::wire::IssueWire;
 use crate::bead::wire::StatusWire;
 use std::collections::HashSet;
 use std::path::Path;
+
+/// Fixed prefix for the host-written closed-bead launch audit note.
+pub const CLOSED_BEAD_LAUNCH_NOTE_PREFIX: &str = "CLOSED-BEAD LAUNCH:";
+
+/// Compose the `CLOSED-BEAD LAUNCH:` note written when a launch attaches
+/// to a bead that was already closed at submission time.
+pub fn closed_bead_launch_note(
+    issue: &IssueWire,
+    agent_name: &str,
+    launch: &BeadLaunchClaimContextWire,
+) -> String {
+    let submitted = launch.submitted_at.as_deref().unwrap_or("unknown");
+    let run_part = match launch
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(run_id) => format!("; run {run_id}"),
+        None => String::new(),
+    };
+    let closed_at = issue.closed_at.as_deref().unwrap_or("unknown");
+    let resolution = issue
+        .resolution
+        .as_ref()
+        .map(BeadResolutionWire::as_str)
+        .unwrap_or("unknown");
+    format!(
+        "{CLOSED_BEAD_LAUNCH_NOTE_PREFIX} agent {agent_name} launched against this closed bead; status left closed.\nLaunch submitted {submitted}{run_part}.\nPrior close: {closed_at} · {resolution}."
+    )
+}
 
 pub fn claim_for_agent_launch(
     beads_dir: &Path,
     issue_id: &str,
     agent_name: &str,
     now: Option<String>,
+    launch: &BeadLaunchClaimContextWire,
 ) -> Result<BeadMutationOutcomeWire, BeadError> {
     if agent_name.trim().is_empty() {
         return Err(BeadError::validation(
             "agent name for bead launch claim cannot be empty or blank",
         ));
     }
+    if let Some(submitted_at) = launch.submitted_at.as_deref() {
+        if let Err(error) =
+            chrono::DateTime::parse_from_rfc3339(submitted_at.trim())
+        {
+            return Err(BeadError::validation(format!(
+                "submitted_at must be an RFC-3339 timestamp: {submitted_at:?} ({error})"
+            )));
+        }
+    }
 
     run_mutation(beads_dir, "claim_for_launch", |view| {
-        run_claim_launch(view, issue_id, agent_name, now.clone())
+        run_claim_launch(view, issue_id, agent_name, now.clone(), launch)
     })
 }
 
@@ -103,15 +148,13 @@ fn run_claim_launch(
     issue_id: &str,
     agent_name: &str,
     now: Option<String>,
+    launch: &BeadLaunchClaimContextWire,
 ) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError> {
     let current = view.get(issue_id)?;
     if current.status == StatusWire::Closed {
-        return Err(BeadError {
-            kind: "closed".to_string(),
-            message: format!(
-                "cannot claim closed bead for agent launch: {issue_id}"
-            ),
-        });
+        return run_closed_launch_claim(
+            view, issue_id, agent_name, now, launch, current,
+        );
     }
     if current.status == StatusWire::InProgress
         && current.assignee == agent_name
@@ -156,6 +199,109 @@ fn run_claim_launch(
         outcome("claim_for_agent_launch", true, vec![issue.id.clone()]);
     result.issue = Some(issue);
     Ok(MutationStep::Done(result))
+}
+
+fn run_closed_launch_claim(
+    view: &mut MutationView,
+    issue_id: &str,
+    agent_name: &str,
+    now: Option<String>,
+    launch: &BeadLaunchClaimContextWire,
+    current: IssueWire,
+) -> Result<MutationStep<BeadMutationOutcomeWire>, BeadError> {
+    let Some(submitted_at) = launch.submitted_at.as_deref() else {
+        return Err(BeadError {
+            kind: "closed".to_string(),
+            message: format!(
+                "cannot claim closed bead for agent launch: {issue_id}"
+            ),
+        });
+    };
+    if let Some(closed_at) = current.closed_at.as_deref() {
+        let submitted =
+            chrono::DateTime::parse_from_rfc3339(submitted_at.trim()).map_err(
+                |error| {
+                    BeadError::validation(format!(
+                        "submitted_at must be an RFC-3339 timestamp: {submitted_at:?} ({error})"
+                    ))
+                },
+            )?;
+        let closed = chrono::DateTime::parse_from_rfc3339(closed_at.trim())
+            .map_err(|error| {
+                BeadError::validation(format!(
+                    "closed_at must be an RFC-3339 timestamp when comparing launch submitted_at: {closed_at:?} ({error})"
+                ))
+            })?;
+        if closed > submitted {
+            return Err(closed_while_queued_error(
+                &current,
+                submitted_at.trim(),
+            ));
+        }
+    }
+    let now = now.unwrap_or_else(now_utc);
+    let entry = closed_bead_launch_note(&current, agent_name, launch);
+    let mut issue = current;
+    let Some(event_id) = view.stage_event(
+        &issue.id,
+        BeadEventOperationWire::NoteAppended,
+        BeadEventPayloadWire::NoteAppended {
+            entry: entry.clone(),
+            attachments: vec![],
+        },
+        &now,
+        agent_name,
+    )?
+    else {
+        return Ok(MutationStep::NeedsReplay);
+    };
+    if let Some(note) =
+        BeadNoteWire::from_event(&event_id, &now, agent_name, &entry, vec![])
+    {
+        issue.notes.push(note);
+    }
+    issue.updated_at = now.clone();
+    issue.validate()?;
+    view.stage_issue(issue.clone());
+    let Some(mut rows) = view.commit(&[issue.id.clone()])? else {
+        return Ok(MutationStep::NeedsReplay);
+    };
+    let issue = rows.pop().expect("one closed-bead launch row");
+    let mut result =
+        outcome("claim_for_agent_launch", true, vec![issue.id.clone()]);
+    result.noted_ids = vec![issue.id.clone()];
+    result.message =
+        format!("attached to closed bead {}; status left closed", issue.id);
+    result.issue = Some(issue);
+    Ok(MutationStep::Done(result))
+}
+
+fn closed_while_queued_error(
+    issue: &IssueWire,
+    submitted_at: &str,
+) -> BeadError {
+    let closed_at = issue.closed_at.as_deref().unwrap_or("unknown");
+    let resolution = issue
+        .resolution
+        .as_ref()
+        .map(BeadResolutionWire::as_str)
+        .unwrap_or("unknown");
+    let resolution_part = match issue
+        .close_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(reason) => format!("{resolution}: {reason}"),
+        None => resolution.to_string(),
+    };
+    BeadError {
+        kind: "closed_while_queued".to_string(),
+        message: format!(
+            "bead {} was closed at {closed_at} ({resolution_part}) after this launch was submitted at {submitted_at}; relaunch to run it against the closed bead deliberately",
+            issue.id
+        ),
+    }
 }
 
 /// The single `claim_for_agent_wait` algorithm, over the view on both

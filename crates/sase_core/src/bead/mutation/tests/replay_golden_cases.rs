@@ -221,7 +221,13 @@ fn rm_one(dir: &Path, id: &str) -> String {
 }
 
 fn cl_launch(dir: &Path, id: &str, agent: &str) -> String {
-    outcome_string(claim_for_agent_launch(dir, id, agent, some_now()))
+    outcome_string(claim_for_agent_launch(
+        dir,
+        id,
+        agent,
+        some_now(),
+        &BeadLaunchClaimContextWire::default(),
+    ))
 }
 
 fn cl_wait(dir: &Path, id: &str, agent: &str) -> String {

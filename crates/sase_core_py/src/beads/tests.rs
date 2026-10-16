@@ -311,6 +311,8 @@ fn bead_mutation_bindings_preserve_changed_and_epic_preclaim() {
             &phase.id,
             "worker",
             Some("2026-01-01T00:02:00Z".to_string()),
+            None,
+            None,
         )
         .unwrap();
         assert!(py_to_json_value(first.bind(py)).unwrap()["changed"]
@@ -323,6 +325,8 @@ fn bead_mutation_bindings_preserve_changed_and_epic_preclaim() {
             &phase.id,
             "worker",
             Some("2026-01-01T00:03:00Z".to_string()),
+            None,
+            None,
         )
         .unwrap();
         let repeated = py_to_json_value(repeated.bind(py)).unwrap();
@@ -377,6 +381,105 @@ fn bead_mutation_bindings_preserve_changed_and_epic_preclaim() {
         assert!(preclaimed["changed"].as_bool().unwrap());
         assert_eq!(preclaimed["issue_ids"], json!([phase.id, epic.id]));
         assert_eq!(preclaimed["rollback_preclaims"][1]["bead_id"], epic.id);
+    });
+}
+
+#[test]
+fn bead_claim_for_agent_launch_attaches_or_refuses_closed_beads() {
+    pyo3::prepare_freethreaded_python();
+    let temp = tempfile::tempdir().unwrap();
+    core_bead_init_store(temp.path(), "beads", "sase", "owner").unwrap();
+    let beads_dir = temp.path().join("beads");
+    let epic = core_bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Epic".to_string(),
+            issue_type: IssueTypeWire::Plan,
+            now: Some("2026-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    let phase = core_bead_create_issue(
+        &beads_dir,
+        BeadCreateRequestWire {
+            title: "Phase".to_string(),
+            issue_type: IssueTypeWire::Phase,
+            parent_id: Some(epic.id.clone()),
+            now: Some("2026-01-01T00:01:00Z".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .issue
+    .unwrap();
+    core_bead_close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&phase.id),
+        Some("phase done".to_string()),
+        Some(BeadResolutionWire::Done),
+        false,
+        None,
+        None,
+        Some("2026-01-01T00:02:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+    core_bead_close_issues_with_note(
+        &beads_dir,
+        std::slice::from_ref(&epic.id),
+        Some("epic done".to_string()),
+        Some(BeadResolutionWire::Done),
+        false,
+        None,
+        None,
+        Some("2026-01-01T00:03:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+
+    Python::with_gil(|py| {
+        let path = beads_dir.to_str().unwrap();
+        let attached = py_bead_claim_for_agent_launch(
+            py,
+            path,
+            &phase.id,
+            "worker",
+            Some("2026-01-01T00:05:00Z".to_string()),
+            Some("2026-01-01T00:04:00Z".to_string()),
+            Some("20260101_000400".to_string()),
+        )
+        .unwrap();
+        let attached = py_to_json_value(attached.bind(py)).unwrap();
+        assert!(attached["changed"].as_bool().unwrap());
+        assert_eq!(attached["issue"]["status"], json!("closed"));
+        assert_eq!(attached["noted_ids"], json!([phase.id.clone()]));
+        let notes = attached["issue"]["notes"].as_array().unwrap();
+        assert!(notes.iter().any(|note| {
+            note["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("CLOSED-BEAD LAUNCH:")
+        }));
+
+        let queued = py_bead_claim_for_agent_launch(
+            py,
+            path,
+            &epic.id,
+            "worker",
+            Some("2026-01-01T00:06:00Z".to_string()),
+            Some("2026-01-01T00:02:30Z".to_string()),
+            Some("20260101_000230".to_string()),
+        )
+        .unwrap_err();
+        let message = queued.to_string();
+        assert!(
+            message.starts_with("closed_while_queued:")
+                || message.contains("closed_while_queued:"),
+            "{message}"
+        );
     });
 }
 

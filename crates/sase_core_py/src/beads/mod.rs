@@ -889,20 +889,29 @@ fn py_bead_snooze_cancel<'py>(
 }
 
 #[pyfunction]
-#[pyo3(name = "bead_claim_for_agent_launch", signature = (beads_dir, bead_id, agent_name, now=None))]
+#[pyo3(
+    name = "bead_claim_for_agent_launch",
+    signature = (beads_dir, bead_id, agent_name, now=None, submitted_at=None, run_id=None)
+)]
 fn py_bead_claim_for_agent_launch<'py>(
     py: Python<'py>,
     beads_dir: &str,
     bead_id: &str,
     agent_name: &str,
     now: Option<String>,
+    submitted_at: Option<String>,
+    run_id: Option<String>,
 ) -> PyResult<PyObject> {
     let beads_dir = PathBuf::from(beads_dir);
+    let launch = sase_core::bead::BeadLaunchClaimContextWire {
+        submitted_at,
+        run_id,
+    };
     bead_result_to_py(
         py,
         py.allow_threads(|| {
             core_bead_claim_for_agent_launch(
-                &beads_dir, bead_id, agent_name, now,
+                &beads_dir, bead_id, agent_name, now, &launch,
             )
         }),
     )

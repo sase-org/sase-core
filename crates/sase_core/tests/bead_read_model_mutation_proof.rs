@@ -37,9 +37,9 @@ use sase_core::bead::{
     remove_bead_references, remove_dependencies, remove_issue,
     remove_issue_note, set_bead_link_projections, snooze_task,
     unmark_ready_to_work, update_issue, update_issues, BeadCreateRequestWire,
-    BeadLinkProjectionRequestWire, BeadMutationOutcomeWire,
-    BeadPreclaimAssignmentWire, BeadUpdateFieldsWire, IssueTypeWire,
-    PhaseSizeWire,
+    BeadLaunchClaimContextWire, BeadLinkProjectionRequestWire,
+    BeadMutationOutcomeWire, BeadPreclaimAssignmentWire, BeadUpdateFieldsWire,
+    IssueTypeWire, PhaseSizeWire,
 };
 use sase_core::bead::{blocked_issues, stats};
 use sase_core::{ArtifactLinkOriginWire, BeadLinkDirectionWire};
@@ -339,7 +339,7 @@ fn cache_matches_replay_after_every_family_mutation() {
             }
         };
         let stamp = step_stamp(step + 10);
-        let arm = next_rng() % 30;
+        let arm = next_rng() % 31;
         match arm {
             // Notes family.
             0 => {
@@ -664,6 +664,7 @@ fn cache_matches_replay_after_every_family_mutation() {
                             &target,
                             &agent,
                             Some(stamp.clone()),
+                            &BeadLaunchClaimContextWire::default(),
                         )
                     },
                 );
@@ -957,6 +958,30 @@ fn cache_matches_replay_after_every_family_mutation() {
                             &target,
                             "family",
                             Some(stamp.clone()),
+                        )
+                    },
+                );
+            }
+            29 => {
+                let target = if snap.closed.is_empty() {
+                    id(next_rng())
+                } else {
+                    snap.closed[next_rng() % snap.closed.len()].clone()
+                };
+                let launch = BeadLaunchClaimContextWire {
+                    submitted_at: Some(stamp.clone()),
+                    run_id: Some(format!("family-run-{step}")),
+                };
+                assert_family_step(
+                    &stores,
+                    &format!("closed-bead launch attach {step}"),
+                    |dir| {
+                        claim_for_agent_launch(
+                            dir,
+                            &target,
+                            "family-attach-agent",
+                            Some(stamp.clone()),
+                            &launch,
                         )
                     },
                 );

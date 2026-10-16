@@ -341,6 +341,7 @@ fn proof_history_claim_and_release_stay_bounded() {
         &task,
         "proof-agent",
         Some("2026-02-01T00:04:00Z".to_string()),
+        &BeadLaunchClaimContextWire::default(),
     )
     .unwrap()
     .issue
