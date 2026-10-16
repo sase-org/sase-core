@@ -520,6 +520,15 @@ fn memory_compatible_path(root: &Path) -> CompatibleLayoutPathWire {
     )
 }
 
+const PROJECT_AGENT_DOCUMENT_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+const HOME_AGENT_DOCUMENT_NAMES: [&str; 5] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "OPENCODE.md",
+    "QWEN.md",
+];
+
 fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
     let namespace_root = root.join("sase");
     let config = compatible_path(
@@ -560,7 +569,10 @@ fn project_content_layout(root: &Path) -> ProjectContentLayoutWire {
             LayoutPathRoleWire::Canonical,
             LayoutTrackingWire::Generated,
         ),
-        agent_documents: agent_document_paths(root),
+        agent_documents: agent_document_paths(
+            root,
+            &PROJECT_AGENT_DOCUMENT_NAMES,
+        ),
     }
 }
 
@@ -601,7 +613,7 @@ fn home_content_layout(root: &Path) -> HomeContentLayoutWire {
             LayoutPathRoleWire::Canonical,
             LayoutTrackingWire::Generated,
         ),
-        agent_documents: agent_document_paths(root),
+        agent_documents: agent_document_paths(root, &HOME_AGENT_DOCUMENT_NAMES),
     }
 }
 
@@ -643,7 +655,7 @@ fn chezmoi_content_layout(root: &Path) -> ChezmoiContentLayoutWire {
             LayoutPathRoleWire::Canonical,
             LayoutTrackingWire::Generated,
         ),
-        agent_documents: agent_document_paths(root),
+        agent_documents: agent_document_paths(root, &HOME_AGENT_DOCUMENT_NAMES),
     }
 }
 
@@ -1121,23 +1133,20 @@ fn compatible_path<const N: usize>(
     }
 }
 
-fn agent_document_paths(root: &Path) -> Vec<LayoutPathWire> {
-    [
-        "AGENTS.md",
-        "CLAUDE.md",
-        "GEMINI.md",
-        "OPENCODE.md",
-        "QWEN.md",
-    ]
-    .into_iter()
-    .map(|filename| {
-        layout_path(
-            root.join(filename),
-            LayoutPathRoleWire::Unchanged,
-            LayoutTrackingWire::Generated,
-        )
-    })
-    .collect()
+fn agent_document_paths(
+    root: &Path,
+    filenames: &[&str],
+) -> Vec<LayoutPathWire> {
+    filenames
+        .iter()
+        .map(|filename| {
+            layout_path(
+                root.join(filename),
+                LayoutPathRoleWire::Unchanged,
+                LayoutTrackingWire::Generated,
+            )
+        })
+        .collect()
 }
 
 fn layout_path(
@@ -1193,6 +1202,49 @@ mod tests {
         assert_eq!(
             project.memory_readme.tracking,
             LayoutTrackingWire::Generated
+        );
+        assert_eq!(
+            project
+                .agent_documents
+                .iter()
+                .map(|path| path.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/workspace/project/AGENTS.md",
+                "/workspace/project/CLAUDE.md"
+            ]
+        );
+        assert_eq!(
+            layout
+                .home
+                .agent_documents
+                .iter()
+                .map(|path| path.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/home/alice/AGENTS.md",
+                "/home/alice/CLAUDE.md",
+                "/home/alice/GEMINI.md",
+                "/home/alice/OPENCODE.md",
+                "/home/alice/QWEN.md",
+            ]
+        );
+        assert_eq!(
+            layout
+                .chezmoi
+                .as_ref()
+                .unwrap()
+                .agent_documents
+                .iter()
+                .map(|path| path.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/dotfiles/home/AGENTS.md",
+                "/dotfiles/home/CLAUDE.md",
+                "/dotfiles/home/GEMINI.md",
+                "/dotfiles/home/OPENCODE.md",
+                "/dotfiles/home/QWEN.md",
+            ]
         );
         assert_eq!(
             layout.home.global_config.path,
