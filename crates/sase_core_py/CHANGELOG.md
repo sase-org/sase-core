@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.1](https://github.com/sase-org/sase-core/compare/v0.40.0...v0.40.1) - 2026-10-16
+
+### Added
+
+- *(clan-waves)* return key-based layout wire
+- *(clan-waves)* project clan dependency waves
+
 ## [0.40.0](https://github.com/sase-org/sase-core/compare/v0.39.1...v0.40.0) - 2026-10-14
 
 ### Added
