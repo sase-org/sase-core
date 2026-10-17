@@ -16,6 +16,8 @@ mod history;
 mod output;
 mod plans;
 mod query;
+mod records;
+mod records_cache;
 mod runs;
 mod snapshot;
 mod wire;
@@ -26,6 +28,8 @@ mod classify_tests;
 mod counter_tests;
 #[cfg(test)]
 mod query_tests;
+#[cfg(test)]
+mod records_tests;
 #[cfg(test)]
 mod runs_tests;
 #[cfg(test)]
