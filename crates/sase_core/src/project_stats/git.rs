@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::file_history::{
-    run_git_unchecked, run_git_unchecked_with_stdin, safe_revision_token,
-    GitResult,
+    run_git_unchecked, run_git_unchecked_with_stdin,
+    run_git_unchecked_with_stdin_env, safe_revision_token, GitResult,
 };
 
 use super::wire::{
@@ -217,6 +217,14 @@ pub(crate) fn run_unchecked(
     .map_err(|error| error.to_string())
 }
 
+pub(crate) fn run_checked(
+    repo: &Path,
+    args: &[&str],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<GitResult, String> {
+    run_output(repo, args, budget)
+}
+
 pub(crate) fn run_unchecked_with_stdin(
     repo: &Path,
     args: &[&str],
@@ -328,12 +336,45 @@ fn parse_cat_file_batch(
     Ok(out)
 }
 
+pub(crate) fn run_unchecked_with_stdin_env(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    extra_env: &[(&str, &str)],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<GitResult, String> {
+    run_git_unchecked_with_stdin_env(
+        repo,
+        args,
+        stdin,
+        extra_env,
+        Duration::from_millis(budget.timeout_ms.max(1)),
+        budget.max_output_bytes.max(1),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn run_checked_with_stdin(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<GitResult, String> {
+    require_complete(run_unchecked_with_stdin(repo, args, stdin, budget)?, args)
+}
+
 pub(crate) fn run_output(
     repo: &Path,
     args: &[&str],
     budget: &ProjectStatsBudgetWire,
 ) -> Result<GitResult, String> {
-    let result = run_unchecked(repo, args, budget)?;
+    require_complete(run_unchecked(repo, args, budget)?, args)
+}
+
+fn require_complete(
+    result: GitResult,
+    args: &[&str],
+) -> Result<GitResult, String> {
     if result.truncated {
         return Err(format!(
             "git {} exceeded its command budget",

@@ -1,6 +1,6 @@
 //! Shared blob-line counter interface for the project statistics snapshot.
 
-#![allow(dead_code)] // The dependent snapshot phase is the first production caller.
+#![allow(dead_code)] // The snapshot phase is the first production caller.
 
 use crate::project_stats::wire::ProjectStatsCodeCounterWire;
 

@@ -112,7 +112,25 @@ pub fn run_git_unchecked_with_stdin(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<GitResult, FileHistoryError> {
-    run_process(git_command(repo, args), Some(stdin), timeout, max_bytes)
+    run_git_unchecked_with_stdin_env(repo, args, stdin, &[], timeout, max_bytes)
+}
+
+/// Like [`run_git_unchecked_with_stdin`], with extra environment entries
+/// applied before routing variables are scrubbed.
+pub fn run_git_unchecked_with_stdin_env(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<GitResult, FileHistoryError> {
+    run_process(
+        git_command_with_injected_env(repo, args, extra_env),
+        Some(stdin),
+        timeout,
+        max_bytes,
+    )
 }
 
 /// Whether *value* is safe to pass as a git revision token: no

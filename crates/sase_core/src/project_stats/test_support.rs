@@ -70,6 +70,13 @@ pub(crate) fn commit_files(repo: &Path, files: &[(&str, &str)], message: &str) {
     git(repo, &["commit", "-m", message]);
 }
 
+pub(crate) fn write_bytes(repo: &Path, relative: &str, bytes: &[u8]) {
+    let path = repo.join(relative);
+    fs::create_dir_all(path.parent().expect("file parent"))
+        .expect("create parent directory");
+    fs::write(path, bytes).expect("write fixture bytes");
+}
+
 pub(crate) fn commit_all(repo: &Path, message: &str) {
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-m", message]);
