@@ -77,6 +77,63 @@ fn in_tree_store() -> ProjectStatsPlanStoreWire {
 }
 
 #[test]
+fn sidecar_root_counts_plans_without_a_directory_prefix() {
+    let fixture = init_repo();
+    commit(
+        &fixture.repo,
+        "202610/root-plan.md",
+        &plan_markdown("epic", Some("openai/gpt"), None, None),
+        "add a plan at the sidecar root",
+    );
+    commit(&fixture.repo, "README.md", "Not a plan", "add readme");
+    let store = ProjectStatsPlanStoreWire {
+        storage: ProjectStatsPlanStorageWire::SidecarRepos,
+        repo_path: Some(fixture.repo.to_string_lossy().into_owned()),
+        plans_dir: ".".to_owned(),
+        project_filter: None,
+    };
+    let response = query_project_stats(&request(
+        vec![project("alpha", &fixture.repo, store)],
+        "",
+        None,
+    ))
+    .unwrap();
+    let output = response.projects[0].output.as_ref().unwrap();
+    assert_eq!(output.plans_committed, Some(1));
+    assert_eq!(output.plans_epic, Some(1));
+}
+
+#[test]
+fn unresolved_sidecar_does_not_count_primary_repository_plans() {
+    let fixture = init_repo();
+    commit(
+        &fixture.repo,
+        "sdd/plans/primary.md",
+        &plan_markdown("epic", Some("openai/gpt"), None, None),
+        "add a primary plan",
+    );
+    let store = ProjectStatsPlanStoreWire {
+        storage: ProjectStatsPlanStorageWire::SeparateRepo,
+        repo_path: None,
+        plans_dir: ".".to_owned(),
+        project_filter: None,
+    };
+    let response = query_project_stats(&request(
+        vec![project("alpha", &fixture.repo, store)],
+        "",
+        None,
+    ))
+    .unwrap();
+    let output = response.projects[0].output.as_ref().unwrap();
+    assert_eq!(output.commits, Some(1));
+    assert_eq!(output.plans_committed, None);
+    assert!(response
+        .issues
+        .iter()
+        .any(|issue| issue.code == "plan_store_unresolved"));
+}
+
+#[test]
 fn first_add_survives_rename_and_later_edits_are_not_double_counted() {
     let fixture = init_repo();
     commit(

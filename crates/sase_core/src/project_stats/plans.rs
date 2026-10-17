@@ -24,7 +24,7 @@ use crate::project_stats::wire::{
 
 use super::FacetContext;
 
-const PLANS_CACHE_SCHEMA_VERSION: u32 = 1;
+const PLANS_CACHE_SCHEMA_VERSION: u32 = 2;
 const MAX_PLAN_COMMITS: usize = 500_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +365,8 @@ fn record_from_blob(
 
 fn is_plan_path(path: &str, plans_dir: &str) -> bool {
     let dir = plans_dir.trim_end_matches('/');
-    let under = path == dir || path.starts_with(&format!("{dir}/"));
+    let under =
+        dir == "." || path == dir || path.starts_with(&format!("{dir}/"));
     under && path.ends_with(".md") && !path.contains(".plan-decisions.")
 }
 
@@ -412,6 +413,9 @@ fn store_spec(
             identity: String::new(),
             ref_candidates: vec!["HEAD".to_owned()],
         });
+    }
+    if store.storage != ProjectStatsPlanStorageWire::InTree {
+        return None;
     }
     context
         .project
