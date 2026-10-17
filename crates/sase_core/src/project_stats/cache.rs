@@ -101,9 +101,52 @@ pub(crate) fn cache_key(repo: &ResolvedRepo) -> String {
 /// Cache path: `{cache_dir}/v{schema}/{key}.json`; `key` is the SHA-256
 /// digest of the canonical semantic key assembled above.
 pub(crate) fn cache_path(cache_dir: &str, key: &str) -> PathBuf {
-    Path::new(cache_dir)
-        .join(format!("v{HISTORY_CACHE_SCHEMA_VERSION}"))
-        .join(format!("{key}.json"))
+    kind_path(cache_dir, "", key)
+}
+
+/// Cache path namespaced by entry kind: `{cache_dir}/v{schema}/{kind}/{key}.json`.
+pub(crate) fn kind_path(cache_dir: &str, kind: &str, key: &str) -> PathBuf {
+    let mut path =
+        Path::new(cache_dir).join(format!("v{HISTORY_CACHE_SCHEMA_VERSION}"));
+    if !kind.is_empty() {
+        path = path.join(kind);
+    }
+    path.join(format!("{key}.json"))
+}
+
+/// Load a JSON cache document, treating any disk or parse error as a miss.
+pub(crate) fn load_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Option<T> {
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Persist a JSON cache document with the same writer-only lock as history.
+pub(crate) fn persist_json<T: Serialize>(path: &Path, value: &T) {
+    let Ok(json) = serde_json::to_vec(value) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let lock_path = sibling_lock_path(path);
+    let Ok(lock) = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+    else {
+        return;
+    };
+    if lock.lock_exclusive().is_err() {
+        return;
+    }
+    let _ = write_temp_and_rename(parent, path, &json);
+    let _ = FileExt::unlock(&lock);
 }
 
 /// Load one valid entry, treating all disk errors as a cache miss.

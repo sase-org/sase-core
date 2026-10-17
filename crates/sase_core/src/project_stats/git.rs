@@ -4,7 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::file_history::{run_git_unchecked, safe_revision_token, GitResult};
+use crate::file_history::{
+    run_git_unchecked, run_git_unchecked_with_stdin, safe_revision_token,
+    GitResult,
+};
 
 use super::wire::{
     ProjectStatsBudgetWire, ProjectStatsIssueWire, ProjectStatsRepoSpecWire,
@@ -214,7 +217,118 @@ pub(crate) fn run_unchecked(
     .map_err(|error| error.to_string())
 }
 
-fn run_output(
+pub(crate) fn run_unchecked_with_stdin(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<GitResult, String> {
+    run_git_unchecked_with_stdin(
+        repo,
+        args,
+        stdin,
+        Duration::from_millis(budget.timeout_ms.max(1)),
+        budget.max_output_bytes.max(1),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Read blob contents for *oids* via `cat-file --batch`, feeding stdin
+/// on a dedicated thread so large batches cannot deadlock.
+pub(crate) fn read_blobs(
+    repo: &Path,
+    oids: &[String],
+    budget: &ProjectStatsBudgetWire,
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    // Size chunks so one cat-file stdout stays under the command budget.
+    // 1 KiB per oid covers typical agent page JSON with headroom.
+    let per_oid = 1024_u64;
+    let chunk = (budget.max_output_bytes / per_oid)
+        .clamp(64, 65_536)
+        .min(oids.len().max(1) as u64) as usize;
+    let mut out = Vec::with_capacity(oids.len());
+    for chunk in oids.chunks(chunk) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let mut stdin = Vec::new();
+        for oid in chunk {
+            stdin.extend_from_slice(oid.as_bytes());
+            stdin.push(b'\n');
+        }
+        let result = run_unchecked_with_stdin(
+            repo,
+            &["cat-file", "--batch"],
+            &stdin,
+            budget,
+        )?;
+        if result.truncated {
+            return Err(
+                "git cat-file --batch exceeded its command budget".to_owned()
+            );
+        }
+        if result.code != Some(0) {
+            return Err("git cat-file --batch did not succeed".to_owned());
+        }
+        out.extend(parse_cat_file_batch(&result.stdout, chunk.len())?);
+    }
+    Ok(out)
+}
+
+fn parse_cat_file_batch(
+    stdout: &[u8],
+    expected: usize,
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    let mut cursor = 0;
+    let mut out = Vec::with_capacity(expected);
+    while out.len() < expected {
+        let rest = stdout.get(cursor..).unwrap_or(&[]);
+        if rest.is_empty() {
+            return Err(
+                "git cat-file --batch returned fewer objects than requested"
+                    .to_owned(),
+            );
+        }
+        let Some(newline) = rest.iter().position(|byte| *byte == b'\n') else {
+            return Err("git cat-file --batch header is truncated".to_owned());
+        };
+        let header = std::str::from_utf8(&rest[..newline])
+            .map_err(|error| {
+                format!("git cat-file header is not UTF-8: {error}")
+            })?
+            .trim_end_matches('\r');
+        cursor += newline + 1;
+        let parts: Vec<&str> = header.split(' ').collect();
+        if parts.len() >= 2 && parts[1] == "missing" {
+            out.push(None);
+            continue;
+        }
+        if parts.len() < 3 {
+            return Err(format!(
+                "git cat-file --batch returned a malformed header: {header}"
+            ));
+        }
+        let size: usize = parts[2].parse().map_err(|_| {
+            format!("git cat-file --batch size is not an integer: {header}")
+        })?;
+        let bytes = stdout.get(cursor..cursor + size).ok_or_else(|| {
+            "git cat-file --batch body is truncated".to_owned()
+        })?;
+        out.push(Some(bytes.to_vec()));
+        cursor += size;
+        if stdout.get(cursor) == Some(&b'\n') {
+            cursor += 1;
+        } else if cursor < stdout.len() {
+            return Err(
+                "git cat-file --batch body is missing its trailing newline"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn run_output(
     repo: &Path,
     args: &[&str],
     budget: &ProjectStatsBudgetWire,
@@ -232,7 +346,7 @@ fn run_output(
     Ok(result)
 }
 
-fn output_text(result: GitResult) -> Result<String, String> {
+pub(crate) fn output_text(result: GitResult) -> Result<String, String> {
     String::from_utf8(result.stdout)
         .map_err(|error| format!("Git returned non-UTF-8 metadata: {error}"))
 }

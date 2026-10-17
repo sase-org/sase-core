@@ -489,7 +489,7 @@ fn all_facets_serialize_with_explicit_nulls_for_unimplemented_seams() {
     assert_eq!(json["projects"][0]["runs"], serde_json::Value::Null);
     assert_eq!(json["portfolio"]["code"], serde_json::Value::Null);
     assert_eq!(json["portfolio"]["runs"], serde_json::Value::Null);
-    assert!(json["projects"][0]["output"]["plans_committed"].is_null());
+    assert_eq!(json["projects"][0]["output"]["plans_committed"], 0);
 }
 
 #[test]

@@ -11,17 +11,15 @@ use super::git::ResolvedRepo;
 use super::history::HistoryOutcome;
 use super::wire::{
     ProjectStatsCoverageWire, ProjectStatsIssueWire, ProjectStatsLifetimeWire,
-    ProjectStatsModelWire, ProjectStatsOutputWire, ProjectStatsRefWire,
-    ProjectStatsRepoStatusWire, ProjectStatsRepoTierWire, ProjectStatsRepoWire,
+    ProjectStatsOutputWire, ProjectStatsRefWire, ProjectStatsRepoStatusWire,
+    ProjectStatsRepoTierWire, ProjectStatsRepoWire,
 };
 use super::FacetContext;
 
 pub(crate) struct OutputMeasurement {
     pub output: ProjectStatsOutputWire,
     pub lifetime: ProjectStatsLifetimeWire,
-    pub models: Vec<ProjectStatsModelWire>,
     pub repos: Vec<ProjectStatsRepoWire>,
-    pub coverage: ProjectStatsCoverageWire,
     pub issues: Vec<ProjectStatsIssueWire>,
     pub source_tokens: Vec<String>,
 }
@@ -93,13 +91,10 @@ pub(crate) fn measure(context: &FacetContext<'_>) -> OutputMeasurement {
     } else {
         project_from_code_rows(context, &code_rows, &health)
     };
-    let coverage = output.commit_coverage.clone();
     OutputMeasurement {
-        models: output.models.clone(),
         output,
         lifetime,
         repos: repo_wires,
-        coverage,
         issues,
         source_tokens,
     }

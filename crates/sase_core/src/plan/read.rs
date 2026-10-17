@@ -340,7 +340,7 @@ fn trim_line(line: &str) -> &str {
     line.trim_end_matches('\n').trim_end_matches('\r')
 }
 
-fn parse_frontmatter_map(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_frontmatter_map(text: &str) -> BTreeMap<String, String> {
     let Ok(value) = serde_yaml::from_str::<Value>(text) else {
         return BTreeMap::new();
     };

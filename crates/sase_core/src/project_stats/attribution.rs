@@ -122,14 +122,57 @@ fn directory_model(
     if let Some(name) = directory.by_sha.get(&row.sha) {
         return member_model(directory, name);
     }
-    let code_page = format!("{agent}--code");
-    if directory.by_name.contains_key(&code_page) {
-        return member_model(directory, &code_page);
+    lookup_named_model(directory, agent, "code")
+}
+
+/// Attribute one committed plan from its standing frontmatter.
+///
+/// `proposed_with` is authoritative. Otherwise `proposed_by` is resolved
+/// through `<name>--plan`, the exact name, then a shared family model.
+pub(crate) fn attribute_plan(
+    proposed_with: Option<&str>,
+    proposed_by: Option<&str>,
+    directory: &Directory,
+    aliases: &BTreeMap<String, String>,
+) -> Attribution {
+    if let Some(tag) =
+        proposed_with.map(str::trim).filter(|tag| !tag.is_empty())
+    {
+        return match parse_model_tag(tag) {
+            Some((provider, model)) => resolved(provider, model, aliases),
+            None => unknown(REASON_MALFORMED_MODEL_TAG),
+        };
     }
-    if directory.by_name.contains_key(agent) {
-        return member_model(directory, agent);
+    let Some(proposer) =
+        proposed_by.map(str::trim).filter(|name| !name.is_empty())
+    else {
+        return Attribution {
+            kind: ProjectStatsModelKindWire::NoAgent,
+            provider: None,
+            model: None,
+            model_is_alias: false,
+            unknown_reason: None,
+        };
+    };
+    match lookup_named_model(directory, proposer, "plan") {
+        Ok((provider, model)) => resolved(provider, model, aliases),
+        Err(reason) => unknown(reason),
     }
-    family_shared_model(directory, agent)
+}
+
+fn lookup_named_model(
+    directory: &Directory,
+    name: &str,
+    role: &str,
+) -> Result<(String, String), &'static str> {
+    let role_page = format!("{name}--{role}");
+    if directory.by_name.contains_key(&role_page) {
+        return member_model(directory, &role_page);
+    }
+    if directory.by_name.contains_key(name) {
+        return member_model(directory, name);
+    }
+    family_shared_model(directory, name)
 }
 
 fn member_model(
@@ -244,6 +287,7 @@ mod tests {
             DirectoryMember {
                 name: "writer".to_owned(),
                 family: None,
+                role: None,
                 provider: Some("anthropic".to_owned()),
                 model: Some("claude".to_owned()),
                 model_metadata_present: true,
@@ -283,6 +327,7 @@ mod tests {
         let sha_member = DirectoryMember {
             name: "from-sha".to_owned(),
             family: None,
+            role: None,
             provider: Some("openai".to_owned()),
             model: Some("gpt".to_owned()),
             model_metadata_present: true,
@@ -305,6 +350,7 @@ mod tests {
             DirectoryMember {
                 name: "writer--code".to_owned(),
                 family: None,
+                role: None,
                 provider: Some("anthropic".to_owned()),
                 model: Some("opus".to_owned()),
                 model_metadata_present: true,
@@ -328,6 +374,7 @@ mod tests {
                 DirectoryMember {
                     name: name.to_owned(),
                     family: Some("clan".to_owned()),
+                    role: None,
                     provider: Some("xai".to_owned()),
                     model: Some("grok".to_owned()),
                     model_metadata_present: true,
@@ -367,5 +414,40 @@ mod tests {
         );
         assert_eq!(attributed.model.as_deref(), Some("sonnet"));
         assert!(attributed.model_is_alias);
+    }
+
+    #[test]
+    fn plan_attribution_prefers_proposed_with_then_plan_page() {
+        let mut directory = Directory::default();
+        directory.by_name.insert(
+            "writer--plan".to_owned(),
+            DirectoryMember {
+                name: "writer--plan".to_owned(),
+                family: None,
+                role: Some("plan".to_owned()),
+                provider: Some("anthropic".to_owned()),
+                model: Some("opus".to_owned()),
+                model_metadata_present: true,
+            },
+        );
+        let stamped = attribute_plan(
+            Some("openai/gpt"),
+            Some("writer"),
+            &directory,
+            &BTreeMap::new(),
+        );
+        assert_eq!(stamped.provider.as_deref(), Some("openai"));
+        assert_eq!(stamped.model.as_deref(), Some("gpt"));
+        let from_page =
+            attribute_plan(None, Some("writer"), &directory, &BTreeMap::new());
+        assert_eq!(from_page.model.as_deref(), Some("opus"));
+        let none = attribute_plan(None, None, &directory, &BTreeMap::new());
+        assert_eq!(none.kind, ProjectStatsModelKindWire::NoAgent);
+        let missing =
+            attribute_plan(None, Some("ghost"), &directory, &BTreeMap::new());
+        assert_eq!(
+            missing.unknown_reason.as_deref(),
+            Some(REASON_PAGE_UNPUBLISHED)
+        );
     }
 }

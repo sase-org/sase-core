@@ -27,6 +27,10 @@ mod classify_tests;
 #[cfg(test)]
 mod counter_tests;
 #[cfg(test)]
+mod directory_tests;
+#[cfg(test)]
+mod plans_tests;
+#[cfg(test)]
 mod query_tests;
 #[cfg(test)]
 mod records_tests;

@@ -8,11 +8,19 @@ use chrono_tz::Tz;
 use super::attribution::{attribute_commit, Attribution};
 use super::directory::Directory;
 use super::history::HistoryRow;
+use super::plans::{PlanAttribution, PlanMeasurement, PlanTier};
 use super::wire::{
     ProjectStatsCoverageWire, ProjectStatsLifetimeWire,
     ProjectStatsModelKindWire, ProjectStatsModelWire, ProjectStatsOutputWire,
     ProjectStatsUnknownReasonCountWire,
 };
+
+#[derive(Default)]
+struct PlanCounts {
+    plans: u64,
+    epic: u64,
+    tale: u64,
+}
 
 const SECONDS_PER_DAY: i64 = 86_400;
 
@@ -230,6 +238,140 @@ pub(crate) fn output_from_attributions(
     output
 }
 
+/// Overlay measured plan counts onto an Output document.
+pub(crate) fn apply_plan_measurement(
+    output: &mut ProjectStatsOutputWire,
+    plans: &PlanMeasurement,
+) {
+    output.plans_committed = plans.counts.plans_committed;
+    output.plans_epic = plans.counts.plans_epic;
+    output.plans_tale = plans.counts.plans_tale;
+    output.plan_coverage = plans.coverage.clone();
+    if plans.measured {
+        output.models =
+            merge_model_plan_counts(&output.models, &plans.attributions);
+    }
+    debug_assert!(check_output_invariants(output).is_ok());
+}
+
+fn merge_model_plan_counts(
+    commit_rows: &[ProjectStatsModelWire],
+    attributions: &[PlanAttribution],
+) -> Vec<ProjectStatsModelWire> {
+    let mut resolved: BTreeMap<(String, String, bool), PlanCounts> =
+        BTreeMap::new();
+    let mut unknown = PlanCounts::default();
+    let mut no_agent = PlanCounts::default();
+    for item in attributions {
+        let bucket = match item.attribution.kind {
+            ProjectStatsModelKindWire::Resolved => {
+                let provider =
+                    item.attribution.provider.clone().unwrap_or_default();
+                let model = item.attribution.model.clone().unwrap_or_default();
+                resolved
+                    .entry((provider, model, item.attribution.model_is_alias))
+                    .or_default()
+            }
+            ProjectStatsModelKindWire::Unknown => &mut unknown,
+            ProjectStatsModelKindWire::NoAgent => &mut no_agent,
+        };
+        bucket.plans += 1;
+        match item.tier {
+            PlanTier::Epic => bucket.epic += 1,
+            PlanTier::Tale => bucket.tale += 1,
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut trailing = Vec::new();
+    for row in commit_rows {
+        let mut row = row.clone();
+        match row.kind {
+            ProjectStatsModelKindWire::Resolved => {
+                let key = (
+                    row.provider.clone().unwrap_or_default(),
+                    row.model.clone().unwrap_or_default(),
+                    row.model_is_alias,
+                );
+                let counts = resolved.remove(&key).unwrap_or_default();
+                fill_plan_counts(&mut row, &counts);
+                rows.push(row);
+            }
+            ProjectStatsModelKindWire::Unknown => {
+                fill_plan_counts(&mut row, &unknown);
+                trailing.push(row);
+            }
+            ProjectStatsModelKindWire::NoAgent => {
+                fill_plan_counts(&mut row, &no_agent);
+                trailing.push(row);
+            }
+        }
+    }
+    for ((provider, model, model_is_alias), counts) in resolved {
+        rows.push(ProjectStatsModelWire {
+            kind: ProjectStatsModelKindWire::Resolved,
+            provider: Some(provider),
+            model: Some(model),
+            model_is_alias,
+            commits: 0,
+            plans: Some(counts.plans),
+            plans_epic: Some(counts.epic),
+            plans_tale: Some(counts.tale),
+            unknown_reasons: Vec::new(),
+        });
+    }
+    rows.sort_by(|left, right| {
+        right
+            .commits
+            .cmp(&left.commits)
+            .then(left.provider.cmp(&right.provider))
+            .then(left.model.cmp(&right.model))
+    });
+    if !trailing
+        .iter()
+        .any(|row| row.kind == ProjectStatsModelKindWire::Unknown)
+    {
+        trailing.insert(
+            0,
+            ProjectStatsModelWire {
+                kind: ProjectStatsModelKindWire::Unknown,
+                provider: None,
+                model: None,
+                model_is_alias: false,
+                commits: 0,
+                plans: Some(unknown.plans),
+                plans_epic: Some(unknown.epic),
+                plans_tale: Some(unknown.tale),
+                unknown_reasons: Vec::new(),
+            },
+        );
+    }
+    if !trailing
+        .iter()
+        .any(|row| row.kind == ProjectStatsModelKindWire::NoAgent)
+    {
+        trailing.push(ProjectStatsModelWire {
+            kind: ProjectStatsModelKindWire::NoAgent,
+            provider: None,
+            model: None,
+            model_is_alias: false,
+            commits: 0,
+            plans: Some(no_agent.plans),
+            plans_epic: Some(no_agent.epic),
+            plans_tale: Some(no_agent.tale),
+            unknown_reasons: Vec::new(),
+        });
+    }
+    rows.extend(trailing);
+    rows
+}
+
+fn fill_plan_counts(row: &mut ProjectStatsModelWire, counts: &PlanCounts) {
+    row.plans = Some(counts.plans);
+    row.plans_epic = Some(counts.epic);
+    row.plans_tale = Some(counts.tale);
+}
+
 pub(crate) fn attribution_coverage(
     configured_repos: u64,
     measured_repos: u64,
@@ -285,13 +427,13 @@ pub(crate) fn check_output_invariants(
                 "unavailable output must not report agent_commits".to_owned()
             );
         }
-        if !output.models.is_empty() {
+        if output.plans_committed.is_none() && !output.models.is_empty() {
             return Err(
                 "unavailable output must not emit a model distribution"
                     .to_owned(),
             );
         }
-        return Ok(());
+        return check_plan_invariants(output);
     };
     let agent_commits = output
         .agent_commits
@@ -343,6 +485,45 @@ pub(crate) fn check_output_invariants(
     } else if commits > 0 {
         return Err(
             "agent share is null for a measured nonzero denominator".to_owned()
+        );
+    }
+    check_plan_invariants(output)
+}
+
+fn check_plan_invariants(
+    output: &ProjectStatsOutputWire,
+) -> Result<(), String> {
+    let Some(plans) = output.plans_committed else {
+        return Ok(());
+    };
+    let epic = output.plans_epic.unwrap_or(0);
+    let tale = output.plans_tale.unwrap_or(0);
+    if epic + tale != plans {
+        return Err(format!(
+            "plan epic {epic} plus tale {tale} do not sum to {plans}"
+        ));
+    }
+    let mut plan_sum = 0;
+    let mut epic_sum = 0;
+    let mut tale_sum = 0;
+    for row in &output.models {
+        let row_plans = row.plans.ok_or_else(|| {
+            "measured plans require every model row to carry plan counts"
+                .to_owned()
+        })?;
+        plan_sum += row_plans;
+        epic_sum += row.plans_epic.unwrap_or(0);
+        tale_sum += row.plans_tale.unwrap_or(0);
+    }
+    if plan_sum != plans {
+        return Err(format!(
+            "model plan rows sum to {plan_sum}, expected {plans}"
+        ));
+    }
+    if epic_sum != epic || tale_sum != tale {
+        return Err(
+            "model epic/tale plan subtotals do not match output totals"
+                .to_owned(),
         );
     }
     Ok(())

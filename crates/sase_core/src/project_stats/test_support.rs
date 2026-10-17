@@ -62,6 +62,39 @@ pub(crate) fn commit(repo: &Path, relative: &str, text: &str, message: &str) {
     git(repo, &["commit", "-m", message]);
 }
 
+pub(crate) fn commit_files(repo: &Path, files: &[(&str, &str)], message: &str) {
+    for (relative, text) in files {
+        write_file(repo, relative, text);
+    }
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-m", message]);
+}
+
+pub(crate) fn commit_all(repo: &Path, message: &str) {
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-m", message]);
+}
+
+pub(crate) fn plan_markdown(
+    tier: &str,
+    proposed_with: Option<&str>,
+    proposed_by: Option<&str>,
+    project: Option<&str>,
+) -> String {
+    let mut frontmatter = format!("---\ntier: {tier}\n");
+    if let Some(value) = proposed_with {
+        frontmatter.push_str(&format!("proposed_with: {value}\n"));
+    }
+    if let Some(value) = proposed_by {
+        frontmatter.push_str(&format!("proposed_by: {value}\n"));
+    }
+    if let Some(value) = project {
+        frontmatter.push_str(&format!("project: {value}\n"));
+    }
+    frontmatter.push_str("---\n\n# Plan\n");
+    frontmatter
+}
+
 pub(crate) fn commit_at(
     repo: &Path,
     relative: &str,
