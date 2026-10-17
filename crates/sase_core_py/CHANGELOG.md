@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0](https://github.com/sase-org/sase-core/compare/v0.40.1...v0.41.0) - 2026-10-17
+
+### Added
+
+- *(project-stats)* aggregate Output and expose project_stats_query
+- *(bead)* attach launch claims to beads closed before submission
+
+### Fixed
+
+- *(project-stats)* [**breaking**] distinguish unavailable counts from measured zeros
+
 ## [0.40.1](https://github.com/sase-org/sase-core/compare/v0.40.0...v0.40.1) - 2026-10-16
 
 ### Added
