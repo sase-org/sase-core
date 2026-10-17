@@ -21,8 +21,10 @@ pub use index::{
 pub use lineage::{fold_lineages, fold_new_commits, path_alias_map};
 pub use parse::{parse_raw_log, RawChangeEntry, RawChangeKind, RawCommit};
 pub use runner::{
-    looks_like_full_sha, nonzero_oid, run_git_checked, run_git_unchecked,
-    safe_pathspec, safe_revision_token, GitResult,
+    looks_like_full_sha, nonzero_oid, run_git_checked,
+    run_git_checked_with_stdin, run_git_unchecked,
+    run_git_unchecked_with_stdin, safe_pathspec, safe_revision_token,
+    GitResult,
 };
 pub use status::{hash_worktree_blob, path_status};
 pub use wire::{

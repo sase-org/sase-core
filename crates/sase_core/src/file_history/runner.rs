@@ -4,17 +4,45 @@
 //! so user config cannot change the output, passes
 //! `--no-optional-locks` with `GIT_OPTIONAL_LOCKS=0` so background
 //! reads never fight writers, sets `GIT_TERMINAL_PROMPT=0` so git can
-//! never block on credentials, and takes pathspecs only after `--`.
-//! Timeouts and output caps yield `truncated = true`, never an error.
+//! never block on credentials, sets `GIT_NO_LAZY_FETCH=1` so reads
+//! cannot trigger on-demand fetches, and takes pathspecs only after
+//! `--`. Repository-routing variables inherited from the parent
+//! (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+//! `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+//! `GIT_COMMON_DIR`, and `GIT_NAMESPACE`) are removed so `-C`
+//! selects the repo. Timeouts and output caps yield
+//! `truncated = true`, never an error.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::Path;
-use std::process::{ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use super::wire::FileHistoryError;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+type StdinWorker<'scope> = ScopedJoinHandle<'scope, io::Result<()>>;
+type StdoutWorker<'scope> =
+    ScopedJoinHandle<'scope, io::Result<CapturedStdout>>;
+
+/// Parent-environment keys that would reroute git away from `-C`.
+const GIT_ROUTING_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
+#[derive(Debug, Default)]
+struct CapturedStdout {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
 
 /// Output of one git invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,18 +62,7 @@ pub fn run_git_checked(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<GitResult, FileHistoryError> {
-    let result = run_git_unchecked(repo, args, timeout, max_bytes)?;
-    if result.code == Some(0) {
-        Ok(result)
-    } else {
-        Err(FileHistoryError::GitFailed(format!(
-            "git {} exited with {}",
-            describe_args(args),
-            result
-                .code
-                .map_or("signal".to_string(), |code| code.to_string()),
-        )))
-    }
+    require_success(run_git_unchecked(repo, args, timeout, max_bytes)?, args)
 }
 
 /// Run git and report the exit code without failing on it. Used for
@@ -57,58 +74,45 @@ pub fn run_git_unchecked(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<GitResult, FileHistoryError> {
-    let mut child = Command::new("git")
-        .arg("-c")
-        .arg("core.quotepath=off")
-        .arg("-c")
-        .arg("diff.renames=true")
-        .arg("--no-optional-locks")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            FileHistoryError::GitFailed(format!("spawn git: {error}"))
-        })?;
-    // Drain stdout on a reader thread while polling for exit. Reading
-    // only after exit deadlocks once git writes more than the pipe
-    // buffer (64 KiB on Linux): git blocks on write while this thread
-    // blocks in `try_wait`, so the deadline always fires first.
-    let reader = child
-        .stdout
-        .take()
-        .map(|pipe| std::thread::spawn(move || drain_stdout(pipe, max_bytes)));
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait().map_err(|error| {
-            FileHistoryError::GitFailed(format!("wait git: {error}"))
-        })? {
-            Some(status) => {
-                let (stdout, size_truncated) = join_reader(reader);
-                return Ok(GitResult {
-                    code: status.code(),
-                    stdout,
-                    truncated: size_truncated,
-                });
-            }
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let (stdout, _) = join_reader(reader);
-                return Ok(GitResult {
-                    code: None,
-                    stdout,
-                    truncated: true,
-                });
-            }
-            None => std::thread::sleep(WAIT_POLL_INTERVAL),
-        }
-    }
+    run_process(git_command(repo, args), None, timeout, max_bytes)
+}
+
+/// Run git with a bounded stdin payload and require exit code zero.
+///
+/// Callers must still inspect [`GitResult::truncated`] when this
+/// returns `Ok`: git can exit zero after the byte cap or a timeout
+/// kill reports through the unchecked helper first.
+pub fn run_git_checked_with_stdin(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<GitResult, FileHistoryError> {
+    require_success(
+        run_git_unchecked_with_stdin(repo, args, stdin, timeout, max_bytes)?,
+        args,
+    )
+}
+
+/// Run git with a bounded stdin payload, writing it on a dedicated
+/// thread while stdout drains.
+///
+/// Stdin is closed after the write completes so batch commands such as
+/// `cat-file --batch` see EOF. The same whole-command deadline and
+/// output cap as [`run_git_unchecked`] apply. A stdin write or stdout
+/// read failure is an error rather than a successful-looking partial
+/// result; `BrokenPipe` on stdin is the expected early-exit path and
+/// is not a failure. Callers must still inspect
+/// [`GitResult::truncated`] when git exits zero.
+pub fn run_git_unchecked_with_stdin(
+    repo: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<GitResult, FileHistoryError> {
+    run_process(git_command(repo, args), Some(stdin), timeout, max_bytes)
 }
 
 /// Whether *value* is safe to pass as a git revision token: no
@@ -152,6 +156,204 @@ pub fn safe_pathspec(value: &str) -> bool {
         && value.bytes().all(|byte| !byte.is_ascii_control())
 }
 
+fn require_success(
+    result: GitResult,
+    args: &[&str],
+) -> Result<GitResult, FileHistoryError> {
+    if result.code == Some(0) {
+        Ok(result)
+    } else {
+        Err(FileHistoryError::GitFailed(format!(
+            "git {} exited with {}",
+            describe_args(args),
+            result
+                .code
+                .map_or("signal".to_string(), |code| code.to_string()),
+        )))
+    }
+}
+
+fn git_command(repo: &Path, args: &[&str]) -> Command {
+    git_command_with_injected_env(repo, args, &[])
+}
+
+fn git_command_with_injected_env(
+    repo: &Path,
+    args: &[&str],
+    injected: &[(&str, &str)],
+) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg("core.quotepath=off")
+        .arg("-c")
+        .arg("diff.renames=true")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(repo)
+        .args(args);
+    for &(key, value) in injected {
+        command.env(key, value);
+    }
+    apply_git_env(&mut command);
+    command
+}
+
+fn apply_git_env(command: &mut Command) {
+    for key in GIT_ROUTING_VARS {
+        command.env_remove(key);
+    }
+    command
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+}
+
+fn run_process(
+    mut command: Command,
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<GitResult, FileHistoryError> {
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|error| {
+        FileHistoryError::GitFailed(format!("spawn git: {error}"))
+    })?;
+    match std::thread::scope(|scope| {
+        run_spawned(scope, &mut child, stdin, timeout, max_bytes)
+    }) {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        }
+    }
+}
+
+fn run_spawned<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    child: &mut Child,
+    stdin: Option<&'scope [u8]>,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<GitResult, FileHistoryError> {
+    let stdin_pipe = child.stdin.take();
+    let stdout_pipe = child.stdout.take();
+    if stdin.is_some() && stdin_pipe.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(FileHistoryError::GitFailed(
+            "git stdin missing".to_string(),
+        ));
+    }
+    if stdout_pipe.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(FileHistoryError::GitFailed(
+            "git stdout missing".to_string(),
+        ));
+    }
+    let writer = match (stdin, stdin_pipe) {
+        (Some(bytes), Some(pipe)) => {
+            Some(scope.spawn(move || write_stdin(pipe, bytes)))
+        }
+        _ => None,
+    };
+    let reader = stdout_pipe
+        .map(|pipe| scope.spawn(move || drain_stdout(pipe, max_bytes)));
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return finish_exited(status.code(), writer, reader);
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                return finish_timeout(child, writer, reader);
+            }
+            Ok(None) => std::thread::sleep(WAIT_POLL_INTERVAL),
+            Err(error) => {
+                reap_and_join(child, true, writer, reader);
+                return Err(FileHistoryError::GitFailed(format!(
+                    "wait git: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn finish_exited(
+    code: Option<i32>,
+    writer: Option<StdinWorker<'_>>,
+    reader: Option<StdoutWorker<'_>>,
+) -> Result<GitResult, FileHistoryError> {
+    let (write, read) = join_workers(writer, reader);
+    write.map_err(|error| {
+        FileHistoryError::GitFailed(format!("git stdin: {error}"))
+    })?;
+    let captured = read.map_err(|error| {
+        FileHistoryError::GitFailed(format!("git stdout: {error}"))
+    })?;
+    Ok(GitResult {
+        code,
+        stdout: captured.bytes,
+        truncated: captured.truncated,
+    })
+}
+
+fn finish_timeout(
+    child: &mut Child,
+    writer: Option<StdinWorker<'_>>,
+    reader: Option<StdoutWorker<'_>>,
+) -> Result<GitResult, FileHistoryError> {
+    let captured = reap_and_join(child, true, writer, reader);
+    Ok(GitResult {
+        code: None,
+        stdout: captured.bytes,
+        truncated: true,
+    })
+}
+
+fn reap_and_join(
+    child: &mut Child,
+    kill: bool,
+    writer: Option<StdinWorker<'_>>,
+    reader: Option<StdoutWorker<'_>>,
+) -> CapturedStdout {
+    if kill {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    let (_, read) = join_workers(writer, reader);
+    read.unwrap_or_default()
+}
+
+fn join_workers(
+    writer: Option<StdinWorker<'_>>,
+    reader: Option<StdoutWorker<'_>>,
+) -> (io::Result<()>, io::Result<CapturedStdout>) {
+    let write = match writer {
+        Some(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other("git stdin thread panicked")),
+        },
+        None => Ok(()),
+    };
+    let read = match reader {
+        Some(handle) => match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other("git stdout thread panicked")),
+        },
+        None => Ok(CapturedStdout::default()),
+    };
+    (write, read)
+}
+
 fn describe_args(args: &[&str]) -> String {
     args.iter()
         .take(4)
@@ -160,13 +362,18 @@ fn describe_args(args: &[&str]) -> String {
         .join(" ")
 }
 
-/// Join a stdout reader thread, tolerating a missing or failed thread.
-fn join_reader(
-    reader: Option<std::thread::JoinHandle<(Vec<u8>, bool)>>,
-) -> (Vec<u8>, bool) {
-    reader
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+/// Write *bytes* then close stdin so batch git commands see EOF.
+///
+/// `BrokenPipe` means the child closed early (exit or kill) and is
+/// not treated as a write failure.
+fn write_stdin(mut pipe: ChildStdin, bytes: &[u8]) -> io::Result<()> {
+    let result = match pipe.write_all(bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(error),
+    };
+    drop(pipe);
+    result
 }
 
 /// Drain a child's stdout to EOF, keeping at most `max_bytes`.
@@ -175,7 +382,10 @@ fn join_reader(
 /// stopping early would leave git blocked on write and deadlock the
 /// wait loop for outputs larger than the pipe buffer. Excess bytes are
 /// discarded; the flag reports whether the cap was exceeded.
-fn drain_stdout(mut pipe: ChildStdout, max_bytes: u64) -> (Vec<u8>, bool) {
+fn drain_stdout(
+    mut pipe: ChildStdout,
+    max_bytes: u64,
+) -> io::Result<CapturedStdout> {
     let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
     let mut buf = Vec::new();
     let mut total: u64 = 0;
@@ -190,15 +400,25 @@ fn drain_stdout(mut pipe: ChildStdout, max_bytes: u64) -> (Vec<u8>, bool) {
                     buf.extend_from_slice(&chunk[..read.min(room)]);
                 }
             }
-            Err(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(error) => return Err(error),
         }
     }
-    (buf, total > max_bytes)
+    Ok(CapturedStdout {
+        bytes: buf,
+        truncated: total > max_bytes,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    const PIPE_BUFFER_BYTES: usize = 64 * 1024;
+    const OVER_PIPE: usize = 200_000;
 
     #[test]
     fn revision_tokens_reject_options_and_ranges() {
@@ -245,25 +465,10 @@ mod tests {
         // more than the 64 KiB pipe buffer. Reading stdout only after
         // exit deadlocked here: git blocked on write while the wait
         // loop polled, so the deadline always fired first.
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let run = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(status.success(), "git {args:?} failed");
-        };
-        run(&["init", "--initial-branch=master"]);
-        run(&["config", "user.name", "SASE Test"]);
-        run(&["config", "user.email", "sase@example.com"]);
-        run(&["config", "commit.gpgsign", "false"]);
-        std::fs::write(repo.join("big.txt"), "x".repeat(200_000)).unwrap();
-        run(&["add", "-A"]);
-        run(&["commit", "-m", "big"]);
+        let (_tmp, repo) = init_test_repo();
+        std::fs::write(repo.join("big.txt"), "x".repeat(OVER_PIPE)).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "big"]);
         let timeout = Duration::from_secs(30);
         let result = run_git_unchecked(
             &repo,
@@ -274,7 +479,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.code, Some(0));
         assert!(
-            result.stdout.len() > 64 * 1024,
+            result.stdout.len() > PIPE_BUFFER_BYTES,
             "output is {} bytes",
             result.stdout.len()
         );
@@ -301,5 +506,276 @@ mod tests {
         assert!(!safe_pathspec(":(glob)**"));
         assert!(!safe_pathspec("a:b"));
         assert!(!safe_pathspec("a\nb"));
+    }
+
+    #[test]
+    fn routing_env_vars_are_removed_and_lock_vars_are_set() {
+        let injected: Vec<(&str, &str)> = GIT_ROUTING_VARS
+            .iter()
+            .map(|key| (*key, "/sase-git-runner-bogus"))
+            .chain([
+                ("GIT_NO_LAZY_FETCH", "0"),
+                ("GIT_OPTIONAL_LOCKS", "1"),
+                ("GIT_TERMINAL_PROMPT", "1"),
+            ])
+            .collect();
+        let dumped = child_env_with_injected(&injected);
+        for key in GIT_ROUTING_VARS {
+            assert!(
+                !dumped
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}="))),
+                "{key} leaked into the child:\n{dumped}"
+            );
+        }
+        assert!(
+            dumped.lines().any(|line| line == "GIT_NO_LAZY_FETCH=1"),
+            "GIT_NO_LAZY_FETCH missing:\n{dumped}"
+        );
+        assert!(
+            dumped.lines().any(|line| line == "GIT_OPTIONAL_LOCKS=0"),
+            "GIT_OPTIONAL_LOCKS missing:\n{dumped}"
+        );
+        assert!(
+            dumped.lines().any(|line| line == "GIT_TERMINAL_PROMPT=0"),
+            "GIT_TERMINAL_PROMPT missing:\n{dumped}"
+        );
+    }
+
+    #[test]
+    fn injected_routing_env_does_not_reroute_git() {
+        let (_tmp, repo) = init_test_repo();
+        let injected: Vec<(&str, &str)> = GIT_ROUTING_VARS
+            .iter()
+            .map(|key| (*key, "/sase-git-runner-bogus"))
+            .collect();
+        let result = run_process(
+            git_command_with_injected_env(
+                &repo,
+                &["rev-parse", "--is-inside-work-tree"],
+                &injected,
+            ),
+            None,
+            Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "true");
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn batch_stdin_success_hashes_payload() {
+        let (_tmp, repo) = init_test_repo();
+        let payload = b"hello\n";
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &["hash-object", "--stdin"],
+            payload,
+            Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(!result.truncated);
+        let expected = git_hash_object(&repo, payload);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).trim(),
+            expected.trim()
+        );
+    }
+
+    #[test]
+    fn batch_stdin_larger_than_the_pipe_buffer_does_not_deadlock() {
+        let (_tmp, repo) = init_test_repo();
+        let payload = vec![b'x'; OVER_PIPE];
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &["hash-object", "--stdin"],
+            &payload,
+            Duration::from_secs(30),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(!result.truncated);
+        let expected = git_hash_object(&repo, &payload);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).trim(),
+            expected.trim()
+        );
+    }
+
+    #[test]
+    fn batch_stdin_and_stdout_both_exceed_pipe_capacity() {
+        let (_tmp, repo) = init_test_repo();
+        let oid = "0".repeat(40);
+        let mut input = Vec::new();
+        for _ in 0..3000 {
+            input.extend_from_slice(oid.as_bytes());
+            input.push(b'\n');
+        }
+        assert!(input.len() > PIPE_BUFFER_BYTES);
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &["cat-file", "--batch-check"],
+            &input,
+            Duration::from_secs(30),
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(
+            result.stdout.len() > PIPE_BUFFER_BYTES,
+            "output is {} bytes",
+            result.stdout.len()
+        );
+        assert!(!result.truncated);
+        let text = String::from_utf8_lossy(&result.stdout);
+        assert!(text.contains("missing"));
+    }
+
+    #[test]
+    fn batch_stdin_reports_nonzero_git_exit() {
+        let (_tmp, repo) = init_test_repo();
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                "definitely-missing-ref",
+            ],
+            b"",
+            Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert_ne!(result.code, Some(0));
+        assert!(run_git_checked_with_stdin(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                "definitely-missing-ref",
+            ],
+            b"",
+            Duration::from_secs(10),
+            4096,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn batch_stdin_truncation_is_visible_on_zero_exit() {
+        let (_tmp, repo) = init_test_repo();
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &["hash-object", "--stdin"],
+            b"hello\n",
+            Duration::from_secs(10),
+            4,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(result.stdout.len(), 4);
+        assert!(result.truncated);
+        let checked = run_git_checked_with_stdin(
+            &repo,
+            &["hash-object", "--stdin"],
+            b"hello\n",
+            Duration::from_secs(10),
+            4,
+        )
+        .unwrap();
+        assert_eq!(checked.code, Some(0));
+        assert!(checked.truncated);
+    }
+
+    #[test]
+    fn timeout_kills_child_and_joins_a_blocked_writer() {
+        let payload = vec![b'x'; OVER_PIPE];
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let result = run_process(
+            command,
+            Some(payload.as_slice()),
+            Duration::from_millis(400),
+            1024,
+        )
+        .unwrap();
+        assert_eq!(result.code, None);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn early_exit_broken_pipe_is_not_a_write_failure() {
+        let (_tmp, repo) = init_test_repo();
+        let payload = vec![b'x'; OVER_PIPE];
+        let result = run_git_unchecked_with_stdin(
+            &repo,
+            &["rev-parse", "--is-inside-work-tree"],
+            &payload,
+            Duration::from_secs(10),
+            4096,
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "true");
+        assert!(!result.truncated);
+    }
+
+    fn init_test_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=master"]);
+        git(&repo, &["config", "user.name", "SASE Test"]);
+        git(&repo, &["config", "user.email", "sase@example.com"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        (tmp, repo)
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_hash_object(repo: &Path, payload: &[u8]) -> String {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["hash-object", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(payload).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "git hash-object failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn child_env_with_injected(injected: &[(&str, &str)]) -> String {
+        let mut command = Command::new("env");
+        for &(key, value) in injected {
+            command.env(key, value);
+        }
+        apply_git_env(&mut command);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "env failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 }
