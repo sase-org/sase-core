@@ -497,9 +497,9 @@ fn index_journals(
         }
         match index.get(&key) {
             Some(existing)
-                if existing.updated_at >= journal.updated_at
-                    && !(existing.updated_at.is_empty()
-                        && !journal.updated_at.is_empty()) => {}
+                if (journal.updated_at.is_empty()
+                    || !existing.updated_at.is_empty())
+                    && existing.updated_at >= journal.updated_at => {}
             _ => {
                 index.insert(key, journal.clone());
             }

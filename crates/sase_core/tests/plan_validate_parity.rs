@@ -87,6 +87,7 @@ fn plan_validate_matches_python_facade_fixture() {
             "parent_bead": "sase-7z.1",
             "bead": "sase-88.1",
             "proposed_by": null,
+            "proposed_with": null,
             "parent": "sase/repos/plans/202607/parent.md"
         }
     });
