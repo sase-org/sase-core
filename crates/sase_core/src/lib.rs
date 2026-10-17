@@ -109,6 +109,7 @@ pub mod plan;
 pub mod procs;
 pub mod project_onboarding;
 pub mod project_spec;
+pub mod project_stats;
 pub mod project_tag;
 pub mod prompt_archive;
 pub mod prompt_artifact;
