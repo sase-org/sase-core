@@ -37,6 +37,7 @@ const SYSTEM_FIELDS: &[&str] = &[
     "project",
     "bead",
     "proposed_by",
+    "proposed_with",
     "parent",
     "bead_id",
 ];
@@ -151,6 +152,7 @@ pub struct ValidatedPlanWire {
     pub parent_bead: Option<String>,
     pub bead: Option<String>,
     pub proposed_by: Option<String>,
+    pub proposed_with: Option<String>,
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
@@ -447,6 +449,13 @@ pub fn plan_frontmatter_schema(
             json!("bbugyi200.athena.q8--plan"),
         ),
         field_spec(
+            "proposed_with",
+            "non-empty string",
+            false,
+            "Provider/model of the SASE agent that proposed this plan, written by SASE.",
+            json!("claude/opus"),
+        ),
+        field_spec(
             "project",
             "non-empty string",
             false,
@@ -561,6 +570,8 @@ impl<'a> Validator<'a> {
         let bead = self.optional_non_empty_string(mapping, "bead", &index);
         let proposed_by =
             self.optional_non_empty_string(mapping, "proposed_by", &index);
+        let proposed_with =
+            self.optional_non_empty_string(mapping, "proposed_with", &index);
         let parent = self.optional_non_empty_string(mapping, "parent", &index);
         if parent.is_some() {
             self.push(
@@ -652,6 +663,7 @@ impl<'a> Validator<'a> {
             parent_bead,
             bead,
             proposed_by,
+            proposed_with,
             parent,
             project,
             decisions: frontmatter.decisions,
@@ -1626,6 +1638,7 @@ mod tests {
                 parent_bead: None,
                 bead: Some("sase-88.1".to_string()),
                 proposed_by: None,
+                proposed_with: None,
                 parent: Some("sase/repos/plans/202607/parent.md".to_string(),),
                 project: None,
                 decisions: Vec::new(),
@@ -1920,6 +1933,7 @@ mod tests {
                 parent_bead: None,
                 bead: None,
                 proposed_by: None,
+                proposed_with: None,
                 parent: None,
                 project: None,
                 decisions: Vec::new(),
@@ -2159,7 +2173,9 @@ mod tests {
             );
             let result = plan_validate(&without, tier).unwrap();
             assert!(result.ok, "{tier}: {:?}", result.diagnostics);
-            assert_eq!(result.plan.unwrap().proposed_by, None);
+            let plan = result.plan.unwrap();
+            assert_eq!(plan.proposed_by, None);
+            assert_eq!(plan.proposed_with, None);
 
             let with = without.replace(
                 "goal: Validate proposal attribution\n",
@@ -2167,9 +2183,21 @@ mod tests {
             );
             let result = plan_validate(&with, tier).unwrap();
             assert!(result.ok, "{tier}: {:?}", result.diagnostics);
+            let plan = result.plan.unwrap();
             assert_eq!(
-                result.plan.unwrap().proposed_by.as_deref(),
+                plan.proposed_by.as_deref(),
                 Some("bbugyi200.athena.q8--plan")
+            );
+
+            let with_model = without.replace(
+                "goal: Validate proposal attribution\n",
+                "goal: Validate proposal attribution\nproposed_with: ' claude/opus '\n",
+            );
+            let result = plan_validate(&with_model, tier).unwrap();
+            assert!(result.ok, "{tier}: {:?}", result.diagnostics);
+            assert_eq!(
+                result.plan.unwrap().proposed_with.as_deref(),
+                Some("claude/opus")
             );
 
             for (value, code) in [
@@ -2182,6 +2210,19 @@ mod tests {
                 assert!(!result.ok, "{tier}: {value}");
                 assert!(result.diagnostics.iter().any(|diagnostic| {
                     diagnostic.field_path == "proposed_by"
+                        && diagnostic.code == code
+                }));
+            }
+
+            for (value, code) in [
+                ("'   '", "value-empty"),
+                ("[claude, opus]", "type-mismatch"),
+            ] {
+                let invalid = with_model.replace("' claude/opus '", value);
+                let result = plan_validate(&invalid, tier).unwrap();
+                assert!(!result.ok, "{tier}: {value}");
+                assert!(result.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.field_path == "proposed_with"
                         && diagnostic.code == code
                 }));
             }
@@ -2271,6 +2312,7 @@ mod tests {
                 "decided_via",
                 "bead",
                 "proposed_by",
+                "proposed_with",
                 "project",
                 "parent",
                 "bead_id",
@@ -2312,6 +2354,7 @@ mod tests {
                 "decided_via",
                 "bead",
                 "proposed_by",
+                "proposed_with",
                 "project",
                 "parent",
                 "bead_id",
@@ -2354,6 +2397,10 @@ mod tests {
             (
                 "proposed_by",
                 "Name of the SASE agent that proposed this plan, written by SASE.",
+            ),
+            (
+                "proposed_with",
+                "Provider/model of the SASE agent that proposed this plan, written by SASE.",
             ),
             (
                 "project",

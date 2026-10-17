@@ -501,6 +501,7 @@ mod tests {
             parent_bead: None,
             bead: None,
             proposed_by: None,
+            proposed_with: None,
             parent: None,
             project: None,
             decisions,
