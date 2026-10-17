@@ -63,9 +63,11 @@ mod unix {
     const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
     const INITIAL_BACKOFF: Duration = Duration::from_millis(5);
     const MAX_BACKOFF: Duration = Duration::from_millis(250);
-    const CONTAINING_MODE: u32 = 0o755;
-    const PROTECTED_DIR_MODE: u32 = 0o700;
-    const PROTECTED_FILE_MODE: u32 = 0o600;
+    // mode_t is u32 on Linux and u16 on macOS; keep these native at the syscall
+    // boundary so mkdirat/fchmod/openat compile on both.
+    const CONTAINING_MODE: libc::mode_t = 0o755;
+    const PROTECTED_DIR_MODE: libc::mode_t = 0o700;
+    const PROTECTED_FILE_MODE: libc::mode_t = 0o600;
 
     pub(crate) struct ProtectedDir {
         dir: OwnedFd,
@@ -436,7 +438,7 @@ mod unix {
     fn mkdirat(
         parent: libc::c_int,
         name: &CString,
-        mode: u32,
+        mode: libc::mode_t,
     ) -> Result<(), Error> {
         let rc = unsafe { libc::mkdirat(parent, name.as_ptr(), mode) };
         if rc != 0 {
@@ -513,7 +515,7 @@ mod unix {
         }
     }
 
-    fn fchmod_fd(fd: libc::c_int, mode: u32) -> Result<(), Error> {
+    fn fchmod_fd(fd: libc::c_int, mode: libc::mode_t) -> Result<(), Error> {
         let rc = unsafe { libc::fchmod(fd, mode) };
         if rc != 0 {
             Err(Error::Unavailable)
@@ -522,7 +524,7 @@ mod unix {
         }
     }
 
-    fn fchmod_file(file: &File, mode: u32) -> Result<(), Error> {
+    fn fchmod_file(file: &File, mode: libc::mode_t) -> Result<(), Error> {
         fchmod_fd(file.as_raw_fd(), mode)
     }
 
