@@ -4,8 +4,10 @@
 //! History, attribution, and facet implementations can then be added behind
 //! these interfaces without changing the request or response shape.
 
+mod cache;
 mod code;
 mod directory;
+mod git;
 mod history;
 mod output;
 mod plans;
@@ -14,6 +16,8 @@ mod runs;
 mod snapshot;
 mod wire;
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
