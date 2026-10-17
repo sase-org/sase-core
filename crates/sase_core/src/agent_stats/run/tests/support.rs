@@ -94,6 +94,7 @@ pub(super) fn request() -> AgentRunStatsRequestWire {
         macro_top_n: 40,
         macro_breakdown_top_n: 5,
         macro_focus: None,
+        excluded_commit_repo_names: Vec::new(),
     }
 }
 
@@ -128,6 +129,7 @@ pub(super) fn runner_request(
         macro_top_n: 40,
         macro_breakdown_top_n: 5,
         macro_focus: None,
+        excluded_commit_repo_names: Vec::new(),
     }
 }
 

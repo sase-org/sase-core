@@ -70,6 +70,10 @@ pub struct AgentRunStatsRequestWire {
     /// Exact macro name to include as an unbounded focused breakdown.
     #[serde(default)]
     pub macro_focus: Option<String>,
+    /// `meta_commits[].repo_name` values omitted from project and Patch
+    /// commit folds. An empty list keeps every recorded commit.
+    #[serde(default)]
+    pub excluded_commit_repo_names: Vec<String>,
 }
 
 /// Query controls for durable activity-log and plan statistics.
@@ -600,6 +604,7 @@ mod tests {
         assert_eq!(decoded.macro_top_n, 40);
         assert_eq!(decoded.macro_breakdown_top_n, 5);
         assert_eq!(decoded.macro_focus, None);
+        assert!(decoded.excluded_commit_repo_names.is_empty());
     }
 
     #[test]

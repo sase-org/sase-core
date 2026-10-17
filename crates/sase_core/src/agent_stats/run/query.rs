@@ -5,7 +5,7 @@
 //! per-row work fans out to the lifecycle, fold, attribution, and
 //! finishing modules.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
@@ -112,6 +112,12 @@ pub(super) fn query_run_stats_with_liveness(
     let mut workspace_counts = BTreeMap::<(String, i64), u64>::new();
     let mut runtime_groups = BTreeMap::<String, DurationAccumulator>::new();
     let mut work = WorkAccumulators::default();
+    let excluded_commit_repos: HashSet<String> = request
+        .excluded_commit_repo_names
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
     let mut macros = MacroAccumulators {
         runs_with_macros: 0,
         runs_without_macros: 0,
@@ -195,7 +201,8 @@ pub(super) fn query_run_stats_with_liveness(
         }
 
         let duration = run_duration_seconds(&record, &row);
-        let attribution = resolve_run_attribution(&record, &row);
+        let attribution =
+            resolve_run_attribution(&record, &row, &excluded_commit_repos);
         fold_macros(
             &record,
             &row,

@@ -4,7 +4,7 @@
 //! then folds and finishes the per-project and per-patch work tables,
 //! including spec-file metadata.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -23,6 +23,7 @@ use super::types::*;
 pub(super) fn resolve_run_attribution(
     record: &AgentArtifactRecordWire,
     row: &IndexRunRow,
+    excluded_commit_repos: &HashSet<String>,
 ) -> RunAttribution {
     let meta_commits = record
         .done
@@ -35,6 +36,9 @@ pub(super) fn resolve_run_attribution(
     if let Some(meta_commits) = meta_commits {
         for commit in meta_commits.iter().filter_map(|value| value.as_object())
         {
+            if commit_repo_excluded(commit, excluded_commit_repos) {
+                continue;
+            }
             total_commits += 1;
             let name = commit
                 .get("patch_name")
@@ -95,6 +99,20 @@ pub(super) fn resolve_run_attribution(
         patches: Vec::new(),
         total_commits,
     }
+}
+
+fn commit_repo_excluded(
+    commit: &serde_json::Map<String, serde_json::Value>,
+    excluded: &HashSet<String>,
+) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    commit
+        .get("repo_name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|name| !name.is_empty() && excluded.contains(name))
 }
 
 pub(super) fn real_patch_name(

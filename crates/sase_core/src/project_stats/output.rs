@@ -340,13 +340,3 @@ fn source_token(
         .to_string(),
     }
 }
-
-/// Runs-phase hook: `if_runs` filtering stays a no-op until run counts exist.
-pub(crate) fn include_project(
-    project: &super::wire::ProjectStatsProjectSpecWire,
-) -> bool {
-    match project.selection {
-        super::wire::ProjectStatsSelectionWire::Always
-        | super::wire::ProjectStatsSelectionWire::IfRuns => true,
-    }
-}

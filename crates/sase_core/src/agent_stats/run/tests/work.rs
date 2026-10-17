@@ -306,3 +306,67 @@ fn missing_archive_spec_is_not_malformed() {
     assert_eq!(result.work.patches[0].name, "clean-spec");
     assert_eq!(result.work.patches[0].status, "Ready");
 }
+
+#[test]
+fn excluded_commit_repo_names_skip_project_and_patch_folds_only() {
+    let tmp = tempdir().unwrap();
+    let projects = tmp.path().join("projects");
+    let project = "gh_sase-org__sase";
+    let start = "2026-07-10T01:00:00Z";
+    add_project_run(
+        &projects,
+        project,
+        "20260710010000",
+        json!({
+            "name": "writer",
+            "run_started_at": start,
+            "cl_name": "code-spec"
+        }),
+        Some(json!({
+            "outcome": "completed",
+            "finished_at": finish_at(start, 40.0),
+            "step_output": {"meta_commits": [
+                {"sha": "1", "repo_name": "sase", "patch_name": "code-spec"},
+                {"sha": "2", "repo_name": "beads", "patch_name": "code-spec"},
+                {"sha": "3", "repo_name": "plans", "patch_name": "code-spec"}
+            ]}
+        })),
+        false,
+    );
+    let index = tmp.path().join("agent_artifact_index.sqlite");
+    rebuild_agent_artifact_index(
+        &index,
+        &projects,
+        AgentArtifactScanOptionsWire::default(),
+    )
+    .unwrap();
+
+    let omitted: crate::agent_stats::AgentRunStatsRequestWire =
+        serde_json::from_value(serde_json::json!({
+            "start_ts": request().start_ts,
+            "end_ts": request().end_ts,
+            "bucket_seconds": request().bucket_seconds,
+            "top_n": request().top_n,
+            "work_top_n": request().work_top_n,
+        }))
+        .unwrap();
+    let mut empty = request();
+    empty.excluded_commit_repo_names = Vec::new();
+    let baseline = query_run_stats(&index, omitted).unwrap();
+    let empty_set = query_run_stats(&index, empty).unwrap();
+    assert_eq!(baseline.work, empty_set.work);
+    assert_eq!(baseline.work.projects[0].commits, 3);
+    assert_eq!(baseline.work.patches[0].commits, 3);
+    assert_eq!(baseline.commits.total_commits, 3);
+
+    let mut excluded = request();
+    excluded.excluded_commit_repo_names =
+        vec!["beads".to_string(), "plans".to_string()];
+    let filtered = query_run_stats(&index, excluded).unwrap();
+    assert_eq!(filtered.work.projects[0].commits, 1);
+    assert_eq!(filtered.work.patches[0].commits, 1);
+    assert_eq!(
+        filtered.commits.total_commits,
+        baseline.commits.total_commits
+    );
+}

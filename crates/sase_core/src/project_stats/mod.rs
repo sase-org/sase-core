@@ -21,6 +21,8 @@ mod wire;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]
+mod runs_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

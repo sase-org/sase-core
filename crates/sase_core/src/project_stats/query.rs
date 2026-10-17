@@ -29,19 +29,30 @@ struct WalkedSource {
 
 type SpecInstanceKey = (String, Vec<String>, String, String);
 
-/// Validate the request, walk unique repositories once, and fill Output.
+/// Validate the request, walk unique repositories once, and fill Output
+/// plus the Runs facet when requested.
 ///
-/// Code, Runs, and plan seams stay unimplemented until sibling phases land.
-/// `selection: if_runs` is preserved as a dispatch hook and does not invent
-/// run counts.
+/// Code and plan seams stay unimplemented until sibling phases land.
 pub fn query_project_stats(
     request: &ProjectStatsRequestWire,
 ) -> Result<ProjectStatsResponseWire, ProjectStatsError> {
     validate_project_stats_request(request)?;
 
     let directory = directory::load_directory();
-    let walks = load_unique_sources(request);
-    let mut projects = Vec::with_capacity(request.projects.len());
+    let runs_snapshot = if runs::needs_snapshot(request) {
+        Some(runs::load(request))
+    } else {
+        None
+    };
+    let selected: Vec<&ProjectStatsProjectSpecWire> = request
+        .projects
+        .iter()
+        .filter(|project| {
+            runs::include_project(project, runs_snapshot.as_ref())
+        })
+        .collect();
+    let walks = load_unique_sources(request, &selected);
+    let mut projects = Vec::with_capacity(selected.len());
     let mut all_issues = Vec::new();
     let mut all_tokens = BTreeSet::new();
     let mut facet_tokens = BTreeSet::new();
@@ -51,10 +62,7 @@ pub fn query_project_stats(
     let wants_code = wants_facet(request, ProjectStatsFacetWire::Code);
     let wants_runs = wants_facet(request, ProjectStatsFacetWire::Runs);
 
-    for project in &request.projects {
-        if !output::include_project(project) {
-            continue;
-        }
+    for project in selected {
         let measured = project_repos(project, &walks);
         let context = FacetContext {
             request,
@@ -64,15 +72,15 @@ pub fn query_project_stats(
         };
         let output_measured = output::measure(&context);
         let code_result = code::query(&context);
-        let runs_result = runs::query(&context);
         let _plans = plans::query(&context);
+        let mapped_runs = runs_snapshot
+            .as_ref()
+            .map(|snapshot| runs::map_project(snapshot, project, wants_runs));
         facet_tokens.extend(code_result.source_tokens);
-        facet_tokens.extend(runs_result.source_tokens);
 
         all_tokens.extend(output_measured.source_tokens.iter().cloned());
         all_issues.extend(output_measured.issues.iter().cloned());
         all_issues.extend(code_result.issues.iter().cloned());
-        all_issues.extend(runs_result.issues.iter().cloned());
 
         if wants_output {
             collect_portfolio_code(
@@ -106,6 +114,13 @@ pub fn query_project_stats(
             )
         };
 
+        let (runs_value, patches, truncated_patch_rows) = match mapped_runs {
+            Some(mapped) => {
+                (mapped.runs, mapped.patches, mapped.truncated_patch_rows)
+            }
+            None => (None, Vec::new(), 0),
+        };
+
         projects.push(ProjectStatsProjectWire {
             key: project.key.clone(),
             label: project.label.clone(),
@@ -113,17 +128,33 @@ pub fn query_project_stats(
             output,
             lifetime,
             code: if wants_code { code_result.value } else { None },
-            runs: if wants_runs { runs_result.value } else { None },
+            runs: runs_value,
             repos,
             not_counted: project.not_counted.clone(),
             models,
-            patches: Vec::new(),
-            truncated_patch_rows: 0,
+            patches,
+            truncated_patch_rows,
             coverage,
         });
     }
 
-    let portfolio = if wants_output {
+    if let Some(snapshot) = &runs_snapshot {
+        facet_tokens.extend(snapshot.source_tokens.iter().cloned());
+        if wants_runs {
+            all_issues.extend(snapshot.issues.iter().cloned());
+            if let Some(issue) = runs::truncation_issue(snapshot) {
+                all_issues.push(issue);
+            }
+        }
+        if request.include_run_only_projects {
+            let claimed = runs::claimed_index_names(&request.projects);
+            projects.extend(runs::unregistered_projects(
+                snapshot, &claimed, wants_runs,
+            ));
+        }
+    }
+
+    let mut portfolio = if wants_output {
         portfolio_from_rows(
             request,
             &directory,
@@ -133,6 +164,9 @@ pub fn query_project_stats(
     } else {
         ProjectStatsPortfolioWire::default()
     };
+    if wants_runs {
+        portfolio.runs = runs::portfolio_runs(&projects);
+    }
 
     let fingerprint = fingerprint(
         request,
@@ -177,6 +211,7 @@ fn spec_instance_key(spec: &ProjectStatsRepoSpecWire) -> SpecInstanceKey {
 
 fn load_unique_sources(
     request: &ProjectStatsRequestWire,
+    projects: &[&ProjectStatsProjectSpecWire],
 ) -> BTreeMap<SpecInstanceKey, WalkedSource> {
     let mut resolve_cache: BTreeMap<
         (String, Vec<String>),
@@ -188,7 +223,7 @@ fn load_unique_sources(
     > = BTreeMap::new();
     let mut by_spec = BTreeMap::new();
     let mut specs = Vec::new();
-    for project in &request.projects {
+    for project in projects {
         for spec in &project.code_repos {
             specs.push(spec);
         }
