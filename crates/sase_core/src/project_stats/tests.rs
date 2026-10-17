@@ -453,22 +453,24 @@ fn enums_use_snake_case_and_cover_contract_variants() {
 }
 
 #[test]
-fn scaffold_keeps_unimplemented_facets_null_and_fingerprint_ignores_cache_dir()
-{
+fn unimplemented_facets_stay_null_and_fingerprint_ignores_cache_dir() {
     let mut first_request = request();
-    let first = query_project_stats(&first_request).expect("query scaffold");
+    let first = query_project_stats(&first_request).expect("query");
     assert_eq!(first.projects.len(), 1);
     let first_project = &first.projects[0];
-    assert!(first_project.output.is_none());
-    assert!(first_project.lifetime.is_none());
+    let output = first_project.output.as_ref().expect("output facet");
+    assert!(first_project.lifetime.is_some());
     assert!(first_project.code.is_none());
     assert!(first_project.runs.is_none());
+    assert_eq!(output.commits, 0);
     assert_eq!(first_project.coverage.configured_repos, 1);
-    assert_eq!(first_project.coverage.measured_repos, 0);
+    assert_eq!(first_project.coverage.unavailable_repos, 1);
+    assert_eq!(first.portfolio.output.as_ref().unwrap().commits, 0);
+    assert_eq!(first.portfolio.code, None);
+    assert_eq!(first.portfolio.runs, None);
 
     first_request.cache_dir = "/other/cache".to_owned();
-    let second =
-        query_project_stats(&first_request).expect("second query scaffold");
+    let second = query_project_stats(&first_request).expect("second query");
     assert_eq!(first.fingerprint, second.fingerprint);
 }
 

@@ -1,5 +1,4 @@
 //! Full-DAG commit history, parsed into raw rows and cached before attribution.
-#![allow(dead_code)] // The query-binding phase consumes this history seam.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,19 +40,31 @@ pub(crate) struct HistoryOutcome {
 /// Resolve one repository, load or build its full history, and return both
 /// pieces for the aggregation phase. Resolution failures remain per-source
 /// issues and do not become request errors.
+#[cfg(test)]
 pub(crate) fn read_repo_history(
     spec: &ProjectStatsRepoSpecWire,
     budget: &ProjectStatsBudgetWire,
     cache_dir: &str,
 ) -> Result<(ResolvedRepo, HistoryOutcome), ProjectStatsIssueWire> {
     let repo = git::resolve_repo(spec, budget)?;
-    let key = cache::cache_key(&repo);
+    let outcome = history_for_resolved(&repo, spec, budget, cache_dir);
+    Ok((repo, outcome))
+}
+
+/// Walk or reuse cached history for an already resolved repository.
+pub(crate) fn history_for_resolved(
+    repo: &ResolvedRepo,
+    spec: &ProjectStatsRepoSpecWire,
+    budget: &ProjectStatsBudgetWire,
+    cache_dir: &str,
+) -> HistoryOutcome {
+    let key = cache::cache_key(repo);
     let cache_path =
         (!cache_dir.is_empty()).then(|| cache::cache_path(cache_dir, &key));
     let cached = cache_path
         .as_deref()
         .and_then(cache::load)
-        .filter(|entry| entry.matches_repo(&key, &repo));
+        .filter(|entry| entry.matches_repo(&key, repo));
 
     let mut outcome = if repo.tip.is_empty() {
         HistoryOutcome {
@@ -72,10 +83,10 @@ pub(crate) fn read_repo_history(
             Some(entry)
                 if entry.is_complete()
                     && !entry.tip().is_empty()
-                    && is_ancestor(&repo, entry.tip(), &repo.tip, budget) =>
+                    && is_ancestor(repo, entry.tip(), &repo.tip, budget) =>
             {
                 let mut delta = walk_history(
-                    &repo,
+                    repo,
                     Some((entry.tip(), &repo.tip)),
                     budget,
                     spec,
@@ -86,7 +97,7 @@ pub(crate) fn read_repo_history(
                 delta.rows = rows;
                 delta
             }
-            _ => walk_history(&repo, None, budget, spec),
+            _ => walk_history(repo, None, budget, spec),
         }
     };
 
@@ -104,21 +115,13 @@ pub(crate) fn read_repo_history(
             &path,
             &HistoryCacheEntry::new(
                 key,
-                &repo,
+                repo,
                 outcome.complete,
                 outcome.rows.clone(),
             ),
         );
     }
-    Ok((repo, outcome))
-}
-
-/// Return an empty and complete history for the phase-1 query scaffold.
-pub(crate) fn empty_history() -> HistoryOutcome {
-    HistoryOutcome {
-        complete: true,
-        ..HistoryOutcome::default()
-    }
+    outcome
 }
 
 fn walk_history(

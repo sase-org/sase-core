@@ -3,7 +3,6 @@
 //! Cache files hold only commit rows. Attribution is intentionally computed
 //! after loading them so changed directory data can reclassify old commits
 //! without another Git walk.
-#![allow(dead_code)] // The query-binding phase consumes the history API.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};

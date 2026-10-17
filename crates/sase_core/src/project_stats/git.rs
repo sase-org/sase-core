@@ -1,5 +1,4 @@
 //! Repository identity, ref validation, and source metadata for project stats.
-#![allow(dead_code)] // The query-binding phase wires this source into queries.
 
 use std::fs;
 use std::path::{Path, PathBuf};

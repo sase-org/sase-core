@@ -1,5 +1,4 @@
 //! Read-only attribution directory seam for future artifact-backed metadata.
-#![allow(dead_code)] // The sibling attribution phase populates these maps.
 
 use std::collections::BTreeMap;
 
@@ -8,6 +7,7 @@ use std::collections::BTreeMap;
 pub(crate) struct DirectoryMember {
     pub name: String,
     pub family: Option<String>,
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub model_metadata_present: bool,
 }

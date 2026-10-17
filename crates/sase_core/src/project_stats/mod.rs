@@ -1,9 +1,10 @@
 //! Project-wide statistics contracts and query extension points.
 //!
-//! The first implementation phase establishes stable wire types and validation.
-//! History, attribution, and facet implementations can then be added behind
-//! these interfaces without changing the request or response shape.
+//! History, attribution, and facet implementations fill these interfaces
+//! without changing the request or response shape.
 
+mod aggregate;
+mod attribution;
 mod cache;
 mod code;
 mod directory;
@@ -17,23 +18,34 @@ mod snapshot;
 mod wire;
 
 #[cfg(test)]
+mod query_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
 use crate::project_stats::directory::Directory;
+use crate::project_stats::git::ResolvedRepo;
 use crate::project_stats::history::HistoryOutcome;
+
+/// One configured repository after unique resolve/walk.
+pub(crate) struct MeasuredRepo<'a> {
+    pub spec: &'a wire::ProjectStatsRepoSpecWire,
+    pub tier: wire::ProjectStatsRepoTierWire,
+    pub resolved: Option<&'a ResolvedRepo>,
+    pub history: Option<&'a HistoryOutcome>,
+    pub issue: Option<&'a wire::ProjectStatsIssueWire>,
+}
+
 /// Shared read-only inputs passed to facet implementations.
-#[allow(dead_code)] // Facet owners consume their relevant shared inputs.
 pub(crate) struct FacetContext<'a> {
     pub request: &'a wire::ProjectStatsRequestWire,
     pub project: &'a wire::ProjectStatsProjectSpecWire,
     pub directory: &'a Directory,
-    pub histories: &'a [HistoryOutcome],
+    pub repos: &'a [MeasuredRepo<'a>],
 }
 
 /// A facet can expose a measurement, source issues, and fingerprint inputs.
-#[allow(dead_code)] // Issues and tokens are populated as source seams land.
 pub(crate) struct FacetResult<T> {
     pub value: Option<T>,
     pub issues: Vec<wire::ProjectStatsIssueWire>,
