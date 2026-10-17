@@ -29,7 +29,7 @@ use super::support::*;
 
 #[tokio::test]
 async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let (status, enrolled) = json_response_with_state(
@@ -132,7 +132,7 @@ async fn fleet_enrollment_and_hello_return_identity_and_capabilities() {
 
 #[tokio::test]
 async fn fleet_enrollment_rejects_replayed_and_expired_bootstrap_secrets() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let body = fleet_enroll_body(&bootstrap, &[], vec![FLEET_PROTOCOL_VERSION]);
@@ -165,7 +165,7 @@ async fn fleet_enrollment_rejects_replayed_and_expired_bootstrap_secrets() {
 
 #[tokio::test]
 async fn fleet_routes_enforce_declared_scopes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_HELLO], None);
     let (enroll_status, enrolled) = json_response_with_state(
@@ -210,7 +210,7 @@ async fn fleet_routes_enforce_declared_scopes() {
 
 #[tokio::test]
 async fn fleet_launch_accepts_scoped_request_and_returns_receipt() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_agent_bridge(&tmp);
     let bootstrap = fleet_bootstrap(&state, &[FLEET_SCOPE_LAUNCH], None);
     let (enroll_status, enrolled) = json_response_with_state(
@@ -268,7 +268,7 @@ async fn fleet_launch_accepts_scoped_request_and_returns_receipt() {
 
 #[tokio::test]
 async fn fleet_launch_omits_bridge_name_when_prompt_has_id() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let launches = Arc::new(Mutex::new(Vec::new()));
     let state = state_for_custom_agent_bridge(
         &tmp,
@@ -321,7 +321,7 @@ async fn fleet_launch_omits_bridge_name_when_prompt_has_id() {
 
 #[tokio::test]
 async fn fleet_launch_replays_delayed_launch_and_reconciles_visible_row() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let launch_count = Arc::new(AtomicUsize::new(0));
     let state = state_for_custom_agent_bridge(
         &tmp,
@@ -434,7 +434,7 @@ async fn fleet_launch_replays_delayed_launch_and_reconciles_visible_row() {
 
 #[tokio::test]
 async fn fleet_launch_failure_settles_failed_without_raw_bridge_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let launch_count = Arc::new(AtomicUsize::new(0));
     let state = state_for_custom_agent_bridge(
         &tmp,
@@ -476,7 +476,7 @@ async fn fleet_launch_failure_settles_failed_without_raw_bridge_output() {
 
 #[tokio::test]
 async fn fleet_launch_recovers_pending_reservation_after_gateway_restart() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let first_state = state_for_agent_bridge(&tmp);
     let bootstrap = fleet_bootstrap(&first_state, &[FLEET_SCOPE_LAUNCH], None);
     let (enroll_status, enrolled) = json_response_with_state(
@@ -662,7 +662,7 @@ async fn wait_for_agents_changed(
 
 #[tokio::test]
 async fn fleet_mutate_denies_missing_scope() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -681,7 +681,7 @@ async fn fleet_mutate_denies_missing_scope() {
 
 #[tokio::test]
 async fn fleet_mutate_stop_settles_and_replays() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -722,7 +722,7 @@ async fn fleet_mutate_stop_settles_and_replays() {
 
 #[tokio::test]
 async fn fleet_mutate_changed_payload_conflicts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -750,7 +750,7 @@ async fn fleet_mutate_changed_payload_conflicts() {
 
 #[tokio::test]
 async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let old_artifact = seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let old_state = state_for_agent_bridge(&tmp);
     let (_, installation_id) =
@@ -841,7 +841,7 @@ async fn fleet_mutate_refuses_stale_revision_and_superseded_instance() {
 
 #[tokio::test]
 async fn fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", false, false);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -864,7 +864,7 @@ async fn fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure() {
         "{status} {body}"
     );
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, true);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -885,7 +885,7 @@ async fn fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["code"], "unsupported_action");
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (token, installation_id) =
@@ -909,7 +909,7 @@ async fn fleet_mutate_refuses_terminal_missing_capability_and_bridge_failure() {
 
 #[tokio::test]
 async fn fleet_mutate_same_key_returns_settled_after_terminal() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let artifact = seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let state = state_for_agent_bridge(&tmp);
     let (token, installation_id) =
@@ -990,7 +990,7 @@ async fn fleet_stop_retains_row_with_retry_and_fork() {
         }
     }
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let kills = Arc::new(Mutex::new(Vec::new()));
     let state = super::support::state_for_custom_agent_bridge(
@@ -1054,7 +1054,7 @@ async fn fleet_stop_retains_row_with_retry_and_fork() {
 
 #[tokio::test]
 async fn fleet_catalog_overlay_serves_fresh_launch_before_rebuild() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "alpha", true, false);
     let state = state_for_agent_bridge(&tmp);
     let initial = state

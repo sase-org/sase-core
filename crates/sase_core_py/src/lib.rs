@@ -48,6 +48,7 @@ mod json_bridge;
 mod macro_input_types;
 mod memory_history;
 mod migration;
+mod mobile_pairing;
 mod note_attachment;
 mod notifications;
 mod plans;
@@ -96,6 +97,7 @@ fn sase_core_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     artifact_links::register_artifact_links(m)?;
     autonomy::register_autonomy(m)?;
     migration::register_migration(m)?;
+    mobile_pairing::register_mobile_pairing(m)?;
     notifications::register_notifications(m)?;
     procs::register_procs(m)?;
     project_onboarding::register_project_onboarding(m)?;

@@ -46,10 +46,21 @@ use super::super::state::{
 
 use super::super::support::default_attachment_token_ttl;
 
+pub(crate) fn temp_home() -> TempDir {
+    let tmp = tempfile::Builder::new()
+        .prefix("sase-gw-")
+        .tempdir_in("/tmp")
+        .expect("create gateway test home under /tmp");
+    let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+    std::fs::set_permissions(tmp.path(), perms).unwrap();
+    tmp
+}
+
 pub(crate) async fn json_response(
     request: Request<Body>,
 ) -> (StatusCode, Value) {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     json_response_with_state(state, request).await
 }
@@ -78,12 +89,11 @@ pub(crate) async fn raw_response_with_state(
 
 pub(crate) fn state_for_tmp(
     tmp: &TempDir,
-    pairing_ttl: Duration,
+    _pairing_ttl: Duration,
 ) -> GatewayState {
     GatewayState::new_with_options(GatewayStateOptions {
         bind_addr: "127.0.0.1:0".to_string(),
         sase_home: tmp.path().to_path_buf(),
-        pairing_ttl,
         host_label: "test-host".to_string(),
         event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
         heartbeat_interval: StdDuration::from_secs(60),
@@ -368,7 +378,6 @@ pub(crate) fn state_for_notifications_with_attachment_options(
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -394,7 +403,6 @@ pub(crate) fn state_for_notifications_with_action_states(
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -514,7 +522,6 @@ pub(crate) fn state_for_custom_agent_bridge(
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -721,7 +728,6 @@ pub(crate) fn state_for_helper_bridge(tmp: &TempDir) -> GatewayState {
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -925,7 +931,6 @@ esac
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -994,7 +999,6 @@ exit 4
         GatewayStateOptions {
             bind_addr: "127.0.0.1:0".to_string(),
             sase_home: tmp.path().to_path_buf(),
-            pairing_ttl: Duration::minutes(5),
             host_label: "test-host".to_string(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: StdDuration::from_secs(60),
@@ -1016,19 +1020,34 @@ pub(crate) fn seed_store_notification(
         .unwrap();
 }
 
+pub(crate) fn issue_pairing(
+    state: &GatewayState,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let issued = sase_core::mobile_pairing::issue_mobile_pairing_challenge(
+        &sase_core::mobile_pairing::MobilePairingIssueRequestWire {
+            schema_version:
+                sase_core::mobile_pairing::MOBILE_PAIRING_WIRE_SCHEMA_VERSION,
+            host_label: Some("workstation".to_string()),
+            state_root: Some(state.sase_home.to_string_lossy().into_owned()),
+        },
+        now,
+    )
+    .expect("issue owner-local pairing challenge");
+    json!({
+        "schema_version": issued.schema_version,
+        "pairing_id": issued.pairing_id,
+        "code": issued.code,
+        "expires_at": issued.expires_at,
+        "host_label": issued.host_label,
+        "host_fingerprint": issued.host_fingerprint,
+    })
+}
+
 pub(crate) async fn pair_device(
     state: GatewayState,
 ) -> (Value, Value, String, String) {
-    let start_body = json!({
-        "schema_version": 1,
-        "host_label": "workstation"
-    });
-    let (start_status, start) = json_response_with_state(
-        state.clone(),
-        json_request("POST", "/api/v1/session/pair/start", start_body),
-    )
-    .await;
-    assert_eq!(start_status, StatusCode::OK);
+    let start = issue_pairing(&state, chrono::Utc::now());
 
     let finish_body = json!({
         "schema_version": 1,

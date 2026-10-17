@@ -53,8 +53,7 @@ pub struct GatewayState {
     pub(crate) bind: GatewayBindWire,
     pub(crate) build: GatewayBuildWire,
     pub(crate) token_store: DeviceTokenStore,
-    pub(crate) pairings: Arc<Mutex<HashMap<String, PairingChallenge>>>,
-    pub(crate) pairing_ttl: ChronoDuration,
+    pub(crate) sase_home: PathBuf,
     pub(crate) host_label: String,
     pub(crate) event_hub: EventHub,
     pub(crate) heartbeat_interval: StdDuration,
@@ -84,7 +83,6 @@ impl GatewayState {
         Self::new_with_options(GatewayStateOptions {
             bind_addr,
             sase_home: sase_home.into(),
-            pairing_ttl: ChronoDuration::minutes(5),
             host_label: default_host_label(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
@@ -119,7 +117,6 @@ impl GatewayState {
         let mut state = Self::new_with_options(GatewayStateOptions {
             bind_addr,
             sase_home: sase_home.clone(),
-            pairing_ttl: ChronoDuration::minutes(5),
             host_label: default_host_label(),
             event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
@@ -160,8 +157,7 @@ impl GatewayState {
                 git_sha: None,
             },
             token_store: DeviceTokenStore::new(state_dir),
-            pairings: Arc::new(Mutex::new(HashMap::new())),
-            pairing_ttl: options.pairing_ttl,
+            sase_home: options.sase_home.clone(),
             host_label: options.host_label,
             event_hub: EventHub::new(options.event_buffer_capacity),
             heartbeat_interval: options.heartbeat_interval,
@@ -281,19 +277,12 @@ impl GatewayState {
 pub struct GatewayStateOptions {
     pub bind_addr: String,
     pub sase_home: PathBuf,
-    pub pairing_ttl: ChronoDuration,
     pub host_label: String,
     pub event_buffer_capacity: usize,
     pub heartbeat_interval: StdDuration,
     pub attachment_token_ttl: ChronoDuration,
     pub max_attachment_bytes: u64,
     pub push_config: PushConfig,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PairingChallenge {
-    pub(crate) code: String,
-    pub(crate) expires_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug)]

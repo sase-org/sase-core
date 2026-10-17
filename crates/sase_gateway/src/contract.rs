@@ -40,7 +40,6 @@ pub fn api_v1_contract_snapshot() -> Value {
             "header": "Authorization",
             "unauthenticated_routes": [
                 "GET /api/v1/health",
-                "POST /api/v1/session/pair/start",
                 "POST /api/v1/session/pair/finish"
             ]
         },
@@ -50,14 +49,6 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "path": "/api/v1/health",
                 "auth": false,
                 "success": "HealthResponseWire",
-                "errors": ["ApiErrorWire"]
-            },
-            {
-                "method": "POST",
-                "path": "/api/v1/session/pair/start",
-                "auth": false,
-                "request": "PairStartRequestWire",
-                "success": "PairStartResponseWire",
                 "errors": ["ApiErrorWire"]
             },
             {
@@ -391,7 +382,11 @@ pub fn api_v1_contract_snapshot() -> Value {
                 "build": "GatewayBuildWire",
                 "bind": "GatewayBindWire",
                 "push": "PushGatewayStatusWire",
-                "fleet": "FleetHealthWire"
+                "fleet": "FleetHealthWire",
+                "pairing": "HealthPairingWire"
+            },
+            "HealthPairingWire": {
+                "issuance": "owner_local_v1; challenges are issued only by the owner-local CLI, never over HTTP"
             },
             "FleetHealthWire": {
                 "supported_protocol_versions": "u32[]; canonical non-secret fleet protocol versions supported by this gateway"

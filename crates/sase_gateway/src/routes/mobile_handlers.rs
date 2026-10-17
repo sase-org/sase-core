@@ -26,9 +26,13 @@ use serde_json::Value as JsonValue;
 
 use crate::host_bridge::{DynNotificationHostBridge, HostBridgeError};
 
-use crate::storage::{
-    format_time, generate_pairing_code, generate_prefixed_id,
+use sase_core::mobile_pairing::{
+    consume_mobile_pairing_challenge, MobilePairingConsumeOutcome,
+    MobilePairingConsumeRequestWire, MobilePairingError,
+    MOBILE_PAIRING_WIRE_SCHEMA_VERSION,
 };
+
+use crate::storage::format_time;
 
 use crate::wire::{
     EventPayloadWire, EventRecordWire, MobileAgentImageLaunchRequestWire,
@@ -44,11 +48,10 @@ use crate::wire::{
     MobilePatchTagListResponseWire, MobileUpdateStartRequestWire,
     MobileUpdateStartResponseWire, MobileUpdateStatusRequestWire,
     MobileUpdateStatusResponseWire, NotificationStateMutationResponseWire,
-    PairFinishRequestWire, PairFinishResponseWire, PairStartRequestWire,
-    PairStartResponseWire, PushSubscriptionDeleteResponseWire,
-    PushSubscriptionListResponseWire, PushSubscriptionRegisterResponseWire,
-    PushSubscriptionRequestWire, SessionResponseWire,
-    GATEWAY_WIRE_SCHEMA_VERSION,
+    PairFinishRequestWire, PairFinishResponseWire,
+    PushSubscriptionDeleteResponseWire, PushSubscriptionListResponseWire,
+    PushSubscriptionRegisterResponseWire, PushSubscriptionRequestWire,
+    SessionResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 use super::errors::*;
@@ -57,38 +60,6 @@ use super::state::*;
 
 use super::support::*;
 
-pub(crate) async fn pair_start(
-    State(state): State<GatewayState>,
-    payload: Result<Json<PairStartRequestWire>, JsonRejection>,
-) -> Result<Json<PairStartResponseWire>, ApiError> {
-    let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
-    validate_schema(payload.schema_version)?;
-    let now = Utc::now();
-    let pairing_id = generate_prefixed_id("pair");
-    let code = generate_pairing_code();
-    let host_label = payload
-        .host_label
-        .unwrap_or_else(|| state.host_label.clone());
-    let challenge = PairingChallenge {
-        code: code.clone(),
-        expires_at: now + state.pairing_ttl,
-    };
-    state
-        .pairings
-        .lock()
-        .map_err(|_| ApiError::internal("pairings"))?
-        .insert(pairing_id.clone(), challenge);
-    state.audit(None, "/api/v1/session/pair/start", None, "success");
-    Ok(Json(PairStartResponseWire {
-        schema_version: GATEWAY_WIRE_SCHEMA_VERSION,
-        pairing_id,
-        code,
-        expires_at: format_time(now + state.pairing_ttl),
-        host_label,
-        host_fingerprint: None,
-    }))
-}
-
 pub(crate) async fn pair_finish(
     State(state): State<GatewayState>,
     payload: Result<Json<PairFinishRequestWire>, JsonRejection>,
@@ -96,39 +67,36 @@ pub(crate) async fn pair_finish(
     let Json(payload) = payload.map_err(ApiError::from_json_rejection)?;
     validate_schema(payload.schema_version)?;
     let now = Utc::now();
-    let challenge = {
-        let mut pairings = state
-            .pairings
-            .lock()
-            .map_err(|_| ApiError::internal("pairings"))?;
-        pairings.remove(&payload.pairing_id)
-    };
-    let Some(challenge) = challenge else {
-        state.audit(
-            None,
-            "/api/v1/session/pair/finish",
-            Some(payload.pairing_id),
-            "pairing_rejected",
-        );
-        return Err(ApiError::pairing_rejected("pairing_id"));
-    };
-    if challenge.expires_at <= now {
-        state.audit(
-            None,
-            "/api/v1/session/pair/finish",
-            Some(payload.pairing_id),
-            "pairing_expired",
-        );
-        return Err(ApiError::pairing_expired("code"));
-    }
-    if challenge.code != payload.code {
-        state.audit(
-            None,
-            "/api/v1/session/pair/finish",
-            Some(payload.pairing_id),
-            "pairing_rejected",
-        );
-        return Err(ApiError::pairing_rejected("code"));
+    let outcome = consume_mobile_pairing_challenge(
+        &MobilePairingConsumeRequestWire {
+            schema_version: MOBILE_PAIRING_WIRE_SCHEMA_VERSION,
+            pairing_id: payload.pairing_id.clone(),
+            code: payload.code.clone(),
+            state_root: Some(state.sase_home.to_string_lossy().into_owned()),
+        },
+        now,
+    )
+    .map_err(pairing_store_error)?;
+    match outcome {
+        MobilePairingConsumeOutcome::Accepted => {}
+        MobilePairingConsumeOutcome::Expired => {
+            state.audit(
+                None,
+                "/api/v1/session/pair/finish",
+                Some(payload.pairing_id),
+                "pairing_expired",
+            );
+            return Err(ApiError::pairing_expired("code"));
+        }
+        MobilePairingConsumeOutcome::Rejected => {
+            state.audit(
+                None,
+                "/api/v1/session/pair/finish",
+                Some(payload.pairing_id),
+                "pairing_rejected",
+            );
+            return Err(ApiError::pairing_rejected("pairing_id"));
+        }
     }
 
     let (device, token) = state
@@ -147,6 +115,16 @@ pub(crate) async fn pair_finish(
         token_type: "bearer".to_string(),
         token,
     }))
+}
+
+fn pairing_store_error(error: MobilePairingError) -> ApiError {
+    match error {
+        MobilePairingError::SchemaVersion { .. } => ApiError::invalid_request(
+            "schema_version",
+            "unsupported pairing schema version",
+        ),
+        _ => ApiError::internal("pairing"),
+    }
 }
 
 pub(crate) async fn session(

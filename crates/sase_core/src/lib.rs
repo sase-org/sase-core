@@ -97,6 +97,7 @@ pub mod managed_tmp_roots;
 pub mod markdown_link_refs;
 pub mod memory_history;
 pub mod migration;
+pub mod mobile_pairing;
 pub mod model_completion;
 pub mod model_route;
 pub mod model_validity;

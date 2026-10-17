@@ -24,9 +24,8 @@ The HTTP status code carries transport status, while `code` is the stable client
 
 ## Routes
 
-- `GET /api/v1/health` returns an unauthenticated `HealthResponseWire`, including the non-secret fleet protocol versions this gateway supports so clients can check compatibility before enrollment.
-- `POST /api/v1/session/pair/start` returns a short-lived one-time pairing code and no long-lived credential.
-- `POST /api/v1/session/pair/finish` exchanges the one-time code and device metadata for a bearer token exactly once.
+- `GET /api/v1/health` returns an unauthenticated `HealthResponseWire`, including the non-secret fleet protocol versions this gateway supports so clients can check compatibility before enrollment, and `pairing.issuance = owner_local_v1` when challenges must be issued by the owner-local CLI rather than HTTP.
+- `POST /api/v1/session/pair/finish` exchanges a locally issued one-time code and device metadata for a bearer token exactly once. HTTP callers cannot create pairing challenges.
 - `GET /api/v1/session` requires `Authorization: Bearer <token>` and returns the authenticated device.
 - `GET /api/v1/session/push-subscriptions` lists active push subscriptions for the authenticated device.
 - `POST /api/v1/session/push-subscriptions` registers or updates one hint-only push subscription for the authenticated

@@ -23,7 +23,7 @@ use super::support::*;
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_changespec_tags_returns_command_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "success");
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -61,7 +61,7 @@ async fn command_helper_bridge_changespec_tags_returns_command_output() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_macro_catalog_returns_new_helper_fields() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "success");
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -108,7 +108,7 @@ async fn command_helper_bridge_macro_catalog_returns_new_helper_fields() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_update_start_returns_command_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "success");
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -149,7 +149,7 @@ async fn command_helper_bridge_update_start_returns_command_output() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_update_status_returns_command_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "success");
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -186,7 +186,7 @@ async fn command_helper_bridge_update_status_returns_command_output() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_update_exit_codes_map_to_stable_errors() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "not-found");
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
     let auth = format!("Bearer {token}");
@@ -221,7 +221,7 @@ async fn command_helper_bridge_update_exit_codes_map_to_stable_errors() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_malformed_json_maps_to_unavailable() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "invalid-json");
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -246,7 +246,7 @@ async fn command_helper_bridge_malformed_json_maps_to_unavailable() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_exit_failure_maps_to_unavailable() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "exit-failure");
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -268,7 +268,7 @@ async fn command_helper_bridge_exit_failure_maps_to_unavailable() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_helper_bridge_not_found_maps_to_helper_not_found() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_helper_bridge(&tmp, "not-found");
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -288,7 +288,7 @@ async fn command_helper_bridge_not_found_maps_to_helper_not_found() {
 }
 #[tokio::test]
 async fn invalid_and_revoked_tokens_are_unauthorized() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -326,7 +326,7 @@ async fn events_without_token_returns_typed_unauthorized_error() {
 
 #[tokio::test]
 async fn events_with_token_returns_sse_response() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -341,7 +341,7 @@ async fn events_with_token_returns_sse_response() {
 
 #[tokio::test]
 async fn agents_without_token_returns_typed_unauthorized_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_agent_bridge(&tmp);
 
     let (status, value) = json_response_with_state(
@@ -357,7 +357,7 @@ async fn agents_without_token_returns_typed_unauthorized_error() {
 
 #[tokio::test]
 async fn production_agent_bridge_returns_typed_unavailable_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -374,7 +374,7 @@ async fn production_agent_bridge_returns_typed_unavailable_error() {
 
 #[tokio::test]
 async fn fake_agent_bridge_routes_return_stable_success_shapes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_agent_bridge(&tmp);
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -498,7 +498,7 @@ async fn fake_agent_bridge_routes_return_stable_success_shapes() {
 
 #[tokio::test]
 async fn helper_routes_without_token_return_typed_unauthorized_errors() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_helper_bridge(&tmp);
     let requests = [
         Request::builder()
@@ -544,7 +544,7 @@ async fn helper_routes_without_token_return_typed_unauthorized_errors() {
 
 #[tokio::test]
 async fn production_helper_bridge_returns_typed_unavailable_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -596,7 +596,7 @@ fn helper_host_bridge_errors_map_to_stable_api_codes() {
 
 #[tokio::test]
 async fn fake_helper_bridge_routes_return_stable_success_shapes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_helper_bridge(&tmp);
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
     let auth = format!("Bearer {token}");
@@ -734,7 +734,7 @@ async fn fake_helper_bridge_routes_return_stable_success_shapes() {
 #[cfg(unix)]
 #[tokio::test]
 async fn command_agent_bridge_routes_return_command_output() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_command_agent_bridge(&tmp);
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 

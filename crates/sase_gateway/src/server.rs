@@ -169,7 +169,13 @@ mod tests {
 
     #[tokio::test]
     async fn listener_serves_health_over_http() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("sase-gw-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+        std::fs::set_permissions(tmp.path(), perms).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle =
@@ -198,7 +204,13 @@ mod tests {
 
     #[tokio::test]
     async fn listener_smoke_exercises_pairing_auth_and_session() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("sase-gw-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let mut perms = std::fs::metadata(tmp.path()).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+        std::fs::set_permissions(tmp.path(), perms).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn({
@@ -228,6 +240,7 @@ mod tests {
             health["fleet"]["supported_protocol_versions"],
             serde_json::json!([crate::wire::FLEET_PROTOCOL_VERSION])
         );
+        assert_eq!(health["pairing"]["issuance"], "owner_local_v1");
 
         let (start_status, start) = request_json(
             addr,
@@ -240,7 +253,35 @@ mod tests {
             })),
         )
         .await;
-        assert_eq!(start_status, 200);
+        assert_eq!(start_status, 404);
+        assert_eq!(start["code"], "not_found");
+        assert!(start.get("code_hash").is_none());
+        assert!(start.get("pairing_id").is_none());
+
+        let (auth_start_status, auth_start) = request_json(
+            addr,
+            "POST",
+            "/api/v1/session/pair/start",
+            Some("sase_mobile_unused"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "host_label": "workstation"
+            })),
+        )
+        .await;
+        assert_eq!(auth_start_status, 404);
+        assert_eq!(auth_start["code"], "not_found");
+
+        let issued = sase_core::mobile_pairing::issue_mobile_pairing_challenge(
+            &sase_core::mobile_pairing::MobilePairingIssueRequestWire {
+                schema_version:
+                    sase_core::mobile_pairing::MOBILE_PAIRING_WIRE_SCHEMA_VERSION,
+                host_label: Some("workstation".to_string()),
+                state_root: Some(tmp.path().to_string_lossy().into_owned()),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
 
         let (finish_status, finish) = request_json(
             addr,
@@ -249,8 +290,8 @@ mod tests {
             None,
             Some(serde_json::json!({
                 "schema_version": 1,
-                "pairing_id": start["pairing_id"],
-                "code": start["code"],
+                "pairing_id": issued.pairing_id,
+                "code": issued.code,
                 "device": {
                     "display_name": "Pixel 9",
                     "platform": "android",

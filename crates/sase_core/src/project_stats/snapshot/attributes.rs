@@ -258,7 +258,7 @@ pub(crate) fn parse_check_attr(
         );
     }
     let mut parsed: HashMap<Vec<u8>, CommittedAttributes> = HashMap::new();
-    for triple in fields.chunks_exact(3) {
+    for triple in fields.as_chunks::<3>().0 {
         let path = triple[0].to_vec();
         let name = triple[1];
         let value = AttributeState::parse(triple[2]).map_err(|_| {

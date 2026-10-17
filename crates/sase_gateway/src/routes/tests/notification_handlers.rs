@@ -40,7 +40,7 @@ use super::support::*;
 
 #[tokio::test]
 async fn notifications_without_token_returns_typed_unauthorized_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_notifications(&tmp, Vec::new());
 
     let (status, value) = json_response_with_state(
@@ -56,7 +56,7 @@ async fn notifications_without_token_returns_typed_unauthorized_error() {
 
 #[tokio::test]
 async fn notifications_list_filters_and_orders_newest_first() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut read =
         notification("read-row", "2026-05-06T15:00:00Z", Some("PlanApproval"));
     read.read = true;
@@ -95,7 +95,7 @@ async fn notifications_list_filters_and_orders_newest_first() {
 
 #[tokio::test]
 async fn notifications_list_uses_host_action_state() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let row = notification(
         "handled-row",
         "2026-05-06T17:00:00Z",
@@ -127,7 +127,7 @@ async fn notifications_list_uses_host_action_state() {
 
 #[tokio::test]
 async fn notifications_list_uses_resurface_activity_cursor_and_id_tiebreaker() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let recent = notification("recent", "2026-05-06T17:00:00Z", None);
     let mut resurfaced_a =
         notification("resurfaced-a", "2026-05-01T12:00:00Z", None);
@@ -167,7 +167,7 @@ async fn notifications_list_uses_resurface_activity_cursor_and_id_tiebreaker() {
 
 #[tokio::test]
 async fn notifications_list_expiry_publishes_activity_cursor_event() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut due = notification("due-row", "2026-05-01T12:00:00Z", None);
     due.read = true;
     due.muted = true;
@@ -217,7 +217,7 @@ async fn notifications_list_expiry_publishes_activity_cursor_event() {
 
 #[tokio::test]
 async fn notifications_list_can_include_dismissed_and_silent_rows() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut dismissed =
         notification("dismissed-row", "2026-05-06T15:00:00Z", None);
     dismissed.dismissed = true;
@@ -243,7 +243,7 @@ async fn notifications_list_can_include_dismissed_and_silent_rows() {
 
 #[tokio::test]
 async fn notification_detail_returns_notes_action_and_attachments() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let attachment = tmp.path().join("plan.md");
     std::fs::write(&attachment, "plan").unwrap();
     let mut row = notification(
@@ -274,7 +274,7 @@ async fn notification_detail_returns_notes_action_and_attachments() {
 
 #[tokio::test]
 async fn notification_detail_mints_short_lived_download_tokens() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let attachment = tmp.path().join("plan.md");
     std::fs::write(&attachment, "# Plan\n").unwrap();
     let mut row = notification(
@@ -317,7 +317,7 @@ async fn notification_detail_mints_short_lived_download_tokens() {
 
 #[tokio::test]
 async fn attachment_download_requires_gateway_auth() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let attachment = tmp.path().join("digest.txt");
     std::fs::write(&attachment, "digest").unwrap();
     let mut row = notification("digest-row", "2026-05-06T15:00:00Z", None);
@@ -346,7 +346,7 @@ async fn attachment_download_requires_gateway_auth() {
 
 #[tokio::test]
 async fn attachment_tokens_are_bound_to_device() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let attachment = tmp.path().join("image.png");
     std::fs::write(&attachment, b"\x89PNG\r\n").unwrap();
     let mut row = notification("image-row", "2026-05-06T15:00:00Z", None);
@@ -381,7 +381,7 @@ async fn attachment_tokens_are_bound_to_device() {
 
 #[tokio::test]
 async fn expired_attachment_tokens_return_typed_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let attachment = tmp.path().join("artifact.json");
     std::fs::write(&attachment, "{}").unwrap();
     let mut row = notification("json-row", "2026-05-06T15:00:00Z", None);
@@ -415,7 +415,7 @@ async fn expired_attachment_tokens_return_typed_error() {
 
 #[tokio::test]
 async fn unsafe_or_oversized_attachments_do_not_receive_tokens() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let safe = tmp.path().join("safe.txt");
     let symlink = tmp.path().join("safe-link.txt");
     let oversized = tmp.path().join("large.diff");
@@ -471,8 +471,8 @@ async fn unsafe_or_oversized_attachments_do_not_receive_tokens() {
 
 #[tokio::test]
 async fn symlink_pointing_outside_tmp_is_not_downloadable() {
-    let tmp = tempfile::tempdir().unwrap();
-    let outside_tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
+    let outside_tmp = temp_home();
     let outside = outside_tmp.path().join("secret.txt");
     std::fs::write(&outside, "secret").unwrap();
     let link = tmp.path().join("evil.txt");
@@ -508,7 +508,7 @@ async fn symlink_pointing_outside_tmp_is_not_downloadable() {
 
 #[tokio::test]
 async fn action_artifacts_are_declared_as_attachments() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let artifacts_dir = tmp.path().join("agent").join("artifacts");
     std::fs::create_dir_all(&artifacts_dir).unwrap();
     let output_file = tmp.path().join("output.log");
@@ -555,7 +555,7 @@ async fn action_artifacts_are_declared_as_attachments() {
 
 #[tokio::test]
 async fn notification_detail_not_found_returns_typed_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_notifications(&tmp, Vec::new());
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -577,7 +577,7 @@ async fn notification_detail_not_found_returns_typed_error() {
 #[tokio::test]
 async fn notification_state_mutation_without_token_returns_typed_unauthorized_error(
 ) {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
 
     let (status, value) = json_response_with_state(
@@ -596,7 +596,7 @@ async fn notification_state_mutation_without_token_returns_typed_unauthorized_er
 
 #[tokio::test]
 async fn notification_state_mutation_not_found_returns_typed_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -617,7 +617,7 @@ async fn notification_state_mutation_not_found_returns_typed_error() {
 
 #[tokio::test]
 async fn notification_mark_read_updates_store_and_audits() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let row = notification("state-row", "2026-05-06T15:00:00Z", None);
     seed_store_notification(&tmp, &row);
@@ -657,7 +657,7 @@ async fn notification_mark_read_updates_store_and_audits() {
 
 #[tokio::test]
 async fn notification_dismiss_updates_store_and_emits_refresh_event() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let row = notification("dismiss-row", "2026-05-06T15:00:00Z", None);
     seed_store_notification(&tmp, &row);
@@ -757,7 +757,7 @@ impl NotificationHostBridge for RecordingNotificationActionBridge {
 
 #[tokio::test]
 async fn gate_action_forwards_selected_option_submission() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let bridge = Arc::new(RecordingNotificationActionBridge::default());
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     state.notification_bridge = DynNotificationHostBridge::new(bridge.clone());
@@ -791,7 +791,7 @@ async fn gate_action_forwards_selected_option_submission() {
 
 #[tokio::test]
 async fn question_action_forwards_specialized_submission() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let bridge = Arc::new(RecordingNotificationActionBridge::default());
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     state.notification_bridge = DynNotificationHostBridge::new(bridge.clone());
@@ -822,7 +822,7 @@ async fn question_action_forwards_specialized_submission() {
 
 #[tokio::test]
 async fn event_resume_replays_buffered_records_after_last_event_id() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, finish, _token, _device_id) = pair_device(state.clone()).await;
     let device: DeviceRecordWire =
@@ -855,11 +855,10 @@ async fn event_resume_replays_buffered_records_after_last_event_id() {
 
 #[tokio::test]
 async fn event_resume_outside_buffer_returns_resync_required() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = GatewayState::new_with_options(GatewayStateOptions {
         bind_addr: "127.0.0.1:0".to_string(),
         sase_home: tmp.path().to_path_buf(),
-        pairing_ttl: Duration::minutes(5),
         host_label: "test-host".to_string(),
         event_buffer_capacity: 1,
         heartbeat_interval: StdDuration::from_secs(60),
@@ -898,7 +897,7 @@ async fn event_resume_outside_buffer_returns_resync_required() {
 
 #[tokio::test]
 async fn event_resume_after_restart_returns_resync_required() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let first_state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, finish, _token, _device_id) =
         pair_device(first_state.clone()).await;

@@ -28,7 +28,7 @@ use super::support::*;
 
 #[tokio::test]
 async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let (enroll_status, enrolled) = json_response_with_state(
@@ -106,7 +106,7 @@ async fn fleet_rotation_and_revocation_reject_stale_or_revoked_tokens() {
 
 #[tokio::test]
 async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let (status, enrolled) = json_response_with_state(
@@ -154,7 +154,7 @@ async fn fleet_protocol_negotiation_rejects_incompatible_versions() {
 
 #[tokio::test]
 async fn fleet_installation_pin_mismatch_returns_quarantine_response() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let bootstrap = fleet_bootstrap(&state, &[], None);
     let mut body =
@@ -176,7 +176,7 @@ async fn fleet_installation_pin_mismatch_returns_quarantine_response() {
 
 #[tokio::test]
 async fn fleet_enrollment_attempts_are_rate_limited() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let invalid_body = json!({
         "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
@@ -212,7 +212,7 @@ async fn fleet_enrollment_attempts_are_rate_limited() {
 
 #[tokio::test]
 async fn fleet_request_body_limit_rejects_large_enrollment_payloads() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let oversized = json!({
         "schema_version": FLEET_API_WIRE_SCHEMA_VERSION,
@@ -276,6 +276,9 @@ async fn health_route_returns_stable_record() {
             },
             "fleet": {
                 "supported_protocol_versions": [crate::wire::FLEET_PROTOCOL_VERSION]
+            },
+            "pairing": {
+                "issuance": "owner_local_v1"
             }
         })
     );
@@ -305,12 +308,12 @@ async fn session_without_token_returns_typed_unauthorized_error() {
 }
 
 #[tokio::test]
-async fn pair_start_returns_short_lived_code_without_token() {
-    let tmp = tempfile::tempdir().unwrap();
+async fn pair_start_http_route_is_gone() {
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
 
     let (status, value) = json_response_with_state(
-        state,
+        state.clone(),
         json_request(
             "POST",
             "/api/v1/session/pair/start",
@@ -321,18 +324,33 @@ async fn pair_start_returns_short_lived_code_without_token() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(value["code"], "not_found");
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(value["schema_version"], GATEWAY_WIRE_SCHEMA_VERSION);
-    assert!(value["pairing_id"].as_str().unwrap().starts_with("pair_"));
-    assert_eq!(value["code"].as_str().unwrap().len(), 6);
-    assert_eq!(value["host_label"], "workstation");
-    assert!(value.get("token").is_none());
+    let (auth_status, auth_value) = json_response_with_state(
+        state,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/session/pair/start")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sase_mobile_unused")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "schema_version": 1,
+                    "host_label": "workstation"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(auth_status, StatusCode::NOT_FOUND);
+    assert_eq!(auth_value["code"], "not_found");
 }
 
 #[tokio::test]
 async fn pair_finish_persists_device_and_returns_token_once() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
 
     let (start, finish, token, _device_id) = pair_device(state.clone()).await;
@@ -376,21 +394,12 @@ async fn pair_finish_persists_device_and_returns_token_once() {
 
 #[tokio::test]
 async fn pair_finish_rejects_expired_code() {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = state_for_tmp(&tmp, Duration::seconds(-1));
-    let (start_status, start) = json_response_with_state(
-        state.clone(),
-        json_request(
-            "POST",
-            "/api/v1/session/pair/start",
-            json!({
-                "schema_version": 1,
-                "host_label": null
-            }),
-        ),
-    )
-    .await;
-    assert_eq!(start_status, StatusCode::OK);
+    let tmp = temp_home();
+    let state = state_for_tmp(&tmp, Duration::minutes(5));
+    let start = issue_pairing(
+        &state,
+        chrono::Utc::now() - chrono::Duration::minutes(6),
+    );
 
     let finish_body = json!({
         "schema_version": 1,
@@ -414,7 +423,7 @@ async fn pair_finish_rejects_expired_code() {
 
 #[tokio::test]
 async fn session_returns_authenticated_device() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -444,7 +453,7 @@ async fn session_returns_authenticated_device() {
 
 #[tokio::test]
 async fn push_subscriptions_require_auth() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
 
     let (status, value) =
@@ -458,7 +467,7 @@ async fn push_subscriptions_require_auth() {
 
 #[tokio::test]
 async fn push_subscription_register_list_and_revoke_round_trip() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, device_id) = pair_device(state.clone()).await;
 
@@ -525,7 +534,7 @@ async fn push_subscription_register_list_and_revoke_round_trip() {
 
 #[tokio::test]
 async fn push_subscription_duplicate_updates_existing_record() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
     let initial = json!({
@@ -575,7 +584,7 @@ async fn push_subscription_duplicate_updates_existing_record() {
 
 #[tokio::test]
 async fn push_subscription_validation_and_audit_do_not_leak_provider_token() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (_start, _finish, token, _device_id) = pair_device(state.clone()).await;
 
@@ -628,11 +637,10 @@ async fn push_subscription_validation_and_audit_do_not_leak_provider_token() {
 
 #[tokio::test]
 async fn test_push_provider_records_hint_attempts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = GatewayState::new_with_options(GatewayStateOptions {
         bind_addr: "127.0.0.1:0".to_string(),
         sase_home: tmp.path().to_path_buf(),
-        pairing_ttl: Duration::minutes(5),
         host_label: "test-host".to_string(),
         event_buffer_capacity: DEFAULT_EVENT_BUFFER_CAPACITY,
         heartbeat_interval: StdDuration::from_secs(60),

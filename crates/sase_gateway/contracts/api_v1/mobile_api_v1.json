@@ -4,7 +4,6 @@
     "scheme": "bearer",
     "unauthenticated_routes": [
       "GET /api/v1/health",
-      "POST /api/v1/session/pair/start",
       "POST /api/v1/session/pair/finish"
     ]
   },
@@ -149,10 +148,14 @@
       "git_sha": "string|null",
       "package_version": "string"
     },
+    "HealthPairingWire": {
+      "issuance": "owner_local_v1; challenges are issued only by the owner-local CLI, never over HTTP"
+    },
     "HealthResponseWire": {
       "bind": "GatewayBindWire",
       "build": "GatewayBuildWire",
       "fleet": "FleetHealthWire",
+      "pairing": "HealthPairingWire",
       "push": "PushGatewayStatusWire",
       "schema_version": "u32",
       "service": "sase_gateway",
@@ -699,16 +702,6 @@
       "method": "GET",
       "path": "/api/v1/health",
       "success": "HealthResponseWire"
-    },
-    {
-      "auth": false,
-      "errors": [
-        "ApiErrorWire"
-      ],
-      "method": "POST",
-      "path": "/api/v1/session/pair/start",
-      "request": "PairStartRequestWire",
-      "success": "PairStartResponseWire"
     },
     {
       "auth": false,

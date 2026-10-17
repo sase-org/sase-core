@@ -5,9 +5,11 @@ use axum::{Json, Router};
 
 use tower_http::trace::TraceLayer;
 
+use sase_core::mobile_pairing::MOBILE_PAIRING_ISSUANCE;
+
 use crate::wire::{
-    default_fleet_protocol_versions, FleetHealthWire, HealthResponseWire,
-    GATEWAY_WIRE_SCHEMA_VERSION,
+    default_fleet_protocol_versions, FleetHealthWire, HealthPairingWire,
+    HealthResponseWire, GATEWAY_WIRE_SCHEMA_VERSION,
 };
 
 use super::errors::ApiError;
@@ -28,7 +30,6 @@ pub fn app_with_state(state: GatewayState) -> Router {
     Router::new()
         .nest("/api/fleet/v1", fleet_v1_routes())
         .route("/api/v1/health", get(health))
-        .route("/api/v1/session/pair/start", post(pair_start))
         .route("/api/v1/session/pair/finish", post(pair_finish))
         .route("/api/v1/session", get(session))
         .route(
@@ -111,6 +112,9 @@ async fn health(State(state): State<GatewayState>) -> Json<HealthResponseWire> {
         push: state.push_dispatcher.status(),
         fleet: FleetHealthWire {
             supported_protocol_versions: default_fleet_protocol_versions(),
+        },
+        pairing: HealthPairingWire {
+            issuance: MOBILE_PAIRING_ISSUANCE.to_string(),
         },
     })
 }

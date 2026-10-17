@@ -78,6 +78,11 @@ pub struct FleetHealthWire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthPairingWire {
+    pub issuance: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthResponseWire {
     pub schema_version: u32,
     pub status: String,
@@ -87,6 +92,7 @@ pub struct HealthResponseWire {
     pub bind: GatewayBindWire,
     pub push: PushGatewayStatusWire,
     pub fleet: FleetHealthWire,
+    pub pairing: HealthPairingWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,6 +844,10 @@ mod tests {
             fleet: FleetHealthWire {
                 supported_protocol_versions: default_fleet_protocol_versions(),
             },
+            pairing: HealthPairingWire {
+                issuance: sase_core::mobile_pairing::MOBILE_PAIRING_ISSUANCE
+                    .to_string(),
+            },
         };
 
         assert_eq!(
@@ -868,6 +878,9 @@ mod tests {
                 },
                 "fleet": {
                     "supported_protocol_versions": [FLEET_PROTOCOL_VERSION]
+                },
+                "pairing": {
+                    "issuance": "owner_local_v1"
                 }
             })
         );

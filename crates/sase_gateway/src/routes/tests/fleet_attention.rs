@@ -294,7 +294,7 @@ async fn post_attention_resolve(
 
 #[tokio::test]
 async fn fleet_attention_denies_missing_scope() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let state = state_for_tmp(&tmp, Duration::minutes(5));
     let (token, _installation_id) =
         enroll_mutate(&state, &[FLEET_SCOPE_HELLO]).await;
@@ -350,7 +350,7 @@ async fn fleet_attention_denies_missing_scope() {
 
 #[tokio::test]
 async fn fleet_attention_read_empty_request_touches_no_notification_store() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let bridge = Arc::new(FakeAttentionNotificationBridge::default());
     state.notification_bridge = DynNotificationHostBridge::new(bridge.clone());
@@ -366,7 +366,7 @@ async fn fleet_attention_read_empty_request_touches_no_notification_store() {
 
 #[tokio::test]
 async fn fleet_attention_inventory_returns_uncataloged_pending_requests() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let envelope_path = tmp.path().join("gate_request.json");
     write_gate_envelope(&envelope_path);
@@ -410,7 +410,7 @@ async fn fleet_attention_inventory_returns_uncataloged_pending_requests() {
 
 #[tokio::test]
 async fn fleet_attention_inventory_pages_pending_entries() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let bridge =
         Arc::new(FakeAttentionNotificationBridge::with_notifications(vec![
@@ -468,7 +468,7 @@ async fn fleet_attention_inventory_pages_pending_entries() {
 
 #[tokio::test]
 async fn fleet_attention_inventory_succeeds_on_busy_host() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let envelope_path = tmp.path().join("gate_request.json");
     write_gate_envelope(&envelope_path);
@@ -518,7 +518,7 @@ async fn fleet_attention_inventory_succeeds_on_busy_host() {
 
 #[tokio::test]
 async fn fleet_attention_read_projects_correlated_gate_and_question() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -572,7 +572,7 @@ async fn fleet_attention_read_projects_correlated_gate_and_question() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_gate_settles_replays_and_conflicts() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -666,7 +666,7 @@ async fn fleet_attention_resolve_gate_settles_replays_and_conflicts() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_sudo_approve_is_deny_only_remote() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -768,7 +768,7 @@ async fn fleet_attention_resolve_sudo_approve_is_deny_only_remote() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_refuses_stale_revision() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -823,7 +823,7 @@ async fn fleet_attention_resolve_refuses_stale_revision() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_second_controller_gets_already_settled() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -906,7 +906,7 @@ async fn fleet_attention_resolve_second_controller_gets_already_settled() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_settles_unknown_request() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let bridge = Arc::new(FakeAttentionNotificationBridge::default());
     state.notification_bridge = DynNotificationHostBridge::new(bridge);
@@ -949,7 +949,7 @@ async fn fleet_attention_resolve_settles_unknown_request() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_maps_bridge_race_to_already_settled() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
@@ -1011,7 +1011,7 @@ async fn fleet_attention_resolve_maps_bridge_race_to_already_settled() {
 
 #[tokio::test]
 async fn fleet_attention_resolve_publishes_invalidation_events() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = temp_home();
     seed_fleet_agent(tmp.path(), "mobile-demo", true, false);
     let mut state = state_for_tmp(&tmp, Duration::minutes(5));
     let summary = first_summary(&state).await;
