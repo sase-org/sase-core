@@ -13,15 +13,18 @@ pub use request::{
 };
 pub use response::{
     ProjectStatsCodeCounterWire, ProjectStatsCodeWire,
-    ProjectStatsCoverageWire, ProjectStatsIssueWire, ProjectStatsLanguageWire,
-    ProjectStatsLifetimeWire, ProjectStatsModelKindWire, ProjectStatsModelWire,
-    ProjectStatsOutputWire, ProjectStatsPatchWire, ProjectStatsPlanCountsWire,
+    ProjectStatsCoverageWire, ProjectStatsExclusionCountWire,
+    ProjectStatsExclusionReasonCountWire, ProjectStatsExclusionReasonWire,
+    ProjectStatsFileExclusionWire, ProjectStatsFileRoleWire,
+    ProjectStatsIssueWire, ProjectStatsLanguageWire, ProjectStatsLifetimeWire,
+    ProjectStatsModelKindWire, ProjectStatsModelWire, ProjectStatsOutputWire,
+    ProjectStatsPatchWire, ProjectStatsPlanCountsWire,
     ProjectStatsPortfolioWire, ProjectStatsProjectWire, ProjectStatsRangeWire,
     ProjectStatsRefWire, ProjectStatsRepoStatusWire, ProjectStatsRepoTierWire,
-    ProjectStatsRepoWire, ProjectStatsResponseWire, ProjectStatsRunsWire,
-    ProjectStatsSnapshotWire, ProjectStatsUnknownReasonCountWire,
-    PROJECT_STATS_CLASSIFIER_VERSION, PROJECT_STATS_ENGINE_VERSION,
-    PROJECT_STATS_METRIC_POLICY_VERSION,
+    ProjectStatsRepoWire, ProjectStatsResponseWire, ProjectStatsRoleCountWire,
+    ProjectStatsRunsWire, ProjectStatsSnapshotWire,
+    ProjectStatsUnknownReasonCountWire, PROJECT_STATS_CLASSIFIER_VERSION,
+    PROJECT_STATS_ENGINE_VERSION, PROJECT_STATS_METRIC_POLICY_VERSION,
 };
 
 use thiserror::Error;

@@ -6,7 +6,9 @@
 mod aggregate;
 mod attribution;
 mod cache;
+mod classify;
 mod code;
+mod counter;
 mod directory;
 mod facet;
 mod git;
@@ -18,6 +20,10 @@ mod runs;
 mod snapshot;
 mod wire;
 
+#[cfg(test)]
+mod classify_tests;
+#[cfg(test)]
+mod counter_tests;
 #[cfg(test)]
 mod query_tests;
 #[cfg(test)]
@@ -32,7 +38,10 @@ pub use query::query_project_stats;
 pub use wire::{
     validate_project_stats_request, ProjectStatsAgentSidecarSpecWire,
     ProjectStatsBudgetWire, ProjectStatsCodeCounterWire, ProjectStatsCodeWire,
-    ProjectStatsCoverageWire, ProjectStatsError, ProjectStatsFacetWire,
+    ProjectStatsCoverageWire, ProjectStatsError,
+    ProjectStatsExclusionCountWire, ProjectStatsExclusionReasonCountWire,
+    ProjectStatsExclusionReasonWire, ProjectStatsFacetWire,
+    ProjectStatsFileExclusionWire, ProjectStatsFileRoleWire,
     ProjectStatsIssueWire, ProjectStatsLanguageWire, ProjectStatsLifetimeWire,
     ProjectStatsModelKindWire, ProjectStatsModelWire,
     ProjectStatsNotCountedReasonWire, ProjectStatsNotCountedWire,
@@ -43,8 +52,9 @@ pub use wire::{
     ProjectStatsRangeWire, ProjectStatsRefWire, ProjectStatsRepoKindWire,
     ProjectStatsRepoSpecWire, ProjectStatsRepoStatusWire,
     ProjectStatsRepoTierWire, ProjectStatsRepoWire, ProjectStatsRequestWire,
-    ProjectStatsResponseWire, ProjectStatsRunsWire, ProjectStatsSelectionWire,
-    ProjectStatsSnapshotWire, ProjectStatsUnknownReasonCountWire,
-    PROJECT_STATS_CLASSIFIER_VERSION, PROJECT_STATS_ENGINE_VERSION,
-    PROJECT_STATS_METRIC_POLICY_VERSION, PROJECT_STATS_WIRE_SCHEMA_VERSION,
+    ProjectStatsResponseWire, ProjectStatsRoleCountWire, ProjectStatsRunsWire,
+    ProjectStatsSelectionWire, ProjectStatsSnapshotWire,
+    ProjectStatsUnknownReasonCountWire, PROJECT_STATS_CLASSIFIER_VERSION,
+    PROJECT_STATS_ENGINE_VERSION, PROJECT_STATS_METRIC_POLICY_VERSION,
+    PROJECT_STATS_WIRE_SCHEMA_VERSION,
 };

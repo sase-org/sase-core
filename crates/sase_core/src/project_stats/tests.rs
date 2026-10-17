@@ -158,20 +158,20 @@ fn response_fixture() -> ProjectStatsResponseWire {
         agent_commits: Some(7),
     };
     let code = ProjectStatsCodeWire {
-        counter: ProjectStatsCodeCounterWire::Sloc,
-        code_files: 8,
-        code_lines: 120,
-        test_lines: 35,
-        test_share: Some(0.2258),
-        doc_files: 2,
-        doc_lines: 18,
-        agent_context_files: 1,
-        agent_context_lines: 12,
-        languages: vec![ProjectStatsLanguageWire {
+        counter: ProjectStatsCodeCounterWire::Nonblank,
+        code_files: Some(8),
+        code_lines: Some(120),
+        test_lines: Some(35),
+        test_share: Some(35.0 / 120.0),
+        doc_files: Some(2),
+        doc_lines: Some(18),
+        agent_context_files: Some(1),
+        agent_context_lines: Some(12),
+        languages: Some(vec![ProjectStatsLanguageWire {
             name: "Rust".to_owned(),
-            files: 6,
-            lines: 90,
-        }],
+            files: 8,
+            lines: 120,
+        }]),
         repos_configured: 2,
         repos_measured: 1,
     };
@@ -203,7 +203,81 @@ fn response_fixture() -> ProjectStatsResponseWire {
         }),
         output: Some(project_output.clone()),
         lifetime: Some(lifetime.clone()),
-        snapshot: None,
+        snapshot: Some(ProjectStatsSnapshotWire {
+            tracked_files: 14,
+            tracked_lines: Some(172),
+            test_files: Some(2),
+            test_lines: Some(35),
+            doc_files: Some(2),
+            doc_lines: Some(18),
+            agent_context_files: Some(1),
+            agent_context_lines: Some(12),
+            lifetime_commits: None,
+            lifetime_agent_commits: None,
+            languages: Some(vec![ProjectStatsLanguageWire {
+                name: "Rust".to_owned(),
+                files: 8,
+                lines: 120,
+            }]),
+            as_of_ts: Some(1_700_000_000),
+            counter: Some(ProjectStatsCodeCounterWire::Nonblank),
+            role_counts: Some(vec![
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::Source,
+                    files: 6,
+                    lines: 85,
+                },
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::Tests,
+                    files: 2,
+                    lines: 35,
+                },
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::Docs,
+                    files: 2,
+                    lines: 18,
+                },
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::AgentContext,
+                    files: 1,
+                    lines: 12,
+                },
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::ConfigData,
+                    files: 1,
+                    lines: 22,
+                },
+                ProjectStatsRoleCountWire {
+                    role: ProjectStatsFileRoleWire::Other,
+                    files: 0,
+                    lines: 0,
+                },
+            ]),
+            exclusion_counts: Some(vec![
+                ProjectStatsExclusionCountWire {
+                    exclusion: ProjectStatsFileExclusionWire::Generated,
+                    files: 1,
+                    reasons: vec![ProjectStatsExclusionReasonCountWire {
+                        reason: ProjectStatsExclusionReasonWire::Oversize,
+                        files: 1,
+                    }],
+                },
+                ProjectStatsExclusionCountWire {
+                    exclusion: ProjectStatsFileExclusionWire::Vendored,
+                    files: 0,
+                    reasons: Vec::new(),
+                },
+                ProjectStatsExclusionCountWire {
+                    exclusion: ProjectStatsFileExclusionWire::Binary,
+                    files: 0,
+                    reasons: Vec::new(),
+                },
+            ]),
+            skipped_symlinks: Some(1),
+            skipped_gitlinks: Some(0),
+            first_commit_ts: None,
+            last_commit_ts: None,
+        }),
     };
     let record_repo = ProjectStatsRepoWire {
         id: "records".to_owned(),
@@ -223,21 +297,24 @@ fn response_fixture() -> ProjectStatsResponseWire {
         lifetime: None,
         snapshot: Some(ProjectStatsSnapshotWire {
             tracked_files: 10,
-            tracked_lines: 200,
-            test_files: 2,
-            test_lines: 30,
-            doc_files: 3,
-            doc_lines: 50,
-            agent_context_files: 1,
-            agent_context_lines: 15,
-            lifetime_commits: 22,
-            lifetime_agent_commits: 9,
-            languages: vec![ProjectStatsLanguageWire {
-                name: "Markdown".to_owned(),
-                files: 3,
-                lines: 50,
-            }],
+            tracked_lines: None,
+            test_files: None,
+            test_lines: None,
+            doc_files: None,
+            doc_lines: None,
+            agent_context_files: None,
+            agent_context_lines: None,
+            lifetime_commits: Some(22),
+            lifetime_agent_commits: None,
+            languages: None,
             as_of_ts: Some(1_700_000_000),
+            counter: None,
+            role_counts: None,
+            exclusion_counts: None,
+            skipped_symlinks: None,
+            skipped_gitlinks: None,
+            first_commit_ts: Some(1_600_000_000),
+            last_commit_ts: Some(1_700_000_000),
         }),
     };
     let project_wire = ProjectStatsProjectWire {
@@ -318,6 +395,131 @@ fn full_request_and_response_contracts_round_trip() {
             "fetched_at": 1_700_000_000
         })
     );
+    assert_eq!(response_json["projects"][0]["code"]["code_lines"], 120);
+    assert_eq!(
+        response_json["projects"][0]["repos"][0]["snapshot"]["role_counts"][1]
+            ["role"],
+        "tests"
+    );
+    assert_eq!(
+        response_json["projects"][0]["repos"][1]["snapshot"]["tracked_lines"],
+        Value::Null
+    );
+    assert_eq!(
+        response_json["projects"][0]["repos"][1]["snapshot"]
+            ["lifetime_commits"],
+        22
+    );
+    let code_snapshot = &response_json["projects"][0]["repos"][0]["snapshot"];
+    let included_files: u64 = code_snapshot["role_counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["files"].as_u64().unwrap())
+        .sum();
+    let excluded_files: u64 = code_snapshot["exclusion_counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["files"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        included_files
+            + excluded_files
+            + code_snapshot["skipped_symlinks"].as_u64().unwrap(),
+        code_snapshot["tracked_files"].as_u64().unwrap()
+    );
+    assert_eq!(
+        code_snapshot["role_counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["lines"].as_u64().unwrap())
+            .sum::<u64>(),
+        code_snapshot["tracked_lines"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn code_contract_distinguishes_unavailable_from_measured_empty() {
+    let unavailable = ProjectStatsCodeWire {
+        counter: ProjectStatsCodeCounterWire::Nonblank,
+        code_files: None,
+        code_lines: None,
+        test_lines: None,
+        test_share: None,
+        doc_files: None,
+        doc_lines: None,
+        agent_context_files: None,
+        agent_context_lines: None,
+        languages: None,
+        repos_configured: 2,
+        repos_measured: 0,
+    };
+    let unavailable_json = serde_json::to_value(unavailable).unwrap();
+    assert_eq!(unavailable_json["code_files"], Value::Null);
+    assert_eq!(unavailable_json["code_lines"], Value::Null);
+    assert_eq!(unavailable_json["languages"], Value::Null);
+
+    let empty = ProjectStatsCodeWire {
+        counter: ProjectStatsCodeCounterWire::Nonblank,
+        code_files: Some(0),
+        code_lines: Some(0),
+        test_lines: Some(0),
+        test_share: None,
+        doc_files: Some(0),
+        doc_lines: Some(0),
+        agent_context_files: Some(0),
+        agent_context_lines: Some(0),
+        languages: Some(Vec::new()),
+        repos_configured: 0,
+        repos_measured: 0,
+    };
+    let empty_json = serde_json::to_value(empty).unwrap();
+    assert_eq!(empty_json["code_files"], 0);
+    assert_eq!(empty_json["code_lines"], 0);
+    assert_eq!(empty_json["test_share"], Value::Null);
+    assert_eq!(empty_json["languages"], json!([]));
+}
+
+#[test]
+fn previous_cached_code_and_snapshot_shapes_still_deserialize() {
+    let code: ProjectStatsCodeWire = serde_json::from_value(json!({
+        "counter": "nonblank",
+        "code_files": 4,
+        "code_lines": 20,
+        "test_lines": 5,
+        "test_share": 0.25,
+        "doc_files": 1,
+        "doc_lines": 3,
+        "agent_context_files": 0,
+        "agent_context_lines": 0,
+        "languages": [],
+        "repos_configured": 1,
+        "repos_measured": 1
+    }))
+    .unwrap();
+    assert_eq!(code.code_files, Some(4));
+    assert_eq!(code.languages, Some(Vec::new()));
+
+    let snapshot: ProjectStatsSnapshotWire = serde_json::from_value(json!({
+        "tracked_files": 4,
+        "tracked_lines": 20,
+        "test_files": 1,
+        "test_lines": 5,
+        "doc_files": 1,
+        "doc_lines": 3,
+        "agent_context_files": 0,
+        "agent_context_lines": 0,
+        "lifetime_commits": 9,
+        "lifetime_agent_commits": 4,
+        "languages": [],
+        "as_of_ts": 1_700_000_000
+    }))
+    .unwrap();
+    assert_eq!(snapshot.tracked_lines, Some(20));
+    assert_eq!(snapshot.first_commit_ts, None);
+    assert_eq!(snapshot.role_counts, None);
 }
 
 #[test]
@@ -408,6 +610,10 @@ fn validation_checks_versions_ranges_timezone_bounds_and_identities() {
 
 #[test]
 fn enums_use_snake_case_and_cover_contract_variants() {
+    assert_eq!(
+        ProjectStatsCodeCounterWire::default(),
+        ProjectStatsCodeCounterWire::Nonblank
+    );
     let value = serde_json::to_value(vec![
         ProjectStatsFacetWire::Output,
         ProjectStatsFacetWire::Code,

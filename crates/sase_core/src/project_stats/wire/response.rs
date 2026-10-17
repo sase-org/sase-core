@@ -121,15 +121,25 @@ pub struct ProjectStatsLifetimeWire {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectStatsCodeWire {
     pub counter: ProjectStatsCodeCounterWire,
-    pub code_files: u64,
-    pub code_lines: u64,
-    pub test_lines: u64,
+    /// Null when no configured source could be measured. A measured empty
+    /// population is `Some(0)`.
+    #[serde(default)]
+    pub code_files: Option<u64>,
+    #[serde(default)]
+    pub code_lines: Option<u64>,
+    #[serde(default)]
+    pub test_lines: Option<u64>,
     pub test_share: Option<f64>,
-    pub doc_files: u64,
-    pub doc_lines: u64,
-    pub agent_context_files: u64,
-    pub agent_context_lines: u64,
-    pub languages: Vec<ProjectStatsLanguageWire>,
+    #[serde(default)]
+    pub doc_files: Option<u64>,
+    #[serde(default)]
+    pub doc_lines: Option<u64>,
+    #[serde(default)]
+    pub agent_context_files: Option<u64>,
+    #[serde(default)]
+    pub agent_context_lines: Option<u64>,
+    #[serde(default)]
+    pub languages: Option<Vec<ProjectStatsLanguageWire>>,
     pub repos_configured: u64,
     pub repos_measured: u64,
 }
@@ -140,8 +150,8 @@ pub struct ProjectStatsCodeWire {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectStatsCodeCounterWire {
-    #[default]
     Sloc,
+    #[default]
     Nonblank,
 }
 
@@ -282,16 +292,113 @@ pub struct ProjectStatsRepoWire {
 /// Tracked-file and lifetime-commit facts from a record repository snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectStatsSnapshotWire {
+    /// Total tracked blob entries, including symlinks and excluded blobs but
+    /// excluding gitlinks.
     pub tracked_files: u64,
-    pub tracked_lines: u64,
-    pub test_files: u64,
-    pub test_lines: u64,
-    pub doc_files: u64,
-    pub doc_lines: u64,
-    pub agent_context_files: u64,
-    pub agent_context_lines: u64,
-    pub lifetime_commits: u64,
-    pub lifetime_agent_commits: u64,
-    pub languages: Vec<ProjectStatsLanguageWire>,
+    /// Content-derived values are null for metadata-only records snapshots.
+    #[serde(default)]
+    pub tracked_lines: Option<u64>,
+    #[serde(default)]
+    pub test_files: Option<u64>,
+    #[serde(default)]
+    pub test_lines: Option<u64>,
+    #[serde(default)]
+    pub doc_files: Option<u64>,
+    #[serde(default)]
+    pub doc_lines: Option<u64>,
+    #[serde(default)]
+    pub agent_context_files: Option<u64>,
+    #[serde(default)]
+    pub agent_context_lines: Option<u64>,
+    /// Records snapshots measure this count. Code snapshots leave it null.
+    #[serde(default)]
+    pub lifetime_commits: Option<u64>,
+    /// Agent attribution is not measured by either snapshot implementation.
+    #[serde(default)]
+    pub lifetime_agent_commits: Option<u64>,
+    #[serde(default)]
+    pub languages: Option<Vec<ProjectStatsLanguageWire>>,
     pub as_of_ts: Option<i64>,
+    /// Set only for committed-code snapshots.
+    #[serde(default)]
+    pub counter: Option<ProjectStatsCodeCounterWire>,
+    /// Complete role partitions are present for code snapshots and null for
+    /// metadata-only records snapshots.
+    #[serde(default)]
+    pub role_counts: Option<Vec<ProjectStatsRoleCountWire>>,
+    #[serde(default)]
+    pub exclusion_counts: Option<Vec<ProjectStatsExclusionCountWire>>,
+    #[serde(default)]
+    pub skipped_symlinks: Option<u64>,
+    #[serde(default)]
+    pub skipped_gitlinks: Option<u64>,
+    /// Records use author time, matching lifetime history statistics.
+    #[serde(default)]
+    pub first_commit_ts: Option<i64>,
+    #[serde(default)]
+    pub last_commit_ts: Option<i64>,
+}
+
+/// Role assigned to an included regular file in a committed code snapshot.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatsFileRoleWire {
+    Source,
+    Tests,
+    Docs,
+    AgentContext,
+    ConfigData,
+    Other,
+}
+
+/// File role totals; `lines` follows the snapshot's selected counter for
+/// source/tests and nonblank counting for docs, context, config/data, and
+/// other roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectStatsRoleCountWire {
+    pub role: ProjectStatsFileRoleWire,
+    pub files: u64,
+    pub lines: u64,
+}
+
+/// Why an otherwise regular file was excluded from included roles.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatsFileExclusionWire {
+    Generated,
+    Vendored,
+    Binary,
+}
+
+/// Stable reason bucket used to audit exclusion totals.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatsExclusionReasonWire {
+    Attribute,
+    PathHeuristic,
+    Oversize,
+    NulByte,
+    LfsPointer,
+}
+
+/// Number of excluded files for one reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectStatsExclusionReasonCountWire {
+    pub reason: ProjectStatsExclusionReasonWire,
+    pub files: u64,
+}
+
+/// File exclusion totals and their auditable reason breakdown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectStatsExclusionCountWire {
+    pub exclusion: ProjectStatsFileExclusionWire,
+    pub files: u64,
+    #[serde(default)]
+    pub reasons: Vec<ProjectStatsExclusionReasonCountWire>,
 }
