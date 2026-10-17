@@ -114,6 +114,9 @@ fn validate_request(
 fn decide_ambiguous(
     request: &GateFollowupDecisionRequestWire,
 ) -> Option<GateFollowupDecisionWire> {
+    if ignore_first_pass_successor_evidence(request) {
+        return None;
+    }
     let evidence = request.successor_evidence.as_ref()?;
     if !evidence.ambiguous {
         return None;
@@ -134,6 +137,9 @@ fn decide_ambiguous(
 fn decide_existing_successor(
     request: &GateFollowupDecisionRequestWire,
 ) -> Option<GateFollowupDecisionWire> {
+    if ignore_first_pass_successor_evidence(request) {
+        return None;
+    }
     let evidence = request.successor_evidence.as_ref()?;
     if evidence.ambiguous || !(evidence.running || evidence.completed) {
         return None;
@@ -179,6 +185,23 @@ fn decide_existing_successor(
             diagnostics(request),
         ))
     }
+}
+
+fn ignore_first_pass_successor_evidence(
+    request: &GateFollowupDecisionRequestWire,
+) -> bool {
+    if request.mode != MODE_SETTLE
+        || request.already_settled
+        || matching_attempt(request).is_some()
+    {
+        return false;
+    }
+    let receipt_present = nonzero(request.followup_agent.as_deref()).is_some()
+        || matches!(
+            request.followup_outcome.as_deref(),
+            Some(OUTCOME_LAUNCHED | OUTCOME_LAUNCHED_DEGRADED)
+        );
+    !receipt_present
 }
 
 fn decide_live_attempt(

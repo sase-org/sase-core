@@ -22,6 +22,13 @@ fn request() -> GateFollowupDecisionRequestWire {
     }
 }
 
+fn first_pass_settle_request() -> GateFollowupDecisionRequestWire {
+    let mut input = request();
+    input.mode = MODE_SETTLE.to_string();
+    input.already_settled = false;
+    input
+}
+
 #[test]
 fn attempt_id_is_stable_for_the_same_gate_and_fingerprint() {
     let first = gate_followup_attempt_id("gate-1", "fp-a");
@@ -149,6 +156,69 @@ fn completed_successor_still_counts() {
         ..Default::default()
     });
     let verdict = decide_gate_followup(&input).unwrap();
+    assert_eq!(verdict.recovery, RECOVERY_ADOPT);
+    assert!(!verdict.launch_allowed);
+}
+
+#[test]
+fn first_pass_settle_ignores_running_or_completed_successor_evidence_without_attempt(
+) {
+    for (running, completed) in [(true, false), (false, true)] {
+        let mut input = first_pass_settle_request();
+        input.successor_evidence = Some(GateFollowupSuccessorEvidenceWire {
+            attached_agent: Some("lane--0".to_string()),
+            running,
+            completed,
+            ..Default::default()
+        });
+
+        let verdict = decide_gate_followup(&input).unwrap();
+
+        assert_eq!(verdict.recovery, RECOVERY_RESUME);
+        assert!(verdict.launch_allowed);
+        assert!(!verdict.needs_attention);
+    }
+}
+
+#[test]
+fn first_pass_settle_ignores_ambiguous_successor_evidence_without_attempt() {
+    let mut input = first_pass_settle_request();
+    input.successor_evidence = Some(GateFollowupSuccessorEvidenceWire {
+        ambiguous: true,
+        running: true,
+        attached_agent: Some("maybe--0".to_string()),
+        ..Default::default()
+    });
+
+    let verdict = decide_gate_followup(&input).unwrap();
+
+    assert_eq!(verdict.recovery, RECOVERY_RESUME);
+    assert!(verdict.launch_allowed);
+    assert!(!verdict.needs_attention);
+}
+
+#[test]
+fn stale_launching_attempt_keeps_running_successor_adoption_on_settle() {
+    let mut input = first_pass_settle_request();
+    input.attempt = Some(GateFollowupAttemptWire {
+        attempt_id: "att-1".to_string(),
+        fingerprint: Some("sha256:plan-approve-commit".to_string()),
+        stage: Some(ATTEMPT_STAGE_LAUNCHING.to_string()),
+        live: false,
+        owner_pid: Some(4242),
+        started_at: None,
+        error_stage: None,
+        error_type: None,
+        error_message: None,
+    });
+    input.successor_evidence = Some(GateFollowupSuccessorEvidenceWire {
+        attached_agent: Some("lane--0".to_string()),
+        running: true,
+        ..Default::default()
+    });
+
+    let verdict = decide_gate_followup(&input).unwrap();
+
     assert_eq!(verdict.recovery, RECOVERY_ADOPT);
     assert!(!verdict.launch_allowed);
 }
