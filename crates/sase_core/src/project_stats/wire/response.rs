@@ -52,9 +52,11 @@ pub struct ProjectStatsProjectWire {
     pub key: String,
     pub label: String,
     pub state: ProjectStatsProjectStateWire,
-    /// Null when unrequested, not implemented, or unavailable as a whole.
+    /// Null when unrequested or not implemented. A requested Output facet
+    /// stays present; unavailable measurements use null counts.
     pub output: Option<ProjectStatsOutputWire>,
-    /// Null when unrequested, not implemented, or unavailable as a whole.
+    /// Null when unrequested or not implemented. Returned with Output when
+    /// that facet is requested.
     pub lifetime: Option<ProjectStatsLifetimeWire>,
     /// Null when unrequested, not implemented, or unavailable as a whole.
     pub code: Option<ProjectStatsCodeWire>,
@@ -80,10 +82,13 @@ pub struct ProjectStatsPortfolioWire {
 }
 
 /// Output and model measurements for a project or repository.
+///
+/// Count fields are null when every selected source for this measure is
+/// unavailable. Measured empty repositories and empty ranges use `0`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectStatsOutputWire {
-    pub commits: u64,
-    pub agent_commits: u64,
+    pub commits: Option<u64>,
+    pub agent_commits: Option<u64>,
     pub agent_share: Option<f64>,
     pub plans_committed: Option<u64>,
     pub plans_epic: Option<u64>,
@@ -108,8 +113,8 @@ pub struct ProjectStatsLifetimeWire {
     pub last_commit_ts: Option<i64>,
     pub age_days: Option<u64>,
     pub active_days: Option<u64>,
-    pub commits: u64,
-    pub agent_commits: u64,
+    pub commits: Option<u64>,
+    pub agent_commits: Option<u64>,
 }
 
 /// Code size and file-class measurements.

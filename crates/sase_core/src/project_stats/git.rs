@@ -182,12 +182,22 @@ pub(crate) fn issue(
     code: &str,
     message: String,
 ) -> ProjectStatsIssueWire {
-    ProjectStatsIssueWire {
-        repo: Some(spec.name.clone()),
-        code: code.to_owned(),
-        message,
-        ..ProjectStatsIssueWire::default()
-    }
+    retarget_issue(
+        ProjectStatsIssueWire {
+            code: code.to_owned(),
+            message,
+            ..ProjectStatsIssueWire::default()
+        },
+        spec,
+    )
+}
+
+pub(crate) fn retarget_issue(
+    mut issue: ProjectStatsIssueWire,
+    spec: &ProjectStatsRepoSpecWire,
+) -> ProjectStatsIssueWire {
+    issue.repo = Some(spec.name.clone());
+    issue
 }
 
 pub(crate) fn run_unchecked(

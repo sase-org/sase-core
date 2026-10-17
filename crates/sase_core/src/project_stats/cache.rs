@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use fs2::FileExt;
@@ -108,7 +108,7 @@ pub(crate) fn cache_path(cache_dir: &str, key: &str) -> PathBuf {
 
 /// Load one valid entry, treating all disk errors as a cache miss.
 /// Readers never open the writer lock file.
-pub(crate) fn load(path: &Path) -> Option<HistoryCacheEntry> {
+pub(crate) fn load(path: &Path) -> Option<Arc<HistoryCacheEntry>> {
     let path_key = path.to_string_lossy().into_owned();
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
@@ -121,7 +121,7 @@ pub(crate) fn load(path: &Path) -> Option<HistoryCacheEntry> {
                 && entry.mtime_nanos == age.subsec_nanos()
                 && entry.length == length
             {
-                return Some(entry.value.clone());
+                return Some(Arc::clone(&entry.value));
             }
         }
     }
@@ -131,6 +131,7 @@ pub(crate) fn load(path: &Path) -> Option<HistoryCacheEntry> {
     if entry.schema_version != HISTORY_CACHE_SCHEMA_VERSION {
         return None;
     }
+    let arc = Arc::new(entry);
     if let Ok(mut guard) = cache_memo().lock() {
         guard.insert(
             path_key,
@@ -138,11 +139,11 @@ pub(crate) fn load(path: &Path) -> Option<HistoryCacheEntry> {
                 mtime_secs: age.as_secs(),
                 mtime_nanos: age.subsec_nanos(),
                 length,
-                value: entry.clone(),
+                value: Arc::clone(&arc),
             },
         );
     }
-    Some(entry)
+    Some(arc)
 }
 
 /// Persist an entry using a writer-only sibling lock and atomic rename.
@@ -169,10 +170,34 @@ pub(crate) fn persist(path: &Path, entry: &HistoryCacheEntry) {
     if lock.lock_exclusive().is_err() {
         return;
     }
-    let _ = write_temp_and_rename(parent, path, &json);
+    let wrote = write_temp_and_rename(parent, path, &json).is_ok();
     let _ = FileExt::unlock(&lock);
+    if !wrote {
+        return;
+    }
+    remember(path, entry);
+}
+
+fn remember(path: &Path, entry: &HistoryCacheEntry) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = modified.duration_since(UNIX_EPOCH) else {
+        return;
+    };
     if let Ok(mut guard) = cache_memo().lock() {
-        guard.remove(&path.to_string_lossy().into_owned());
+        guard.insert(
+            path.to_string_lossy().into_owned(),
+            MemoEntry {
+                mtime_secs: age.as_secs(),
+                mtime_nanos: age.subsec_nanos(),
+                length: metadata.len(),
+                value: Arc::new(entry.clone()),
+            },
+        );
     }
 }
 
@@ -209,7 +234,7 @@ struct MemoEntry {
     mtime_secs: u64,
     mtime_nanos: u32,
     length: u64,
-    value: HistoryCacheEntry,
+    value: Arc<HistoryCacheEntry>,
 }
 
 fn cache_memo() -> &'static Mutex<HashMap<String, MemoEntry>> {

@@ -117,8 +117,8 @@ fn both_footer_spellings_and_authoritative_model_tags() {
     let cache = cache_dir();
     let response = query_repo(&fixture.repo, cache.path());
     let output = response.projects[0].output.as_ref().unwrap();
-    assert_eq!(output.commits, 2);
-    assert_eq!(output.agent_commits, 2);
+    assert_eq!(output.commits, Some(2));
+    assert_eq!(output.agent_commits, Some(2));
     check_output_invariants(output).unwrap();
     let resolved: Vec<_> = output
         .models
@@ -158,8 +158,8 @@ fn malformed_repeated_prose_and_absent_agent_model_tags() {
     let cache = cache_dir();
     let response = query_repo(&fixture.repo, cache.path());
     let output = response.projects[0].output.as_ref().unwrap();
-    assert_eq!(output.commits, 4);
-    assert_eq!(output.agent_commits, 2);
+    assert_eq!(output.commits, Some(4));
+    assert_eq!(output.agent_commits, Some(2));
     check_output_invariants(output).unwrap();
     let unknown = output
         .models
@@ -233,7 +233,7 @@ fn merges_are_included_in_output_counts() {
     let cache = cache_dir();
     let response = query_repo(&fixture.repo, cache.path());
     let output = response.projects[0].output.as_ref().unwrap();
-    assert_eq!(output.commits, 4);
+    assert_eq!(output.commits, Some(4));
 }
 
 #[test]
@@ -261,9 +261,16 @@ fn shared_history_is_deduplicated_within_and_across_projects() {
         &cache.path().to_string_lossy(),
     ))
     .unwrap();
-    assert_eq!(response.projects[0].output.as_ref().unwrap().commits, 1);
-    assert_eq!(response.projects[1].output.as_ref().unwrap().commits, 1);
-    assert_eq!(response.portfolio.output.as_ref().unwrap().commits, 1);
+    assert_eq!(
+        response.projects[0].output.as_ref().unwrap().commits,
+        Some(1)
+    );
+    assert_eq!(
+        response.projects[1].output.as_ref().unwrap().commits,
+        Some(1)
+    );
+    assert_eq!(response.portfolio.output.as_ref().unwrap().commits, Some(1));
+    assert_eq!(response.projects[0].coverage.configured_repos, 1);
     let primary = response.projects[0]
         .repos
         .iter()
@@ -274,8 +281,8 @@ fn shared_history_is_deduplicated_within_and_across_projects() {
         .iter()
         .find(|repo| repo.id == "clone")
         .unwrap();
-    assert_eq!(primary.output.as_ref().unwrap().commits, 1);
-    assert_eq!(cloned.output.as_ref().unwrap().commits, 1);
+    assert_eq!(primary.output.as_ref().unwrap().commits, Some(1));
+    assert_eq!(cloned.output.as_ref().unwrap().commits, Some(1));
 }
 
 #[test]
@@ -299,13 +306,13 @@ fn record_repos_are_visible_and_excluded_from_code_totals() {
     ))
     .unwrap();
     let project = &response.projects[0];
-    assert_eq!(project.output.as_ref().unwrap().commits, 1);
+    assert_eq!(project.output.as_ref().unwrap().commits, Some(1));
     let record = project
         .repos
         .iter()
         .find(|repo| repo.tier == ProjectStatsRepoTierWire::Records)
         .unwrap();
-    assert_eq!(record.output.as_ref().unwrap().commits, 1);
+    assert_eq!(record.output.as_ref().unwrap().commits, Some(1));
     assert_eq!(project.coverage.configured_repos, 1);
 }
 
@@ -352,8 +359,8 @@ fn half_open_range_and_non_monotonic_clocks() {
     let project = &response.projects[0];
     let output = project.output.as_ref().unwrap();
     let lifetime = project.lifetime.as_ref().unwrap();
-    assert_eq!(output.commits, 1);
-    assert_eq!(lifetime.commits, 3);
+    assert_eq!(output.commits, Some(1));
+    assert_eq!(lifetime.commits, Some(3));
     assert_eq!(lifetime.first_commit_ts, Some(1_600_000_000));
 }
 
@@ -434,7 +441,7 @@ fn mixed_available_unavailable_and_partial_sources() {
     req.budget.max_output_bytes = 256;
     let response = query_project_stats(&req).unwrap();
     let project = &response.projects[0];
-    assert!(project.output.as_ref().unwrap().commits >= 1);
+    assert!(project.output.as_ref().unwrap().commits.unwrap_or(0) >= 1);
     assert!(project.coverage.unavailable_repos >= 1);
     assert!(project.coverage.partial_repos >= 1);
     assert!(project.coverage.measured_repos >= 1);
@@ -526,9 +533,9 @@ fn empty_repository_is_measured_zero() {
     let response = query_repo(&fixture.repo, cache.path());
     let output = response.projects[0].output.as_ref().unwrap();
     let lifetime = response.projects[0].lifetime.as_ref().unwrap();
-    assert_eq!(output.commits, 0);
+    assert_eq!(output.commits, Some(0));
     assert_eq!(output.agent_share, None);
-    assert_eq!(lifetime.commits, 0);
+    assert_eq!(lifetime.commits, Some(0));
     assert_eq!(lifetime.first_commit_ts, None);
     assert_eq!(
         response.projects[0].repos[0].status,
@@ -536,12 +543,400 @@ fn empty_repository_is_measured_zero() {
     );
 }
 
+fn ref_spec(id: &str, path: &Path, refs: &[&str]) -> ProjectStatsRepoSpecWire {
+    let mut spec = repo_spec(id, path);
+    spec.ref_candidates = refs.iter().map(|item| (*item).to_owned()).collect();
+    spec
+}
+
+fn named_spec(
+    id: &str,
+    name: &str,
+    path: &Path,
+    refs: &[&str],
+) -> ProjectStatsRepoSpecWire {
+    let mut spec = ref_spec(id, path, refs);
+    spec.name = name.to_owned();
+    spec
+}
+
+fn divergent_fixture() -> super::test_support::Fixture {
+    let fixture = init_repo();
+    commit(&fixture.repo, "root.txt", "root\n", "root");
+    git(&fixture.repo, &["checkout", "-b", "side"]);
+    commit(&fixture.repo, "side.txt", "side\n", "side");
+    git(&fixture.repo, &["checkout", "main"]);
+    commit(&fixture.repo, "main.txt", "main\n", "main");
+    fixture
+}
+
+fn assert_output_invariants(response: &ProjectStatsResponseWire) {
+    for project in &response.projects {
+        if let Some(output) = &project.output {
+            check_output_invariants(output).unwrap();
+        }
+    }
+    if let Some(output) = &response.portfolio.output {
+        check_output_invariants(output).unwrap();
+    }
+}
+
+#[test]
+fn divergent_refs_union_history_without_inflating_coverage() {
+    let fixture = divergent_fixture();
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let main_side = vec![
+        ref_spec("main", &fixture.repo, &["main"]),
+        ref_spec("side", &fixture.repo, &["side"]),
+    ];
+    let side_main = vec![
+        ref_spec("side", &fixture.repo, &["side"]),
+        ref_spec("main", &fixture.repo, &["main"]),
+    ];
+    let first = query_project_stats(&request(
+        vec![project("alpha", main_side, Vec::new())],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let second = query_project_stats(&request(
+        vec![project("alpha", side_main, Vec::new())],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert_output_invariants(&first);
+    assert_eq!(first.projects[0].output.as_ref().unwrap().commits, Some(3));
+    assert_eq!(first.portfolio.output.as_ref().unwrap().commits, Some(3));
+    assert_eq!(
+        first.projects[0].lifetime.as_ref().unwrap().commits,
+        Some(3)
+    );
+    assert_eq!(first.projects[0].coverage.configured_repos, 1);
+    assert_eq!(first.projects[0].coverage.measured_repos, 1);
+    assert_output_invariants(&second);
+    assert_eq!(
+        first.projects[0].output.as_ref().unwrap().commits,
+        second.projects[0].output.as_ref().unwrap().commits
+    );
+    assert_eq!(first.projects[0].coverage, second.projects[0].coverage);
+    assert_eq!(
+        first.portfolio.output.as_ref().unwrap().commits,
+        second.portfolio.output.as_ref().unwrap().commits
+    );
+}
+
+#[test]
+fn divergent_refs_across_projects_union_in_the_portfolio() {
+    let fixture = divergent_fixture();
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let response = query_project_stats(&request(
+        vec![
+            project(
+                "alpha",
+                vec![ref_spec("main", &fixture.repo, &["main"])],
+                Vec::new(),
+            ),
+            project(
+                "beta",
+                vec![ref_spec("side", &fixture.repo, &["side"])],
+                Vec::new(),
+            ),
+        ],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert_output_invariants(&response);
+    assert_eq!(
+        response.projects[0].output.as_ref().unwrap().commits,
+        Some(2)
+    );
+    assert_eq!(
+        response.projects[1].output.as_ref().unwrap().commits,
+        Some(2)
+    );
+    assert_eq!(response.portfolio.output.as_ref().unwrap().commits, Some(3));
+    assert_eq!(response.portfolio.coverage.configured_repos, 1);
+}
+
+#[test]
+fn same_tip_aliases_keep_their_selected_ref_names() {
+    let fixture = init_repo();
+    commit(&fixture.repo, "file.txt", "one\n", "one");
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![
+                named_spec("main", "main-alias", &fixture.repo, &["main"]),
+                named_spec("head", "head-alias", &fixture.repo, &["HEAD"]),
+            ],
+            Vec::new(),
+        )],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let main = response.projects[0]
+        .repos
+        .iter()
+        .find(|repo| repo.id == "main")
+        .unwrap();
+    let head = response.projects[0]
+        .repos
+        .iter()
+        .find(|repo| repo.id == "head")
+        .unwrap();
+    assert_eq!(main.reference.as_ref().unwrap().name, "main");
+    assert_eq!(head.reference.as_ref().unwrap().name, "HEAD");
+    assert_eq!(
+        main.reference.as_ref().unwrap().commit,
+        head.reference.as_ref().unwrap().commit
+    );
+    assert_eq!(
+        response.projects[0].output.as_ref().unwrap().commits,
+        Some(1)
+    );
+}
+
+#[test]
+fn repeated_missing_paths_keep_their_issue_names() {
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let missing = Path::new("/no/such/project-stats-repo");
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![
+                named_spec("one", "display-one", missing, &["main"]),
+                named_spec("two", "display-two", missing, &["main"]),
+            ],
+            Vec::new(),
+        )],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let one = response.projects[0]
+        .repos
+        .iter()
+        .find(|repo| repo.id == "one")
+        .unwrap();
+    let two = response.projects[0]
+        .repos
+        .iter()
+        .find(|repo| repo.id == "two")
+        .unwrap();
+    assert_eq!(
+        one.issue.as_ref().and_then(|issue| issue.repo.as_deref()),
+        Some("display-one")
+    );
+    assert_eq!(
+        two.issue.as_ref().and_then(|issue| issue.repo.as_deref()),
+        Some("display-two")
+    );
+    assert_eq!(response.projects[0].output.as_ref().unwrap().commits, None);
+    assert!(response.projects[0]
+        .output
+        .as_ref()
+        .unwrap()
+        .models
+        .is_empty());
+    assert_eq!(
+        response.projects[0].lifetime.as_ref().unwrap().commits,
+        None
+    );
+}
+
+#[test]
+fn two_clones_share_coverage_identity_and_keep_isolated_history() {
+    let source = init_repo();
+    commit(&source.repo, "shared.txt", "shared\n", "shared");
+    let clone = clone_repo(&source.repo);
+    commit(&clone.repo, "only-clone.txt", "clone\n", "clone only");
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let first_specs = vec![
+        repo_spec("source", &source.repo),
+        repo_spec("clone", &clone.repo),
+    ];
+    let mut reversed = first_specs.clone();
+    reversed.reverse();
+    let first = query_project_stats(&request(
+        vec![project("alpha", first_specs, Vec::new())],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let second = query_project_stats(&request(
+        vec![project("alpha", reversed, Vec::new())],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert_eq!(first.projects[0].output.as_ref().unwrap().commits, Some(2));
+    assert_eq!(first.portfolio.output.as_ref().unwrap().commits, Some(2));
+    assert_eq!(first.projects[0].coverage.configured_repos, 1);
+    assert_eq!(first.projects[0].coverage.measured_repos, 1);
+    assert_eq!(first.projects[0].coverage, second.projects[0].coverage);
+    assert_eq!(
+        first.projects[0].output.as_ref().unwrap().commits,
+        second.projects[0].output.as_ref().unwrap().commits
+    );
+}
+
+#[test]
+fn coverage_uses_worst_health_for_a_shared_identity() {
+    let available = init_repo();
+    commit(&available.repo, "ok.txt", "ok\n", "ok");
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let mut ok = repo_spec("ok", &available.repo);
+    ok.identity = "https://example.test/shared.git".to_owned();
+    let holder = tempfile::tempdir().unwrap();
+    let shallow_path = holder.path().join("shallow");
+    let source_url = format!("file://{}", available.repo.display());
+    let clone_output = std::process::Command::new("git")
+        .args(["clone", "--depth=1", &source_url])
+        .arg(&shallow_path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_NAMESPACE")
+        .output()
+        .expect("clone shallow");
+    assert!(clone_output.status.success());
+    let mut shallow_spec = repo_spec("shallow", &shallow_path);
+    shallow_spec.identity = ok.identity.clone();
+    let forward = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![ok.clone(), shallow_spec.clone()],
+            Vec::new(),
+        )],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let reverse = query_project_stats(&request(
+        vec![project("alpha", vec![shallow_spec, ok], Vec::new())],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert_eq!(forward.projects[0].coverage.configured_repos, 1);
+    assert_eq!(forward.projects[0].coverage.measured_repos, 1);
+    assert_eq!(forward.projects[0].coverage.partial_repos, 1);
+    assert_eq!(
+        forward.projects[0].coverage.partial_repos,
+        reverse.projects[0].coverage.partial_repos
+    );
+}
+
+#[test]
+fn all_missing_sources_serialize_null_counts() {
+    let cache = cache_dir();
+    let (start, end, now) = wide_range();
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![repo_spec("missing", Path::new("/no/such/repo"))],
+            Vec::new(),
+        )],
+        start,
+        end,
+        now,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    let json = serde_json::to_value(&response).unwrap();
+    assert!(json["projects"][0]["output"].is_object());
+    assert_eq!(
+        json["projects"][0]["output"]["commits"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["projects"][0]["output"]["agent_commits"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["projects"][0]["lifetime"]["commits"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json["portfolio"]["output"]["commits"],
+        serde_json::Value::Null
+    );
+    assert_eq!(json["projects"][0]["code"], serde_json::Value::Null);
+    assert!(json["projects"][0]["output"]["models"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn empty_range_on_nonempty_history_is_measured_zero() {
+    let fixture = init_repo();
+    commit_at(
+        &fixture.repo,
+        "file.txt",
+        "one\n",
+        "one",
+        1_700_000_000,
+        1_700_000_000,
+    );
+    let cache = cache_dir();
+    let response = query_project_stats(&request(
+        vec![project(
+            "alpha",
+            vec![repo_spec("code", &fixture.repo)],
+            Vec::new(),
+        )],
+        1_700_000_100,
+        1_700_000_100,
+        1_700_000_200,
+        &cache.path().to_string_lossy(),
+    ))
+    .unwrap();
+    assert_eq!(
+        response.projects[0].output.as_ref().unwrap().commits,
+        Some(0)
+    );
+    assert_eq!(
+        response.projects[0].lifetime.as_ref().unwrap().commits,
+        Some(1)
+    );
+}
+
 #[test]
 #[ignore = "manual cold/warm measurement; not a CI timing gate"]
 fn measured_history_acceptance_on_sase_checkout() {
-    let Some(repo) = sase_checkout() else {
-        return;
-    };
+    let repo = sase_checkout().expect("authorized sase checkout");
     let cache = cache_dir();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -568,35 +963,92 @@ fn measured_history_acceptance_on_sase_checkout() {
         warm_samples.push(start.elapsed().as_secs_f64() * 1000.0);
         assert_eq!(cold.fingerprint, warm.fingerprint);
         assert_eq!(cold.projects[0].output, warm.projects[0].output);
+        assert_eq!(cold.projects[0].lifetime, warm.projects[0].lifetime);
     }
     warm_samples.sort_by(|left, right| left.partial_cmp(right).unwrap());
     let median = warm_samples[warm_samples.len() / 2];
     let output = cold.projects[0].output.as_ref().unwrap();
+    let lifetime = cold.projects[0].lifetime.as_ref().unwrap();
     let tip = cold.projects[0].repos[0]
         .reference
         .as_ref()
         .map(|reference| reference.commit.clone())
         .unwrap_or_default();
+    let identity = cold.projects[0].repos[0]
+        .reference
+        .as_ref()
+        .map(|reference| reference.name.clone())
+        .unwrap_or_default();
     eprintln!(
-        "project_stats measure repo={} history_commits={} range_commits={} tip={} budget_ms={} max_bytes={} cold_ms={cold_ms:.1} warm_median_ms={median:.1} cache={} includes_extension_startup=false",
+        "project_stats measure repo={} identity_ref={} history_commits={} range_commits={} tip={} budget_ms={} max_bytes={} cold_ms={cold_ms:.1} warm_median_ms={median:.1} cache={} includes_extension_startup=false",
         repo.display(),
-        cold.projects[0].lifetime.as_ref().unwrap().commits,
-        output.commits,
+        identity,
+        lifetime.commits.unwrap_or(0),
+        output.commits.unwrap_or(0),
         tip,
         req.budget.timeout_ms,
         req.budget.max_output_bytes,
         cache.path().display()
     );
+    assert!(
+        median < 150.0,
+        "warm one-project median {median:.1} ms exceeds 150 ms budget"
+    );
 }
 
-fn sase_checkout() -> Option<std::path::PathBuf> {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for relative in ["../../../../..", "../.."] {
-        if let Ok(candidate) = manifest.join(relative).canonicalize() {
-            if candidate.join(".git").exists() {
-                return Some(candidate);
-            }
-        }
+#[test]
+fn acceptance_harness_rejects_core_and_missing_paths() {
+    let err = validate_sase_checkout(Path::new("/no/such/sase")).unwrap_err();
+    assert!(err.contains("not a git checkout"), "{err}");
+    let core = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let err = validate_sase_checkout(&core).unwrap_err();
+    assert!(err.contains("sase-core"), "{err}");
+}
+
+fn sase_checkout() -> Result<std::path::PathBuf, String> {
+    let raw = std::env::var("PROJECT_STATS_SASE_REPO").map_err(|_| {
+        "PROJECT_STATS_SASE_REPO must name the primary sase checkout; \
+the ignored acceptance test does not fall back to sase-core"
+            .to_owned()
+    })?;
+    let path =
+        std::path::PathBuf::from(&raw)
+            .canonicalize()
+            .map_err(|error| {
+                format!(
+                "PROJECT_STATS_SASE_REPO={raw} is not a usable path: {error}"
+            )
+            })?;
+    validate_sase_checkout(&path)?;
+    Ok(path)
+}
+
+fn validate_sase_checkout(path: &Path) -> Result<(), String> {
+    let git_dir = path.join(".git");
+    if !git_dir.exists() {
+        return Err(format!(
+            "PROJECT_STATS_SASE_REPO={} is not a git checkout",
+            path.display()
+        ));
     }
-    None
+    let looks_like_core = path.join("crates/sase_core").is_dir()
+        && !path.join("src/sase").is_dir();
+    if looks_like_core {
+        return Err(format!(
+            "PROJECT_STATS_SASE_REPO={} points at sase-core, not the sase primary checkout",
+            path.display()
+        ));
+    }
+    if !path.join("src/sase").is_dir()
+        || !path.join("sase-core-revision.txt").is_file()
+    {
+        return Err(format!(
+            "PROJECT_STATS_SASE_REPO={} is not the sase primary repository",
+            path.display()
+        ));
+    }
+    Ok(())
 }

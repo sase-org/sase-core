@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -22,9 +23,11 @@ use super::{code, plans, runs, FacetContext, MeasuredRepo};
 #[derive(Clone)]
 struct WalkedSource {
     resolved: Option<ResolvedRepo>,
-    history: Option<HistoryOutcome>,
+    history: Option<Arc<HistoryOutcome>>,
     issue: Option<ProjectStatsIssueWire>,
 }
+
+type SpecInstanceKey = (String, Vec<String>, String, String);
 
 /// Validate the request, walk unique repositories once, and fill Output.
 ///
@@ -43,8 +46,7 @@ pub fn query_project_stats(
     let mut all_tokens = BTreeSet::new();
     let mut facet_tokens = BTreeSet::new();
     let mut portfolio_code_rows = Vec::new();
-    let mut portfolio_health = PortfolioHealth::default();
-    let mut portfolio_keys = BTreeSet::new();
+    let mut portfolio_keys = BTreeMap::new();
     let wants_output = wants_facet(request, ProjectStatsFacetWire::Output);
     let wants_code = wants_facet(request, ProjectStatsFacetWire::Code);
     let wants_runs = wants_facet(request, ProjectStatsFacetWire::Runs);
@@ -76,7 +78,6 @@ pub fn query_project_stats(
             collect_portfolio_code(
                 &measured,
                 &mut portfolio_code_rows,
-                &mut portfolio_health,
                 &mut portfolio_keys,
             );
         }
@@ -127,7 +128,7 @@ pub fn query_project_stats(
             request,
             &directory,
             &portfolio_code_rows,
-            portfolio_health,
+            output::health_from_statuses(portfolio_keys.values().copied()),
         )
     } else {
         ProjectStatsPortfolioWire::default()
@@ -169,12 +170,23 @@ fn spec_key(spec: &ProjectStatsRepoSpecWire) -> (String, Vec<String>) {
     (path, spec.ref_candidates.clone())
 }
 
+fn spec_instance_key(spec: &ProjectStatsRepoSpecWire) -> SpecInstanceKey {
+    let (path, refs) = spec_key(spec);
+    (path, refs, spec.id.clone(), spec.name.clone())
+}
+
 fn load_unique_sources(
     request: &ProjectStatsRequestWire,
-) -> BTreeMap<(String, Vec<String>), WalkedSource> {
-    let mut walks = Vec::new();
+) -> BTreeMap<SpecInstanceKey, WalkedSource> {
+    let mut resolve_cache: BTreeMap<
+        (String, Vec<String>),
+        Result<ResolvedRepo, ProjectStatsIssueWire>,
+    > = BTreeMap::new();
+    let mut history_cache: BTreeMap<
+        (String, String, String),
+        Arc<HistoryOutcome>,
+    > = BTreeMap::new();
     let mut by_spec = BTreeMap::new();
-    let mut by_walk_key = BTreeMap::new();
     let mut specs = Vec::new();
     for project in &request.projects {
         for spec in &project.code_repos {
@@ -185,56 +197,59 @@ fn load_unique_sources(
         }
     }
     for spec in specs {
-        let key = spec_key(spec);
-        if by_spec.contains_key(&key) {
+        let instance = spec_instance_key(spec);
+        if by_spec.contains_key(&instance) {
             continue;
         }
-        match git::resolve_repo(spec, &request.budget) {
+        let resolve_key = spec_key(spec);
+        let resolved = match resolve_cache
+            .entry(resolve_key)
+            .or_insert_with(|| git::resolve_repo(spec, &request.budget))
+        {
             Err(issue) => {
-                let index = walks.len();
-                walks.push(WalkedSource {
-                    resolved: None,
-                    history: None,
-                    issue: Some(issue),
-                });
-                by_spec.insert(key, index);
-            }
-            Ok(resolved) => {
-                let walk_key = (
-                    resolved.identity.clone(),
-                    resolved.common_dir.clone(),
-                    resolved.tip.clone(),
+                by_spec.insert(
+                    instance,
+                    WalkedSource {
+                        resolved: None,
+                        history: None,
+                        issue: Some(git::retarget_issue(issue.clone(), spec)),
+                    },
                 );
-                if let Some(&index) = by_walk_key.get(&walk_key) {
-                    by_spec.insert(key, index);
-                    continue;
-                }
-                let history = history::history_for_resolved(
+                continue;
+            }
+            Ok(resolved) => resolved.clone(),
+        };
+        let walk_key = (
+            resolved.identity.clone(),
+            resolved.common_dir.clone(),
+            resolved.tip.clone(),
+        );
+        let history = history_cache
+            .entry(walk_key)
+            .or_insert_with(|| {
+                history::history_for_resolved(
                     &resolved,
                     spec,
                     &request.budget,
                     &request.cache_dir,
-                );
-                let index = walks.len();
-                walks.push(WalkedSource {
-                    resolved: Some(resolved),
-                    history: Some(history),
-                    issue: None,
-                });
-                by_walk_key.insert(walk_key, index);
-                by_spec.insert(key, index);
-            }
-        }
+                )
+            })
+            .clone();
+        by_spec.insert(
+            instance,
+            WalkedSource {
+                resolved: Some(resolved),
+                history: Some(history),
+                issue: None,
+            },
+        );
     }
     by_spec
-        .into_iter()
-        .map(|(key, index)| (key, walks[index].clone()))
-        .collect()
 }
 
 fn project_repos<'a>(
     project: &'a ProjectStatsProjectSpecWire,
-    walks: &'a BTreeMap<(String, Vec<String>), WalkedSource>,
+    walks: &'a BTreeMap<SpecInstanceKey, WalkedSource>,
 ) -> Vec<MeasuredRepo<'a>> {
     let mut repos = Vec::new();
     for spec in &project.code_repos {
@@ -253,68 +268,44 @@ fn project_repos<'a>(
 fn measured_repo<'a>(
     spec: &'a ProjectStatsRepoSpecWire,
     tier: ProjectStatsRepoTierWire,
-    walks: &'a BTreeMap<(String, Vec<String>), WalkedSource>,
+    walks: &'a BTreeMap<SpecInstanceKey, WalkedSource>,
 ) -> MeasuredRepo<'a> {
-    let walked = walks.get(&spec_key(spec));
+    let walked = walks.get(&spec_instance_key(spec));
     MeasuredRepo {
         spec,
         tier,
         resolved: walked.and_then(|item| item.resolved.as_ref()),
-        history: walked.and_then(|item| item.history.as_ref()),
+        history: walked.and_then(|item| item.history.as_deref()),
         issue: walked.and_then(|item| item.issue.as_ref()),
     }
-}
-
-#[derive(Default)]
-struct PortfolioHealth {
-    configured: u64,
-    measured: u64,
-    partial: u64,
-    unavailable: u64,
 }
 
 fn collect_portfolio_code<'a>(
     repos: &[MeasuredRepo<'a>],
     rows: &mut Vec<&'a crate::project_stats::history::HistoryRow>,
-    health: &mut PortfolioHealth,
-    seen: &mut BTreeSet<String>,
+    health_by_identity: &mut BTreeMap<
+        String,
+        crate::project_stats::wire::ProjectStatsRepoStatusWire,
+    >,
 ) {
-    use super::wire::ProjectStatsRepoStatusWire;
     for repo in repos {
         if repo.tier != ProjectStatsRepoTierWire::Code {
             continue;
         }
-        let key = match repo.resolved {
-            Some(resolved) => {
-                format!("{}\n{}", resolved.identity, resolved.common_dir)
-            }
-            None => format!("path:{}", repo.spec.path),
-        };
-        if !seen.insert(key) {
-            continue;
-        }
-        health.configured += 1;
-        let status = match (repo.resolved, repo.history, repo.issue) {
-            (_, None, Some(_)) => ProjectStatsRepoStatusWire::Unavailable,
-            (Some(resolved), Some(history), _)
-                if history.complete && !resolved.shallow =>
-            {
-                ProjectStatsRepoStatusWire::Ok
-            }
-            (Some(_), Some(_), _) => ProjectStatsRepoStatusWire::Partial,
-            _ => ProjectStatsRepoStatusWire::Unavailable,
-        };
-        match status {
-            ProjectStatsRepoStatusWire::Ok => health.measured += 1,
-            ProjectStatsRepoStatusWire::Partial => {
-                health.measured += 1;
-                health.partial += 1;
-            }
-            ProjectStatsRepoStatusWire::Unavailable => health.unavailable += 1,
-        }
         if let Some(history) = repo.history {
-            rows.extend(history.rows.iter());
+            if !history.failed {
+                rows.extend(history.rows.iter());
+            }
         }
+        let key = output::coverage_identity_key(repo);
+        let status =
+            output::repo_status(repo.resolved, repo.history, repo.issue);
+        health_by_identity
+            .entry(key)
+            .and_modify(|existing| {
+                *existing = output::worse_status(*existing, status);
+            })
+            .or_insert(status);
     }
 }
 
@@ -322,11 +313,12 @@ fn portfolio_from_rows(
     request: &ProjectStatsRequestWire,
     directory: &directory::Directory,
     rows: &[&crate::project_stats::history::HistoryRow],
-    health: PortfolioHealth,
+    health: output::CoverageHealth,
 ) -> ProjectStatsPortfolioWire {
     use super::aggregate::{
         attribute_rows, attribution_coverage, lifetime,
-        output_from_attributions, rows_in_output_range, unique_by_sha,
+        output_from_attributions, rows_in_output_range, unavailable_lifetime,
+        unavailable_output, unique_by_sha,
     };
     let unique = unique_by_sha(rows.iter().copied());
     let in_range =
@@ -340,8 +332,14 @@ fn portfolio_from_rows(
         health.unavailable,
         &attributions,
     );
-    let output = output_from_attributions(&attributions, coverage.clone());
-    let lifetime = lifetime(&unique, request.now_ts, &request.timezone);
+    let (output, lifetime) = if health.measured == 0 {
+        (unavailable_output(coverage.clone()), unavailable_lifetime())
+    } else {
+        (
+            output_from_attributions(&attributions, coverage.clone()),
+            lifetime(&unique, request.now_ts, &request.timezone),
+        )
+    };
     ProjectStatsPortfolioWire {
         models: output.models.clone(),
         output: Some(output),

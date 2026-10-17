@@ -64,7 +64,11 @@ pub(crate) fn lifetime(
     timezone: &str,
 ) -> ProjectStatsLifetimeWire {
     if rows.is_empty() {
-        return ProjectStatsLifetimeWire::default();
+        return ProjectStatsLifetimeWire {
+            commits: Some(0),
+            agent_commits: Some(0),
+            ..ProjectStatsLifetimeWire::default()
+        };
     }
     let first = rows.iter().map(|row| row.author_ts).min();
     let last = rows.iter().map(|row| row.author_ts).max();
@@ -87,9 +91,30 @@ pub(crate) fn lifetime(
         last_commit_ts: last,
         age_days,
         active_days: Some(dates.len() as u64),
-        commits: rows.len() as u64,
-        agent_commits,
+        commits: Some(rows.len() as u64),
+        agent_commits: Some(agent_commits),
     }
+}
+
+/// Requested Output/lifetime with no usable source: present, unmeasured.
+pub(crate) fn unavailable_output(
+    commit_coverage: ProjectStatsCoverageWire,
+) -> ProjectStatsOutputWire {
+    ProjectStatsOutputWire {
+        commits: None,
+        agent_commits: None,
+        agent_share: None,
+        plans_committed: None,
+        plans_epic: None,
+        plans_tale: None,
+        models: Vec::new(),
+        commit_coverage,
+        plan_coverage: ProjectStatsCoverageWire::default(),
+    }
+}
+
+pub(crate) fn unavailable_lifetime() -> ProjectStatsLifetimeWire {
+    ProjectStatsLifetimeWire::default()
 }
 
 fn local_author_date(author_ts: i64, tz: Tz) -> Option<chrono::NaiveDate> {
@@ -191,8 +216,8 @@ pub(crate) fn output_from_attributions(
         Some(agent_commits as f64 / commits as f64)
     };
     let output = ProjectStatsOutputWire {
-        commits,
-        agent_commits,
+        commits: Some(commits),
+        agent_commits: Some(agent_commits),
         agent_share,
         plans_committed: None,
         plans_epic: None,
@@ -254,11 +279,27 @@ pub(crate) fn attribution_coverage(
 pub(crate) fn check_output_invariants(
     output: &ProjectStatsOutputWire,
 ) -> Result<(), String> {
+    let Some(commits) = output.commits else {
+        if output.agent_commits.is_some() {
+            return Err(
+                "unavailable output must not report agent_commits".to_owned()
+            );
+        }
+        if !output.models.is_empty() {
+            return Err(
+                "unavailable output must not emit a model distribution"
+                    .to_owned(),
+            );
+        }
+        return Ok(());
+    };
+    let agent_commits = output
+        .agent_commits
+        .ok_or_else(|| "measured output is missing agent_commits".to_owned())?;
     let model_sum: u64 = output.models.iter().map(|row| row.commits).sum();
-    if model_sum != output.commits {
+    if model_sum != commits {
         return Err(format!(
-            "model rows sum to {model_sum}, expected {}",
-            output.commits
+            "model rows sum to {model_sum}, expected {commits}"
         ));
     }
     let mut provider_sum = 0;
@@ -283,23 +324,23 @@ pub(crate) fn check_output_invariants(
             ProjectStatsModelKindWire::NoAgent => no_agent += row.commits,
         }
     }
-    if provider_sum + unknown + no_agent != output.commits {
+    if provider_sum + unknown + no_agent != commits {
         return Err("provider subtotals do not sum to commits".to_owned());
     }
-    if resolved + unknown != output.agent_commits {
+    if resolved + unknown != agent_commits {
         return Err(
             "resolved plus unknown agent counts must equal agent-tagged commits"
                 .to_owned(),
         );
     }
-    if output.agent_commits > output.commits {
+    if agent_commits > commits {
         return Err("agent share numerator exceeds denominator".to_owned());
     }
     if let Some(share) = output.agent_share {
         if !(0.0..=1.0 + f64::EPSILON).contains(&share) {
             return Err("agent share is outside 0..=1".to_owned());
         }
-    } else if output.commits > 0 {
+    } else if commits > 0 {
         return Err(
             "agent share is null for a measured nonzero denominator".to_owned()
         );

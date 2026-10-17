@@ -135,8 +135,8 @@ fn response_fixture() -> ProjectStatsResponseWire {
         },
     ];
     let project_output = ProjectStatsOutputWire {
-        commits: 4,
-        agent_commits: 2,
+        commits: Some(4),
+        agent_commits: Some(2),
         agent_share: Some(0.5),
         plans_committed: Some(2),
         plans_epic: Some(1),
@@ -154,8 +154,8 @@ fn response_fixture() -> ProjectStatsResponseWire {
         last_commit_ts: Some(1_700_000_000),
         age_days: Some(1157),
         active_days: Some(3),
-        commits: 11,
-        agent_commits: 7,
+        commits: Some(11),
+        agent_commits: Some(7),
     };
     let code = ProjectStatsCodeWire {
         counter: ProjectStatsCodeCounterWire::Sloc,
@@ -462,10 +462,11 @@ fn unimplemented_facets_stay_null_and_fingerprint_ignores_cache_dir() {
     assert!(first_project.lifetime.is_some());
     assert!(first_project.code.is_none());
     assert!(first_project.runs.is_none());
-    assert_eq!(output.commits, 0);
+    assert_eq!(output.commits, None);
+    assert!(output.models.is_empty());
     assert_eq!(first_project.coverage.configured_repos, 1);
     assert_eq!(first_project.coverage.unavailable_repos, 1);
-    assert_eq!(first.portfolio.output.as_ref().unwrap().commits, 0);
+    assert_eq!(first.portfolio.output.as_ref().unwrap().commits, None);
     assert_eq!(first.portfolio.code, None);
     assert_eq!(first.portfolio.runs, None);
 

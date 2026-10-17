@@ -96,7 +96,63 @@ fn project_stats_query_round_trips_a_nontrivial_repo() {
         assert_eq!(value["projects"][0]["output"]["agent_commits"], json!(1));
         assert!(value["projects"][0]["code"].is_null());
         assert!(value["projects"][0]["runs"].is_null());
+        assert!(value["projects"][0]["output"]["commits"].is_number());
         assert!(value["fingerprint"].as_str().unwrap().len() > 16);
+    });
+}
+
+#[test]
+fn project_stats_query_serializes_null_counts_for_unavailable_sources() {
+    pyo3::prepare_freethreaded_python();
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().join("cache");
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_project_stats(&module).unwrap();
+        let value = json!({
+            "schema_version": 1,
+            "start_ts": 0,
+            "end_ts": 4_000_000_000i64,
+            "now_ts": 4_000_000_000i64,
+            "timezone": "America/New_York",
+            "facets": ["output"],
+            "cache_dir": cache.to_string_lossy(),
+            "projects": [{
+                "key": "missing",
+                "label": "Missing",
+                "state": "enabled",
+                "selection": "always",
+                "index_project_names": [],
+                "code_repos": [{
+                    "id": "primary",
+                    "name": "primary",
+                    "kind": "primary",
+                    "path": "/no/such/project-stats-repo",
+                    "identity": "https://example.test/missing.git",
+                    "ref_candidates": ["main"],
+                }],
+                "record_repos": [],
+                "not_counted": [],
+                "plan_store": {
+                    "storage": "in_tree",
+                    "plans_dir": "sdd/plans",
+                },
+            }],
+        });
+        let request = json_value_to_py(py, &value).unwrap();
+        let object = request
+            .bind(py)
+            .downcast::<pyo3::types::PyDict>()
+            .unwrap()
+            .clone();
+        let func = module.getattr("project_stats_query").unwrap();
+        let result = func.call1((object,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert!(value["projects"][0]["output"].is_object());
+        assert!(value["projects"][0]["output"]["commits"].is_null());
+        assert!(value["projects"][0]["lifetime"]["commits"].is_null());
+        assert!(value["portfolio"]["output"]["commits"].is_null());
+        assert!(value["projects"][0]["code"].is_null());
     });
 }
 

@@ -1,7 +1,8 @@
 //! Full-DAG commit history, parsed into raw rows and cached before attribution.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,9 @@ pub(crate) struct HistoryOutcome {
     /// True when every commit reachable in the selected Git graph was read
     /// and parsed. Shallow repositories remain explicitly marked by issue.
     pub complete: bool,
+    /// True when the walk command failed and produced no usable history.
+    /// Truncated walks with complete records stay `failed: false`.
+    pub failed: bool,
     pub issues: Vec<ProjectStatsIssueWire>,
 }
 
@@ -48,7 +52,7 @@ pub(crate) fn read_repo_history(
 ) -> Result<(ResolvedRepo, HistoryOutcome), ProjectStatsIssueWire> {
     let repo = git::resolve_repo(spec, budget)?;
     let outcome = history_for_resolved(&repo, spec, budget, cache_dir);
-    Ok((repo, outcome))
+    Ok((repo, (*outcome).clone()))
 }
 
 /// Walk or reuse cached history for an already resolved repository.
@@ -57,26 +61,34 @@ pub(crate) fn history_for_resolved(
     spec: &ProjectStatsRepoSpecWire,
     budget: &ProjectStatsBudgetWire,
     cache_dir: &str,
-) -> HistoryOutcome {
+) -> Arc<HistoryOutcome> {
     let key = cache::cache_key(repo);
     let cache_path =
         (!cache_dir.is_empty()).then(|| cache::cache_path(cache_dir, &key));
+    if let Some(path) = cache_path.as_deref() {
+        if let Some(hit) = interned_outcome(path, &repo.tip) {
+            return hit;
+        }
+    }
     let cached = cache_path
         .as_deref()
         .and_then(cache::load)
         .filter(|entry| entry.matches_repo(&key, repo));
 
+    let mut reused_complete_equal_tip = false;
     let mut outcome = if repo.tip.is_empty() {
         HistoryOutcome {
             complete: true,
             ..HistoryOutcome::default()
         }
     } else {
-        match cached {
+        match cached.as_deref() {
             Some(entry) if entry.is_complete() && entry.tip() == repo.tip => {
+                reused_complete_equal_tip = true;
                 HistoryOutcome {
                     rows: entry.rows().to_vec(),
                     complete: true,
+                    failed: false,
                     issues: Vec::new(),
                 }
             }
@@ -110,18 +122,63 @@ pub(crate) fn history_for_resolved(
         ));
     }
 
-    if let Some(path) = cache_path {
-        cache::persist(
-            &path,
-            &HistoryCacheEntry::new(
-                key,
-                repo,
-                outcome.complete,
-                outcome.rows.clone(),
-            ),
-        );
+    if let Some(path) = cache_path.as_ref() {
+        if !outcome.failed && !reused_complete_equal_tip {
+            cache::persist(
+                path,
+                &HistoryCacheEntry::new(
+                    key,
+                    repo,
+                    outcome.complete,
+                    outcome.rows.clone(),
+                ),
+            );
+        }
+        intern_outcome(path, &repo.tip, outcome)
+    } else {
+        Arc::new(outcome)
     }
-    outcome
+}
+
+fn intern_key(path: &Path, tip: &str) -> String {
+    let mut key = path.to_string_lossy().into_owned();
+    key.push('\0');
+    key.push_str(tip);
+    key
+}
+
+fn interned_outcome(path: &Path, tip: &str) -> Option<Arc<HistoryOutcome>> {
+    let key = intern_key(path, tip);
+    outcome_memo().lock().ok()?.get(&key).cloned()
+}
+
+fn intern_outcome(
+    path: &Path,
+    tip: &str,
+    outcome: HistoryOutcome,
+) -> Arc<HistoryOutcome> {
+    let store = outcome.complete && !outcome.failed;
+    let arc = Arc::new(outcome);
+    if store {
+        if let Ok(mut guard) = outcome_memo().lock() {
+            guard.insert(intern_key(path, tip), Arc::clone(&arc));
+        }
+    }
+    arc
+}
+
+fn outcome_memo() -> &'static Mutex<HashMap<String, Arc<HistoryOutcome>>> {
+    static MEMO: OnceLock<Mutex<HashMap<String, Arc<HistoryOutcome>>>> =
+        OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drop interned complete outcomes so tests can force disk or Git reloads.
+#[cfg(test)]
+pub(crate) fn clear_outcome_memo() {
+    if let Ok(mut guard) = outcome_memo().lock() {
+        guard.clear();
+    }
 }
 
 fn walk_history(
@@ -132,6 +189,7 @@ fn walk_history(
 ) -> HistoryOutcome {
     if !git::valid_oid(&repo.tip) {
         return HistoryOutcome {
+            failed: true,
             issues: vec![git::issue(
                 spec,
                 "invalid_ref",
@@ -160,6 +218,7 @@ fn walk_history(
         Ok(result) => result,
         Err(error) => {
             return HistoryOutcome {
+                failed: true,
                 issues: vec![git::issue(
                     spec,
                     "history_unavailable",
@@ -173,6 +232,7 @@ fn walk_history(
     let mut outcome = HistoryOutcome {
         rows: Vec::new(),
         complete: result.code == Some(0) && !result.truncated,
+        failed: false,
         issues: Vec::new(),
     };
     if result.truncated {
@@ -185,6 +245,7 @@ fn walk_history(
         ));
     } else if result.code != Some(0) {
         outcome.complete = false;
+        outcome.failed = true;
         outcome.issues.push(git::issue(
             spec,
             "history_unavailable",
@@ -225,6 +286,9 @@ fn walk_history(
         ));
     }
     sort_and_deduplicate(&mut outcome.rows);
+    if outcome.failed {
+        outcome.rows.clear();
+    }
     outcome
 }
 
@@ -540,6 +604,7 @@ mod tests {
         );
         fs::write(&path, "{").expect("corrupt cache file");
         cache::clear_memo();
+        clear_outcome_memo();
         let (_, recovered) = read(
             &fixture.repo,
             cache.path(),
@@ -554,6 +619,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&value).unwrap())
             .expect("write wrong schema");
         cache::clear_memo();
+        clear_outcome_memo();
         let (_, rebuilt) = read(
             &fixture.repo,
             cache.path(),
@@ -581,6 +647,7 @@ mod tests {
             &ProjectStatsBudgetWire::default(),
         );
         cache::clear_memo();
+        clear_outcome_memo();
         let tight = ProjectStatsBudgetWire {
             max_output_bytes: 256,
             ..ProjectStatsBudgetWire::default()
@@ -684,5 +751,33 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "shallow_history"));
+    }
+
+    #[test]
+    fn failed_walk_after_resolution_is_failed_not_partial() {
+        let fixture = init_repo();
+        commit(&fixture.repo, "file.txt", "one\n", "one");
+        let spec = spec(&fixture.repo);
+        let resolved = crate::project_stats::git::resolve_repo(
+            &spec,
+            &ProjectStatsBudgetWire::default(),
+        )
+        .unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let mut broken = resolved.clone();
+        broken.canonical_path = empty.path().to_string_lossy().into_owned();
+        let outcome = history_for_resolved(
+            &broken,
+            &spec,
+            &ProjectStatsBudgetWire::default(),
+            "",
+        );
+        assert!(outcome.failed);
+        assert!(!outcome.complete);
+        assert!(outcome.rows.is_empty());
+        assert!(outcome
+            .issues
+            .iter()
+            .any(|issue| issue.code == "history_unavailable"));
     }
 }
