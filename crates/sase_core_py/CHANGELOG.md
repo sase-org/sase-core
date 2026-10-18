@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0](https://github.com/sase-org/sase-core/compare/v0.41.0...v0.42.0) - 2026-10-18
+
+### Added
+
+- *(stats)* populate Code facet with identity-deduplicated snapshots
+
+### Fixed
+
+- [**breaking**] issue mobile pairing challenges only from the owner-local CLI
+
 ## [0.41.0](https://github.com/sase-org/sase-core/compare/v0.40.1...v0.41.0) - 2026-10-17
 
 ### Added
