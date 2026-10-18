@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0](https://github.com/sase-org/sase-core/compare/v0.41.0...v0.42.0) - 2026-10-18
+
+### Added
+
+- *(stats)* populate Code facet with identity-deduplicated snapshots
+- *(project-stats)* add committed-tree code snapshots and incremental blob cache
+- *(project-stats)* join the agent directory and count committed plans
+- *(project-stats)* add metadata-only records snapshots
+
+### Fixed
+
+- *(mobile-pairing)* promote variadic openat modes to c_uint
+- *(mobile-pairing)* pass native mode_t to mkdirat and fchmod
+- [**breaking**] issue mobile pairing challenges only from the owner-local CLI
+- *(stats)* handle root and unresolved plan stores
+- *(gate-followup)* guard first-pass successor adoption
+
+### Other
+
+- *(project-stats)* stage non-UTF-8 snapshot fixture path in the Git index only
+
 ## [0.41.0](https://github.com/sase-org/sase-core/compare/v0.40.1...v0.41.0) - 2026-10-17
 
 ### Added
