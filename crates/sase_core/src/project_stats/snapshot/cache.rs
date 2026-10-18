@@ -2,7 +2,7 @@
 
 #![allow(dead_code)] // Reached through measure_code_snapshot.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,7 @@ pub(crate) struct CachedBlobFacts {
     pub size: u64,
     pub evidence: BlobEvidence,
     pub nonblank_lines: u64,
+    pub code_lines: BTreeMap<String, u64>,
 }
 
 impl CodeSnapshotCacheEntry {
@@ -166,6 +167,7 @@ pub(crate) fn cache_key(
         "metric_policy": PROJECT_STATS_METRIC_POLICY_VERSION,
         "classifier": PROJECT_STATS_CLASSIFIER_VERSION,
         "counter": counter,
+        "counter_version": crate::project_stats::counter::COUNTER_VERSION,
     });
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     hex::encode(Sha256::digest(bytes))

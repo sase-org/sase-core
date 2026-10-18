@@ -62,15 +62,6 @@ pub(crate) fn measure_code_snapshot(
             blob_oids_requested: Vec::new(),
         });
     }
-    if counter == ProjectStatsCodeCounterWire::Sloc {
-        return Err(issue(
-            spec,
-            "counter_unavailable",
-            "the sloc counter is not enabled".to_owned(),
-            Some("Use counter nonblank until the tokei dependency gate lands."),
-        ));
-    }
-
     let tree_oid = tree::read_tree_oid(repo, spec, budget)?;
     let key = cache::cache_key(repo, counter);
     let cache_path =
@@ -104,7 +95,13 @@ pub(crate) fn measure_code_snapshot(
     let mut pending: Vec<PendingRead> = Vec::new();
 
     for entry in &entries {
-        match measure_entry(entry, &attributes, &previous_rows, &blob_facts) {
+        match measure_entry(
+            entry,
+            &attributes,
+            &previous_rows,
+            &blob_facts,
+            counter,
+        ) {
             EntryDecision::Done(row) => measured.push(row),
             EntryDecision::Read(pending_read) => pending.push(pending_read),
         }
@@ -155,16 +152,21 @@ pub(crate) fn measure_code_snapshot(
             Some(bytes),
         );
         let (selected_lines, nonblank_lines) =
-            counts_for(counter, &classification, bytes)?;
-        blob_facts.insert(
-            item.oid.clone(),
+            counts_for(counter, &item.path, &classification, bytes);
+        let facts = blob_facts.entry(item.oid.clone()).or_insert_with(|| {
             CachedBlobFacts {
                 oid: item.oid.clone(),
                 size: item.size,
                 evidence,
                 nonblank_lines: nonblank_lines.unwrap_or(0),
-            },
-        );
+                code_lines: BTreeMap::new(),
+            }
+        });
+        if let Some(key) = parsing_key(counter, &item.path, &classification) {
+            if let Some(lines) = selected_lines {
+                facts.code_lines.insert(key, lines);
+            }
+        }
         measured.push(MeasuredPath {
             path: item.path,
             mode: item.mode,
@@ -215,6 +217,7 @@ fn measure_entry(
     attributes: &HashMap<Vec<u8>, CommittedAttributes>,
     previous_rows: &HashMap<Vec<u8>, MeasuredPath>,
     blob_facts: &HashMap<String, CachedBlobFacts>,
+    policy: ProjectStatsCodeCounterWire,
 ) -> EntryDecision {
     let mode = entry.classify_mode();
     let attrs = if entry.is_regular_blob() {
@@ -300,7 +303,23 @@ fn measure_entry(
             );
             let (selected_lines, nonblank_lines) = match &classification {
                 Classification::Included { .. } => {
-                    (Some(facts.nonblank_lines), Some(facts.nonblank_lines))
+                    let lines = if let Some(key) =
+                        parsing_key(policy, &entry.path, &classification)
+                    {
+                        let Some(lines) = facts.code_lines.get(&key) else {
+                            return EntryDecision::Read(PendingRead {
+                                path: entry.path.clone(),
+                                mode,
+                                oid: entry.oid.clone(),
+                                size: entry.size,
+                                attributes: attrs,
+                            });
+                        };
+                        *lines
+                    } else {
+                        facts.nonblank_lines
+                    };
+                    (Some(lines), Some(facts.nonblank_lines))
                 }
                 _ => (None, None),
             };
@@ -326,30 +345,50 @@ fn measure_entry(
     })
 }
 
+// A blob can appear at multiple paths/languages. Parser identity, not the
+// displayed classifier label or OID alone, determines reusable SLOC.
+fn parsing_key(
+    policy: ProjectStatsCodeCounterWire,
+    path: &[u8],
+    classification: &Classification,
+) -> Option<String> {
+    match classification {
+        Classification::Included {
+            role:
+                ProjectStatsFileRoleWire::Source | ProjectStatsFileRoleWire::Tests,
+            language,
+        } if policy == ProjectStatsCodeCounterWire::Sloc => {
+            Some(counter::code_language(path, language.as_deref()).to_string())
+        }
+        _ => None,
+    }
+}
+
 fn counts_for(
     policy: ProjectStatsCodeCounterWire,
+    path: &[u8],
     classification: &Classification,
     bytes: &[u8],
-) -> Result<(Option<u64>, Option<u64>), ProjectStatsIssueWire> {
+) -> (Option<u64>, Option<u64>) {
     match classification {
         Classification::Included { language, .. } => {
-            let counted = counter::count_blob(
-                policy,
-                language.as_deref(),
-                bytes,
-            )
-            .map_err(|error| ProjectStatsIssueWire {
-                code: "counter_unavailable".to_owned(),
-                message: error.to_string(),
-                hint: Some(
-                    "Use counter nonblank until the tokei dependency gate lands."
-                        .to_owned(),
-                ),
-                ..ProjectStatsIssueWire::default()
-            })?;
-            Ok((Some(counted.selected_lines), Some(counted.nonblank_lines)))
+            let policy = if matches!(
+                classification,
+                Classification::Included {
+                    role: ProjectStatsFileRoleWire::Source
+                        | ProjectStatsFileRoleWire::Tests,
+                    ..
+                }
+            ) {
+                policy
+            } else {
+                ProjectStatsCodeCounterWire::Nonblank
+            };
+            let counted =
+                counter::count_blob(policy, path, language.as_deref(), bytes);
+            (Some(counted.selected_lines), Some(counted.nonblank_lines))
         }
-        _ => Ok((None, None)),
+        _ => (None, None),
     }
 }
 

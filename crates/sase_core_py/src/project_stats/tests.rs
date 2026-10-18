@@ -237,7 +237,12 @@ fn project_stats_query_round_trips_code_only() {
         let value = py_to_json_value(&result).unwrap();
         assert!(value["projects"][0]["output"].is_null());
         assert_eq!(value["projects"][0]["code"]["code_files"], json!(1));
-        assert_eq!(value["projects"][0]["code"]["counter"], json!("nonblank"));
+        assert_eq!(value["projects"][0]["code"]["counter"], json!("sloc"));
+        assert_eq!(
+            value["projects"][0]["repos"][0]["snapshot"]["counter"],
+            json!("sloc")
+        );
+        assert_eq!(value["portfolio"]["code"]["counter"], json!("sloc"));
         assert!(value["projects"][0]["repos"][0]["snapshot"].is_object());
         assert!(value["portfolio"]["code"].is_object());
     });

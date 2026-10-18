@@ -12,6 +12,7 @@ name = "sase_core"
 path = "src/lib.rs"
 
 [dependencies]
+tokei = { version = "=15.0.0", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -1,51 +1,86 @@
 //! Shared blob-line counter interface for the project statistics snapshot.
 
-#![allow(dead_code)] // The snapshot phase is the first production caller.
-
 use crate::project_stats::wire::ProjectStatsCodeCounterWire;
+
+// tokei 15.0.0 passed the isolated release-wheel gate on 2026-10-18:
+// +159,459 bytes (0.152 MiB), 2,068.595 / 1,867.069 seconds (1.108x).
+// Both target and build directories were empty and independent; this replaces
+// the invalid earlier timing that inherited a shared Cargo build directory.
+// Bump this identity when parser version, language mapping or Config changes.
+pub(crate) const COUNTER_VERSION: &str = "tokei-15.0.0-docstrings-comments-v2";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct BlobLineCounts {
-    /// The count selected by the request's Code counter policy.
     pub selected_lines: u64,
-    /// Nonblank lines, retained for prose and data roles under every policy.
     pub nonblank_lines: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CounterError {
-    SlocPolicyNotAvailable,
+/// Resolve only the supplied extension and SASE's bounded language/shebang hint.
+/// Never use tokei's filesystem detection or Config::from_config_files.
+pub(crate) fn code_language(
+    path: &[u8],
+    language: Option<&str>,
+) -> tokei::LanguageType {
+    let extension = path
+        .rsplit(|byte| *byte == b'/')
+        .next()
+        .and_then(|name| {
+            name.iter()
+                .rposition(|byte| *byte == b'.')
+                .map(|dot| &name[dot + 1..])
+        })
+        .and_then(|suffix| std::str::from_utf8(suffix).ok());
+    extension
+        .and_then(|ext| {
+            tokei::LanguageType::from_file_extension(&ext.to_ascii_lowercase())
+        })
+        .or_else(|| {
+            language.and_then(|name| {
+                // from_name is case-sensitive; SASE hints are lowercase.
+                match name {
+                    "cpp" => "C++",
+                    "jinja" => "Jinja2",
+                    "make" => "Makefile",
+                    "docker" => "Dockerfile",
+                    "sh" | "zsh" | "bash" => "BASH",
+                    other => other,
+                }
+                .parse::<tokei::LanguageType>()
+                .ok()
+            })
+        })
+        .unwrap_or(tokei::LanguageType::Text)
 }
 
-impl std::fmt::Display for CounterError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SlocPolicyNotAvailable => {
-                formatter.write_str("the sloc counter is not enabled")
-            }
-        }
-    }
-}
-
-/// Count a blob with an explicit policy and language hint. The initial
-/// production policy is nonblank; SLOC remains behind the later measured
-/// dependency gate.
+/// Count source/tests with an explicit policy. Other roles retain nonblank.
+/// Embedded languages contribute through summarise().
 pub(crate) fn count_blob(
     policy: ProjectStatsCodeCounterWire,
-    _language: Option<&str>,
+    path: &[u8],
+    language: Option<&str>,
     bytes: &[u8],
-) -> Result<BlobLineCounts, CounterError> {
+) -> BlobLineCounts {
     let nonblank_lines = count_nonblank_lines(bytes);
     let selected_lines = match policy {
         ProjectStatsCodeCounterWire::Nonblank => nonblank_lines,
         ProjectStatsCodeCounterWire::Sloc => {
-            return Err(CounterError::SlocPolicyNotAvailable);
+            // Keep the pinned parser's semantics: multiline Python docstrings
+            // are comments, but a single-line triple-quoted string counts as
+            // code in tokei 15.0.0, even with this option enabled.
+            let config = tokei::Config {
+                treat_doc_strings_as_comments: Some(true),
+                ..tokei::Config::default()
+            };
+            code_language(path, language)
+                .parse_from_slice(bytes, &config)
+                .summarise()
+                .code as u64
         }
     };
-    Ok(BlobLineCounts {
+    BlobLineCounts {
         selected_lines,
         nonblank_lines,
-    })
+    }
 }
 
 /// Count lines containing a non-whitespace character. LF terminates lines,

@@ -44,7 +44,7 @@ pub fn query_project_stats(
     let wants_code = wants_facet(request, ProjectStatsFacetWire::Code);
     let wants_runs = wants_facet(request, ProjectStatsFacetWire::Runs);
     let need_git = wants_output || wants_code;
-    let counter = ProjectStatsCodeCounterWire::Nonblank;
+    let counter = ProjectStatsCodeCounterWire::Sloc;
 
     let directory_snapshot = if wants_output {
         directory::load(request)
@@ -627,6 +627,7 @@ fn fingerprint(
         "engine": PROJECT_STATS_ENGINE_VERSION,
         "metric_policy": PROJECT_STATS_METRIC_POLICY_VERSION,
         "classifier": PROJECT_STATS_CLASSIFIER_VERSION,
+        "counter_version": super::counter::COUNTER_VERSION,
         "sources": source_tokens,
         "facet_tokens": facet_tokens,
     }))

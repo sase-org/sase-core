@@ -27,6 +27,14 @@ fn measure_at(
     repo: &Path,
     cache: &Path,
 ) -> Result<CodeSnapshot, crate::project_stats::wire::ProjectStatsIssueWire> {
+    measure_policy(repo, cache, ProjectStatsCodeCounterWire::Sloc)
+}
+
+fn measure_policy(
+    repo: &Path,
+    cache: &Path,
+    policy: ProjectStatsCodeCounterWire,
+) -> Result<CodeSnapshot, crate::project_stats::wire::ProjectStatsIssueWire> {
     cache::clear_memo();
     let spec = spec(repo);
     let resolved = resolve_repo(&spec, &budget()).expect("resolve");
@@ -35,7 +43,7 @@ fn measure_at(
         &spec,
         &budget(),
         &cache.to_string_lossy(),
-        ProjectStatsCodeCounterWire::Nonblank,
+        policy,
     )
 }
 
@@ -561,5 +569,154 @@ fn local_user_attributes_file_does_not_contaminate_committed_policy() {
             ProjectStatsFileExclusionWire::Generated
         ),
         0
+    );
+}
+
+#[test]
+fn sloc_cache_reuses_parser_inputs_across_renames_and_role_changes() {
+    let fixture = init_repo();
+    let cache = cache_dir();
+    commit(&fixture.repo, "src/a.py", "# comment\nvalue\n", "python");
+    let oid = git(&fixture.repo, &["rev-parse", "HEAD:src/a.py"]);
+    let cold = measure(&fixture.repo, cache.path());
+    assert_eq!(
+        role_lines(&cold.snapshot, ProjectStatsFileRoleWire::Source),
+        1
+    );
+    fs::create_dir_all(fixture.repo.join("tests")).unwrap();
+    git(&fixture.repo, &["mv", "src/a.py", "tests/a.py"]);
+    commit_all(&fixture.repo, "move to tests");
+    let moved = measure(&fixture.repo, cache.path());
+    assert!(moved.blob_oids_requested.is_empty());
+    assert_eq!(
+        role_lines(&moved.snapshot, ProjectStatsFileRoleWire::Tests),
+        1
+    );
+    git(&fixture.repo, &["mv", "tests/a.py", "src/a.rs"]);
+    commit_all(&fixture.repo, "different parser");
+    let renamed = measure(&fixture.repo, cache.path());
+    assert_eq!(renamed.blob_oids_requested, vec![oid.clone()]);
+    assert_eq!(
+        role_lines(&renamed.snapshot, ProjectStatsFileRoleWire::Source),
+        2
+    );
+    assert_eq!(
+        renamed.snapshot,
+        measure(&fixture.repo, cache_dir().path()).snapshot
+    );
+    git(&fixture.repo, &["mv", "src/a.rs", "README.md"]);
+    commit_all(&fixture.repo, "prose");
+    let prose = measure(&fixture.repo, cache.path());
+    assert!(prose.blob_oids_requested.is_empty());
+    assert_eq!(
+        role_lines(&prose.snapshot, ProjectStatsFileRoleWire::Docs),
+        2
+    );
+    // Both parser results survive an intervening prose-only snapshot.
+    git(&fixture.repo, &["mv", "README.md", "src/a.py"]);
+    commit_all(&fixture.repo, "back to python");
+    let back = measure(&fixture.repo, cache.path());
+    assert!(back.blob_oids_requested.is_empty());
+    assert_eq!(
+        back.snapshot,
+        measure(&fixture.repo, cache_dir().path()).snapshot
+    );
+}
+
+#[test]
+fn sloc_policy_does_not_reuse_nonblank_snapshot_and_prose_stays_nonblank() {
+    let fixture = init_repo();
+    for (path, bytes) in [
+        ("lib.rs", "// comment\nfn main() {}\n"),
+        ("AGENTS.md", "<!-- comment -->\ninstructions\n"),
+        ("README.md", "<!-- comment -->\ndocs\n"),
+        ("config.toml", "# comment\nx = 1\n"),
+    ] {
+        write_file(&fixture.repo, path, bytes);
+    }
+    commit_all(&fixture.repo, "roles");
+    let cache = cache_dir();
+    let baseline = measure_policy(
+        &fixture.repo,
+        cache.path(),
+        ProjectStatsCodeCounterWire::Nonblank,
+    )
+    .unwrap();
+    assert_eq!(
+        role_lines(&baseline.snapshot, ProjectStatsFileRoleWire::Source),
+        2
+    );
+    let sloc = measure(&fixture.repo, cache.path());
+    assert!(!sloc.blob_oids_requested.is_empty());
+    assert_eq!(
+        role_lines(&sloc.snapshot, ProjectStatsFileRoleWire::Source),
+        1
+    );
+    for role in [
+        ProjectStatsFileRoleWire::Docs,
+        ProjectStatsFileRoleWire::AgentContext,
+        ProjectStatsFileRoleWire::ConfigData,
+    ] {
+        assert_eq!(role_lines(&sloc.snapshot, role), 2);
+    }
+    assert!(measure(&fixture.repo, cache.path())
+        .blob_oids_requested
+        .is_empty());
+    assert_eq!(
+        sloc.snapshot,
+        measure(&fixture.repo, cache_dir().path()).snapshot
+    );
+}
+
+#[test]
+fn shared_oid_retains_each_parser_and_attributes_reclassify_without_reread() {
+    let fixture = init_repo();
+    let cache = cache_dir();
+    write_file(&fixture.repo, "a.py", "# comment\nvalue\n");
+    write_file(&fixture.repo, "b.rs", "# comment\nvalue\n");
+    commit_all(&fixture.repo, "two parsers");
+    let cold = measure(&fixture.repo, cache.path());
+    assert_eq!(cold.blob_oids_requested.len(), 1);
+    assert_eq!(
+        role_lines(&cold.snapshot, ProjectStatsFileRoleWire::Source),
+        3
+    );
+    git(&fixture.repo, &["mv", "a.py", "renamed.py"]);
+    git(&fixture.repo, &["mv", "b.rs", "renamed.rs"]);
+    write_file(
+        &fixture.repo,
+        ".gitattributes",
+        "renamed.py linguist-documentation\n",
+    );
+    commit_all(&fixture.repo, "rename and document");
+    let warm = measure(&fixture.repo, cache.path());
+    assert_eq!(warm.blob_oids_requested.len(), 1); // only .gitattributes
+    assert_eq!(
+        role_lines(&warm.snapshot, ProjectStatsFileRoleWire::Source),
+        2
+    );
+    assert_eq!(
+        role_lines(&warm.snapshot, ProjectStatsFileRoleWire::Docs),
+        2
+    );
+    assert_eq!(
+        warm.snapshot,
+        measure(&fixture.repo, cache_dir().path()).snapshot
+    );
+    write_file(
+        &fixture.repo,
+        ".gitattributes",
+        "renamed.py -linguist-documentation\n",
+    );
+    commit_all(&fixture.repo, "restore code role");
+    let restored = measure(&fixture.repo, cache.path());
+    assert_eq!(restored.blob_oids_requested.len(), 1); // only .gitattributes
+    assert_eq!(
+        role_lines(&restored.snapshot, ProjectStatsFileRoleWire::Source),
+        3
+    );
+    assert_eq!(
+        restored.snapshot,
+        measure(&fixture.repo, cache_dir().path()).snapshot
     );
 }

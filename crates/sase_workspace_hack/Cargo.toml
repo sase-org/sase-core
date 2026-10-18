@@ -16,19 +16,25 @@ publish = false
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+aho-corasick = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = { version = "0.9" }
+crossbeam-utils = { version = "0.8" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "channel", "io", "sink"] }
-hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more", "raw"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", default-features = false, features = ["i128"] }
-once_cell = { version = "1" }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "std", "unicode"] }
+phf_shared = { version = "0.11" }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+regex = { version = "1" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
 regex-syntax = { version = "0.8" }
-serde_core = { version = "1", default-features = false, features = ["alloc", "result", "std"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 slab = { version = "0.4", default-features = false, features = ["std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new"] }
@@ -38,34 +44,76 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 
 [build-dependencies]
-once_cell = { version = "1" }
+aho-corasick = { version = "1" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = { version = "0.9" }
+crossbeam-utils = { version = "0.8" }
+log = { version = "0.4", default-features = false, features = ["std"] }
+memchr = { version = "2" }
+num-traits = { version = "0.2", default-features = false, features = ["i128"] }
+phf_shared = { version = "0.11" }
 proc-macro2 = { version = "1" }
 quote = { version = "1" }
+rand = { version = "0.8", features = ["small_rng"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+regex = { version = "1" }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-build", "dfa-onepass", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-syntax = { version = "0.8" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_core = { version = "1", default-features = false, features = ["alloc", "rc", "result", "std"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 syn = { version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
 slab = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+
+[target.x86_64-unknown-linux-gnu.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
 
 [target.aarch64-unknown-linux-gnu.dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
 slab = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+
+[target.aarch64-unknown-linux-gnu.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
 
 [target.x86_64-apple-darwin.dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 errno = { version = "0.3" }
 libc = { version = "0.2" }
 slab = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
+[target.x86_64-apple-darwin.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
+
 [target.aarch64-apple-darwin.dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
 errno = { version = "0.3" }
 libc = { version = "0.2" }
 slab = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+
+[target.aarch64-apple-darwin.build-dependencies]
+bitflags = { version = "2", default-features = false, features = ["std"] }
+libc = { version = "0.2" }
 
 [target.x86_64-pc-windows-msvc.dependencies]
 slab = { version = "0.4" }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
-windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+windows-sys-b21d60becc0929df = { package = "windows-sys", version = "0.52", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+windows-sys-c8eced492e86ede7 = { package = "windows-sys", version = "0.48", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_Registry", "Win32_System_Time", "Win32_UI_Shell"] }
+windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }
+
+[target.x86_64-pc-windows-msvc.build-dependencies]
+windows-sys-d4189bed749088b6 = { package = "windows-sys", version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_IO", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }
 
 ### END HAKARI SECTION
