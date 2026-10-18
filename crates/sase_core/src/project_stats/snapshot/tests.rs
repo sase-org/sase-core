@@ -6,7 +6,8 @@ use super::{cache, measure_code_snapshot, CodeSnapshot};
 use crate::project_stats::classify::MAX_CLASSIFIED_BLOB_BYTES;
 use crate::project_stats::git::resolve_repo;
 use crate::project_stats::test_support::{
-    commit, commit_all, git, init_repo, spec, write_bytes, write_file, Fixture,
+    commit, commit_all, git, init_repo, spec, stage_blob_at_raw_path,
+    write_bytes, write_file, Fixture,
 };
 use crate::project_stats::wire::{
     ProjectStatsBudgetWire, ProjectStatsCodeCounterWire,
@@ -215,12 +216,15 @@ fn measures_every_role_and_skips_gitlinks_and_symlinks() {
 fn odd_filenames_and_non_utf8_paths_are_preserved() {
     let fixture = init_repo();
     write_file(&fixture.repo, "src/odd name.rs", "fn spaced() {}\n");
-    let weird = fixture
-        .repo
-        .join(PathBuf::from(std::ffi::OsStr::from_bytes(b"src/\xff.rs")));
-    fs::create_dir_all(weird.parent().expect("parent")).expect("parent");
-    fs::write(&weird, "fn bytes() {}\n").expect("write non-utf8");
-    commit_all(&fixture.repo, "odd names");
+    // The non-UTF-8 name goes straight into the index: macOS rejects it on
+    // disk (EILSEQ), and the measured snapshot reads only the committed tree.
+    git(&fixture.repo, &["add", "src/odd name.rs"]);
+    stage_blob_at_raw_path(
+        &fixture.repo,
+        std::ffi::OsStr::from_bytes(b"src/\xff.rs"),
+        b"fn bytes() {}\n",
+    );
+    git(&fixture.repo, &["commit", "-m", "odd names"]);
     let cache = cache_dir();
     let snapshot = measure(&fixture.repo, cache.path());
     assert_eq!(
