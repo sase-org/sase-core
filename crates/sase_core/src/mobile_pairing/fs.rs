@@ -63,8 +63,9 @@ mod unix {
     const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
     const INITIAL_BACKOFF: Duration = Duration::from_millis(5);
     const MAX_BACKOFF: Duration = Duration::from_millis(250);
-    // mode_t is u32 on Linux and u16 on macOS; keep these native at the syscall
-    // boundary so mkdirat/fchmod/openat compile on both.
+    // Native mode_t belongs at the fixed-argument mkdirat/fchmod boundary.
+    // Variadic openat(O_CREAT, ...) needs a C integer promotion instead;
+    // passing mode_t is E0617 on macOS, where mode_t is u16.
     const CONTAINING_MODE: libc::mode_t = 0o755;
     const PROTECTED_DIR_MODE: libc::mode_t = 0o700;
     const PROTECTED_FILE_MODE: libc::mode_t = 0o600;
@@ -188,7 +189,7 @@ mod unix {
                     self.dir.as_raw_fd(),
                     tmp_c.as_ptr(),
                     flags,
-                    PROTECTED_FILE_MODE,
+                    openat_creat_mode(PROTECTED_FILE_MODE),
                 )
             };
             if fd < 0 {
@@ -390,7 +391,7 @@ mod unix {
                 dir_fd,
                 c_name.as_ptr(),
                 create_flags,
-                PROTECTED_FILE_MODE,
+                openat_creat_mode(PROTECTED_FILE_MODE),
             )
         };
         if created < 0 {
@@ -433,6 +434,16 @@ mod unix {
             };
         }
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Promote `mode_t` for variadic `openat` with `O_CREAT`.
+    ///
+    /// C default argument promotions apply to the mode operand. `From` is
+    /// lossless (`u16` → `u32` on macOS; identity on Linux). Clippy treats
+    /// the Linux identity as `useless_conversion`.
+    #[allow(clippy::useless_conversion)]
+    fn openat_creat_mode(mode: libc::mode_t) -> libc::c_uint {
+        libc::c_uint::from(mode)
     }
 
     fn mkdirat(
