@@ -208,6 +208,7 @@ pub(crate) fn run_unchecked(
     args: &[&str],
     budget: &ProjectStatsBudgetWire,
 ) -> Result<GitResult, String> {
+    record_git_command(args);
     run_git_unchecked(
         repo,
         args,
@@ -231,6 +232,7 @@ pub(crate) fn run_unchecked_with_stdin(
     stdin: &[u8],
     budget: &ProjectStatsBudgetWire,
 ) -> Result<GitResult, String> {
+    record_git_command(args);
     run_git_unchecked_with_stdin(
         repo,
         args,
@@ -343,6 +345,7 @@ pub(crate) fn run_unchecked_with_stdin_env(
     extra_env: &[(&str, &str)],
     budget: &ProjectStatsBudgetWire,
 ) -> Result<GitResult, String> {
+    record_git_command(args);
     run_git_unchecked_with_stdin_env(
         repo,
         args,
@@ -458,6 +461,49 @@ pub(crate) fn valid_oid(value: &str) -> bool {
 
 pub(crate) fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn record_git_command(args: &[&str]) {
+    #[cfg(test)]
+    capture::record(args);
+    #[cfg(not(test))]
+    let _ = args;
+}
+
+#[cfg(test)]
+pub(crate) fn capture_git_commands<F, T>(f: F) -> (T, Vec<Vec<String>>)
+where
+    F: FnOnce() -> T,
+{
+    capture::start();
+    let value = f();
+    (value, capture::take())
+}
+
+#[cfg(test)]
+mod capture {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LOG: RefCell<Option<Vec<Vec<String>>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn start() {
+        LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub(super) fn record(args: &[&str]) {
+        LOG.with(|log| {
+            if let Some(items) = log.borrow_mut().as_mut() {
+                items
+                    .push(args.iter().map(|item| (*item).to_owned()).collect());
+            }
+        });
+    }
+
+    pub(super) fn take() -> Vec<Vec<String>> {
+        LOG.with(|log| log.borrow_mut().take().unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

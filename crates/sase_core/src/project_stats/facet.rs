@@ -21,20 +21,3 @@ pub(crate) struct FacetContext<'a> {
     pub directory: &'a Directory,
     pub repos: &'a [MeasuredRepo<'a>],
 }
-
-/// A facet can expose a measurement, source issues, and fingerprint inputs.
-pub(crate) struct FacetResult<T> {
-    pub value: Option<T>,
-    pub issues: Vec<wire::ProjectStatsIssueWire>,
-    pub source_tokens: Vec<String>,
-}
-
-impl<T> FacetResult<T> {
-    pub(crate) fn unimplemented() -> Self {
-        Self {
-            value: None,
-            issues: Vec::new(),
-            source_tokens: Vec::new(),
-        }
-    }
-}

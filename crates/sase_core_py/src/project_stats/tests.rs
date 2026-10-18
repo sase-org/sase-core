@@ -8,12 +8,12 @@ use std::fs;
 fn tiny_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
     git(&repo, &["init", "--initial-branch=main"]);
     git(&repo, &["config", "user.name", "SASE Test"]);
     git(&repo, &["config", "user.email", "sase@example.test"]);
     git(&repo, &["config", "commit.gpgsign", "false"]);
-    fs::write(repo.join("file.txt"), "hello\n").unwrap();
+    fs::write(repo.join("src/lib.rs"), "pub fn hello() {}\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(
         &repo,
@@ -27,18 +27,65 @@ fn tiny_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     (tmp, repo, cache)
 }
 
+fn empty_repo() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--initial-branch=main"]);
+    git(&repo, &["config", "user.name", "SASE Test"]);
+    git(&repo, &["config", "user.email", "sase@example.test"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    let cache = tmp.path().join("cache");
+    (tmp, repo, cache)
+}
+
 fn request_dict<'py>(
     py: Python<'py>,
     repo: &std::path::Path,
     cache: &std::path::Path,
 ) -> Bound<'py, PyDict> {
+    request_dict_with(py, repo, cache, &["output"], repo, true)
+}
+
+fn request_dict_with<'py>(
+    py: Python<'py>,
+    code_repo: &std::path::Path,
+    cache: &std::path::Path,
+    facets: &[&str],
+    record_repo: &std::path::Path,
+    include_code: bool,
+) -> Bound<'py, PyDict> {
+    let code_repos = if include_code {
+        json!([{
+            "id": "primary",
+            "name": "primary",
+            "kind": "primary",
+            "path": code_repo.to_string_lossy(),
+            "identity": "https://example.test/tiny.git",
+            "ref_candidates": ["main", "HEAD"],
+        }])
+    } else {
+        json!([])
+    };
+    let record_repos = if record_repo != code_repo || !include_code {
+        json!([{
+            "id": "records",
+            "name": "records",
+            "kind": "sidecar",
+            "path": record_repo.to_string_lossy(),
+            "identity": "https://example.test/records.git",
+            "ref_candidates": ["main", "HEAD"],
+        }])
+    } else {
+        json!([])
+    };
     let value = json!({
         "schema_version": 1,
         "start_ts": 0,
         "end_ts": 4_000_000_000i64,
         "now_ts": 4_000_000_000i64,
         "timezone": "America/New_York",
-        "facets": ["output"],
+        "facets": facets,
         "cache_dir": cache.to_string_lossy(),
         "projects": [{
             "key": "tiny",
@@ -46,15 +93,8 @@ fn request_dict<'py>(
             "state": "enabled",
             "selection": "always",
             "index_project_names": [],
-            "code_repos": [{
-                "id": "primary",
-                "name": "primary",
-                "kind": "primary",
-                "path": repo.to_string_lossy(),
-                "identity": "https://example.test/tiny.git",
-                "ref_candidates": ["main", "HEAD"],
-            }],
-            "record_repos": [],
+            "code_repos": code_repos,
+            "record_repos": record_repos,
             "not_counted": [],
             "plan_store": {
                 "storage": "in_tree",
@@ -180,5 +220,133 @@ fn project_stats_query_rejects_an_invalid_request() {
             message.contains("unsupported project statistics schema"),
             "{message}"
         );
+    });
+}
+
+#[test]
+fn project_stats_query_round_trips_code_only() {
+    pyo3::prepare_freethreaded_python();
+    let (_tmp, repo, cache) = tiny_repo();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_project_stats(&module).unwrap();
+        let request =
+            request_dict_with(py, &repo, &cache, &["code"], &repo, true);
+        let func = module.getattr("project_stats_query").unwrap();
+        let result = func.call1((request,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert!(value["projects"][0]["output"].is_null());
+        assert_eq!(value["projects"][0]["code"]["code_files"], json!(1));
+        assert_eq!(value["projects"][0]["code"]["counter"], json!("nonblank"));
+        assert!(value["projects"][0]["repos"][0]["snapshot"].is_object());
+        assert!(value["portfolio"]["code"].is_object());
+    });
+}
+
+#[test]
+fn project_stats_query_round_trips_combined_and_records() {
+    pyo3::prepare_freethreaded_python();
+    let (_tmp, repo, cache) = tiny_repo();
+    let records = _tmp.path().join("records");
+    fs::create_dir_all(&records).unwrap();
+    git(&records, &["init", "--initial-branch=main"]);
+    git(&records, &["config", "user.name", "SASE Test"]);
+    git(&records, &["config", "user.email", "sase@example.test"]);
+    git(&records, &["config", "commit.gpgsign", "false"]);
+    fs::write(records.join("note.md"), "body\n").unwrap();
+    git(&records, &["add", "-A"]);
+    git(&records, &["commit", "-m", "record"]);
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_project_stats(&module).unwrap();
+        let request = request_dict_with(
+            py,
+            &repo,
+            &cache,
+            &["output", "code"],
+            &records,
+            true,
+        );
+        let func = module.getattr("project_stats_query").unwrap();
+        let result = func.call1((request,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert_eq!(value["projects"][0]["output"]["commits"], json!(1));
+        assert_eq!(value["projects"][0]["code"]["code_files"], json!(1));
+        let record = value["projects"][0]["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repo| repo["tier"] == json!("records"))
+            .unwrap();
+        assert_eq!(record["snapshot"]["tracked_files"], json!(1));
+        assert!(record["snapshot"]["tracked_lines"].is_null());
+        assert_eq!(record["snapshot"]["lifetime_commits"], json!(1));
+    });
+}
+
+#[test]
+fn project_stats_query_code_unavailable_and_zero() {
+    pyo3::prepare_freethreaded_python();
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().join("cache");
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_project_stats(&module).unwrap();
+        let value = json!({
+            "schema_version": 1,
+            "start_ts": 0,
+            "end_ts": 4_000_000_000i64,
+            "now_ts": 4_000_000_000i64,
+            "timezone": "America/New_York",
+            "facets": ["code"],
+            "cache_dir": cache.to_string_lossy(),
+            "projects": [{
+                "key": "missing",
+                "label": "Missing",
+                "state": "enabled",
+                "selection": "always",
+                "index_project_names": [],
+                "code_repos": [{
+                    "id": "primary",
+                    "name": "primary",
+                    "kind": "primary",
+                    "path": "/no/such/project-stats-repo",
+                    "identity": "https://example.test/missing.git",
+                    "ref_candidates": ["main"],
+                }],
+                "record_repos": [],
+                "not_counted": [],
+                "plan_store": {
+                    "storage": "in_tree",
+                    "plans_dir": "sdd/plans",
+                },
+            }],
+        });
+        let request = json_value_to_py(py, &value).unwrap();
+        let object = request
+            .bind(py)
+            .downcast::<pyo3::types::PyDict>()
+            .unwrap()
+            .clone();
+        let func = module.getattr("project_stats_query").unwrap();
+        let result = func.call1((object,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert!(value["projects"][0]["code"].is_object());
+        assert!(value["projects"][0]["code"]["code_files"].is_null());
+        assert_eq!(value["projects"][0]["code"]["repos_measured"], json!(0));
+    });
+
+    let (_tmp, repo, cache) = empty_repo();
+    Python::with_gil(|py| {
+        let module = PyModule::new_bound(py, "sase_core_rs").unwrap();
+        register_project_stats(&module).unwrap();
+        let request =
+            request_dict_with(py, &repo, &cache, &["code"], &repo, true);
+        let func = module.getattr("project_stats_query").unwrap();
+        let result = func.call1((request,)).unwrap();
+        let value = py_to_json_value(&result).unwrap();
+        assert_eq!(value["projects"][0]["code"]["code_files"], json!(0));
+        assert!(value["projects"][0]["code"]["test_share"].is_null());
+        assert_eq!(value["projects"][0]["code"]["repos_measured"], json!(1));
     });
 }

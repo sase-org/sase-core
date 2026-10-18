@@ -224,6 +224,40 @@ fn measure_repo(
     (wire, token, extra_issues)
 }
 
+pub(crate) fn repo_wire_from_resolve(
+    repo: &super::MeasuredRepo<'_>,
+    git_requested: bool,
+) -> ProjectStatsRepoWire {
+    let status = if !git_requested {
+        ProjectStatsRepoStatusWire::Ok
+    } else if repo.issue.is_some() && repo.resolved.is_none() {
+        ProjectStatsRepoStatusWire::Unavailable
+    } else if repo.resolved.is_some() {
+        ProjectStatsRepoStatusWire::Ok
+    } else {
+        ProjectStatsRepoStatusWire::Unavailable
+    };
+    let issue = repo.issue.cloned();
+    let reference = repo.resolved.map(|resolved| ProjectStatsRefWire {
+        name: resolved.ref_name.clone(),
+        commit: resolved.tip.clone(),
+        shallow: resolved.shallow,
+        fetched_at: resolved.fetched_at,
+    });
+    ProjectStatsRepoWire {
+        id: repo.spec.id.clone(),
+        name: repo.spec.name.clone(),
+        kind: repo.spec.kind,
+        tier: repo.tier,
+        status,
+        issue,
+        reference,
+        output: None,
+        lifetime: None,
+        snapshot: None,
+    }
+}
+
 pub(crate) fn repo_status(
     resolved: Option<&ResolvedRepo>,
     history: Option<&HistoryOutcome>,
@@ -295,7 +329,7 @@ pub(crate) fn health_from_statuses(
     health
 }
 
-fn with_project(
+pub(crate) fn with_project(
     mut issue: ProjectStatsIssueWire,
     project: &str,
 ) -> ProjectStatsIssueWire {

@@ -25,6 +25,8 @@ mod wire;
 #[cfg(test)]
 mod classify_tests;
 #[cfg(test)]
+mod code_query_tests;
+#[cfg(test)]
 mod counter_tests;
 #[cfg(test)]
 mod directory_tests;
@@ -41,7 +43,7 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use facet::{FacetContext, FacetResult, MeasuredRepo};
+pub(crate) use facet::{FacetContext, MeasuredRepo};
 pub use query::query_project_stats;
 pub use wire::{
     validate_project_stats_request, ProjectStatsAgentSidecarSpecWire,

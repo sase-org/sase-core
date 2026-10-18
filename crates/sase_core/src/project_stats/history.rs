@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +12,6 @@ use super::wire::{
     ProjectStatsBudgetWire, ProjectStatsIssueWire, ProjectStatsRepoSpecWire,
 };
 use crate::commit_footer::parse_commit_footer;
-use crate::file_history::run_git_unchecked;
 
 const HISTORY_LOG_FORMAT: &str = "%H%x1f%P%x1f%at%x1f%ct%x1f%B";
 
@@ -207,12 +205,8 @@ fn walk_history(
     } else {
         args.push(&repo.tip);
     }
-    let result = run_git_unchecked(
-        Path::new(&repo.canonical_path),
-        &args,
-        Duration::from_millis(budget.timeout_ms.max(1)),
-        budget.max_output_bytes.max(1),
-    );
+    let result =
+        git::run_unchecked(Path::new(&repo.canonical_path), &args, budget);
 
     let result = match result {
         Ok(result) => result,

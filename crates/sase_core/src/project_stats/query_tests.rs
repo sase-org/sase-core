@@ -460,9 +460,9 @@ fn mixed_available_unavailable_and_partial_sources() {
 }
 
 #[test]
-fn all_facets_serialize_with_explicit_nulls_for_unimplemented_seams() {
+fn all_facets_serialize_code_and_keep_runs_null_without_an_index() {
     let fixture = init_repo();
-    commit(&fixture.repo, "file.txt", "one\n", "one");
+    commit(&fixture.repo, "src/main.rs", "fn main() {}\n", "one");
     let cache = cache_dir();
     let (start, end, now) = wide_range();
     let mut req = request(
@@ -485,9 +485,10 @@ fn all_facets_serialize_with_explicit_nulls_for_unimplemented_seams() {
     let json = serde_json::to_value(&response).unwrap();
     assert!(json["projects"][0]["output"].is_object());
     assert!(json["projects"][0]["lifetime"].is_object());
-    assert_eq!(json["projects"][0]["code"], serde_json::Value::Null);
+    assert!(json["projects"][0]["code"].is_object());
+    assert_eq!(json["projects"][0]["code"]["code_files"], 1);
     assert_eq!(json["projects"][0]["runs"], serde_json::Value::Null);
-    assert_eq!(json["portfolio"]["code"], serde_json::Value::Null);
+    assert!(json["portfolio"]["code"].is_object());
     assert_eq!(json["portfolio"]["runs"], serde_json::Value::Null);
     assert_eq!(json["projects"][0]["output"]["plans_committed"], 0);
 }

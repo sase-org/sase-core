@@ -659,21 +659,25 @@ fn enums_use_snake_case_and_cover_contract_variants() {
 }
 
 #[test]
-fn unimplemented_facets_stay_null_and_fingerprint_ignores_cache_dir() {
+fn unavailable_code_is_present_and_fingerprint_ignores_cache_dir() {
     let mut first_request = request();
     let first = query_project_stats(&first_request).expect("query");
     assert_eq!(first.projects.len(), 1);
     let first_project = &first.projects[0];
     let output = first_project.output.as_ref().expect("output facet");
     assert!(first_project.lifetime.is_some());
-    assert!(first_project.code.is_none());
+    let code = first_project.code.as_ref().expect("code facet");
     assert!(first_project.runs.is_none());
     assert_eq!(output.commits, None);
     assert!(output.models.is_empty());
     assert_eq!(first_project.coverage.configured_repos, 1);
     assert_eq!(first_project.coverage.unavailable_repos, 1);
+    assert_eq!(code.code_files, None);
+    assert_eq!(code.code_lines, None);
+    assert_eq!(code.repos_configured, 1);
+    assert_eq!(code.repos_measured, 0);
     assert_eq!(first.portfolio.output.as_ref().unwrap().commits, None);
-    assert_eq!(first.portfolio.code, None);
+    assert_eq!(first.portfolio.code.as_ref().unwrap().code_files, None);
     assert_eq!(first.portfolio.runs, None);
 
     first_request.cache_dir = "/other/cache".to_owned();

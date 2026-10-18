@@ -1,5 +1,4 @@
 //! Metadata-only snapshots for configured record repositories.
-#![allow(dead_code)] // The query-integration phase consumes this phase's seam.
 
 use std::path::Path;
 

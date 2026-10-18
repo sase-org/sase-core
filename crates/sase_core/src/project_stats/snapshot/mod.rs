@@ -1,7 +1,5 @@
 //! Committed-tree code snapshots with an incremental per-path blob cache.
 
-#![allow(dead_code)] // Query-integration is the first production caller.
-
 mod attributes;
 mod blobs;
 mod cache;
@@ -15,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use self::attributes::AttrSession;
 use self::cache::{CachedBlobFacts, CodeSnapshotCacheEntry};
 use self::tree::TreeEntry;
+use super::wire::ProjectStatsBudgetWire;
 use crate::project_stats::classify::{
     classify_file, classify_file_evidenced, BlobEvidence, Classification,
     CommittedAttributes, SkippedEntry,
@@ -28,16 +27,6 @@ use crate::project_stats::wire::{
     ProjectStatsIssueWire, ProjectStatsLanguageWire, ProjectStatsRepoSpecWire,
     ProjectStatsRoleCountWire, ProjectStatsSnapshotWire,
 };
-use crate::project_stats::{FacetContext, FacetResult};
-
-use super::wire::ProjectStatsBudgetWire;
-
-/// Facet entry stays unimplemented until query-integration owns dispatch.
-pub(crate) fn query(
-    _context: &FacetContext<'_>,
-) -> FacetResult<ProjectStatsSnapshotWire> {
-    FacetResult::unimplemented()
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodeSnapshot {
